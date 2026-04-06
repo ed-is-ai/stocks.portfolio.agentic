@@ -1,0 +1,98 @@
+# Momentum Stock Agent Architecture
+
+## System Context
+
+```mermaid
+C4Context
+    title Momentum Stock Agent - System Context
+
+    Person(user, "Trader / Operator", "Starts the pipeline and reviews alerts")
+    System(agent_app, "Momentum Stock Agent", "Python app that scans, analyses, and alerts on momentum setups")
+
+    System_Ext(yfinance, "Yahoo Finance / yfinance", "Market data provider for price and volume history")
+    System_Ext(foundry, "Foundry Local LLM", "phi-4-mini model used for CANSLIM scoring")
+    System_Ext(smtp, "SMTP / Email Service", "Sends email alerts")
+    System_Ext(sqlite, "SQLite", "Local alert history database")
+
+    Rel(user, agent_app, "Starts the pipeline and runs scheduled scans")
+    Rel(agent_app, yfinance, "Fetches historical stock data")
+    Rel(agent_app, foundry, "Requests stock scoring commentary", "OpenAI-compatible API")
+    Rel(agent_app, smtp, "Sends alert emails")
+    Rel(agent_app, sqlite, "Stores alert history and cooldown state")
+```
+
+## Container Diagram
+
+```mermaid
+C4Container
+    title Momentum Stock Agent - Container Diagram
+
+    Person(user, "Trader / Operator", "Starts the pipeline and reviews alerts")
+
+    System_Boundary(agent_app, "Momentum Stock Agent") {
+        Container(orchestrator, "orchestrator.py", "Python", "Schedules and runs the scan/analysis/alert pipeline")
+        Container(scanner, "scanner_agent.py", "Python", "Fetches stock data and computes technical indicators")
+        Container(analyst, "analyst_agent.py", "Python", "Scores stocks using LLM or rule-based CANSLIM logic")
+        Container(alerting, "alert_agent.py", "Python", "Filters analysis results, records alerts, and sends email notifications")
+    }
+
+    Container_Ext(yfinance, "Yahoo Finance / yfinance", "Market data provider")
+    Container_Ext(foundry, "Foundry Local LLM", "phi-4-mini model server")
+    Container_Ext(smtp, "SMTP / Email Service", "Email delivery")
+    Container_Ext(sqlite, "SQLite DB", "Local persistent alert history")
+
+    Rel(user, orchestrator, "Runs pipeline / starts scheduler")
+    Rel(orchestrator, scanner, "Calls scan_watchlist()")
+    Rel(orchestrator, analyst, "Calls analyse_stocks()")
+    Rel(orchestrator, alerting, "Calls run_alerts()")
+
+    Rel(scanner, yfinance, "Downloads historical price and volume data")
+    Rel(analyst, foundry, "Queries model for score and stage analysis", "HTTP / OpenAI-compatible")
+    Rel(alerting, smtp, "Sends alert emails when thresholds are met")
+    Rel(alerting, sqlite, "Reads/writes alert cooldown history")
+```
+
+## Component Diagram
+
+```mermaid
+C4Component
+    title Momentum Stock Agent - Component Diagram
+
+    Container(orchestrator, "orchestrator.py", "Python", "Pipeline scheduler and coordinator") {
+        Component(pipeline, "pipeline()", "Coordinates the scan -> analyse -> alert workflow")
+        Component(schedule, "BlockingScheduler", "Runs pipeline every 15 minutes during market hours")
+    }
+
+    Container(scanner, "scanner_agent.py", "Python", "Market data and technical analysis") {
+        Component(fetch_data, "fetch_stock_data()", "Loads ticker history from yfinance")
+        Component(tech_compute, "compute_technicals()", "Computes moving averages, RSI, ATR, relative volume")
+        Component(scan_watchlist, "scan_watchlist()", "Processes tickers and returns structured scan results")
+    }
+
+    Container(analyst, "analyst_agent.py", "Python", "Setup scoring and LLM fallback logic") {
+        Component(llm_client, "get_llm_client()", "Connects to Foundry Local LLM")
+        Component(score_llm, "score_stock_llm()", "Formats prompt and parses LLM JSON output")
+        Component(rule_score, "rule_based_score()", "Deterministic fallback scoring")
+        Component(analyse_stocks, "analyse_stocks()", "Scores each scanned stock and sorts results")
+    }
+
+    Container(alerting, "alert_agent.py", "Python", "Alert decision and notification delivery") {
+        Component(db_init, "init_db()", "Creates alerts table if missing")
+        Component(cooldown, "was_recently_alerted()", "Suppresses repeat alerts")
+        Component(email_send, "send_email()", "Sends HTML/plain email via SMTP")
+        Component(run_alerts, "run_alerts()", "Filters results, records alerts, and triggers notifications")
+    }
+
+    Rel(pipeline, scan_watchlist, "Gets scan results")
+    Rel(pipeline, analyse_stocks, "Gets scored analysis")
+    Rel(pipeline, run_alerts, "Triggers alert evaluation")
+
+    Rel(scan_watchlist, fetch_data, "Fetches raw prices")
+    Rel(scan_watchlist, tech_compute, "Calculates metrics")
+    Rel(analyse_stocks, llm_client, "Optionally connects to Foundry")
+    Rel(analyse_stocks, score_llm, "Uses LLM scoring")
+    Rel(analyse_stocks, rule_score, "Falls back to deterministic scoring")
+    Rel(run_alerts, db_init, "Ensures alert history exists")
+    Rel(run_alerts, cooldown, "Checks alert cooldown")
+    Rel(run_alerts, email_send, "Sends alert emails")
+```

@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Agent Test Dashboard</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+        }
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+        }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            padding: 20px;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            border-left: 4px solid #28a745;
+        }
+        .stat-card.error {
+            border-left-color: #dc3545;
+        }
+        .stat-card.warning {
+            border-left-color: #ffc107;
+        }
+        .stat-number {
+            font-size: 2.5em;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        .stat-label {
+            color: #666;
+            font-size: 0.9em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .test-results {
+            padding: 20px;
+        }
+        .test-section {
+            margin-bottom: 30px;
+        }
+        .test-section h2 {
+            color: #333;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .test-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            margin-bottom: 10px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border-left: 4px solid #28a745;
+        }
+        .test-item.failed {
+            border-left-color: #dc3545;
+            background: #fff5f5;
+        }
+        .test-item.error {
+            border-left-color: #dc3545;
+            background: #fff5f5;
+        }
+        .test-item.skipped {
+            border-left-color: #ffc107;
+            background: #fffbf0;
+        }
+        .test-name {
+            font-weight: 500;
+            flex: 1;
+        }
+        .test-status {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            font-weight: bold;
+            text-transform: uppercase;
+        }
+        .status-passed {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status-failed {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status-skipped {
+            background: #fff3cd;
+            color: #856404;
+        }
+        .test-duration {
+            color: #666;
+            font-size: 0.9em;
+            margin-left: 15px;
+        }
+        .error-details {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.8em;
+            color: #721c24;
+            white-space: pre-wrap;
+        }
+        .summary {
+            background: #e9ecef;
+            padding: 20px;
+            margin: 20px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .summary h3 {
+            margin: 0 0 10px 0;
+            color: #333;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #28a745, #20c997);
+            transition: width 0.3s ease;
+        }
+        .run-button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 1em;
+            margin: 10px;
+        }
+        .run-button:hover {
+            background: #0056b3;
+        }
+        .run-button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #3498db;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Stock Agent Test Dashboard</h1>
+            <p>Real-time test results and pipeline monitoring</p>
+        </div>
+
+        <div class="summary">
+            <h3>Test Summary</h3>
+            <div class="stats-grid">
+                <div class="stat-card" id="total-tests">
+                    <div class="stat-number" id="total-count">0</div>
+                    <div class="stat-label">Total Tests</div>
+                </div>
+                <div class="stat-card" id="passed-tests">
+                    <div class="stat-number" id="passed-count">0</div>
+                    <div class="stat-label">Passed</div>
+                </div>
+                <div class="stat-card error" id="failed-tests">
+                    <div class="stat-number" id="failed-count">0</div>
+                    <div class="stat-label">Failed</div>
+                </div>
+                <div class="stat-card warning" id="skipped-tests">
+                    <div class="stat-number" id="skipped-count">0</div>
+                    <div class="stat-label">Skipped</div>
+                </div>
+            </div>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+            </div>
+            <button class="run-button" id="run-tests" onclick="runTests()">
+                <span id="run-text">Run All Tests</span>
+                <div class="loading" id="loading-spinner" style="display: none"></div>
+            </button>
+        </div>
+
+        <div class="test-results">
+            <div class="test-section">
+                <h2>🔥 Smoke Tests</h2>
+                <div id="smoke-tests"></div>
+            </div>
+
+            <div class="test-section">
+                <h2>📊 Unit Tests</h2>
+                <div id="unit-tests"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let testResults = {
+            smoke: [],
+            unit: []
+        };
+
+        // Mock test data - in real implementation, this would come from pytest-json-report or similar
+        const mockTestData = {
+            smoke: [
+                {
+                    name: "test_full_pipeline_execution",
+                    status: "passed",
+                    duration: "2.34s",
+                    file: "test_smoke.py"
+                },
+                {
+                    name: "test_agent_chaining",
+                    status: "passed",
+                    duration: "1.12s",
+                    file: "test_smoke.py"
+                },
+                {
+                    name: "test_market_hours_check",
+                    status: "passed",
+                    duration: "0.05s",
+                    file: "test_smoke.py"
+                }
+            ],
+            unit: [
+                {
+                    name: "test_stock_scan_creation",
+                    status: "passed",
+                    duration: "0.02s",
+                    file: "test_models.py"
+                },
+                {
+                    name: "test_stock_analysis_creation",
+                    status: "passed",
+                    duration: "0.01s",
+                    file: "test_models.py"
+                },
+                {
+                    name: "test_fetch_stock_data_success",
+                    status: "passed",
+                    duration: "0.15s",
+                    file: "test_scanner.py"
+                },
+                {
+                    name: "test_compute_technicals",
+                    status: "passed",
+                    duration: "0.08s",
+                    file: "test_scanner.py"
+                },
+                {
+                    name: "test_rule_based_score_high_score",
+                    status: "passed",
+                    duration: "0.03s",
+                    file: "test_analyst.py"
+                },
+                {
+                    name: "test_should_alert_high_score",
+                    status: "passed",
+                    duration: "0.02s",
+                    file: "test_alert.py"
+                },
+                {
+                    name: "test_execute_single_agent",
+                    status: "passed",
+                    duration: "0.01s",
+                    file: "test_framework.py"
+                },
+                {
+                    name: "test_execute_multiple_agents",
+                    status: "passed",
+                    duration: "0.02s",
+                    file: "test_framework.py"
+                }
+            ]
+        };
+
+        function updateStats() {
+            const allTests = [...testResults.smoke, ...testResults.unit];
+            const total = allTests.length;
+            const passed = allTests.filter(t => t.status === 'passed').length;
+            const failed = allTests.filter(t => t.status === 'failed').length;
+            const skipped = allTests.filter(t => t.status === 'skipped').length;
+
+            document.getElementById('total-count').textContent = total;
+            document.getElementById('passed-count').textContent = passed;
+            document.getElementById('failed-count').textContent = failed;
+            document.getElementById('skipped-count').textContent = skipped;
+
+            const passRate = total > 0 ? (passed / total) * 100 : 0;
+            document.getElementById('progress-fill').style.width = `${passRate}%`;
+        }
+
+        function createTestElement(test, category) {
+            const div = document.createElement('div');
+            div.className = `test-item ${test.status}`;
+
+            div.innerHTML = `
+                <div class="test-name">${test.name}</div>
+                <div class="test-status status-${test.status}">${test.status}</div>
+                <div class="test-duration">${test.duration || 'N/A'}</div>
+            `;
+
+            if (test.error) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error-details';
+                errorDiv.textContent = test.error;
+                div.appendChild(errorDiv);
+            }
+
+            return div;
+        }
+
+        function displayTestResults() {
+            const smokeContainer = document.getElementById('smoke-tests');
+            const unitContainer = document.getElementById('unit-tests');
+
+            smokeContainer.innerHTML = '';
+            unitContainer.innerHTML = '';
+
+            testResults.smoke.forEach(test => {
+                smokeContainer.appendChild(createTestElement(test, 'smoke'));
+            });
+
+            testResults.unit.forEach(test => {
+                unitContainer.appendChild(createTestElement(test, 'unit'));
+            });
+
+            updateStats();
+        }
+
+        async function runTests() {
+            const runButton = document.getElementById('run-tests');
+            const runText = document.getElementById('run-text');
+            const spinner = document.getElementById('loading-spinner');
+
+            runButton.disabled = true;
+            runText.textContent = 'Running Tests...';
+            spinner.style.display = 'inline-block';
+
+            try {
+                // Simulate running tests - in real implementation, this would call pytest
+                // and parse the results from pytest-json-report or similar
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                // Load mock results
+                testResults = mockTestData;
+
+                // Simulate some failures for demo
+                testResults.unit[2].status = 'failed';
+                testResults.unit[2].error = 'AssertionError: Expected 100, got 99';
+
+                displayTestResults();
+
+            } catch (error) {
+                console.error('Error running tests:', error);
+            } finally {
+                runButton.disabled = false;
+                runText.textContent = 'Run All Tests';
+                spinner.style.display = 'none';
+            }
+        }
+
+        // Load test data from JSON file
+        async function loadTestData() {
+            try {
+                const response = await fetch('dashboard-data.json');
+                if (response.ok) {
+                    const data = await response.json();
+                    return processTestData(data);
+                }
+            } catch (error) {
+                console.log('Using mock data:', error);
+            }
+            return mockTestData;
+        }
+
+        function processTestData(data) {
+            // Convert pytest JSON format to dashboard format
+            const processed = {
+                smoke: [],
+                unit: []
+            };
+
+            data.tests.forEach(test => {
+                const category = test.file.includes('smoke') ? 'smoke' : 'unit';
+                processed[category].push({
+                    name: test.name,
+                    status: test.status,
+                    duration: test.duration,
+                    file: test.file,
+                    error: test.error
+                });
+            });
+
+            return processed;
+        }
+
+        // Initialize with loaded data
+        async function initializeDashboard() {
+            testResults = await loadTestData();
+            displayTestResults();
+        }
+
+        initializeDashboard();
+    </script>
+</body>
+</html>
