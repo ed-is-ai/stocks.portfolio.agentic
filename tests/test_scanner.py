@@ -67,10 +67,10 @@ class TestScannerAgent:
         # Check volume
         assert result['volume'] == 1400000
 
+    @patch('scanner_agent._fetch_fundamentals', return_value={"eps_growth": None, "roe": None, "inst_ownership_pct": None})
     @patch('yfinance.download')
-    def test_scan_watchlist(self, mock_download):
+    def test_scan_watchlist(self, mock_download, _mock_fundamentals):
         """Test scanning multiple tickers."""
-        # Mock yfinance response
         dates = pd.date_range(start='2023-01-01', periods=100, freq='D')
         mock_download.return_value = pd.DataFrame({
             'Close': [100 + i * 0.1 for i in range(100)],
@@ -81,7 +81,7 @@ class TestScannerAgent:
         }, index=dates)
 
         agent = ScannerAgent()
-        results = agent.scan_watchlist(['AAPL', 'GOOGL'])
+        results = agent.scan_watchlist(['AAPL', 'GOOGL'], spy_uptrend=True, spy_52w_return=10.0)
 
         assert len(results) == 2
         assert results[0].ticker == 'AAPL'
