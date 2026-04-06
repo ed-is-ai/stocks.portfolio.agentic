@@ -6,7 +6,9 @@ falls back to rule-based scoring.
 
 import json
 import re
-from typing import Iterable
+import sqlite3
+from datetime import datetime
+from typing import ClassVar, Iterable
 
 import openai
 
@@ -36,37 +38,132 @@ Scoring guide:
 - Near entry = price within 5% of recent base breakout point (approximated by 52w high proximity)
 """
 
+RESULTS_DB = "results.db"
+
+
+def _open_db() -> sqlite3.Connection:
+    """Open (or create) the results database and ensure the schema exists."""
+    conn = sqlite3.connect(RESULTS_DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_history (
+            ticker       TEXT NOT NULL,
+            as_of        TEXT NOT NULL,
+            score        INTEGER NOT NULL,
+            canslim_total INTEGER,
+            momentum_total INTEGER,
+            stage        TEXT,
+            price        REAL,
+            entry_price  REAL,
+            stop_loss    REAL,
+            near_entry   INTEGER,
+            PRIMARY KEY (ticker, as_of)
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def _load_previous_scores(conn: sqlite3.Connection) -> dict[str, int]:
+    """Return {ticker: last_score} for every ticker that has history."""
+    rows = conn.execute("""
+        SELECT ticker, score
+        FROM analysis_history
+        WHERE as_of = (
+            SELECT MAX(as_of) FROM analysis_history h2 WHERE h2.ticker = analysis_history.ticker
+        )
+    """).fetchall()
+    return {ticker: score for ticker, score in rows}
+
+
+def _save_results(conn: sqlite3.Connection, records: list[StockRecord], as_of: str) -> None:
+    """Persist this run's analysis results to the database."""
+    rows: list[tuple[str, str, int, int | None, int | None, str | None, float | None, float | None, float | None, int]] = []
+    for stock in records:
+        a = stock.analysis
+        if not a:
+            continue
+        rows.append((
+            stock.ticker,
+            as_of,
+            a.score,
+            a.canslim.total if a.canslim else None,
+            a.momentum.total if a.momentum else None,
+            a.stage,
+            stock.price,
+            a.entry_price,
+            a.stop_loss,
+            1 if a.near_entry else 0,
+        ))
+    conn.executemany(
+        """INSERT OR REPLACE INTO analysis_history
+           (ticker, as_of, score, canslim_total, momentum_total, stage,
+            price, entry_price, stop_loss, near_entry)
+           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+        rows,
+    )
+    conn.commit()
+
 
 class AnalystAgent(Agent):
     name: str = "AnalystAgent"
 
+    PROGRESS_FILE: ClassVar[str] = "analysis_progress.txt"
+
     def run(self, payload: Iterable[StockRecord]) -> list[StockRecord]:
         scan_results = list(payload)
         llm = self.get_llm_client()
-        if llm:
-            print(f"Using Foundry Local ({llm[1]}) for analysis")
-        else:
-            print("Foundry Local unavailable — using rule-based scoring")
+        mode_line = (
+            f"Using Foundry Local ({llm[1]}) for analysis"
+            if llm
+            else "Foundry Local unavailable — using rule-based scoring"
+        )
+        print(mode_line)
 
+        as_of = datetime.now().strftime("%Y-%m-%d %H:%M")
+        conn = _open_db()
+        prev_scores = _load_previous_scores(conn)
+
+        total = len(scan_results)
         analysis_results: list[StockRecord] = []
-        for stock in scan_results:
-            try:
-                analysis = self.score_stock(stock, llm)
-                stock.analysis = analysis
-                analysis_results.append(stock)
-            except Exception as error:
-                print(f"  [err] {stock.ticker}: {error}")
+        with open(self.PROGRESS_FILE, "w", encoding="utf-8") as progress:
+            progress.write(f"{mode_line}\n")
+            progress.write(f"Analysing {total} tickers...\n\n")
+            progress.flush()
+
+            for idx, stock in enumerate(scan_results, 1):
+                try:
+                    analysis = self.score_stock(stock, llm)
+                    stock.analysis = analysis
+                    analysis_results.append(stock)
+                    canslim = f"{analysis.canslim.total}/14" if analysis.canslim else "—"
+                    mom = f"{analysis.momentum.total}/14" if analysis.momentum else "—"
+                    delta = _fmt_delta(stock.ticker, analysis.score, prev_scores)
+                    line = (
+                        f"[{idx:>3}/{total}] {stock.ticker:<6}  "
+                        f"score={analysis.score}/10 {delta}  CANSLIM={canslim}  Mom={mom}  "
+                        f"{analysis.stage}"
+                    )
+                except Exception as error:
+                    line = f"[{idx:>3}/{total}] {stock.ticker:<6}  ERROR: {error}"
+                    print(f"  [err] {stock.ticker}: {error}")
+
+                progress.write(line + "\n")
+                progress.flush()
 
         sorted_results = sorted(
             analysis_results,
             key=lambda record: (
+                record.analysis.score if record.analysis else 0,
                 record.analysis.canslim.total if record.analysis and record.analysis.canslim else 0,
                 record.analysis.momentum.total if record.analysis and record.analysis.momentum else 0,
-                record.analysis.score if record.analysis else 0,
             ),
             reverse=True,
         )
-        self._print_table(sorted_results)
+
+        _save_results(conn, sorted_results, as_of)
+        conn.close()
+
+        self._print_table(sorted_results, prev_scores)
         return sorted_results
 
     @staticmethod
@@ -82,10 +179,10 @@ class AnalystAgent(Agent):
         return "".join(bars[round((v - lo) / span * 8)] for v in sampled)
 
     @staticmethod
-    def _print_table(records: list[StockRecord]) -> None:
+    def _print_table(records: list[StockRecord], prev_scores: dict[str, int]) -> None:
         header = (
-            f"  {'Ticker':<6}  {'Scr':>4}  {'CANSLIM':>7}  {'Mom':>5}  {'Price':>9}  "
-            f"{'Entry':>9}  {'Stop':>9}  {'Stage':<8}  {'NE':>2}  Chart"
+            f"  {'Ticker':<6}  {'Scr':>4}  {'Chg':>4}  {'CANSLIM':>7}  {'Mom':>5}  "
+            f"{'Risk%':>6}  {'Price':>9}  {'Entry':>9}  {'Stop':>9}  {'Stage':<8}  {'NE':>2}  Chart"
         )
         print()
         print(header)
@@ -100,10 +197,15 @@ class AnalystAgent(Agent):
             canslim = f"{a.canslim.total}/14" if a.canslim else "—"
             mom = f"{a.momentum.total}/14" if a.momentum else "—"
             ne = "Y" if a.near_entry else " "
+            delta = _fmt_delta(stock.ticker, a.score, prev_scores)
+            if a.entry_price and a.stop_loss:
+                risk_pct = f"{(a.entry_price - a.stop_loss) / a.entry_price * 100:.1f}%"
+            else:
+                risk_pct = "—"
             spark = AnalystAgent._sparkline(stock.price_history)
             print(
-                f"  {stock.ticker:<6}  {a.score:>3}/10  {canslim:>7}  {mom:>5}  {price:>9}  "
-                f"{entry:>9}  {stop:>9}  {a.stage:<8}  {ne:>2}  {spark}"
+                f"  {stock.ticker:<6}  {a.score:>3}/10  {delta:>4}  {canslim:>7}  {mom:>5}  "
+                f"{risk_pct:>6}  {price:>9}  {entry:>9}  {stop:>9}  {a.stage:<8}  {ne:>2}  {spark}"
             )
 
     def get_llm_client(self) -> tuple[openai.OpenAI, str] | None:
@@ -308,6 +410,18 @@ class AnalystAgent(Agent):
         m = 2 if stock.spy_uptrend else 0
 
         return CANSLIMScore(C=c, A=a, N=n, S=s, L=l, I=i, M=m)
+
+
+def _fmt_delta(ticker: str, score: int, prev_scores: dict[str, int]) -> str:
+    """Return a score-change label: '+2', '-1', '=', or 'new'."""
+    if ticker not in prev_scores:
+        return "new"
+    diff = score - prev_scores[ticker]
+    if diff > 0:
+        return f"+{diff}"
+    if diff < 0:
+        return str(diff)
+    return "="
 
 
 if __name__ == "__main__":
