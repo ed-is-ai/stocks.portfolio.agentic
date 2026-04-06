@@ -116,11 +116,29 @@ class AlertAgent(Agent):
         strengths = "\n".join(f"  + {item}" for item in analysis.strengths)
         risks = "\n".join(f"  - {item}" for item in analysis.risks)
 
+        entry = f"${analysis.entry_price:.2f}" if analysis.entry_price else "—"
+        stop = f"${analysis.stop_loss:.2f}" if analysis.stop_loss else "—"
+        if analysis.entry_price and analysis.stop_loss:
+            risk_pct = ((analysis.entry_price - analysis.stop_loss) / analysis.entry_price) * 100
+            risk_str = f"{risk_pct:.1f}% below entry"
+        else:
+            risk_str = "—"
+
+        canslim_str = ""
+        if analysis.canslim:
+            cs = analysis.canslim
+            canslim_str = (
+                f"\nCANSLIM {cs.total}/14: "
+                f"C={cs.C} A={cs.A} N={cs.N} S={cs.S} L={cs.L} I={cs.I} M={cs.M}"
+            )
+
         body = (
             f"{stock.ticker} — Score {analysis.score}/10 | {analysis.stage}\n"
             f"Price: ${stock.price}  |  RSI: {stock.rsi14}  |  RelVol: {stock.rel_volume}x\n"
             f"Distance from 52w high: {stock.pct_from_52w_high}%\n"
-            f"\n{analysis.summary}\n"
+            f"Entry: {entry}  |  Stop: {stop}  |  Risk: {risk_str}\n"
+            f"\n{analysis.summary}"
+            f"{canslim_str}\n"
             f"\n{strengths}"
         )
         if risks:
@@ -139,8 +157,42 @@ class AlertAgent(Agent):
             f"<ul style='padding-left:20px;color:#c0392b'>{risks_html}</ul>" if risks_html else ""
         )
 
+        entry = f"${analysis.entry_price:.2f}" if analysis.entry_price else "—"
+        stop = f"${analysis.stop_loss:.2f}" if analysis.stop_loss else "—"
+        if analysis.entry_price and analysis.stop_loss:
+            risk_pct = ((analysis.entry_price - analysis.stop_loss) / analysis.entry_price) * 100
+            risk_str = f"{risk_pct:.1f}%"
+        else:
+            risk_str = "—"
+
+        canslim_section = ""
+        if analysis.canslim:
+            cs = analysis.canslim
+            def _bar(val: int) -> str:
+                return "&#9632;" * val + "&#9633;" * (2 - val)
+            canslim_section = f"""
+          <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:0.85em">
+            <tr><td colspan="3" style="padding:4px 6px;background:#eee;font-weight:bold">
+              CANSLIM Score: {cs.total}/14
+            </td></tr>
+            <tr><td style="padding:3px 6px;background:#f8f8f8;width:30%">C &mdash; Momentum</td>
+                <td style="padding:3px 6px">{_bar(cs.C)}</td><td style="padding:3px 6px">{cs.C}/2</td></tr>
+            <tr><td style="padding:3px 6px;background:#f8f8f8">A &mdash; Annual Strength</td>
+                <td style="padding:3px 6px">{_bar(cs.A)}</td><td style="padding:3px 6px">{cs.A}/2</td></tr>
+            <tr><td style="padding:3px 6px;background:#f8f8f8">N &mdash; Near New High</td>
+                <td style="padding:3px 6px">{_bar(cs.N)}</td><td style="padding:3px 6px">{cs.N}/2</td></tr>
+            <tr><td style="padding:3px 6px;background:#f8f8f8">S &mdash; Volume</td>
+                <td style="padding:3px 6px">{_bar(cs.S)}</td><td style="padding:3px 6px">{cs.S}/2</td></tr>
+            <tr><td style="padding:3px 6px;background:#f8f8f8">L &mdash; Leader (RSI)</td>
+                <td style="padding:3px 6px">{_bar(cs.L)}</td><td style="padding:3px 6px">{cs.L}/2</td></tr>
+            <tr><td style="padding:3px 6px;background:#f8f8f8">I &mdash; Stage Structure</td>
+                <td style="padding:3px 6px">{_bar(cs.I)}</td><td style="padding:3px 6px">{cs.I}/2</td></tr>
+            <tr><td style="padding:3px 6px;background:#f8f8f8">M &mdash; SMA Alignment</td>
+                <td style="padding:3px 6px">{_bar(cs.M)}</td><td style="padding:3px 6px">{cs.M}/2</td></tr>
+          </table>"""
+
         return f"""
-        <html><body style=\"font-family:Arial,sans-serif;max-width:520px;margin:auto;padding:20px\">
+        <html><body style=\"font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px\">
           <h2 style=\"border-bottom:2px solid {score_color};padding-bottom:8px\">
             {stock.ticker}
             <span style=\"color:{score_color};font-size:0.9em\">
@@ -160,13 +212,66 @@ class AlertAgent(Agent):
               <td style=\"padding:6px;background:#f8f8f8\"><b>From 52w High</b></td>
               <td style=\"padding:6px\">{stock.pct_from_52w_high}%</td>
             </tr>
+            <tr>
+              <td style=\"padding:6px;background:#dff0d8\"><b>Entry</b></td>
+              <td style=\"padding:6px;color:#27ae60;font-weight:bold\">{entry}</td>
+              <td style=\"padding:6px;background:#f2dede\"><b>Stop Loss</b></td>
+              <td style=\"padding:6px;color:#c0392b;font-weight:bold\">{stop}</td>
+            </tr>
+            <tr>
+              <td style=\"padding:6px;background:#f8f8f8\" colspan="2"><b>Risk to Stop</b></td>
+              <td style=\"padding:6px\" colspan="2">{risk_str} below entry</td>
+            </tr>
           </table>
           <p style=\"font-style:italic;color:#555\">{analysis.summary}</p>
           <ul style=\"padding-left:20px;color:#27ae60\">{strengths_html}</ul>
           {risks_section}
+          {canslim_section}
+          {self._svg_chart(stock.price_history, score_color)}
           <p style=\"color:#aaa;font-size:0.8em;margin-top:24px\">{date.today().isoformat()} &mdash; Momentum Scanner</p>
         </body></html>
         """
+
+    @staticmethod
+    def _svg_chart(prices: list[float], line_color: str = "#2980b9") -> str:
+        """Return an inline SVG line chart of weekly closes over the past 12 months."""
+        if len(prices) < 2:
+            return ""
+        w, h, pad = 520, 120, 10
+        lo, hi = min(prices), max(prices)
+        span = hi - lo or 1
+        n = len(prices)
+
+        def x(i: int) -> float:
+            return pad + (i / (n - 1)) * (w - 2 * pad)
+
+        def y(v: float) -> float:
+            return h - pad - ((v - lo) / span) * (h - 2 * pad)
+
+        points = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(prices))
+        # Filled area under the line
+        area_pts = (
+            f"{x(0):.1f},{h - pad} "
+            + points
+            + f" {x(n - 1):.1f},{h - pad}"
+        )
+
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
+            f'style="display:block;margin:16px 0;font-family:Arial,sans-serif">'
+            f'<rect width="{w}" height="{h}" fill="#f8f8f8" rx="4"/>'
+            f'<polygon points="{area_pts}" fill="{line_color}" opacity="0.12"/>'
+            f'<polyline points="{points}" fill="none" stroke="{line_color}" '
+            f'stroke-width="2" stroke-linejoin="round"/>'
+            f'<circle cx="{x(n-1):.1f}" cy="{y(prices[-1]):.1f}" r="3" fill="{line_color}"/>'
+            f'<text x="{x(0)}" y="{h - 1}" font-size="9" fill="#aaa">52w ago</text>'
+            f'<text x="{x(n-1) - 20}" y="{h - 1}" font-size="9" fill="#aaa">now</text>'
+            f'<text x="{pad + 2}" y="{y(hi) + 9}" font-size="9" fill="#888">'
+            f'${hi:,.2f}</text>'
+            f'<text x="{pad + 2}" y="{y(lo) - 3}" font-size="9" fill="#888">'
+            f'${lo:,.2f}</text>'
+            f"</svg>"
+        )
 
     def send_email(self, subject: str, html_body: str, text_body: str) -> None:
         if not self.email_config.user or not self.email_config.password or not self.email_config.recipient:

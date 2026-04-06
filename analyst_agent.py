@@ -5,12 +5,13 @@ falls back to rule-based scoring.
 """
 
 import json
+import re
 from typing import Iterable
 
 import openai
 
 from ms_agent_framework import Agent
-from models import StockAnalysis, StockRecord
+from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
 
 
 FOUNDRY_BASE_URL = "http://localhost:5272/v1"
@@ -41,52 +42,111 @@ class AnalystAgent(Agent):
 
     def run(self, payload: Iterable[StockRecord]) -> list[StockRecord]:
         scan_results = list(payload)
-        client = self.get_llm_client()
-        if client:
-            print(f"Using Foundry Local ({FOUNDRY_MODEL}) for analysis")
+        llm = self.get_llm_client()
+        if llm:
+            print(f"Using Foundry Local ({llm[1]}) for analysis")
         else:
             print("Foundry Local unavailable — using rule-based scoring")
 
         analysis_results: list[StockRecord] = []
         for stock in scan_results:
             try:
-                analysis = self.score_stock(stock, client)
+                analysis = self.score_stock(stock, llm)
                 stock.analysis = analysis
                 analysis_results.append(stock)
-                print(
-                    f"  {stock.ticker}: {analysis.score}/10 — {analysis.stage} "
-                    f"— near_entry={analysis.near_entry}"
-                )
             except Exception as error:
                 print(f"  [err] {stock.ticker}: {error}")
-        return sorted(
+
+        sorted_results = sorted(
             analysis_results,
-            key=lambda record: record.analysis.score if record.analysis else 0,
+            key=lambda record: (
+                record.analysis.canslim.total if record.analysis and record.analysis.canslim else 0,
+                record.analysis.momentum.total if record.analysis and record.analysis.momentum else 0,
+                record.analysis.score if record.analysis else 0,
+            ),
             reverse=True,
         )
+        self._print_table(sorted_results)
+        return sorted_results
 
-    def get_llm_client(self) -> openai.OpenAI | None:
+    @staticmethod
+    def _sparkline(prices: list[float], width: int = 12) -> str:
+        """Render a sparkline from a price series using ASCII block chars."""
+        bars = " _.,-~^*#"  # 9 levels, ASCII-safe
+        if len(prices) < 2:
+            return " " * width
+        step = max(1, len(prices) // width)
+        sampled = [prices[i] for i in range(0, len(prices), step)][-width:]
+        lo, hi = min(sampled), max(sampled)
+        span = hi - lo or 1
+        return "".join(bars[round((v - lo) / span * 8)] for v in sampled)
+
+    @staticmethod
+    def _print_table(records: list[StockRecord]) -> None:
+        header = (
+            f"  {'Ticker':<6}  {'Scr':>4}  {'CANSLIM':>7}  {'Mom':>5}  {'Price':>9}  "
+            f"{'Entry':>9}  {'Stop':>9}  {'Stage':<8}  {'NE':>2}  Chart"
+        )
+        print()
+        print(header)
+        print("  " + "-" * (len(header) - 2))
+        for stock in records:
+            a = stock.analysis
+            if not a:
+                continue
+            price = f"${stock.price:,.2f}"
+            entry = f"${a.entry_price:,.2f}" if a.entry_price else "—"
+            stop = f"${a.stop_loss:,.2f}" if a.stop_loss else "—"
+            canslim = f"{a.canslim.total}/14" if a.canslim else "—"
+            mom = f"{a.momentum.total}/14" if a.momentum else "—"
+            ne = "Y" if a.near_entry else " "
+            spark = AnalystAgent._sparkline(stock.price_history)
+            print(
+                f"  {stock.ticker:<6}  {a.score:>3}/10  {canslim:>7}  {mom:>5}  {price:>9}  "
+                f"{entry:>9}  {stop:>9}  {a.stage:<8}  {ne:>2}  {spark}"
+            )
+
+    def get_llm_client(self) -> tuple[openai.OpenAI, str] | None:
+        """Return (client, model_id) if Foundry Local is reachable, else None."""
         try:
             client = openai.OpenAI(base_url=FOUNDRY_BASE_URL, api_key="foundry-local")
-            client.models.list()
-            return client
+            models = client.models.list().data
+            if not models:
+                return None
+            # Prefer any phi-4-mini variant; fall back to first available model.
+            preferred = next(
+                (m.id for m in models if "phi-4-mini" in m.id.lower()), models[0].id
+            )
+            return client, preferred
         except Exception:
             return None
 
-    def score_stock(self, stock: StockRecord, client: OpenAI | None) -> StockAnalysis:
-        if client:
-            return self.score_stock_llm(stock, client)
+    def score_stock(
+        self, stock: StockRecord, llm: tuple[openai.OpenAI, str] | None
+    ) -> StockAnalysis:
+        """Score a stock using the LLM if available, else rule-based fallback."""
+        if llm:
+            return self.score_stock_llm(stock, llm[0], llm[1])
         return self.rule_based_score(stock)
 
-    def score_stock_llm(self, stock: StockRecord, client: OpenAI) -> StockAnalysis:
-        prompt = SCORE_PROMPT.format(data=json.dumps(stock.model_dump(), indent=2))
+    @staticmethod
+    def _strip_think(text: str) -> str:
+        """Remove <think>...</think> reasoning blocks emitted by reasoning models."""
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    def score_stock_llm(
+        self, stock: StockRecord, client: openai.OpenAI, model: str
+    ) -> StockAnalysis:
+        """Score via Foundry Local LLM, falling back to rule-based on parse error."""
+        data = stock.model_dump(exclude={"price_history", "analysis"})
+        prompt = SCORE_PROMPT.format(data=json.dumps(data, indent=2))
         response = client.chat.completions.create(
-            model=FOUNDRY_MODEL,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
-            max_tokens=400,
+            max_tokens=600,
         )
-        raw = response.choices[0].message.content.strip()
+        raw = self._strip_think(response.choices[0].message.content.strip())
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -95,6 +155,7 @@ class AnalystAgent(Agent):
         return StockAnalysis.model_validate(payload)
 
     def rule_based_score(self, stock: StockRecord) -> StockAnalysis:
+        """Score using technical rules and compute both CANSLIM and momentum scores."""
         score = 5
         strengths: list[str] = []
         risks: list[str] = []
@@ -146,14 +207,107 @@ class AnalystAgent(Agent):
         else:
             stage = "Stage 3"
 
+        momentum = self._momentum_score(stock, stage)
+        canslim = self._canslim_fundamental_score(stock)
+
+        # Pivot buy point: 0.5% above 52w high (standard CANSLIM entry)
+        entry_price = round(stock.high_52w * 1.005, 2)
+
+        # Stop loss: 2× ATR below current price, floored at 52w low
+        atr = stock.atr14 or (stock.price * 0.02)
+        stop_loss = round(max(stock.price - 2 * atr, stock.low_52w), 2)
+
         return StockAnalysis(
             score=score,
             stage=stage,
             near_entry=near_entry,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            canslim=canslim,
+            momentum=momentum,
             strengths=strengths[:3],
             risks=risks[:2],
             summary=f"Rule-based score {score}/10. {stage} structure.",
         )
+
+    def _momentum_score(self, stock: StockRecord, stage: str) -> MomentumScore:
+        """Score each letter 0–2 using technical/price proxies for CANSLIM letters."""
+        price = stock.price
+        sma10 = stock.sma10 or price
+        sma30 = stock.sma30 or price
+        sma50 = stock.sma50 or price
+        rsi = stock.rsi14 or 50.0
+        rel_vol = stock.rel_volume or 1.0
+        pct_from_high = stock.pct_from_52w_high or -50.0
+        week_chg = stock.pct_change_week or 0.0
+        high_52w = stock.high_52w
+        low_52w = stock.low_52w
+
+        # C — current momentum proxy (weekly price change)
+        c = 2 if week_chg >= 5 else 1 if week_chg >= 1 else 0
+
+        # A — annual strength proxy (position within 52w range)
+        rng = high_52w - low_52w
+        pct_in_range = (price - low_52w) / rng if rng > 0 else 0.5
+        a = 2 if pct_in_range >= 0.8 else 1 if pct_in_range >= 0.6 else 0
+
+        # N — new highs (proximity to 52w high)
+        n = 2 if pct_from_high >= -5 else 1 if pct_from_high >= -15 else 0
+
+        # S — supply & demand (relative volume)
+        s = 2 if rel_vol >= 1.5 else 1 if rel_vol >= 1.0 else 0
+
+        # L — leader vs laggard (RSI)
+        l = 2 if 60 <= rsi <= 80 else 1 if 50 <= rsi < 60 else 0
+
+        # I — institutional sponsorship proxy (Weinstein Stage 2 SMA structure)
+        i = 2 if stage == "Stage 2" else 1 if stage == "Stage 1" else 0
+
+        # M — market/trend alignment (SMA stack)
+        if price > sma10 > sma30 > sma50:
+            m = 2
+        elif price > sma50:
+            m = 1
+        else:
+            m = 0
+
+        return MomentumScore(C=c, A=a, N=n, S=s, L=l, I=i, M=m)
+
+    def _canslim_fundamental_score(self, stock: StockRecord) -> CANSLIMScore:
+        """True CANSLIM scoring using fundamental and market data.
+
+        Missing data scores 0 for that letter — no score is awarded when
+        the data is unavailable rather than assuming a pass.
+        """
+        pct_from_high = stock.pct_from_52w_high or -50.0
+        rel_vol = stock.rel_volume or 1.0
+
+        # C — Current quarterly EPS growth (≥25% = 2, ≥10% = 1)
+        eps = stock.eps_growth
+        c = 2 if eps is not None and eps >= 0.25 else 1 if eps is not None and eps >= 0.10 else 0
+
+        # A — Annual earnings quality via ROE (≥17% = 2, ≥10% = 1)
+        roe = stock.roe
+        a = 2 if roe is not None and roe >= 0.17 else 1 if roe is not None and roe >= 0.10 else 0
+
+        # N — New highs / breakout (same proxy as momentum: 52w high proximity)
+        n = 2 if pct_from_high >= -5 else 1 if pct_from_high >= -15 else 0
+
+        # S — Supply & demand via relative volume (same proxy as momentum)
+        s = 2 if rel_vol >= 1.5 else 1 if rel_vol >= 1.0 else 0
+
+        # L — Leader: 12m price return vs S&P 500 (outperform by 20pp = 2, any outperform = 1)
+        rs = stock.rel_strength_vs_spy
+        l = 2 if rs is not None and rs >= 20 else 1 if rs is not None and rs >= 0 else 0
+
+        # I — Institutional sponsorship (≥50% held = 2, ≥30% = 1)
+        inst = stock.inst_ownership_pct
+        i = 2 if inst is not None and inst >= 0.50 else 1 if inst is not None and inst >= 0.30 else 0
+
+        # M — Market direction: SPY in confirmed uptrend (above 200-day SMA)
+        m = 2 if stock.spy_uptrend else 0
+
+        return CANSLIMScore(C=c, A=a, N=n, S=s, L=l, I=i, M=m)
 
 
 if __name__ == "__main__":
