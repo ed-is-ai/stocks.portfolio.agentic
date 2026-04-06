@@ -11,14 +11,15 @@ from models import StockRecord, StockAnalysis, StockScan
 
 @pytest.fixture
 def sample_stock_data():
-    """Sample stock data for testing."""
+    """Sample stock data for testing (needs DatetimeIndex for resample)."""
+    dates = pd.date_range(start="2023-01-01", periods=5, freq="W")
     return pd.DataFrame({
         'close': [100.0, 101.0, 102.0, 103.0, 104.0],
         'high': [105.0, 106.0, 107.0, 108.0, 109.0],
         'low': [95.0, 96.0, 97.0, 98.0, 99.0],
         'open': [99.0, 100.0, 101.0, 102.0, 103.0],
         'volume': [1000000, 1100000, 1200000, 1300000, 1400000]
-    })
+    }, index=dates)
 
 
 @pytest.fixture
