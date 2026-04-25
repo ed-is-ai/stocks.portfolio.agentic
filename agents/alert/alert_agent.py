@@ -10,6 +10,7 @@ import sqlite3
 from datetime import date, datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Iterable
 
 from ms_agent_framework import Agent
@@ -19,7 +20,7 @@ from models import EmailConfig, StockRecord
 SCORE_THRESHOLD = 7
 NEAR_ENTRY_ONLY = True
 ALERT_COOLDOWN_HOURS = 24
-DB_PATH = "alerts.db"
+DB_PATH = str(Path(__file__).parent / "alerts.db")
 
 EMAIL_CONFIG = EmailConfig(
     host=os.getenv("EMAIL_HOST", "smtp.gmail.com"),
@@ -300,7 +301,13 @@ class AlertAgent(Agent):
 
 
 if __name__ == "__main__":
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
+
+    analysis_file = _Path(__file__).parent.parent / "analyst" / "analysis_results.json"
     agent = AlertAgent()
-    with open("analysis_results.json", encoding="utf-8") as handle:
+    with open(analysis_file, encoding="utf-8") as handle:
         payload = [StockRecord.model_validate(item) for item in json.load(handle)]
     agent.run(payload)

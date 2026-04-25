@@ -5,6 +5,7 @@ Outputs typed scan results for the Analyst Agent using the local MS Agent framew
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
@@ -14,83 +15,26 @@ from ms_agent_framework import Agent
 from models import StockRecord
 
 
-WATCHLIST = [
-    # StockTwits Top 25 Momentum — S&P 500 (2026-04-06)
-    "SNDK",  # Sandisk
-    "LYB",   # LyondellBasell
-    "DOW",   # Dow Inc.
-    "APA",   # APA Corporation
-    "WDC",   # Western Digital
-    "GLW",   # Corning Inc.
-    "CF",    # CF Industries
-    "MRNA",  # Moderna
-    "TER",   # Teradyne
-    "STX",   # Seagate Technology
-    "TPL",   # Texas Pacific Land
-    "OXY",   # Occidental Petroleum
-    "FIX",   # Comfort Systems
-    "VLO",   # Valero Energy
-    "MPC",   # Marathon Petroleum
-    "BG",    # Bunge Global
-    "KEYS",  # Keysight Technologies
-    "Q",     # Qnity Electronics
-    "GNRC",  # Generac
-    "COP",   # ConocoPhillips
-    "DELL",  # Dell Technologies
-    "GEV",   # GE Vernova
-    "PSX",   # Phillips 66
-    "INTC",  # Intel (also Nasdaq 100)
-    "EOG",   # EOG Resources
-    # StockTwits Top 25 Momentum — Nasdaq 100 (2026-04-06)
-    "ARM",   # Arm Holdings
-    "AMAT",  # Applied Materials
-    "BKR",   # Baker Hughes
-    "FANG",  # Diamondback Energy
-    "MU",    # Micron Technology
-    "LRCX",  # Lam Research
-    "ODFL",  # Old Dominion Freight
-    "MRVL",  # Marvell Technology
-    "KLAC",  # KLA Corporation
-    "MPWR",  # Monolithic Power Systems
-    "ASML",  # ASML Holding
-    "ROST",  # Ross Stores
-    "LIN",   # Linde plc
-    "COST",  # Costco
-    "HON",   # Honeywell
-    "ADI",   # Analog Devices
-    "FAST",  # Fastenal
-    "AEP",   # American Electric Power
-    "GILD",  # Gilead Sciences
-    "CSX",   # CSX Corporation
-    "EXC",   # Exelon
-    "WMT",   # Walmart
-    # StockTwits Top 25 Momentum — Russell 2000 (2026-04-06)
-    "ERAS",  # Erasca Inc
-    "IBRX",  # ImmunityBio Inc
-    "SATL",  # Satellogic Inc
-    "FSLY",  # Fastly Inc
-    "KOS",   # Kosmos Energy
-    "AAOI",  # Applied Optoelectronics
-    "ICHR",  # Ichor Holdings
-    "ELVN",  # Enliven Therapeutics
-    "UCTT",  # Ultra Clean Holdings
-    "TNGX",  # Tango Therapeutics
-    "ALMS",  # Alumis Inc
-    "DAWN",  # Day One Biopharmaceuticals
-    "TROX",  # Tronox Holdings
-    "AEHR",  # Aehr Test Systems
-    "SPIR",  # Spire Global
-    "DNTH",  # Dianthus Therapeutics
-    "VIAV",  # Viavi Solutions
-    "ELDN",  # Eledon Pharmaceuticals
-    "AMPX",  # Amprius Technologies
-    "VAL",   # Valaris Ltd
-    "WTI",   # W&T Offshore
-    "CRVS",  # Corvus Pharmaceuticals
-    "TSSI",  # TSS Inc
-    "DOCN",  # DigitalOcean
-    "CURV",  # Torrid Holdings
-]
+_EXTRACTION_RESULTS = (
+    Path(__file__).parent.parent / "extraction" / "extraction_results.json"
+)
+
+
+def load_watchlist() -> list[str]:
+    """Load tickers from extraction_results.json, flattening grouped sources."""
+    with open(_EXTRACTION_RESULTS, encoding="utf-8") as fh:
+        data: list[str] | dict[str, list[str]] = json.load(fh)
+    if isinstance(data, list):
+        return data
+    seen: set[str] = set()
+    result: list[str] = []
+    for group in data.values():
+        for ticker in group:
+            if ticker not in seen:
+                result.append(ticker)
+                seen.add(ticker)
+    return result
+
 
 PERIOD_DAYS = 252  # ~1 trading year for stage analysis
 
@@ -137,7 +81,7 @@ class ScannerAgent(Agent):
     name: str = "ScannerAgent"
 
     def run(self, payload: Iterable[str] | None = None) -> list[StockRecord]:
-        tickers = list(payload) if payload else WATCHLIST
+        tickers = list(payload) if payload else load_watchlist()
         spy_uptrend, spy_52w_return = _fetch_spy_context()
         return self.scan_watchlist(tickers, spy_uptrend, spy_52w_return)
 
@@ -264,8 +208,13 @@ class ScannerAgent(Agent):
 
 
 if __name__ == "__main__":
-    agent = ScannerAgent()
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    agent = ScannerAgent(name="ScannerAgent")
     scan_results = agent.run()
-    with open("scan_results.json", "w", encoding="utf-8") as handle:
+    out = Path(__file__).parent / "scan_results.json"
+    with open(out, "w", encoding="utf-8") as handle:
         json.dump([item.model_dump() for item in scan_results], handle, indent=2)
-    print(f"\nSaved {len(scan_results)} tickers to scan_results.json")
+    print(f"\nSaved {len(scan_results)} tickers to {out}")

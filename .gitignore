@@ -23,6 +23,9 @@ scan_results.json
 analysis_results.json
 dashboard-data.json
 test-results.json
+analysis_progress.txt
+orchestrator_out.txt
+tmp_import_check.py
 
 # IDE
 .vscode/

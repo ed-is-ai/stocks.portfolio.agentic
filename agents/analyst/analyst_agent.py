@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import ClassVar, Iterable
 
 import openai
@@ -38,7 +39,7 @@ Scoring guide:
 - Near entry = price within 5% of recent base breakout point (approximated by 52w high proximity)
 """
 
-RESULTS_DB = "results.db"
+RESULTS_DB = str(Path(__file__).parent / "results.db")
 
 
 def _open_db() -> sqlite3.Connection:
@@ -107,7 +108,7 @@ def _save_results(conn: sqlite3.Connection, records: list[StockRecord], as_of: s
 class AnalystAgent(Agent):
     name: str = "AnalystAgent"
 
-    PROGRESS_FILE: ClassVar[str] = "analysis_progress.txt"
+    PROGRESS_FILE: ClassVar[str] = str(Path(__file__).parent / "analysis_progress.txt")
 
     def run(self, payload: Iterable[StockRecord]) -> list[StockRecord]:
         scan_results = list(payload)
@@ -425,12 +426,19 @@ def _fmt_delta(ticker: str, score: int, prev_scores: dict[str, int]) -> str:
 
 
 if __name__ == "__main__":
-    with open("scan_results.json", encoding="utf-8") as handle:
+    import sys
+    from pathlib import Path as _Path
+
+    sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
+
+    scan_file = _Path(__file__).parent.parent / "scanner" / "scan_results.json"
+    with open(scan_file, encoding="utf-8") as handle:
         scan_data = json.load(handle)
 
     results = AnalystAgent().run([StockRecord.model_validate(item) for item in scan_data])
 
-    with open("analysis_results.json", "w", encoding="utf-8") as handle:
+    out = _Path(__file__).parent / "analysis_results.json"
+    with open(out, "w", encoding="utf-8") as handle:
         handle.write(json.dumps([item.model_dump() for item in results], indent=2))
 
     print("\nTop 5 setups:")

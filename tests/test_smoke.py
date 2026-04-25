@@ -9,9 +9,9 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from orchestrator import pipeline
-from scanner_agent import ScannerAgent
-from analyst_agent import AnalystAgent
-from alert_agent import AlertAgent
+from agents.scanner.scanner_agent import ScannerAgent
+from agents.analyst.analyst_agent import AnalystAgent
+from agents.alert.alert_agent import AlertAgent
 from ms_agent_framework import AgentApp
 
 
@@ -36,17 +36,17 @@ class TestSmokeTests:
         pipeline(force=True)
 
         # Verify output files were created
-        assert os.path.exists('scan_results.json')
-        assert os.path.exists('analysis_results.json')
+        assert os.path.exists('agents/scanner/scan_results.json')
+        assert os.path.exists('agents/analyst/analysis_results.json')
 
         # Verify JSON files contain data
-        with open('scan_results.json') as f:
+        with open('agents/scanner/scan_results.json') as f:
             scan_data = json.load(f)
             assert len(scan_data) > 0
             assert 'ticker' in scan_data[0]
             assert 'price' in scan_data[0]
 
-        with open('analysis_results.json') as f:
+        with open('agents/analyst/analysis_results.json') as f:
             analysis_data = json.load(f)
             assert len(analysis_data) > 0
             assert 'analysis' in analysis_data[0]

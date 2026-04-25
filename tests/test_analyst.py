@@ -5,7 +5,7 @@ Unit tests for AnalystAgent.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from analyst_agent import FOUNDRY_BASE_URL, AnalystAgent
+from agents.analyst.analyst_agent import FOUNDRY_BASE_URL, AnalystAgent
 from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord, StockScan
 
 
@@ -37,14 +37,14 @@ def _make_scan(**overrides) -> StockRecord:
 class TestAnalystAgent:
     """Test AnalystAgent functionality."""
 
-    @patch("analyst_agent.openai.OpenAI")
+    @patch("agents.analyst.analyst_agent.openai.OpenAI")
     def test_get_llm_client_unavailable(self, mock_openai):
         """Test LLM client returns None when Foundry connection fails."""
         mock_openai.side_effect = Exception("connection refused")
         agent = AnalystAgent()
         assert agent.get_llm_client() is None
 
-    @patch("analyst_agent.openai.OpenAI")
+    @patch("agents.analyst.analyst_agent.openai.OpenAI")
     def test_get_llm_client_available(self, mock_openai):
         """Test LLM client when Foundry is available."""
         mock_model = MagicMock()

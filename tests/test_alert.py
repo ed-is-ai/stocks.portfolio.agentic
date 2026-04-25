@@ -7,7 +7,7 @@ import sqlite3
 import os
 from unittest.mock import patch, MagicMock
 
-from alert_agent import AlertAgent
+from agents.alert.alert_agent import AlertAgent
 from models import EmailConfig, StockRecord, StockScan, StockAnalysis
 
 
@@ -183,7 +183,7 @@ class TestAlertAgent:
         # Should not attempt to send email
         # (We can't easily test this without mocking, but at least verify no exceptions)
 
-    @patch('alert_agent.AlertAgent.send_email')
+    @patch('agents.alert.alert_agent.AlertAgent.send_email')
     def test_run_method_with_alerts(self, mock_send_email, tmp_path, sample_high_score_stocks):
         """Test run method with alerts triggered."""
         email_cfg = EmailConfig(
