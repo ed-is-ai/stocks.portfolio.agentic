@@ -19,11 +19,12 @@ env/
 
 # Runtime outputs
 *.db
-scan_results.json
-analysis_results.json
+**/scan_results.json
+**/analysis_results.json
+**/analysis_results.xlsx
+**/analysis_progress.txt
 dashboard-data.json
 test-results.json
-analysis_progress.txt
 orchestrator_out.txt
 tmp_import_check.py
 

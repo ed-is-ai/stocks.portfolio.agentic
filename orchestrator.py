@@ -7,6 +7,11 @@ import argparse
 import json
 from datetime import datetime
 
+import openpyxl
+from openpyxl.cell.cell import Cell
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.hyperlink import Hyperlink
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -15,14 +20,177 @@ from agents.alert.alert_agent import AlertAgent
 from agents.extraction.extraction_agent import ExtractionAgent
 from ms_agent_framework import AgentApp
 from agents.scanner.scanner_agent import ScannerAgent, load_watchlist
+from models import StockRecord
 
 
 SCAN_OUTPUT = "agents/scanner/scan_results.json"
 ANALYSIS_OUTPUT = "agents/analyst/analysis_results.json"
+EXCEL_OUTPUT = "agents/analyst/analysis_results.xlsx"
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MIN = 30
 MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MIN = 0
+
+_HEADERS = [
+    "Ticker", "Score", "CANSLIM", "Momentum", "Stage", "Near Entry",
+    "Entry", "Stop", "Risk %", "Price", "RSI", "Rel Vol",
+    "% 52w High", "% Chg Week", "Rel Str vs SPY",
+    "EPS Growth", "ROE", "Inst Ownership %", "SPY Uptrend",
+    "As Of", "Summary",
+]
+
+_SCORE_FILLS = {
+    "high":   PatternFill("solid", fgColor="C6EFCE"),  # green  ≥8
+    "mid":    PatternFill("solid", fgColor="FFEB9C"),  # yellow 6–7
+    "low":    PatternFill("solid", fgColor="FFC7CE"),  # red    ≤5
+}
+_HEADER_FILL = PatternFill("solid", fgColor="2F5496")
+_HEADER_FONT = Font(bold=True, color="FFFFFF")
+_NEAR_ENTRY_FILL = PatternFill("solid", fgColor="E2EFDA")
+
+
+def _yahoo_url(ticker: str) -> str:
+    return f"https://finance.yahoo.com/quote/{ticker.replace('.', '-')}"
+
+
+def _score_fill(score: int) -> PatternFill:
+    if score >= 8:
+        return _SCORE_FILLS["high"]
+    if score >= 6:
+        return _SCORE_FILLS["mid"]
+    return _SCORE_FILLS["low"]
+
+
+def _pct(value: float | None) -> str:
+    return f"{value * 100:.1f}%" if value is not None else ""
+
+
+def _record_to_row(r: StockRecord) -> list[object]:
+    a = r.analysis
+    if not a:
+        return [r.ticker] + [""] * (len(_HEADERS) - 1)
+    risk = (
+        f"{(a.entry_price - a.stop_loss) / a.entry_price * 100:.1f}%"
+        if a.entry_price and a.stop_loss
+        else ""
+    )
+    return [
+        r.ticker,
+        f"{a.score}/10",
+        f"{a.canslim.total}/14" if a.canslim else "",
+        f"{a.momentum.total}/14" if a.momentum else "",
+        a.stage,
+        "Y" if a.near_entry else "",
+        a.entry_price,
+        a.stop_loss,
+        risk,
+        r.price,
+        r.rsi14,
+        r.rel_volume,
+        r.pct_from_52w_high,
+        r.pct_change_week,
+        r.rel_strength_vs_spy,
+        _pct(r.eps_growth),
+        _pct(r.roe),
+        _pct(r.inst_ownership_pct),
+        "Y" if r.spy_uptrend else "N",
+        r.as_of,
+        a.summary,
+    ]
+
+
+def _apply_header(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
+    ws.append(_HEADERS)
+    for col, _ in enumerate(_HEADERS, 1):
+        cell = ws.cell(1, col)
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    ws.row_dimensions[1].height = 30
+    ws.freeze_panes = "A2"
+
+
+def _set_col_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
+    widths = {
+        "A": 8,   # Ticker
+        "B": 8,   # Score
+        "C": 10,  # CANSLIM
+        "D": 10,  # Momentum
+        "E": 10,  # Stage
+        "F": 8,   # Near Entry
+        "G": 10,  # Entry
+        "H": 10,  # Stop
+        "I": 8,   # Risk %
+        "J": 10,  # Price
+        "K": 7,   # RSI
+        "L": 8,   # Rel Vol
+        "M": 11,  # % 52w High
+        "N": 11,  # % Chg Week
+        "O": 14,  # Rel Str vs SPY
+        "P": 11,  # EPS Growth
+        "Q": 8,   # ROE
+        "R": 15,  # Inst Ownership
+        "S": 10,  # SPY Uptrend
+        "T": 12,  # As Of
+        "U": 50,  # Summary
+    }
+    for col, width in widths.items():
+        ws.column_dimensions[col].width = width
+
+
+def write_excel(records: list[StockRecord], path: str) -> None:
+    """Write analysis results to a formatted Excel workbook."""
+    wb = openpyxl.Workbook()
+
+    # --- Sheet 1: All results ---
+    ws_all = wb.active
+    ws_all.title = "All Results"
+    _apply_header(ws_all)
+    _set_col_widths(ws_all)
+
+    for r in records:
+        row = _record_to_row(r)
+        ws_all.append(row)
+        data_row = ws_all.max_row
+        score = r.analysis.score if r.analysis else 0
+        fill = _score_fill(score)
+        link_cell = ws_all.cell(data_row, 1)
+        assert isinstance(link_cell, Cell)
+        link_cell.hyperlink = Hyperlink(ref="", target=_yahoo_url(r.ticker))
+        link_cell.font = Font(color="0563C1", underline="single")
+        link_cell.fill = fill
+        ws_all.cell(data_row, 2).fill = fill   # Score cell
+        if r.analysis and r.analysis.near_entry:
+            ws_all.cell(data_row, 6).fill = _NEAR_ENTRY_FILL
+        for col in range(1, len(_HEADERS) + 1):
+            ws_all.cell(data_row, col).alignment = Alignment(vertical="center")
+
+    # --- Sheet 2: Top 20 ---
+    top20 = [r for r in records if r.analysis][:20]
+    ws_top = wb.create_sheet("Top 20")
+    _apply_header(ws_top)
+    _set_col_widths(ws_top)
+
+    for rank, r in enumerate(top20, 1):
+        row = _record_to_row(r)
+        row[0] = f"{rank}. {r.ticker}"
+        ws_top.append(row)
+        data_row = ws_top.max_row
+        score = r.analysis.score if r.analysis else 0
+        fill = _score_fill(score)
+        top_link = ws_top.cell(data_row, 1)
+        assert isinstance(top_link, Cell)
+        top_link.hyperlink = Hyperlink(ref="", target=_yahoo_url(r.ticker))
+        top_link.font = Font(color="0563C1", underline="single")
+        top_link.fill = fill
+        ws_top.cell(data_row, 2).fill = fill
+        if r.analysis and r.analysis.near_entry:
+            ws_top.cell(data_row, 6).fill = _NEAR_ENTRY_FILL
+        for col in range(1, len(_HEADERS) + 1):
+            ws_top.cell(data_row, col).alignment = Alignment(vertical="center")
+
+    wb.save(path)
+    print(f"      Excel saved -> {path}")
 
 
 def is_market_hours() -> bool:
@@ -44,14 +212,9 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
     print(f"Pipeline run: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print("="*50)
 
-    watchlist: list[str]
     if extract:
-        watchlist = ExtractionAgent().run()
-        if not watchlist:
-            print("Extraction returned no tickers — falling back to default watchlist")
-            watchlist = load_watchlist()
-    else:
-        watchlist = load_watchlist()
+        ExtractionAgent().run()  # refreshes extraction_results.json with latest WisdomWise data
+    watchlist = load_watchlist()  # always scan the full combined watchlist
 
     scanner = ScannerAgent(name="ScannerAgent")
     analyst = AnalystAgent()
@@ -70,6 +233,8 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
     with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
         json.dump([item.model_dump() for item in analysis_results], stream, indent=2)
+
+    write_excel(analysis_results, EXCEL_OUTPUT)
 
     print("\nPipeline complete.")
 

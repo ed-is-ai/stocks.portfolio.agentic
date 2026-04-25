@@ -7,7 +7,7 @@ import json
 import os
 import smtplib
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
@@ -36,9 +36,49 @@ class AlertAgent(Agent):
     db_path: str = DB_PATH
     email_config: EmailConfig = EMAIL_CONFIG
 
+    def check_positions(
+        self, stocks: list[StockRecord], conn: sqlite3.Connection
+    ) -> None:
+        """Fire follow-up alerts when a watching position crosses entry or stop loss."""
+        rows = conn.execute(
+            "SELECT rowid, ticker, entry_price, stop_loss FROM alerts WHERE status='watching'"
+        ).fetchall()
+        if not rows:
+            return
+        price_map = {s.ticker: s.price for s in stocks}
+        for rowid, ticker, entry_price, stop_loss in rows:
+            current = price_map.get(ticker)
+            if current is None:
+                continue
+            if entry_price is not None and current >= entry_price:
+                msg = (
+                    f"ENTRY TRIGGERED: {ticker} @ ${current:.2f} "
+                    f"(entry was ${entry_price:.2f})"
+                )
+                print(f"\n{msg}")
+                self.send_email(f"Entry Triggered: {ticker}", f"<p>{msg}</p>", msg)
+                conn.execute(
+                    "UPDATE alerts SET status='entered' WHERE rowid=?", (rowid,)
+                )
+                conn.commit()
+            elif stop_loss is not None and current <= stop_loss:
+                msg = (
+                    f"STOP LOSS HIT: {ticker} @ ${current:.2f} "
+                    f"(stop was ${stop_loss:.2f})"
+                )
+                print(f"\n{msg}")
+                self.send_email(f"Stop Loss Hit: {ticker}", f"<p>{msg}</p>", msg)
+                conn.execute(
+                    "UPDATE alerts SET status='stopped' WHERE rowid=?", (rowid,)
+                )
+                conn.commit()
+
     def run(self, payload: Iterable[StockRecord]) -> int:
         results = list(payload)
         conn = self.init_db()
+        conn.execute("DELETE FROM alerts")
+        conn.commit()
+        self.check_positions(results, conn)
         alerted_count = 0
 
         for stock in results:
@@ -72,10 +112,25 @@ class AlertAgent(Agent):
             )
             """
         )
+        for col_sql in [
+            "ALTER TABLE alerts ADD COLUMN entry_price REAL",
+            "ALTER TABLE alerts ADD COLUMN stop_loss REAL",
+            "ALTER TABLE alerts ADD COLUMN status TEXT DEFAULT 'watching'",
+        ]:
+            try:
+                conn.execute(col_sql)
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
         return conn
 
     def was_recently_alerted(self, conn: sqlite3.Connection, ticker: str) -> bool:
+        watching = conn.execute(
+            "SELECT 1 FROM alerts WHERE ticker=? AND status='watching' LIMIT 1",
+            (ticker,),
+        ).fetchone()
+        if watching:
+            return True
         row = conn.execute(
             "SELECT alerted_at FROM alerts WHERE ticker=? ORDER BY alerted_at DESC LIMIT 1",
             (ticker,),
@@ -83,18 +138,22 @@ class AlertAgent(Agent):
         if not row:
             return False
         last = row[0][:13]
-        diff = datetime.utcnow() - datetime.fromisoformat(last + ":00:00")
+        diff = datetime.now(timezone.utc) - datetime.fromisoformat(last + ":00:00+00:00")
         return diff.total_seconds() < ALERT_COOLDOWN_HOURS * 3600
 
     def record_alert(self, conn: sqlite3.Connection, stock: StockRecord) -> None:
         conn.execute(
-            "INSERT INTO alerts (ticker, alerted_at, score, stage, summary) VALUES (?, ?, ?, ?, ?)",
+            """INSERT INTO alerts
+               (ticker, alerted_at, score, stage, summary, entry_price, stop_loss, status)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'watching')""",
             (
                 stock.ticker,
-                datetime.utcnow().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
                 stock.analysis.score,
                 stock.analysis.stage,
                 stock.analysis.summary,
+                stock.analysis.entry_price,
+                stock.analysis.stop_loss,
             ),
         )
         conn.commit()
@@ -153,7 +212,12 @@ class AlertAgent(Agent):
         strengths_html = "".join(f"<li>&#10003; {item}</li>" for item in analysis.strengths)
         risks_html = "".join(f"<li>&#9888; {item}</li>" for item in analysis.risks)
 
-        score_color = "#27ae60" if analysis.score >= 8 else "#f39c12" if analysis.score >= 6 else "#e74c3c"
+        if analysis.score >= 8:
+            score_color = "#27ae60"
+        elif analysis.score >= 6:
+            score_color = "#f39c12"
+        else:
+            score_color = "#e74c3c"
         risks_section = (
             f"<ul style='padding-left:20px;color:#c0392b'>{risks_html}</ul>" if risks_html else ""
         )

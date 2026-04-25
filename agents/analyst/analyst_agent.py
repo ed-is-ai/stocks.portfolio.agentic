@@ -183,7 +183,7 @@ class AnalystAgent(Agent):
     def _print_table(records: list[StockRecord], prev_scores: dict[str, int]) -> None:
         header = (
             f"  {'Ticker':<6}  {'Scr':>4}  {'Chg':>4}  {'CANSLIM':>7}  {'Mom':>5}  "
-            f"{'Risk%':>6}  {'Price':>9}  {'Entry':>9}  {'Stop':>9}  {'Stage':<8}  {'NE':>2}  Chart"
+            f"{'Price':>9}  {'Entry':>9}  {'Stop':>9}  {'Risk%':>6}  {'Stage':<8}  {'NE':>2}  Chart"
         )
         print()
         print(header)
@@ -206,7 +206,7 @@ class AnalystAgent(Agent):
             spark = AnalystAgent._sparkline(stock.price_history)
             print(
                 f"  {stock.ticker:<6}  {a.score:>3}/10  {delta:>4}  {canslim:>7}  {mom:>5}  "
-                f"{risk_pct:>6}  {price:>9}  {entry:>9}  {stop:>9}  {a.stage:<8}  {ne:>2}  {spark}"
+                f"{price:>9}  {entry:>9}  {stop:>9}  {risk_pct:>6}  {a.stage:<8}  {ne:>2}  {spark}"
             )
 
     def get_llm_client(self) -> tuple[openai.OpenAI, str] | None:
