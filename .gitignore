@@ -28,6 +28,9 @@ test-results.json
 orchestrator_out.txt
 tmp_import_check.py
 
+# Claude Code internals
+.claude/
+
 # IDE
 .vscode/
 *.code-workspace
