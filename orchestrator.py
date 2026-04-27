@@ -19,7 +19,7 @@ from agents.analyst.analyst_agent import AnalystAgent
 from agents.alert.alert_agent import AlertAgent
 from agents.extraction.extraction_agent import ExtractionAgent
 from ms_agent_framework import AgentApp
-from agents.scanner.scanner_agent import ScannerAgent, load_watchlist
+from agents.scanner.scanner_agent import ScannerAgent, load_watchlist, load_source_map
 from models import StockRecord
 
 
@@ -32,17 +32,27 @@ MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MIN = 0
 
 _HEADERS = [
-    "Ticker", "Score", "CANSLIM", "Momentum", "Stage", "Near Entry",
-    "Entry", "Stop", "Risk %", "Price", "RSI", "Rel Vol",
+    "Ticker", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Near Entry",
+    "Entry", "Stop", "Risk %", "Price", "P/E", "RSI", "Rel Vol",
     "% 52w High", "% Chg Week", "Rel Str vs SPY",
-    "EPS Growth", "ROE", "Inst Ownership %", "SPY Uptrend",
+    "EPS Growth", "ROE", "Inst Ownership %", "13F Buyers", "SPY Uptrend",
+    "SMA Stack", "SMA50", "Near High", "RSI Zone", "Vol Zone",
     "As Of", "Summary",
 ]
+
+# Signal columns are X-AB (1-indexed: 24-28)
+_SIGNAL_COL_START = 24
+_SIGNAL_COL_END = 28
 
 _SCORE_FILLS = {
     "high":   PatternFill("solid", fgColor="C6EFCE"),  # green  ≥8
     "mid":    PatternFill("solid", fgColor="FFEB9C"),  # yellow 6–7
     "low":    PatternFill("solid", fgColor="FFC7CE"),  # red    ≤5
+}
+_SIGNAL_FILLS = {
+    "+": PatternFill("solid", fgColor="C6EFCE"),  # green  — positive for buying
+    "-": PatternFill("solid", fgColor="FFC7CE"),  # red    — negative / caution
+    "~": PatternFill("solid", fgColor="FFEB9C"),  # yellow — neutral
 }
 _HEADER_FILL = PatternFill("solid", fgColor="2F5496")
 _HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -65,6 +75,57 @@ def _pct(value: float | None) -> str:
     return f"{value * 100:.1f}%" if value is not None else ""
 
 
+def _signals(r: StockRecord) -> list[str]:
+    """Return 5 buy-signal indicators (+/-/~) from scan data.
+
+    These correspond to the conditions previously used in the heuristic score
+    and are shown as coloured columns in the Excel output.
+    """
+    sma150 = r.sma150
+    sma200 = r.sma200
+    sma50 = r.sma50
+    rsi = r.rsi14
+    pct = r.pct_from_52w_high
+    vol = r.rel_volume
+
+    # SMA Stack: price > SMA150 > SMA200 → bullish macro structure
+    if sma150 and sma200 and r.price > sma150 > sma200:
+        sma_stack = "+"
+    elif sma150 and sma200 and r.price < sma150 and r.price < sma200:
+        sma_stack = "-"
+    else:
+        sma_stack = "~"
+
+    # SMA50: short-term trend
+    sma50_sig = "+" if sma50 and r.price > sma50 else "-"
+
+    # Near High: -15% to -1% is the ideal consolidation zone; < -30% is too extended
+    if pct is not None and -15 <= pct <= -1:
+        near_high = "+"
+    elif pct is not None and pct < -30:
+        near_high = "-"
+    else:
+        near_high = "~"
+
+    # RSI Zone: 50-80 healthy, >80 overbought, <40 weak, 40-50 neutral
+    if rsi is not None and 50 <= rsi <= 80:
+        rsi_zone = "+"
+    elif rsi is not None and (rsi > 80 or rsi < 40):
+        rsi_zone = "-"
+    else:
+        rsi_zone = "~"
+
+    # Vol Zone: elevated volume signals institutional participation
+    if vol >= 1.5:
+        vol_zone = "+"
+    elif vol < 0.7:
+        vol_zone = "-"
+    else:
+        vol_zone = "~"
+
+    return [sma_stack, sma50_sig, near_high, rsi_zone, vol_zone]
+
+
 def _record_to_row(r: StockRecord) -> list[object]:
     a = r.analysis
     if not a:
@@ -76,6 +137,8 @@ def _record_to_row(r: StockRecord) -> list[object]:
     )
     return [
         r.ticker,
+        "Y" if r.in_stocktwits else "",
+        "Y" if r.in_whale_wisdom else "",
         f"{a.score}/10",
         f"{a.canslim.total}/14" if a.canslim else "",
         f"{a.momentum.total}/14" if a.momentum else "",
@@ -85,6 +148,7 @@ def _record_to_row(r: StockRecord) -> list[object]:
         a.stop_loss,
         risk,
         r.price,
+        round(r.pe_ratio, 1) if r.pe_ratio else "",
         r.rsi14,
         r.rel_volume,
         r.pct_from_52w_high,
@@ -93,7 +157,9 @@ def _record_to_row(r: StockRecord) -> list[object]:
         _pct(r.eps_growth),
         _pct(r.roe),
         _pct(r.inst_ownership_pct),
+        r.funds_buying if r.funds_buying is not None else "",
         "Y" if r.spy_uptrend else "N",
+        *_signals(r),
         r.as_of,
         a.summary,
     ]
@@ -113,26 +179,35 @@ def _apply_header(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
 def _set_col_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
     widths = {
         "A": 8,   # Ticker
-        "B": 8,   # Score
-        "C": 10,  # CANSLIM
-        "D": 10,  # Momentum
-        "E": 10,  # Stage
-        "F": 8,   # Near Entry
-        "G": 10,  # Entry
-        "H": 10,  # Stop
-        "I": 8,   # Risk %
-        "J": 10,  # Price
-        "K": 7,   # RSI
-        "L": 8,   # Rel Vol
-        "M": 11,  # % 52w High
-        "N": 11,  # % Chg Week
-        "O": 14,  # Rel Str vs SPY
-        "P": 11,  # EPS Growth
-        "Q": 8,   # ROE
-        "R": 15,  # Inst Ownership
-        "S": 10,  # SPY Uptrend
-        "T": 12,  # As Of
-        "U": 50,  # Summary
+        "B": 11,  # StockTwits
+        "C": 12,  # Whale Wisdom
+        "D": 8,   # Score
+        "E": 10,  # CANSLIM
+        "F": 10,  # Momentum
+        "G": 10,  # Stage
+        "H": 8,   # Near Entry
+        "I": 10,  # Entry
+        "J": 10,  # Stop
+        "K": 8,   # Risk %
+        "L": 10,  # Price
+        "M": 7,   # P/E
+        "N": 7,   # RSI
+        "O": 8,   # Rel Vol
+        "P": 11,  # % 52w High
+        "Q": 11,  # % Chg Week
+        "R": 14,  # Rel Str vs SPY
+        "S": 11,  # EPS Growth
+        "T": 8,   # ROE
+        "U": 15,  # Inst Ownership
+        "V": 10,  # 13F Buyers
+        "W": 10,  # SPY Uptrend
+        "X": 9,   # SMA Stack
+        "Y": 7,   # SMA50
+        "Z": 9,   # Near High
+        "AA": 8,  # RSI Zone
+        "AB": 8,  # Vol Zone
+        "AC": 12, # As Of
+        "AD": 50, # Summary
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
@@ -159,9 +234,14 @@ def write_excel(records: list[StockRecord], path: str) -> None:
         link_cell.hyperlink = Hyperlink(ref="", target=_yahoo_url(r.ticker))
         link_cell.font = Font(color="0563C1", underline="single")
         link_cell.fill = fill
-        ws_all.cell(data_row, 2).fill = fill   # Score cell
+        ws_all.cell(data_row, 4).fill = fill   # Score cell
         if r.analysis and r.analysis.near_entry:
-            ws_all.cell(data_row, 6).fill = _NEAR_ENTRY_FILL
+            ws_all.cell(data_row, 8).fill = _NEAR_ENTRY_FILL
+        for col in range(_SIGNAL_COL_START, _SIGNAL_COL_END + 1):
+            cell = ws_all.cell(data_row, col)
+            if cell.value in _SIGNAL_FILLS:
+                cell.fill = _SIGNAL_FILLS[cell.value]
+                cell.alignment = Alignment(horizontal="center", vertical="center")
         for col in range(1, len(_HEADERS) + 1):
             ws_all.cell(data_row, col).alignment = Alignment(vertical="center")
 
@@ -183,9 +263,14 @@ def write_excel(records: list[StockRecord], path: str) -> None:
         top_link.hyperlink = Hyperlink(ref="", target=_yahoo_url(r.ticker))
         top_link.font = Font(color="0563C1", underline="single")
         top_link.fill = fill
-        ws_top.cell(data_row, 2).fill = fill
+        ws_top.cell(data_row, 4).fill = fill
         if r.analysis and r.analysis.near_entry:
-            ws_top.cell(data_row, 6).fill = _NEAR_ENTRY_FILL
+            ws_top.cell(data_row, 8).fill = _NEAR_ENTRY_FILL
+        for col in range(_SIGNAL_COL_START, _SIGNAL_COL_END + 1):
+            cell = ws_top.cell(data_row, col)
+            if cell.value in _SIGNAL_FILLS:
+                cell.fill = _SIGNAL_FILLS[cell.value]
+                cell.alignment = Alignment(horizontal="center", vertical="center")
         for col in range(1, len(_HEADERS) + 1):
             ws_top.cell(data_row, col).alignment = Alignment(vertical="center")
 
@@ -215,6 +300,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
     if extract:
         ExtractionAgent().run()  # refreshes extraction_results.json with latest WisdomWise data
     watchlist = load_watchlist()  # always scan the full combined watchlist
+    source_map = load_source_map()
 
     scanner = ScannerAgent(name="ScannerAgent")
     analyst = AnalystAgent()
@@ -226,6 +312,11 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
     _, intermediates = app.execute_with_intermediates(watchlist)
     scan_results, analysis_results = intermediates
+
+    for r in analysis_results:
+        st, ww = source_map.get(r.ticker, (False, False))
+        r.in_stocktwits = st
+        r.in_whale_wisdom = ww
 
     with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
         json.dump([item.model_dump() for item in scan_results], stream, indent=2)
