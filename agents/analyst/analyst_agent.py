@@ -242,7 +242,8 @@ class AnalystAgent(Agent):
     def _print_table(records: list[StockRecord], prev_scores: dict[str, int]) -> None:
         header = (
             f"  {'Ticker':<6}  {'Scr':>4}  {'Chg':>4}  {'CANSLIM':>7}  {'Mom':>5}  "
-            f"{'Price':>9}  {'Entry':>9}  {'Stop':>9}  {'Risk%':>6}  {'Stage':<8}  {'NE':>2}  Chart"
+            f"{'Price':>9}  {'Entry':>9}  {'Stop':>9}  {'Risk%':>6}  {'Stage':<8}  {'NE':>2}  "
+            f"{'B':>3}  {'S':>3}  {'Net':>4}  {'Rec':<10}  Chart"
         )
         print()
         print(header)
@@ -262,10 +263,16 @@ class AnalystAgent(Agent):
                 risk_pct = f"{(a.entry_price - a.stop_loss) / a.entry_price * 100:.1f}%"
             else:
                 risk_pct = "—"
+            buyers = str(stock.funds_buying) if stock.funds_buying is not None else "—"
+            sellers = str(stock.funds_selling) if stock.funds_selling is not None else "—"
+            net = (f"+{stock.funds_net}" if stock.funds_net and stock.funds_net > 0
+                   else str(stock.funds_net) if stock.funds_net is not None else "—")
+            rec = recommendation(a)
             spark = AnalystAgent._sparkline(stock.price_history)
             print(
                 f"  {stock.ticker:<6}  {a.score:>3}/10  {delta:>4}  {canslim:>7}  {mom:>5}  "
-                f"{price:>9}  {entry:>9}  {stop:>9}  {risk_pct:>6}  {a.stage:<8}  {ne:>2}  {spark}"
+                f"{price:>9}  {entry:>9}  {stop:>9}  {risk_pct:>6}  {a.stage:<8}  {ne:>2}  "
+                f"{buyers:>3}  {sellers:>3}  {net:>4}  {rec:<10}  {spark}"
             )
 
     def get_llm_client(self) -> tuple[openai.OpenAI, str] | None:
@@ -489,6 +496,20 @@ class AnalystAgent(Agent):
         m = 2 if stock.spy_uptrend else 0
 
         return CANSLIMScore(C=c, A=a, N=n, S=s, L=l, I=i, M=m)
+
+
+def recommendation(a: StockAnalysis) -> str:
+    """Return BUY / SELL / No Action based on stage, entry proximity, and score.
+
+    BUY  — Stage 2, within 5% of pivot (near entry), score ≥ 7
+    SELL — Stage 3 or 4 (trend breaking down), or score ≤ 3
+    No Action — monitoring: Stage 2 not yet at entry, Stage 1 basing, etc.
+    """
+    if a.stage == "Stage 2" and a.near_entry and a.score >= 7:
+        return "BUY"
+    if a.stage in ("Stage 3", "Stage 4") or a.score <= 3:
+        return "SELL"
+    return "No Action"
 
 
 def _fmt_delta(ticker: str, score: int, prev_scores: dict[str, int]) -> str:

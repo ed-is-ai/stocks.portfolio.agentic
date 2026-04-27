@@ -15,7 +15,7 @@ from openpyxl.worksheet.hyperlink import Hyperlink
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from agents.analyst.analyst_agent import AnalystAgent
+from agents.analyst.analyst_agent import AnalystAgent, recommendation
 from agents.alert.alert_agent import AlertAgent
 from agents.extraction.extraction_agent import ExtractionAgent
 from ms_agent_framework import AgentApp
@@ -37,7 +37,7 @@ _HEADERS = [
     "% 52w High", "% Chg Week", "Rel Str vs SPY",
     "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "WW Sellers", "WW Net", "SPY Uptrend",
     "SMA Stack", "SMA50", "Near High", "RSI Zone", "Vol Zone",
-    "As Of", "Summary",
+    "Recommendation", "As Of", "Summary",
 ]
 
 # Signal columns are AA-AE (1-indexed: 27-31)
@@ -163,6 +163,7 @@ def _record_to_row(r: StockRecord) -> list[object]:
         r.funds_net if r.funds_net is not None else "",
         "Y" if r.spy_uptrend else "N",
         *_signals(r),
+        recommendation(a),
         r.as_of,
         a.summary,
     ]
@@ -212,8 +213,9 @@ def _set_col_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
         "AC": 9,  # Near High
         "AD": 8,  # RSI Zone
         "AE": 8,  # Vol Zone
-        "AF": 12, # As Of
-        "AG": 50, # Summary
+        "AF": 12, # Recommendation
+        "AG": 12, # As Of
+        "AH": 50, # Summary
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
@@ -310,7 +312,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
     scanner = ScannerAgent(name="ScannerAgent")
     analyst = AnalystAgent()
-    alerter = AlertAgent()
+    alerter = AlertAgent(name="AlertAgent")
     app = AgentApp(name="MomentumStockAgent")
     app.add_agent(scanner)
     app.add_agent(analyst)
