@@ -6,7 +6,7 @@ Outputs typed scan results for the Analyst Agent using the local MS Agent framew
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 import pandas as pd
 import yfinance as yf
@@ -81,14 +81,15 @@ def _fetch_spy_context() -> tuple[bool, float]:
         return True, 0.0
 
 
-def _fetch_fundamentals(ticker: str) -> dict:
-    """Return fundamental fields from yfinance Ticker.info (best-effort, None on failure)."""
+def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
+    """Return fundamental fields from yfinance (best-effort, None on failure)."""
     try:
         t = yf.Ticker(ticker)
-        info = t.info
+        info: Any = t.info  # yfinance stubs type this as dict[Unknown, Unknown]
         funds_buying = _count_buyers(t)
         return {
-            "eps_growth": info.get("earningsGrowth"),
+            "eps_growth": _quarterly_eps_growth(t, info),
+            "annual_eps_growth": _annual_eps_growth(t),
             "roe": info.get("returnOnEquity"),
             "inst_ownership_pct": info.get("heldPercentInstitutions"),
             "pe_ratio": info.get("trailingPE"),
@@ -96,9 +97,69 @@ def _fetch_fundamentals(ticker: str) -> dict:
         }
     except Exception:
         return {
-            "eps_growth": None, "roe": None, "inst_ownership_pct": None,
-            "pe_ratio": None, "funds_buying": None,
+            "eps_growth": None, "annual_eps_growth": None, "roe": None,
+            "inst_ownership_pct": None, "pe_ratio": None, "funds_buying": None,
         }
+
+
+def _quarterly_eps_growth(t: yf.Ticker, info: Any) -> float | None:
+    """Compute most-recent-quarter YoY EPS growth from quarterly income statement.
+
+    Compares Q0 Diluted EPS to Q4 (same quarter one year ago).
+    Falls back to info.earningsGrowth when insufficient quarterly data.
+    Skips the calculation when the year-ago EPS was negative (sign flip distorts %).
+    """
+    try:
+        qi = t.quarterly_income_stmt
+        if qi.empty:
+            return info.get("earningsGrowth")
+        eps_row = "Diluted EPS" if "Diluted EPS" in qi.index else (
+            "Basic EPS" if "Basic EPS" in qi.index else None
+        )
+        if eps_row is None:
+            return info.get("earningsGrowth")
+        # .values gives a plain numpy array, avoiding Series[Any] | Any iloc typing issues
+        eps_vals: list[float] = [float(v) for v in qi.loc[eps_row].values]
+        if len(eps_vals) < 5:
+            return info.get("earningsGrowth")
+        recent, year_ago = eps_vals[0], eps_vals[4]
+        if pd.isna(recent) or pd.isna(year_ago) or year_ago <= 0:
+            return info.get("earningsGrowth")
+        return round((recent - year_ago) / year_ago, 4)
+    except Exception:
+        return info.get("earningsGrowth")
+
+
+def _annual_eps_growth(t: yf.Ticker) -> float | None:
+    """Compute multi-year annual EPS CAGR from the annual income statement.
+
+    Uses up to 4 years of Diluted EPS data (3 growth periods).
+    Returns None when fewer than 3 data points are available or EPS was
+    negative in the base year (CAGR undefined for sign-flip scenarios).
+    """
+    try:
+        ai = t.income_stmt
+        if ai.empty:
+            return None
+        eps_row = "Diluted EPS" if "Diluted EPS" in ai.index else (
+            "Basic EPS" if "Basic EPS" in ai.index else None
+        )
+        if eps_row is None:
+            return None
+        # Drop NaN and convert to plain floats to sidestep Series[Any] | Any iloc typing
+        eps_vals: list[float] = [
+            float(v) for v in ai.loc[eps_row].values if not pd.isna(v)
+        ]
+        if len(eps_vals) < 3:
+            return None
+        n = min(len(eps_vals), 4)  # cap at 4 data points (3 growth periods)
+        newest, oldest = eps_vals[0], eps_vals[n - 1]
+        if oldest <= 0 or newest <= 0:
+            return None
+        cagr = (newest / oldest) ** (1 / (n - 1)) - 1
+        return round(cagr, 4)
+    except Exception:
+        return None
 
 
 def _count_buyers(ticker_obj: yf.Ticker) -> int | None:

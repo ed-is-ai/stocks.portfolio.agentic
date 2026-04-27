@@ -463,9 +463,13 @@ class AnalystAgent(Agent):
         eps = stock.eps_growth
         c = 2 if eps is not None and eps >= 0.25 else 1 if eps is not None and eps >= 0.10 else 0
 
-        # A — Annual earnings quality via ROE (≥17% = 2, ≥10% = 1)
+        # A — Annual EPS CAGR over 3 years (≥25% = 2, ≥15% = 1); falls back to ROE if unavailable
+        annual_eps = stock.annual_eps_growth
         roe = stock.roe
-        a = 2 if roe is not None and roe >= 0.17 else 1 if roe is not None and roe >= 0.10 else 0
+        if annual_eps is not None:
+            a = 2 if annual_eps >= 0.25 else 1 if annual_eps >= 0.15 else 0
+        else:
+            a = 2 if roe is not None and roe >= 0.17 else 1 if roe is not None and roe >= 0.10 else 0
 
         # N — New highs / breakout (same proxy as momentum: 52w high proximity)
         n = 2 if pct_from_high >= -5 else 1 if pct_from_high >= -15 else 0

@@ -220,6 +220,23 @@ class TestAnalystAgent:
         assert score.M == 2
         assert score.total == 8
 
+    def test_canslim_a_uses_annual_eps_growth_when_available(self):
+        """annual_eps_growth takes priority over ROE for A letter."""
+        record = _make_scan(
+            annual_eps_growth=0.30,  # A: 2 (≥25% CAGR)
+            roe=0.05,                # would give A: 0 if used
+        )
+        agent = AnalystAgent()
+        score = agent._canslim_fundamental_score(record)
+        assert score.A == 2
+
+    def test_canslim_a_falls_back_to_roe_when_annual_eps_missing(self):
+        """When annual_eps_growth is None, A falls back to ROE."""
+        record = _make_scan(annual_eps_growth=None, roe=0.20)  # ROE ≥17% → A: 2
+        agent = AnalystAgent()
+        score = agent._canslim_fundamental_score(record)
+        assert score.A == 2
+
     def test_canslim_spy_downtrend_scores_zero_m(self):
         """SPY in downtrend (spy_uptrend=False) scores M=0."""
         record = _make_scan(spy_uptrend=False)

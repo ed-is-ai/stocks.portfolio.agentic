@@ -25,7 +25,8 @@ class StockScan(BaseModel):
     pct_from_52w_high: float
     pct_change_week: float
     # Fundamental data (fetched from yfinance Ticker.info)
-    eps_growth: float | None = None          # Quarterly EPS growth YoY (0.25 = 25%)
+    eps_growth: float | None = None          # Current quarter EPS growth YoY (0.25 = 25%)
+    annual_eps_growth: float | None = None   # 3-year annual EPS CAGR (0.25 = 25%)
     roe: float | None = None                 # Return on equity (0.17 = 17%)
     inst_ownership_pct: float | None = None  # Institutional ownership fraction (0.0–1.0)
     pe_ratio: float | None = None            # Trailing twelve-month P/E ratio
@@ -66,7 +67,7 @@ class CANSLIMScore(BaseModel):
     """
 
     C: int = Field(ge=0, le=2)  # Current quarterly EPS growth ≥25% YoY
-    A: int = Field(ge=0, le=2)  # Annual earnings quality — return on equity ≥17%
+    A: int = Field(ge=0, le=2)  # Annual EPS CAGR ≥25% over 3 years (fallback: ROE ≥17%)
     N: int = Field(ge=0, le=2)  # New highs — proximity to 52w high (breakout proxy)
     S: int = Field(ge=0, le=2)  # Supply & demand — relative volume on up-days
     L: int = Field(ge=0, le=2)  # Leader — 12m price return vs S&P 500
