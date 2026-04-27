@@ -306,6 +306,12 @@ class ScannerAgent(Agent):
                     spy_uptrend=spy_uptrend,
                     rel_strength_vs_spy=rel_strength,
                     funds_buying=ww_data.get("filers_increasing"),
+                funds_selling=ww_data.get("filers_decreasing"),
+                funds_net=(
+                    ww_data["filers_increasing"] - ww_data["filers_decreasing"]
+                    if "filers_increasing" in ww_data and "filers_decreasing" in ww_data
+                    else None
+                ),
                     **technicals,
                     **fundamentals,
                 )

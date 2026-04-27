@@ -32,6 +32,8 @@ class StockScan(BaseModel):
     pe_ratio: float | None = None            # Trailing twelve-month P/E ratio
     inst_count: int | None = None            # Total number of institutions holding shares (13F)
     funds_buying: int | None = None          # WhalWisdom: # filers that increased position last quarter
+    funds_selling: int | None = None         # WhalWisdom: # filers that decreased position last quarter
+    funds_net: int | None = None             # WhalWisdom: funds_buying minus funds_selling
     # Market context
     rel_strength_vs_spy: float | None = None  # Stock 52w return minus SPY 52w return (pct pts)
     spy_uptrend: bool | None = None           # True if SPY is above its 200-day SMA

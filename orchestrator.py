@@ -35,14 +35,14 @@ _HEADERS = [
     "Ticker", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Near Entry",
     "Entry", "Stop", "Risk %", "Price", "P/E", "RSI", "Rel Vol",
     "% 52w High", "% Chg Week", "Rel Str vs SPY",
-    "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "SPY Uptrend",
+    "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "WW Sellers", "WW Net", "SPY Uptrend",
     "SMA Stack", "SMA50", "Near High", "RSI Zone", "Vol Zone",
     "As Of", "Summary",
 ]
 
-# Signal columns are Y-AC (1-indexed: 25-29)
-_SIGNAL_COL_START = 25
-_SIGNAL_COL_END = 29
+# Signal columns are AA-AE (1-indexed: 27-31)
+_SIGNAL_COL_START = 27
+_SIGNAL_COL_END = 31
 
 _SCORE_FILLS = {
     "high":   PatternFill("solid", fgColor="C6EFCE"),  # green  ≥8
@@ -159,6 +159,8 @@ def _record_to_row(r: StockRecord) -> list[object]:
         _pct(r.inst_ownership_pct),
         r.inst_count if r.inst_count is not None else "",
         r.funds_buying if r.funds_buying is not None else "",
+        r.funds_selling if r.funds_selling is not None else "",
+        r.funds_net if r.funds_net is not None else "",
         "Y" if r.spy_uptrend else "N",
         *_signals(r),
         r.as_of,
@@ -202,14 +204,16 @@ def _set_col_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
         "U": 15,  # Inst Ownership
         "V": 10,  # Inst Count
         "W": 9,   # WW Buyers
-        "X": 10,  # SPY Uptrend
-        "Y": 9,   # SMA Stack
-        "Z": 7,   # SMA50
-        "AA": 9,  # Near High
-        "AB": 8,  # RSI Zone
-        "AC": 8,  # Vol Zone
-        "AD": 12, # As Of
-        "AE": 50, # Summary
+        "X": 9,   # WW Sellers
+        "Y": 8,   # WW Net
+        "Z": 10,  # SPY Uptrend
+        "AA": 9,  # SMA Stack
+        "AB": 7,  # SMA50
+        "AC": 9,  # Near High
+        "AD": 8,  # RSI Zone
+        "AE": 8,  # Vol Zone
+        "AF": 12, # As Of
+        "AG": 50, # Summary
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
