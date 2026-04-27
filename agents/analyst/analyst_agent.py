@@ -42,6 +42,65 @@ Scoring guide:
 RESULTS_DB = str(Path(__file__).parent / "results.db")
 
 
+def _sma_slope(prices: list[float], window: int, lookback: int = 4) -> float | None:
+    """Approximate SMA slope: current window-SMA minus the same SMA 'lookback' steps ago.
+
+    Returns None when there is insufficient data (tests / cold-start).
+    Positive = rising, negative = declining.
+    Weekly closes are used to approximate the equivalent daily SMA direction.
+    """
+    if len(prices) < window + lookback:
+        return None
+    current_sma = sum(prices[-window:]) / window
+    past_sma = sum(prices[-(window + lookback):-lookback]) / window
+    return current_sma - past_sma
+
+
+def _stage_classify(stock: StockRecord) -> str:
+    """Classify Weinstein stage using SMA levels and slope direction.
+
+    Stage 2 requires SMA200 to be rising — price position alone is not enough.
+    Falls back to simple structural classification when price_history is too short.
+    """
+    price = stock.price
+    sma150 = stock.sma150 or price
+    sma200 = stock.sma200 or price
+
+    above_150 = price > sma150
+    above_200 = price > sma200
+    ma_bullish = sma150 > sma200  # 150-day above 200-day = bullish alignment
+
+    s150 = _sma_slope(stock.price_history, window=30, lookback=4)
+    s200 = _sma_slope(stock.price_history, window=40, lookback=4)
+
+    # Insufficient history — fall back to structure-only classification
+    if s150 is None or s200 is None:
+        if above_150 and ma_bullish:
+            return "Stage 2"
+        if not above_150 and not above_200:
+            return "Stage 4"
+        if above_200 and not above_150:
+            return "Stage 3"  # Price dropped through SMA150, SMA200 still above
+        return "Stage 1"  # Price above SMA150 but SMAs not yet aligned
+
+    # Full slope-aware classification
+    s200_rising = s200 > 0
+    s150_declining = s150 < 0
+
+    # Stage 2: classic advancing — price above aligned, rising SMAs
+    if above_150 and ma_bullish and s200_rising:
+        return "Stage 2"
+    # Stage 4: declining — price below both SMAs and SMA150 is falling
+    if not above_150 and not above_200 and s150_declining:
+        return "Stage 4"
+    # Stage 3: topping — dropped below SMA150 while SMA200 still rising, or
+    #           still above SMA150 but SMA200 has started rolling over
+    if (not above_150 and above_200) or (above_150 and ma_bullish and not s200_rising):
+        return "Stage 3"
+    # Stage 1: basing — SMAs flattening, price recovering from Stage 4 lows
+    return "Stage 1"
+
+
 def _open_db() -> sqlite3.Connection:
     """Open (or create) the results database and ensure the schema exists."""
     conn = sqlite3.connect(RESULTS_DB)
@@ -227,10 +286,31 @@ class AnalystAgent(Agent):
     def score_stock(
         self, stock: StockRecord, llm: tuple[openai.OpenAI, str] | None
     ) -> StockAnalysis:
-        """Score a stock using the LLM if available, else rule-based fallback."""
+        """Score a stock using the LLM if available, else rule-based fallback.
+
+        CANSLIM, momentum, entry price, and stop loss are always computed
+        deterministically — the LLM only provides narrative fields.
+        """
         if llm:
-            return self.score_stock_llm(stock, llm[0], llm[1])
-        return self.rule_based_score(stock)
+            analysis = self.score_stock_llm(stock, llm[0], llm[1])
+        else:
+            analysis = self.rule_based_score(stock)
+
+        if analysis.canslim is None:
+            analysis.canslim = self._canslim_fundamental_score(stock)
+        if analysis.momentum is None:
+            analysis.momentum = self._momentum_score(stock)
+        if analysis.entry_price is None:
+            base_high = stock.high_base or stock.high_52w
+            analysis.entry_price = round(base_high * 1.005, 2)
+        if analysis.stop_loss is None:
+            base_high = stock.high_base or stock.high_52w
+            entry_price = analysis.entry_price or round(base_high * 1.005, 2)
+            oneil_stop = round(entry_price * 0.92, 2)
+            handle_stop = round((stock.handle_low or 0) * 0.99, 2)
+            analysis.stop_loss = max(handle_stop, oneil_stop) if stock.handle_low else oneil_stop
+
+        return analysis
 
     @staticmethod
     def _strip_think(text: str) -> str:
@@ -258,8 +338,11 @@ class AnalystAgent(Agent):
         return StockAnalysis.model_validate(payload)
 
     def rule_based_score(self, stock: StockRecord) -> StockAnalysis:
-        """Score using technical rules and compute both CANSLIM and momentum scores."""
-        score = 5
+        """Score purely on CANSLIM fundamentals + momentum technicals (50/50).
+
+        Technical conditions are still evaluated to populate strengths/risks
+        text for alert emails, but they do not influence the numeric score.
+        """
         strengths: list[str] = []
         risks: list[str] = []
 
@@ -271,54 +354,41 @@ class AnalystAgent(Agent):
         rel_vol = stock.rel_volume or 1.0
         pct_from_high = stock.pct_from_52w_high or -50
 
+        # Collect qualitative signals for alert email text (no scoring)
         if price > sma150 > sma200:
-            score += 1
             strengths.append("Price above SMA150 & SMA200 (Stage 2 structure)")
         if price > sma50:
-            score += 1
             strengths.append("Price above SMA50")
         if -15 <= pct_from_high <= -1:
-            score += 1
             strengths.append(f"Within {abs(pct_from_high):.0f}% of 52w high")
         if 50 <= rsi <= 80:
-            score += 1
             strengths.append(f"RSI {rsi:.0f} — healthy momentum range")
         elif rsi > 80:
             risks.append(f"RSI {rsi:.0f} — potentially overbought")
-            score -= 1
         elif rsi < 40:
             risks.append(f"RSI {rsi:.0f} — weak momentum")
-            score -= 1
         if rel_vol >= 1.5:
-            score += 1
             strengths.append(f"Relative volume {rel_vol:.1f}x — institutional interest")
         elif rel_vol < 0.7:
             risks.append(f"Low relative volume ({rel_vol:.1f}x)")
-            score -= 1
         if pct_from_high < -30:
             risks.append(f"Far from 52w high ({pct_from_high:.0f}%)")
-            score -= 1
 
-        score = max(1, min(10, score))
         near_entry = -5 <= pct_from_high <= 0
-        if price > sma150 > sma200 and price > sma50:
-            stage = "Stage 2"
-        elif price < sma150 and price < sma200:
-            stage = "Stage 4"
-        elif price > sma200 and price < sma150:
-            stage = "Stage 1"
-        else:
-            stage = "Stage 3"
-
-        momentum = self._momentum_score(stock, stage)
+        stage = _stage_classify(stock)
         canslim = self._canslim_fundamental_score(stock)
+        momentum = self._momentum_score(stock)
 
-        # Pivot buy point: 0.5% above 52w high (standard CANSLIM entry)
-        entry_price = round(stock.high_52w * 1.005, 2)
+        # Score is 50% CANSLIM fundamentals + 50% momentum technicals
+        score = max(1, min(10, round(
+            0.5 * (canslim.total / 14 * 10) + 0.5 * (momentum.total / 14 * 10)
+        )))
 
-        # Stop loss: 2× ATR below current price, floored at 52w low
-        atr = stock.atr14 or (stock.price * 0.02)
-        stop_loss = round(max(stock.price - 2 * atr, stock.low_52w), 2)
+        base_high = stock.high_base or stock.high_52w
+        entry_price = round(base_high * 1.005, 2)
+        oneil_stop = round(entry_price * 0.92, 2)          # O'Neil 8% rule
+        handle_stop = round((stock.handle_low or 0) * 0.99, 2)  # just below handle low
+        stop_loss = max(handle_stop, oneil_stop) if stock.handle_low else oneil_stop
 
         return StockAnalysis(
             score=score,
@@ -330,15 +400,16 @@ class AnalystAgent(Agent):
             momentum=momentum,
             strengths=strengths[:3],
             risks=risks[:2],
-            summary=f"Rule-based score {score}/10. {stage} structure.",
+            summary=f"Score {score}/10 (CANSLIM {canslim.total}/14, Mom {momentum.total}/14). {stage}.",
         )
 
-    def _momentum_score(self, stock: StockRecord, stage: str) -> MomentumScore:
+    def _momentum_score(self, stock: StockRecord) -> MomentumScore:
         """Score each letter 0–2 using technical/price proxies for CANSLIM letters."""
         price = stock.price
         sma10 = stock.sma10 or price
         sma30 = stock.sma30 or price
         sma50 = stock.sma50 or price
+        sma150 = stock.sma150 or price
         rsi = stock.rsi14 or 50.0
         rel_vol = stock.rel_volume or 1.0
         pct_from_high = stock.pct_from_52w_high or -50.0
@@ -346,10 +417,10 @@ class AnalystAgent(Agent):
         high_52w = stock.high_52w
         low_52w = stock.low_52w
 
-        # C — current momentum proxy (weekly price change)
-        c = 2 if week_chg >= 5 else 1 if week_chg >= 1 else 0
+        # C — weekly price change (3% = strong move, 0.5% = modest progress)
+        c = 2 if week_chg >= 3 else 1 if week_chg >= 0.5 else 0
 
-        # A — annual strength proxy (position within 52w range)
+        # A — annual strength (position within 52w range)
         rng = high_52w - low_52w
         pct_in_range = (price - low_52w) / rng if rng > 0 else 0.5
         a = 2 if pct_in_range >= 0.8 else 1 if pct_in_range >= 0.6 else 0
@@ -360,13 +431,16 @@ class AnalystAgent(Agent):
         # S — supply & demand (relative volume)
         s = 2 if rel_vol >= 1.5 else 1 if rel_vol >= 1.0 else 0
 
-        # L — leader vs laggard (RSI)
-        l = 2 if 60 <= rsi <= 80 else 1 if 50 <= rsi < 60 else 0
+        # L — leader vs laggard (RSI; extend partial credit down to 40 for healthy pullbacks)
+        l = 2 if 60 <= rsi <= 80 else 1 if 40 <= rsi < 60 else 0
 
-        # I — institutional sponsorship proxy (Weinstein Stage 2 SMA structure)
-        i = 2 if stage == "Stage 2" else 1 if stage == "Stage 1" else 0
+        # I — institutional proxy: price above SMA150 with rising slope
+        #     (independent of Stage to avoid circular dependency)
+        s150 = _sma_slope(stock.price_history, window=30, lookback=4)
+        s150_rising = s150 is None or s150 > 0  # treat unknown as positive
+        i = 2 if price > sma150 and s150_rising else 1 if price > sma150 else 0
 
-        # M — market/trend alignment (SMA stack)
+        # M — trend alignment (SMA stack)
         if price > sma10 > sma30 > sma50:
             m = 2
         elif price > sma50:

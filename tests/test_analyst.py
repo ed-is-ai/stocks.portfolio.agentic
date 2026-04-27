@@ -227,8 +227,8 @@ class TestAnalystAgent:
         score = agent._canslim_fundamental_score(record)
         assert score.M == 0
 
-    def test_momentum_score_stage2_scores_high_i(self):
-        """Stage 2 structure gives I=2 in momentum score."""
+    def test_momentum_score_above_sma150_scores_high_i(self):
+        """Price above SMA150 (with no slope data) gives I=2 in momentum score."""
         record = _make_scan(
             price=100.0,
             sma10=95.0, sma30=90.0, sma50=85.0, sma150=75.0, sma200=70.0,
@@ -237,7 +237,7 @@ class TestAnalystAgent:
         analysis = agent.rule_based_score(record)
 
         assert analysis.momentum is not None
-        assert analysis.momentum.I == 2  # Stage 2
+        assert analysis.momentum.I == 2  # price > SMA150, slope unknown → positive
 
     def test_strip_think_removes_reasoning_block(self):
         """_strip_think removes <think>...</think> blocks from LLM output."""
