@@ -36,7 +36,24 @@ def load_watchlist() -> list[str]:
     return result
 
 
+def load_source_map() -> dict[str, tuple[bool, bool]]:
+    """Return per-ticker source flags: (in_stocktwits, in_whale_wisdom)."""
+    with open(_EXTRACTION_RESULTS, encoding="utf-8") as fh:
+        data: list[str] | dict[str, list[str]] = json.load(fh)
+    if isinstance(data, list):
+        return {ticker: (False, False) for ticker in data}
+    sources: dict[str, tuple[bool, bool]] = {}
+    for key, tickers in data.items():
+        is_st = "stocktwits" in key.lower()
+        is_ww = "wisdom" in key.lower()
+        for ticker in tickers:
+            st, ww = sources.get(ticker, (False, False))
+            sources[ticker] = (st or is_st, ww or is_ww)
+    return sources
+
+
 PERIOD_DAYS = 252  # ~1 trading year for stage analysis
+
 
 
 def _fetch_spy_context() -> tuple[bool, float]:
@@ -67,14 +84,41 @@ def _fetch_spy_context() -> tuple[bool, float]:
 def _fetch_fundamentals(ticker: str) -> dict:
     """Return fundamental fields from yfinance Ticker.info (best-effort, None on failure)."""
     try:
-        info = yf.Ticker(ticker).info
+        t = yf.Ticker(ticker)
+        info = t.info
+        funds_buying = _count_buyers(t)
         return {
-            "eps_growth": info.get("earningsGrowth"),          # float or None
-            "roe": info.get("returnOnEquity"),                  # float or None
-            "inst_ownership_pct": info.get("heldPercentInstitutions"),  # float or None
+            "eps_growth": info.get("earningsGrowth"),
+            "roe": info.get("returnOnEquity"),
+            "inst_ownership_pct": info.get("heldPercentInstitutions"),
+            "pe_ratio": info.get("trailingPE"),
+            "funds_buying": funds_buying,
         }
     except Exception:
-        return {"eps_growth": None, "roe": None, "inst_ownership_pct": None}
+        return {
+            "eps_growth": None, "roe": None, "inst_ownership_pct": None,
+            "pe_ratio": None, "funds_buying": None,
+        }
+
+
+def _count_buyers(ticker_obj: yf.Ticker) -> int | None:
+    """Count institutional holders that increased or initiated positions in the latest 13F quarter.
+
+    yfinance exposes the current-quarter snapshot only (no prior-quarter comparison),
+    so we count holders whose 'Date Reported' falls within the most recent filing quarter.
+    This is a count of recently active 13F filers, not confirmed net-buyers.
+    """
+    try:
+        holders = ticker_obj.institutional_holders
+        if holders is None or holders.empty:
+            return None
+        if "Date Reported" not in holders.columns:
+            return len(holders)
+        latest_date = holders["Date Reported"].max()
+        recent = holders[holders["Date Reported"] == latest_date]
+        return int(len(recent))
+    except Exception:
+        return None
 
 
 class ScannerAgent(Agent):
@@ -156,6 +200,8 @@ class ScannerAgent(Agent):
             "rel_volume": round(float(rel_volume), 2),
             "high_52w": round(float(high_52w), 2),
             "low_52w": round(float(low_52w), 2),
+            "high_base": round(float(df["high"].tail(50).max()), 2),
+            "handle_low": round(float(df["low"].tail(15).min()), 2),
             "pct_from_52w_high": round((float(latest["close"]) / float(high_52w) - 1) * 100, 1),
             "pct_change_week": round((float(latest["close"]) / float(prev_week["close"]) - 1) * 100, 1),
         }

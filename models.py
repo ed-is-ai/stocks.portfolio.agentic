@@ -20,15 +20,22 @@ class StockScan(BaseModel):
     rel_volume: float
     high_52w: float
     low_52w: float
+    high_base: float | None = None   # Highest daily high over the past 10 weeks (pivot entry reference)
+    handle_low: float | None = None  # Lowest daily low over the past 3 weeks (handle stop reference)
     pct_from_52w_high: float
     pct_change_week: float
     # Fundamental data (fetched from yfinance Ticker.info)
     eps_growth: float | None = None          # Quarterly EPS growth YoY (0.25 = 25%)
     roe: float | None = None                 # Return on equity (0.17 = 17%)
     inst_ownership_pct: float | None = None  # Institutional ownership fraction (0.0–1.0)
+    pe_ratio: float | None = None            # Trailing twelve-month P/E ratio
+    funds_buying: int | None = None          # # institutions that added/initiated in latest 13F quarter
     # Market context
     rel_strength_vs_spy: float | None = None  # Stock 52w return minus SPY 52w return (pct pts)
     spy_uptrend: bool | None = None           # True if SPY is above its 200-day SMA
+    # Watchlist source flags
+    in_stocktwits: bool = False
+    in_whale_wisdom: bool = False
 
 
 class MomentumScore(BaseModel):
