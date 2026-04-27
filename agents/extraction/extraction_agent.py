@@ -34,6 +34,7 @@ _HEADERS = {
 HeatMapStock = dict[str, Any]
 
 _EXTRACTION_RESULTS = Path(__file__).parent / "extraction_results.json"
+_WW_CONTEXT = Path(__file__).parent / "ww_context.json"
 
 
 class ExtractionAgent(Agent):
@@ -65,6 +66,7 @@ class ExtractionAgent(Agent):
 
         print(f"  [ok] Extracted {len(result)} tickers (quarter: {self.last_quarter})")
 
+        self._save_ww_context(ranked)
         added = self._update_results(result)
         if added:
             print(f"  [results] Added {added} new tickers to extraction_results.json")
@@ -90,6 +92,19 @@ class ExtractionAgent(Agent):
         children = cast(list[HeatMapStock], payload["children"])
         print(f"  [net] {len(children)} stocks from heat map (id={HEAT_MAP_ID})")
         return children
+
+    def _save_ww_context(self, ranked: list[HeatMapStock]) -> None:
+        """Write per-ticker WhalWisdom buyer/seller counts to ww_context.json."""
+        context = {
+            str(s["name"]): {
+                "filers_increasing": int(s.get("number_of_filers_increasing") or 0),
+                "filers_decreasing": int(s.get("number_of_filers_decreasing") or 0),
+                "ww_rank": int(s.get("overall_rank") or 0),
+            }
+            for s in ranked
+            if s.get("name")
+        }
+        _WW_CONTEXT.write_text(json.dumps(context, indent=2), encoding="utf-8")
 
     def _update_results(self, new_tickers: list[str]) -> int:
         """Append tickers not already in any group to extraction_results.json.

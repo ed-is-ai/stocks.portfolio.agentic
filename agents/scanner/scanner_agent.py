@@ -18,6 +18,7 @@ from models import StockRecord
 _EXTRACTION_RESULTS = (
     Path(__file__).parent.parent / "extraction" / "extraction_results.json"
 )
+_WW_CONTEXT = Path(__file__).parent.parent / "extraction" / "ww_context.json"
 
 
 def load_watchlist() -> list[str]:
@@ -34,6 +35,14 @@ def load_watchlist() -> list[str]:
                 result.append(ticker)
                 seen.add(ticker)
     return result
+
+
+def load_ww_context() -> dict[str, dict[str, int]]:
+    """Return per-ticker WhalWisdom context: {ticker: {filers_increasing, filers_decreasing, ww_rank}}."""
+    try:
+        return json.loads(_WW_CONTEXT.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
 
 
 def load_source_map() -> dict[str, tuple[bool, bool]]:
@@ -86,19 +95,18 @@ def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
     try:
         t = yf.Ticker(ticker)
         info: Any = t.info  # yfinance stubs type this as dict[Unknown, Unknown]
-        funds_buying = _count_buyers(t)
         return {
             "eps_growth": _quarterly_eps_growth(t, info),
             "annual_eps_growth": _annual_eps_growth(t),
             "roe": info.get("returnOnEquity"),
             "inst_ownership_pct": info.get("heldPercentInstitutions"),
             "pe_ratio": info.get("trailingPE"),
-            "funds_buying": funds_buying,
+            "inst_count": _inst_count(t),
         }
     except Exception:
         return {
             "eps_growth": None, "annual_eps_growth": None, "roe": None,
-            "inst_ownership_pct": None, "pe_ratio": None, "funds_buying": None,
+            "inst_ownership_pct": None, "pe_ratio": None, "inst_count": None,
         }
 
 
@@ -162,22 +170,16 @@ def _annual_eps_growth(t: yf.Ticker) -> float | None:
         return None
 
 
-def _count_buyers(ticker_obj: yf.Ticker) -> int | None:
-    """Count institutional holders that increased or initiated positions in the latest 13F quarter.
-
-    yfinance exposes the current-quarter snapshot only (no prior-quarter comparison),
-    so we count holders whose 'Date Reported' falls within the most recent filing quarter.
-    This is a count of recently active 13F filers, not confirmed net-buyers.
-    """
+def _inst_count(ticker_obj: yf.Ticker) -> int | None:
+    """Return total number of institutions holding shares from major_holders."""
     try:
-        holders = ticker_obj.institutional_holders
-        if holders is None or holders.empty:
+        mh = ticker_obj.major_holders
+        if mh is None or mh.empty:
             return None
-        if "Date Reported" not in holders.columns:
-            return len(holders)
-        latest_date = holders["Date Reported"].max()
-        recent = holders[holders["Date Reported"] == latest_date]
-        return int(len(recent))
+        row = mh[mh.index == "institutionsCount"]
+        if row.empty:
+            return None
+        return int(float(row.iloc[0, 0]))
     except Exception:
         return None
 
@@ -284,6 +286,7 @@ class ScannerAgent(Agent):
         self, tickers: list[str], spy_uptrend: bool, spy_52w_return: float
     ) -> list[StockRecord]:
         """Scan tickers, enriching each with fundamentals and SPY market context."""
+        ww = load_ww_context()
         results: list[StockRecord] = []
         for ticker in tickers:
             try:
@@ -296,11 +299,13 @@ class ScannerAgent(Agent):
                 rel_strength = self.compute_rel_strength(
                     technicals["price_history"], spy_52w_return
                 )
+                ww_data = ww.get(ticker, {})
                 record = StockRecord(
                     ticker=ticker,
                     as_of=datetime.today().strftime("%Y-%m-%d"),
                     spy_uptrend=spy_uptrend,
                     rel_strength_vs_spy=rel_strength,
+                    funds_buying=ww_data.get("filers_increasing"),
                     **technicals,
                     **fundamentals,
                 )

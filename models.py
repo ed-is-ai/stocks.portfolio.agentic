@@ -30,7 +30,8 @@ class StockScan(BaseModel):
     roe: float | None = None                 # Return on equity (0.17 = 17%)
     inst_ownership_pct: float | None = None  # Institutional ownership fraction (0.0–1.0)
     pe_ratio: float | None = None            # Trailing twelve-month P/E ratio
-    funds_buying: int | None = None          # # institutions that added/initiated in latest 13F quarter
+    inst_count: int | None = None            # Total number of institutions holding shares (13F)
+    funds_buying: int | None = None          # WhalWisdom: # filers that increased position last quarter
     # Market context
     rel_strength_vs_spy: float | None = None  # Stock 52w return minus SPY 52w return (pct pts)
     spy_uptrend: bool | None = None           # True if SPY is above its 200-day SMA

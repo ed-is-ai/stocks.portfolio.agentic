@@ -35,14 +35,14 @@ _HEADERS = [
     "Ticker", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Near Entry",
     "Entry", "Stop", "Risk %", "Price", "P/E", "RSI", "Rel Vol",
     "% 52w High", "% Chg Week", "Rel Str vs SPY",
-    "EPS Growth", "ROE", "Inst Ownership %", "13F Buyers", "SPY Uptrend",
+    "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "SPY Uptrend",
     "SMA Stack", "SMA50", "Near High", "RSI Zone", "Vol Zone",
     "As Of", "Summary",
 ]
 
-# Signal columns are X-AB (1-indexed: 24-28)
-_SIGNAL_COL_START = 24
-_SIGNAL_COL_END = 28
+# Signal columns are Y-AC (1-indexed: 25-29)
+_SIGNAL_COL_START = 25
+_SIGNAL_COL_END = 29
 
 _SCORE_FILLS = {
     "high":   PatternFill("solid", fgColor="C6EFCE"),  # green  ≥8
@@ -157,6 +157,7 @@ def _record_to_row(r: StockRecord) -> list[object]:
         _pct(r.eps_growth),
         _pct(r.roe),
         _pct(r.inst_ownership_pct),
+        r.inst_count if r.inst_count is not None else "",
         r.funds_buying if r.funds_buying is not None else "",
         "Y" if r.spy_uptrend else "N",
         *_signals(r),
@@ -199,15 +200,16 @@ def _set_col_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
         "S": 11,  # EPS Growth
         "T": 8,   # ROE
         "U": 15,  # Inst Ownership
-        "V": 10,  # 13F Buyers
-        "W": 10,  # SPY Uptrend
-        "X": 9,   # SMA Stack
-        "Y": 7,   # SMA50
-        "Z": 9,   # Near High
-        "AA": 8,  # RSI Zone
-        "AB": 8,  # Vol Zone
-        "AC": 12, # As Of
-        "AD": 50, # Summary
+        "V": 10,  # Inst Count
+        "W": 9,   # WW Buyers
+        "X": 10,  # SPY Uptrend
+        "Y": 9,   # SMA Stack
+        "Z": 7,   # SMA50
+        "AA": 9,  # Near High
+        "AB": 8,  # RSI Zone
+        "AC": 8,  # Vol Zone
+        "AD": 12, # As Of
+        "AE": 50, # Summary
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
@@ -298,7 +300,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
     print("="*50)
 
     if extract:
-        ExtractionAgent().run()  # refreshes extraction_results.json with latest WisdomWise data
+        ExtractionAgent(name="ExtractionAgent").run()  # refreshes extraction_results.json with latest WisdomWise data
     watchlist = load_watchlist()  # always scan the full combined watchlist
     source_map = load_source_map()
 
