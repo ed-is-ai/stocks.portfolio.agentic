@@ -93,6 +93,7 @@ WATCHLIST = [
 ]
 
 PERIOD_DAYS = 252  # ~1 trading year for stage analysis
+FETCH_BUFFER_DAYS = 100  # extra calendar days so SMA200 has enough history
 
 
 def _fetch_spy_context() -> tuple[bool, float]:
@@ -103,7 +104,7 @@ def _fetch_spy_context() -> tuple[bool, float]:
     """
     try:
         end = datetime.today()
-        start = end - timedelta(days=PERIOD_DAYS + 60)
+        start = end - timedelta(days=PERIOD_DAYS + FETCH_BUFFER_DAYS)
         df = yf.download("SPY", start=start, end=end, progress=False, auto_adjust=True)
         if df.empty or len(df) < 200:
             return True, 0.0
@@ -143,7 +144,7 @@ class ScannerAgent(Agent):
 
     def fetch_stock_data(self, ticker: str) -> pd.DataFrame | None:
         end = datetime.today()
-        start = end - timedelta(days=PERIOD_DAYS + 60)
+        start = end - timedelta(days=PERIOD_DAYS + FETCH_BUFFER_DAYS)
         df = yf.download(
             ticker,
             start=start,
@@ -193,6 +194,14 @@ class ScannerAgent(Agent):
         low_52w = year_slice["low"].min()
         rel_volume = (latest["volume"] / latest["vol_ma50"]) if latest["vol_ma50"] > 0 else 1.0
 
+        sma200_now = df["sma200"].iloc[-1]
+        sma200_20d = df["sma200"].iloc[-21] if len(df) > 21 else None
+        sma200_rising: bool | None = (
+            bool(sma200_now > sma200_20d)
+            if sma200_20d is not None and pd.notna(sma200_now) and pd.notna(sma200_20d)
+            else None
+        )
+
         # Weekly closes for the past 52 weeks (oldest → newest)
         weekly = df["close"].resample("W").last().dropna().tail(52)
         price_history = [round(float(v), 2) for v in weekly]
@@ -214,6 +223,7 @@ class ScannerAgent(Agent):
             "low_52w": round(float(low_52w), 2),
             "pct_from_52w_high": round((float(latest["close"]) / float(high_52w) - 1) * 100, 1),
             "pct_change_week": round((float(latest["close"]) / float(prev_week["close"]) - 1) * 100, 1),
+            "sma200_rising": sma200_rising,
         }
 
     def compute_rel_strength(

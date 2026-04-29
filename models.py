@@ -26,6 +26,7 @@ class StockScan(BaseModel):
     eps_growth: float | None = None          # Quarterly EPS growth YoY (0.25 = 25%)
     roe: float | None = None                 # Return on equity (0.17 = 17%)
     inst_ownership_pct: float | None = None  # Institutional ownership fraction (0.0–1.0)
+    sma200_rising: bool | None = None          # True if SMA200 is trending up (vs 20 days ago)
     # Market context
     rel_strength_vs_spy: float | None = None  # Stock 52w return minus SPY 52w return (pct pts)
     spy_uptrend: bool | None = None           # True if SPY is above its 200-day SMA

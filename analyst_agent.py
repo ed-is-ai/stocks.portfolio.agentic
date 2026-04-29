@@ -168,9 +168,16 @@ class AnalystAgent(Agent):
         rel_vol = stock.rel_volume or 1.0
         pct_from_high = stock.pct_from_52w_high or -50
 
+        sma200_rising = stock.sma200_rising
         if price > sma150 > sma200:
             score += 1
             strengths.append("Price above SMA150 & SMA200 (Stage 2 structure)")
+        if sma200_rising:
+            score += 1
+            strengths.append("SMA200 rising (Stage 2 confirmation)")
+        elif sma200_rising is False:
+            risks.append("SMA200 not rising")
+            score -= 1
         if price > sma50:
             score += 1
             strengths.append("Price above SMA50")
@@ -198,7 +205,7 @@ class AnalystAgent(Agent):
 
         score = max(1, min(10, score))
         near_entry = -5 <= pct_from_high <= 0
-        if price > sma150 > sma200 and price > sma50:
+        if price > sma150 > sma200 and price > sma50 and sma200_rising is not False:
             stage = "Stage 2"
         elif price < sma150 and price < sma200:
             stage = "Stage 4"
