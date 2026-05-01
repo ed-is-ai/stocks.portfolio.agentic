@@ -236,8 +236,8 @@
     .btn-adjust-sm { background: #4f46e5;      color: white; }
     .btn-adjust-sm:hover { background: #3730a3; }
 
-    /* ── Multi-year base breakout badge ───────────── */
-    .badge-myb {
+    /* ── Breakout badges (ticker cell) ────────────── */
+    .badge-vcp, .badge-myb {
       display: inline-block;
       margin-left: 0.3rem;
       padding: 0.08rem 0.32rem;
@@ -245,11 +245,11 @@
       font-size: 0.62rem;
       font-weight: 700;
       letter-spacing: 0.04em;
-      background: var(--purple-bg);
-      color: var(--purple);
       cursor: help;
       vertical-align: middle;
     }
+    .badge-vcp { background: var(--orange-bg); color: var(--orange); }
+    .badge-myb { background: var(--purple-bg); color: var(--purple); }
 
     /* ── Watchlist filter buttons ──────────────────── */
     .btn-filter {
@@ -267,6 +267,7 @@
     .btn-filter:hover { border-color: var(--primary); color: var(--primary); }
     .btn-filter.active { background: var(--primary); color: white; border-color: var(--primary); }
     .btn-filter[data-filter="breakout"].active { background: #f97316; border-color: #f97316; }
+    .btn-filter[data-filter="myb"].active { background: var(--purple); border-color: var(--purple); }
 
     /* ── Toolbar above tables ──────────────────────── */
     .tbl-toolbar {
@@ -547,7 +548,8 @@
       const sepaOk     = !_activeFilters.has('sepa8')    || row.dataset.sepa     === '8';
       const alertOk    = !_activeFilters.has('alert')    || row.dataset.rec      === 'alert';
       const breakoutOk = !_activeFilters.has('breakout') || row.dataset.breakout === 'true';
-      row.style.display = (sepaOk && alertOk && breakoutOk) ? '' : 'none';
+      const mybOk      = !_activeFilters.has('myb')      || row.dataset.myb      === 'true';
+      row.style.display = (sepaOk && alertOk && breakoutOk && mybOk) ? '' : 'none';
     });
   }
 

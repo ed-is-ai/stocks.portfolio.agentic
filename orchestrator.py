@@ -69,6 +69,7 @@ _HEADERS = [
     "SMA Stack", "SMA50", "Near High", "RSI Zone", "Vol Zone",
     "SEPA", *[f"SEPA: {v}" for v in _SEPA_LABELS.values()],
     "Sector",
+    "VCP Breakout", "MYB Breakout", "MYB Pivot",
     "Recommendation", "As Of", "Summary",
 ]
 
@@ -224,6 +225,9 @@ def _record_to_row(
         sepa_summary,
         *["Y" if v else "N" for v in sepa_vals],
         r.sector or "",
+        "Y" if a.fresh_breakout else "",
+        "Y" if a.multiyear_breakout else "",
+        a.multiyear_pivot if a.multiyear_pivot else "",
         rec,
         r.as_of,
         a.summary,
@@ -342,6 +346,13 @@ def _format_row(
         sepa_fill = _SIGNAL_FILLS["-"]
     sepa_cell.fill = sepa_fill
     sepa_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for col_name in ("VCP Breakout", "MYB Breakout"):
+        col = _HEADERS.index(col_name) + 1
+        cell = ws.cell(data_row, col)
+        if cell.value == "Y":
+            cell.fill = _SIGNAL_FILLS["+"]
+        cell.alignment = Alignment(horizontal="center", vertical="center")
 
     for col in range(1, len(_HEADERS) + 1):
         ws.cell(data_row, col).alignment = Alignment(vertical="center")

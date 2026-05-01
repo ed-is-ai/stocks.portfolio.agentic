@@ -19,7 +19,8 @@
   <span><i class="bi bi-bar-chart-line me-1"></i>{{ records|length }} stocks analysed &middot; click ticker for Yahoo Finance</span>
   <div class="d-flex align-items-center gap-2">
     <span class="text-muted" style="font-size:0.76rem">CANSLIM /14 &middot; Momentum /14 &middot; SEPA /8 &mdash; hover cells for detail</span>
-    <button class="btn-filter" data-filter="breakout">Breakout</button>
+    <button class="btn-filter" data-filter="breakout">VCP Breakout</button>
+    <button class="btn-filter" data-filter="myb">MYB</button>
     <button class="btn-filter" data-filter="sepa8">SEPA 8</button>
     <button class="btn-filter" data-filter="alert">Stay Alert</button>
   </div>
@@ -68,11 +69,16 @@
       {% else %}
         {% set rec_key = "other" %}
       {% endif %}
-      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec_key }}" data-breakout="{{ 'true' if a and a.fresh_breakout else 'false' }}">
+      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec_key }}"
+          data-breakout="{{ 'true' if a and a.fresh_breakout else 'false' }}"
+          data-myb="{{ 'true' if a and a.multiyear_breakout else 'false' }}">
 
         <!-- Ticker -->
         <td>
           <a href="{{ yahoo_url }}" target="_blank" rel="noopener" class="ticker">{{ r.ticker }}</a>
+          {% if a and a.fresh_breakout %}
+            <span class="badge-vcp" title="VCP breakout — entry zone just transitioned to broken_out this run">VCP</span>
+          {% endif %}
           {% if a and a.multiyear_breakout %}
             <span class="badge-myb" title="Multi-year base breakout — cleared ${{ '%.2f'|format(a.multiyear_pivot) }} pivot">MYB</span>
           {% endif %}
