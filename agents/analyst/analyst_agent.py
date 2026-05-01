@@ -21,6 +21,7 @@ from typing import ClassVar, Iterable
 
 import openai
 
+from agents.analyst.historical_pivots import find_historical_pivots
 from ms_agent_framework import Agent
 from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
 
@@ -637,6 +638,17 @@ class AnalystAgent(Agent):
         analysis.volume_confirmed = stock.rel_volume >= 1.4
         analysis.sepa_template = _sepa_assessment(stock, vcp)
 
+        # Multi-year base breakout detection
+        myb = _detect_multiyear_breakout(stock.ticker, stock.price)
+        if myb:
+            analysis.multiyear_breakout = True
+            analysis.multiyear_pivot = myb["pivot_price"]
+            base_wks = myb["base_weeks"]
+            analysis.strengths = list(analysis.strengths) + [
+                f"Multi-year base breakout: cleared ${myb['pivot_price']:.2f} "
+                f"pivot ({base_wks}w base)"
+            ]
+
         return analysis
 
     @staticmethod
@@ -875,6 +887,36 @@ def _fallback_execution_state(stock: StockRecord) -> str:
     if pct >= -8.0:
         return "Pre-breakout"
     return "far"
+
+
+_MYB_ABOVE_MAX = 8.0   # price must be no more than 8% above the pivot
+_MYB_MIN_BASE_WEEKS = 26  # base must have lasted at least 26 weeks
+
+
+def _detect_multiyear_breakout(ticker: str, price: float) -> dict | None:
+    """Return the most significant historical pivot that price has just cleared.
+
+    Looks for a confirmed or resistance pivot where price is 0–8% above the
+    pivot level and the base lasted ≥26 weeks. Returns None on any error.
+    """
+    try:
+        pivots = find_historical_pivots(ticker, require_stage2=False)
+    except Exception:
+        return None
+
+    candidates = []
+    for p in pivots:
+        if p.get("status") == "open":
+            continue
+        pct_above = (price - p["pivot_price"]) / p["pivot_price"] * 100
+        if 0.0 <= pct_above <= _MYB_ABOVE_MAX and p["base_weeks"] >= _MYB_MIN_BASE_WEEKS:
+            candidates.append((pct_above, p))
+
+    if not candidates:
+        return None
+
+    # Prefer the pivot with the longest base (most significant resistance)
+    return max(candidates, key=lambda x: x[1]["base_weeks"])[1]
 
 
 def recommendation(a: StockAnalysis) -> str:

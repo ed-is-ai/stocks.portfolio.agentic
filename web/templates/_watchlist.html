@@ -73,6 +73,9 @@
         <!-- Ticker -->
         <td>
           <a href="{{ yahoo_url }}" target="_blank" rel="noopener" class="ticker">{{ r.ticker }}</a>
+          {% if a and a.multiyear_breakout %}
+            <span class="badge-myb" title="Multi-year base breakout — cleared ${{ '%.2f'|format(a.multiyear_pivot) }} pivot">MYB</span>
+          {% endif %}
         </td>
 
         <!-- Score /10 -->

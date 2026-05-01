@@ -105,6 +105,8 @@ class StockAnalysis(BaseModel):
     reward_risk_ratio: float | None = None         # 2.0 targeting 2R by convention
     volume_confirmed: bool = False         # rel_volume >= 1.4 at scan time
     fresh_breakout: bool = False           # zone just transitioned to broken_out this run
+    multiyear_breakout: bool = False       # price 0-8% above a significant multi-year base pivot
+    multiyear_pivot: float | None = None   # the historical pivot level being broken
     sepa_template: dict[str, bool] | None = None  # 8 Minervini trend template conditions
     canslim: CANSLIMScore | None = None    # Fundamental CANSLIM score
     momentum: MomentumScore | None = None  # Technical momentum score
