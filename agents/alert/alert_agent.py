@@ -190,6 +190,123 @@ class AlertAgent(Agent):
             return f"Multi-Year Base Breakout {pivot}"
         return None
 
+    @staticmethod
+    def _breakout_narrative(stock: StockRecord) -> dict[str, str]:
+        """Return a dict of labelled narrative lines assessing breakout strength.
+
+        Keys: volume, sepa, canslim, momentum, verdict
+        Values: plain-text sentences ready for both text and HTML rendering.
+        """
+        a = stock.analysis
+        assert a is not None
+
+        # --- Volume ---
+        rv = stock.rel_volume
+        if rv >= 1.5:
+            vol_line = f"Strong volume confirmation ({rv:.1f}x average) — institutions buying."
+        elif rv >= 1.0:
+            vol_line = f"Moderate volume ({rv:.1f}x average) — acceptable but watch for follow-through."
+        else:
+            vol_line = (
+                f"Weak volume ({rv:.1f}x average) — breakout lacks conviction; wait for volume surge."
+            )
+
+        # --- SEPA ---
+        sepa_count = 0
+        sepa_detail = ""
+        if a.sepa_template:
+            t = a.sepa_template
+            checks = {
+                "P>SMA150&200": t.get("above_150_200"),
+                "SMA150>200": t.get("sma150_above_200"),
+                "SMA200 rising": t.get("sma200_rising"),
+                "SMA50>150&200": t.get("sma50_above_150_200"),
+                ">25% above low": t.get("above_25pct_of_low"),
+                "<25% from high": t.get("within_25pct_of_high"),
+                "RS leader": t.get("rs_leader"),
+                "P>SMA50": t.get("above_sma50"),
+            }
+            sepa_count = sum(1 for v in checks.values() if v)
+            failed = [k for k, v in checks.items() if not v]
+            if sepa_count == 8:
+                sepa_line = "Perfect SEPA trend template (8/8) — textbook Stage 2 uptrend."
+            elif sepa_count >= 6:
+                missing = ", ".join(failed)
+                sepa_line = f"Strong SEPA ({sepa_count}/8). Missing: {missing}."
+            else:
+                missing = ", ".join(failed)
+                sepa_line = f"Weak SEPA ({sepa_count}/8) — trend template incomplete. Missing: {missing}."
+        else:
+            sepa_line = "SEPA data unavailable."
+
+        # --- CANSLIM ---
+        if a.canslim:
+            cs = a.canslim
+            parts = []
+            if cs.C == 2:
+                parts.append("strong current earnings (C=2)")
+            elif cs.C == 1:
+                parts.append("moderate current earnings (C=1)")
+            else:
+                parts.append("weak/missing current earnings (C=0)")
+            if cs.A == 2:
+                parts.append("strong annual earnings growth (A=2)")
+            elif cs.A == 0:
+                parts.append("weak/missing annual earnings (A=0)")
+            if cs.L == 2:
+                parts.append("RS leader vs S&P (L=2)")
+            elif cs.L == 0:
+                parts.append("lagging vs S&P (L=0)")
+            if cs.I == 2:
+                parts.append("high institutional ownership (I=2)")
+            elif cs.I == 0:
+                parts.append("low institutional ownership (I=0)")
+            m_str = "market in uptrend (M=2)" if cs.M == 2 else "market headwind (M<2)"
+            canslim_line = (
+                f"CANSLIM {cs.total}/14: {'; '.join(parts)}; {m_str}."
+            )
+        else:
+            canslim_line = "CANSLIM data unavailable."
+
+        # --- Momentum ---
+        if a.momentum:
+            mo = a.momentum
+            mom_parts = []
+            if mo.N == 2:
+                mom_parts.append("at 52w high (N=2)")
+            if mo.L == 2:
+                mom_parts.append("RSI leader (L=2)")
+            elif mo.L == 0:
+                mom_parts.append("RSI weak (L=0)")
+            if mo.I == 2:
+                mom_parts.append("Stage 2 SMA structure (I=2)")
+            if mo.S == 2:
+                mom_parts.append("elevated volume (S=2)")
+            elif mo.S == 0:
+                mom_parts.append("low volume (S=0)")
+            mom_line = f"Momentum {mo.total}/14: {'; '.join(mom_parts)}." if mom_parts else f"Momentum {mo.total}/14."
+        else:
+            mom_line = "Momentum data unavailable."
+
+        # --- Verdict ---
+        score = a.score
+        signals_strong = rv >= 1.5 and sepa_count >= 6 and score >= 8
+        signals_ok = rv >= 1.0 and sepa_count >= 5 and score >= 7
+        if signals_strong:
+            verdict = "HIGH CONVICTION — volume, trend template, and score all confirm. Consider acting promptly."
+        elif signals_ok:
+            verdict = "MODERATE CONVICTION — setup is valid but not all signals align. Size position conservatively."
+        else:
+            verdict = "LOW CONVICTION — one or more key signals are weak. Wait for stronger confirmation before entry."
+
+        return {
+            "volume": vol_line,
+            "sepa": sepa_line,
+            "canslim": canslim_line,
+            "momentum": mom_line,
+            "verdict": verdict,
+        }
+
     def should_alert(self, stock: StockRecord, conn: sqlite3.Connection) -> bool:
         if self.alert_trigger(stock) is None:
             return False
@@ -220,14 +337,21 @@ class AlertAgent(Agent):
                 f"C={cs.C} A={cs.A} N={cs.N} S={cs.S} L={cs.L} I={cs.I} M={cs.M}"
             )
 
+        n = self._breakout_narrative(stock)
         trigger_line = f"** {trigger} **\n\n" if trigger else ""
         body = (
             f"{trigger_line}{stock.ticker} — Score {analysis.score}/10 | {analysis.stage}\n"
             f"Price: ${stock.price}  |  RSI: {stock.rsi14}  |  RelVol: {stock.rel_volume}x\n"
             f"Distance from 52w high: {stock.pct_from_52w_high}%\n"
             f"Entry: {entry}  |  Stop: {stop}  |  Risk: {risk_str}\n"
-            f"\n{analysis.summary}"
+            f"\n{analysis.summary}\n"
             f"{canslim_str}\n"
+            f"\n--- Breakout Assessment ---\n"
+            f"Volume:   {n['volume']}\n"
+            f"SEPA:     {n['sepa']}\n"
+            f"CANSLIM:  {n['canslim']}\n"
+            f"Momentum: {n['momentum']}\n"
+            f"\n>>> {n['verdict']}\n"
             f"\n{strengths}"
         )
         if risks:
@@ -326,6 +450,7 @@ class AlertAgent(Agent):
             </tr>
           </table>
           <p style=\"font-style:italic;color:#555\">{analysis.summary}</p>
+          {self._narrative_html(stock)}
           <ul style=\"padding-left:20px;color:#27ae60\">{strengths_html}</ul>
           {risks_section}
           {canslim_section}
@@ -374,6 +499,46 @@ class AlertAgent(Agent):
             f'${lo:,.2f}</text>'
             f"</svg>"
         )
+
+    def _narrative_html(self, stock: StockRecord) -> str:
+        """Render breakout narrative as a styled HTML section."""
+        n = self._breakout_narrative(stock)
+        rv = stock.rel_volume
+        vol_color = "#27ae60" if rv >= 1.5 else "#f39c12" if rv >= 1.0 else "#e74c3c"
+
+        a = stock.analysis
+        sepa_count = 0
+        if a and a.sepa_template:
+            sepa_count = sum(1 for v in a.sepa_template.values() if v)
+        sepa_color = "#27ae60" if sepa_count >= 6 else "#f39c12" if sepa_count >= 4 else "#e74c3c"
+
+        score = a.score if a else 0
+        verdict_bg = "#d4edda" if score >= 8 and rv >= 1.5 else "#fff3cd" if score >= 7 else "#f8d7da"
+        verdict_border = "#27ae60" if score >= 8 and rv >= 1.5 else "#f39c12" if score >= 7 else "#e74c3c"
+
+        def _row(label: str, text: str, color: str = "#333") -> str:
+            return (
+                f"<tr><td style='padding:5px 8px;background:#f8f8f8;font-weight:600;"
+                f"width:90px;font-size:0.82em;color:#555;vertical-align:top'>{label}</td>"
+                f"<td style='padding:5px 8px;color:{color};font-size:0.84em'>{text}</td></tr>"
+            )
+
+        return f"""
+        <div style="margin:16px 0">
+          <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;
+                      letter-spacing:0.06em;color:#888;margin-bottom:6px">Breakout Assessment</div>
+          <table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-radius:4px">
+            {_row("Volume", n["volume"], vol_color)}
+            {_row("SEPA", n["sepa"], sepa_color)}
+            {_row("CANSLIM", n["canslim"])}
+            {_row("Momentum", n["momentum"])}
+          </table>
+          <div style="margin-top:8px;padding:10px 14px;background:{verdict_bg};
+                      border-left:4px solid {verdict_border};border-radius:0 4px 4px 0;
+                      font-weight:700;font-size:0.88em">
+            {n["verdict"]}
+          </div>
+        </div>"""
 
     def send_email(self, subject: str, html_body: str, text_body: str) -> None:
         if not self.email_config.user or not self.email_config.password or not self.email_config.recipient:
