@@ -1,0 +1,52 @@
+{% if not trades %}
+<div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
+  <i class="bi bi-info-circle-fill fs-5"></i>
+  No trades recorded yet.
+</div>
+{% else %}
+<div class="tbl-toolbar">
+  <span><i class="bi bi-clock-history me-1"></i>{{ trades|length }} trade(s) recorded</span>
+</div>
+<div class="tbl-wrap">
+  <table class="table table-hover align-middle">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Ticker</th>
+        <th>Action</th>
+        <th>Shares</th>
+        <th>Price</th>
+        <th>Total</th>
+        <th>Notes</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in trades %}
+      <tr>
+        <td class="text-muted" style="font-size:0.76rem">{{ t.date }}</td>
+        <td><strong>{{ t.ticker }}</strong></td>
+        <td>
+          <span class="rec {% if t.action == 'BUY' %}rec-buy{% else %}rec-sell{% endif %}">{{ t.action }}</span>
+        </td>
+        <td>{{ t.shares }}</td>
+        <td>${{ "%.2f"|format(t.price) }}</td>
+        <td class="fw-semibold">${{ "%.2f"|format(t.shares * t.price) }}</td>
+        <td class="text-muted" style="font-size:0.76rem">{{ t.notes }}</td>
+        <td>
+          <button class="btn btn-link btn-sm text-danger p-0"
+                  style="font-size:1rem"
+                  title="Delete trade"
+                  hx-delete="/trades/{{ t.id }}"
+                  hx-target="#tab-content"
+                  hx-swap="innerHTML"
+                  hx-confirm="Delete this trade?">
+            <i class="bi bi-trash3"></i>
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

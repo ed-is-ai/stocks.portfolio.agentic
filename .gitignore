@@ -17,6 +17,10 @@ env/
 .env
 *.env
 
+# Interactive Investor session (contains auth tokens)
+agents/ii_platform/.auth_state.json
+agents/ii_platform/debug/
+
 # Runtime outputs
 *.db
 **/scan_results.json

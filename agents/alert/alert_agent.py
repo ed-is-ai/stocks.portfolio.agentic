@@ -22,9 +22,21 @@ NEAR_ENTRY_ONLY = True
 ALERT_COOLDOWN_HOURS = 24
 DB_PATH = str(Path(__file__).parent / "alerts.db")
 
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an integer environment variable with safe whitespace handling."""
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return int(raw_value.strip())
+    except (ValueError, AttributeError):
+        return default
+
+
 EMAIL_CONFIG = EmailConfig(
     host=os.getenv("EMAIL_HOST", "smtp.gmail.com"),
-    port=int(os.getenv("EMAIL_PORT", "587")),
+    port=_env_int("EMAIL_PORT", 587),
     user=os.getenv("EMAIL_USER", ""),
     password=os.getenv("EMAIL_PASSWORD", ""),
     recipient=os.getenv("EMAIL_TO", ""),
@@ -163,7 +175,7 @@ class AlertAgent(Agent):
             return False
         if stock.analysis.score < SCORE_THRESHOLD:
             return False
-        if NEAR_ENTRY_ONLY and not stock.analysis.near_entry:
+        if NEAR_ENTRY_ONLY and stock.analysis.entry_zone not in ("broken_out", "approaching"):
             return False
         if self.was_recently_alerted(conn, stock.ticker):
             print(f"  [skip] {stock.ticker}: already alerted recently")

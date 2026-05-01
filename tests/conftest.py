@@ -48,7 +48,7 @@ def sample_stock_record():
     analysis = StockAnalysis(
         score=7,
         stage="Stage 2",
-        near_entry=True,
+        entry_zone="approaching",
         strengths=["Strong momentum", "Above key SMAs"],
         risks=["High valuation"],
         summary="Good setup with strong technicals"

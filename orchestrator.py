@@ -7,6 +7,9 @@ import argparse
 import json
 from datetime import datetime
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import openpyxl
 from openpyxl.cell.cell import Cell
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -18,12 +21,24 @@ from apscheduler.triggers.cron import CronTrigger
 from agents.analyst.analyst_agent import AnalystAgent, recommendation
 from agents.alert.alert_agent import AlertAgent
 from agents.extraction.extraction_agent import ExtractionAgent
+from agents.trader.trader_agent import TraderAgent
 from ms_agent_framework import AgentApp
 from agents.scanner.scanner_agent import ScannerAgent, load_watchlist, load_source_map
+from agents.scanner.scan_history import (
+    get_fresh_breakouts,
+    get_new_tickers,
+    load_history,
+    save_history,
+)
 from models import StockRecord
 
 
 SCAN_OUTPUT = "agents/scanner/scan_results.json"
+_SOURCE_COMMENTS: dict[str, str] = {
+    "ww_extraction":   "WhaleWisdom heat map – institutional filer top holdings",
+    "vcp_screener":    "Minervini pure VCP setup – S&P 500 screened via FMP API",
+    "tv_screener":     "TradingView screener – Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
+}
 ANALYSIS_OUTPUT = "agents/analyst/analysis_results.json"
 EXCEL_OUTPUT = "agents/analyst/analysis_results.xlsx"
 MARKET_OPEN_HOUR = 9
@@ -31,18 +46,37 @@ MARKET_OPEN_MIN = 30
 MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MIN = 0
 
+_SEPA_LABELS = {
+    "above_150_200":        "P>SMA150&200",
+    "sma150_above_200":     "SMA150>200",
+    "sma200_rising":        "SMA200 Rising",
+    "sma50_above_150_200":  "SMA50>150&200",
+    "above_25pct_of_low":   ">=25% abv Low",
+    "within_25pct_of_high": "<=25% frm High",
+    "rs_leader":            "RS Leader",
+    "above_sma50":          "P>SMA50",
+}
+_SEPA_KEYS = list(_SEPA_LABELS.keys())
+
 _HEADERS = [
-    "Ticker", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Near Entry",
-    "Entry", "Stop", "Risk %", "Price", "P/E", "RSI", "Rel Vol",
+    "Ticker", "Source", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Zone",
+    "Prev Entry", "Next Entry", "Stop", "Risk %", "1R Target", "2R Target", "3R Target", "R:R", "Price", "P/E", "RSI", "Rel Vol",
     "% 52w High", "% Chg Week", "Rel Str vs SPY",
-    "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "WW Sellers", "WW Net", "SPY Uptrend",
+    "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "WW Sellers", "WW Net",
+    "Congress Buys", "Congress Sells", "Congress Net",
+    "Senate Buys", "Senate Sells", "Senate Net",
+    "SPY Uptrend",
     "SMA Stack", "SMA50", "Near High", "RSI Zone", "Vol Zone",
+    "SEPA", *[f"SEPA: {v}" for v in _SEPA_LABELS.values()],
+    "Sector",
     "Recommendation", "As Of", "Summary",
 ]
 
-# Signal columns are AA-AE (1-indexed: 27-31)
-_SIGNAL_COL_START = 27
-_SIGNAL_COL_END = 31
+# Derive column positions dynamically so they stay correct as columns are added.
+_SIGNAL_COL_START = _HEADERS.index("SMA Stack") + 1   # 1-indexed
+_SIGNAL_COL_END   = _HEADERS.index("Vol Zone") + 1
+_SEPA_COL_START   = _HEADERS.index("SEPA") + 1
+_SEPA_COL_END     = _SEPA_COL_START + len(_SEPA_KEYS)  # summary + 8 conditions (exclusive end = summary+8)
 
 _SCORE_FILLS = {
     "high":   PatternFill("solid", fgColor="C6EFCE"),  # green  ≥8
@@ -126,7 +160,9 @@ def _signals(r: StockRecord) -> list[str]:
     return [sma_stack, sma50_sig, near_high, rsi_zone, vol_zone]
 
 
-def _record_to_row(r: StockRecord) -> list[object]:
+def _record_to_row(
+    r: StockRecord, portfolio_tickers: set[str] | None = None
+) -> list[object]:
     a = r.analysis
     if not a:
         return [r.ticker] + [""] * (len(_HEADERS) - 1)
@@ -135,18 +171,32 @@ def _record_to_row(r: StockRecord) -> list[object]:
         if a.entry_price and a.stop_loss
         else ""
     )
+    tmpl = a.sepa_template or {}
+    sepa_vals = [tmpl.get(k, False) for k in _SEPA_KEYS]
+    sepa_summary = f"{sum(sepa_vals)}/8"
+
+    rec = recommendation(a)
+    if rec == "Avoid" and portfolio_tickers and r.ticker in portfolio_tickers:
+        rec = "SELL"
+
     return [
         r.ticker,
+        r.source,
         "Y" if r.in_stocktwits else "",
         "Y" if r.in_whale_wisdom else "",
         f"{a.score}/10",
         f"{a.canslim.total}/14" if a.canslim else "",
         f"{a.momentum.total}/14" if a.momentum else "",
         a.stage,
-        "Y" if a.near_entry else "",
+        a.entry_zone,
+        a.prev_entry_price,
         a.entry_price,
         a.stop_loss,
         risk,
+        a.r_multiples.get("1.0R") if a.r_multiples else "",
+        a.r_multiples.get("2.0R") if a.r_multiples else "",
+        a.r_multiples.get("3.0R") if a.r_multiples else "",
+        f"{a.reward_risk_ratio:.1f}x" if a.reward_risk_ratio else "",
         r.price,
         round(r.pe_ratio, 1) if r.pe_ratio else "",
         r.rsi14,
@@ -161,9 +211,20 @@ def _record_to_row(r: StockRecord) -> list[object]:
         r.funds_buying if r.funds_buying is not None else "",
         r.funds_selling if r.funds_selling is not None else "",
         r.funds_net if r.funds_net is not None else "",
+        r.congress_buys if r.congress_buys is not None else "",
+        r.congress_sells if r.congress_sells is not None else "",
+        (r.congress_buys or 0) - (r.congress_sells or 0)
+        if r.congress_buys is not None or r.congress_sells is not None else "",
+        r.senate_buys if r.senate_buys is not None else "",
+        r.senate_sells if r.senate_sells is not None else "",
+        (r.senate_buys or 0) - (r.senate_sells or 0)
+        if r.senate_buys is not None or r.senate_sells is not None else "",
         "Y" if r.spy_uptrend else "N",
         *_signals(r),
-        recommendation(a),
+        sepa_summary,
+        *["Y" if v else "N" for v in sepa_vals],
+        r.sector or "",
+        rec,
         r.as_of,
         a.summary,
     ]
@@ -183,107 +244,191 @@ def _apply_header(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
 def _set_col_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
     widths = {
         "A": 8,   # Ticker
-        "B": 11,  # StockTwits
-        "C": 12,  # Whale Wisdom
-        "D": 8,   # Score
-        "E": 10,  # CANSLIM
-        "F": 10,  # Momentum
-        "G": 10,  # Stage
-        "H": 8,   # Near Entry
-        "I": 10,  # Entry
-        "J": 10,  # Stop
-        "K": 8,   # Risk %
-        "L": 10,  # Price
-        "M": 7,   # P/E
-        "N": 7,   # RSI
-        "O": 8,   # Rel Vol
-        "P": 11,  # % 52w High
-        "Q": 11,  # % Chg Week
-        "R": 14,  # Rel Str vs SPY
-        "S": 11,  # EPS Growth
-        "T": 8,   # ROE
-        "U": 15,  # Inst Ownership
-        "V": 10,  # Inst Count
-        "W": 9,   # WW Buyers
-        "X": 9,   # WW Sellers
-        "Y": 8,   # WW Net
-        "Z": 10,  # SPY Uptrend
-        "AA": 9,  # SMA Stack
-        "AB": 7,  # SMA50
-        "AC": 9,  # Near High
-        "AD": 8,  # RSI Zone
-        "AE": 8,  # Vol Zone
-        "AF": 12, # Recommendation
-        "AG": 12, # As Of
-        "AH": 50, # Summary
+        "B": 18,  # Source
+        "C": 11,  # StockTwits
+        "D": 12,  # Whale Wisdom
+        "E": 8,   # Score
+        "F": 10,  # CANSLIM
+        "G": 10,  # Momentum
+        "H": 10,  # Stage
+        "I": 8,   # Zone
+        "J": 11,  # Prev Entry
+        "K": 11,  # Next Entry
+        "L": 10,  # Stop
+        "M": 8,   # Risk %
+        "N": 10,  # 1R Target
+        "O": 10,  # 2R Target
+        "P": 10,  # 3R Target
+        "Q": 7,   # R:R
+        "R": 10,  # Price
+        "S": 7,   # P/E
+        "T": 7,   # RSI
+        "U": 8,   # Rel Vol
+        "V": 11,  # % 52w High
+        "V": 11,  # % Chg Week
+        "W": 14,  # Rel Str vs SPY
+        "X": 11,  # EPS Growth
+        "Y": 8,   # ROE
+        "Z": 15,  # Inst Ownership
+        "AA": 10, # Inst Count
+        "AB": 9,  # WW Buyers
+        "AC": 9,  # WW Sellers
+        "AD": 8,  # WW Net
+        "AE": 12, # Congress Buys
+        "AF": 12, # Congress Sells
+        "AG": 10, # Congress Net
+        "AH": 10, # Senate Buys
+        "AI": 10, # Senate Sells
+        "AJ": 10, # Senate Net
+        "AK": 10, # SPY Uptrend
+        "AL": 9,  # SMA Stack
+        "AM": 7,  # SMA50
+        "AN": 9,  # Near High
+        "AO": 8,  # RSI Zone
+        "AP": 8,  # Vol Zone
+        "AQ": 7,  # SEPA summary
+        "AR": 13, "AS": 13, "AT": 13, "AU": 13,  # SEPA conditions 1-4
+        "AV": 13, "AW": 13, "AX": 13, "AY": 13,  # SEPA conditions 5-8
+        "AZ": 12, # Sector
+        "BA": 12, # Recommendation
+        "BB": 12, # As Of
+        "BC": 50, # Summary
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
 
 
-def write_excel(records: list[StockRecord], path: str) -> None:
+def _format_row(
+    ws: openpyxl.worksheet.worksheet.Worksheet,
+    data_row: int,
+    r: StockRecord,
+) -> None:
+    """Apply fills, hyperlink, and alignment for a single data row."""
+    score = r.analysis.score if r.analysis else 0
+    fill = _score_fill(score)
+    link_cell = ws.cell(data_row, 1)
+    assert isinstance(link_cell, Cell)
+    link_cell.hyperlink = Hyperlink(ref="", target=_yahoo_url(r.ticker))
+    link_cell.font = Font(color="0563C1", underline="single")
+    link_cell.fill = fill
+    ws.cell(data_row, 4).fill = fill
+    if r.analysis and r.analysis.entry_zone in ("broken_out", "approaching"):
+        ws.cell(data_row, 8).fill = _NEAR_ENTRY_FILL
+
+    for col in range(_SIGNAL_COL_START, _SIGNAL_COL_END + 1):
+        cell = ws.cell(data_row, col)
+        if cell.value in _SIGNAL_FILLS:
+            cell.fill = _SIGNAL_FILLS[cell.value]
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for col in range(_SEPA_COL_START + 1, _SEPA_COL_END + 1):
+        cell = ws.cell(data_row, col)
+        if cell.value == "Y":
+            cell.fill = _SIGNAL_FILLS["+"]
+        elif cell.value == "N":
+            cell.fill = _SIGNAL_FILLS["-"]
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    sepa_cell = ws.cell(data_row, _SEPA_COL_START)
+    try:
+        count = int(str(sepa_cell.value).split("/")[0])
+    except (ValueError, AttributeError):
+        count = 0
+    if count == 8:
+        sepa_fill = _SIGNAL_FILLS["+"]
+    elif count >= 6:
+        sepa_fill = _SIGNAL_FILLS["~"]
+    else:
+        sepa_fill = _SIGNAL_FILLS["-"]
+    sepa_cell.fill = sepa_fill
+    sepa_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for col in range(1, len(_HEADERS) + 1):
+        ws.cell(data_row, col).alignment = Alignment(vertical="center")
+
+
+_NEW_TICKER_FILL = PatternFill("solid", fgColor="FFF2CC")  # pale yellow — new tickers
+_BREAKOUT_FILL   = PatternFill("solid", fgColor="FFE0B2")  # pale orange — fresh breakouts
+
+
+def _write_sheet(
+    ws: openpyxl.worksheet.worksheet.Worksheet,
+    records: list[StockRecord],
+    held: set[str],
+    ranked: bool = False,
+) -> None:
+    """Populate a worksheet with header + formatted data rows."""
+    _apply_header(ws)
+    _set_col_widths(ws)
+    for rank, r in enumerate(records, 1):
+        row = _record_to_row(r, held)
+        if ranked:
+            row[0] = f"{rank}. {r.ticker}"
+        ws.append(row)
+        _format_row(ws, ws.max_row, r)
+
+
+def write_excel(
+    records: list[StockRecord],
+    path: str,
+    portfolio_tickers: set[str] | None = None,
+    new_tickers: set[str] | None = None,
+) -> None:
     """Write analysis results to a formatted Excel workbook."""
+    held = portfolio_tickers or set()
+    new = new_tickers or set()
     wb = openpyxl.Workbook()
 
     # --- Sheet 1: All results ---
     ws_all = wb.active
     ws_all.title = "All Results"
-    _apply_header(ws_all)
-    _set_col_widths(ws_all)
+    _write_sheet(ws_all, records, held)
 
-    for r in records:
-        row = _record_to_row(r)
-        ws_all.append(row)
-        data_row = ws_all.max_row
-        score = r.analysis.score if r.analysis else 0
-        fill = _score_fill(score)
-        link_cell = ws_all.cell(data_row, 1)
-        assert isinstance(link_cell, Cell)
-        link_cell.hyperlink = Hyperlink(ref="", target=_yahoo_url(r.ticker))
-        link_cell.font = Font(color="0563C1", underline="single")
-        link_cell.fill = fill
-        ws_all.cell(data_row, 4).fill = fill   # Score cell
-        if r.analysis and r.analysis.near_entry:
-            ws_all.cell(data_row, 8).fill = _NEAR_ENTRY_FILL
-        for col in range(_SIGNAL_COL_START, _SIGNAL_COL_END + 1):
-            cell = ws_all.cell(data_row, col)
-            if cell.value in _SIGNAL_FILLS:
-                cell.fill = _SIGNAL_FILLS[cell.value]
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-        for col in range(1, len(_HEADERS) + 1):
-            ws_all.cell(data_row, col).alignment = Alignment(vertical="center")
+    # Highlight new tickers with a pale-yellow row tint on Sheet 1
+    for row_idx in range(2, ws_all.max_row + 1):
+        ticker_cell = ws_all.cell(row_idx, 1)
+        raw = str(ticker_cell.value or "").lstrip("0123456789. ")
+        if raw in new:
+            for col in range(1, len(_HEADERS) + 1):
+                cell = ws_all.cell(row_idx, col)
+                if not cell.fill or cell.fill.fgColor.rgb in ("00000000", "FFFFFFFF"):
+                    cell.fill = _NEW_TICKER_FILL
 
-    # --- Sheet 2: Top 20 ---
+    # --- Sheet 2: New Tickers ---
+    new_records = [r for r in records if r.ticker in new]
+    if new_records:
+        ws_new = wb.create_sheet("New Tickers")
+        _write_sheet(ws_new, new_records, held)
+        # All rows on this sheet get the yellow tint
+        for row_idx in range(2, ws_new.max_row + 1):
+            for col in range(1, len(_HEADERS) + 1):
+                cell = ws_new.cell(row_idx, col)
+                if not cell.fill or cell.fill.fgColor.rgb in ("00000000", "FFFFFFFF"):
+                    cell.fill = _NEW_TICKER_FILL
+
+    # --- Sheet 3: Fresh Breakouts ---
+    breakout_records = [r for r in records if r.analysis and r.analysis.fresh_breakout]
+    if breakout_records:
+        ws_bo = wb.create_sheet("Breakouts")
+        _write_sheet(ws_bo, breakout_records, held)
+        for row_idx in range(2, ws_bo.max_row + 1):
+            for col in range(1, len(_HEADERS) + 1):
+                cell = ws_bo.cell(row_idx, col)
+                if not cell.fill or cell.fill.fgColor.rgb in ("00000000", "FFFFFFFF"):
+                    cell.fill = _BREAKOUT_FILL
+
+    # --- Sheet 4: Top 20 ---
     top20 = [r for r in records if r.analysis][:20]
     ws_top = wb.create_sheet("Top 20")
-    _apply_header(ws_top)
-    _set_col_widths(ws_top)
-
-    for rank, r in enumerate(top20, 1):
-        row = _record_to_row(r)
-        row[0] = f"{rank}. {r.ticker}"
-        ws_top.append(row)
-        data_row = ws_top.max_row
-        score = r.analysis.score if r.analysis else 0
-        fill = _score_fill(score)
-        top_link = ws_top.cell(data_row, 1)
-        assert isinstance(top_link, Cell)
-        top_link.hyperlink = Hyperlink(ref="", target=_yahoo_url(r.ticker))
-        top_link.font = Font(color="0563C1", underline="single")
-        top_link.fill = fill
-        ws_top.cell(data_row, 4).fill = fill
-        if r.analysis and r.analysis.near_entry:
-            ws_top.cell(data_row, 8).fill = _NEAR_ENTRY_FILL
-        for col in range(_SIGNAL_COL_START, _SIGNAL_COL_END + 1):
-            cell = ws_top.cell(data_row, col)
-            if cell.value in _SIGNAL_FILLS:
-                cell.fill = _SIGNAL_FILLS[cell.value]
-                cell.alignment = Alignment(horizontal="center", vertical="center")
-        for col in range(1, len(_HEADERS) + 1):
-            ws_top.cell(data_row, col).alignment = Alignment(vertical="center")
+    _write_sheet(ws_top, top20, held, ranked=True)
 
     wb.save(path)
-    print(f"      Excel saved -> {path}")
+    parts = [f"{len(records)} records"]
+    if new_records:
+        parts.append(f"{len(new_records)} new")
+    if breakout_records:
+        parts.append(f"{len(breakout_records)} breakouts")
+    print(f"      Excel saved -> {path}  ({', '.join(parts)})")
 
 
 def is_market_hours() -> bool:
@@ -326,14 +471,50 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         r.in_stocktwits = st
         r.in_whale_wisdom = ww
 
+    grouped: dict[str, list[dict]] = {k: [] for k in _SOURCE_COMMENTS}
+    for item in scan_results:
+        primary = item.source.split(",")[0] or "ww_extraction"
+        grouped.setdefault(primary, []).append(item.model_dump())
+
+    scan_payload: dict[str, object] = {"as_of": datetime.now().isoformat(timespec="seconds")}
+    for src, items in grouped.items():
+        scan_payload[src] = {"_comment": _SOURCE_COMMENTS.get(src, src), "results": items}
+
     with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
-        json.dump([item.model_dump() for item in scan_results], stream, indent=2)
-    print(f"      Scanned {len(scan_results)} tickers")
+        json.dump(scan_payload, stream, indent=2)
+
+    src_summary = ", ".join(
+        f"{k}:{len(v['results'])}"  # type: ignore[index]
+        for k, v in scan_payload.items()
+        if isinstance(v, dict)
+    )
+    print(f"      Scanned {len(scan_results)} tickers ({src_summary})")
 
     with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
         json.dump([item.model_dump() for item in analysis_results], stream, indent=2)
 
-    write_excel(analysis_results, EXCEL_OUTPUT)
+    _trader = TraderAgent(name="TraderAgent")
+    held = {p.ticker for p in _trader.get_portfolio()}
+
+    current_tickers = [r.ticker for r in analysis_results]
+    history = load_history()
+    new = get_new_tickers(current_tickers, history)
+    breakouts = get_fresh_breakouts(analysis_results, history)
+    save_history(analysis_results, history)
+
+    # Tag records so the web app and Excel sheet can consume them
+    for r in analysis_results:
+        if r.analysis and r.ticker in breakouts:
+            r.analysis.fresh_breakout = True
+
+    if new:
+        print(f"      New tickers this run:     {len(new)}")
+    if breakouts:
+        print(f"      Fresh breakouts this run: {len(breakouts)}"
+              f"  ({', '.join(sorted(breakouts)[:8])}"
+              f"{'...' if len(breakouts) > 8 else ''})")
+
+    write_excel(analysis_results, EXCEL_OUTPUT, held, new_tickers=new)
 
     print("\nPipeline complete.")
 

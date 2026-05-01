@@ -5,7 +5,7 @@ Unit tests for AnalystAgent.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agents.analyst.analyst_agent import FOUNDRY_BASE_URL, AnalystAgent
+from agents.analyst.analyst_agent import FOUNDRY_BASE_URL, AnalystAgent, _sepa_assessment, recommendation
 from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord, StockScan
 
 
@@ -27,6 +27,7 @@ def _make_scan(**overrides) -> StockRecord:
         rel_volume=1.2,
         high_52w=110.0,
         low_52w=60.0,
+        high_base=110.0,
         pct_from_52w_high=-9.1,
         pct_change_week=2.5,
     )
@@ -74,9 +75,10 @@ class TestAnalystAgent:
         assert isinstance(analysis, StockAnalysis)
         assert 1 <= analysis.score <= 10
         assert analysis.stage in ["Stage 1", "Stage 2", "Stage 3", "Stage 4"]
-        assert isinstance(analysis.near_entry, bool)
+        assert analysis.entry_zone in ("broken_out", "approaching", "getting_close", "extended", "far")
         assert isinstance(analysis.canslim, CANSLIMScore)
         assert isinstance(analysis.momentum, MomentumScore)
+        assert isinstance(analysis.volume_confirmed, bool)
 
     def test_rule_based_score_low_score(self):
         """Low-scoring stock still produces valid analysis with both scores."""
@@ -110,7 +112,7 @@ class TestAnalystAgent:
         mock_response.choices[0].message.content = """{
             "score": 8,
             "stage": "Stage 2",
-            "near_entry": true,
+            "entry_zone": "approaching",
             "strengths": ["Strong momentum", "Good volume"],
             "risks": ["High valuation"],
             "summary": "Excellent setup"
@@ -123,7 +125,7 @@ class TestAnalystAgent:
 
         assert analysis.score == 8
         assert analysis.stage == "Stage 2"
-        assert analysis.near_entry is True
+        assert analysis.entry_zone in ("broken_out", "approaching", "getting_close", "extended", "far")
         assert len(analysis.strengths) == 2
         assert len(analysis.risks) == 1
 
@@ -261,3 +263,107 @@ class TestAnalystAgent:
         raw = "<think>Let me reason...</think>\n{\"score\": 7}"
         result = AnalystAgent._strip_think(raw)
         assert result == '{"score": 7}'
+
+    def test_entry_price_none_when_high_base_missing(self):
+        """entry_price is None and entry_zone is 'far' when high_base is absent."""
+        record = _make_scan(high_base=None)
+        agent = AnalystAgent()
+        analysis = agent.rule_based_score(record)
+
+        assert analysis.entry_price is None
+        assert analysis.entry_zone == "far"
+
+    def test_volume_confirmed_true_when_rel_volume_high(self):
+        """volume_confirmed=True when rel_volume >= 1.4."""
+        record = _make_scan(rel_volume=1.6)
+        agent = AnalystAgent()
+        analysis = agent.rule_based_score(record)
+        assert analysis.volume_confirmed is True
+
+    def test_volume_confirmed_false_when_rel_volume_low(self):
+        """volume_confirmed=False when rel_volume < 1.4."""
+        record = _make_scan(rel_volume=1.1)
+        agent = AnalystAgent()
+        analysis = agent.rule_based_score(record)
+        assert analysis.volume_confirmed is False
+
+    def test_recommendation_buy_low_vol(self):
+        """Unconfirmed breakout returns 'BUY (low vol)'."""
+        a = StockAnalysis(
+            score=8,
+            stage="Stage 2",
+            entry_zone="broken_out",
+            volume_confirmed=False,
+            summary="test",
+        )
+        assert recommendation(a) == "BUY (low vol)"
+
+    def test_recommendation_avoid_for_bearish(self):
+        """Stage 3/4 or score<=3 returns 'Avoid', not 'SELL'."""
+        a = StockAnalysis(score=2, stage="Stage 3", entry_zone="far", summary="test")
+        assert recommendation(a) == "Avoid"
+
+    def test_recommendation_buy_with_volume(self):
+        """Volume-confirmed breakout with score>=7 returns 'BUY'."""
+        a = StockAnalysis(
+            score=8,
+            stage="Stage 2",
+            entry_zone="broken_out",
+            volume_confirmed=True,
+            summary="test",
+        )
+        assert recommendation(a) == "BUY"
+
+    def test_btp_pricing_populates_r_multiples(self):
+        """score_stock populates r_multiples, risk_pct, reward_risk_ratio via BTP skill."""
+        record = _make_scan(high_base=110.0, handle_low=95.0)
+        agent = AnalystAgent()
+        analysis = agent.score_stock(record, None)
+
+        assert analysis.r_multiples is not None
+        assert set(analysis.r_multiples.keys()) == {"1.0R", "2.0R", "3.0R"}
+        assert analysis.r_multiples["2.0R"] > analysis.r_multiples["1.0R"] > analysis.entry_price
+        assert analysis.risk_pct is not None
+        assert 0 < analysis.risk_pct < 1
+        assert analysis.reward_risk_ratio == pytest.approx(2.0)
+
+    def test_btp_pricing_falls_back_gracefully(self):
+        """score_stock does not crash when no pivot or stop reference is available."""
+        record = _make_scan(high_base=None, handle_low=None, sma50=None)
+        agent = AnalystAgent()
+        analysis = agent.score_stock(record, None)
+
+        assert isinstance(analysis, StockAnalysis)
+        assert analysis.r_multiples is None
+        assert analysis.reward_risk_ratio is None
+
+    def test_sepa_sma200_rising_fallback_uses_price_history(self):
+        """SMA200 Rising falls back to weekly slope when VCP trend template is inconclusive."""
+        record = _make_scan(price_history=[float(i) for i in range(60)])
+        vcp = {
+            "trend_template": {
+                "criteria": {
+                    "c1_price_above_sma150_200": {"passed": True, "detail": ""},
+                    "c2_sma150_above_sma200": {"passed": True, "detail": ""},
+                    "c3_sma200_trending_up": {
+                        "passed": False,
+                        "detail": "Cannot verify 22d SMA200 trend (only 200 days available)",
+                    },
+                    "c4_price_above_sma50": {"passed": True, "detail": ""},
+                    "c5_25pct_above_52w_low": {"passed": True, "detail": ""},
+                    "c6_within_25pct_52w_high": {"passed": True, "detail": ""},
+                    "c7_rs_rank_above_70": {"passed": True, "detail": ""},
+                },
+                "sma50": 95.0,
+                "sma150": 75.0,
+                "sma200": 70.0,
+            },
+            "vcp": {},
+            "volume": {},
+            "pivot": {},
+            "execution": {},
+        }
+
+        sepa = _sepa_assessment(record, vcp)
+
+        assert sepa["sma200_rising"] is True

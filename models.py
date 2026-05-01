@@ -22,6 +22,7 @@ class StockScan(BaseModel):
     low_52w: float
     high_base: float | None = None   # Highest daily high over the past 10 weeks (pivot entry reference)
     handle_low: float | None = None  # Lowest daily low over the past 3 weeks (handle stop reference)
+    sector: str | None = None        # GICS sector from yfinance (e.g. "Technology")
     pct_from_52w_high: float
     pct_change_week: float
     # Fundamental data (fetched from yfinance Ticker.info)
@@ -34,12 +35,21 @@ class StockScan(BaseModel):
     funds_buying: int | None = None          # WhalWisdom: # filers that increased position last quarter
     funds_selling: int | None = None         # WhalWisdom: # filers that decreased position last quarter
     funds_net: int | None = None             # WhalWisdom: funds_buying minus funds_selling
+    congress_buys: int | None = None          # QuiverQuant: congressional buy transactions last 12 months
+    congress_sells: int | None = None         # QuiverQuant: congressional sell transactions last 12 months
+    senate_buys: int | None = None            # QuiverQuant: Senate-only buy transactions last 12 months
+    senate_sells: int | None = None           # QuiverQuant: Senate-only sell transactions last 12 months
     # Market context
     rel_strength_vs_spy: float | None = None  # Stock 52w return minus SPY 52w return (pct pts)
     spy_uptrend: bool | None = None           # True if SPY is above its 200-day SMA
+    # Daily OHLCV history in FMP-compatible format (most recent first)
+    # Each entry: {"date": "YYYY-MM-DD", "open": f, "high": f, "low": f, "close": f, "volume": i}
+    ohlcv_history: list[dict[str, float | int | str]] = []
     # Watchlist source flags
     in_stocktwits: bool = False
     in_whale_wisdom: bool = False
+    # Screener source: "ww_extraction" | "vcp_screener" | "finviz_screener" | comma-joined if multiple
+    source: str = ""
 
 
 class MomentumScore(BaseModel):
@@ -86,9 +96,16 @@ class CANSLIMScore(BaseModel):
 class StockAnalysis(BaseModel):
     score: int = Field(ge=1, le=10)
     stage: str
-    near_entry: bool
-    entry_price: float | None = None
+    entry_zone: str = "far"  # "broken_out"|"approaching"|"getting_close"|"extended"|"far"
+    entry_price: float | None = None       # next entry: 0.5% above current VCP pivot
+    prev_entry_price: float | None = None  # prior pivot: T1 high (top of base)
     stop_loss: float | None = None
+    risk_pct: float | None = None                 # (entry - stop) / entry, e.g. 0.06 = 6%
+    r_multiples: dict[str, float] | None = None   # {"1.0R": x, "2.0R": y, "3.0R": z}
+    reward_risk_ratio: float | None = None         # 2.0 targeting 2R by convention
+    volume_confirmed: bool = False         # rel_volume >= 1.4 at scan time
+    fresh_breakout: bool = False           # zone just transitioned to broken_out this run
+    sepa_template: dict[str, bool] | None = None  # 8 Minervini trend template conditions
     canslim: CANSLIMScore | None = None    # Fundamental CANSLIM score
     momentum: MomentumScore | None = None  # Technical momentum score
     strengths: list[str] = []
@@ -100,9 +117,50 @@ class StockRecord(StockScan):
     analysis: StockAnalysis | None = None
 
 
+class ExitSignal(BaseModel):
+    """Exit or add signal for a held position."""
+
+    action: str  # "EXIT" | "ADD"
+    reason: str
+
+
 class EmailConfig(BaseModel):
     host: str
     port: int
     user: str
     password: str
     recipient: str
+
+
+class Trade(BaseModel):
+    """A single recorded buy or sell transaction."""
+
+    id: int | None = None
+    ticker: str
+    action: str  # "BUY" or "SELL"
+    shares: float
+    price: float
+    date: str
+    notes: str = ""
+    stop_loss: float | None = None    # initial stop from analysis at time of entry
+    entry_price: float | None = None  # analyst pivot entry price
+
+
+class Position(BaseModel):
+    """An open portfolio position with live P&L and Minervini exit metrics."""
+
+    ticker: str
+    shares: float
+    avg_cost: float
+    current_price: float | None = None
+    total_cost: float
+    current_value: float | None = None
+    unrealised_pnl: float | None = None
+    unrealised_pnl_pct: float | None = None
+    entry_price: float | None = None       # pivot entry from first BUY
+    entry_date: str | None = None          # date of first BUY
+    stop_loss: float | None = None         # initial stop from first BUY
+    profit_target_20: float | None = None  # entry_price * 1.20
+    profit_target_25: float | None = None  # entry_price * 1.25
+    next_pivot: float | None = None        # current analyst pivot entry (populated in web layer)
+    exit_signal: ExitSignal | None = None  # populated by ExitEvaluator in web layer

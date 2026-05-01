@@ -3,7 +3,12 @@ Scanner Agent — pulls price/volume via yfinance, computes technicals with pand
 Outputs typed scan results for the Analyst Agent using the local MS Agent framework.
 """
 
+import glob as _glob
 import json
+import os
+import shutil
+import subprocess
+import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -13,6 +18,24 @@ import yfinance as yf
 
 from ms_agent_framework import Agent
 from models import StockRecord
+
+try:
+    from alpha_vantage_client import AlphaVantageClient  # direct run
+except ImportError:
+    from agents.scanner.alpha_vantage_client import AlphaVantageClient  # via orchestrator
+
+try:
+    from congress_client import CongressClient  # direct run
+except ImportError:
+    from agents.scanner.congress_client import CongressClient  # via orchestrator
+
+try:
+    from agents.extraction.tv_extractor import fetch_tv_screener_tickers
+except ImportError:
+    from tv_extractor import fetch_tv_screener_tickers  # type: ignore[no-redef]
+
+_av_client = AlphaVantageClient()
+_congress_client = CongressClient()
 
 
 _EXTRACTION_RESULTS = (
@@ -61,7 +84,68 @@ def load_source_map() -> dict[str, tuple[bool, bool]]:
     return sources
 
 
+def is_tv_source(source: str) -> bool:
+    """Return True if the source label includes the TradingView screener."""
+    return "tv_screener" in source.split(",")
+
+
 PERIOD_DAYS = 252  # ~1 trading year for stage analysis
+
+_SKILLS_DIR = Path(__file__).parent.parent.parent / "skills"
+_VCP_SCRIPT = _SKILLS_DIR / "vcp-screener" / "scripts" / "screen_vcp.py"
+
+
+def fetch_vcp_screener_tickers() -> list[str]:
+    """Run vcp-screener against S&P 500 via FMP API and return candidate symbols.
+
+    Requires FMP_API_KEY env var. Returns empty list and prints a skip notice
+    when the key is absent or the subprocess fails.
+    """
+    api_key = os.environ.get("FMP_API_KEY", "")
+    if not api_key:
+        print("  [skip] vcp_screener: FMP_API_KEY not set")
+        return []
+    if not _VCP_SCRIPT.exists():
+        print("  [skip] vcp_screener: screen_vcp.py not found")
+        return []
+    uv = shutil.which("uv") or str(Path.home() / "AppData/Roaming/Python/Python314/Scripts/uv.exe")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result = subprocess.run(
+            [
+                uv, "run", "python", str(_VCP_SCRIPT),
+                "--api-key", api_key,
+                "--output-dir", tmpdir,
+                "--max-candidates", "100",
+                "--top", "50",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            print(f"  [warn] vcp_screener subprocess failed: {result.stderr[:200]}")
+            return []
+        json_files = _glob.glob(f"{tmpdir}/vcp_screener_*.json")
+        if not json_files:
+            print("  [warn] vcp_screener: no output JSON found")
+            return []
+        data = json.loads(Path(json_files[0]).read_text(encoding="utf-8"))
+        return [r["symbol"] for r in data.get("results", []) if r.get("symbol")]
+
+
+
+def _merge_results(*source_lists: list) -> list:
+    """Merge StockRecord lists; combine source labels for duplicate tickers."""
+    seen: dict[str, Any] = {}
+    for records in source_lists:
+        for r in records:
+            if r.ticker in seen:
+                existing = seen[r.ticker]
+                if r.source not in existing.source.split(","):
+                    existing.source = f"{existing.source},{r.source}"
+            else:
+                seen[r.ticker] = r
+    return list(seen.values())
 
 
 
@@ -91,23 +175,67 @@ def _fetch_spy_context() -> tuple[bool, float]:
 
 
 def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
-    """Return fundamental fields from yfinance (best-effort, None on failure)."""
+    """Return fundamental fields from yfinance with Alpha Vantage as fallback.
+
+    yfinance is tried first (no API key required). For any field that comes
+    back as None, Alpha Vantage is queried if ALPHA_VANTAGE_API_KEY is set.
+    """
     try:
         t = yf.Ticker(ticker)
-        info: Any = t.info  # yfinance stubs type this as dict[Unknown, Unknown]
-        return {
+        info: Any = t.info
+        result: dict[str, Any] = {
             "eps_growth": _quarterly_eps_growth(t, info),
             "annual_eps_growth": _annual_eps_growth(t),
             "roe": info.get("returnOnEquity"),
             "inst_ownership_pct": info.get("heldPercentInstitutions"),
             "pe_ratio": info.get("trailingPE"),
             "inst_count": _inst_count(t),
+            "sector": info.get("sector"),
         }
     except Exception:
-        return {
+        result = {
             "eps_growth": None, "annual_eps_growth": None, "roe": None,
             "inst_ownership_pct": None, "pe_ratio": None, "inst_count": None,
+            "sector": None,
         }
+
+    _fill_from_alpha_vantage(ticker, result)
+    return result
+
+
+def _fill_from_alpha_vantage(ticker: str, result: dict[str, Any]) -> None:
+    """Back-fill None fields in *result* from Alpha Vantage (modifies in place).
+
+    Only runs when ALPHA_VANTAGE_API_KEY is set and at least one field is missing.
+    Uses EARNINGS endpoint for precise YoY EPS (preferred) then OVERVIEW as fallback.
+    """
+    if not _av_client.enabled:
+        return
+
+    needs_eps = result.get("eps_growth") is None
+    needs_annual = result.get("annual_eps_growth") is None
+    needs_basics = any(result.get(k) is None for k in ("roe", "pe_ratio", "sector"))
+
+    if not (needs_eps or needs_annual or needs_basics):
+        return
+
+    # EARNINGS gives the most accurate quarterly/annual EPS numbers
+    if needs_eps:
+        result["eps_growth"] = _av_client.get_quarterly_eps_growth(ticker)
+    if needs_annual:
+        result["annual_eps_growth"] = _av_client.get_annual_eps_cagr(ticker)
+
+    # OVERVIEW fills the remaining fields (one API call)
+    if needs_basics or (needs_eps and result["eps_growth"] is None):
+        av_data = _av_client.get_fundamentals(ticker)
+        if result.get("roe") is None:
+            result["roe"] = av_data.get("roe")
+        if result.get("pe_ratio") is None:
+            result["pe_ratio"] = av_data.get("pe_ratio")
+        if result.get("sector") is None:
+            result["sector"] = av_data.get("sector")
+        if result.get("eps_growth") is None:
+            result["eps_growth"] = av_data.get("eps_growth")
 
 
 def _quarterly_eps_growth(t: yf.Ticker, info: Any) -> float | None:
@@ -188,9 +316,35 @@ class ScannerAgent(Agent):
     name: str = "ScannerAgent"
 
     def run(self, payload: Iterable[str] | None = None) -> list[StockRecord]:
-        tickers = list(payload) if payload else load_watchlist()
         spy_uptrend, spy_52w_return = _fetch_spy_context()
-        return self.scan_watchlist(tickers, spy_uptrend, spy_52w_return)
+
+        ww_tickers = list(payload) if payload else load_watchlist()
+        print(f"\n[Scanner] WW extraction:    {len(ww_tickers)} tickers")
+        ww_results = self._scan_source(ww_tickers, spy_uptrend, spy_52w_return, "ww_extraction")
+
+        vcp_tickers = fetch_vcp_screener_tickers()
+        print(f"[Scanner] VCP screener:     {len(vcp_tickers)} tickers")
+        vcp_results = self._scan_source(vcp_tickers, spy_uptrend, spy_52w_return, "vcp_screener")
+
+        print("[Scanner] TradingView screener...")
+        tv_tickers = fetch_tv_screener_tickers()
+        print(f"[Scanner] TV screener:      {len(tv_tickers)} tickers")
+        tv_results = self._scan_source(tv_tickers, spy_uptrend, spy_52w_return, "tv_screener")
+
+        return _merge_results(ww_results, vcp_results, tv_results)
+
+    def _scan_source(
+        self,
+        tickers: list[str],
+        spy_uptrend: bool,
+        spy_52w_return: float,
+        source: str,
+    ) -> list[StockRecord]:
+        """Scan a list of tickers and tag each result with the given source label."""
+        records = self.scan_watchlist(tickers, spy_uptrend, spy_52w_return)
+        for r in records:
+            r.source = source
+        return records
 
     def fetch_stock_data(self, ticker: str) -> pd.DataFrame | None:
         end = datetime.today()
@@ -248,6 +402,18 @@ class ScannerAgent(Agent):
         weekly = df["close"].resample("W").last().dropna().tail(52)
         price_history = [round(float(v), 2) for v in weekly]
 
+        # Daily OHLCV in FMP-compatible format (most recent first) for VCP calculators
+        ohlcv_history: list[dict[str, float | int | str]] = []
+        for date, row in df.iloc[::-1].iterrows():
+            ohlcv_history.append({
+                "date": date.strftime("%Y-%m-%d"),
+                "open": round(float(row["open"]), 4),
+                "high": round(float(row["high"]), 4),
+                "low": round(float(row["low"]), 4),
+                "close": round(float(row["close"]), 4),
+                "volume": int(row["volume"]),
+            })
+
         return {
             "price": round(float(latest["close"]), 2),
             "price_history": price_history,
@@ -267,6 +433,7 @@ class ScannerAgent(Agent):
             "handle_low": round(float(df["low"].tail(15).min()), 2),
             "pct_from_52w_high": round((float(latest["close"]) / float(high_52w) - 1) * 100, 1),
             "pct_change_week": round((float(latest["close"]) / float(prev_week["close"]) - 1) * 100, 1),
+            "ohlcv_history": ohlcv_history,
         }
 
     def compute_rel_strength(
@@ -300,18 +467,23 @@ class ScannerAgent(Agent):
                     technicals["price_history"], spy_52w_return
                 )
                 ww_data = ww.get(ticker, {})
+                congress = _congress_client.get_stats(ticker)
                 record = StockRecord(
                     ticker=ticker,
                     as_of=datetime.today().strftime("%Y-%m-%d"),
                     spy_uptrend=spy_uptrend,
                     rel_strength_vs_spy=rel_strength,
                     funds_buying=ww_data.get("filers_increasing"),
-                funds_selling=ww_data.get("filers_decreasing"),
-                funds_net=(
-                    ww_data["filers_increasing"] - ww_data["filers_decreasing"]
-                    if "filers_increasing" in ww_data and "filers_decreasing" in ww_data
-                    else None
-                ),
+                    funds_selling=ww_data.get("filers_decreasing"),
+                    funds_net=(
+                        ww_data["filers_increasing"] - ww_data["filers_decreasing"]
+                        if "filers_increasing" in ww_data and "filers_decreasing" in ww_data
+                        else None
+                    ),
+                    congress_buys=congress.buys if congress else None,
+                    congress_sells=congress.sells if congress else None,
+                    senate_buys=congress.senate_buys if congress else None,
+                    senate_sells=congress.senate_sells if congress else None,
                     **technicals,
                     **fundamentals,
                 )
