@@ -17,8 +17,6 @@ from ms_agent_framework import Agent
 from models import EmailConfig, StockRecord
 
 
-SCORE_THRESHOLD = 7
-NEAR_ENTRY_ONLY = True
 ALERT_COOLDOWN_HOURS = 24
 DB_PATH = str(Path(__file__).parent / "alerts.db")
 
@@ -97,11 +95,12 @@ class AlertAgent(Agent):
             if not self.should_alert(stock, conn):
                 continue
 
-            text_msg = self.format_alert_text(stock)
-            html_msg = self.format_alert_html(stock)
-            subject = f"Momentum Alert: {stock.ticker} — {stock.analysis.score}/10 | {stock.analysis.stage}"
+            trigger = self.alert_trigger(stock)
+            text_msg = self.format_alert_text(stock, trigger)
+            html_msg = self.format_alert_html(stock, trigger)
+            subject = f"{trigger}: {stock.ticker} | {stock.analysis.stage} {stock.analysis.score}/10"
 
-            print(f"\nALERT: {stock.ticker}")
+            print(f"\nALERT: {stock.ticker} [{trigger}]")
             print(text_msg)
             self.send_email(subject, html_msg, text_msg)
             self.record_alert(conn, stock)
@@ -170,19 +169,36 @@ class AlertAgent(Agent):
         )
         conn.commit()
 
-    def should_alert(self, stock: StockRecord, conn: sqlite3.Connection) -> bool:
+    def alert_trigger(self, stock: StockRecord) -> str | None:
+        """Return a trigger label if this stock warrants an immediate alert, else None.
+
+        Only fires for genuinely actionable breakout events:
+          - fresh_breakout: VCP entry_zone just transitioned to broken_out this run
+          - multiyear_breakout: price cleared a significant multi-year base pivot
+        """
         if not stock.analysis:
-            return False
-        if stock.analysis.score < SCORE_THRESHOLD:
-            return False
-        if NEAR_ENTRY_ONLY and stock.analysis.entry_zone not in ("broken_out", "approaching"):
+            return None
+        a = stock.analysis
+        is_fresh = a.fresh_breakout
+        is_myb = a.multiyear_breakout
+        if is_fresh and is_myb:
+            return "VCP + Multi-Year Base Breakout"
+        if is_fresh:
+            return "VCP Breakout"
+        if is_myb:
+            pivot = f"${a.multiyear_pivot:.2f}" if a.multiyear_pivot else ""
+            return f"Multi-Year Base Breakout {pivot}"
+        return None
+
+    def should_alert(self, stock: StockRecord, conn: sqlite3.Connection) -> bool:
+        if self.alert_trigger(stock) is None:
             return False
         if self.was_recently_alerted(conn, stock.ticker):
             print(f"  [skip] {stock.ticker}: already alerted recently")
             return False
         return True
 
-    def format_alert_text(self, stock: StockRecord) -> str:
+    def format_alert_text(self, stock: StockRecord, trigger: str | None = None) -> str:
         analysis = stock.analysis
         assert analysis is not None
         strengths = "\n".join(f"  + {item}" for item in analysis.strengths)
@@ -204,8 +220,9 @@ class AlertAgent(Agent):
                 f"C={cs.C} A={cs.A} N={cs.N} S={cs.S} L={cs.L} I={cs.I} M={cs.M}"
             )
 
+        trigger_line = f"** {trigger} **\n\n" if trigger else ""
         body = (
-            f"{stock.ticker} — Score {analysis.score}/10 | {analysis.stage}\n"
+            f"{trigger_line}{stock.ticker} — Score {analysis.score}/10 | {analysis.stage}\n"
             f"Price: ${stock.price}  |  RSI: {stock.rsi14}  |  RelVol: {stock.rel_volume}x\n"
             f"Distance from 52w high: {stock.pct_from_52w_high}%\n"
             f"Entry: {entry}  |  Stop: {stop}  |  Risk: {risk_str}\n"
@@ -218,7 +235,7 @@ class AlertAgent(Agent):
         body += f"\n\n{date.today().isoformat()}"
         return body
 
-    def format_alert_html(self, stock: StockRecord) -> str:
+    def format_alert_html(self, stock: StockRecord, trigger: str | None = None) -> str:
         analysis = stock.analysis
         assert analysis is not None
         strengths_html = "".join(f"<li>&#10003; {item}</li>" for item in analysis.strengths)
@@ -268,8 +285,16 @@ class AlertAgent(Agent):
                 <td style="padding:3px 6px">{_bar(cs.M)}</td><td style="padding:3px 6px">{cs.M}/2</td></tr>
           </table>"""
 
+        trigger_banner = ""
+        if trigger:
+            trigger_banner = (
+                f"<div style=\"background:#1e3a5f;color:white;padding:10px 16px;"
+                f"border-radius:4px;font-weight:bold;margin-bottom:16px;font-size:0.95em\">"
+                f"&#9889; {trigger}</div>"
+            )
         return f"""
         <html><body style=\"font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px\">
+          {trigger_banner}
           <h2 style=\"border-bottom:2px solid {score_color};padding-bottom:8px\">
             {stock.ticker}
             <span style=\"color:{score_color};font-size:0.9em\">
