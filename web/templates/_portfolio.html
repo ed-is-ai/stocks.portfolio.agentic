@@ -19,9 +19,14 @@
 </div>
 <script>
 (function() {
-  const labels = {{ chart_labels | safe }};
-  const values = {{ chart_values | safe }};
-  const costs  = {{ chart_costs  | safe }};
+  const labels   = {{ chart_labels     | safe }};
+  const values   = {{ chart_values     | safe }};
+  const costs    = {{ chart_costs      | safe }};
+  const buyVals  = {{ chart_buys       | safe }};
+  const sellVals = {{ chart_sells      | safe }};
+  const buyTips  = {{ chart_buy_tips   | safe }};
+  const sellTips = {{ chart_sell_tips  | safe }};
+
   const ctx = document.getElementById('portfolioChart').getContext('2d');
   new Chart(ctx, {
     type: 'line',
@@ -38,6 +43,7 @@
           pointHoverRadius: 5,
           fill: true,
           tension: 0.3,
+          order: 3,
         },
         {
           label: 'Cost Basis',
@@ -48,17 +54,54 @@
           pointRadius: 0,
           fill: false,
           tension: 0,
-        }
+          order: 4,
+        },
+        {
+          label: 'Buy',
+          data: buyVals,
+          showLine: false,
+          pointStyle: 'triangle',
+          pointRadius: 9,
+          pointHoverRadius: 11,
+          backgroundColor: '#16a34a',
+          borderColor: '#16a34a',
+          borderWidth: 1,
+          order: 1,
+        },
+        {
+          label: 'Sell',
+          data: sellVals,
+          showLine: false,
+          pointStyle: 'triangle',
+          rotation: 180,
+          pointRadius: 9,
+          pointHoverRadius: 11,
+          backgroundColor: '#dc2626',
+          borderColor: '#dc2626',
+          borderWidth: 1,
+          order: 2,
+        },
       ]
     },
     options: {
       responsive: true,
       interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { labels: { font: { size: 11 }, boxWidth: 14 } },
+        legend: { labels: { font: { size: 11 }, boxWidth: 14, filter: item => item.text !== 'Buy' && item.text !== 'Sell' } },
         tooltip: {
           callbacks: {
-            label: ctx => ' $' + ctx.parsed.y.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})
+            label: function(ctx) {
+              if (ctx.dataset.label === 'Buy') {
+                const tip = buyTips[ctx.dataIndex];
+                return tip ? ' ▲ ' + tip : null;
+              }
+              if (ctx.dataset.label === 'Sell') {
+                const tip = sellTips[ctx.dataIndex];
+                return tip ? ' ▼ ' + tip : null;
+              }
+              if (ctx.parsed.y === null) return null;
+              return ' ' + ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+            }
           }
         }
       },

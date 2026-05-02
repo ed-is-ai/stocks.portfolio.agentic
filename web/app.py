@@ -8,6 +8,7 @@ Run with:
 import csv
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -106,13 +107,62 @@ def _load_portfolio_history() -> dict:
         return {"labels": [], "values": [], "costs": []}
     with open(_PORTFOLIO_VALUE_CSV, newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
-    # Keep last 180 snapshots to avoid chart clutter
     rows = rows[-180:]
     return {
         "labels": [r["timestamp"][:16].replace("T", " ") for r in rows],
         "values": [float(r["total_value"]) for r in rows],
         "costs":  [float(r["total_cost"])  for r in rows],
     }
+
+
+def _trade_markers(chart_data: dict) -> tuple[list, list, list, list]:
+    """Return (buy_values, sell_values, buy_labels, sell_labels) aligned to chart labels.
+
+    Each array is len(labels) long with None at positions that have no trade.
+    buy/sell_labels are tooltip strings for each non-None entry.
+    """
+    labels = chart_data["labels"]
+    values = chart_data["values"]
+    n = len(labels)
+
+    label_dates = []
+    for lbl in labels:
+        try:
+            label_dates.append(datetime.strptime(lbl[:10], "%Y-%m-%d").date())
+        except ValueError:
+            label_dates.append(None)
+
+    buy_vals:    list = [None] * n
+    sell_vals:   list = [None] * n
+    buy_tips:    list = [None] * n
+    sell_tips:   list = [None] * n
+
+    from agents.trader.trader_agent import TraderAgent as _TA
+    trades = _TA(name="TraderAgent").get_trade_history()
+    trades.sort(key=lambda t: t.date)
+
+    for trade in trades:
+        try:
+            td = datetime.strptime(trade.date, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        # Find nearest label index by calendar distance
+        best_idx, best_diff = 0, 10**9
+        for i, ld in enumerate(label_dates):
+            if ld is None:
+                continue
+            diff = abs((ld - td).days)
+            if diff < best_diff:
+                best_diff, best_idx = diff, i
+        tip = f"{trade.action} {trade.shares:g} {trade.ticker} @ ${trade.price:.2f} ({trade.date})"
+        if trade.action == "BUY":
+            buy_vals[best_idx] = values[best_idx]
+            buy_tips[best_idx] = tip
+        else:
+            sell_vals[best_idx] = values[best_idx]
+            sell_tips[best_idx] = tip
+
+    return buy_vals, sell_vals, buy_tips, sell_tips
 
 
 @app.get("/partials/portfolio", response_class=HTMLResponse)
@@ -127,6 +177,7 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
         if stock and stock.analysis:
             pos.next_pivot = stock.analysis.entry_price
     chart_data = _load_portfolio_history()
+    buy_vals, sell_vals, buy_tips, sell_tips = _trade_markers(chart_data)
     return templates.TemplateResponse(
         request, "_portfolio.html",
         context={
@@ -135,6 +186,10 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
             "chart_values": json.dumps(chart_data["values"]),
             "chart_costs":  json.dumps(chart_data["costs"]),
             "chart_points": len(chart_data["values"]),
+            "chart_buys":   json.dumps(buy_vals),
+            "chart_sells":  json.dumps(sell_vals),
+            "chart_buy_tips":  json.dumps(buy_tips),
+            "chart_sell_tips": json.dumps(sell_tips),
         },
     )
 
