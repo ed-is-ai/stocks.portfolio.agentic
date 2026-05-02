@@ -4,6 +4,7 @@ Runs the MS Agent framework pipeline on market hours.
 """
 
 import argparse
+import csv
 import json
 import traceback
 from datetime import datetime, timezone
@@ -36,7 +37,12 @@ from models import StockRecord
 
 
 SCAN_OUTPUT = "agents/scanner/scan_results.json"
-RUN_LOG = "pipeline_runs.jsonl"
+RUN_LOG = "pipeline_runs.csv"
+_RUN_LOG_FIELDS = [
+    "start", "end", "duration_seconds",
+    "scanned", "analysed", "buy_alerts", "sell_alerts", "actionable",
+    "sources", "status", "errors",
+]
 _SOURCE_COMMENTS: dict[str, str] = {
     "ww_extraction":   "WhaleWisdom heat map – institutional filer top holdings",
     "vcp_screener":    "Minervini pure VCP setup – S&P 500 screened via FMP API",
@@ -52,9 +58,14 @@ MARKET_CLOSE_MIN = 0
 
 
 def _append_run_log(entry: dict) -> None:
-    """Append one run record (as a JSON line) to RUN_LOG."""
-    with open(RUN_LOG, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry) + "\n")
+    """Append one run record to the CSV log, writing the header if the file is new."""
+    log_path = Path(RUN_LOG)
+    write_header = not log_path.exists() or log_path.stat().st_size == 0
+    with open(log_path, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=_RUN_LOG_FIELDS)
+        if write_header:
+            writer.writeheader()
+        writer.writerow({k: entry.get(k, "") for k in _RUN_LOG_FIELDS})
 
 _SEPA_LABELS = {
     "above_150_200":        "P>SMA150&200",
@@ -578,7 +589,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             "sell_alerts": sell_alerts,
             "actionable": buy_alerts + sell_alerts,
             "sources": src_summary,
-            "errors": errors,
+            "errors": " | ".join(errors) if errors else "",
             "status": "error" if errors else "ok",
         }
         _append_run_log(log_entry)
