@@ -518,6 +518,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
     positions = _trader.get_portfolio(prices)
     held = {p.ticker for p in positions}
     alerter.check_portfolio_stops(positions, stock_map)
+    alerter.send_summary_email()
 
     current_tickers = [r.ticker for r in analysis_results]
     history = load_history()

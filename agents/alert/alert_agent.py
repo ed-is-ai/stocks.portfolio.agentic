@@ -13,6 +13,8 @@ from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Iterable
 
+from pydantic import PrivateAttr
+
 from ms_agent_framework import Agent
 from models import EmailConfig, Position, StockRecord
 
@@ -45,6 +47,9 @@ class AlertAgent(Agent):
     name: str = "AlertAgent"
     db_path: str = DB_PATH
     email_config: EmailConfig = EMAIL_CONFIG
+
+    _buy_alerts: list[tuple[StockRecord, str]] = PrivateAttr(default_factory=list)
+    _sell_alerts: list[tuple[Position, StockRecord | None]] = PrivateAttr(default_factory=list)
 
     def check_positions(
         self, stocks: list[StockRecord], conn: sqlite3.Connection
@@ -89,26 +94,20 @@ class AlertAgent(Agent):
         conn.execute("DELETE FROM alerts")
         conn.commit()
         self.check_positions(results, conn)
-        alerted_count = 0
+        self._buy_alerts.clear()
 
         for stock in results:
             if not self.should_alert(stock, conn):
                 continue
-
             trigger = self.alert_trigger(stock)
-            text_msg = self.format_alert_text(stock, trigger)
-            html_msg = self.format_alert_html(stock, trigger)
-            subject = f"{trigger}: {stock.ticker} | {stock.analysis.stage} {stock.analysis.score}/10"
-
+            assert trigger is not None
             print(f"\nALERT: {stock.ticker} [{trigger}]")
-            print(text_msg)
-            self.send_email(subject, html_msg, text_msg)
+            self._buy_alerts.append((stock, trigger))
             self.record_alert(conn, stock)
-            alerted_count += 1
 
         conn.close()
-        print(f"\n{alerted_count} alert(s) fired.")
-        return alerted_count
+        print(f"\n{len(self._buy_alerts)} buy alert(s) queued.")
+        return len(self._buy_alerts)
 
     def init_db(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -789,28 +788,198 @@ class AlertAgent(Agent):
     ) -> int:
         """Check all open portfolio positions against their stop loss.
 
-        Sends a rich stop-loss email for any position where current_price <= stop_loss.
-        Returns the number of alerts fired.
+        Queues stop-loss alerts into self._sell_alerts for inclusion in the
+        summary email. Returns the count of positions breaching their stop.
         """
-        fired = 0
+        self._sell_alerts.clear()
         for pos in positions:
             if pos.stop_loss is None or pos.current_price is None:
                 continue
             if pos.current_price > pos.stop_loss:
                 continue
-
             stock = stock_map.get(pos.ticker)
-            n = self._stop_loss_narrative(pos, stock)
-            text_body = self._format_stop_loss_text(pos, stock, n)
-            html_body = self._format_stop_loss_html(pos, stock, n)
-            subject = f"STOP LOSS HIT: {pos.ticker} @ ${pos.current_price:.2f}"
-
             print(f"\nSTOP LOSS: {pos.ticker} @ ${pos.current_price:.2f} "
                   f"(stop ${pos.stop_loss:.2f})")
-            self.send_email(subject, html_body, text_body)
-            fired += 1
+            self._sell_alerts.append((pos, stock))
 
-        return fired
+        print(f"\n{len(self._sell_alerts)} stop-loss alert(s) queued.")
+        return len(self._sell_alerts)
+
+    def send_summary_email(self) -> None:
+        """Send one consolidated daily summary: SELL alerts (top) then BUY alerts.
+
+        Pulls from self._sell_alerts and self._buy_alerts populated by
+        check_portfolio_stops() and run() respectively. No-ops if both are empty.
+        """
+        if not self._sell_alerts and not self._buy_alerts:
+            print("  [email] no actionable alerts — summary not sent.")
+            return
+
+        today = date.today().isoformat()
+        sell_count = len(self._sell_alerts)
+        buy_count = len(self._buy_alerts)
+        subject = (
+            f"Stock Alerts {today} — "
+            + (f"{sell_count} SELL" + (f", {buy_count} BUY" if buy_count else "") if sell_count else f"{buy_count} BUY")
+        )
+
+        # ── Text body ──────────────────────────────────────────────────────
+        text_parts: list[str] = [f"Stock Alert Summary — {today}\n{'='*50}"]
+
+        if self._sell_alerts:
+            text_parts.append("\n\n*** SELL / STOP LOSS ALERTS ***\n")
+            for pos, stock in self._sell_alerts:
+                n = self._stop_loss_narrative(pos, stock)
+                text_parts.append(self._format_stop_loss_text(pos, stock, n))
+                text_parts.append("\n" + "-" * 40)
+
+        if self._buy_alerts:
+            text_parts.append("\n\n*** BUY / BREAKOUT ALERTS ***\n")
+            for stock, trigger in self._buy_alerts:
+                n_txt = self.format_alert_text(stock, trigger)
+                text_parts.append(n_txt)
+                text_parts.append("\n" + "-" * 40)
+
+        text_body = "\n".join(text_parts)
+
+        # ── HTML body ──────────────────────────────────────────────────────
+        html_parts: list[str] = [
+            "<html><body style=\"font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px\">"
+            f"<h2 style=\"color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px\">"
+            f"&#128200; Stock Alert Summary &mdash; {today}</h2>"
+        ]
+
+        if self._sell_alerts:
+            html_parts.append(
+                "<div style=\"margin:20px 0\">"
+                "<h3 style=\"color:#c0392b;margin-bottom:12px\">&#9888; SELL / STOP LOSS</h3>"
+            )
+            for pos, stock in self._sell_alerts:
+                n = self._stop_loss_narrative(pos, stock)
+                html_parts.append(self._sell_card_html(pos, stock, n))
+            html_parts.append("</div>")
+
+        if self._buy_alerts:
+            html_parts.append(
+                "<div style=\"margin:20px 0\">"
+                "<h3 style=\"color:#27ae60;margin-bottom:12px\">&#9889; BUY / BREAKOUT</h3>"
+            )
+            for stock, trigger in self._buy_alerts:
+                html_parts.append(self._buy_card_html(stock, trigger))
+            html_parts.append("</div>")
+
+        html_parts.append(
+            f"<p style=\"color:#aaa;font-size:0.8em;margin-top:24px\">"
+            f"{today} &mdash; Momentum Scanner</p></body></html>"
+        )
+        html_body = "\n".join(html_parts)
+
+        self.send_email(subject, html_body, text_body)
+
+    def _sell_card_html(
+        self, pos: Position, stock: StockRecord | None, n: dict[str, str]
+    ) -> str:
+        """Compact HTML card for one stop-loss hit."""
+        price = pos.current_price or 0.0
+        stop = pos.stop_loss or 0.0
+        pnl = pos.unrealised_pnl
+        pnl_str = f"${pnl:+.2f}" if pnl is not None else "--"
+        pnl_pct = pos.unrealised_pnl_pct
+        pnl_pct_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "--"
+        pnl_color = "#c0392b" if (pnl or 0) < 0 else "#27ae60"
+        verdict_bg = "#f8d7da" if "NOW" in n["verdict"] else "#fff3cd"
+        verdict_border = "#e74c3c" if "NOW" in n["verdict"] else "#f39c12"
+
+        return f"""
+        <div style="border:1px solid #f5c6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#fff8f8">
+          <div style="font-weight:700;font-size:1em;color:#c0392b;margin-bottom:8px">
+            &#9888; {pos.ticker} &mdash; Stop ${stop:.2f} | Price ${price:.2f}
+            <span style="font-weight:400;font-size:0.85em;color:{pnl_color};margin-left:8px">
+              P&amp;L {pnl_str} ({pnl_pct_str})
+            </span>
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:0.82em">
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;width:80px;color:#555;vertical-align:top">Stop</td>
+              <td style="padding:4px 6px;color:#c0392b">{n["stop"]}</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">P&amp;L</td>
+              <td style="padding:4px 6px">{n["pnl"]}</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">Volume</td>
+              <td style="padding:4px 6px">{n["volume"]}</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">Trend</td>
+              <td style="padding:4px 6px">{n["trend"]}</td>
+            </tr>
+          </table>
+          <div style="margin-top:8px;padding:8px 12px;background:{verdict_bg};
+                      border-left:3px solid {verdict_border};font-weight:700;font-size:0.85em">
+            {n["verdict"]}
+          </div>
+        </div>"""
+
+    def _buy_card_html(self, stock: StockRecord, trigger: str) -> str:
+        """Compact HTML card for one breakout alert."""
+        a = stock.analysis
+        assert a is not None
+        score_color = "#27ae60" if a.score >= 8 else "#f39c12" if a.score >= 6 else "#e74c3c"
+        entry = f"${a.entry_price:.2f}" if a.entry_price else "—"
+        stop = f"${a.stop_loss:.2f}" if a.stop_loss else "—"
+        if a.entry_price and a.stop_loss:
+            risk_pct = (a.entry_price - a.stop_loss) / a.entry_price * 100
+            risk_str = f"{risk_pct:.1f}%"
+        else:
+            risk_str = "—"
+        n = self._breakout_narrative(stock)
+        verdict_bg = "#d4edda" if a.score >= 8 and stock.rel_volume >= 1.5 else "#fff3cd" if a.score >= 7 else "#f8d7da"
+        verdict_border = "#27ae60" if a.score >= 8 and stock.rel_volume >= 1.5 else "#f39c12" if a.score >= 7 else "#e74c3c"
+
+        return f"""
+        <div style="border:1px solid #c3e6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#f8fff9">
+          <div style="font-weight:700;font-size:1em;color:#1e3a5f;margin-bottom:4px">
+            &#9889; {stock.ticker}
+            <span style="color:{score_color};font-size:0.88em;margin-left:6px">
+              Score {a.score}/10 &mdash; {a.stage}
+            </span>
+            <span style="background:#1e3a5f;color:white;padding:2px 8px;border-radius:3px;
+                         font-size:0.75em;margin-left:8px">{trigger}</span>
+          </div>
+          <div style="font-size:0.82em;color:#555;margin-bottom:8px">
+            Price <b>${stock.price}</b> &nbsp;|&nbsp;
+            Entry <b>{entry}</b> &nbsp;|&nbsp;
+            Stop <b>{stop}</b> &nbsp;|&nbsp;
+            Risk <b>{risk_str}</b> &nbsp;|&nbsp;
+            RSI <b>{stock.rsi14}</b> &nbsp;|&nbsp;
+            RelVol <b>{stock.rel_volume}x</b>
+          </div>
+          <table style="width:100%;border-collapse:collapse;font-size:0.82em">
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;width:80px;color:#555;vertical-align:top">Volume</td>
+              <td style="padding:4px 6px">{n["volume"]}</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">SEPA</td>
+              <td style="padding:4px 6px">{n["sepa"]}</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">CANSLIM</td>
+              <td style="padding:4px 6px">{n["canslim"]}</td>
+            </tr>
+            <tr>
+              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">Momentum</td>
+              <td style="padding:4px 6px">{n["momentum"]}</td>
+            </tr>
+          </table>
+          <div style="margin-top:8px;padding:8px 12px;background:{verdict_bg};
+                      border-left:3px solid {verdict_border};font-weight:700;font-size:0.85em">
+            {n["verdict"]}
+          </div>
+          {self._svg_chart(stock.price_history, score_color)}
+        </div>"""
 
     def send_email(self, subject: str, html_body: str, text_body: str) -> None:
         if not self.email_config.user or not self.email_config.password or not self.email_config.recipient:
