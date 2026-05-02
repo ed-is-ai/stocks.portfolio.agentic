@@ -129,7 +129,13 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
     chart_data = _load_portfolio_history()
     return templates.TemplateResponse(
         request, "_portfolio.html",
-        context={"positions": positions, "chart_data": chart_data},
+        context={
+            "positions": positions,
+            "chart_labels": json.dumps(chart_data["labels"]),
+            "chart_values": json.dumps(chart_data["values"]),
+            "chart_costs":  json.dumps(chart_data["costs"]),
+            "chart_points": len(chart_data["values"]),
+        },
     )
 
 

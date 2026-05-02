@@ -10,7 +10,7 @@
 {% set total_pnl = total_value - (positions_with_value | sum(attribute='total_cost')) %}
 
 <!-- Portfolio value chart -->
-{% if chart_data and chart_data.values | length >= 2 %}
+{% if chart_points >= 2 %}
 <div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1rem 1.25rem;margin-bottom:1.25rem">
   <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.5rem">
     <i class="bi bi-graph-up me-1"></i>Portfolio Value History
@@ -19,9 +19,9 @@
 </div>
 <script>
 (function() {
-  const labels = {{ chart_data.labels | tojson }};
-  const values = {{ chart_data.values | tojson }};
-  const costs  = {{ chart_data.costs  | tojson }};
+  const labels = {{ chart_labels | safe }};
+  const values = {{ chart_values | safe }};
+  const costs  = {{ chart_costs  | safe }};
   const ctx = document.getElementById('portfolioChart').getContext('2d');
   new Chart(ctx, {
     type: 'line',
