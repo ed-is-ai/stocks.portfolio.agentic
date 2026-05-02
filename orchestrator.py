@@ -38,6 +38,7 @@ _SOURCE_COMMENTS: dict[str, str] = {
     "ww_extraction":   "WhaleWisdom heat map – institutional filer top holdings",
     "vcp_screener":    "Minervini pure VCP setup – S&P 500 screened via FMP API",
     "tv_screener":     "TradingView screener – Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
+    "tv_screener_uk":  "TradingView screener – LSE Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
 }
 ANALYSIS_OUTPUT = "agents/analyst/analysis_results.json"
 EXCEL_OUTPUT = "agents/analyst/analysis_results.xlsx"

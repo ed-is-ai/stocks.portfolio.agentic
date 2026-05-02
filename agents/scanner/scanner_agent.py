@@ -30,9 +30,12 @@ except ImportError:
     from agents.scanner.congress_client import CongressClient  # via orchestrator
 
 try:
-    from agents.extraction.tv_extractor import fetch_tv_screener_tickers
+    from agents.extraction.tv_extractor import (
+        fetch_tv_screener_tickers,
+        fetch_tv_screener_tickers_uk,
+    )
 except ImportError:
-    from tv_extractor import fetch_tv_screener_tickers  # type: ignore[no-redef]
+    from tv_extractor import fetch_tv_screener_tickers, fetch_tv_screener_tickers_uk  # type: ignore[no-redef]
 
 _av_client = AlphaVantageClient()
 _congress_client = CongressClient()
@@ -115,8 +118,8 @@ def fetch_vcp_screener_tickers() -> list[str]:
                 uv, "run", "python", str(_VCP_SCRIPT),
                 "--api-key", api_key,
                 "--output-dir", tmpdir,
-                "--max-candidates", "100",
-                "--top", "50",
+                "--max-candidates", "250",
+                "--top", "100",
             ],
             capture_output=True,
             text=True,
@@ -326,12 +329,18 @@ class ScannerAgent(Agent):
         print(f"[Scanner] VCP screener:     {len(vcp_tickers)} tickers")
         vcp_results = self._scan_source(vcp_tickers, spy_uptrend, spy_52w_return, "vcp_screener")
 
-        print("[Scanner] TradingView screener...")
+        print("[Scanner] TradingView screener (US)...")
         tv_tickers = fetch_tv_screener_tickers()
-        print(f"[Scanner] TV screener:      {len(tv_tickers)} tickers")
+        print(f"[Scanner] TV screener US:   {len(tv_tickers)} tickers")
         tv_results = self._scan_source(tv_tickers, spy_uptrend, spy_52w_return, "tv_screener")
 
-        return _merge_results(ww_results, vcp_results, tv_results)
+        print("[Scanner] TradingView screener (UK)...")
+        uk_raw = fetch_tv_screener_tickers_uk()
+        uk_tickers = [t if t.endswith(".L") else f"{t}.L" for t in uk_raw]
+        print(f"[Scanner] TV screener UK:   {len(uk_tickers)} tickers")
+        uk_results = self._scan_source(uk_tickers, spy_uptrend, spy_52w_return, "tv_screener_uk")
+
+        return _merge_results(ww_results, vcp_results, tv_results, uk_results)
 
     def _scan_source(
         self,
