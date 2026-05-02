@@ -497,11 +497,20 @@ def is_market_hours() -> bool:
 
 
 def pipeline(force: bool = False, extract: bool = False) -> None:
+    start_dt = datetime.now(timezone.utc)
+
     if not force and not is_market_hours():
-        print(f"[{datetime.now().strftime('%H:%M')}] Outside market hours — skipping")
+        print(f"[{start_dt.strftime('%H:%M')}] Outside market hours — skipping")
+        _append_run_log({
+            "start": start_dt.isoformat(timespec="seconds"),
+            "end": start_dt.isoformat(timespec="seconds"),
+            "duration_seconds": 0,
+            "scanned": 0, "analysed": 0,
+            "buy_alerts": 0, "sell_alerts": 0, "actionable": 0,
+            "sources": "", "errors": "", "status": "skipped",
+        })
         return
 
-    start_dt = datetime.now(timezone.utc)
     print(f"\n{'='*50}")
     print(f"Pipeline run: {start_dt.strftime('%Y-%m-%d %H:%M UTC')}")
     print("="*50)

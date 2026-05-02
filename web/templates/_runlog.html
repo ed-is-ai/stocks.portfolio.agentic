@@ -43,6 +43,8 @@
         <td>
           {% if r.status == "ok" %}
             <span class="badge-status status-ok">OK</span>
+          {% elif r.status == "skipped" %}
+            <span class="badge-status status-skip">SKIP</span>
           {% else %}
             <span class="badge-status status-error">ERROR</span>
           {% endif %}
