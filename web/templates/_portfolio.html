@@ -9,6 +9,78 @@
 {% set total_value = positions_with_value | sum(attribute='current_value') %}
 {% set total_pnl = total_value - (positions_with_value | sum(attribute='total_cost')) %}
 
+<!-- Portfolio value chart -->
+{% if chart_data and chart_data.values | length >= 2 %}
+<div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1rem 1.25rem;margin-bottom:1.25rem">
+  <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.5rem">
+    <i class="bi bi-graph-up me-1"></i>Portfolio Value History
+  </div>
+  <canvas id="portfolioChart" style="max-height:200px"></canvas>
+</div>
+<script>
+(function() {
+  const labels = {{ chart_data.labels | tojson }};
+  const values = {{ chart_data.values | tojson }};
+  const costs  = {{ chart_data.costs  | tojson }};
+  const ctx = document.getElementById('portfolioChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Market Value',
+          data: values,
+          borderColor: '#1d4ed8',
+          backgroundColor: 'rgba(29,78,216,0.08)',
+          borderWidth: 2,
+          pointRadius: values.length > 60 ? 0 : 3,
+          pointHoverRadius: 5,
+          fill: true,
+          tension: 0.3,
+        },
+        {
+          label: 'Cost Basis',
+          data: costs,
+          borderColor: '#94a3b8',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { font: { size: 11 }, boxWidth: 14 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => ' $' + ctx.parsed.y.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { font: { size: 10 }, maxTicksLimit: 10, maxRotation: 0 },
+          grid: { display: false }
+        },
+        y: {
+          ticks: {
+            font: { size: 10 },
+            callback: v => '$' + v.toLocaleString('en-US', {minimumFractionDigits:0})
+          },
+          grid: { color: '#f1f5f9' }
+        }
+      }
+    }
+  });
+})();
+</script>
+{% endif %}
+
 <!-- Summary strip -->
 <div class="d-flex flex-wrap gap-3 mb-4">
   <div class="stat-card">

@@ -26,6 +26,7 @@ from models import StockRecord  # noqa: E402
 
 _ANALYSIS_JSON = _ROOT / "agents" / "analyst" / "analysis_results.json"
 _RUN_LOG_CSV = _ROOT / "pipeline_runs.csv"
+_PORTFOLIO_VALUE_CSV = _ROOT / "portfolio_value.csv"
 
 app = FastAPI(title="Stock Trader")
 templates = Jinja2Templates(directory=str(_ROOT / "web" / "templates"))
@@ -99,6 +100,21 @@ async def refresh_data(request: Request) -> HTMLResponse:
     )
 
 
+def _load_portfolio_history() -> dict:
+    """Return chart-ready dicts with labels, values, and costs from the value log."""
+    if not _PORTFOLIO_VALUE_CSV.exists():
+        return {"labels": [], "values": [], "costs": []}
+    with open(_PORTFOLIO_VALUE_CSV, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    # Keep last 180 snapshots to avoid chart clutter
+    rows = rows[-180:]
+    return {
+        "labels": [r["timestamp"][:16].replace("T", " ") for r in rows],
+        "values": [float(r["total_value"]) for r in rows],
+        "costs":  [float(r["total_cost"])  for r in rows],
+    }
+
+
 @app.get("/partials/portfolio", response_class=HTMLResponse)
 async def partial_portfolio(request: Request) -> HTMLResponse:
     records = _load_analysis()
@@ -110,8 +126,10 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
         pos.exit_signal = _evaluator.evaluate(pos, stock)
         if stock and stock.analysis:
             pos.next_pivot = stock.analysis.entry_price
+    chart_data = _load_portfolio_history()
     return templates.TemplateResponse(
-        request, "_portfolio.html", context={"positions": positions}
+        request, "_portfolio.html",
+        context={"positions": positions, "chart_data": chart_data},
     )
 
 

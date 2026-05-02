@@ -38,6 +38,7 @@ from models import StockRecord
 
 SCAN_OUTPUT = "agents/scanner/scan_results.json"
 RUN_LOG = "pipeline_runs.csv"
+PORTFOLIO_VALUE_LOG = "portfolio_value.csv"
 _RUN_LOG_FIELDS = [
     "start", "end", "duration_seconds",
     "scanned", "analysed", "buy_alerts", "sell_alerts", "actionable",
@@ -55,6 +56,21 @@ MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MIN = 30
 MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MIN = 0
+
+
+def _append_portfolio_snapshot(total_value: float, total_cost: float) -> None:
+    """Append one portfolio value snapshot (timestamped) to PORTFOLIO_VALUE_LOG."""
+    log_path = Path(PORTFOLIO_VALUE_LOG)
+    write_header = not log_path.exists() or log_path.stat().st_size == 0
+    with open(log_path, "a", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=["timestamp", "total_value", "total_cost"])
+        if write_header:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="minutes"),
+            "total_value": round(total_value, 2),
+            "total_cost": round(total_cost, 2),
+        })
 
 
 def _append_run_log(entry: dict) -> None:
@@ -548,6 +564,11 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         prices = {r.ticker: r.price for r in analysis_results}
         positions = _trader.get_portfolio(prices)
         held = {p.ticker for p in positions}
+        pf_value = sum(p.current_value for p in positions if p.current_value)
+        pf_cost = sum(p.total_cost for p in positions)
+        if pf_value > 0:
+            _append_portfolio_snapshot(pf_value, pf_cost)
+
         sell_alerts = alerter.check_portfolio_stops(positions, stock_map)
         buy_alerts = len(alerter._buy_alerts)
         alerter.send_summary_email()
