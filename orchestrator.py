@@ -571,7 +571,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
         sell_alerts = alerter.check_portfolio_stops(positions, stock_map)
         buy_alerts = len(alerter._buy_alerts)
-        alerter.send_summary_email()
+        alerter.send_summary_email(positions)
 
         current_tickers = [r.ticker for r in analysis_results]
         history = load_history()

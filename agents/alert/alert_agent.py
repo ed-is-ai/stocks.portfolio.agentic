@@ -805,26 +805,41 @@ class AlertAgent(Agent):
         print(f"\n{len(self._sell_alerts)} stop-loss alert(s) queued.")
         return len(self._sell_alerts)
 
-    def send_summary_email(self) -> None:
-        """Send one consolidated daily summary: SELL alerts (top) then BUY alerts.
+    def send_summary_email(self, positions: list[Position] | None = None) -> None:
+        """Send one consolidated daily summary email.
 
-        Pulls from self._sell_alerts and self._buy_alerts populated by
-        check_portfolio_stops() and run() respectively. No-ops if both are empty.
+        Always sends: starts with a portfolio snapshot, then SELL alerts (top),
+        then BUY alerts. positions is optional — used for the snapshot section.
         """
-        if not self._sell_alerts and not self._buy_alerts:
-            print("  [email] no actionable alerts — summary not sent.")
-            return
-
         today = date.today().isoformat()
         sell_count = len(self._sell_alerts)
         buy_count = len(self._buy_alerts)
-        subject = (
-            f"Stock Alerts {today} — "
-            + (f"{sell_count} SELL" + (f", {buy_count} BUY" if buy_count else "") if sell_count else f"{buy_count} BUY")
-        )
 
-        # ── Text body ──────────────────────────────────────────────────────
-        text_parts: list[str] = [f"Stock Alert Summary — {today}\n{'='*50}"]
+        if sell_count or buy_count:
+            subject = (
+                f"Stock Alerts {today} — "
+                + (f"{sell_count} SELL" + (f", {buy_count} BUY" if buy_count else "") if sell_count else f"{buy_count} BUY")
+            )
+        else:
+            subject = f"Stock Scanner {today} — No alerts"
+
+        # ── Portfolio snapshot (text) ───────────────────────────────────────
+        text_parts: list[str] = [f"Stock Scanner Summary — {today}\n{'='*50}"]
+        if positions:
+            total_value = sum(p.current_value for p in positions if p.current_value)
+            total_cost  = sum(p.total_cost for p in positions)
+            total_pnl   = total_value - total_cost
+            pnl_pct     = total_pnl / total_cost * 100 if total_cost else 0.0
+            text_parts.append(
+                f"\n\nPORTFOLIO SNAPSHOT\n"
+                f"  Positions : {len(positions)}\n"
+                f"  Mkt Value : ${total_value:,.2f}\n"
+                f"  Cost Basis: ${total_cost:,.2f}\n"
+                f"  P&L       : ${total_pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+            )
+            for p in positions:
+                pnl_str = f"${p.unrealised_pnl:+.2f} ({p.unrealised_pnl_pct:+.1f}%)" if p.unrealised_pnl is not None else "--"
+                text_parts.append(f"  {p.ticker:<6} {p.shares:>8.1f} shares  price ${p.current_price or 0:.2f}  P&L {pnl_str}")
 
         if self._sell_alerts:
             text_parts.append("\n\n*** SELL / STOP LOSS ALERTS ***\n")
@@ -836,17 +851,64 @@ class AlertAgent(Agent):
         if self._buy_alerts:
             text_parts.append("\n\n*** BUY / BREAKOUT ALERTS ***\n")
             for stock, trigger in self._buy_alerts:
-                n_txt = self.format_alert_text(stock, trigger)
-                text_parts.append(n_txt)
+                text_parts.append(self.format_alert_text(stock, trigger))
                 text_parts.append("\n" + "-" * 40)
 
+        if not self._sell_alerts and not self._buy_alerts:
+            text_parts.append("\n\nNo actionable alerts this run.")
+
         text_body = "\n".join(text_parts)
+
+        # ── Portfolio snapshot (HTML) ───────────────────────────────────────
+        snapshot_html = ""
+        if positions:
+            total_value = sum(p.current_value for p in positions if p.current_value)
+            total_cost  = sum(p.total_cost for p in positions)
+            total_pnl   = total_value - total_cost
+            pnl_pct     = total_pnl / total_cost * 100 if total_cost else 0.0
+            pnl_color   = "#27ae60" if total_pnl >= 0 else "#c0392b"
+            rows_html = "".join(
+                f"<tr>"
+                f"<td style='padding:5px 8px;font-weight:700'>{p.ticker}</td>"
+                f"<td style='padding:5px 8px;text-align:right'>{p.shares:g}</td>"
+                f"<td style='padding:5px 8px;text-align:right'>${p.current_price or 0:.2f}</td>"
+                f"<td style='padding:5px 8px;text-align:right'>${p.current_value or 0:,.2f}</td>"
+                f"<td style='padding:5px 8px;text-align:right;color:{'#27ae60' if (p.unrealised_pnl or 0) >= 0 else '#c0392b'}'>"
+                f"{'%+.1f' % p.unrealised_pnl_pct}%</td>"
+                f"</tr>"
+                for p in positions if p.current_value
+            )
+            snapshot_html = f"""
+            <div style="margin:16px 0;padding:14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px">
+              <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;margin-bottom:10px">
+                Portfolio Snapshot
+              </div>
+              <div style="display:flex;gap:24px;margin-bottom:10px;flex-wrap:wrap">
+                <div><div style="font-size:0.72em;color:#64748b">Market Value</div>
+                     <div style="font-weight:700;font-size:1.1em">${total_value:,.2f}</div></div>
+                <div><div style="font-size:0.72em;color:#64748b">Cost Basis</div>
+                     <div style="font-weight:700;font-size:1.1em">${total_cost:,.2f}</div></div>
+                <div><div style="font-size:0.72em;color:#64748b">Unrealised P&amp;L</div>
+                     <div style="font-weight:700;font-size:1.1em;color:{pnl_color}">${total_pnl:+,.2f} ({pnl_pct:+.1f}%)</div></div>
+              </div>
+              <table style="width:100%;border-collapse:collapse;font-size:0.82em">
+                <tr style="background:#e2e8f0">
+                  <th style="padding:4px 8px;text-align:left">Ticker</th>
+                  <th style="padding:4px 8px;text-align:right">Shares</th>
+                  <th style="padding:4px 8px;text-align:right">Price</th>
+                  <th style="padding:4px 8px;text-align:right">Value</th>
+                  <th style="padding:4px 8px;text-align:right">P&amp;L %</th>
+                </tr>
+                {rows_html}
+              </table>
+            </div>"""
 
         # ── HTML body ──────────────────────────────────────────────────────
         html_parts: list[str] = [
             "<html><body style=\"font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px\">"
             f"<h2 style=\"color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px\">"
-            f"&#128200; Stock Alert Summary &mdash; {today}</h2>"
+            f"&#128200; Stock Scanner Summary &mdash; {today}</h2>"
+            + snapshot_html
         ]
 
         if self._sell_alerts:
@@ -867,6 +929,11 @@ class AlertAgent(Agent):
             for stock, trigger in self._buy_alerts:
                 html_parts.append(self._buy_card_html(stock, trigger))
             html_parts.append("</div>")
+
+        if not self._sell_alerts and not self._buy_alerts:
+            html_parts.append(
+                "<p style=\"color:#64748b;font-style:italic\">No actionable alerts this run.</p>"
+            )
 
         html_parts.append(
             f"<p style=\"color:#aaa;font-size:0.8em;margin-top:24px\">"
