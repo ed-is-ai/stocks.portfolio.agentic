@@ -5,7 +5,9 @@ Runs the MS Agent framework pipeline on market hours.
 
 import argparse
 import json
-from datetime import datetime
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -34,6 +36,7 @@ from models import StockRecord
 
 
 SCAN_OUTPUT = "agents/scanner/scan_results.json"
+RUN_LOG = "pipeline_runs.jsonl"
 _SOURCE_COMMENTS: dict[str, str] = {
     "ww_extraction":   "WhaleWisdom heat map – institutional filer top holdings",
     "vcp_screener":    "Minervini pure VCP setup – S&P 500 screened via FMP API",
@@ -46,6 +49,12 @@ MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MIN = 30
 MARKET_CLOSE_HOUR = 16
 MARKET_CLOSE_MIN = 0
+
+
+def _append_run_log(entry: dict) -> None:
+    """Append one run record (as a JSON line) to RUN_LOG."""
+    with open(RUN_LOG, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry) + "\n")
 
 _SEPA_LABELS = {
     "above_150_200":        "P>SMA150&200",
@@ -465,82 +474,119 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         print(f"[{datetime.now().strftime('%H:%M')}] Outside market hours — skipping")
         return
 
+    start_dt = datetime.now(timezone.utc)
     print(f"\n{'='*50}")
-    print(f"Pipeline run: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    print(f"Pipeline run: {start_dt.strftime('%Y-%m-%d %H:%M UTC')}")
     print("="*50)
 
-    if extract:
-        ExtractionAgent(name="ExtractionAgent").run()  # refreshes extraction_results.json with latest WisdomWise data
-    watchlist = load_watchlist()  # always scan the full combined watchlist
-    source_map = load_source_map()
+    errors: list[str] = []
+    scanned = 0
+    analysed = 0
+    buy_alerts = 0
+    sell_alerts = 0
+    src_summary = ""
 
-    scanner = ScannerAgent(name="ScannerAgent")
-    analyst = AnalystAgent()
-    alerter = AlertAgent(name="AlertAgent")
-    app = AgentApp(name="MomentumStockAgent")
-    app.add_agent(scanner)
-    app.add_agent(analyst)
-    app.add_agent(alerter)
+    try:
+        if extract:
+            ExtractionAgent(name="ExtractionAgent").run()
+        watchlist = load_watchlist()
+        source_map = load_source_map()
 
-    _, intermediates = app.execute_with_intermediates(watchlist)
-    scan_results, analysis_results = intermediates
+        scanner = ScannerAgent(name="ScannerAgent")
+        analyst = AnalystAgent()
+        alerter = AlertAgent(name="AlertAgent")
+        app = AgentApp(name="MomentumStockAgent")
+        app.add_agent(scanner)
+        app.add_agent(analyst)
+        app.add_agent(alerter)
 
-    for r in analysis_results:
-        st, ww = source_map.get(r.ticker, (False, False))
-        r.in_stocktwits = st
-        r.in_whale_wisdom = ww
+        _, intermediates = app.execute_with_intermediates(watchlist)
+        scan_results, analysis_results = intermediates
+        scanned = len(scan_results)
+        analysed = len(analysis_results)
 
-    grouped: dict[str, list[dict]] = {k: [] for k in _SOURCE_COMMENTS}
-    for item in scan_results:
-        primary = item.source.split(",")[0] or "ww_extraction"
-        grouped.setdefault(primary, []).append(item.model_dump())
+        for r in analysis_results:
+            st, ww = source_map.get(r.ticker, (False, False))
+            r.in_stocktwits = st
+            r.in_whale_wisdom = ww
 
-    scan_payload: dict[str, object] = {"as_of": datetime.now().isoformat(timespec="seconds")}
-    for src, items in grouped.items():
-        scan_payload[src] = {"_comment": _SOURCE_COMMENTS.get(src, src), "results": items}
+        grouped: dict[str, list[dict]] = {k: [] for k in _SOURCE_COMMENTS}
+        for item in scan_results:
+            primary = item.source.split(",")[0] or "ww_extraction"
+            grouped.setdefault(primary, []).append(item.model_dump())
 
-    with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
-        json.dump(scan_payload, stream, indent=2)
+        scan_payload: dict[str, object] = {"as_of": datetime.now().isoformat(timespec="seconds")}
+        for src, items in grouped.items():
+            scan_payload[src] = {"_comment": _SOURCE_COMMENTS.get(src, src), "results": items}
 
-    src_summary = ", ".join(
-        f"{k}:{len(v['results'])}"  # type: ignore[index]
-        for k, v in scan_payload.items()
-        if isinstance(v, dict)
-    )
-    print(f"      Scanned {len(scan_results)} tickers ({src_summary})")
+        with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
+            json.dump(scan_payload, stream, indent=2)
 
-    with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
-        json.dump([item.model_dump() for item in analysis_results], stream, indent=2)
+        src_summary = ", ".join(
+            f"{k}:{len(v['results'])}"  # type: ignore[index]
+            for k, v in scan_payload.items()
+            if isinstance(v, dict)
+        )
+        print(f"      Scanned {scanned} tickers ({src_summary})")
 
-    _trader = TraderAgent(name="TraderAgent")
-    stock_map = {r.ticker: r for r in analysis_results}
-    prices = {r.ticker: r.price for r in analysis_results}
-    positions = _trader.get_portfolio(prices)
-    held = {p.ticker for p in positions}
-    alerter.check_portfolio_stops(positions, stock_map)
-    alerter.send_summary_email()
+        with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
+            json.dump([item.model_dump() for item in analysis_results], stream, indent=2)
 
-    current_tickers = [r.ticker for r in analysis_results]
-    history = load_history()
-    new = get_new_tickers(current_tickers, history)
-    breakouts = get_fresh_breakouts(analysis_results, history)
-    save_history(analysis_results, history)
+        _trader = TraderAgent(name="TraderAgent")
+        stock_map = {r.ticker: r for r in analysis_results}
+        prices = {r.ticker: r.price for r in analysis_results}
+        positions = _trader.get_portfolio(prices)
+        held = {p.ticker for p in positions}
+        sell_alerts = alerter.check_portfolio_stops(positions, stock_map)
+        buy_alerts = len(alerter._buy_alerts)
+        alerter.send_summary_email()
 
-    # Tag records so the web app and Excel sheet can consume them
-    for r in analysis_results:
-        if r.analysis and r.ticker in breakouts:
-            r.analysis.fresh_breakout = True
+        current_tickers = [r.ticker for r in analysis_results]
+        history = load_history()
+        new = get_new_tickers(current_tickers, history)
+        breakouts = get_fresh_breakouts(analysis_results, history)
+        save_history(analysis_results, history)
 
-    if new:
-        print(f"      New tickers this run:     {len(new)}")
-    if breakouts:
-        print(f"      Fresh breakouts this run: {len(breakouts)}"
-              f"  ({', '.join(sorted(breakouts)[:8])}"
-              f"{'...' if len(breakouts) > 8 else ''})")
+        for r in analysis_results:
+            if r.analysis and r.ticker in breakouts:
+                r.analysis.fresh_breakout = True
 
-    write_excel(analysis_results, EXCEL_OUTPUT, held, new_tickers=new)
+        if new:
+            print(f"      New tickers this run:     {len(new)}")
+        if breakouts:
+            print(f"      Fresh breakouts this run: {len(breakouts)}"
+                  f"  ({', '.join(sorted(breakouts)[:8])}"
+                  f"{'...' if len(breakouts) > 8 else ''})")
 
-    print("\nPipeline complete.")
+        write_excel(analysis_results, EXCEL_OUTPUT, held, new_tickers=new)
+        print("\nPipeline complete.")
+
+    except Exception:
+        errors.append(traceback.format_exc())
+        print(f"\n[ERROR] Pipeline failed:\n{errors[-1]}")
+
+    finally:
+        end_dt = datetime.now(timezone.utc)
+        duration = round((end_dt - start_dt).total_seconds(), 1)
+        log_entry = {
+            "start": start_dt.isoformat(timespec="seconds"),
+            "end": end_dt.isoformat(timespec="seconds"),
+            "duration_seconds": duration,
+            "scanned": scanned,
+            "analysed": analysed,
+            "buy_alerts": buy_alerts,
+            "sell_alerts": sell_alerts,
+            "actionable": buy_alerts + sell_alerts,
+            "sources": src_summary,
+            "errors": errors,
+            "status": "error" if errors else "ok",
+        }
+        _append_run_log(log_entry)
+        print(
+            f"[log] run {log_entry['status'].upper()} | "
+            f"{duration}s | scanned={scanned} analysed={analysed} "
+            f"actionable={log_entry['actionable']} (buy={buy_alerts} sell={sell_alerts})"
+        )
 
 
 def main() -> None:
