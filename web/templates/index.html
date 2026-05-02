@@ -250,6 +250,7 @@
     }
     .badge-vcp { background: var(--orange-bg); color: var(--orange); }
     .badge-myb { background: var(--purple-bg); color: var(--purple); }
+    .badge-uk  { font-size: 0.75rem; vertical-align: middle; margin-left: 0.25rem; }
 
     /* ── Watchlist filter buttons ──────────────────── */
     .btn-filter {
@@ -268,6 +269,7 @@
     .btn-filter.active { background: var(--primary); color: white; border-color: var(--primary); }
     .btn-filter[data-filter="breakout"].active { background: #f97316; border-color: #f97316; }
     .btn-filter[data-filter="myb"].active { background: var(--purple); border-color: var(--purple); }
+    .btn-filter[data-filter="uk"].active  { background: #1d4ed8; border-color: #1d4ed8; }
 
     /* ── Toolbar above tables ──────────────────────── */
     .tbl-toolbar {
@@ -549,7 +551,8 @@
       const alertOk    = !_activeFilters.has('alert')    || row.dataset.rec      === 'alert';
       const breakoutOk = !_activeFilters.has('breakout') || row.dataset.breakout === 'true';
       const mybOk      = !_activeFilters.has('myb')      || row.dataset.myb      === 'true';
-      row.style.display = (sepaOk && alertOk && breakoutOk && mybOk) ? '' : 'none';
+      const ukOk       = !_activeFilters.has('uk')       || row.dataset.market   === 'uk';
+      row.style.display = (sepaOk && alertOk && breakoutOk && mybOk && ukOk) ? '' : 'none';
     });
   }
 

@@ -23,6 +23,7 @@
     <button class="btn-filter" data-filter="myb">MYB</button>
     <button class="btn-filter" data-filter="sepa8">SEPA 8</button>
     <button class="btn-filter" data-filter="alert">Stay Alert</button>
+            <button class="btn-filter" data-filter="uk">UK</button>
   </div>
 </div>
 <div class="tbl-wrap">
@@ -69,9 +70,11 @@
       {% else %}
         {% set rec_key = "other" %}
       {% endif %}
+      {% set is_uk = r.ticker.endswith('.L') %}
       <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec_key }}"
           data-breakout="{{ 'true' if a and a.fresh_breakout else 'false' }}"
-          data-myb="{{ 'true' if a and a.multiyear_breakout else 'false' }}">
+          data-myb="{{ 'true' if a and a.multiyear_breakout else 'false' }}"
+          data-market="{{ 'uk' if is_uk else 'us' }}">
 
         <!-- Ticker -->
         <td>
@@ -81,6 +84,9 @@
           {% endif %}
           {% if a and a.multiyear_breakout %}
             <span class="badge-myb" title="Multi-year base breakout — cleared ${{ '%.2f'|format(a.multiyear_pivot) }} pivot">MYB</span>
+          {% endif %}
+          {% if is_uk %}
+            <span class="badge-uk" title="London Stock Exchange (LSE)">🇬🇧</span>
           {% endif %}
         </td>
 

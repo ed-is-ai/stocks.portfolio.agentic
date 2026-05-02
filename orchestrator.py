@@ -60,7 +60,7 @@ _SEPA_LABELS = {
 _SEPA_KEYS = list(_SEPA_LABELS.keys())
 
 _HEADERS = [
-    "Ticker", "Source", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Zone",
+    "Ticker", "Market", "Source", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Zone",
     "Prev Entry", "Next Entry", "Stop", "Risk %", "1R Target", "2R Target", "3R Target", "R:R", "Price", "P/E", "RSI", "Rel Vol",
     "% 52w High", "% Chg Week", "Rel Str vs SPY",
     "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "WW Sellers", "WW Net",
@@ -183,6 +183,7 @@ def _record_to_row(
 
     return [
         r.ticker,
+        "UK" if r.ticker.endswith(".L") else "US",
         r.source,
         "Y" if r.in_stocktwits else "",
         "Y" if r.in_whale_wisdom else "",
@@ -354,6 +355,12 @@ def _format_row(
         if cell.value == "Y":
             cell.fill = _SIGNAL_FILLS["+"]
         cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    market_col = _HEADERS.index("Market") + 1
+    market_cell = ws.cell(data_row, market_col)
+    if market_cell.value == "UK":
+        market_cell.fill = PatternFill("solid", fgColor="DBEAFE")  # pale blue
+    market_cell.alignment = Alignment(horizontal="center", vertical="center")
 
     for col in range(1, len(_HEADERS) + 1):
         ws.cell(data_row, col).alignment = Alignment(vertical="center")
