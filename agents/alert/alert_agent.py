@@ -848,9 +848,13 @@ class AlertAgent(Agent):
                 text_parts.append(self._format_stop_loss_text(pos, stock, n))
                 text_parts.append("\n" + "-" * 40)
 
-        if self._buy_alerts:
+        strong_buys = [
+            (s, t) for s, t in self._buy_alerts
+            if "LOW CONVICTION" not in self._breakout_narrative(s)["verdict"]
+        ]
+        if strong_buys:
             text_parts.append("\n\n*** BUY / BREAKOUT ALERTS ***\n")
-            for stock, trigger in self._buy_alerts:
+            for stock, trigger in strong_buys:
                 text_parts.append(self.format_alert_text(stock, trigger))
                 text_parts.append("\n" + "-" * 40)
 
@@ -921,16 +925,23 @@ class AlertAgent(Agent):
                 html_parts.append(self._sell_card_html(pos, stock, n))
             html_parts.append("</div>")
 
-        if self._buy_alerts:
+        if strong_buys:
             html_parts.append(
                 "<div style=\"margin:20px 0\">"
                 "<h3 style=\"color:#27ae60;margin-bottom:12px\">&#9889; BUY / BREAKOUT</h3>"
             )
-            for stock, trigger in self._buy_alerts:
+            for stock, trigger in strong_buys:
                 html_parts.append(self._buy_card_html(stock, trigger))
             html_parts.append("</div>")
 
-        if not self._sell_alerts and not self._buy_alerts:
+        low_conviction_count = len(self._buy_alerts) - len(strong_buys)
+        if low_conviction_count:
+            html_parts.append(
+                f"<p style=\"color:#94a3b8;font-size:0.8em;font-style:italic\">"
+                f"{low_conviction_count} low-conviction breakout(s) suppressed.</p>"
+            )
+
+        if not self._sell_alerts and not strong_buys:
             html_parts.append(
                 "<p style=\"color:#64748b;font-style:italic\">No actionable alerts this run.</p>"
             )
