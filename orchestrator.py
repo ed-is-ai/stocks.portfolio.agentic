@@ -505,7 +505,11 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         json.dump([item.model_dump() for item in analysis_results], stream, indent=2)
 
     _trader = TraderAgent(name="TraderAgent")
-    held = {p.ticker for p in _trader.get_portfolio()}
+    stock_map = {r.ticker: r for r in analysis_results}
+    prices = {r.ticker: r.price for r in analysis_results}
+    positions = _trader.get_portfolio(prices)
+    held = {p.ticker for p in positions}
+    alerter.check_portfolio_stops(positions, stock_map)
 
     current_tickers = [r.ticker for r in analysis_results]
     history = load_history()

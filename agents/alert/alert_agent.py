@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 from ms_agent_framework import Agent
-from models import EmailConfig, StockRecord
+from models import EmailConfig, Position, StockRecord
 
 
 ALERT_COOLDOWN_HOURS = 24
@@ -539,6 +539,278 @@ class AlertAgent(Agent):
             {n["verdict"]}
           </div>
         </div>"""
+
+    @staticmethod
+    def _stop_loss_narrative(
+        pos: Position, stock: StockRecord | None
+    ) -> dict[str, str]:
+        """Assess the situation when a portfolio stop loss is hit."""
+        price = pos.current_price or 0.0
+        stop = pos.stop_loss or 0.0
+        entry = pos.entry_price or pos.avg_cost
+
+        # --- How far through the stop ---
+        pct_below = (stop - price) / stop * 100 if stop else 0.0
+        if pct_below <= 1.0:
+            stop_line = (
+                f"Price ${price:.2f} is just touching the stop ${stop:.2f} "
+                f"({pct_below:.1f}% below). Could be a false break — watch closely."
+            )
+        elif pct_below <= 4.0:
+            stop_line = (
+                f"Price ${price:.2f} is {pct_below:.1f}% below stop ${stop:.2f}. "
+                f"Stop is clearly violated — exit discipline required."
+            )
+        else:
+            stop_line = (
+                f"Price ${price:.2f} is {pct_below:.1f}% below stop ${stop:.2f}. "
+                f"Hard stop breach — exit immediately to limit further damage."
+            )
+
+        # --- P&L context ---
+        if entry and entry > 0:
+            pnl_pct = (price - entry) / entry * 100
+            if pnl_pct >= 20:
+                pnl_line = (
+                    f"Position is still +{pnl_pct:.1f}% from entry ${entry:.2f}. "
+                    f"Consider trailing stop rather than full exit."
+                )
+            elif pnl_pct >= 0:
+                pnl_line = (
+                    f"Position is +{pnl_pct:.1f}% from entry ${entry:.2f}. "
+                    f"Small gain — protect capital, exit at stop."
+                )
+            else:
+                pnl_line = (
+                    f"Position is {pnl_pct:.1f}% from entry ${entry:.2f}. "
+                    f"Taking a loss — cut quickly to preserve capital for better setups."
+                )
+        else:
+            pnl_line = "Entry price not recorded."
+
+        # --- Volume / selling pressure ---
+        if stock:
+            rv = stock.rel_volume
+            if rv >= 1.5:
+                vol_line = (
+                    f"Heavy volume ({rv:.1f}x average) on the decline — institutional selling. "
+                    f"High probability this is a genuine breakdown, not noise."
+                )
+            elif rv >= 1.0:
+                vol_line = (
+                    f"Moderate volume ({rv:.1f}x average). Watch whether volume increases "
+                    f"— escalating volume confirms breakdown."
+                )
+            else:
+                vol_line = (
+                    f"Low volume ({rv:.1f}x average) on the decline — may be a thin-market "
+                    f"false break. Reassess on higher-volume session."
+                )
+        else:
+            vol_line = "Volume data unavailable."
+
+        # --- Stage / trend condition ---
+        if stock and stock.analysis:
+            a = stock.analysis
+            stage = a.stage
+            sepa_count = sum(1 for v in (a.sepa_template or {}).values() if v)
+            if stage in ("Stage 3", "Stage 4"):
+                trend_line = (
+                    f"Stock has moved into {stage} — trend is deteriorating. "
+                    f"SEPA {sepa_count}/8. Exit aligns with stage analysis."
+                )
+            elif sepa_count <= 4:
+                trend_line = (
+                    f"SEPA trend template is weak ({sepa_count}/8) — key Stage 2 "
+                    f"conditions are breaking down. Exit is appropriate."
+                )
+            else:
+                trend_line = (
+                    f"{stage} structure still intact (SEPA {sepa_count}/8). "
+                    f"Stop hit may be temporary — monitor for recovery above stop."
+                )
+        else:
+            trend_line = "Stage/trend data unavailable."
+
+        # --- CANSLIM thesis ---
+        if stock and stock.analysis and stock.analysis.canslim:
+            cs = stock.analysis.canslim
+            broken = []
+            if cs.C == 0:
+                broken.append("current earnings deteriorating (C=0)")
+            if cs.A == 0:
+                broken.append("annual earnings weak (A=0)")
+            if cs.L == 0:
+                broken.append("no longer an RS leader (L=0)")
+            if cs.M < 2:
+                broken.append("market not in confirmed uptrend (M<2)")
+            if broken:
+                canslim_line = f"CANSLIM thesis weakening: {'; '.join(broken)}."
+            else:
+                canslim_line = (
+                    f"CANSLIM fundamentals still solid ({cs.total}/14). "
+                    f"Stop hit may be technical, not fundamental."
+                )
+        else:
+            canslim_line = "CANSLIM data unavailable."
+
+        # --- Action verdict ---
+        if stock and stock.analysis:
+            a = stock.analysis
+            sepa_count = sum(1 for v in (a.sepa_template or {}).values() if v)
+            stage_bad = a.stage in ("Stage 3", "Stage 4")
+            vol_bad = stock.rel_volume >= 1.2
+            if stage_bad or (pct_below > 4.0) or (vol_bad and sepa_count <= 4):
+                verdict = "EXIT NOW — multiple signals confirm breakdown. Do not wait for a bounce."
+            elif pct_below <= 1.0 and sepa_count >= 6:
+                verdict = (
+                    "WATCH — marginal stop touch on good trend template. "
+                    "Set a hard intraday alert; exit on close below stop."
+                )
+            else:
+                verdict = (
+                    "EXIT — stop is violated. Honour your risk rules. "
+                    "Re-evaluate if price reclaims stop on strong volume."
+                )
+        else:
+            verdict = "EXIT — stop loss hit. Honour your risk management rules."
+
+        return {
+            "stop": stop_line,
+            "pnl": pnl_line,
+            "volume": vol_line,
+            "trend": trend_line,
+            "canslim": canslim_line,
+            "verdict": verdict,
+        }
+
+    def _format_stop_loss_text(
+        self, pos: Position, stock: StockRecord | None, n: dict[str, str]
+    ) -> str:
+        price = pos.current_price or 0.0
+        stop = pos.stop_loss or 0.0
+        pnl = pos.unrealised_pnl
+        pnl_str = f"${pnl:+.2f}" if pnl is not None else "--"
+        pnl_pct = pos.unrealised_pnl_pct
+        pnl_pct_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "--"
+        return (
+            f"** STOP LOSS HIT: {pos.ticker} **\n\n"
+            f"{pos.ticker}  |  {pos.shares} shares  |  Avg cost ${pos.avg_cost:.2f}\n"
+            f"Current price: ${price:.2f}  |  Stop: ${stop:.2f}\n"
+            f"Unrealised P&L: {pnl_str} ({pnl_pct_str})\n"
+            f"\n--- Situation Assessment ---\n"
+            f"Stop:     {n['stop']}\n"
+            f"P&L:      {n['pnl']}\n"
+            f"Volume:   {n['volume']}\n"
+            f"Trend:    {n['trend']}\n"
+            f"CANSLIM:  {n['canslim']}\n"
+            f"\n>>> {n['verdict']}\n"
+            f"\n{date.today().isoformat()}"
+        )
+
+    def _format_stop_loss_html(
+        self, pos: Position, stock: StockRecord | None, n: dict[str, str]
+    ) -> str:
+        price = pos.current_price or 0.0
+        stop = pos.stop_loss or 0.0
+        pnl = pos.unrealised_pnl
+        pnl_str = f"${pnl:+.2f}" if pnl is not None else "--"
+        pnl_pct = pos.unrealised_pnl_pct
+        pnl_pct_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "--"
+        pnl_color = "#c0392b" if (pnl or 0) < 0 else "#27ae60"
+
+        verdict_bg = "#f8d7da" if "NOW" in n["verdict"] else "#fff3cd"
+        verdict_border = "#e74c3c" if "NOW" in n["verdict"] else "#f39c12"
+
+        def _row(label: str, text: str, color: str = "#333") -> str:
+            return (
+                f"<tr><td style='padding:5px 8px;background:#f8f8f8;font-weight:600;"
+                f"width:90px;font-size:0.82em;color:#555;vertical-align:top'>{label}</td>"
+                f"<td style='padding:5px 8px;color:{color};font-size:0.84em'>{text}</td></tr>"
+            )
+
+        rv = stock.rel_volume if stock else None
+        vol_color = "#e74c3c" if (rv or 0) >= 1.5 else "#f39c12" if (rv or 0) >= 1.0 else "#27ae60"
+        a = stock.analysis if stock else None
+        sepa_count = sum(1 for v in (a.sepa_template or {}).values() if v) if a else 0
+        trend_color = "#e74c3c" if sepa_count <= 4 else "#f39c12" if sepa_count <= 6 else "#27ae60"
+
+        return f"""
+        <html><body style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px">
+          <div style="background:#c0392b;color:white;padding:10px 16px;border-radius:4px;
+                      font-weight:bold;margin-bottom:16px;font-size:0.95em">
+            &#9888; STOP LOSS HIT: {pos.ticker}
+          </div>
+          <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+            <tr>
+              <td style="padding:6px;background:#f8f8f8"><b>Ticker</b></td>
+              <td style="padding:6px">{pos.ticker}</td>
+              <td style="padding:6px;background:#f8f8f8"><b>Shares</b></td>
+              <td style="padding:6px">{pos.shares}</td>
+            </tr>
+            <tr>
+              <td style="padding:6px;background:#f8f8f8"><b>Current Price</b></td>
+              <td style="padding:6px;font-weight:bold">${price:.2f}</td>
+              <td style="padding:6px;background:#f8f8f8"><b>Stop Loss</b></td>
+              <td style="padding:6px;color:#c0392b;font-weight:bold">${stop:.2f}</td>
+            </tr>
+            <tr>
+              <td style="padding:6px;background:#f8f8f8"><b>Avg Cost</b></td>
+              <td style="padding:6px">${pos.avg_cost:.2f}</td>
+              <td style="padding:6px;background:#f8f8f8"><b>Unrealised P&amp;L</b></td>
+              <td style="padding:6px;color:{pnl_color};font-weight:bold">{pnl_str} ({pnl_pct_str})</td>
+            </tr>
+          </table>
+          <div style="margin:16px 0">
+            <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;
+                        letter-spacing:0.06em;color:#888;margin-bottom:6px">Situation Assessment</div>
+            <table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-radius:4px">
+              {_row("Stop", n["stop"], "#c0392b")}
+              {_row("P&amp;L", n["pnl"])}
+              {_row("Volume", n["volume"], vol_color)}
+              {_row("Trend", n["trend"], trend_color)}
+              {_row("CANSLIM", n["canslim"])}
+            </table>
+            <div style="margin-top:8px;padding:10px 14px;background:{verdict_bg};
+                        border-left:4px solid {verdict_border};border-radius:0 4px 4px 0;
+                        font-weight:700;font-size:0.88em">
+              {n["verdict"]}
+            </div>
+          </div>
+          <p style="color:#aaa;font-size:0.8em;margin-top:24px">
+            {date.today().isoformat()} &mdash; Momentum Scanner
+          </p>
+        </body></html>"""
+
+    def check_portfolio_stops(
+        self,
+        positions: list[Position],
+        stock_map: dict[str, StockRecord],
+    ) -> int:
+        """Check all open portfolio positions against their stop loss.
+
+        Sends a rich stop-loss email for any position where current_price <= stop_loss.
+        Returns the number of alerts fired.
+        """
+        fired = 0
+        for pos in positions:
+            if pos.stop_loss is None or pos.current_price is None:
+                continue
+            if pos.current_price > pos.stop_loss:
+                continue
+
+            stock = stock_map.get(pos.ticker)
+            n = self._stop_loss_narrative(pos, stock)
+            text_body = self._format_stop_loss_text(pos, stock, n)
+            html_body = self._format_stop_loss_html(pos, stock, n)
+            subject = f"STOP LOSS HIT: {pos.ticker} @ ${pos.current_price:.2f}"
+
+            print(f"\nSTOP LOSS: {pos.ticker} @ ${pos.current_price:.2f} "
+                  f"(stop ${pos.stop_loss:.2f})")
+            self.send_email(subject, html_body, text_body)
+            fired += 1
+
+        return fired
 
     def send_email(self, subject: str, html_body: str, text_body: str) -> None:
         if not self.email_config.user or not self.email_config.password or not self.email_config.recipient:
