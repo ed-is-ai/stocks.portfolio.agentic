@@ -848,10 +848,19 @@ class AlertAgent(Agent):
                 text_parts.append(self._format_stop_loss_text(pos, stock, n))
                 text_parts.append("\n" + "-" * 40)
 
-        strong_buys = [
-            (s, t) for s, t in self._buy_alerts
-            if "LOW CONVICTION" not in self._breakout_narrative(s)["verdict"]
-        ]
+        def _conviction_rank(item: tuple[StockRecord, str]) -> int:
+            verdict = self._breakout_narrative(item[0])["verdict"]
+            if "HIGH CONVICTION" in verdict:
+                return 0
+            if "MODERATE CONVICTION" in verdict:
+                return 1
+            return 2
+
+        strong_buys = sorted(
+            [(s, t) for s, t in self._buy_alerts
+             if "LOW CONVICTION" not in self._breakout_narrative(s)["verdict"]],
+            key=_conviction_rank,
+        )
         if strong_buys:
             text_parts.append("\n\n*** BUY / BREAKOUT ALERTS ***\n")
             for stock, trigger in strong_buys:
@@ -954,6 +963,10 @@ class AlertAgent(Agent):
 
         self.send_email(subject, html_body, text_body)
 
+    @staticmethod
+    def _yahoo_url(ticker: str) -> str:
+        return f"https://finance.yahoo.com/quote/{ticker.replace('.', '-')}"
+
     def _sell_card_html(
         self, pos: Position, stock: StockRecord | None, n: dict[str, str]
     ) -> str:
@@ -968,10 +981,11 @@ class AlertAgent(Agent):
         verdict_bg = "#f8d7da" if "NOW" in n["verdict"] else "#fff3cd"
         verdict_border = "#e74c3c" if "NOW" in n["verdict"] else "#f39c12"
 
+        url = self._yahoo_url(pos.ticker)
         return f"""
         <div style="border:1px solid #f5c6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#fff8f8">
           <div style="font-weight:700;font-size:1em;color:#c0392b;margin-bottom:8px">
-            &#9888; {pos.ticker} &mdash; Stop ${stop:.2f} | Price ${price:.2f}
+            &#9888; <a href="{url}" style="color:#c0392b;text-decoration:none" target="_blank">{pos.ticker}</a> &mdash; Stop ${stop:.2f} | Price ${price:.2f}
             <span style="font-weight:400;font-size:0.85em;color:{pnl_color};margin-left:8px">
               P&amp;L {pnl_str} ({pnl_pct_str})
             </span>
@@ -1015,11 +1029,12 @@ class AlertAgent(Agent):
         n = self._breakout_narrative(stock)
         verdict_bg = "#d4edda" if a.score >= 8 and stock.rel_volume >= 1.5 else "#fff3cd" if a.score >= 7 else "#f8d7da"
         verdict_border = "#27ae60" if a.score >= 8 and stock.rel_volume >= 1.5 else "#f39c12" if a.score >= 7 else "#e74c3c"
+        url = self._yahoo_url(stock.ticker)
 
         return f"""
         <div style="border:1px solid #c3e6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#f8fff9">
           <div style="font-weight:700;font-size:1em;color:#1e3a5f;margin-bottom:4px">
-            &#9889; {stock.ticker}
+            &#9889; <a href="{url}" style="color:#1e3a5f;text-decoration:none;font-weight:800" target="_blank">{stock.ticker}</a>
             <span style="color:{score_color};font-size:0.88em;margin-left:6px">
               Score {a.score}/10 &mdash; {a.stage}
             </span>
