@@ -5,6 +5,7 @@ Run with:
     python -m uvicorn web.app:app --reload
 """
 
+import csv
 import json
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ from agents.trader.trader_agent import TraderAgent  # noqa: E402
 from models import StockRecord  # noqa: E402
 
 _ANALYSIS_JSON = _ROOT / "agents" / "analyst" / "analysis_results.json"
+_RUN_LOG_CSV = _ROOT / "pipeline_runs.csv"
 
 app = FastAPI(title="Stock Trader")
 templates = Jinja2Templates(directory=str(_ROOT / "web" / "templates"))
@@ -118,6 +120,18 @@ async def partial_history(request: Request) -> HTMLResponse:
     trades = trader.get_trade_history()
     return templates.TemplateResponse(
         request, "_history.html", context={"trades": trades}
+    )
+
+
+@app.get("/partials/runlog", response_class=HTMLResponse)
+async def partial_runlog(request: Request) -> HTMLResponse:
+    runs: list[dict] = []
+    if _RUN_LOG_CSV.exists():
+        with open(_RUN_LOG_CSV, newline="", encoding="utf-8") as fh:
+            runs = list(csv.DictReader(fh))
+    runs.reverse()  # most recent first
+    return templates.TemplateResponse(
+        request, "_runlog.html", context={"runs": runs}
     )
 
 

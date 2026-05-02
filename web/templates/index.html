@@ -271,6 +271,30 @@
     .btn-filter[data-filter="myb"].active { background: var(--purple); border-color: var(--purple); }
     .btn-filter[data-filter="uk"].active  { background: #1d4ed8; border-color: #1d4ed8; }
 
+    /* ── Run log ───────────────────────────────────── */
+    .badge-status {
+      display: inline-block;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .status-ok    { background: var(--green-bg); color: var(--green); }
+    .status-error { background: var(--red-bg);   color: var(--red);   }
+    .rl-num {
+      display: inline-block;
+      min-width: 1.6rem;
+      text-align: center;
+      padding: 0.1rem 0.35rem;
+      border-radius: 0.25rem;
+      font-weight: 700;
+      font-size: 0.76rem;
+    }
+    .rl-buy  { background: var(--green-bg); color: var(--green); }
+    .rl-sell { background: var(--red-bg);   color: var(--red);   }
+    .rl-error { font-size: 0.72rem; color: var(--red); }
+
     /* ── Toolbar above tables ──────────────────────── */
     .tbl-toolbar {
       display: flex;
@@ -340,6 +364,12 @@
         <a class="nav-link" id="tab-history"
            hx-get="/partials/history" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
           <i class="bi bi-clock-history"></i>Trade History
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" id="tab-runlog"
+           hx-get="/partials/runlog" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+          <i class="bi bi-journal-text"></i>Run Log
         </a>
       </li>
     </ul>
