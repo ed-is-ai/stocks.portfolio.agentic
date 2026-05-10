@@ -62,13 +62,13 @@ class ExtractionAgent(Agent):
             stocks = self._fetch_heat_map()
             if stocks:
                 ranked = sorted(
-                    stocks,
-                    key=lambda s: int(s.get("overall_rank") or 9999)
+                    stocks, key=lambda s: int(s.get("overall_rank") or 9999)
                 )
                 tickers = [str(s["name"]) for s in ranked if s.get("name")]
                 ww_result = list(dict.fromkeys(tickers))[:TOP_N]
-                print(f"    [ok] {len(ww_result)} tickers "
-                      f"(quarter: {self.last_quarter})")
+                print(
+                    f"    [ok] {len(ww_result)} tickers (quarter: {self.last_quarter})"
+                )
                 self._save_ww_context(ranked)
         except Exception as exc:
             print(f"    [err] {exc}")
@@ -105,9 +105,9 @@ class ExtractionAgent(Agent):
             return {}
 
         try:
-            data: dict[str, Any] = cast(dict[str, Any], json.loads(
-                _ST_WATCHLIST.read_text(encoding="utf-8")
-            ))
+            data: dict[str, Any] = cast(
+                dict[str, Any], json.loads(_ST_WATCHLIST.read_text(encoding="utf-8"))
+            )
             indices = data.get("indices", {})
             result = {}
             for index_name, index_data in indices.items():
@@ -131,7 +131,11 @@ class ExtractionAgent(Agent):
         payload: dict[str, Any] = cast(dict[str, Any], resp.json())
 
         if not isinstance(payload, dict) or "children" in payload is False:
-            keys = list(payload.keys()) if isinstance(payload, dict) else str(type(payload))
+            keys = (
+                list(payload.keys())
+                if isinstance(payload, dict)
+                else str(type(payload))
+            )
             raise ValueError(f"Unexpected API response shape: {keys}")
 
         self.last_quarter = str(payload.get("name") or "")
@@ -171,15 +175,15 @@ class ExtractionAgent(Agent):
             data = {}
 
         # Remove old StockTwits groups (clean slate for new quarterly data)
-        updated_data = {
-            k: v for k, v in data.items()
-            if "stocktwits" not in k.lower()
-        }
+        updated_data = {k: v for k, v in data.items() if "stocktwits" not in k.lower()}
 
         # Add new StockTwits groups with today's date
         today = datetime.today().strftime("%Y-%m-%d")
-        index_labels = {"sp500": "S&P 500", "nasdaq100": "NASDAQ 100",
-                        "russell2000": "Russell 2000"}
+        index_labels = {
+            "sp500": "S&P 500",
+            "nasdaq100": "NASDAQ 100",
+            "russell2000": "Russell 2000",
+        }
         for index_name, tickers in st_by_index.items():
             label = index_labels.get(index_name, index_name.upper())
             key = f"StockTwits Top 25 Momentum — {label} ({today})"
@@ -191,8 +195,7 @@ class ExtractionAgent(Agent):
         updated_data[ww_key] = ww_tickers
 
         _EXTRACTION_RESULTS.write_text(
-            json.dumps(updated_data, indent=2),
-            encoding="utf-8"
+            json.dumps(updated_data, indent=2), encoding="utf-8"
         )
 
     def _update_results(self, new_tickers: list[str]) -> int:
@@ -223,9 +226,7 @@ class ExtractionAgent(Agent):
         else:
             data[key] = to_add
 
-        _EXTRACTION_RESULTS.write_text(
-            json.dumps(data, indent=2), encoding="utf-8"
-        )
+        _EXTRACTION_RESULTS.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return len(to_add)
 
 
