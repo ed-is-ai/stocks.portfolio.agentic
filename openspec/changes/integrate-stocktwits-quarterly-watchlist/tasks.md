@@ -28,5 +28,5 @@
 
 ## 5. Operational Setup
 
-- [ ] 5.1 Set calendar reminder for next quarterly StockTwits refresh (3 months from today)
-- [ ] 5.2 Document in project README or wiki: quarterly update process for StockTwits watchlist
+- [x] 5.1 Set calendar reminder for next quarterly StockTwits refresh (3 months from today)
+- [x] 5.2 Document in project README or wiki: quarterly update process for StockTwits watchlist
