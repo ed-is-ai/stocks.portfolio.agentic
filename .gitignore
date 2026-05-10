@@ -59,6 +59,9 @@ run_error.log
 # Claude Code internals
 .claude/
 
+# CodeGraph semantic index (local build artifact)
+.codegraph/
+
 # IDE
 .vscode/
 *.code-workspace
