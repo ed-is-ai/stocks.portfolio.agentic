@@ -1,0 +1,254 @@
+{% if not positions %}
+<div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
+  <i class="bi bi-info-circle-fill fs-5"></i>
+  <span>No open positions. Go to <strong>Watchlist</strong> and click <strong>Buy</strong> to record a purchase.</span>
+</div>
+{% else %}
+{% set total_cost = positions | sum(attribute='total_cost') %}
+{% set positions_with_value = positions | selectattr('current_value', 'ne', none) | list %}
+{% set total_value = positions_with_value | sum(attribute='current_value') %}
+{% set total_pnl = total_value - (positions_with_value | sum(attribute='total_cost')) %}
+
+<!-- Portfolio value chart -->
+{% if chart_points >= 2 %}
+<div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1rem 1.25rem;margin-bottom:1.25rem">
+  <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.5rem">
+    <i class="bi bi-graph-up me-1"></i>Portfolio Value History
+  </div>
+  <canvas id="portfolioChart" style="max-height:200px"></canvas>
+</div>
+<script>
+(function() {
+  const labels   = {{ chart_labels     | safe }};
+  const values   = {{ chart_values     | safe }};
+  const costs    = {{ chart_costs      | safe }};
+  const buyVals  = {{ chart_buys       | safe }};
+  const sellVals = {{ chart_sells      | safe }};
+  const buyTips  = {{ chart_buy_tips   | safe }};
+  const sellTips = {{ chart_sell_tips  | safe }};
+
+  const ctx = document.getElementById('portfolioChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [
+        {
+          label: 'Market Value',
+          data: values,
+          borderColor: '#1d4ed8',
+          backgroundColor: 'rgba(29,78,216,0.08)',
+          borderWidth: 2,
+          pointRadius: values.length > 60 ? 0 : 3,
+          pointHoverRadius: 5,
+          fill: true,
+          tension: 0.3,
+          order: 3,
+        },
+        {
+          label: 'Cost Basis',
+          data: costs,
+          borderColor: '#94a3b8',
+          borderWidth: 1.5,
+          borderDash: [5, 4],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+          order: 4,
+        },
+        {
+          label: 'Buy',
+          data: buyVals,
+          showLine: false,
+          pointStyle: 'triangle',
+          pointRadius: 9,
+          pointHoverRadius: 11,
+          backgroundColor: '#16a34a',
+          borderColor: '#16a34a',
+          borderWidth: 1,
+          order: 1,
+        },
+        {
+          label: 'Sell',
+          data: sellVals,
+          showLine: false,
+          pointStyle: 'triangle',
+          rotation: 180,
+          pointRadius: 9,
+          pointHoverRadius: 11,
+          backgroundColor: '#dc2626',
+          borderColor: '#dc2626',
+          borderWidth: 1,
+          order: 2,
+        },
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { font: { size: 11 }, boxWidth: 14, filter: item => item.text !== 'Buy' && item.text !== 'Sell' } },
+        tooltip: {
+          callbacks: {
+            label: function(ctx) {
+              if (ctx.dataset.label === 'Buy') {
+                const tip = buyTips[ctx.dataIndex];
+                return tip ? ' ▲ ' + tip : null;
+              }
+              if (ctx.dataset.label === 'Sell') {
+                const tip = sellTips[ctx.dataIndex];
+                return tip ? ' ▼ ' + tip : null;
+              }
+              if (ctx.parsed.y === null) return null;
+              return ' ' + ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+            }
+          }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { font: { size: 10 }, maxTicksLimit: 10, maxRotation: 0 },
+          grid: { display: false }
+        },
+        y: {
+          ticks: {
+            font: { size: 10 },
+            callback: v => '$' + v.toLocaleString('en-US', {minimumFractionDigits:0})
+          },
+          grid: { color: '#f1f5f9' }
+        }
+      }
+    }
+  });
+})();
+</script>
+{% endif %}
+
+<!-- Summary strip -->
+<div class="d-flex flex-wrap gap-3 mb-4">
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Cost</div>
+    <div class="sval">${{ "%.2f"|format(total_cost) }}</div>
+  </div>
+  {% if positions_with_value %}
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-graph-up me-1"></i>Market Value</div>
+    <div class="sval">${{ "%.2f"|format(total_value) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-percent me-1"></i>Unrealised P&amp;L</div>
+    <div class="sval {% if total_pnl >= 0 %}pos{% else %}neg{% endif %}">
+      {{ "+" if total_pnl >= 0 }}${{ "%.2f"|format(total_pnl) }}
+      <span style="font-size:0.72rem; font-weight:500; opacity:0.8">
+        ({{ "+" if total_pnl >= 0 }}{{ "%.1f"|format(total_pnl / (positions_with_value | sum(attribute='total_cost')) * 100) }}%)
+      </span>
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-collection me-1"></i>Positions</div>
+    <div class="sval">{{ positions|length }}</div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="tbl-wrap">
+  <table class="table table-hover align-middle">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Shares</th>
+        <th>Avg Cost</th>
+        <th>Price</th>
+        <th>Cost Basis</th>
+        <th>Mkt Value</th>
+        <th>Unreal P&amp;L</th>
+        <th>P&amp;L %</th>
+        <th>Stop</th>
+        <th>Last Pivot</th>
+        <th>Next Pivot</th>
+        <th>Signal</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for p in positions %}
+      <tr class="{% if p.exit_signal and p.exit_signal.action == 'EXIT' %}row-exit{% endif %}">
+        <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ p.ticker }}</span></td>
+        <td>{{ p.shares }}</td>
+        <td>${{ "%.2f"|format(p.avg_cost) }}</td>
+        <td>
+          {% if p.current_price %}
+            <strong>${{ "%.2f"|format(p.current_price) }}</strong>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>${{ "%.2f"|format(p.total_cost) }}</td>
+        <td>
+          {% if p.current_value %}${{ "%.2f"|format(p.current_value) }}{% else %}<span class="text-muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if p.unrealised_pnl is not none %}
+            <span class="{% if p.unrealised_pnl >= 0 %}pos{% else %}neg{% endif %}">
+              {{ "+" if p.unrealised_pnl >= 0 }}${{ "%.2f"|format(p.unrealised_pnl) }}
+            </span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if p.unrealised_pnl_pct is not none %}
+            <span class="{% if p.unrealised_pnl_pct >= 0 %}pos{% else %}neg{% endif %}">
+              {{ "+" if p.unrealised_pnl_pct >= 0 }}{{ "%.1f"|format(p.unrealised_pnl_pct) }}%
+            </span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if p.stop_loss %}
+            <span class="neg">${{ "%.2f"|format(p.stop_loss) }}</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if p.entry_price %}
+            <span class="text-muted">${{ "%.2f"|format(p.entry_price) }}</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if p.next_pivot %}
+            <span class="text-muted">${{ "%.2f"|format(p.next_pivot) }}</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if p.exit_signal %}
+            <span class="exit-badge exit-{{ p.exit_signal.action }}" title="{{ p.exit_signal.reason }}">
+              {{ p.exit_signal.action }}
+            </span>
+          {% endif %}
+        </td>
+        <td>
+          <button class="btn-adjust-sm me-2"
+                  onclick="openAdjust('{{ p.ticker }}', {{ p.shares }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %}, '{{ p.entry_date or '' }}', {% if p.stop_loss %}{{ p.stop_loss }}{% else %}''{% endif %}, {% if p.entry_price %}{{ p.entry_price }}{% else %}''{% endif %})">
+            Adjust
+          </button>
+          <button class="btn-sell-sm"
+                  onclick="openSell('{{ p.ticker }}', {{ p.shares }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %})">
+            Sell
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<small class="text-muted mt-2 d-block" style="font-size:0.74rem">
+  {{ positions|length }} position(s) &middot; prices from last pipeline run &middot; hover signal badge for reason
+</small>
+{% endif %}

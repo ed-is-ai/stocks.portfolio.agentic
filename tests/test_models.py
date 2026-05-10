@@ -32,7 +32,7 @@ class TestModels:
         analysis = StockAnalysis(
             score=8,
             stage="Stage 2",
-            near_entry=True,
+            entry_zone="approaching",
             strengths=["Strong momentum", "Good volume"],
             risks=["High valuation"],
             summary="Excellent setup"
@@ -40,7 +40,7 @@ class TestModels:
 
         assert analysis.score == 8
         assert analysis.stage == "Stage 2"
-        assert analysis.near_entry == True
+        assert analysis.entry_zone == "approaching"
         assert len(analysis.strengths) == 2
         assert len(analysis.risks) == 1
 
@@ -61,7 +61,7 @@ class TestModels:
         analysis = StockAnalysis(
             score=6,
             stage="Stage 1",
-            near_entry=False,
+            entry_zone="far",
             strengths=["Above SMA200"],
             risks=["Weak RSI", "Low volume"],
             summary="Mixed signals"
@@ -94,18 +94,18 @@ class TestModels:
     def test_score_validation(self):
         """Test score range validation."""
         # Valid score
-        analysis = StockAnalysis(score=7, stage="Stage 2", near_entry=False,
+        analysis = StockAnalysis(score=7, stage="Stage 2", entry_zone="far",
                                strengths=[], risks=[], summary="Test")
         assert analysis.score == 7
 
         # Invalid score - too high
         with pytest.raises(ValueError):
-            StockAnalysis(score=15, stage="Stage 2", near_entry=False,
+            StockAnalysis(score=15, stage="Stage 2", entry_zone="far",
                          strengths=[], risks=[], summary="Test")
 
         # Invalid score - too low
         with pytest.raises(ValueError):
-            StockAnalysis(score=0, stage="Stage 2", near_entry=False,
+            StockAnalysis(score=0, stage="Stage 2", entry_zone="far",
                          strengths=[], risks=[], summary="Test")
 
     def test_model_serialization(self):

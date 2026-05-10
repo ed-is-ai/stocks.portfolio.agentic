@@ -1,0 +1,102 @@
+{% if not runs %}
+<div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1">
+  <i class="bi bi-exclamation-triangle-fill text-warning fs-5"></i>
+  <span>No run log found. Run the pipeline first: <code>python orchestrator.py --once</code></span>
+</div>
+{% else %}
+<div class="tbl-toolbar">
+  <span><i class="bi bi-journal-text me-1"></i>{{ runs|length }} pipeline run{{ 's' if runs|length != 1 else '' }} logged &middot; most recent first</span>
+</div>
+<div class="tbl-wrap">
+  <table class="table table-hover align-middle">
+    <thead>
+      <tr>
+        <th>Start (UTC)</th>
+        <th>Duration</th>
+        <th>Status</th>
+        <th title="Stocks returned by the scanner">Scanned</th>
+        <th title="Stocks that went through the analyst">Analysed</th>
+        <th title="Buy alerts (VCP / MYB breakouts)">Buy Alerts</th>
+        <th title="Sell alerts (stop losses hit)">Sell Alerts</th>
+        <th title="Total actionable signals">Actionable</th>
+        <th>Sources</th>
+        <th>Errors</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in runs %}
+      <tr>
+        <!-- Start time -->
+        <td style="white-space:nowrap;font-size:0.78rem">{{ r.start | replace("T", " ") | replace("+00:00", "") }}</td>
+
+        <!-- Duration -->
+        <td style="font-size:0.78rem;white-space:nowrap">
+          {% set secs = r.duration_seconds | float %}
+          {% if secs >= 60 %}
+            {{ "%.0f"|format(secs // 60) }}m {{ "%.0f"|format(secs % 60) }}s
+          {% else %}
+            {{ r.duration_seconds }}s
+          {% endif %}
+        </td>
+
+        <!-- Status -->
+        <td>
+          {% if r.status == "ok" %}
+            <span class="badge-status status-ok">OK</span>
+          {% elif r.status == "skipped" %}
+            <span class="badge-status status-skip">SKIP</span>
+          {% else %}
+            <span class="badge-status status-error">ERROR</span>
+          {% endif %}
+        </td>
+
+        <!-- Scanned -->
+        <td class="text-center fw-semibold">{{ r.scanned }}</td>
+
+        <!-- Analysed -->
+        <td class="text-center">{{ r.analysed }}</td>
+
+        <!-- Buy alerts -->
+        <td class="text-center">
+          {% if r.buy_alerts | int > 0 %}
+            <span class="rl-num rl-buy">{{ r.buy_alerts }}</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Sell alerts -->
+        <td class="text-center">
+          {% if r.sell_alerts | int > 0 %}
+            <span class="rl-num rl-sell">{{ r.sell_alerts }}</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Actionable -->
+        <td class="text-center">
+          {% if r.actionable | int > 0 %}
+            <span class="fw-semibold">{{ r.actionable }}</span>
+          {% else %}
+            <span class="text-muted">0</span>
+          {% endif %}
+        </td>
+
+        <!-- Sources -->
+        <td style="font-size:0.72rem;color:#64748b">{{ r.sources }}</td>
+
+        <!-- Errors -->
+        <td style="max-width:260px">
+          {% if r.errors %}
+            <span class="rl-error" title="{{ r.errors }}">
+              <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ r.errors[:80] }}{% if r.errors|length > 80 %}…{% endif %}
+            </span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}

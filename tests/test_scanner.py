@@ -6,7 +6,7 @@ import pytest
 import pandas as pd
 from unittest.mock import patch
 
-from scanner_agent import ScannerAgent
+from agents.scanner.scanner_agent import ScannerAgent
 
 
 class TestScannerAgent:
@@ -67,7 +67,7 @@ class TestScannerAgent:
         # Check volume
         assert result['volume'] == 1400000
 
-    @patch('scanner_agent._fetch_fundamentals', return_value={"eps_growth": None, "roe": None, "inst_ownership_pct": None})
+    @patch('agents.scanner.scanner_agent._fetch_fundamentals', return_value={"eps_growth": None, "roe": None, "inst_ownership_pct": None})
     @patch('yfinance.download')
     def test_scan_watchlist(self, mock_download, _mock_fundamentals):
         """Test scanning multiple tickers."""

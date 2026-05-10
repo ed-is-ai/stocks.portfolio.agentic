@@ -6,93 +6,137 @@
 C4Context
     title Momentum Stock Agent - System Context
 
-    Person(user, "Trader / Operator", "Starts the pipeline and reviews alerts")
-    System(agent_app, "Momentum Stock Agent", "Python app that scans, analyses, and alerts on momentum setups")
+    Person(user, "Trader / Operator", "Starts pipeline, reviews alerts, executes trades")
+    System(agent_system, "Momentum Stock Agent System", "Multi-agent pipeline: extracts watchlist, scans, analyzes, alerts, records trades")
 
-    System_Ext(yfinance, "Yahoo Finance / yfinance", "Market data provider for price and volume history")
-    System_Ext(foundry, "Foundry Local LLM", "phi-4-mini model used for CANSLIM scoring")
-    System_Ext(smtp, "SMTP / Email Service", "Sends email alerts")
-    System_Ext(sqlite, "SQLite", "Local alert history database")
+    System_Ext(extraction_src, "Watchlist Sources", "TradingView, StockTwits, WhaleWisdom, Congress API")
+    System_Ext(market_data, "Market Data", "Yahoo Finance (yfinance), FMP API, Alpha Vantage")
+    System_Ext(llm, "Foundry Local LLM", "phi-4-mini for CANSLIM scoring")
+    System_Ext(email, "Email Service", "SMTP for alert notifications")
+    System_Ext(broker, "Alpaca Broker", "Live order execution (future integration)")
 
-    Rel(user, agent_app, "Starts the pipeline and runs scheduled scans")
-    Rel(agent_app, yfinance, "Fetches historical stock data")
-    Rel(agent_app, foundry, "Requests stock scoring commentary", "OpenAI-compatible API")
-    Rel(agent_app, smtp, "Sends alert emails")
-    Rel(agent_app, sqlite, "Stores alert history and cooldown state")
+    Rel(user, agent_system, "Starts scheduled pipeline")
+    Rel(user, agent_system, "Reviews alerts and manages trades")
+    Rel(agent_system, extraction_src, "Fetches watchlist tickers")
+    Rel(agent_system, market_data, "Pulls OHLCV, fundamentals, technicals")
+    Rel(agent_system, llm, "Requests stock scoring")
+    Rel(agent_system, email, "Sends email alerts")
+    Rel(agent_system, broker, "Executes live trades (future)")
 ```
 
 ## Container Diagram
 
 ```mermaid
 C4Container
-    title Momentum Stock Agent - Container Diagram
+    title Momentum Stock Agent - Container Diagram (Data Pipeline)
 
-    Person(user, "Trader / Operator", "Starts the pipeline and reviews alerts")
+    Person(user, "Trader / Operator", "Schedules pipeline, reviews alerts, manages trades")
 
-    System_Boundary(agent_app, "Momentum Stock Agent") {
-        Container(orchestrator, "orchestrator.py", "Python", "Schedules and runs the scan/analysis/alert pipeline")
-        Container(scanner, "scanner_agent.py", "Python", "Fetches stock data and computes technical indicators")
-        Container(analyst, "analyst_agent.py", "Python", "Scores stocks using LLM or rule-based CANSLIM logic")
-        Container(alerting, "alert_agent.py", "Python", "Filters analysis results, records alerts, and sends email notifications")
+    System_Boundary(pipeline, "Momentum Stock Agent") {
+        Container(orchestrator, "orchestrator.py", "Python", "Schedules and orchestrates the 5-agent pipeline")
+        Container(extraction, "extraction_agent.py", "Python", "Aggregates watchlist from multiple sources")
+        Container(scanner, "scanner_agent.py", "Python", "Fetches OHLCV and computes technicals")
+        Container(analyst, "analyst_agent.py", "Python", "Scores using CANSLIM + Weinstein Stage + VCP")
+        Container(alerting, "alert_agent.py", "Python", "Filters signals, enforces cooldown, sends alerts")
+        Container(trader, "trader_agent.py", "Python", "Records trades, computes P&L (record-only currently)")
     }
 
-    Container_Ext(yfinance, "Yahoo Finance / yfinance", "Market data provider")
-    Container_Ext(foundry, "Foundry Local LLM", "phi-4-mini model server")
-    Container_Ext(smtp, "SMTP / Email Service", "Email delivery")
-    Container_Ext(sqlite, "SQLite DB", "Local persistent alert history")
+    Container_Ext(watchlist_src, "Watchlist Sources", "TradingView, StockTwits, WhaleWisdom, Congress")
+    Container_Ext(market_data, "Market Data APIs", "yfinance, FMP, Alpha Vantage")
+    Container_Ext(llm_server, "Foundry Local LLM", "phi-4-mini scoring (optional fallback)")
+    Container_Ext(smtp_svc, "Email Service", "SMTP alert delivery")
+    Container_Ext(alpaca, "Alpaca Broker API", "Live order execution (future)")
 
-    Rel(user, orchestrator, "Runs pipeline / starts scheduler")
-    Rel(orchestrator, scanner, "Calls scan_watchlist()")
-    Rel(orchestrator, analyst, "Calls analyse_stocks()")
-    Rel(orchestrator, alerting, "Calls run_alerts()")
+    Rel(user, orchestrator, "Triggers pipeline run or scheduling")
+    Rel(orchestrator, extraction, "run()")
+    Rel(orchestrator, scanner, "run(extraction results)")
+    Rel(orchestrator, analyst, "run(scan results)")
+    Rel(orchestrator, alerting, "run(analysis results)")
+    Rel(orchestrator, trader, "record trades from alerts")
 
-    Rel(scanner, yfinance, "Downloads historical price and volume data")
-    Rel(analyst, foundry, "Queries model for score and stage analysis", "HTTP / OpenAI-compatible")
-    Rel(alerting, smtp, "Sends alert emails when thresholds are met")
-    Rel(alerting, sqlite, "Reads/writes alert cooldown history")
+    Rel(extraction, watchlist_src, "Fetches tickers from multiple sources")
+    Rel(scanner, market_data, "Downloads OHLCV, fundamentals, Congress data")
+    Rel(analyst, llm_server, "Optional: requests CANSLIM score")
+    Rel(alerting, smtp_svc, "Sends email alerts for BUY signals")
+    Rel(trader, alpaca, "Future: executes live orders")
 ```
 
-## Component Diagram
+## Component Diagram - 5-Agent Pipeline
 
 ```mermaid
 C4Component
     title Momentum Stock Agent - Component Diagram
 
-    Container(orchestrator, "orchestrator.py", "Python", "Pipeline scheduler and coordinator") {
-        Component(pipeline, "pipeline()", "Coordinates the scan -> analyse -> alert workflow")
-        Component(schedule, "BlockingScheduler", "Runs pipeline every 15 minutes during market hours")
+    Container(orchestrator, "orchestrator.py", "Agent framework", "Orchestration") {
+        Component(schedule, "APScheduler", "Market hours trigger (9:30-4:00 ET weekdays)")
+        Component(pipeline_run, "run_pipeline()", "Executes Extraction → Scanner → Analyst → Alert → Trader")
+        Component(error_handle, "Error handling & logging", "Catches failures, logs to pipeline_runs.csv")
     }
 
-    Container(scanner, "scanner_agent.py", "Python", "Market data and technical analysis") {
-        Component(fetch_data, "fetch_stock_data()", "Loads ticker history from yfinance")
-        Component(tech_compute, "compute_technicals()", "Computes moving averages, RSI, ATR, relative volume")
-        Component(scan_watchlist, "scan_watchlist()", "Processes tickers and returns structured scan results")
+    Container(extraction, "extraction_agent.py", "Multi-source aggregation", "Watchlist building") {
+        Component(tv_src, "TradingView screener", "fetch_tv_screener_tickers()")
+        Component(st_src, "StockTwits source", "load_source_map()")
+        Component(ww_src, "WhaleWisdom context", "load_ww_context()")
+        Component(dedup, "Deduplication & union", "Merges sources, removes duplicates")
+        Component(qual_gate, "Quality gates", "Filters by volume, price thresholds")
     }
 
-    Container(analyst, "analyst_agent.py", "Python", "Setup scoring and LLM fallback logic") {
-        Component(llm_client, "get_llm_client()", "Connects to Foundry Local LLM")
-        Component(score_llm, "score_stock_llm()", "Formats prompt and parses LLM JSON output")
-        Component(rule_score, "rule_based_score()", "Deterministic fallback scoring")
-        Component(analyse_stocks, "analyse_stocks()", "Scores each scanned stock and sorts results")
+    Container(scanner, "scanner_agent.py", "Technical analysis", "Data enrichment") {
+        Component(fetch_prices, "fetch_stock_data()", "yfinance OHLCV + 252-day history")
+        Component(tech_ind, "compute_technicals()", "SMA10/30/50/150/200, RSI14, ATR14, volume, rel_strength")
+        Component(vcp_data, "VCP pivot detection", "high_base (50d max), handle_low (15d min)")
+        Component(scan_run, "scan_watchlist()", "Returns list[StockRecord] with all metrics")
     }
 
-    Container(alerting, "alert_agent.py", "Python", "Alert decision and notification delivery") {
-        Component(db_init, "init_db()", "Creates alerts table if missing")
-        Component(cooldown, "was_recently_alerted()", "Suppresses repeat alerts")
-        Component(email_send, "send_email()", "Sends HTML/plain email via SMTP")
-        Component(run_alerts, "run_alerts()", "Filters results, records alerts, and triggers notifications")
+    Container(analyst, "analyst_agent.py", "Setup scoring", "Analysis & signals") {
+        Component(vcp_run, "_run_vcp_analysis()", "Calls vcp-screener skill calculators")
+        Component(canslim, "_canslim_fundamental_score()", "Scores C/A/N/S/L/I/M (7-component, 14-point total)")
+        Component(stage, "_stage_classify()", "Weinstein Stage 1-4 classification via SMA levels")
+        Component(entry_zone, "_execution_state_to_entry_zone()", "Maps VCP state → broken_out/approaching/extended/far")
+        Component(price_calc, "_run_btp_pricing()", "Calculates entry, stop loss, R-multiples via risk_calculator")
+        Component(score_run, "score_stock()", "Returns StockAnalysis with score/stage/entry/stop")
     }
 
-    Rel(pipeline, scan_watchlist, "Gets scan results")
-    Rel(pipeline, analyse_stocks, "Gets scored analysis")
-    Rel(pipeline, run_alerts, "Triggers alert evaluation")
+    Container(alerting, "alert_agent.py", "Notification & cooldown", "Alert delivery") {
+        Component(trigger, "alert_trigger()", "Detects fresh_breakout OR multiyear_breakout")
+        Component(cooldown, "was_recently_alerted()", "24-hour per-ticker cooldown enforcement")
+        Component(record, "record_alert()", "Persists alert to alerts.db with metadata")
+        Component(email_fmt, "format_alert_html()", "Builds email with CANSLIM table, narrative, risk")
+        Component(email_send, "send_email()", "SMTP delivery with Yahoo Finance links")
+    }
 
-    Rel(scan_watchlist, fetch_data, "Fetches raw prices")
-    Rel(scan_watchlist, tech_compute, "Calculates metrics")
-    Rel(analyse_stocks, llm_client, "Optionally connects to Foundry")
-    Rel(analyse_stocks, score_llm, "Uses LLM scoring")
-    Rel(analyse_stocks, rule_score, "Falls back to deterministic scoring")
-    Rel(run_alerts, db_init, "Ensures alert history exists")
-    Rel(run_alerts, cooldown, "Checks alert cooldown")
-    Rel(run_alerts, email_send, "Sends alert emails")
+    Container(trader, "trader_agent.py", "Trade recording", "Position tracking") {
+        Component(record_buy, "record_buy()", "Logs BUY to trades.db with entry/stop")
+        Component(record_sell, "record_sell()", "Logs SELL to trades.db, updates cash")
+        Component(cash_mgr, "Cash management", "get_cash() / set_cash() per portfolio")
+        Component(pnl_calc, "Positions query", "get_trade_history() for P&L calculation")
+    }
+
+    Rel(schedule, pipeline_run, "Triggers at market open")
+    Rel(pipeline_run, extraction, "Builds watchlist")
+    Rel(pipeline_run, scanner, "Scans tickers")
+    Rel(pipeline_run, analyst, "Analyzes scans")
+    Rel(pipeline_run, alerting, "Filters & alerts")
+    Rel(pipeline_run, trader, "Records trades")
+    Rel(pipeline_run, error_handle, "Logs run metrics")
+
+    Rel(extraction, dedup, "Merges sources")
+    Rel(dedup, qual_gate, "Applies filters")
+    Rel(scanner, fetch_prices, "Gets OHLCV")
+    Rel(scanner, tech_ind, "Computes indicators")
+    Rel(scanner, vcp_data, "Calculates pivots")
+    Rel(analyst, vcp_run, "Calls skill")
+    Rel(analyst, canslim, "Fundamental score")
+    Rel(analyst, stage, "Stage classification")
+    Rel(analyst, entry_zone, "Entry zone mapping")
+    Rel(analyst, price_calc, "Trade pricing")
+    Rel(alerting, trigger, "Checks signal")
+    Rel(alerting, cooldown, "Enforces limit")
+    Rel(alerting, record, "Saves to DB")
+    Rel(alerting, email_fmt, "Formats HTML")
+    Rel(alerting, email_send, "Sends email")
+    Rel(trader, record_buy, "Logs buy")
+    Rel(trader, record_sell, "Logs sell")
+    Rel(trader, cash_mgr, "Manages cash")
+    Rel(trader, pnl_calc, "Calculates P&L")
 ```

@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Stock Trader</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+  <style>
+    /* ── Design tokens ─────────────────────────────── */
+    :root {
+      --primary:     #0f2744;
+      --surface:     #f1f5f9;
+      --border:      #e2e8f0;
+      --muted:       #64748b;
+      --green:       #16a34a;
+      --green-bg:    #dcfce7;
+      --amber:       #b45309;
+      --amber-bg:    #fef3c7;
+      --red:         #dc2626;
+      --red-bg:      #fee2e2;
+      --blue:        #1d4ed8;
+      --blue-bg:     #dbeafe;
+      --purple:      #7c3aed;
+      --purple-bg:   #ede9fe;
+      --orange:      #c2410c;
+      --orange-bg:   #fff7ed;
+    }
+
+    /* ── Base ──────────────────────────────────────── */
+    *, body { font-family: 'Inter', sans-serif; }
+    body { background: var(--surface); color: #1e293b; }
+
+    /* ── Navbar ────────────────────────────────────── */
+    .navbar {
+      background: var(--primary) !important;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      padding: 0.55rem 1.25rem;
+    }
+    .navbar-brand {
+      font-weight: 700;
+      font-size: 1rem;
+      letter-spacing: -0.01em;
+      color: white !important;
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+    .navbar-brand .bi { color: #60a5fa; font-size: 1.15rem; }
+    .navbar-tag { font-size: 0.72rem; color: rgba(255,255,255,0.45); }
+
+    /* ── Tab bar ───────────────────────────────────── */
+    .tab-bar {
+      background: white;
+      border-bottom: 2px solid var(--border);
+      padding: 0 0.5rem;
+      display: flex;
+      align-items: flex-end;
+    }
+    .nav-tabs { border: none; }
+    .nav-tabs .nav-item { margin-bottom: -2px; }
+    .nav-tabs .nav-link {
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+      font-weight: 500;
+      padding: 0.6rem 1rem;
+      transition: color .15s, border-color .15s;
+    }
+    .nav-tabs .nav-link:hover { color: var(--primary); background: none; border-bottom-color: var(--border); }
+    .nav-tabs .nav-link.active { color: var(--primary); font-weight: 600; border-bottom-color: var(--primary); background: none; }
+    .nav-tabs .nav-link .bi { margin-right: 0.3rem; font-size: 0.82rem; }
+
+    /* ── Content panel ─────────────────────────────── */
+    #tab-content {
+      background: white;
+      border: 1px solid var(--border);
+      border-top: none;
+      border-radius: 0 0 0.5rem 0.5rem;
+      padding: 1.25rem 1.5rem;
+      min-height: 420px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }
+
+    /* ── Tables ────────────────────────────────────── */
+    .tbl-wrap { overflow-y: auto; max-height: 72vh; border-radius: 0.4rem; border: 1px solid var(--border); }
+    .table { font-size: 0.82rem; margin-bottom: 0; }
+    .table thead th {
+      background: var(--primary);
+      color: rgba(255,255,255,0.88);
+      font-weight: 600;
+      font-size: 0.68rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      border: none;
+      padding: 0.58rem 0.75rem;
+      white-space: nowrap;
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .table tbody td { padding: 0.42rem 0.75rem; border-color: var(--border); vertical-align: middle; }
+    .table tbody tr:hover td { background: #f8fafc; }
+    .table tbody tr:last-child td { border-bottom: none; }
+
+    /* ── Ticker link ───────────────────────────────── */
+    a.ticker { color: var(--primary); font-weight: 700; font-size: 0.85rem; text-decoration: none; }
+    a.ticker:hover { color: var(--blue); text-decoration: underline; }
+
+    /* ── Score / sub-score badges ──────────────────── */
+    .sc {
+      display: inline-block;
+      padding: 0.12rem 0.38rem;
+      border-radius: 0.3rem;
+      font-weight: 700;
+      font-size: 0.76rem;
+      min-width: 2.6rem;
+      text-align: center;
+    }
+    .sc-hi  { background: var(--green-bg);  color: var(--green);  }
+    .sc-mid { background: var(--amber-bg);  color: var(--amber);  }
+    .sc-lo  { background: var(--red-bg);    color: var(--red);    }
+
+    /* ── Stage pill ────────────────────────────────── */
+    .stage {
+      display: inline-block;
+      padding: 0.12rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.68rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .stage-1 { background: var(--blue-bg);   color: var(--blue);   }
+    .stage-2 { background: var(--green-bg);  color: var(--green);  }
+    .stage-3 { background: var(--amber-bg);  color: var(--amber);  }
+    .stage-4 { background: var(--red-bg);    color: var(--red);    }
+
+    /* ── Delta badges (vs entry / vs stop) ─────────── */
+    .dl {
+      display: inline-block;
+      padding: 0.1rem 0.38rem;
+      border-radius: 0.25rem;
+      font-size: 0.74rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .dl-great  { background: #dcfce7; color: #15803d; }
+    .dl-good   { background: #f0fdf4; color: var(--green); }
+    .dl-ok     { background: var(--amber-bg); color: var(--amber); }
+    .dl-muted  { background: #f1f5f9; color: #64748b; }
+    .dl-danger { background: var(--red-bg); color: var(--red); }
+    .dl-ext    { background: var(--orange-bg); color: var(--orange); }
+
+    /* ── Recommendation badges ─────────────────────── */
+    .rec {
+      display: inline-block;
+      padding: 0.18rem 0.52rem;
+      border-radius: 999px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .rec-buy      { background: var(--green-bg);   color: var(--green);  }
+    .rec-lowvol   { background: #fef9c3;           color: #92400e;       }
+    .rec-sell     { background: var(--red-bg);     color: var(--red);    }
+    .rec-avoid    { background: #f1f5f9;           color: #475569;       }
+    .rec-extended { background: var(--orange-bg);  color: var(--orange); }
+    .rec-alert    { background: var(--blue-bg);    color: var(--blue);   }
+    .rec-watch    { background: var(--purple-bg);  color: var(--purple); }
+    .rec-none     { color: #94a3b8; font-size: 0.74rem; font-style: italic; }
+
+    /* ── PnL ───────────────────────────────────────── */
+    .pos { color: var(--green); font-weight: 600; }
+    .neg { color: var(--red);   font-weight: 600; }
+
+    /* ── Stat cards (portfolio summary) ────────────── */
+    .stat-card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 0.65rem 1.1rem;
+      min-width: 150px;
+    }
+    .stat-card .slbl {
+      font-size: 0.64rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.2rem;
+    }
+    .stat-card .sval { font-size: 1.1rem; font-weight: 700; color: #1e293b; line-height: 1.2; }
+
+    /* ── Exit signal badges ────────────────────────── */
+    .exit-badge {
+      display: inline-block;
+      padding: 0.18rem 0.5rem;
+      border-radius: 0.35rem;
+      font-size: 0.68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      cursor: help;
+    }
+    .exit-EXIT { background: var(--red-bg);   color: var(--red);   }
+    .exit-ADD  { background: var(--green-bg); color: var(--green); }
+
+    /* ── Portfolio row tints ───────────────────────── */
+    tr.row-exit td { background: #fff8f8 !important; }
+    tr.row-exit:hover td { background: #fee2e2 !important; }
+
+    /* ── Action buttons ────────────────────────────── */
+    .btn-buy-sm, .btn-sell-sm, .btn-adjust-sm {
+      border: none;
+      font-weight: 600;
+      font-size: 0.72rem;
+      padding: 0.22rem 0.62rem;
+      border-radius: 0.3rem;
+      cursor: pointer;
+      transition: background .15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.2rem;
+    }
+    .btn-buy-sm    { background: var(--green); color: white; }
+    .btn-buy-sm:hover    { background: #15803d; }
+    .btn-sell-sm   { background: var(--red);   color: white; }
+    .btn-sell-sm:hover   { background: #b91c1c; }
+    .btn-adjust-sm { background: #4f46e5;      color: white; }
+    .btn-adjust-sm:hover { background: #3730a3; }
+
+    /* ── Breakout badges (ticker cell) ────────────── */
+    .badge-vcp, .badge-myb {
+      display: inline-block;
+      margin-left: 0.3rem;
+      padding: 0.08rem 0.32rem;
+      border-radius: 0.25rem;
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      cursor: help;
+      vertical-align: middle;
+    }
+    .badge-vcp { background: var(--orange-bg); color: var(--orange); }
+    .badge-myb { background: var(--purple-bg); color: var(--purple); }
+    .badge-uk  { font-size: 0.75rem; vertical-align: middle; margin-left: 0.25rem; }
+
+    /* ── Watchlist filter buttons ──────────────────── */
+    .btn-filter {
+      border: 1px solid var(--border);
+      background: white;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 0.2rem 0.6rem;
+      border-radius: 999px;
+      cursor: pointer;
+      transition: background .15s, color .15s, border-color .15s;
+      white-space: nowrap;
+    }
+    .btn-filter:hover { border-color: var(--primary); color: var(--primary); }
+    .btn-filter.active { background: var(--primary); color: white; border-color: var(--primary); }
+    .btn-filter[data-filter="breakout"].active { background: #f97316; border-color: #f97316; }
+    .btn-filter[data-filter="myb"].active { background: var(--purple); border-color: var(--purple); }
+    .btn-filter[data-filter="uk"].active  { background: #1d4ed8; border-color: #1d4ed8; }
+
+    /* ── Run log ───────────────────────────────────── */
+    .badge-status {
+      display: inline-block;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .status-ok    { background: var(--green-bg);  color: var(--green);  }
+    .status-error { background: var(--red-bg);    color: var(--red);    }
+    .status-skip  { background: var(--amber-bg);  color: var(--amber);  }
+    .rl-num {
+      display: inline-block;
+      min-width: 1.6rem;
+      text-align: center;
+      padding: 0.1rem 0.35rem;
+      border-radius: 0.25rem;
+      font-weight: 700;
+      font-size: 0.76rem;
+    }
+    .rl-buy  { background: var(--green-bg); color: var(--green); }
+    .rl-sell { background: var(--red-bg);   color: var(--red);   }
+    .rl-error { font-size: 0.72rem; color: var(--red); }
+
+    /* ── Toolbar above tables ──────────────────────── */
+    .tbl-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 0.65rem;
+      font-size: 0.78rem;
+      color: var(--muted);
+    }
+
+    /* ── HTMX spinner ──────────────────────────────── */
+    .spinner-border-sm { width: 1rem; height: 1rem; }
+
+    /* ── Modals ────────────────────────────────────── */
+    .modal-content { border: none; border-radius: 0.5rem; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+    .modal-header { padding: 0.85rem 1.25rem; border-radius: calc(0.5rem - 1px) calc(0.5rem - 1px) 0 0; border-bottom: 1px solid rgba(255,255,255,0.15); }
+    .modal-header .btn-close { filter: invert(1) opacity(0.7); }
+    .modal-title { font-weight: 600; font-size: 0.92rem; }
+    .modal-body { padding: 1.25rem; }
+    .modal-footer { padding: 0.75rem 1.25rem; background: #f8fafc; border-top: 1px solid var(--border); border-radius: 0 0 calc(0.5rem - 1px) calc(0.5rem - 1px); }
+    .form-label { font-size: 0.76rem; font-weight: 600; color: #374151; margin-bottom: 0.3rem; }
+    .form-control, .form-select { font-size: 0.85rem; border-color: var(--border); }
+    .form-control:focus, .form-select:focus { border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+  </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar d-flex justify-content-between align-items-center">
+  <div class="d-flex align-items-center gap-3">
+    <span class="navbar-brand">
+      <i class="bi bi-graph-up-arrow"></i>
+      Stock Trader
+    </span>
+    <span class="navbar-tag">Portfolio Manager</span>
+  </div>
+  <div class="d-flex align-items-center gap-2">
+    <button id="refresh-data-button" class="btn btn-sm btn-light btn-refresh"
+            hx-post="/refresh-data"
+            hx-target="#tab-content" hx-swap="innerHTML"
+            hx-indicator="#spinner">
+      <i class="bi bi-arrow-clockwise"></i> Refresh Data
+    </button>
+    <span id="refresh-feedback" class="text-white small"></span>
+    <span id="spinner" class="htmx-indicator spinner-border spinner-border-sm text-light"></span>
+  </div>
+</nav>
+
+<div class="container-fluid mt-3 px-3">
+
+  <!-- Tab bar -->
+  <div class="tab-bar">
+    <ul class="nav nav-tabs" id="mainTabs">
+      <li class="nav-item">
+        <a class="nav-link active" id="tab-watchlist"
+           hx-get="/partials/watchlist" hx-target="#tab-content" hx-trigger="click, load" hx-indicator="#spinner">
+          <i class="bi bi-eye"></i>Watchlist
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" id="tab-portfolio"
+           hx-get="/partials/portfolio" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+          <i class="bi bi-briefcase"></i>Portfolio
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" id="tab-history"
+           hx-get="/partials/history" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+          <i class="bi bi-clock-history"></i>Trade History
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" id="tab-runlog"
+           hx-get="/partials/runlog" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+          <i class="bi bi-journal-text"></i>Run Log
+        </a>
+      </li>
+    </ul>
+  </div>
+
+  <!-- Tab content -->
+  <div id="tab-content">
+    <div class="text-center py-5 text-muted">
+      <div class="spinner-border spinner-border-sm mb-2 d-block mx-auto"></div>
+      Loading…
+    </div>
+  </div>
+
+</div>
+
+<!-- Buy Modal -->
+<div class="modal fade" id="buyModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#166534;">
+        <h5 class="modal-title text-white"><i class="bi bi-cart-plus me-2"></i>Record Buy</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form hx-post="/trades" hx-target="#tab-content" hx-swap="innerHTML"
+            hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('buyModal')).hide()">
+        <input type="hidden" name="action" value="BUY">
+        <input type="hidden" name="entry_price" id="buy-entry-price">
+        <input type="hidden" name="stop_loss" id="buy-stop-loss">
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Ticker</label>
+            <input class="form-control" name="ticker" id="buy-ticker" required>
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label">Shares</label>
+              <input class="form-control" name="shares" type="number" step="any" min="0.0001" required>
+            </div>
+            <div class="col">
+              <label class="form-label">Price ($)</label>
+              <input class="form-control" name="price" id="buy-price" type="number" step="any" min="0.0001" required>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Date</label>
+            <input class="form-control" name="date" type="date" id="buy-date" required>
+          </div>
+          <div class="mb-1">
+            <label class="form-label">Notes</label>
+            <input class="form-control" name="notes" placeholder="Optional">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-success btn-sm fw-semibold"><i class="bi bi-check-lg me-1"></i>Record Buy</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Sell Modal -->
+<div class="modal fade" id="sellModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#991b1b;">
+        <h5 class="modal-title text-white"><i class="bi bi-dash-circle me-2"></i>Record Sell</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form hx-post="/trades" hx-target="#tab-content" hx-swap="innerHTML"
+            hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('sellModal')).hide()">
+        <input type="hidden" name="action" value="SELL">
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Ticker</label>
+            <input class="form-control" name="ticker" id="sell-ticker" readonly>
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label">Shares</label>
+              <input class="form-control" name="shares" id="sell-shares" type="number" step="any" min="0.0001" required>
+            </div>
+            <div class="col">
+              <label class="form-label">Price ($)</label>
+              <input class="form-control" name="price" id="sell-price" type="number" step="any" min="0.0001" required>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Date</label>
+            <input class="form-control" name="date" type="date" id="sell-date" required>
+          </div>
+          <div class="mb-1">
+            <label class="form-label">Notes</label>
+            <input class="form-control" name="notes" placeholder="Optional">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-danger btn-sm fw-semibold"><i class="bi bi-check-lg me-1"></i>Record Sell</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Adjust Modal -->
+<div class="modal fade" id="adjustModal" tabindex="-1">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header" style="background:#0f4c81;">
+        <h5 class="modal-title text-white"><i class="bi bi-pencil-square me-2"></i>Adjust Position</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <form hx-post="/trades" hx-target="#tab-content" hx-swap="innerHTML"
+            hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('adjustModal')).hide()">
+        <input type="hidden" name="action" value="CORRECT">
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Ticker</label>
+            <input class="form-control" name="ticker" id="adjust-ticker" readonly>
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label">Shares</label>
+              <input class="form-control" name="shares" id="adjust-shares" type="number" step="any" min="0.0001" required>
+            </div>
+            <div class="col">
+              <label class="form-label">Price ($)</label>
+              <input class="form-control" name="price" id="adjust-price" type="number" step="any" min="0.0001" required>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Date</label>
+            <input class="form-control" name="date" type="date" id="adjust-date" required>
+          </div>
+          <div class="row g-2 mb-3">
+            <div class="col">
+              <label class="form-label">Entry Price</label>
+              <input class="form-control" name="entry_price" id="adjust-entry-price" type="number" step="any" min="0">
+            </div>
+            <div class="col">
+              <label class="form-label">Stop Loss</label>
+              <input class="form-control" name="stop_loss" id="adjust-stop-loss" type="number" step="any" min="0">
+            </div>
+          </div>
+          <div class="mb-1">
+            <label class="form-label">Notes</label>
+            <input class="form-control" name="notes" id="adjust-notes" placeholder="Optional">
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-light btn-sm" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary btn-sm fw-semibold"><i class="bi bi-check-lg me-1"></i>Apply Adjustment</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+  function openBuy(ticker, price, entry, stop) {
+    const buyPrice = parseFloat(price) || 0;
+    const analystStop = (stop && stop !== 'null') ? parseFloat(stop) : null;
+    const floorStop = buyPrice > 0 ? parseFloat((buyPrice * 0.90).toFixed(2)) : null;
+    const stopVal = analystStop !== null ? Math.max(analystStop, floorStop) : floorStop;
+    document.getElementById('buy-ticker').value      = ticker;
+    document.getElementById('buy-price').value       = price || '';
+    document.getElementById('buy-entry-price').value = (entry && entry !== 'null') ? entry : '';
+    document.getElementById('buy-stop-loss').value   = stopVal !== null ? stopVal.toFixed(2) : '';
+    document.getElementById('buy-date').value        = new Date().toISOString().slice(0,10);
+    new bootstrap.Modal(document.getElementById('buyModal')).show();
+  }
+
+  function openAdjust(ticker, shares, price, entryDate, stop, entryPrice) {
+    document.getElementById('adjust-ticker').value = ticker;
+    document.getElementById('adjust-shares').value = shares || '';
+    document.getElementById('adjust-price').value = price || '';
+    document.getElementById('adjust-date').value = entryDate || new Date().toISOString().slice(0,10);
+    document.getElementById('adjust-stop-loss').value = stop || '';
+    document.getElementById('adjust-entry-price').value = entryPrice || '';
+    document.getElementById('adjust-notes').value = 'Adjustment';
+    new bootstrap.Modal(document.getElementById('adjustModal')).show();
+  }
+
+  function openSell(ticker, shares, price) {
+    document.getElementById('sell-ticker').value = ticker;
+    document.getElementById('sell-shares').value = shares || '';
+    document.getElementById('sell-price').value  = price || '';
+    document.getElementById('sell-date').value   = new Date().toISOString().slice(0,10);
+    new bootstrap.Modal(document.getElementById('sellModal')).show();
+  }
+
+  // Watchlist row filters
+  const _activeFilters = new Set();
+
+  document.body.addEventListener('click', function(e) {
+    const btn = e.target.closest('[data-filter]');
+    if (!btn) return;
+    const f = btn.dataset.filter;
+    if (_activeFilters.has(f)) { _activeFilters.delete(f); btn.classList.remove('active'); }
+    else                        { _activeFilters.add(f);    btn.classList.add('active');    }
+    _applyFilters();
+  });
+
+  function _applyFilters() {
+    document.querySelectorAll('#tab-content tbody tr[data-sepa]').forEach(row => {
+      const sepaOk     = !_activeFilters.has('sepa8')    || row.dataset.sepa     === '8';
+      const alertOk    = !_activeFilters.has('alert')    || row.dataset.rec      === 'alert';
+      const breakoutOk = !_activeFilters.has('breakout') || row.dataset.breakout === 'true';
+      const mybOk      = !_activeFilters.has('myb')      || row.dataset.myb      === 'true';
+      const ukOk       = !_activeFilters.has('uk')       || row.dataset.market   === 'uk';
+      row.style.display = (sepaOk && alertOk && breakoutOk && mybOk && ukOk) ? '' : 'none';
+    });
+  }
+
+  // Reset filters when watchlist is re-loaded
+  document.body.addEventListener('htmx:afterSettle', function(e) {
+    if (e.detail.target.id === 'tab-content') _activeFilters.clear();
+  });
+
+  // Keep active tab in sync with navigation clicks
+  document.getElementById('mainTabs').addEventListener('click', function(e) {
+    const link = e.target.closest('.nav-link');
+    if (!link) return;
+    document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
+    link.classList.add('active');
+  });
+
+  // After a trade form (from a modal) updates #tab-content, activate the Portfolio tab
+  document.body.addEventListener('htmx:afterSettle', function(e) {
+    if (e.detail.target.id !== 'tab-content') return;
+    if (e.detail.elt && e.detail.elt.tagName === 'FORM') {
+      document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
+      document.getElementById('tab-portfolio').classList.add('active');
+    }
+  });
+
+  const refreshButton = document.getElementById('refresh-data-button');
+  const refreshFeedback = document.getElementById('refresh-feedback');
+
+  document.body.addEventListener('htmx:beforeRequest', function(e) {
+    if (e.detail.elt === refreshButton) {
+      refreshButton.disabled = true;
+      refreshButton.classList.add('loading');
+      refreshFeedback.textContent = 'Refreshing data…';
+    }
+  });
+
+  document.body.addEventListener('htmx:afterRequest', function(e) {
+    if (e.detail.elt === refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.classList.remove('loading');
+      refreshFeedback.textContent = '';
+    }
+  });
+
+  document.body.addEventListener('htmx:responseError', function(e) {
+    if (e.detail.elt === refreshButton) {
+      refreshButton.disabled = false;
+      refreshButton.classList.remove('loading');
+      refreshFeedback.textContent = 'Refresh failed. See console for details.';
+    }
+  });
+</script>
+</body>
+</html>

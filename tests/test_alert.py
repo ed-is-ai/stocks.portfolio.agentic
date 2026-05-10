@@ -7,7 +7,7 @@ import sqlite3
 import os
 from unittest.mock import patch, MagicMock
 
-from alert_agent import AlertAgent
+from agents.alert.alert_agent import AlertAgent
 from models import EmailConfig, StockRecord, StockScan, StockAnalysis
 
 
@@ -34,7 +34,7 @@ class TestAlertAgent:
             analysis = StockAnalysis(
                 score=9 - i,  # Scores: 9, 8, 7
                 stage="Stage 2",
-                near_entry=True,
+                entry_zone="approaching",
                 strengths=["Strong momentum"],
                 risks=[],
                 summary="High score stock"
@@ -68,7 +68,7 @@ class TestAlertAgent:
             analysis = StockAnalysis(
                 score=3 + i,  # Scores: 3, 4
                 stage="Stage 4",
-                near_entry=False,
+                entry_zone="far",
                 strengths=[],
                 risks=["Weak momentum"],
                 summary="Low score stock"
@@ -107,7 +107,7 @@ class TestAlertAgent:
 
         # Score exactly 8 - should alert
         analysis = StockAnalysis(
-            score=8, stage="Stage 2", near_entry=True,
+            score=8, stage="Stage 2", entry_zone="approaching",
             strengths=[], risks=[], summary="Test"
         )
         scan = StockScan(
@@ -183,7 +183,7 @@ class TestAlertAgent:
         # Should not attempt to send email
         # (We can't easily test this without mocking, but at least verify no exceptions)
 
-    @patch('alert_agent.AlertAgent.send_email')
+    @patch('agents.alert.alert_agent.AlertAgent.send_email')
     def test_run_method_with_alerts(self, mock_send_email, tmp_path, sample_high_score_stocks):
         """Test run method with alerts triggered."""
         email_cfg = EmailConfig(
@@ -220,3 +220,18 @@ class TestAlertAgent:
         agent.run([])
 
         # Should not crash
+
+    def test_email_port_env_with_whitespace(self, monkeypatch):
+        """Test EMAIL_PORT environment values with whitespace/newlines."""
+        monkeypatch.setenv("EMAIL_HOST", "smtp.test.com")
+        monkeypatch.setenv("EMAIL_PORT", "587\n")
+        monkeypatch.setenv("EMAIL_USER", "user@example.com")
+        monkeypatch.setenv("EMAIL_PASSWORD", "pass")
+        monkeypatch.setenv("EMAIL_TO", "recipient@example.com")
+
+        import importlib
+        import agents.alert.alert_agent as alert_agent_module
+
+        reload_module = importlib.reload(alert_agent_module)
+
+        assert reload_module.EMAIL_CONFIG.port == 587
