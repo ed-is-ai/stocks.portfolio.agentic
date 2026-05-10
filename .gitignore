@@ -31,6 +31,30 @@ dashboard-data.json
 test-results.json
 orchestrator_out.txt
 tmp_import_check.py
+data/*/*
+reports/
+
+# Portfolio & Runtime Data (contains personal investment details)
+portfolio_value.csv
+pipeline_runs.csv
+agents/extraction/ww_context.json
+agents/scanner/scan_history.json
+agents/trader/trades.db.backup
+**/scan_history.json
+
+# Intermediate/debug scripts and notebooks (may contain portfolio details)
+**/import_brokerage_trades.py
+**/merge_brokerage_history.py
+**/migrate_portfolio_col.py
+**/backfill_portfolio_history.py
+**/backfill_weekly.py
+**/debug_positions.py
+**/init_email_tracking.py
+**/query_alert_history.py
+**/tmp_debug.py
+*_agent_refactor.ipynb
+refresh_data.ipynb
+run_error.log
 
 # Claude Code internals
 .claude/
