@@ -1,0 +1,32 @@
+schema: spec-driven
+spec-gen:
+  version: 1.0.0
+  generatedAt: 2026-05-10T21:19:47.525Z
+  domains:
+    - scanner
+    - analyst
+    - trader
+    - alert
+    - extraction
+    - market
+    - institutional
+    - vcp
+    - canslim
+  confidence: 0.92
+context: |-
+  # User-provided context (preserved)
+  # User-provided context (preserved)
+  # Auto-detected by spec-gen
+  Tech stack: Python, FastAPI, Pydantic, SQLite, Pandas, OpenAI
+  Architecture: Microservices
+  Domains: scanner, analyst, trader, alert, extraction, market, institutional, vcp, canslim
+
+  # Auto-detected by spec-gen
+  Tech stack: Python, FastAPI, Pydantic, SQLite, Pandas, OpenAI
+  Architecture: Microservices
+  Domains: scanner, analyst, trader, alert, extraction, market, institutional, vcp, canslim
+
+  # Auto-detected by spec-gen
+  Tech stack: Python, FastAPI, Pydantic, SQLite, Pandas, OpenAI
+  Architecture: Microservices
+  Domains: scanner, analyst, trader, alert, extraction, market, institutional, vcp, canslim

@@ -1,0 +1,232 @@
+{
+  "generatedAt": "2026-05-10T21:19:47.544Z",
+  "specVersion": "1.0.0",
+  "domains": [
+    {
+      "domain": "alert",
+      "specPath": "openspec/specs/alert/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\ALERT_TRACKING.md",
+        "C:\\src\\Agents.stocks\\tests\\test_alert.py",
+        "C:\\src\\Agents.stocks\\agents\\alert\\alert_agent.py",
+        "C:\\src\\Agents.stocks\\agents\\alert\\__init__.py"
+      ],
+      "requirementCount": 7,
+      "dependsOn": [
+        "models"
+      ],
+      "calledBy": [
+        "models",
+        "tests"
+      ]
+    },
+    {
+      "domain": "analyst",
+      "specPath": "openspec/specs/analyst/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\tests\\test_analyst.py",
+        "C:\\src\\Agents.stocks\\agents\\analyst\\analyst_agent.py",
+        "C:\\src\\Agents.stocks\\agents\\analyst\\exit_evaluator.py",
+        "C:\\src\\Agents.stocks\\agents\\analyst\\historical_pivots.py",
+        "C:\\src\\Agents.stocks\\agents\\analyst\\__init__.py"
+      ],
+      "requirementCount": 5,
+      "dependsOn": [
+        "models"
+      ],
+      "calledBy": [
+        "models",
+        "tests",
+        "web"
+      ]
+    },
+    {
+      "domain": "canslim",
+      "specPath": "openspec/specs/canslim/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\references\\fmp_api_endpoints.md",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\references\\canslim_methodology.md",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\references\\interpretation_guide.md",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\references\\scoring_system.md",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\tests\\test_fmp_fallback.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\tests\\test_canslim_fixes.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\tests\\conftest.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\finviz_stock_client.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\fmp_client.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\check_institutional_endpoint.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\report_generator.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\screen_canslim.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\scorer.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\earnings_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\growth_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\institutional_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\leadership_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\market_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\new_highs_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\supply_demand_calculator.py"
+      ],
+      "requirementCount": 1,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "extraction",
+      "specPath": "openspec/specs/extraction/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\agents\\extraction\\extraction_agent.py",
+        "C:\\src\\Agents.stocks\\agents\\extraction\\extraction_results.json",
+        "C:\\src\\Agents.stocks\\agents\\extraction\\tv_extractor.py",
+        "C:\\src\\Agents.stocks\\agents\\extraction\\__init__.py"
+      ],
+      "requirementCount": 4,
+      "dependsOn": [
+        "models"
+      ],
+      "calledBy": [
+        "models"
+      ]
+    },
+    {
+      "domain": "institutional",
+      "specPath": "openspec/specs/institutional/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\references\\institutional_investor_types.md",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\references\\13f_filings_guide.md",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\references\\interpretation_framework.md",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\check_institutional_endpoint.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\tests\\test_filters.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\tests\\test_matching.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\tests\\test_parser_contract.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\tests\\test_single_stock.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\tests\\test_tracker_integration.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\tests\\conftest.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\data_quality.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\analyze_single_stock.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\track_institutional_flow.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\scripts\\track_institution_portfolio.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\institutional_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\README.md",
+        "C:\\src\\Agents.stocks\\skills\\institutional-flow-tracker\\SKILL.md"
+      ],
+      "requirementCount": 9,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "market",
+      "specPath": "openspec/specs/market/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_breadth_csv_client.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_breadth.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_defensive_rotation.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_delta.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_distribution_day.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_freshness.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_historical_comparator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_index_technical.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_leading_stock.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_math_utils.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_report_generator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_scenario_engine.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_scorer.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_sentiment.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_utils.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\helpers.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\test_fmp_client.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\tests\\conftest.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\fmp_client.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\breadth_csv_client.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\historical_comparator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\report_generator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\scenario_engine.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\utils.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\market_top_detector.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\scorer.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\math_utils.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\breadth_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\defensive_rotation_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\distribution_day_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\index_technical_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\leading_stock_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\sentiment_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\scripts\\calculators\\__init__.py",
+        "C:\\src\\Agents.stocks\\skills\\canslim-screener\\scripts\\calculators\\market_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\references\\distribution_day_guide.md",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\references\\historical_tops.md",
+        "C:\\src\\Agents.stocks\\skills\\market-top-detector\\references\\market_top_methodology.md"
+      ],
+      "requirementCount": 12,
+      "dependsOn": [],
+      "calledBy": []
+    },
+    {
+      "domain": "scanner",
+      "specPath": "openspec/specs/scanner/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\tests\\test_scanner.py",
+        "C:\\src\\Agents.stocks\\agents\\scanner\\alpha_vantage_client.py",
+        "C:\\src\\Agents.stocks\\agents\\scanner\\congress_client.py",
+        "C:\\src\\Agents.stocks\\agents\\scanner\\scanner_agent.py",
+        "C:\\src\\Agents.stocks\\agents\\scanner\\scan_history.py",
+        "C:\\src\\Agents.stocks\\agents\\scanner\\__init__.py",
+        "C:\\src\\Agents.stocks\\web\\templates\\_scanner.html"
+      ],
+      "requirementCount": 17,
+      "dependsOn": [
+        "models"
+      ],
+      "calledBy": [
+        "models",
+        "tests"
+      ]
+    },
+    {
+      "domain": "trader",
+      "specPath": "openspec/specs/trader/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\tests\\test_trader_agent.py",
+        "C:\\src\\Agents.stocks\\agents\\trader\\ingestion\\base.py",
+        "C:\\src\\Agents.stocks\\agents\\trader\\ingestion\\generic.py",
+        "C:\\src\\Agents.stocks\\agents\\trader\\ingestion\\sipp.py",
+        "C:\\src\\Agents.stocks\\agents\\trader\\ingestion\\work_pension.py",
+        "C:\\src\\Agents.stocks\\agents\\trader\\ingestion\\__init__.py",
+        "C:\\src\\Agents.stocks\\agents\\trader\\trader_agent.py",
+        "C:\\src\\Agents.stocks\\agents\\trader\\__init__.py"
+      ],
+      "requirementCount": 9,
+      "dependsOn": [
+        "models"
+      ],
+      "calledBy": [
+        "models",
+        "web"
+      ]
+    },
+    {
+      "domain": "vcp",
+      "specPath": "openspec/specs/vcp/spec.md",
+      "sourceFiles": [
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\references\\fmp_api_endpoints.md",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\references\\scoring_system.md",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\references\\vcp_methodology.md",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\fmp_client.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\report_generator.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\scorer.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\screen_vcp.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\execution_state.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\pattern_classifier.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\pivot_proximity_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\relative_strength_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\trend_template_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\volume_pattern_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\vcp_pattern_calculator.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\calculators\\__init__.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\tests\\test_vcp_screener.py",
+        "C:\\src\\Agents.stocks\\skills\\vcp-screener\\scripts\\tests\\conftest.py"
+      ],
+      "requirementCount": 7,
+      "dependsOn": [],
+      "calledBy": []
+    }
+  ]
+}
