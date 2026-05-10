@@ -35,43 +35,89 @@ HeatMapStock = dict[str, Any]
 
 _EXTRACTION_RESULTS = Path(__file__).parent / "extraction_results.json"
 _WW_CONTEXT = Path(__file__).parent / "ww_context.json"
+_ST_WATCHLIST = (
+    Path(__file__).parent.parent.parent / "config" / "stocktwits_watchlist.json"
+)
 
 
 class ExtractionAgent(Agent):
-    """Fetches the WisdomWise heat map and returns top-N tickers by institutional rank."""
+    """Aggregate watchlist from multiple sources: WhaleWisdom institutional data
+    and quarterly-curated StockTwits momentum lists. Deduplicates and outputs
+    source-tagged results for Scanner integration."""
 
     name: str = "ExtractionAgent"
     last_quarter: str = ""
 
     def run(self, payload: Any = None) -> list[str]:  # noqa: ARG002
-        """Return up to TOP_N tickers ranked by heat map overall_rank.
+        """Fetch WhaleWisdom and StockTwits tickers, merge, and update results.
 
-        Also appends any previously-unseen tickers to extraction_results.json
-        under a dated WisdomWise source group.
+        Returns combined list of tickers from both sources.
         """
-        print(f"Fetching top {TOP_N} holdings from WisdomWise heat map...")
+        print("Fetching extraction sources...")
+
+        # Fetch WhaleWisdom
+        print(f"  WhaleWisdom: Fetching top {TOP_N} holdings...")
+        ww_result = []
         try:
             stocks = self._fetch_heat_map()
+            if stocks:
+                ranked = sorted(
+                    stocks,
+                    key=lambda s: int(s.get("overall_rank") or 9999)
+                )
+                tickers = [str(s["name"]) for s in ranked if s.get("name")]
+                ww_result = list(dict.fromkeys(tickers))[:TOP_N]
+                print(f"    [ok] {len(ww_result)} tickers "
+                      f"(quarter: {self.last_quarter})")
+                self._save_ww_context(ranked)
         except Exception as exc:
-            print(f"  [err] {exc}")
-            return []
+            print(f"    [err] {exc}")
 
-        if not stocks:
-            print("  [warn] Heat map returned no stocks")
-            return []
+        # Load StockTwits
+        print("  StockTwits: Loading quarterly watchlist...")
+        st_by_index = self._load_stocktwits_config()
+        if st_by_index:
+            st_total = sum(len(t) for t in st_by_index.values())
+            print(f"    [ok] {st_total} tickers from config")
+        else:
+            print("    [warn] No StockTwits data loaded")
 
-        ranked = sorted(stocks, key=lambda s: int(s.get("overall_rank") or 9999))
-        tickers = [str(s["name"]) for s in ranked if s.get("name")]
-        result = list(dict.fromkeys(tickers))[:TOP_N]
+        # Update results with both sources
+        self._update_results_with_sources(ww_result, st_by_index)
 
-        print(f"  [ok] Extracted {len(result)} tickers (quarter: {self.last_quarter})")
+        # Return combined unique tickers
+        all_tickers: set[str] = set(ww_result)
+        for tickers in st_by_index.values():
+            all_tickers.update(tickers)
 
-        self._save_ww_context(ranked)
-        added = self._update_results(result)
-        if added:
-            print(f"  [results] Added {added} new tickers to extraction_results.json")
+        result = list(all_tickers)
+        print(f"[ok] Extraction complete: {len(result)} total unique tickers")
 
         return result
+
+    def _load_stocktwits_config(self) -> dict[str, list[str]]:
+        """Load StockTwits watchlist config and return tickers by index.
+
+        Returns dict: {"sp500": [...], "nasdaq100": [...], "russell2000": [...]}
+        """
+        if not _ST_WATCHLIST.exists():
+            print(f"  [warn] StockTwits config not found at {_ST_WATCHLIST}")
+            return {}
+
+        try:
+            data: dict[str, Any] = cast(dict[str, Any], json.loads(
+                _ST_WATCHLIST.read_text(encoding="utf-8")
+            ))
+            indices = data.get("indices", {})
+            result = {}
+            for index_name, index_data in indices.items():
+                tickers = index_data.get("tickers", [])
+                if tickers:
+                    result[index_name] = [str(t) for t in tickers]
+            return result
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"  [err] Failed to load StockTwits config: {exc}")
+            return {}
 
     def _fetch_heat_map(self) -> list[HeatMapStock]:
         """Call the heat map JSON endpoint and return the children list."""
@@ -105,6 +151,49 @@ class ExtractionAgent(Agent):
             if s.get("name")
         }
         _WW_CONTEXT.write_text(json.dumps(context, indent=2), encoding="utf-8")
+
+    def _update_results_with_sources(
+        self,
+        ww_tickers: list[str],
+        st_by_index: dict[str, list[str]],
+    ) -> None:
+        """Update extraction_results.json with both WhaleWisdom and StockTwits.
+
+        Replaces old StockTwits groups with new quarterly data.
+        Keeps WhaleWisdom group for each run.
+        """
+        try:
+            raw: list[str] | dict[str, list[str]] = json.loads(
+                _EXTRACTION_RESULTS.read_text(encoding="utf-8")
+            )
+            data: dict[str, list[str]] = raw if isinstance(raw, dict) else {}
+        except OSError:
+            data = {}
+
+        # Remove old StockTwits groups (clean slate for new quarterly data)
+        updated_data = {
+            k: v for k, v in data.items()
+            if "stocktwits" not in k.lower()
+        }
+
+        # Add new StockTwits groups with today's date
+        today = datetime.today().strftime("%Y-%m-%d")
+        index_labels = {"sp500": "S&P 500", "nasdaq100": "NASDAQ 100",
+                        "russell2000": "Russell 2000"}
+        for index_name, tickers in st_by_index.items():
+            label = index_labels.get(index_name, index_name.upper())
+            key = f"StockTwits Top 25 Momentum — {label} ({today})"
+            updated_data[key] = tickers
+
+        # Update WhaleWisdom group
+        ww_label = self.last_quarter or "WhaleScore v2.0"
+        ww_key = f"WisdomWise Heat Map — {ww_label} ({today})"
+        updated_data[ww_key] = ww_tickers
+
+        _EXTRACTION_RESULTS.write_text(
+            json.dumps(updated_data, indent=2),
+            encoding="utf-8"
+        )
 
     def _update_results(self, new_tickers: list[str]) -> int:
         """Append tickers not already in any group to extraction_results.json.
