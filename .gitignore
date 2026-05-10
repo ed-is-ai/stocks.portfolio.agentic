@@ -68,3 +68,7 @@ run_error.log
 
 # Submodule (managed separately)
 softaworks-agent-toolkit/
+
+# spec-gen analysis artifacts
+.spec-gen/
+.spec-gen/decisions/

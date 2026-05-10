@@ -1,0 +1,80 @@
+{% if not realized %}
+<div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
+  <i class="bi bi-info-circle-fill fs-5"></i>
+  <span>No closed positions yet. Sell a holding to see realized P&L.</span>
+</div>
+{% else %}
+<script>
+const fmt = v => '£' + v.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2});
+</script>
+
+<div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1.25rem;margin-bottom:1.25rem">
+  <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:1rem">
+    <i class="bi bi-graph-up me-1"></i>Realized Profit/Loss
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-bottom:1.5rem">
+    <div style="padding:1rem;background:var(--surface);border-radius:0.5rem;border-left:3px solid {% if total_pnl >= 0 %}#16a34a{% else %}#dc2626{% endif %}">
+      <div style="font-size:0.75rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:0.25rem">Total P&L (GBP)</div>
+      <div style="font-size:1.5rem;font-weight:700;color:{% if total_pnl >= 0 %}#16a34a{% else %}#dc2626{% endif %}">
+        {% if total_pnl >= 0 %}+{% endif %}£{{ "%.2f"|format(total_pnl) }}
+      </div>
+    </div>
+    <div style="padding:1rem;background:var(--surface);border-radius:0.5rem;border-left:3px solid var(--muted)">
+      <div style="font-size:0.75rem;font-weight:600;text-transform:uppercase;color:var(--muted);margin-bottom:0.25rem">Trades Closed</div>
+      <div style="font-size:1.5rem;font-weight:700;color:var(--muted)">
+        {{ realized | length }}
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-bottom:1rem;display:flex;gap:0.5rem;justify-content:flex-start">
+    <button class="btn btn-sm btn-outline-secondary"
+            hx-get="/partials/pnl?refresh=true"
+            hx-target="#tab-content" hx-swap="innerHTML"
+            hx-indicator="#spinner"
+            title="Refresh P&L calculations">
+      <i class="bi bi-arrow-clockwise"></i> Refresh data
+    </button>
+  </div>
+
+  <div style="overflow-x:auto">
+    <table style="width:100%;font-size:0.85rem;border-collapse:collapse">
+      <thead>
+        <tr style="border-bottom:2px solid var(--border)">
+          <th style="text-align:left;padding:0.75rem;font-weight:600;color:var(--muted)">Ticker</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Buy Date</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Sell Date</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Entry (GBP)</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Exit (GBP)</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Shares</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Cost (GBP)</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Proceeds (GBP)</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">P&L (GBP)</th>
+          <th style="text-align:right;padding:0.75rem;font-weight:600;color:var(--muted)">Return %</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in realized %}
+        <tr style="border-bottom:1px solid var(--border);transition:background 0.1s">
+          <td style="padding:0.75rem;font-weight:600">{{ row.ticker }}</td>
+          <td style="text-align:right;padding:0.75rem;color:var(--muted);font-size:0.8rem">{{ row.buy_date }}</td>
+          <td style="text-align:right;padding:0.75rem;color:var(--muted);font-size:0.8rem">{{ row.sell_date }}</td>
+          <td style="text-align:right;padding:0.75rem">£{{ "%.2f"|format(row.buy_price) }}</td>
+          <td style="text-align:right;padding:0.75rem">£{{ "%.2f"|format(row.sell_price) }}</td>
+          <td style="text-align:right;padding:0.75rem">{{ row.shares }}</td>
+          <td style="text-align:right;padding:0.75rem;color:var(--muted)">£{{ "%.2f"|format(row.cost_basis) }}</td>
+          <td style="text-align:right;padding:0.75rem;color:var(--muted)">£{{ "%.2f"|format(row.proceeds) }}</td>
+          <td style="text-align:right;padding:0.75rem;font-weight:600;color:{% if row.pnl >= 0 %}#16a34a{% else %}#dc2626{% endif %}">
+            {% if row.pnl >= 0 %}+{% endif %}£{{ "%.2f"|format(row.pnl) }}
+          </td>
+          <td style="text-align:right;padding:0.75rem;font-weight:600;color:{% if row.pnl_pct >= 0 %}#16a34a{% else %}#dc2626{% endif %}">
+            {% if row.pnl_pct >= 0 %}+{% endif %}{{ row.pnl_pct }}%
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
