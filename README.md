@@ -144,6 +144,39 @@ sqlite3 agents/alert/alerts.db "SELECT * FROM alerts ORDER BY timestamp DESC LIM
 tail portfolio_value.csv
 ```
 
+### Quarterly SIPP Portfolio Update
+
+The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pension) CSV imports.
+
+**Process:**
+1. Export SIPP CSV from your provider (Interactive Investor, AJ Bell, etc.)
+   - Expected columns: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance
+   - Save as `data/processed/SIPP/merged.csv`
+
+2. Run the import (via web UI portfolio tab or directly):
+   ```python
+   from agents.trader.trader_agent import TraderAgent
+   agent = TraderAgent()
+   cash_balance = agent.import_sipp('data/processed/SIPP/merged.csv')
+   ```
+
+3. Verify results:
+   - Check portfolio shows correct number of open positions
+   - Confirm cash balance matches account statement
+   - Review average cost basis and unrealised P&L
+
+**Import Logic:**
+- **Trades**: Only rows with valid Symbol field (not 'n/a') imported as stock trades
+- **Special case**: HSBC GLOB funds (Symbol='n/a', description contains "HSBC GLOB") use fixed ticker 'HSFWA'
+- **Cash flows**: Non-trade entries (contributions, tax relief, interest, dividends) stored in separate cash_flows table
+- **Chronological ordering**: Trades replayed in date order (DD/MM/YYYY format)
+- **Cash position**: Final Running Balance used as authoritative cash balance
+
+**Troubleshooting SIPP imports:**
+- Too many positions? Ensure Symbol column is filled for all trades (not 'n/a')
+- Negative shares? Check for over-sells or missing buy transactions
+- Cash mismatch? Verify final Running Balance matches account statement
+
 ## Troubleshooting
 
 **Scanner returns 0 tickers:**
