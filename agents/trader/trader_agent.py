@@ -5,6 +5,7 @@ Standalone agent; not part of the main scan pipeline.
 Run as part of the web UI backend.
 """
 
+import csv
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +28,15 @@ CREATE TABLE IF NOT EXISTS trades (
     stop_loss   REAL,
     entry_price REAL
 );
+CREATE TABLE IF NOT EXISTS cash_flows (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    date        TEXT NOT NULL,
+    flow_type   TEXT NOT NULL CHECK(flow_type IN ('CONTRIBUTION', 'DIVIDEND', 'INTEREST', 'TAX_RELIEF', 'TRANSFER', 'WITHDRAWAL', 'OTHER')),
+    ticker      TEXT,
+    amount      REAL NOT NULL CHECK(amount > 0),
+    description TEXT,
+    reference   TEXT UNIQUE
+);
 """
 
 
@@ -45,7 +55,12 @@ def _row_to_trade(row: tuple[Any, ...]) -> Trade:
 
 
 class TraderAgent(Agent):
-    """Records trades and computes portfolio P&L using average cost basis."""
+    """Records trades and computes portfolio P&L using average cost basis.
+
+    Supports importing SIPP transactions from CSV, separating stock trades
+    from non-trade cash flows (contributions, dividends, tax relief, interest).
+    Maintains separate tables: trades (stock buy/sell) and cash_flows (non-trades).
+    """
 
     name: str = "TraderAgent"
     db_path: Path = _DB_PATH
@@ -58,7 +73,7 @@ class TraderAgent(Agent):
 
     def _init_db(self) -> None:
         with self._conn() as conn:
-            conn.execute(_SCHEMA)
+            conn.executescript(_SCHEMA)
             for col_def in ("stop_loss REAL", "entry_price REAL"):
                 try:
                     conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
@@ -82,7 +97,15 @@ class TraderAgent(Agent):
             cur = conn.execute(
                 "INSERT INTO trades (ticker, action, shares, price, date, notes,"
                 " stop_loss, entry_price) VALUES (?, 'BUY', ?, ?, ?, ?, ?, ?)",
-                (ticker.upper(), shares, price, trade_date, notes, stop_loss, entry_price),
+                (
+                    ticker.upper(),
+                    shares,
+                    price,
+                    trade_date,
+                    notes,
+                    stop_loss,
+                    entry_price,
+                ),
             )
             trade_id: int = cur.lastrowid  # type: ignore[assignment]
         return Trade(
@@ -141,7 +164,15 @@ class TraderAgent(Agent):
             cur = conn.execute(
                 "INSERT INTO trades (ticker, action, shares, price, date, notes,"
                 " stop_loss, entry_price) VALUES (?, 'BUY', ?, ?, ?, ?, ?, ?)",
-                (ticker.upper(), shares, price, trade_date, notes, stop_loss, entry_price),
+                (
+                    ticker.upper(),
+                    shares,
+                    price,
+                    trade_date,
+                    notes,
+                    stop_loss,
+                    entry_price,
+                ),
             )
             trade_id: int = cur.lastrowid  # type: ignore[assignment]
         return Trade(
@@ -168,11 +199,12 @@ class TraderAgent(Agent):
             "SELECT id, ticker, action, shares, price, date, notes, stop_loss, entry_price"
             " FROM trades"
         )
+        date_order = "substr(date, 7, 4) || '/' || substr(date, 4, 2) || '/' || substr(date, 1, 2) DESC, id DESC"
         if ticker:
-            sql = base + " WHERE ticker = ? ORDER BY date DESC, id DESC"
+            sql = base + " WHERE ticker = ? ORDER BY " + date_order
             params: tuple[Any, ...] = (ticker.upper(),)
         else:
-            sql = base + " ORDER BY date DESC, id DESC"
+            sql = base + " ORDER BY " + date_order
             params = ()
         with self._conn() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -185,11 +217,13 @@ class TraderAgent(Agent):
 
         Replays all trades chronologically to derive shares and avg cost per ticker.
         Unrealised P&L requires current_prices dict; omit for cost-only view.
+        Only includes valid-ticker trades (excludes Symbol='n/a').
         """
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT ticker, action, shares, price, date, stop_loss, entry_price"
-                " FROM trades ORDER BY date, id"
+                " FROM trades WHERE ticker NOT IN ('', 'n/a', 'N/A')"
+                " ORDER BY substr(date, 7, 4) || '/' || substr(date, 4, 2) || '/' || substr(date, 1, 2), id"
             ).fetchall()
 
         state = self._replay_trades(rows)
@@ -217,7 +251,9 @@ class TraderAgent(Agent):
             s = state[ticker]
             if action == "BUY":
                 new_total = s["shares"] + shares
-                s["avg_cost"] = (s["avg_cost"] * s["shares"] + price * shares) / new_total
+                s["avg_cost"] = (
+                    s["avg_cost"] * s["shares"] + price * shares
+                ) / new_total
                 s["shares"] = new_total
                 if s["entry_date"] is None:
                     s["entry_date"] = date
@@ -241,7 +277,9 @@ class TraderAgent(Agent):
         total_cost = round(avg_cost * remaining, 2)
         cp = current_prices.get(ticker) if current_prices else None
         current_value = round(cp * remaining, 2) if cp is not None else None
-        upnl = round(current_value - total_cost, 2) if current_value is not None else None
+        upnl = (
+            round(current_value - total_cost, 2) if current_value is not None else None
+        )
         upnl_pct = (
             round(upnl / total_cost * 100, 2)
             if upnl is not None and total_cost > 0
@@ -265,6 +303,202 @@ class TraderAgent(Agent):
             profit_target_20=pt20,
             profit_target_25=pt25,
         )
+
+    def update_portfolio_snapshot(self, cash_balance: float | None = None) -> None:
+        """Update portfolio_value.csv with total_value, total_cost, cash_balance, investments_value."""
+        from datetime import datetime, timezone
+        import json
+
+        portfolio_csv = Path(__file__).parent.parent.parent / "portfolio_value.csv"
+
+        # Load current prices from analysis results
+        analysis_json = (
+            Path(__file__).parent.parent.parent
+            / "agents"
+            / "analyst"
+            / "analysis_results.json"
+        )
+        prices = {}
+        if analysis_json.exists():
+            try:
+                data = json.loads(analysis_json.read_text(encoding="utf-8"))
+                prices = {r["ticker"]: r["price"] for r in data}
+            except Exception:
+                pass
+
+        positions = self.get_portfolio(prices if prices else None)
+        total_cost = sum(p.total_cost for p in positions if p.total_cost is not None)
+        total_value = sum(
+            p.current_value for p in positions if p.current_value is not None
+        )
+        if total_value is None:
+            total_value = total_cost
+
+        if cash_balance is None:
+            if portfolio_csv.exists():
+                try:
+                    with open(portfolio_csv) as f:
+                        reader = csv.DictReader(f)
+                        rows = list(reader)
+                        if rows:
+                            cash_balance = float(rows[-1].get("cash_balance", "0"))
+                        else:
+                            cash_balance = 0.0
+                except Exception:
+                    cash_balance = 0.0
+            else:
+                cash_balance = 0.0
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        investments_value = total_cost
+
+        with open(portfolio_csv, "w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "timestamp",
+                    "total_value",
+                    "total_cost",
+                    "cash_balance",
+                    "investments_value",
+                ],
+            )
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": timestamp,
+                    "total_value": f"{total_value:.2f}",
+                    "total_cost": f"{total_cost:.2f}",
+                    "cash_balance": f"{cash_balance:.2f}",
+                    "investments_value": f"{investments_value:.2f}",
+                }
+            )
+
+    def import_sipp(self, csv_path: str | Path) -> float:
+        """Import SIPP CSV, extract trades and cash flows. Return cash balance."""
+        csv_path = Path(csv_path)
+
+        def clean_amount(s: str | None) -> float:
+            if not s or s.strip() in ("", "n/a"):
+                return 0.0
+            s = (
+                s.replace("﻿", "")
+                .replace("£", "")
+                .replace(",", "")
+                .replace('"', "")
+                .strip()
+            )
+            try:
+                return float(s)
+            except ValueError:
+                return 0.0
+
+        def classify_flow_type(description: str) -> str:
+            d = description.lower()
+            if "contribution" in d:
+                return "CONTRIBUTION"
+            elif "div" in d:
+                return "DIVIDEND"
+            elif "interest" in d:
+                return "INTEREST"
+            elif "tax relief" in d:
+                return "TAX_RELIEF"
+            elif "trf" in d:
+                return "TRANSFER"
+            elif "debit" in d:
+                return "WITHDRAWAL"
+            return "OTHER"
+
+        with open(csv_path, encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+        conn = self._conn()
+        buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
+
+        for row in rows:
+            qty = row.get("Quantity", "").strip()
+            symbol = row.get("Symbol", "").strip()
+            sedol = row.get("Sedol", "").strip()
+            debit = clean_amount(row.get("Debit", ""))
+            credit = clean_amount(row.get("Credit", ""))
+            price = clean_amount(row.get("Price", ""))
+            date = row.get("Date", "").strip()
+            description = row.get("Description", "").strip()
+            reference = row.get("Reference", "").strip()
+
+            if qty and qty != "n/a":
+                # Trade if Symbol is valid or if HSBC GLOB
+                is_trade = symbol and symbol != "n/a"
+                is_hsbc_glob = "HSBC GLOB" in description.upper()
+
+                if is_trade or is_hsbc_glob:
+                    try:
+                        shares = float(qty.replace("£", "").replace(",", ""))
+                        if shares > 0 and price > 0:
+                            action = (
+                                "BUY" if debit > 0 else "SELL" if credit > 0 else None
+                            )
+                            if action:
+                                ticker = symbol.upper() if is_trade else "HSFWA"
+                                conn.execute(
+                                    "INSERT INTO trades (ticker, action, shares, price, date, notes) "
+                                    "VALUES (?, ?, ?, ?, ?, ?)",
+                                    (ticker, action, shares, price, date, ""),
+                                )
+                                if action == "BUY":
+                                    buy_count += 1
+                                else:
+                                    sell_count += 1
+                    except ValueError:
+                        pass
+                else:
+                    amount = credit if credit > 0 else debit
+                    if amount > 0:
+                        flow_type = classify_flow_type(description)
+                        try:
+                            conn.execute(
+                                "INSERT OR IGNORE INTO cash_flows "
+                                "(date, flow_type, ticker, amount, description, reference) "
+                                "VALUES (?, ?, ?, ?, ?, ?)",
+                                (date, flow_type, None, amount, description, reference),
+                            )
+                            cash_count += 1
+                        except Exception:
+                            pass
+            else:
+                if symbol and symbol != "n/a":
+                    continue
+                amount = credit if credit > 0 else debit
+                if amount > 0:
+                    flow_type = classify_flow_type(description)
+                    try:
+                        conn.execute(
+                            "INSERT OR IGNORE INTO cash_flows "
+                            "(date, flow_type, ticker, amount, description, reference) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (date, flow_type, None, amount, description, reference),
+                        )
+                        cash_count += 1
+                    except Exception:
+                        pass
+
+            running_balance = row.get("Running Balance", "").strip()
+            if running_balance and running_balance != "n/a":
+                rb = clean_amount(running_balance)
+                if rb > 0:
+                    cash_balance = rb
+
+        conn.commit()
+        conn.close()
+
+        self.update_portfolio_snapshot(cash_balance)
+
+        print(
+            f"SIPP import complete: {buy_count} BUY, {sell_count} SELL, "
+            f"{cash_count} cash flows. Cash balance: GBP {cash_balance:,.2f}"
+        )
+        return cash_balance
 
     def run(self, payload: Any = None) -> list[Position]:
         """Standalone agent interface — return current portfolio."""
