@@ -10,6 +10,7 @@
   <div style="font-size:0.74rem; color:var(--muted)">
     {% if prices_as_of %}
       <i class="bi bi-clock me-1"></i>Prices as of {{ prices_as_of }}
+      {% if gbpusd_rate %}&nbsp;&middot;&nbsp;Rate: £1&nbsp;=&nbsp;${{ "%.4f"|format(gbpusd_rate) }}{% endif %}
     {% else %}
       <i class="bi bi-clock me-1"></i>No cached prices — click Refresh
     {% endif %}
@@ -29,10 +30,6 @@
 
 {% endif %}
 {% if positions %}
-{% set total_cost = positions | sum(attribute='total_cost') %}
-{% set positions_with_value = positions | selectattr('current_value', 'ne', none) | list %}
-{% set total_value = positions_with_value | sum(attribute='current_value') %}
-{% set total_pnl = total_value - (positions_with_value | sum(attribute='total_cost')) %}
 
 <!-- Portfolio value chart -->
 {% if chart_points >= 2 %}
@@ -125,7 +122,7 @@
                 return tip ? ' ▼ ' + tip : null;
               }
               if (ctx.parsed.y === null) return null;
-              return ' ' + ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
+              return ' ' + ctx.dataset.label + ': £' + ctx.parsed.y.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2});
             }
           }
         }
@@ -138,7 +135,7 @@
         y: {
           ticks: {
             font: { size: 10 },
-            callback: v => '$' + v.toLocaleString('en-US', {minimumFractionDigits:0})
+            callback: v => '£' + v.toLocaleString('en-GB', {minimumFractionDigits:0})
           },
           grid: { color: '#f1f5f9' }
         }
@@ -150,24 +147,26 @@
 
 {% endif %}
 
-<!-- Summary strip -->
+<!-- Summary strip (all values in GBP) -->
 <div class="d-flex flex-wrap gap-3 mb-4">
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Cost</div>
-    <div class="sval">${{ "%.2f"|format(total_cost) }}</div>
+    <div class="sval">£{{ "%.2f"|format(total_cost_gbp) }}</div>
   </div>
   {% if positions_with_value %}
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-graph-up me-1"></i>Market Value</div>
-    <div class="sval">${{ "%.2f"|format(total_value) }}</div>
+    <div class="sval">£{{ "%.2f"|format(total_value_gbp) }}</div>
   </div>
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-percent me-1"></i>Unrealised P&amp;L</div>
-    <div class="sval {% if total_pnl >= 0 %}pos{% else %}neg{% endif %}">
-      {{ "+" if total_pnl >= 0 }}${{ "%.2f"|format(total_pnl) }}
+    <div class="sval {% if total_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+      {{ "+" if total_pnl_gbp >= 0 }}£{{ "%.2f"|format(total_pnl_gbp) }}
+      {% if total_cost_gbp_valued > 0 %}
       <span style="font-size:0.72rem; font-weight:500; opacity:0.8">
-        ({{ "+" if total_pnl >= 0 }}{{ "%.1f"|format(total_pnl / (positions_with_value | sum(attribute='total_cost')) * 100) }}%)
+        ({{ "+" if total_pnl_gbp >= 0 }}{{ "%.1f"|format(total_pnl_gbp / total_cost_gbp_valued * 100) }}%)
       </span>
+      {% endif %}
     </div>
   </div>
   <div class="stat-card">
@@ -198,25 +197,26 @@
     </thead>
     <tbody>
       {% for p in positions %}
+      {% set sym = '$' if p.price_currency == 'USD' else '£' %}
       <tr class="{% if p.exit_signal and p.exit_signal.action == 'EXIT' %}row-exit{% endif %}">
         <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ p.ticker }}</span></td>
         <td>{{ p.shares }}</td>
-        <td>${{ "%.2f"|format(p.avg_cost) }}</td>
+        <td>{{ sym }}{{ "%.2f"|format(p.avg_cost) }}</td>
         <td>
           {% if p.current_price %}
-            <strong>${{ "%.2f"|format(p.current_price) }}</strong>
+            <strong>{{ sym }}{{ "%.2f"|format(p.current_price) }}</strong>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
         </td>
-        <td>${{ "%.2f"|format(p.total_cost) }}</td>
+        <td>{{ sym }}{{ "%.2f"|format(p.total_cost) }}</td>
         <td>
-          {% if p.current_value %}${{ "%.2f"|format(p.current_value) }}{% else %}<span class="text-muted">—</span>{% endif %}
+          {% if p.current_value %}{{ sym }}{{ "%.2f"|format(p.current_value) }}{% else %}<span class="text-muted">—</span>{% endif %}
         </td>
         <td>
           {% if p.unrealised_pnl is not none %}
             <span class="{% if p.unrealised_pnl >= 0 %}pos{% else %}neg{% endif %}">
-              {{ "+" if p.unrealised_pnl >= 0 }}${{ "%.2f"|format(p.unrealised_pnl) }}
+              {{ "+" if p.unrealised_pnl >= 0 }}{{ sym }}{{ "%.2f"|format(p.unrealised_pnl) }}
             </span>
           {% else %}
             <span class="text-muted">—</span>
@@ -233,21 +233,21 @@
         </td>
         <td>
           {% if p.stop_loss %}
-            <span class="neg">${{ "%.2f"|format(p.stop_loss) }}</span>
+            <span class="neg">£{{ "%.2f"|format(p.stop_loss) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
         </td>
         <td>
           {% if p.entry_price %}
-            <span class="text-muted">${{ "%.2f"|format(p.entry_price) }}</span>
+            <span class="text-muted">£{{ "%.2f"|format(p.entry_price) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
         </td>
         <td>
           {% if p.next_pivot %}
-            <span class="text-muted">${{ "%.2f"|format(p.next_pivot) }}</span>
+            <span class="text-muted">£{{ "%.2f"|format(p.next_pivot) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}

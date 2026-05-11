@@ -166,3 +166,4 @@ class Position(BaseModel):
     profit_target_25: float | None = None  # entry_price * 1.25
     next_pivot: float | None = None        # current analyst pivot entry (populated in web layer)
     exit_signal: ExitSignal | None = None  # populated by ExitEvaluator in web layer
+    price_currency: str = "GBP"            # ISO currency code for current_price/current_value/pnl

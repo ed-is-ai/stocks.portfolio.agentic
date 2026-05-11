@@ -38,9 +38,11 @@ CREATE TABLE IF NOT EXISTS cash_flows (
     reference   TEXT UNIQUE
 );
 CREATE TABLE IF NOT EXISTS price_cache (
-    ticker      TEXT PRIMARY KEY,
-    price       REAL NOT NULL,
-    fetched_at  TEXT NOT NULL
+    ticker          TEXT PRIMARY KEY,
+    price           REAL NOT NULL,
+    fetched_at      TEXT NOT NULL,
+    currency        TEXT DEFAULT 'GBP',
+    original_price  REAL
 );
 """
 
@@ -82,6 +84,11 @@ class TraderAgent(Agent):
             for col_def in ("stop_loss REAL", "entry_price REAL"):
                 try:
                     conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
+                except Exception:
+                    pass
+            for col_def in ("currency TEXT DEFAULT 'GBP'", "original_price REAL"):
+                try:
+                    conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
                 except Exception:
                     pass
             conn.commit()
@@ -216,13 +223,16 @@ class TraderAgent(Agent):
         return [_row_to_trade(r) for r in rows]
 
     def get_portfolio(
-        self, current_prices: dict[str, float] | None = None
+        self,
+        current_prices: dict[str, float] | None = None,
+        display_info: dict[str, tuple[float, str]] | None = None,
     ) -> list[Position]:
         """Compute open positions using average cost basis.
 
         Replays all trades chronologically to derive shares and avg cost per ticker.
         Unrealised P&L requires current_prices dict; omit for cost-only view.
         Only includes valid-ticker trades (excludes Symbol='n/a').
+        display_info: optional {ticker: (original_price, currency)} for template display.
         """
         with self._conn() as conn:
             rows = conn.execute(
@@ -233,7 +243,7 @@ class TraderAgent(Agent):
 
         state = self._replay_trades(rows)
         return [
-            self._build_position(ticker, s, current_prices)
+            self._build_position(ticker, s, current_prices, display_info)
             for ticker, s in state.items()
             if s["shares"] > 0
         ]
@@ -275,12 +285,28 @@ class TraderAgent(Agent):
         ticker: str,
         s: dict[str, Any],
         current_prices: dict[str, float] | None,
+        display_info: dict[str, tuple[float, str]] | None = None,
     ) -> Position:
-        """Build a Position model from replay state and live prices."""
+        """Build a Position model from replay state and live prices.
+
+        For USD stocks, all monetary fields (current_price, current_value,
+        unrealised_pnl) are kept in USD so that P&L is self-consistent.
+        The web layer converts to GBP for aggregate totals.
+        """
         avg_cost = s["avg_cost"]
         remaining = s["shares"]
         total_cost = round(avg_cost * remaining, 2)
-        cp = current_prices.get(ticker) if current_prices else None
+
+        disp = display_info.get(ticker) if display_info else None
+        currency = disp[1] if disp else "GBP"
+        is_usd = currency == "USD"
+
+        if is_usd and disp is not None:
+            # Use original USD price so cost (USD) and value (USD) are comparable
+            cp: float | None = disp[0]
+        else:
+            cp = current_prices.get(ticker) if current_prices else None
+
         current_value = round(cp * remaining, 2) if cp is not None else None
         upnl = (
             round(current_value - total_cost, 2) if current_value is not None else None
@@ -307,6 +333,7 @@ class TraderAgent(Agent):
             stop_loss=s["stop_loss"],
             profit_target_20=pt20,
             profit_target_25=pt25,
+            price_currency=currency,
         )
 
     def update_portfolio_snapshot(self, cash_balance: float | None = None) -> None:
@@ -505,39 +532,66 @@ class TraderAgent(Agent):
         )
         return cash_balance
 
-    def save_price_cache(self, prices: dict[str, float]) -> None:
-        """Persist fetched prices to the DB with a UTC timestamp."""
+    def save_price_cache(
+        self,
+        prices: dict[str, float],
+        currencies: dict[str, tuple[float, str]] | None = None,
+    ) -> None:
+        """Persist fetched prices to the DB with a UTC timestamp.
+
+        currencies: optional {ticker: (original_price, currency_code)} for display.
+        """
         from datetime import datetime, timezone
 
         fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         with self._conn() as conn:
-            conn.executemany(
-                "INSERT INTO price_cache (ticker, price, fetched_at) VALUES (?, ?, ?)"
-                " ON CONFLICT(ticker) DO UPDATE SET price=excluded.price, fetched_at=excluded.fetched_at",
-                [(t, p, fetched_at) for t, p in prices.items()],
-            )
+            for t, p in prices.items():
+                orig = currencies.get(t) if currencies else None
+                orig_price = orig[0] if orig else None
+                currency = orig[1] if orig else "GBP"
+                conn.execute(
+                    "INSERT INTO price_cache (ticker, price, fetched_at, currency, original_price)"
+                    " VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT(ticker) DO UPDATE SET"
+                    "  price=excluded.price, fetched_at=excluded.fetched_at,"
+                    "  currency=excluded.currency, original_price=excluded.original_price",
+                    (t, p, fetched_at, currency, orig_price),
+                )
             conn.commit()
 
-    def load_price_cache(self) -> tuple[dict[str, float], str | None]:
-        """Return (prices dict, fetched_at string) from the DB, or ({}, None) if empty."""
+    def load_price_cache(
+        self,
+    ) -> tuple[dict[str, float], str | None, dict[str, tuple[float, str]]]:
+        """Return (prices, fetched_at, display_info) from the DB.
+
+        display_info: {ticker: (original_price, currency_code)}
+        """
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT ticker, price, fetched_at FROM price_cache"
+                "SELECT ticker, price, fetched_at, currency, original_price FROM price_cache"
             ).fetchall()
         if not rows:
-            return {}, None
+            return {}, None, {}
         prices = {r[0]: r[1] for r in rows}
         fetched_at = rows[0][2]
-        return prices, fetched_at
+        display_info: dict[str, tuple[float, str]] = {
+            r[0]: (r[4], r[3] or "GBP")
+            for r in rows
+            if r[4] is not None
+        }
+        return prices, fetched_at, display_info
 
     def refresh_portfolio_prices(
-        self, current_prices: dict[str, float]
+        self,
+        current_prices: dict[str, float],
+        display_info: dict[str, tuple[float, str]] | None = None,
     ) -> list[Position]:
         """Fetch live prices and recalculate portfolio metrics.
 
-        Takes a dict of current prices {ticker: price} and returns updated
+        Takes a dict of current prices {ticker: gbp_price} and returns updated
         Position objects with recalculated market value, unrealised P&L,
         and profit targets. Handles missing prices gracefully.
+        display_info: optional {ticker: (original_price, currency)} for template display.
         """
         import logging
 
@@ -554,19 +608,16 @@ class TraderAgent(Agent):
         state = self._replay_trades(rows)
         positions = []
 
-        missing_tickers = []
-        for ticker, s in state.items():
-            if s["shares"] > 0:
-                if ticker not in current_prices:
-                    missing_tickers.append(ticker)
-                    logger.warning(f"Missing price for ticker: {ticker}")
-
+        missing_tickers = [
+            ticker for ticker, s in state.items()
+            if s["shares"] > 0 and ticker not in current_prices
+        ]
         if missing_tickers:
             logger.warning(f"Could not fetch prices for: {missing_tickers}")
 
         for ticker, s in state.items():
             if s["shares"] > 0:
-                pos = self._build_position(ticker, s, current_prices)
+                pos = self._build_position(ticker, s, current_prices, display_info)
                 positions.append(pos)
 
         logger.info(f"Portfolio refresh complete: {len(positions)} positions updated")

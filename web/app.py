@@ -7,6 +7,7 @@ Run with:
 
 import csv
 import json
+import logging
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +47,30 @@ def _load_ticker_aliases() -> dict[str, str]:
         return {}
 
 
+def _fetch_gbpusd_rate() -> float | None:
+    """Fetch live GBP/USD rate from yfinance; return None on failure."""
+    try:
+        import yfinance as yf
+        return float(yf.Ticker("GBPUSD=X").fast_info.last_price)
+    except Exception:
+        return None
+
+
+def _get_gbpusd_rate() -> float:
+    """Return live GBP/USD rate, falling back to last cached value."""
+    logger = logging.getLogger(__name__)
+    rate = _fetch_gbpusd_rate()
+    if rate:
+        trader.save_price_cache({"__GBPUSD__": rate})
+        return rate
+    cached, _, _disp = trader.load_price_cache()
+    if "__GBPUSD__" in cached:
+        logger.warning("GBPUSD rate fetch failed; using cached rate")
+        return cached["__GBPUSD__"]
+    logger.warning("GBPUSD rate unavailable; defaulting to 1.35")
+    return 1.35
+
+
 def _load_analysis() -> list[StockRecord]:
     """Load latest analysis results, returning empty list on any error."""
     try:
@@ -82,71 +107,95 @@ async def partial_watchlist(request: Request) -> HTMLResponse:
     )
 
 
+_logger = logging.getLogger(__name__)
+
+
+def _fetch_price_gbp(
+    yf_sym: str, gbpusd: float
+) -> tuple[float, float, str] | None:
+    """Fetch the most recent closing price for a yfinance symbol.
+
+    Returns (gbp_price, original_price, currency_code) or None on failure.
+    gbp_price is always in GBP; original_price is in the native currency.
+    """
+    import math
+    import yfinance as yf
+
+    data = yf.download(yf_sym, period="5d", progress=False, auto_adjust=True)
+    if data.empty:
+        return None
+    close = data["Close"] if "Close" in data.columns else data.iloc[:, 0]
+    series = close.iloc[:, 0] if hasattr(close, "columns") else close
+    series = series.dropna()
+    if series.empty:
+        return None
+    val = float(series.iloc[-1])
+    if math.isnan(val):
+        return None
+    orig_price = round(val, 2)
+    gbp_price = orig_price
+    currency = "GBP"
+    try:
+        currency = yf.Ticker(yf_sym).fast_info.currency or "GBP"
+        if currency == "GBp":
+            gbp_price = round(orig_price / 100, 4)
+            currency = "GBP"
+        elif currency == "USD":
+            gbp_price = round(orig_price / gbpusd, 4)
+    except Exception:
+        _logger.warning(f"Could not determine currency for {yf_sym}; using raw price")
+    return gbp_price, orig_price, currency
+
+
+def _fetch_all_prices(
+    tickers: list[str], aliases: dict[str, str], gbpusd: float
+) -> tuple[dict[str, float], dict[str, tuple[float, str]]]:
+    """Fetch GBP-normalised prices for all portfolio tickers.
+
+    Returns (gbp_prices, display_info) where:
+    - gbp_prices: {ticker: gbp_price} for portfolio calculations
+    - display_info: {ticker: (original_price, currency)} for the UI
+    """
+    gbp_prices: dict[str, float] = {}
+    display_info: dict[str, tuple[float, str]] = {}
+    for t in tickers:
+        yf_sym = aliases.get(t, t)
+        result = _fetch_price_gbp(yf_sym, gbpusd)
+        if (result is None or result[0] < 0.01) and t not in aliases:
+            result = _fetch_price_gbp(f"{t}.L", gbpusd)
+        if result is not None and result[0] >= 0.01:
+            gbp_price, orig_price, currency = result
+            gbp_prices[t] = gbp_price
+            display_info[t] = (orig_price, currency)
+    return gbp_prices, display_info
+
+
 @app.post("/api/portfolio/refresh", response_class=HTMLResponse)
 async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
     """Fetch live prices from yfinance and return updated portfolio partial."""
-    import logging
-
-    logger = logging.getLogger(__name__)
     try:
-        import yfinance as yf
-
         portfolio = trader.get_portfolio()
-        logger.info(f"Refreshing {len(portfolio)} positions")
+        _logger.info(f"Refreshing {len(portfolio)} positions")
         if not portfolio:
             return _render_portfolio(request, [], error_message="No positions to refresh", status_code=400)
 
-        import math
-
+        gbpusd = _get_gbpusd_rate()
         tickers = [p.ticker for p in portfolio]
-        aliases = _load_ticker_aliases()
+        gbp_prices, display_info = _fetch_all_prices(tickers, _load_ticker_aliases(), gbpusd)
 
-        def _fetch_last_price(yf_sym: str) -> float | None:
-            """Fetch the most recent non-NaN closing price for a single yfinance symbol."""
-            data = yf.download(yf_sym, period="5d", progress=False, auto_adjust=True)
-            if data.empty:
-                return None
-            # For a single ticker yfinance may return MultiIndex or flat columns
-            close = data["Close"] if "Close" in data.columns else data.iloc[:, 0]
-            series = close.iloc[:, 0] if hasattr(close, "columns") else close
-            series = series.dropna()
-            if series.empty:
-                return None
-            val = float(series.iloc[-1])
-            if math.isnan(val):
-                return None
-            price = round(val, 2)
-            try:
-                if yf.Ticker(yf_sym).fast_info.currency == "GBp":
-                    price = round(price / 100, 4)
-            except Exception:
-                logger.warning(f"Could not determine currency for {yf_sym}; using raw price")
-            return price
-
-        prices: dict[str, float] = {}
-        for t in tickers:
-            yf_sym = aliases.get(t, t)
-            price = _fetch_last_price(yf_sym)
-            if (price is None or price < 0.01) and t not in aliases:
-                # retry as London-listed; US match may be a penny-stock false positive
-                uk_price = _fetch_last_price(f"{t}.L")
-                if uk_price is not None and uk_price >= 0.01:
-                    price = uk_price
-            if price is not None and price >= 0.01:
-                prices[t] = price
-
-        trader.save_price_cache(prices)
-        _, prices_as_of = trader.load_price_cache()
-        updated_positions = trader.refresh_portfolio_prices(prices)
-        logger.info(f"Refreshed {len(updated_positions)} positions successfully")
-        return _render_portfolio(request, updated_positions, prices_as_of=prices_as_of)
+        trader.save_price_cache(gbp_prices, display_info)
+        _, prices_as_of, _ = trader.load_price_cache()
+        updated_positions = trader.refresh_portfolio_prices(gbp_prices, display_info)
+        _logger.info(f"Refreshed {len(updated_positions)} positions successfully")
+        return _render_portfolio(request, updated_positions, prices_as_of=prices_as_of, gbpusd_rate=gbpusd)
     except Exception as e:
-        logger.error(f"Failed to refresh portfolio prices: {str(e)}")
-        cached_positions = trader.get_portfolio()
-        _, prices_as_of = trader.load_price_cache()
+        _logger.exception(f"Failed to refresh portfolio prices: {e}")
+        cached_prices, prices_as_of, display_info = trader.load_price_cache()
+        cached_positions = trader.get_portfolio(cached_prices or None, display_info or None)
+        gbpusd = cached_prices.get("__GBPUSD__")
         return _render_portfolio(
             request, cached_positions, prices_as_of=prices_as_of,
-            error_message=f"Failed to fetch prices: {e}", status_code=500,
+            gbpusd_rate=gbpusd, error_message=f"Failed to fetch prices: {e}", status_code=500,
         )
 
 
@@ -244,10 +293,16 @@ def _trade_markers(chart_data: dict) -> tuple[list, list, list, list]:
     return buy_vals, sell_vals, buy_tips, sell_tips
 
 
+def _to_gbp(amount: float, currency: str, gbpusd: float) -> float:
+    """Convert amount to GBP using current rate if currency is USD."""
+    return amount / gbpusd if currency == "USD" else amount
+
+
 def _render_portfolio(
     request: Request,
     positions: list,
     prices_as_of: str | None = None,
+    gbpusd_rate: float | None = None,
     error_message: str | None = None,
     status_code: int = 200,
 ) -> HTMLResponse:
@@ -259,13 +314,33 @@ def _render_portfolio(
         pos.exit_signal = _evaluator.evaluate(pos, stock)
         if stock and stock.analysis:
             pos.next_pivot = stock.analysis.entry_price
+
+    # Compute GBP-equivalent totals for summary cards
+    fx = gbpusd_rate or 1.35
+    total_cost_gbp = sum(_to_gbp(p.total_cost, p.price_currency, fx) for p in positions)
+    positions_with_value = [p for p in positions if p.current_value is not None]
+    total_value_gbp = sum(
+        _to_gbp(p.current_value, p.price_currency, fx)  # type: ignore[arg-type]
+        for p in positions_with_value
+    )
+    total_cost_gbp_valued = sum(
+        _to_gbp(p.total_cost, p.price_currency, fx) for p in positions_with_value
+    )
+    total_pnl_gbp = total_value_gbp - total_cost_gbp_valued
+
     chart_data = _load_portfolio_history()
     buy_vals, sell_vals, buy_tips, sell_tips = _trade_markers(chart_data)
     return templates.TemplateResponse(
         request, "_portfolio.html",
         context={
             "positions": positions,
+            "positions_with_value": positions_with_value,
+            "total_cost_gbp": total_cost_gbp,
+            "total_value_gbp": total_value_gbp,
+            "total_pnl_gbp": total_pnl_gbp,
+            "total_cost_gbp_valued": total_cost_gbp_valued,
             "prices_as_of": prices_as_of,
+            "gbpusd_rate": gbpusd_rate,
             "error_message": error_message,
             "chart_labels": json.dumps(chart_data["labels"]),
             "chart_values": json.dumps(chart_data["values"]),
@@ -282,11 +357,12 @@ def _render_portfolio(
 
 @app.get("/partials/portfolio", response_class=HTMLResponse)
 async def partial_portfolio(request: Request) -> HTMLResponse:
-    cached_prices, prices_as_of = trader.load_price_cache()
+    cached_prices, prices_as_of, display_info = trader.load_price_cache()
     analysis_prices = _current_prices(_load_analysis())
     prices = {**cached_prices, **analysis_prices}
-    positions = trader.get_portfolio(prices or None)
-    return _render_portfolio(request, positions, prices_as_of=prices_as_of)
+    positions = trader.get_portfolio(prices or None, display_info or None)
+    gbpusd = cached_prices.get("__GBPUSD__")
+    return _render_portfolio(request, positions, prices_as_of=prices_as_of, gbpusd_rate=gbpusd)
 
 
 @app.get("/partials/history", response_class=HTMLResponse)
