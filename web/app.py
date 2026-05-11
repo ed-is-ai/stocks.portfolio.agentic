@@ -187,7 +187,9 @@ async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
         _, prices_as_of, _ = trader.load_price_cache()
         updated_positions = trader.refresh_portfolio_prices(gbp_prices, display_info)
         _logger.info(f"Refreshed {len(updated_positions)} positions successfully")
-        return _render_portfolio(request, updated_positions, prices_as_of=prices_as_of, gbpusd_rate=gbpusd)
+        cash_balance = trader.get_cash_balance()
+        trader.update_portfolio_snapshot(cash_balance)
+        return _render_portfolio(request, updated_positions, prices_as_of=prices_as_of, gbpusd_rate=gbpusd, cash_balance=cash_balance)
     except Exception as e:
         _logger.exception(f"Failed to refresh portfolio prices: {e}")
         cached_prices, prices_as_of, display_info = trader.load_price_cache()

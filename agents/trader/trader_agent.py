@@ -415,19 +415,13 @@ class TraderAgent(Agent):
 
         timestamp = datetime.now(timezone.utc).isoformat()
         investments_value = total_cost
+        fieldnames = ["timestamp", "total_value", "total_cost", "cash_balance", "investments_value"]
+        needs_header = not portfolio_csv.exists()
 
-        with open(portfolio_csv, "w", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "timestamp",
-                    "total_value",
-                    "total_cost",
-                    "cash_balance",
-                    "investments_value",
-                ],
-            )
-            writer.writeheader()
+        with open(portfolio_csv, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if needs_header:
+                writer.writeheader()
             writer.writerow(
                 {
                     "timestamp": timestamp,
