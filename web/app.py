@@ -230,16 +230,22 @@ async def refresh_data(request: Request) -> HTMLResponse:
 
 
 def _load_portfolio_history() -> dict:
-    """Return chart-ready dicts with labels, values, and costs from the value log."""
+    """Return chart-ready dicts with labels, values, costs, and cash from the value log."""
     if not _PORTFOLIO_VALUE_CSV.exists():
-        return {"labels": [], "values": [], "costs": []}
+        return {"labels": [], "values": [], "costs": [], "cash_values": []}
     with open(_PORTFOLIO_VALUE_CSV, newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     rows = rows[-180:]
+
+    def _cash(r: dict) -> float | None:
+        v = r.get("cash_balance")
+        return float(v) if v not in (None, "") else None
+
     return {
-        "labels": [r["timestamp"][:16].replace("T", " ") for r in rows],
-        "values": [float(r["total_value"]) for r in rows],
-        "costs":  [float(r["total_cost"])  for r in rows],
+        "labels":      [r["timestamp"][:16].replace("T", " ") for r in rows],
+        "values":      [float(r["total_value"]) for r in rows],
+        "costs":       [float(r["total_cost"])  for r in rows],
+        "cash_values": [_cash(r) for r in rows],
     }
 
 
@@ -351,6 +357,7 @@ def _render_portfolio(
             "chart_labels": json.dumps(chart_data["labels"]),
             "chart_values": json.dumps(chart_data["values"]),
             "chart_costs":  json.dumps(chart_data["costs"]),
+            "chart_cash":   json.dumps(chart_data["cash_values"]),
             "chart_points": len(chart_data["values"]),
             "chart_buys":   json.dumps(buy_vals),
             "chart_sells":  json.dumps(sell_vals),

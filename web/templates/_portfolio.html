@@ -44,6 +44,7 @@
   const labels   = {{ chart_labels     | safe }};
   const values   = {{ chart_values     | safe }};
   const costs    = {{ chart_costs      | safe }};
+  const cashVals = {{ chart_cash       | safe }};
   const buyVals  = {{ chart_buys       | safe }};
   const sellVals = {{ chart_sells      | safe }};
   const buyTips  = {{ chart_buy_tips   | safe }};
@@ -77,6 +78,17 @@
           fill: false,
           tension: 0,
           order: 4,
+        },
+        {
+          label: 'Cash',
+          data: cashVals,
+          borderColor: '#16a34a',
+          borderWidth: 1.5,
+          borderDash: [4, 3],
+          pointRadius: 0,
+          fill: false,
+          tension: 0,
+          order: 5,
         },
         {
           label: 'Buy',
