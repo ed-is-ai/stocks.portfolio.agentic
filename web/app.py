@@ -303,6 +303,7 @@ def _render_portfolio(
     positions: list,
     prices_as_of: str | None = None,
     gbpusd_rate: float | None = None,
+    cash_balance: float | None = None,
     error_message: str | None = None,
     status_code: int = 200,
 ) -> HTMLResponse:
@@ -315,18 +316,22 @@ def _render_portfolio(
         if stock and stock.analysis:
             pos.next_pivot = stock.analysis.entry_price
 
-    # Compute GBP-equivalent totals for summary cards
+    # Compute GBP-equivalent totals for summary cards (including cash)
     fx = gbpusd_rate or 1.35
     total_cost_gbp = sum(_to_gbp(p.total_cost, p.price_currency, fx) for p in positions)
+    if cash_balance is not None:
+        total_cost_gbp += cash_balance
     positions_with_value = [p for p in positions if p.current_value is not None]
     total_value_gbp = sum(
         _to_gbp(p.current_value, p.price_currency, fx)  # type: ignore[arg-type]
         for p in positions_with_value
     )
+    if cash_balance is not None:
+        total_value_gbp += cash_balance
     total_cost_gbp_valued = sum(
         _to_gbp(p.total_cost, p.price_currency, fx) for p in positions_with_value
     )
-    total_pnl_gbp = total_value_gbp - total_cost_gbp_valued
+    total_pnl_gbp = total_value_gbp - total_cost_gbp_valued - (cash_balance or 0)
 
     chart_data = _load_portfolio_history()
     buy_vals, sell_vals, buy_tips, sell_tips = _trade_markers(chart_data)
@@ -339,6 +344,7 @@ def _render_portfolio(
             "total_value_gbp": total_value_gbp,
             "total_pnl_gbp": total_pnl_gbp,
             "total_cost_gbp_valued": total_cost_gbp_valued,
+            "cash_balance": cash_balance,
             "prices_as_of": prices_as_of,
             "gbpusd_rate": gbpusd_rate,
             "error_message": error_message,
@@ -362,7 +368,11 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
     prices = {**cached_prices, **analysis_prices}
     positions = trader.get_portfolio(prices or None, display_info or None)
     gbpusd = cached_prices.get("__GBPUSD__")
-    return _render_portfolio(request, positions, prices_as_of=prices_as_of, gbpusd_rate=gbpusd)
+    cash_balance = trader.get_cash_balance()
+    return _render_portfolio(
+        request, positions,
+        prices_as_of=prices_as_of, gbpusd_rate=gbpusd, cash_balance=cash_balance,
+    )
 
 
 @app.get("/partials/history", response_class=HTMLResponse)

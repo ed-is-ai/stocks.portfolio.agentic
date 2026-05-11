@@ -44,6 +44,11 @@ CREATE TABLE IF NOT EXISTS price_cache (
     currency        TEXT DEFAULT 'GBP',
     original_price  REAL
 );
+CREATE TABLE IF NOT EXISTS account_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -91,7 +96,34 @@ class TraderAgent(Agent):
                     conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
                 except Exception:
                     pass
+            # Seed cash_balance from portfolio_value.csv if not yet stored
+            has_cash = conn.execute(
+                "SELECT 1 FROM account_state WHERE key='cash_balance'"
+            ).fetchone()
+            if not has_cash:
+                self._seed_cash_from_csv(conn)
             conn.commit()
+
+    def _seed_cash_from_csv(self, conn: sqlite3.Connection) -> None:
+        """Seed cash_balance from portfolio_value.csv on first startup."""
+        pv_csv = self.db_path.parent.parent.parent / "portfolio_value.csv"
+        if not pv_csv.exists():
+            return
+        try:
+            with open(pv_csv, newline="", encoding="utf-8") as fh:
+                rows = list(csv.DictReader(fh))
+            if rows and "cash_balance" in rows[-1]:
+                amount = float(rows[-1]["cash_balance"])
+                if amount > 0:
+                    from datetime import datetime, timezone
+                    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                    conn.execute(
+                        "INSERT OR IGNORE INTO account_state (key, value, updated_at)"
+                        " VALUES ('cash_balance', ?, ?)",
+                        (str(amount), updated_at),
+                    )
+        except Exception:
+            pass
 
     def record_buy(
         self,
@@ -524,6 +556,8 @@ class TraderAgent(Agent):
         conn.commit()
         conn.close()
 
+        if cash_balance > 0:
+            self.set_cash_balance(cash_balance)
         self.update_portfolio_snapshot(cash_balance)
 
         print(
@@ -580,6 +614,27 @@ class TraderAgent(Agent):
             if r[4] is not None
         }
         return prices, fetched_at, display_info
+
+    def set_cash_balance(self, amount: float) -> None:
+        """Persist the SIPP cash balance (Running Balance) to account_state."""
+        from datetime import datetime, timezone
+
+        updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO account_state (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                ("cash_balance", str(amount), updated_at),
+            )
+            conn.commit()
+
+    def get_cash_balance(self) -> float | None:
+        """Return the stored SIPP cash balance, or None if not yet imported."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT value FROM account_state WHERE key='cash_balance'"
+            ).fetchone()
+        return float(row[0]) if row else None
 
     def refresh_portfolio_prices(
         self,

@@ -271,6 +271,23 @@
         </td>
       </tr>
       {% endfor %}
+      {% if cash_balance %}
+      <tr>
+        <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">CASH</span></td>
+        <td>—</td>
+        <td>—</td>
+        <td><strong>£1.00</strong></td>
+        <td>£{{ "%.2f"|format(cash_balance) }}</td>
+        <td>£{{ "%.2f"|format(cash_balance) }}</td>
+        <td><span class="pos">£0.00</span></td>
+        <td><span class="pos">0.0%</span></td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+        <td></td>
+        <td></td>
+      </tr>
+      {% endif %}
     </tbody>
   </table>
 </div>
