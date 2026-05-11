@@ -56,7 +56,7 @@
 
 - [ ] 6.1 Verify web server restarts without errors
 - [ ] 6.2 Test refresh button in browser (manual QA)
-- [ ] 6.3 Commit changes with message: `feat(trader): add portfolio price refresh with yfinance`
+- [x] 6.3 Commit changes with message: `feat(trader): add portfolio price refresh with yfinance`
 - [ ] 6.4 Create PR with description of feature and testing steps
 - [x] 6.5 Verify type checks pass in CI
 - [x] 6.6 Verify formatter checks pass in CI
