@@ -310,6 +310,10 @@
     /* ── HTMX spinner ──────────────────────────────── */
     .spinner-border-sm { width: 1rem; height: 1rem; }
 
+    /* ── Spin animation ────────────────────────────── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin 1s linear infinite; }
+
     /* ── Modals ────────────────────────────────────── */
     .modal-content { border: none; border-radius: 0.5rem; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
     .modal-header { padding: 0.85rem 1.25rem; border-radius: calc(0.5rem - 1px) calc(0.5rem - 1px) 0 0; border-bottom: 1px solid rgba(255,255,255,0.15); }

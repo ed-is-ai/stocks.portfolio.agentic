@@ -71,6 +71,97 @@ async def partial_watchlist(request: Request) -> HTMLResponse:
     )
 
 
+@app.post("/api/portfolio/refresh", response_class=HTMLResponse)
+async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
+    """Fetch live prices from yfinance and return updated portfolio partial."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+    try:
+        import yfinance as yf
+
+        portfolio = trader.get_portfolio()
+        logger.info(f"Refreshing {len(portfolio)} positions")
+        if not portfolio:
+            return templates.TemplateResponse(
+                request, "_portfolio.html",
+                context={
+                    "positions": [],
+                    "chart_labels": json.dumps([]),
+                    "chart_values": json.dumps([]),
+                    "chart_costs": json.dumps([]),
+                    "chart_points": 0,
+                    "chart_buys": json.dumps([]),
+                    "chart_sells": json.dumps([]),
+                    "chart_buy_tips": json.dumps([]),
+                    "chart_sell_tips": json.dumps([]),
+                    "error_message": "No positions to refresh",
+                },
+                status_code=400,
+            )
+
+        tickers = [p.ticker for p in portfolio]
+        tickers_str = " ".join(tickers)
+        yf_data = yf.download(tickers_str, period="1d", progress=False)
+
+        prices = {}
+        if len(tickers) == 1:
+            if not yf_data.empty:
+                prices[tickers[0]] = round(float(yf_data["Close"].iloc[-1]), 2)
+        else:
+            for ticker in tickers:
+                if ticker in yf_data["Close"].columns:
+                    prices[ticker] = round(
+                        float(yf_data["Close"][ticker].iloc[-1]), 2
+                    )
+
+        updated_positions = trader.refresh_portfolio_prices(prices)
+        records = _load_analysis()
+        analysis_map = {r.ticker: r for r in records}
+        for pos in updated_positions:
+            stock = analysis_map.get(pos.ticker)
+            pos.exit_signal = _evaluator.evaluate(pos, stock)
+            if stock and stock.analysis:
+                pos.next_pivot = stock.analysis.entry_price
+
+        chart_data = _load_portfolio_history()
+        buy_vals, sell_vals, buy_tips, sell_tips = _trade_markers(chart_data)
+
+        logger.info(f"Refreshed {len(updated_positions)} positions successfully")
+        return templates.TemplateResponse(
+            request, "_portfolio.html",
+            context={
+                "positions": updated_positions,
+                "chart_labels": json.dumps(chart_data["labels"]),
+                "chart_values": json.dumps(chart_data["values"]),
+                "chart_costs": json.dumps(chart_data["costs"]),
+                "chart_points": len(chart_data["values"]),
+                "chart_buys": json.dumps(buy_vals),
+                "chart_sells": json.dumps(sell_vals),
+                "chart_buy_tips": json.dumps(buy_tips),
+                "chart_sell_tips": json.dumps(sell_tips),
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to refresh portfolio prices: {str(e)}")
+        return templates.TemplateResponse(
+            request, "_portfolio.html",
+            context={
+                "positions": [],
+                "chart_labels": json.dumps([]),
+                "chart_values": json.dumps([]),
+                "chart_costs": json.dumps([]),
+                "chart_points": 0,
+                "chart_buys": json.dumps([]),
+                "chart_sells": json.dumps([]),
+                "chart_buy_tips": json.dumps([]),
+                "chart_sell_tips": json.dumps([]),
+                "error_message": f"Failed to fetch prices: {str(e)}",
+            },
+            status_code=500,
+        )
+
+
 @app.post("/refresh-data", response_class=HTMLResponse)
 async def refresh_data(request: Request) -> HTMLResponse:
     """Refresh the analysis dataset by running the orchestrator once."""

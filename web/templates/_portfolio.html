@@ -4,6 +4,25 @@
   <span>No open positions. Go to <strong>Watchlist</strong> and click <strong>Buy</strong> to record a purchase.</span>
 </div>
 {% else %}
+
+<!-- Toolbar -->
+<div class="d-flex justify-content-between align-items-center mb-3 gap-2">
+  <div></div>
+  <button id="refreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-2" onclick="refreshPortfolioPrices()">
+    <i class="bi bi-arrow-clockwise" id="refreshIcon"></i>
+    <span id="refreshText">Refresh Prices</span>
+  </button>
+</div>
+
+{% if error_message %}
+<div class="alert alert-danger border-0 d-flex align-items-center gap-2 mb-3">
+  <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+  <span>{{ error_message }}</span>
+</div>
+{% endif %}
+
+{% endif %}
+{% if positions %}
 {% set total_cost = positions | sum(attribute='total_cost') %}
 {% set positions_with_value = positions | selectattr('current_value', 'ne', none) | list %}
 {% set total_value = positions_with_value | sum(attribute='current_value') %}
@@ -121,6 +140,38 @@
     }
   });
 })();
+</script>
+
+<script>
+async function refreshPortfolioPrices() {
+  const btn = document.getElementById('refreshBtn');
+  const icon = document.getElementById('refreshIcon');
+  const text = document.getElementById('refreshText');
+
+  btn.disabled = true;
+  icon.classList.add('spin');
+  text.textContent = 'Fetching...';
+
+  try {
+    const response = await fetch('/api/portfolio/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    if (response.ok) {
+      const html = await response.text();
+      document.getElementById('tab-content').innerHTML = html;
+    } else {
+      const html = await response.text();
+      document.getElementById('tab-content').innerHTML = html;
+    }
+  } catch (error) {
+    btn.disabled = false;
+    icon.classList.remove('spin');
+    text.textContent = 'Refresh Prices';
+    alert('Error: ' + error.message);
+  }
+}
 </script>
 {% endif %}
 

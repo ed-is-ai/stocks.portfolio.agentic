@@ -500,6 +500,48 @@ class TraderAgent(Agent):
         )
         return cash_balance
 
+    def refresh_portfolio_prices(
+        self, current_prices: dict[str, float]
+    ) -> list[Position]:
+        """Fetch live prices and recalculate portfolio metrics.
+
+        Takes a dict of current prices {ticker: price} and returns updated
+        Position objects with recalculated market value, unrealised P&L,
+        and profit targets. Handles missing prices gracefully.
+        """
+        import logging
+
+        logger = logging.getLogger(__name__)
+        logger.info("Starting portfolio price refresh")
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT ticker, action, shares, price, date, stop_loss, entry_price"
+                " FROM trades WHERE ticker NOT IN ('', 'n/a', 'N/A')"
+                " ORDER BY substr(date, 7, 4) || '/' || substr(date, 4, 2) || '/' || substr(date, 1, 2), id"
+            ).fetchall()
+
+        state = self._replay_trades(rows)
+        positions = []
+
+        missing_tickers = []
+        for ticker, s in state.items():
+            if s["shares"] > 0:
+                if ticker not in current_prices:
+                    missing_tickers.append(ticker)
+                    logger.warning(f"Missing price for ticker: {ticker}")
+
+        if missing_tickers:
+            logger.warning(f"Could not fetch prices for: {missing_tickers}")
+
+        for ticker, s in state.items():
+            if s["shares"] > 0:
+                pos = self._build_position(ticker, s, current_prices)
+                positions.append(pos)
+
+        logger.info(f"Portfolio refresh complete: {len(positions)} positions updated")
+        return positions
+
     def run(self, payload: Any = None) -> list[Position]:
         """Standalone agent interface — return current portfolio."""
         return self.get_portfolio()

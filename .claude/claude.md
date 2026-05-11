@@ -159,3 +159,50 @@ This document contains critical information about working with this codebase. Fo
    - Follow existing patterns
    - Document public APIs
    - Test thoroughly
+
+## Quarterly SIPP Portfolio Update
+
+The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pension) CSV imports. The process is automated in `TraderAgent.import_sipp()`.
+
+### Process
+
+1. **Export SIPP CSV** from your provider (interactive investor, AJ Bell, etc.)
+   - File format: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance
+   - Recommended filename: `merged.csv` in `data/processed/SIPP/`
+
+2. **Run the import** (typically done via portfolio tab in web UI):
+   ```python
+   from agents.trader.trader_agent import TraderAgent
+   agent = TraderAgent()
+   cash_balance = agent.import_sipp('data/processed/SIPP/merged.csv')
+   ```
+
+3. **Verify results**:
+   - Check portfolio count (should match actual holdings)
+   - Confirm cash balance matches account statement
+   - Review open positions and average cost basis
+
+### Key Import Logic
+
+- **Trades**: Only rows with valid Symbol field (not 'n/a') are imported as stock trades
+- **Exception**: HSBC GLOB funds use description matching; ticker is 'HSFWA'
+- **Cash flows**: Non-trade entries (contributions, tax relief, interest, dividends) stored separately in cash_flows table
+- **Date sorting**: Trades replayed chronologically (DD/MM/YYYY converted to YYYY/MM/DD for sorting)
+- **Cash position**: Final Running Balance column used as authoritative cash balance
+
+### Common Issues
+
+**Too many open positions (>10)?**
+- Check CSV for duplicate Symbol entries with different Sedol values
+- Ensure Symbol column is filled for all valid trades (not 'n/a')
+- Run with sorted CSV (chronological order, oldest first)
+
+**Negative shares in position?**
+- Indicates sells exceed buys for that ticker
+- Check CSV for over-sells or missing buy transactions
+- Add correcting transaction if confirmed closed
+
+**Cash balance mismatch?**
+- Verify final Running Balance in CSV matches account statement
+- Check for duplicate entries in cash_flows table (reference must be unique)
+- Ensure no data corruption in CSV (look for hidden characters)
