@@ -113,7 +113,15 @@ async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
             if series.empty:
                 return None
             val = float(series.iloc[-1])
-            return round(val, 2) if not math.isnan(val) else None
+            if math.isnan(val):
+                return None
+            price = round(val, 2)
+            try:
+                if yf.Ticker(yf_sym).fast_info.currency == "GBp":
+                    price = round(price / 100, 4)
+            except Exception:
+                logger.warning(f"Could not determine currency for {yf_sym}; using raw price")
+            return price
 
         prices: dict[str, float] = {}
         for t in tickers:
