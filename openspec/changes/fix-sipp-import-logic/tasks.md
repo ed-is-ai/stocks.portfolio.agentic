@@ -29,8 +29,8 @@
 
 - [x] 5.1 Clear existing trades.db (delete all from trades table, delete all from cash_flows if exists)
 - [x] 5.2 Re-import merged.csv using corrected logic
-- [x] 5.3 Verify: open positions count equals 7 (GOOGL, INTC, RIO, SGLN, SMT, WCOG, HSBC FTSE)
-- [x] 5.4 Verify: cash_balance matches SIPP Running Balance (GBP 46,700.57)
+- [x] 5.3 Verify: open positions count equals expected holdings
+- [x] 5.4 Verify: cash_balance matches SIPP Running Balance
 
 ## 6. Code Quality & Testing
 

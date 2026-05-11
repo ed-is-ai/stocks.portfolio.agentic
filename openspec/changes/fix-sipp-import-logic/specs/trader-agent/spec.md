@@ -4,14 +4,14 @@
 Trader Agent reads SIPP CSV export and imports stock transactions as trades while separately capturing cash flows. Trade filtering requires valid Symbol field (not 'n/a'); rows with Symbol='n/a' are routed to cash_flows table as dividends, contributions, or other cash movements.
 
 #### Scenario: Import SIPP stock trade with valid ticker
-- **WHEN** CSV row has valid `Symbol` (e.g., "GOOGL"), `Quantity > 0`, and Debit or Credit amount
+- **WHEN** CSV row has valid `Symbol` (e.g., "STOCK_A"), `Quantity > 0`, and Debit or Credit amount
 - **THEN** Trader Agent:
-  - Creates a trade record: ticker=GOOGL, action=BUY (if Debit) or SELL (if Credit)
+  - Creates a trade record: ticker=STOCK_A, action=BUY (if Debit) or SELL (if Credit)
   - Stores: date, shares, price per share
   - Writes to trades database
 
 #### Scenario: Skip non-trade CSV rows with Symbol='n/a'
-- **WHEN** CSV row has `Symbol='n/a'` with Quantity (e.g., "87 UNILEVER Del") and Credit amount
+- **WHEN** CSV row has `Symbol='n/a'` with Quantity and Credit amount
 - **THEN** Trader Agent:
   - Does NOT create a trade record
   - Classifies as dividend/other cash flow based on Description
@@ -37,8 +37,7 @@ Trader Agent calculates total portfolio value using open positions (from valid t
   - Total portfolio = sum(position costs) + Running Balance
   - Writes to portfolio_value.csv: timestamp, total_value, total_cost, cash_balance, investments_value
 
-#### Scenario: Portfolio reflects 7 open positions not 96
+#### Scenario: Portfolio reflects correct number of open positions
 - **WHEN** SIPP CSV is imported with correct trade filtering
-- **THEN** open positions count equals actual holdings (7 in user account)
-- **AND** positions match expected tickers: GOOGL, INTC, RIO, SGLN, SMT, WCOG, HSBC FTSE
-
+- **THEN** open positions count equals actual holdings (not inflated by phantom positions)
+- **AND** positions match only tickers with net positive share count after full trade replay

@@ -45,7 +45,7 @@ The system SHALL only import rows as trades where the Symbol field contains a va
 - **AND** instead routes it to cash_flows based on the Description and Amount fields
 
 #### Scenario: Import only valid ticker trades
-- **WHEN** a CSV row has a valid `Symbol` (e.g., "GOOGL", "INTC") AND `Quantity > 0` AND Debit/Credit
+- **WHEN** a CSV row has a valid `Symbol` (not 'n/a') AND `Quantity > 0` AND Debit/Credit
 - **THEN** the system imports it as a trade (BUY if Debit, SELL if Credit)
 - **AND** open positions are calculated only from these valid ticker trades
 
