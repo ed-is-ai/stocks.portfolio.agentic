@@ -35,6 +35,17 @@ trader = TraderAgent(name="TraderAgent")
 _evaluator = ExitEvaluator()
 
 
+_TICKER_ALIASES_JSON = _ROOT / "data" / "ticker_aliases.json"
+
+
+def _load_ticker_aliases() -> dict[str, str]:
+    """Load internal-ticker → Yahoo Finance symbol mappings from data/ticker_aliases.json."""
+    try:
+        return json.loads(_TICKER_ALIASES_JSON.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+
+
 def _load_analysis() -> list[StockRecord]:
     """Load latest analysis results, returning empty list on any error."""
     try:
@@ -83,82 +94,51 @@ async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
         portfolio = trader.get_portfolio()
         logger.info(f"Refreshing {len(portfolio)} positions")
         if not portfolio:
-            return templates.TemplateResponse(
-                request, "_portfolio.html",
-                context={
-                    "positions": [],
-                    "chart_labels": json.dumps([]),
-                    "chart_values": json.dumps([]),
-                    "chart_costs": json.dumps([]),
-                    "chart_points": 0,
-                    "chart_buys": json.dumps([]),
-                    "chart_sells": json.dumps([]),
-                    "chart_buy_tips": json.dumps([]),
-                    "chart_sell_tips": json.dumps([]),
-                    "error_message": "No positions to refresh",
-                },
-                status_code=400,
-            )
+            return _render_portfolio(request, [], error_message="No positions to refresh", status_code=400)
+
+        import math
 
         tickers = [p.ticker for p in portfolio]
-        tickers_str = " ".join(tickers)
-        yf_data = yf.download(tickers_str, period="1d", progress=False)
+        aliases = _load_ticker_aliases()
 
-        prices = {}
-        if len(tickers) == 1:
-            if not yf_data.empty:
-                prices[tickers[0]] = round(float(yf_data["Close"].iloc[-1]), 2)
-        else:
-            for ticker in tickers:
-                if ticker in yf_data["Close"].columns:
-                    prices[ticker] = round(
-                        float(yf_data["Close"][ticker].iloc[-1]), 2
-                    )
+        def _fetch_last_price(yf_sym: str) -> float | None:
+            """Fetch the most recent non-NaN closing price for a single yfinance symbol."""
+            data = yf.download(yf_sym, period="5d", progress=False, auto_adjust=True)
+            if data.empty:
+                return None
+            # For a single ticker yfinance may return MultiIndex or flat columns
+            close = data["Close"] if "Close" in data.columns else data.iloc[:, 0]
+            series = close.iloc[:, 0] if hasattr(close, "columns") else close
+            series = series.dropna()
+            if series.empty:
+                return None
+            val = float(series.iloc[-1])
+            return round(val, 2) if not math.isnan(val) else None
 
+        prices: dict[str, float] = {}
+        for t in tickers:
+            yf_sym = aliases.get(t, t)
+            price = _fetch_last_price(yf_sym)
+            if (price is None or price < 0.01) and t not in aliases:
+                # retry as London-listed; US match may be a penny-stock false positive
+                uk_price = _fetch_last_price(f"{t}.L")
+                if uk_price is not None and uk_price >= 0.01:
+                    price = uk_price
+            if price is not None and price >= 0.01:
+                prices[t] = price
+
+        trader.save_price_cache(prices)
+        _, prices_as_of = trader.load_price_cache()
         updated_positions = trader.refresh_portfolio_prices(prices)
-        records = _load_analysis()
-        analysis_map = {r.ticker: r for r in records}
-        for pos in updated_positions:
-            stock = analysis_map.get(pos.ticker)
-            pos.exit_signal = _evaluator.evaluate(pos, stock)
-            if stock and stock.analysis:
-                pos.next_pivot = stock.analysis.entry_price
-
-        chart_data = _load_portfolio_history()
-        buy_vals, sell_vals, buy_tips, sell_tips = _trade_markers(chart_data)
-
         logger.info(f"Refreshed {len(updated_positions)} positions successfully")
-        return templates.TemplateResponse(
-            request, "_portfolio.html",
-            context={
-                "positions": updated_positions,
-                "chart_labels": json.dumps(chart_data["labels"]),
-                "chart_values": json.dumps(chart_data["values"]),
-                "chart_costs": json.dumps(chart_data["costs"]),
-                "chart_points": len(chart_data["values"]),
-                "chart_buys": json.dumps(buy_vals),
-                "chart_sells": json.dumps(sell_vals),
-                "chart_buy_tips": json.dumps(buy_tips),
-                "chart_sell_tips": json.dumps(sell_tips),
-            },
-        )
+        return _render_portfolio(request, updated_positions, prices_as_of=prices_as_of)
     except Exception as e:
         logger.error(f"Failed to refresh portfolio prices: {str(e)}")
-        return templates.TemplateResponse(
-            request, "_portfolio.html",
-            context={
-                "positions": [],
-                "chart_labels": json.dumps([]),
-                "chart_values": json.dumps([]),
-                "chart_costs": json.dumps([]),
-                "chart_points": 0,
-                "chart_buys": json.dumps([]),
-                "chart_sells": json.dumps([]),
-                "chart_buy_tips": json.dumps([]),
-                "chart_sell_tips": json.dumps([]),
-                "error_message": f"Failed to fetch prices: {str(e)}",
-            },
-            status_code=500,
+        cached_positions = trader.get_portfolio()
+        _, prices_as_of = trader.load_price_cache()
+        return _render_portfolio(
+            request, cached_positions, prices_as_of=prices_as_of,
+            error_message=f"Failed to fetch prices: {e}", status_code=500,
         )
 
 
@@ -256,12 +236,16 @@ def _trade_markers(chart_data: dict) -> tuple[list, list, list, list]:
     return buy_vals, sell_vals, buy_tips, sell_tips
 
 
-@app.get("/partials/portfolio", response_class=HTMLResponse)
-async def partial_portfolio(request: Request) -> HTMLResponse:
+def _render_portfolio(
+    request: Request,
+    positions: list,
+    prices_as_of: str | None = None,
+    error_message: str | None = None,
+    status_code: int = 200,
+) -> HTMLResponse:
+    """Render the portfolio partial with chart data."""
     records = _load_analysis()
-    prices = _current_prices(records)
     analysis_map = {r.ticker: r for r in records}
-    positions = trader.get_portfolio(prices)
     for pos in positions:
         stock = analysis_map.get(pos.ticker)
         pos.exit_signal = _evaluator.evaluate(pos, stock)
@@ -273,6 +257,8 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
         request, "_portfolio.html",
         context={
             "positions": positions,
+            "prices_as_of": prices_as_of,
+            "error_message": error_message,
             "chart_labels": json.dumps(chart_data["labels"]),
             "chart_values": json.dumps(chart_data["values"]),
             "chart_costs":  json.dumps(chart_data["costs"]),
@@ -282,7 +268,17 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
             "chart_buy_tips":  json.dumps(buy_tips),
             "chart_sell_tips": json.dumps(sell_tips),
         },
+        status_code=status_code,
     )
+
+
+@app.get("/partials/portfolio", response_class=HTMLResponse)
+async def partial_portfolio(request: Request) -> HTMLResponse:
+    cached_prices, prices_as_of = trader.load_price_cache()
+    analysis_prices = _current_prices(_load_analysis())
+    prices = {**cached_prices, **analysis_prices}
+    positions = trader.get_portfolio(prices or None)
+    return _render_portfolio(request, positions, prices_as_of=prices_as_of)
 
 
 @app.get("/partials/history", response_class=HTMLResponse)

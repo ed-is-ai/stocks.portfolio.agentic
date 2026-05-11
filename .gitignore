@@ -34,6 +34,9 @@ tmp_import_check.py
 data/*/*
 reports/
 
+# Ticker alias mapping (personal portfolio config - not for version control)
+data/ticker_aliases.json
+
 # Portfolio & Runtime Data (contains personal investment details)
 portfolio_value.csv
 pipeline_runs.csv

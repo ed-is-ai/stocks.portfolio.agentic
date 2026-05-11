@@ -640,6 +640,30 @@
       refreshFeedback.textContent = 'Refresh failed. See console for details.';
     }
   });
+
+  async function refreshPortfolioPrices() {
+    const btn = document.getElementById('refreshBtn');
+    const icon = document.getElementById('refreshIcon');
+    const text = document.getElementById('refreshText');
+
+    btn.disabled = true;
+    icon.classList.add('spin');
+    text.textContent = 'Fetching...';
+
+    try {
+      const response = await fetch('/api/portfolio/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      const html = await response.text();
+      document.getElementById('tab-content').innerHTML = html;
+    } catch (error) {
+      if (btn) { btn.disabled = false; }
+      if (icon) { icon.classList.remove('spin'); }
+      if (text) { text.textContent = 'Refresh Prices'; }
+      alert('Failed to fetch prices: ' + error.message);
+    }
+  }
 </script>
 </body>
 </html>

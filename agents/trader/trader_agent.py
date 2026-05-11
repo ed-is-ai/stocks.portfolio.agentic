@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS cash_flows (
     description TEXT,
     reference   TEXT UNIQUE
 );
+CREATE TABLE IF NOT EXISTS price_cache (
+    ticker      TEXT PRIMARY KEY,
+    price       REAL NOT NULL,
+    fetched_at  TEXT NOT NULL
+);
 """
 
 
@@ -499,6 +504,31 @@ class TraderAgent(Agent):
             f"{cash_count} cash flows. Cash balance: GBP {cash_balance:,.2f}"
         )
         return cash_balance
+
+    def save_price_cache(self, prices: dict[str, float]) -> None:
+        """Persist fetched prices to the DB with a UTC timestamp."""
+        from datetime import datetime, timezone
+
+        fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        with self._conn() as conn:
+            conn.executemany(
+                "INSERT INTO price_cache (ticker, price, fetched_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(ticker) DO UPDATE SET price=excluded.price, fetched_at=excluded.fetched_at",
+                [(t, p, fetched_at) for t, p in prices.items()],
+            )
+            conn.commit()
+
+    def load_price_cache(self) -> tuple[dict[str, float], str | None]:
+        """Return (prices dict, fetched_at string) from the DB, or ({}, None) if empty."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT ticker, price, fetched_at FROM price_cache"
+            ).fetchall()
+        if not rows:
+            return {}, None
+        prices = {r[0]: r[1] for r in rows}
+        fetched_at = rows[0][2]
+        return prices, fetched_at
 
     def refresh_portfolio_prices(
         self, current_prices: dict[str, float]
