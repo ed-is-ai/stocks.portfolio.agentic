@@ -16,4 +16,4 @@
 
 ## 4. Commit
 
-- [ ] 4.1 Commit: `feat(portfolio): add cash line to portfolio value chart`
+- [x] 4.1 Commit: `feat(portfolio): add cash line to portfolio value chart`

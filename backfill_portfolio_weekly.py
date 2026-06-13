@@ -105,6 +105,9 @@ if not trades:
     print("No trades found.")
     exit(0)
 
+# Sort by parsed date — SQL sorts DD/MM/YYYY as strings which is not chronological
+trades.sort(key=lambda x: x[0])
+
 first_trade_date = trades[0][0]
 today = date.today()
 
