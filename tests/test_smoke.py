@@ -18,13 +18,26 @@ from ms_agent_framework import AgentApp
 class TestSmokeTests:
     """Smoke tests for the complete pipeline."""
 
-    @patch('agents.scanner.scanner_agent.fetch_finviz_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk', return_value=[])
+    @patch('agents.scanner.scanner_agent._fetch_fundamentals',
+           return_value={"eps_growth": None, "annual_eps_growth": None,
+                         "roe": None, "inst_ownership_pct": None,
+                         "pe_ratio": None, "inst_count": None, "sector": None})
     @patch('agents.scanner.scanner_agent.fetch_vcp_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent._congress_client')
+    @patch('agents.analyst.analyst_agent.AnalystAgent.get_llm_client',
+           return_value=None)
     @patch('yfinance.download')
-    def test_full_pipeline_execution(self, mock_download, _mock_vcp, _mock_fvz):
+    def test_full_pipeline_execution(
+        self, mock_download, _mock_llm, mock_congress, _mock_vcp, _mock_fund,
+        _mock_tv_uk, _mock_tv
+    ):
         """Test that the full pipeline runs without errors."""
         import tempfile
         import orchestrator
+
+        mock_congress.get_stats.return_value = None
 
         # Mock yfinance to return sample data
         import pandas as pd
@@ -72,11 +85,23 @@ class TestSmokeTests:
                 assert 'analysis' in analysis_data[0]
                 assert 'score' in analysis_data[0]['analysis']
 
-    @patch('agents.scanner.scanner_agent.fetch_finviz_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk', return_value=[])
+    @patch('agents.scanner.scanner_agent._fetch_fundamentals',
+           return_value={"eps_growth": None, "annual_eps_growth": None,
+                         "roe": None, "inst_ownership_pct": None,
+                         "pe_ratio": None, "inst_count": None, "sector": None})
     @patch('agents.scanner.scanner_agent.fetch_vcp_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent._congress_client')
+    @patch('agents.analyst.analyst_agent.AnalystAgent.get_llm_client',
+           return_value=None)
     @patch('yfinance.download')
-    def test_agent_chaining(self, mock_download, _mock_vcp, _mock_fvz):
+    def test_agent_chaining(
+        self, mock_download, _mock_llm, mock_congress, _mock_vcp, _mock_fund,
+        _mock_tv_uk, _mock_tv
+    ):
         """Test that agents chain correctly through AgentApp."""
+        mock_congress.get_stats.return_value = None
         # Mock yfinance
         import pandas as pd
         dates = pd.date_range(start='2023-01-01', periods=100, freq='D')

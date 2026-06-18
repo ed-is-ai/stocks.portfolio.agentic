@@ -35,6 +35,7 @@ class TestAlertAgent:
                 score=9 - i,  # Scores: 9, 8, 7
                 stage="Stage 2",
                 entry_zone="approaching",
+                fresh_breakout=True,
                 strengths=["Strong momentum"],
                 risks=[],
                 summary="High score stock"
@@ -102,27 +103,32 @@ class TestAlertAgent:
             assert agent.should_alert(stock, mock_conn) is False
 
     def test_should_alert_boundary_cases(self):
-        """Test boundary cases for alert threshold."""
+        """Test that alerts fire on breakout events, not raw score."""
         agent = AlertAgent()
 
-        # Score exactly 8 - should alert
-        analysis = StockAnalysis(
-            score=8, stage="Stage 2", entry_zone="approaching",
-            strengths=[], risks=[], summary="Test"
-        )
         scan = StockScan(
             ticker="TEST", as_of="2024-01-01", price=100.0, volume=1000000,
             rel_volume=1.0, high_52w=120.0, low_52w=80.0, pct_from_52w_high=-10.0, pct_change_week=0.0
         )
+        mock_conn = MagicMock()
+        mock_conn.execute.return_value.fetchone.return_value = None
+
+        # Fresh breakout - should alert
+        analysis = StockAnalysis(
+            score=8, stage="Stage 2", entry_zone="approaching",
+            fresh_breakout=True, strengths=[], risks=[], summary="Test"
+        )
         stock = StockRecord.model_validate({
             **scan.model_dump(), "analysis": analysis.model_dump()
         })
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = None
         assert agent.should_alert(stock, mock_conn) is True
 
-        # Score 6 - below threshold, should not alert
-        analysis.score = 6
+        # No breakout - should not alert (even with the same score)
+        analysis = StockAnalysis(
+            score=8, stage="Stage 2", entry_zone="approaching",
+            fresh_breakout=False, multiyear_breakout=False,
+            strengths=[], risks=[], summary="Test"
+        )
         stock = StockRecord.model_validate({
             **scan.model_dump(), "analysis": analysis.model_dump()
         })
@@ -183,17 +189,13 @@ class TestAlertAgent:
         # Should not attempt to send email
         # (We can't easily test this without mocking, but at least verify no exceptions)
 
-    @patch('agents.alert.alert_agent.AlertAgent.send_email')
-    def test_run_method_with_alerts(self, mock_send_email, tmp_path, sample_high_score_stocks):
-        """Test run method with alerts triggered."""
-        email_cfg = EmailConfig(
-            host='localhost', port=1025, user='user@example.com',
-            password='pass', recipient='recipient@example.com')
-        agent = AlertAgent(email_config=email_cfg, db_path=str(tmp_path / "alerts.db"))
-        agent.run(sample_high_score_stocks)
+    def test_run_method_with_alerts(self, tmp_path, sample_high_score_stocks):
+        """Test run method queues a buy alert per breakout stock."""
+        agent = AlertAgent(db_path=str(tmp_path / "alerts.db"))
+        count = agent.run(sample_high_score_stocks)
 
-        assert mock_send_email.call_count == len(sample_high_score_stocks)
-        assert mock_send_email.call_args[0][0].startswith('Momentum Alert: HIGH')
+        assert count == len(sample_high_score_stocks)
+        assert len(agent._buy_alerts) == len(sample_high_score_stocks)
 
     def test_database_operations(self, sample_high_score_stocks):
         """Test database alert tracking."""
