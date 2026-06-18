@@ -254,6 +254,11 @@ class TraderAgent(Agent):
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_trade(r) for r in rows]
 
+    def get_latest_trade(self, ticker: str) -> Trade | None:
+        """Return the most recent trade for a ticker, or None if none exist."""
+        history = self.get_trade_history(ticker)
+        return history[0] if history else None
+
     def get_portfolio(
         self,
         current_prices: dict[str, float] | None = None,

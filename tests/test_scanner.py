@@ -89,9 +89,21 @@ class TestScannerAgent:
         assert all(r.price > 0 for r in results)
         assert all(r.volume > 0 for r in results)
 
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk', return_value=[])
+    @patch('agents.scanner.scanner_agent._fetch_fundamentals',
+           return_value={"eps_growth": None, "annual_eps_growth": None,
+                         "roe": None, "inst_ownership_pct": None,
+                         "pe_ratio": None, "inst_count": None, "sector": None})
+    @patch('agents.scanner.scanner_agent.fetch_vcp_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent._congress_client')
     @patch('yfinance.download')
-    def test_run_method(self, mock_download):
+    def test_run_method(
+        self, mock_download, mock_congress, _mock_vcp, _mock_fund,
+        _mock_tv_uk, _mock_tv
+    ):
         """Test the run method."""
+        mock_congress.get_stats.return_value = None
         # Mock yfinance response
         dates = pd.date_range(start='2023-01-01', periods=100, freq='D')
         mock_download.return_value = pd.DataFrame({
@@ -110,8 +122,19 @@ class TestScannerAgent:
         assert isinstance(results[0].price, float)
         assert results[0].price > 0
 
-    def test_run_method_default_watchlist(self):
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk', return_value=[])
+    @patch('agents.scanner.scanner_agent._fetch_fundamentals',
+           return_value={"eps_growth": None, "annual_eps_growth": None,
+                         "roe": None, "inst_ownership_pct": None,
+                         "pe_ratio": None, "inst_count": None, "sector": None})
+    @patch('agents.scanner.scanner_agent.fetch_vcp_screener_tickers', return_value=[])
+    @patch('agents.scanner.scanner_agent._congress_client')
+    def test_run_method_default_watchlist(
+        self, mock_congress, _mock_vcp, _mock_fund, _mock_tv_uk, _mock_tv
+    ):
         """Test run method with default watchlist."""
+        mock_congress.get_stats.return_value = None
         agent = ScannerAgent()
 
         # This would normally fetch data, but we'll just check it doesn't crash
