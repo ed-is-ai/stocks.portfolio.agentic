@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS trades (
     date        TEXT NOT NULL,
     notes       TEXT NOT NULL DEFAULT '',
     stop_loss   REAL,
-    entry_price REAL
+    entry_price REAL,
+    reference   TEXT
 );
 CREATE TABLE IF NOT EXISTS cash_flows (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,11 +87,18 @@ class TraderAgent(Agent):
     def _init_db(self) -> None:
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
-            for col_def in ("stop_loss REAL", "entry_price REAL"):
+            for col_def in ("stop_loss REAL", "entry_price REAL", "reference TEXT"):
                 try:
                     conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
                 except Exception:
                     pass
+            try:
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_reference "
+                    "ON trades(reference) WHERE reference IS NOT NULL"
+                )
+            except Exception:
+                pass
             for col_def in ("currency TEXT DEFAULT 'GBP'", "original_price REAL"):
                 try:
                     conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
@@ -116,7 +124,10 @@ class TraderAgent(Agent):
                 amount = float(rows[-1]["cash_balance"])
                 if amount > 0:
                     from datetime import datetime, timezone
-                    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+                    updated_at = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%d %H:%M UTC"
+                    )
                     conn.execute(
                         "INSERT OR IGNORE INTO account_state (key, value, updated_at)"
                         " VALUES ('cash_balance', ?, ?)",
@@ -420,7 +431,13 @@ class TraderAgent(Agent):
 
         timestamp = datetime.now(timezone.utc).isoformat()
         investments_value = total_cost
-        fieldnames = ["timestamp", "total_value", "total_cost", "cash_balance", "investments_value"]
+        fieldnames = [
+            "timestamp",
+            "total_value",
+            "total_cost",
+            "cash_balance",
+            "investments_value",
+        ]
         needs_header = not portfolio_csv.exists()
 
         with open(portfolio_csv, "a", newline="") as f:
@@ -505,9 +522,19 @@ class TraderAgent(Agent):
                             if action:
                                 ticker = symbol.upper() if is_trade else "HSFWA"
                                 conn.execute(
-                                    "INSERT INTO trades (ticker, action, shares, price, date, notes) "
-                                    "VALUES (?, ?, ?, ?, ?, ?)",
-                                    (ticker, action, shares, price, date, ""),
+                                    "INSERT OR IGNORE INTO trades "
+                                    "(ticker, action, shares, price, date, notes, "
+                                    "reference) "
+                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    (
+                                        ticker,
+                                        action,
+                                        shares,
+                                        price,
+                                        date,
+                                        "",
+                                        reference or None,
+                                    ),
                                 )
                                 if action == "BUY":
                                     buy_count += 1
@@ -608,9 +635,7 @@ class TraderAgent(Agent):
         prices = {r[0]: r[1] for r in rows}
         fetched_at = rows[0][2]
         display_info: dict[str, tuple[float, str]] = {
-            r[0]: (r[4], r[3] or "GBP")
-            for r in rows
-            if r[4] is not None
+            r[0]: (r[4], r[3] or "GBP") for r in rows if r[4] is not None
         }
         return prices, fetched_at, display_info
 
@@ -663,7 +688,8 @@ class TraderAgent(Agent):
         positions = []
 
         missing_tickers = [
-            ticker for ticker, s in state.items()
+            ticker
+            for ticker, s in state.items()
             if s["shares"] > 0 and ticker not in current_prices
         ]
         if missing_tickers:
