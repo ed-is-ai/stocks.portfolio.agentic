@@ -52,3 +52,25 @@ def test_correct_latest_trade(tmp_path: Path) -> None:
     assert latest.shares == 4.0
     assert latest.price == 105.0
     assert latest.notes == "Updated quantity and price"
+
+
+def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    agent.import_sipp(csv_path)
+    agent.import_sipp(csv_path)  # re-import must not duplicate
+
+    portfolio = agent.get_portfolio()
+    assert len(portfolio) == 1
+    assert portfolio[0].ticker == "AAPL"
+    assert portfolio[0].shares == 10.0  # not 20.0
