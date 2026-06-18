@@ -25,9 +25,9 @@
 
 ## 3. Phase 3 — Split schemas
 
-- [ ] 3.1 Create `app/schemas/{scan,record,trade}.py` and move the Pydantic models out of `models.py`
-- [ ] 3.2 Make `models.py` re-export from `app.schemas.*` for backward compatibility
-- [ ] 3.3 `pyrefly check` + `uv run pytest` green; commit `refactor(schemas): split models.py into app/schemas with shim`
+- [x] 3.1 Create `app/schemas/{scan,record,trade}.py` and move the Pydantic models out of `models.py`
+- [x] 3.2 Make `models.py` re-export from `app.schemas.*` for backward compatibility
+- [x] 3.3 `pyrefly check` + `uv run pytest` green; commit `refactor(schemas): split models.py into app/schemas with shim`
 
 ## 4. Phase 4 — Services + thin API
 

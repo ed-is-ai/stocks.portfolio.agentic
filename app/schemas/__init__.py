@@ -1,8 +1,7 @@
-"""Backward-compatibility shim — models moved to ``app.schemas``.
+"""Schema layer — Pydantic models (not ORM).
 
-Import from ``app.schemas`` (or its submodules) in new code. This module
-re-exports the schema classes so existing ``from models import ...`` keeps
-working during the layered-architecture migration.
+Split by concern: ``scan`` (raw scan + scoring + analysis), ``record`` (the
+composed scan+analysis record), and ``trade`` (portfolio/trading models).
 """
 
 from app.schemas.record import StockRecord
