@@ -8,31 +8,29 @@ Run with:
 import csv
 import json
 import logging
-import os
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-# Allow imports from project root regardless of working directory
-_ROOT = Path(__file__).parent.parent
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
-
-from agents.analyst.exit_evaluator import ExitEvaluator  # noqa: E402
-from agents.trader.trader_agent import TraderAgent  # noqa: E402
-from models import StockRecord  # noqa: E402
-
-_ANALYSIS_JSON = _ROOT / "agents" / "analyst" / "analysis_results.json"
-_RUN_LOG_CSV = _ROOT / "pipeline_runs.csv"
-_PORTFOLIO_VALUE_CSV = _ROOT / "portfolio_value.csv"
+from agents.analyst.exit_evaluator import ExitEvaluator
+from agents.trader.trader_agent import TraderAgent
+from app.core import config
+from app.core.config import (
+    ANALYSIS_JSON as _ANALYSIS_JSON,
+    PIPELINE_RUNS_CSV as _RUN_LOG_CSV,
+    PORTFOLIO_VALUE_CSV as _PORTFOLIO_VALUE_CSV,
+    ROOT_DIR as _ROOT,
+    TEMPLATES_DIR as _TEMPLATES_DIR,
+    TICKER_ALIASES_JSON as _TICKER_ALIASES_JSON,
+)
+from models import StockRecord
 
 app = FastAPI(title="Stock Trader")
-templates = Jinja2Templates(directory=str(_ROOT / "web" / "templates"))
+templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
 trader = TraderAgent(name="TraderAgent")
 _evaluator = ExitEvaluator()
 
@@ -45,16 +43,13 @@ def require_local_or_token(request: Request) -> None:
     allowed. When it is set, a matching ``X-Auth-Token`` header is also
     accepted from any host. Anything else gets HTTP 403.
     """
-    token = os.getenv("APP_AUTH_TOKEN")
+    token = config.APP_AUTH_TOKEN()
     if token and request.headers.get("X-Auth-Token") == token:
         return
     client_host = request.client.host if request.client else None
     if client_host in {"127.0.0.1", "::1", "localhost"}:
         return
     raise HTTPException(status_code=403, detail="Forbidden")
-
-
-_TICKER_ALIASES_JSON = _ROOT / "data" / "ticker_aliases.json"
 
 
 def _load_ticker_aliases() -> dict[str, str]:
@@ -69,6 +64,7 @@ def _fetch_gbpusd_rate() -> float | None:
     """Fetch live GBP/USD rate from yfinance; return None on failure."""
     try:
         import yfinance as yf
+
         return float(yf.Ticker("GBPUSD=X").fast_info.last_price)
     except Exception:
         return None
@@ -106,6 +102,7 @@ def _current_prices(records: list[StockRecord]) -> dict[str, float]:
 # Main page
 # ---------------------------------------------------------------------------
 
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html")
@@ -115,12 +112,14 @@ async def index(request: Request) -> HTMLResponse:
 # htmx partials
 # ---------------------------------------------------------------------------
 
+
 @app.get("/partials/watchlist", response_class=HTMLResponse)
 async def partial_watchlist(request: Request) -> HTMLResponse:
     records = _load_analysis()
     portfolio_tickers = {p.ticker for p in trader.get_portfolio()}
     return templates.TemplateResponse(
-        request, "_watchlist.html",
+        request,
+        "_watchlist.html",
         context={"records": records, "portfolio_tickers": portfolio_tickers},
     )
 
@@ -128,9 +127,7 @@ async def partial_watchlist(request: Request) -> HTMLResponse:
 _logger = logging.getLogger(__name__)
 
 
-def _fetch_price_gbp(
-    yf_sym: str, gbpusd: float
-) -> tuple[float, float, str] | None:
+def _fetch_price_gbp(yf_sym: str, gbpusd: float) -> tuple[float, float, str] | None:
     """Fetch the most recent closing price for a yfinance symbol.
 
     Returns (gbp_price, original_price, currency_code) or None on failure.
@@ -195,11 +192,15 @@ async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
         portfolio = trader.get_portfolio()
         _logger.info(f"Refreshing {len(portfolio)} positions")
         if not portfolio:
-            return _render_portfolio(request, [], error_message="No positions to refresh", status_code=400)
+            return _render_portfolio(
+                request, [], error_message="No positions to refresh", status_code=400
+            )
 
         gbpusd = _get_gbpusd_rate()
         tickers = [p.ticker for p in portfolio]
-        gbp_prices, display_info = _fetch_all_prices(tickers, _load_ticker_aliases(), gbpusd)
+        gbp_prices, display_info = _fetch_all_prices(
+            tickers, _load_ticker_aliases(), gbpusd
+        )
 
         trader.save_price_cache(gbp_prices, display_info)
         _, prices_as_of, _ = trader.load_price_cache()
@@ -207,20 +208,35 @@ async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
         _logger.info(f"Refreshed {len(updated_positions)} positions successfully")
         cash_balance = trader.get_cash_balance()
         trader.update_portfolio_snapshot(cash_balance)
-        return _render_portfolio(request, updated_positions, prices_as_of=prices_as_of, gbpusd_rate=gbpusd, cash_balance=cash_balance)
+        return _render_portfolio(
+            request,
+            updated_positions,
+            prices_as_of=prices_as_of,
+            gbpusd_rate=gbpusd,
+            cash_balance=cash_balance,
+        )
     except Exception as e:
         _logger.exception(f"Failed to refresh portfolio prices: {e}")
         cached_prices, prices_as_of, display_info = trader.load_price_cache()
-        cached_positions = trader.get_portfolio(cached_prices or None, display_info or None)
+        cached_positions = trader.get_portfolio(
+            cached_prices or None, display_info or None
+        )
         gbpusd = cached_prices.get("__GBPUSD__")
         return _render_portfolio(
-            request, cached_positions, prices_as_of=prices_as_of,
-            gbpusd_rate=gbpusd, error_message=f"Failed to fetch prices: {e}", status_code=500,
+            request,
+            cached_positions,
+            prices_as_of=prices_as_of,
+            gbpusd_rate=gbpusd,
+            error_message=f"Failed to fetch prices: {e}",
+            status_code=500,
         )
 
 
-@app.post("/refresh-data", response_class=HTMLResponse,
-          dependencies=[Depends(require_local_or_token)])
+@app.post(
+    "/refresh-data",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
 async def refresh_data(request: Request) -> HTMLResponse:
     """Refresh the analysis dataset by running the orchestrator once."""
     import asyncio
@@ -236,10 +252,13 @@ async def refresh_data(request: Request) -> HTMLResponse:
     records = _load_analysis()
     portfolio_tickers = {p.ticker for p in trader.get_portfolio()}
     refresh_success = result.returncode == 0
-    refresh_status = "Data refreshed successfully" if refresh_success else "Data refresh failed"
+    refresh_status = (
+        "Data refreshed successfully" if refresh_success else "Data refresh failed"
+    )
     refresh_details = (result.stdout or result.stderr).strip()
     return templates.TemplateResponse(
-        request, "_watchlist.html",
+        request,
+        "_watchlist.html",
         context={
             "records": records,
             "portfolio_tickers": portfolio_tickers,
@@ -263,9 +282,9 @@ def _load_portfolio_history() -> dict:
         return float(v) if v not in (None, "") else None
 
     return {
-        "labels":      [r["timestamp"][:16].replace("T", " ") for r in rows],
-        "values":      [float(r["total_value"]) for r in rows],
-        "costs":       [float(r["total_cost"])  for r in rows],
+        "labels": [r["timestamp"][:16].replace("T", " ") for r in rows],
+        "values": [float(r["total_value"]) for r in rows],
+        "costs": [float(r["total_cost"]) for r in rows],
         "cash_values": [_cash(r) for r in rows],
     }
 
@@ -287,12 +306,13 @@ def _trade_markers(chart_data: dict) -> tuple[list, list, list, list]:
         except ValueError:
             label_dates.append(None)
 
-    buy_vals:    list = [None] * n
-    sell_vals:   list = [None] * n
-    buy_tips:    list = [None] * n
-    sell_tips:   list = [None] * n
+    buy_vals: list = [None] * n
+    sell_vals: list = [None] * n
+    buy_tips: list = [None] * n
+    sell_tips: list = [None] * n
 
     from agents.trader.trader_agent import TraderAgent as _TA
+
     trades = _TA(name="TraderAgent").get_trade_history()
     trades.sort(key=lambda t: t.date)
 
@@ -363,7 +383,8 @@ def _render_portfolio(
     chart_data = _load_portfolio_history()
     buy_vals, sell_vals, buy_tips, sell_tips = _trade_markers(chart_data)
     return templates.TemplateResponse(
-        request, "_portfolio.html",
+        request,
+        "_portfolio.html",
         context={
             "positions": positions,
             "positions_with_value": positions_with_value,
@@ -377,12 +398,12 @@ def _render_portfolio(
             "error_message": error_message,
             "chart_labels": json.dumps(chart_data["labels"]),
             "chart_values": json.dumps(chart_data["values"]),
-            "chart_costs":  json.dumps(chart_data["costs"]),
-            "chart_cash":   json.dumps(chart_data["cash_values"]),
+            "chart_costs": json.dumps(chart_data["costs"]),
+            "chart_cash": json.dumps(chart_data["cash_values"]),
             "chart_points": len(chart_data["values"]),
-            "chart_buys":   json.dumps(buy_vals),
-            "chart_sells":  json.dumps(sell_vals),
-            "chart_buy_tips":  json.dumps(buy_tips),
+            "chart_buys": json.dumps(buy_vals),
+            "chart_sells": json.dumps(sell_vals),
+            "chart_buy_tips": json.dumps(buy_tips),
             "chart_sell_tips": json.dumps(sell_tips),
         },
         status_code=status_code,
@@ -398,8 +419,11 @@ async def partial_portfolio(request: Request) -> HTMLResponse:
     gbpusd = cached_prices.get("__GBPUSD__")
     cash_balance = trader.get_cash_balance()
     return _render_portfolio(
-        request, positions,
-        prices_as_of=prices_as_of, gbpusd_rate=gbpusd, cash_balance=cash_balance,
+        request,
+        positions,
+        prices_as_of=prices_as_of,
+        gbpusd_rate=gbpusd,
+        cash_balance=cash_balance,
     )
 
 
@@ -418,14 +442,13 @@ async def partial_runlog(request: Request) -> HTMLResponse:
         with open(_RUN_LOG_CSV, newline="", encoding="utf-8") as fh:
             runs = list(csv.DictReader(fh))
     runs.reverse()  # most recent first
-    return templates.TemplateResponse(
-        request, "_runlog.html", context={"runs": runs}
-    )
+    return templates.TemplateResponse(request, "_runlog.html", context={"runs": runs})
 
 
 # ---------------------------------------------------------------------------
 # Trade actions
 # ---------------------------------------------------------------------------
+
 
 @app.post("/trades", dependencies=[Depends(require_local_or_token)])
 async def record_trade(
@@ -451,10 +474,8 @@ async def record_trade(
     return await partial_portfolio(request)
 
 
-@app.delete("/trades/{trade_id}",
-            dependencies=[Depends(require_local_or_token)])
+@app.delete("/trades/{trade_id}", dependencies=[Depends(require_local_or_token)])
 async def delete_trade(trade_id: int) -> RedirectResponse:
     """Delete a trade by ID and redirect to history partial."""
     trader.delete_trade(trade_id)
     return RedirectResponse("/partials/history", status_code=303)
-

@@ -3,6 +3,10 @@ Orchestrator — wires the three agents together and schedules them.
 Runs the MS Agent framework pipeline on market hours.
 """
 
+# load_dotenv() must run before importing modules that read env at import time
+# (e.g. agents.alert.alert_agent), so imports intentionally follow it.
+# ruff: noqa: E402
+
 import argparse
 import csv
 import json
@@ -11,12 +15,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 import openpyxl
 from openpyxl.cell.cell import Cell
 from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.hyperlink import Hyperlink
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -34,24 +38,38 @@ from agents.scanner.scan_history import (
     save_history,
 )
 from models import StockRecord
+from app.core.config import (
+    ANALYSIS_JSON,
+    PIPELINE_RUNS_CSV,
+    PORTFOLIO_VALUE_CSV,
+    SCAN_RESULTS_JSON,
+)
 
 
-SCAN_OUTPUT = "agents/scanner/scan_results.json"
-RUN_LOG = "pipeline_runs.csv"
-PORTFOLIO_VALUE_LOG = "portfolio_value.csv"
+SCAN_OUTPUT = SCAN_RESULTS_JSON
+RUN_LOG = PIPELINE_RUNS_CSV
+PORTFOLIO_VALUE_LOG = PORTFOLIO_VALUE_CSV
 _RUN_LOG_FIELDS = [
-    "start", "end", "duration_seconds",
-    "scanned", "analysed", "buy_alerts", "sell_alerts", "actionable",
-    "sources", "status", "errors",
+    "start",
+    "end",
+    "duration_seconds",
+    "scanned",
+    "analysed",
+    "buy_alerts",
+    "sell_alerts",
+    "actionable",
+    "sources",
+    "status",
+    "errors",
 ]
 _SOURCE_COMMENTS: dict[str, str] = {
-    "ww_extraction":   "WhaleWisdom heat map – institutional filer top holdings",
-    "vcp_screener":    "Minervini pure VCP setup – S&P 500 screened via FMP API",
-    "tv_screener":     "TradingView screener – Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
-    "tv_screener_uk":  "TradingView screener – LSE Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
+    "ww_extraction": "WhaleWisdom heat map – institutional filer top holdings",
+    "vcp_screener": "Minervini pure VCP setup – S&P 500 screened via FMP API",
+    "tv_screener": "TradingView screener – Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
+    "tv_screener_uk": "TradingView screener – LSE Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
 }
-ANALYSIS_OUTPUT = "agents/analyst/analysis_results.json"
-EXCEL_OUTPUT = "agents/analyst/analysis_results.xlsx"
+ANALYSIS_OUTPUT = ANALYSIS_JSON
+EXCEL_OUTPUT = ANALYSIS_JSON.with_suffix(".xlsx")
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MIN = 30
 MARKET_CLOSE_HOUR = 16
@@ -63,14 +81,18 @@ def _append_portfolio_snapshot(total_value: float, total_cost: float) -> None:
     log_path = Path(PORTFOLIO_VALUE_LOG)
     write_header = not log_path.exists() or log_path.stat().st_size == 0
     with open(log_path, "a", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=["timestamp", "total_value", "total_cost"])
+        writer = csv.DictWriter(
+            fh, fieldnames=["timestamp", "total_value", "total_cost"]
+        )
         if write_header:
             writer.writeheader()
-        writer.writerow({
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="minutes"),
-            "total_value": round(total_value, 2),
-            "total_cost": round(total_cost, 2),
-        })
+        writer.writerow(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(timespec="minutes"),
+                "total_value": round(total_value, 2),
+                "total_cost": round(total_cost, 2),
+            }
+        )
 
 
 def _append_run_log(entry: dict) -> None:
@@ -83,43 +105,87 @@ def _append_run_log(entry: dict) -> None:
             writer.writeheader()
         writer.writerow({k: entry.get(k, "") for k in _RUN_LOG_FIELDS})
 
+
 _SEPA_LABELS = {
-    "above_150_200":        "P>SMA150&200",
-    "sma150_above_200":     "SMA150>200",
-    "sma200_rising":        "SMA200 Rising",
-    "sma50_above_150_200":  "SMA50>150&200",
-    "above_25pct_of_low":   ">=25% abv Low",
+    "above_150_200": "P>SMA150&200",
+    "sma150_above_200": "SMA150>200",
+    "sma200_rising": "SMA200 Rising",
+    "sma50_above_150_200": "SMA50>150&200",
+    "above_25pct_of_low": ">=25% abv Low",
     "within_25pct_of_high": "<=25% frm High",
-    "rs_leader":            "RS Leader",
-    "above_sma50":          "P>SMA50",
+    "rs_leader": "RS Leader",
+    "above_sma50": "P>SMA50",
 }
 _SEPA_KEYS = list(_SEPA_LABELS.keys())
 
 _HEADERS = [
-    "Ticker", "Market", "Source", "StockTwits", "Whale Wisdom", "Score", "CANSLIM", "Momentum", "Stage", "Zone",
-    "Prev Entry", "Next Entry", "Stop", "Risk %", "1R Target", "2R Target", "3R Target", "R:R", "Price", "P/E", "RSI", "Rel Vol",
-    "% 52w High", "% Chg Week", "Rel Str vs SPY",
-    "EPS Growth", "ROE", "Inst Ownership %", "Inst Count", "WW Buyers", "WW Sellers", "WW Net",
-    "Congress Buys", "Congress Sells", "Congress Net",
-    "Senate Buys", "Senate Sells", "Senate Net",
+    "Ticker",
+    "Market",
+    "Source",
+    "StockTwits",
+    "Whale Wisdom",
+    "Score",
+    "CANSLIM",
+    "Momentum",
+    "Stage",
+    "Zone",
+    "Prev Entry",
+    "Next Entry",
+    "Stop",
+    "Risk %",
+    "1R Target",
+    "2R Target",
+    "3R Target",
+    "R:R",
+    "Price",
+    "P/E",
+    "RSI",
+    "Rel Vol",
+    "% 52w High",
+    "% Chg Week",
+    "Rel Str vs SPY",
+    "EPS Growth",
+    "ROE",
+    "Inst Ownership %",
+    "Inst Count",
+    "WW Buyers",
+    "WW Sellers",
+    "WW Net",
+    "Congress Buys",
+    "Congress Sells",
+    "Congress Net",
+    "Senate Buys",
+    "Senate Sells",
+    "Senate Net",
     "SPY Uptrend",
-    "SMA Stack", "SMA50", "Near High", "RSI Zone", "Vol Zone",
-    "SEPA", *[f"SEPA: {v}" for v in _SEPA_LABELS.values()],
+    "SMA Stack",
+    "SMA50",
+    "Near High",
+    "RSI Zone",
+    "Vol Zone",
+    "SEPA",
+    *[f"SEPA: {v}" for v in _SEPA_LABELS.values()],
     "Sector",
-    "VCP Breakout", "MYB Breakout", "MYB Pivot",
-    "Recommendation", "As Of", "Summary",
+    "VCP Breakout",
+    "MYB Breakout",
+    "MYB Pivot",
+    "Recommendation",
+    "As Of",
+    "Summary",
 ]
 
 # Derive column positions dynamically so they stay correct as columns are added.
-_SIGNAL_COL_START = _HEADERS.index("SMA Stack") + 1   # 1-indexed
-_SIGNAL_COL_END   = _HEADERS.index("Vol Zone") + 1
-_SEPA_COL_START   = _HEADERS.index("SEPA") + 1
-_SEPA_COL_END     = _SEPA_COL_START + len(_SEPA_KEYS)  # summary + 8 conditions (exclusive end = summary+8)
+_SIGNAL_COL_START = _HEADERS.index("SMA Stack") + 1  # 1-indexed
+_SIGNAL_COL_END = _HEADERS.index("Vol Zone") + 1
+_SEPA_COL_START = _HEADERS.index("SEPA") + 1
+_SEPA_COL_END = _SEPA_COL_START + len(
+    _SEPA_KEYS
+)  # summary + 8 conditions (exclusive end = summary+8)
 
 _SCORE_FILLS = {
-    "high":   PatternFill("solid", fgColor="C6EFCE"),  # green  ≥8
-    "mid":    PatternFill("solid", fgColor="FFEB9C"),  # yellow 6–7
-    "low":    PatternFill("solid", fgColor="FFC7CE"),  # red    ≤5
+    "high": PatternFill("solid", fgColor="C6EFCE"),  # green  ≥8
+    "mid": PatternFill("solid", fgColor="FFEB9C"),  # yellow 6–7
+    "low": PatternFill("solid", fgColor="FFC7CE"),  # red    ≤5
 }
 _SIGNAL_FILLS = {
     "+": PatternFill("solid", fgColor="C6EFCE"),  # green  — positive for buying
@@ -253,11 +319,13 @@ def _record_to_row(
         r.congress_buys if r.congress_buys is not None else "",
         r.congress_sells if r.congress_sells is not None else "",
         (r.congress_buys or 0) - (r.congress_sells or 0)
-        if r.congress_buys is not None or r.congress_sells is not None else "",
+        if r.congress_buys is not None or r.congress_sells is not None
+        else "",
         r.senate_buys if r.senate_buys is not None else "",
         r.senate_sells if r.senate_sells is not None else "",
         (r.senate_buys or 0) - (r.senate_sells or 0)
-        if r.senate_buys is not None or r.senate_sells is not None else "",
+        if r.senate_buys is not None or r.senate_sells is not None
+        else "",
         "Y" if r.spy_uptrend else "N",
         *_signals(r),
         sepa_summary,
@@ -278,63 +346,70 @@ def _apply_header(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
         cell = ws.cell(1, col)
         cell.font = _HEADER_FONT
         cell.fill = _HEADER_FILL
-        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.alignment = Alignment(
+            horizontal="center", vertical="center", wrap_text=True
+        )
     ws.row_dimensions[1].height = 30
     ws.freeze_panes = "A2"
 
 
 def _set_col_widths(ws: openpyxl.worksheet.worksheet.Worksheet) -> None:
     widths = {
-        "A": 8,   # Ticker
+        "A": 8,  # Ticker
         "B": 18,  # Source
         "C": 11,  # StockTwits
         "D": 12,  # Whale Wisdom
-        "E": 8,   # Score
+        "E": 8,  # Score
         "F": 10,  # CANSLIM
         "G": 10,  # Momentum
         "H": 10,  # Stage
-        "I": 8,   # Zone
+        "I": 8,  # Zone
         "J": 11,  # Prev Entry
         "K": 11,  # Next Entry
         "L": 10,  # Stop
-        "M": 8,   # Risk %
+        "M": 8,  # Risk %
         "N": 10,  # 1R Target
         "O": 10,  # 2R Target
         "P": 10,  # 3R Target
-        "Q": 7,   # R:R
+        "Q": 7,  # R:R
         "R": 10,  # Price
-        "S": 7,   # P/E
-        "T": 7,   # RSI
-        "U": 8,   # Rel Vol
-        "V": 11,  # % 52w High
-        "V": 11,  # % Chg Week
+        "S": 7,  # P/E
+        "T": 7,  # RSI
+        "U": 8,  # Rel Vol
+        "V": 11,  # % 52w High / % Chg Week
         "W": 14,  # Rel Str vs SPY
         "X": 11,  # EPS Growth
-        "Y": 8,   # ROE
+        "Y": 8,  # ROE
         "Z": 15,  # Inst Ownership
-        "AA": 10, # Inst Count
+        "AA": 10,  # Inst Count
         "AB": 9,  # WW Buyers
         "AC": 9,  # WW Sellers
         "AD": 8,  # WW Net
-        "AE": 12, # Congress Buys
-        "AF": 12, # Congress Sells
-        "AG": 10, # Congress Net
-        "AH": 10, # Senate Buys
-        "AI": 10, # Senate Sells
-        "AJ": 10, # Senate Net
-        "AK": 10, # SPY Uptrend
+        "AE": 12,  # Congress Buys
+        "AF": 12,  # Congress Sells
+        "AG": 10,  # Congress Net
+        "AH": 10,  # Senate Buys
+        "AI": 10,  # Senate Sells
+        "AJ": 10,  # Senate Net
+        "AK": 10,  # SPY Uptrend
         "AL": 9,  # SMA Stack
         "AM": 7,  # SMA50
         "AN": 9,  # Near High
         "AO": 8,  # RSI Zone
         "AP": 8,  # Vol Zone
         "AQ": 7,  # SEPA summary
-        "AR": 13, "AS": 13, "AT": 13, "AU": 13,  # SEPA conditions 1-4
-        "AV": 13, "AW": 13, "AX": 13, "AY": 13,  # SEPA conditions 5-8
-        "AZ": 12, # Sector
-        "BA": 12, # Recommendation
-        "BB": 12, # As Of
-        "BC": 50, # Summary
+        "AR": 13,
+        "AS": 13,
+        "AT": 13,
+        "AU": 13,  # SEPA conditions 1-4
+        "AV": 13,
+        "AW": 13,
+        "AX": 13,
+        "AY": 13,  # SEPA conditions 5-8
+        "AZ": 12,  # Sector
+        "BA": 12,  # Recommendation
+        "BB": 12,  # As Of
+        "BC": 50,  # Summary
     }
     for col, width in widths.items():
         ws.column_dimensions[col].width = width
@@ -403,7 +478,7 @@ def _format_row(
 
 
 _NEW_TICKER_FILL = PatternFill("solid", fgColor="FFF2CC")  # pale yellow — new tickers
-_BREAKOUT_FILL   = PatternFill("solid", fgColor="FFE0B2")  # pale orange — fresh breakouts
+_BREAKOUT_FILL = PatternFill("solid", fgColor="FFE0B2")  # pale orange — fresh breakouts
 
 
 def _write_sheet(
@@ -501,19 +576,26 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
     if not force and not is_market_hours():
         print(f"[{start_dt.strftime('%H:%M')}] Outside market hours — skipping")
-        _append_run_log({
-            "start": start_dt.isoformat(timespec="seconds"),
-            "end": start_dt.isoformat(timespec="seconds"),
-            "duration_seconds": 0,
-            "scanned": 0, "analysed": 0,
-            "buy_alerts": 0, "sell_alerts": 0, "actionable": 0,
-            "sources": "", "errors": "", "status": "skipped",
-        })
+        _append_run_log(
+            {
+                "start": start_dt.isoformat(timespec="seconds"),
+                "end": start_dt.isoformat(timespec="seconds"),
+                "duration_seconds": 0,
+                "scanned": 0,
+                "analysed": 0,
+                "buy_alerts": 0,
+                "sell_alerts": 0,
+                "actionable": 0,
+                "sources": "",
+                "errors": "",
+                "status": "skipped",
+            }
+        )
         return
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print(f"Pipeline run: {start_dt.strftime('%Y-%m-%d %H:%M UTC')}")
-    print("="*50)
+    print("=" * 50)
 
     errors: list[str] = []
     scanned = 0
@@ -551,9 +633,14 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             primary = item.source.split(",")[0] or "ww_extraction"
             grouped.setdefault(primary, []).append(item.model_dump())
 
-        scan_payload: dict[str, object] = {"as_of": datetime.now().isoformat(timespec="seconds")}
+        scan_payload: dict[str, object] = {
+            "as_of": datetime.now().isoformat(timespec="seconds")
+        }
         for src, items in grouped.items():
-            scan_payload[src] = {"_comment": _SOURCE_COMMENTS.get(src, src), "results": items}
+            scan_payload[src] = {
+                "_comment": _SOURCE_COMMENTS.get(src, src),
+                "results": items,
+            }
 
         with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
             json.dump(scan_payload, stream, indent=2)
@@ -566,7 +653,9 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         print(f"      Scanned {scanned} tickers ({src_summary})")
 
         with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
-            json.dump([item.model_dump() for item in analysis_results], stream, indent=2)
+            json.dump(
+                [item.model_dump() for item in analysis_results], stream, indent=2
+            )
 
         _trader = TraderAgent(name="TraderAgent")
         stock_map = {r.ticker: r for r in analysis_results}
@@ -595,9 +684,11 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         if new:
             print(f"      New tickers this run:     {len(new)}")
         if breakouts:
-            print(f"      Fresh breakouts this run: {len(breakouts)}"
-                  f"  ({', '.join(sorted(breakouts)[:8])}"
-                  f"{'...' if len(breakouts) > 8 else ''})")
+            print(
+                f"      Fresh breakouts this run: {len(breakouts)}"
+                f"  ({', '.join(sorted(breakouts)[:8])}"
+                f"{'...' if len(breakouts) > 8 else ''})"
+            )
 
         write_excel(analysis_results, EXCEL_OUTPUT, held, new_tickers=new)
         print("\nPipeline complete.")
@@ -632,8 +723,14 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Momentum stock scanner")
-    parser.add_argument("--once", action="store_true", help="Run pipeline once and exit")
-    parser.add_argument("--extract", action="store_true", help="Pull watchlist from WisdomWise instead of default")
+    parser.add_argument(
+        "--once", action="store_true", help="Run pipeline once and exit"
+    )
+    parser.add_argument(
+        "--extract",
+        action="store_true",
+        help="Pull watchlist from WisdomWise instead of default",
+    )
     parser.add_argument(
         "--interval",
         type=int,
@@ -646,7 +743,9 @@ def main() -> None:
         pipeline(force=True, extract=args.extract)
         return
 
-    print(f"Scheduler started — running every {args.interval} minutes during market hours")
+    print(
+        f"Scheduler started — running every {args.interval} minutes during market hours"
+    )
     print("Press Ctrl+C to stop\n")
 
     scheduler = BlockingScheduler()

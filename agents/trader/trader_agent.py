@@ -14,10 +14,11 @@ from typing import Any
 
 from ms_agent_framework import Agent
 from models import Position, Trade
+from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parent / "trades.db"
+_DB_PATH = TRADES_DB
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS trades (
@@ -117,13 +118,13 @@ class TraderAgent(Agent):
 
     def _seed_cash_from_csv(self, conn: sqlite3.Connection) -> None:
         """Seed cash_balance from portfolio_value.csv on first startup."""
-        pv_csv = self.db_path.parent.parent.parent / "portfolio_value.csv"
+        pv_csv = PORTFOLIO_VALUE_CSV
         if not pv_csv.exists():
             return
         try:
             with open(pv_csv, newline="", encoding="utf-8") as fh:
                 rows = list(csv.DictReader(fh))
-            if rows and "cash_balance" in rows[-1]:
+            if rows and rows[-1].get("cash_balance"):
                 amount = float(rows[-1]["cash_balance"])
                 if amount > 0:
                     from datetime import datetime, timezone
@@ -399,15 +400,10 @@ class TraderAgent(Agent):
         from datetime import datetime, timezone
         import json
 
-        portfolio_csv = Path(__file__).parent.parent.parent / "portfolio_value.csv"
+        portfolio_csv = PORTFOLIO_VALUE_CSV
 
         # Load current prices from analysis results
-        analysis_json = (
-            Path(__file__).parent.parent.parent
-            / "agents"
-            / "analyst"
-            / "analysis_results.json"
-        )
+        analysis_json = ANALYSIS_JSON
         prices = {}
         if analysis_json.exists():
             try:
@@ -513,7 +509,6 @@ class TraderAgent(Agent):
             for row in rows:
                 qty = row.get("Quantity", "").strip()
                 symbol = row.get("Symbol", "").strip()
-                sedol = row.get("Sedol", "").strip()
                 debit = clean_amount(row.get("Debit", ""))
                 credit = clean_amount(row.get("Credit", ""))
                 price = clean_amount(row.get("Price", ""))
