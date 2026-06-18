@@ -6,6 +6,7 @@ Run as part of the web UI backend.
 """
 
 import csv
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -325,6 +326,13 @@ class TraderAgent(Agent):
                 if entry_price is not None:
                     s["entry_price"] = entry_price
             else:  # SELL
+                if shares > s["shares"]:
+                    logging.getLogger(__name__).warning(
+                        "Oversell for %s: sold %s but only %s held; clamping to 0",
+                        ticker,
+                        shares,
+                        s["shares"],
+                    )
                 s["shares"] = max(0.0, s["shares"] - shares)
         return state
 
@@ -496,91 +504,116 @@ class TraderAgent(Agent):
         conn = self._conn()
         buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
 
-        for row in rows:
-            qty = row.get("Quantity", "").strip()
-            symbol = row.get("Symbol", "").strip()
-            sedol = row.get("Sedol", "").strip()
-            debit = clean_amount(row.get("Debit", ""))
-            credit = clean_amount(row.get("Credit", ""))
-            price = clean_amount(row.get("Price", ""))
-            date = row.get("Date", "").strip()
-            description = row.get("Description", "").strip()
-            reference = row.get("Reference", "").strip()
+        try:
+            for row in rows:
+                qty = row.get("Quantity", "").strip()
+                symbol = row.get("Symbol", "").strip()
+                sedol = row.get("Sedol", "").strip()
+                debit = clean_amount(row.get("Debit", ""))
+                credit = clean_amount(row.get("Credit", ""))
+                price = clean_amount(row.get("Price", ""))
+                date = row.get("Date", "").strip()
+                description = row.get("Description", "").strip()
+                reference = row.get("Reference", "").strip()
 
-            if qty and qty != "n/a":
-                # Trade if Symbol is valid or if HSBC GLOB
-                is_trade = symbol and symbol != "n/a"
-                is_hsbc_glob = "HSBC GLOB" in description.upper()
+                if qty and qty != "n/a":
+                    # Trade if Symbol is valid or if HSBC GLOB
+                    is_trade = symbol and symbol != "n/a"
+                    is_hsbc_glob = "HSBC GLOB" in description.upper()
 
-                if is_trade or is_hsbc_glob:
-                    try:
-                        shares = float(qty.replace("£", "").replace(",", ""))
-                        if shares > 0 and price > 0:
-                            action = (
-                                "BUY" if debit > 0 else "SELL" if credit > 0 else None
-                            )
-                            if action:
-                                ticker = symbol.upper() if is_trade else "HSFWA"
+                    if is_trade or is_hsbc_glob:
+                        try:
+                            shares = float(qty.replace("£", "").replace(",", ""))
+                            if shares > 0 and price > 0:
+                                action = (
+                                    "BUY"
+                                    if debit > 0
+                                    else "SELL"
+                                    if credit > 0
+                                    else None
+                                )
+                                if action:
+                                    ticker = symbol.upper() if is_trade else "HSFWA"
+                                    conn.execute(
+                                        "INSERT OR IGNORE INTO trades "
+                                        "(ticker, action, shares, price, date, "
+                                        "notes, reference) "
+                                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                        (
+                                            ticker,
+                                            action,
+                                            shares,
+                                            price,
+                                            date,
+                                            "",
+                                            reference or None,
+                                        ),
+                                    )
+                                    if action == "BUY":
+                                        buy_count += 1
+                                    else:
+                                        sell_count += 1
+                        except ValueError:
+                            pass
+                    else:
+                        amount = credit if credit > 0 else debit
+                        if amount > 0:
+                            flow_type = classify_flow_type(description)
+                            try:
                                 conn.execute(
-                                    "INSERT OR IGNORE INTO trades "
-                                    "(ticker, action, shares, price, date, notes, "
-                                    "reference) "
-                                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                    "INSERT OR IGNORE INTO cash_flows "
+                                    "(date, flow_type, ticker, amount, "
+                                    "description, reference) "
+                                    "VALUES (?, ?, ?, ?, ?, ?)",
                                     (
-                                        ticker,
-                                        action,
-                                        shares,
-                                        price,
                                         date,
-                                        "",
-                                        reference or None,
+                                        flow_type,
+                                        None,
+                                        amount,
+                                        description,
+                                        reference,
                                     ),
                                 )
-                                if action == "BUY":
-                                    buy_count += 1
-                                else:
-                                    sell_count += 1
-                    except ValueError:
-                        pass
+                                cash_count += 1
+                            except Exception:
+                                pass
                 else:
+                    if symbol and symbol != "n/a":
+                        continue
                     amount = credit if credit > 0 else debit
                     if amount > 0:
                         flow_type = classify_flow_type(description)
                         try:
                             conn.execute(
                                 "INSERT OR IGNORE INTO cash_flows "
-                                "(date, flow_type, ticker, amount, description, reference) "
+                                "(date, flow_type, ticker, amount, "
+                                "description, reference) "
                                 "VALUES (?, ?, ?, ?, ?, ?)",
-                                (date, flow_type, None, amount, description, reference),
+                                (
+                                    date,
+                                    flow_type,
+                                    None,
+                                    amount,
+                                    description,
+                                    reference,
+                                ),
                             )
                             cash_count += 1
                         except Exception:
                             pass
-            else:
-                if symbol and symbol != "n/a":
-                    continue
-                amount = credit if credit > 0 else debit
-                if amount > 0:
-                    flow_type = classify_flow_type(description)
-                    try:
-                        conn.execute(
-                            "INSERT OR IGNORE INTO cash_flows "
-                            "(date, flow_type, ticker, amount, description, reference) "
-                            "VALUES (?, ?, ?, ?, ?, ?)",
-                            (date, flow_type, None, amount, description, reference),
-                        )
-                        cash_count += 1
-                    except Exception:
-                        pass
 
-            running_balance = row.get("Running Balance", "").strip()
-            if running_balance and running_balance != "n/a":
-                rb = clean_amount(running_balance)
-                if rb > 0:
-                    cash_balance = rb
+                running_balance = row.get("Running Balance", "").strip()
+                if running_balance and running_balance != "n/a":
+                    rb = clean_amount(running_balance)
+                    if rb > 0:
+                        cash_balance = rb
 
-        conn.commit()
-        conn.close()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
         if cash_balance > 0:
             self.set_cash_balance(cash_balance)
