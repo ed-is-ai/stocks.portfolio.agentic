@@ -50,8 +50,8 @@ extraction_results  scan_results    analysis_       email alerts  trades
 ### Setup
 
 ```bash
-# Install dependencies
-uv add --dev pytest
+# Install dependencies (resolves from pyproject.toml / uv.lock)
+uv sync
 
 # Run tests
 uv run pytest
