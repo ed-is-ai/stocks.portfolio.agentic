@@ -55,6 +55,9 @@ agents/trader/trades.db.backup
 **/init_email_tracking.py
 **/query_alert_history.py
 **/tmp_debug.py
+**/tmp_check_holdings.py
+**/tmp_debug_backfill.py
+**/tmp_price_cache.py
 *_agent_refactor.ipynb
 refresh_data.ipynb
 run_error.log
