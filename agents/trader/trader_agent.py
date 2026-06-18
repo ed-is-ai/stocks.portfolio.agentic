@@ -7,68 +7,26 @@ Run as part of the web UI backend.
 
 import csv
 import logging
-import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import PrivateAttr
+
 from ms_agent_framework import Agent
 from models import Position, Trade
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
+from app.repositories import db
+from app.repositories.account_repo import AccountStateRepository
+from app.repositories.artifacts_repo import ArtifactsRepository
+from app.repositories.cash_flows_repo import CashFlowsRepository
+from app.repositories.db import Connect
+from app.repositories.price_cache_repo import PriceCacheRepository
+from app.repositories.trades_repo import TradesRepository
 
 logger = logging.getLogger(__name__)
 
 _DB_PATH = TRADES_DB
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS trades (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker      TEXT NOT NULL,
-    action      TEXT NOT NULL CHECK(action IN ('BUY', 'SELL')),
-    shares      REAL NOT NULL CHECK(shares > 0),
-    price       REAL NOT NULL CHECK(price > 0),
-    date        TEXT NOT NULL,
-    notes       TEXT NOT NULL DEFAULT '',
-    stop_loss   REAL,
-    entry_price REAL,
-    reference   TEXT
-);
-CREATE TABLE IF NOT EXISTS cash_flows (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    date        TEXT NOT NULL,
-    flow_type   TEXT NOT NULL CHECK(flow_type IN ('CONTRIBUTION', 'DIVIDEND', 'INTEREST', 'TAX_RELIEF', 'TRANSFER', 'WITHDRAWAL', 'OTHER')),
-    ticker      TEXT,
-    amount      REAL NOT NULL CHECK(amount > 0),
-    description TEXT,
-    reference   TEXT UNIQUE
-);
-CREATE TABLE IF NOT EXISTS price_cache (
-    ticker          TEXT PRIMARY KEY,
-    price           REAL NOT NULL,
-    fetched_at      TEXT NOT NULL,
-    currency        TEXT DEFAULT 'GBP',
-    original_price  REAL
-);
-CREATE TABLE IF NOT EXISTS account_state (
-    key        TEXT PRIMARY KEY,
-    value      TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-"""
-
-
-def _row_to_trade(row: tuple[Any, ...]) -> Trade:
-    return Trade(
-        id=row[0],
-        ticker=row[1],
-        action=row[2],
-        shares=row[3],
-        price=row[4],
-        date=row[5],
-        notes=row[6],
-        stop_loss=row[7] if len(row) > 7 else None,
-        entry_price=row[8] if len(row) > 8 else None,
-    )
 
 
 class TraderAgent(Agent):
@@ -82,61 +40,40 @@ class TraderAgent(Agent):
     name: str = "TraderAgent"
     db_path: Path = _DB_PATH
 
+    _trades: TradesRepository = PrivateAttr()
+    _cash_flows: CashFlowsRepository = PrivateAttr()
+    _price_cache: PriceCacheRepository = PrivateAttr()
+    _account: AccountStateRepository = PrivateAttr()
+    _artifacts: ArtifactsRepository = PrivateAttr()
+
     def model_post_init(self, __context: Any) -> None:
+        connect: Connect = db.make_connect(lambda: self.db_path)
+        self._trades = TradesRepository(connect)
+        self._cash_flows = CashFlowsRepository(connect)
+        self._price_cache = PriceCacheRepository(connect)
+        self._account = AccountStateRepository(connect)
+        self._artifacts = ArtifactsRepository()
         self._init_db()
 
-    def _conn(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+    def _conn(self):
+        """Open a connection to the configured database (for batch imports)."""
+        return db.connect(self.db_path)
 
     def _init_db(self) -> None:
         with self._conn() as conn:
-            conn.executescript(_SCHEMA)
-            for col_def in ("stop_loss REAL", "entry_price REAL", "reference TEXT"):
-                try:
-                    conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
-                except sqlite3.OperationalError as exc:
-                    logger.debug("schema migration step skipped: %s", exc)
-            try:
-                conn.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_reference "
-                    "ON trades(reference) WHERE reference IS NOT NULL"
-                )
-            except Exception:
-                pass
-            for col_def in ("currency TEXT DEFAULT 'GBP'", "original_price REAL"):
-                try:
-                    conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
-                except sqlite3.OperationalError as exc:
-                    logger.debug("schema migration step skipped: %s", exc)
-            # Seed cash_balance from portfolio_value.csv if not yet stored
-            has_cash = conn.execute(
-                "SELECT 1 FROM account_state WHERE key='cash_balance'"
-            ).fetchone()
-            if not has_cash:
-                self._seed_cash_from_csv(conn)
-            conn.commit()
+            db.init_trades_db(conn)
+        # Seed cash_balance from portfolio_value.csv if not yet stored
+        if not self._account.exists("cash_balance"):
+            self._seed_cash_from_csv()
 
-    def _seed_cash_from_csv(self, conn: sqlite3.Connection) -> None:
+    def _seed_cash_from_csv(self) -> None:
         """Seed cash_balance from portfolio_value.csv on first startup."""
-        pv_csv = PORTFOLIO_VALUE_CSV
-        if not pv_csv.exists():
-            return
         try:
-            with open(pv_csv, newline="", encoding="utf-8") as fh:
-                rows = list(csv.DictReader(fh))
+            rows = self._artifacts.read_csv_dicts(PORTFOLIO_VALUE_CSV)
             if rows and rows[-1].get("cash_balance"):
                 amount = float(rows[-1]["cash_balance"])
                 if amount > 0:
-                    from datetime import datetime, timezone
-
-                    updated_at = datetime.now(timezone.utc).strftime(
-                        "%Y-%m-%d %H:%M UTC"
-                    )
-                    conn.execute(
-                        "INSERT OR IGNORE INTO account_state (key, value, updated_at)"
-                        " VALUES ('cash_balance', ?, ?)",
-                        (str(amount), updated_at),
-                    )
+                    self._account.set("cash_balance", str(amount))
         except (OSError, ValueError, KeyError, csv.Error) as exc:
             logger.debug("cash seed from csv skipped: %s", exc)
 
@@ -152,21 +89,16 @@ class TraderAgent(Agent):
     ) -> Trade:
         """Record a buy transaction and return the saved Trade."""
         trade_date = date or datetime.today().strftime("%Y-%m-%d")
-        with self._conn() as conn:
-            cur = conn.execute(
-                "INSERT INTO trades (ticker, action, shares, price, date, notes,"
-                " stop_loss, entry_price) VALUES (?, 'BUY', ?, ?, ?, ?, ?, ?)",
-                (
-                    ticker.upper(),
-                    shares,
-                    price,
-                    trade_date,
-                    notes,
-                    stop_loss,
-                    entry_price,
-                ),
-            )
-            trade_id: int = cur.lastrowid  # type: ignore[assignment]
+        trade_id = self._trades.insert(
+            ticker.upper(),
+            "BUY",
+            shares,
+            price,
+            trade_date,
+            notes,
+            stop_loss,
+            entry_price,
+        )
         return Trade(
             id=trade_id,
             ticker=ticker.upper(),
@@ -189,13 +121,14 @@ class TraderAgent(Agent):
     ) -> Trade:
         """Record a sell transaction and return the saved Trade."""
         trade_date = date or datetime.today().strftime("%Y-%m-%d")
-        with self._conn() as conn:
-            cur = conn.execute(
-                "INSERT INTO trades (ticker, action, shares, price, date, notes)"
-                " VALUES (?, 'SELL', ?, ?, ?, ?)",
-                (ticker.upper(), shares, price, trade_date, notes),
-            )
-            trade_id: int = cur.lastrowid  # type: ignore[assignment]
+        trade_id = self._trades.insert(
+            ticker.upper(),
+            "SELL",
+            shares,
+            price,
+            trade_date,
+            notes,
+        )
         return Trade(
             id=trade_id,
             ticker=ticker.upper(),
@@ -218,22 +151,17 @@ class TraderAgent(Agent):
     ) -> Trade:
         """Overwrite the position for a ticker: delete all trades and insert one BUY."""
         trade_date = date or datetime.today().strftime("%Y-%m-%d")
-        with self._conn() as conn:
-            conn.execute("DELETE FROM trades WHERE ticker = ?", (ticker.upper(),))
-            cur = conn.execute(
-                "INSERT INTO trades (ticker, action, shares, price, date, notes,"
-                " stop_loss, entry_price) VALUES (?, 'BUY', ?, ?, ?, ?, ?, ?)",
-                (
-                    ticker.upper(),
-                    shares,
-                    price,
-                    trade_date,
-                    notes,
-                    stop_loss,
-                    entry_price,
-                ),
-            )
-            trade_id: int = cur.lastrowid  # type: ignore[assignment]
+        self._trades.delete_by_ticker(ticker.upper())
+        trade_id = self._trades.insert(
+            ticker.upper(),
+            "BUY",
+            shares,
+            price,
+            trade_date,
+            notes,
+            stop_loss,
+            entry_price,
+        )
         return Trade(
             id=trade_id,
             ticker=ticker.upper(),
@@ -248,26 +176,11 @@ class TraderAgent(Agent):
 
     def delete_trade(self, trade_id: int) -> bool:
         """Delete a trade by ID. Returns True if a row was deleted."""
-        with self._conn() as conn:
-            cur = conn.execute("DELETE FROM trades WHERE id = ?", (trade_id,))
-            return cur.rowcount > 0
+        return self._trades.delete_by_id(trade_id)
 
     def get_trade_history(self, ticker: str | None = None) -> list[Trade]:
         """Return all trades, newest first. Optionally filter by ticker."""
-        base = (
-            "SELECT id, ticker, action, shares, price, date, notes, stop_loss, entry_price"
-            " FROM trades"
-        )
-        date_order = "substr(date, 7, 4) || '/' || substr(date, 4, 2) || '/' || substr(date, 1, 2) DESC, id DESC"
-        if ticker:
-            sql = base + " WHERE ticker = ? ORDER BY " + date_order
-            params: tuple[Any, ...] = (ticker.upper(),)
-        else:
-            sql = base + " ORDER BY " + date_order
-            params = ()
-        with self._conn() as conn:
-            rows = conn.execute(sql, params).fetchall()
-        return [_row_to_trade(r) for r in rows]
+        return self._trades.history(ticker.upper() if ticker else None)
 
     def get_latest_trade(self, ticker: str) -> Trade | None:
         """Return the most recent trade for a ticker, or None if none exist."""
@@ -286,13 +199,7 @@ class TraderAgent(Agent):
         Only includes valid-ticker trades (excludes Symbol='n/a').
         display_info: optional {ticker: (original_price, currency)} for template display.
         """
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT ticker, action, shares, price, date, stop_loss, entry_price"
-                " FROM trades WHERE ticker NOT IN ('', 'n/a', 'N/A')"
-                " ORDER BY substr(date, 7, 4) || '/' || substr(date, 4, 2) || '/' || substr(date, 1, 2), id"
-            ).fetchall()
-
+        rows = self._trades.open_rows()
         state = self._replay_trades(rows)
         return [
             self._build_position(ticker, s, current_prices, display_info)
@@ -398,18 +305,14 @@ class TraderAgent(Agent):
     def update_portfolio_snapshot(self, cash_balance: float | None = None) -> None:
         """Update portfolio_value.csv with total_value, total_cost, cash_balance, investments_value."""
         from datetime import datetime, timezone
-        import json
-
-        portfolio_csv = PORTFOLIO_VALUE_CSV
 
         # Load current prices from analysis results
-        analysis_json = ANALYSIS_JSON
         prices = {}
-        if analysis_json.exists():
+        data = self._artifacts.read_json(ANALYSIS_JSON, default=None)
+        if data is not None:
             try:
-                data = json.loads(analysis_json.read_text(encoding="utf-8"))
                 prices = {r["ticker"]: r["price"] for r in data}
-            except Exception as exc:
+            except (TypeError, KeyError) as exc:
                 logger.warning("price/value computation failed: %s", exc)
 
         positions = self.get_portfolio(prices if prices else None)
@@ -421,21 +324,13 @@ class TraderAgent(Agent):
             total_value = total_cost
 
         if cash_balance is None:
-            if portfolio_csv.exists():
-                try:
-                    with open(portfolio_csv) as f:
-                        reader = csv.DictReader(f)
-                        rows = list(reader)
-                        if rows:
-                            cash_balance = float(rows[-1].get("cash_balance", "0"))
-                        else:
-                            cash_balance = 0.0
-                except (ValueError, TypeError, OSError, csv.Error) as exc:
-                    logger.warning(
-                        "could not parse cash balance, defaulting to 0.0: %s", exc
-                    )
-                    cash_balance = 0.0
-            else:
+            rows = self._artifacts.read_csv_dicts(PORTFOLIO_VALUE_CSV)
+            try:
+                cash_balance = float(rows[-1].get("cash_balance", "0")) if rows else 0.0
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "could not parse cash balance, defaulting to 0.0: %s", exc
+                )
                 cash_balance = 0.0
 
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -447,21 +342,17 @@ class TraderAgent(Agent):
             "cash_balance",
             "investments_value",
         ]
-        needs_header = not portfolio_csv.exists()
-
-        with open(portfolio_csv, "a", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if needs_header:
-                writer.writeheader()
-            writer.writerow(
-                {
-                    "timestamp": timestamp,
-                    "total_value": f"{total_value:.2f}",
-                    "total_cost": f"{total_cost:.2f}",
-                    "cash_balance": f"{cash_balance:.2f}",
-                    "investments_value": f"{investments_value:.2f}",
-                }
-            )
+        self._artifacts.append_csv_row(
+            PORTFOLIO_VALUE_CSV,
+            fieldnames,
+            {
+                "timestamp": timestamp,
+                "total_value": f"{total_value:.2f}",
+                "total_cost": f"{total_cost:.2f}",
+                "cash_balance": f"{cash_balance:.2f}",
+                "investments_value": f"{investments_value:.2f}",
+            },
+        )
 
     def import_sipp(self, csv_path: str | Path) -> float:
         """Import SIPP CSV, extract trades and cash flows. Return cash balance."""
@@ -534,20 +425,15 @@ class TraderAgent(Agent):
                                 )
                                 if action:
                                     ticker = symbol.upper() if is_trade else "HSFWA"
-                                    conn.execute(
-                                        "INSERT OR IGNORE INTO trades "
-                                        "(ticker, action, shares, price, date, "
-                                        "notes, reference) "
-                                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                        (
-                                            ticker,
-                                            action,
-                                            shares,
-                                            price,
-                                            date,
-                                            "",
-                                            reference or None,
-                                        ),
+                                    self._trades.insert_ignore(
+                                        conn,
+                                        ticker,
+                                        action,
+                                        shares,
+                                        price,
+                                        date,
+                                        "",
+                                        reference or None,
                                     )
                                     if action == "BUY":
                                         buy_count += 1
@@ -560,19 +446,14 @@ class TraderAgent(Agent):
                         if amount > 0:
                             flow_type = classify_flow_type(description)
                             try:
-                                conn.execute(
-                                    "INSERT OR IGNORE INTO cash_flows "
-                                    "(date, flow_type, ticker, amount, "
-                                    "description, reference) "
-                                    "VALUES (?, ?, ?, ?, ?, ?)",
-                                    (
-                                        date,
-                                        flow_type,
-                                        None,
-                                        amount,
-                                        description,
-                                        reference,
-                                    ),
+                                self._cash_flows.insert_ignore(
+                                    conn,
+                                    date,
+                                    flow_type,
+                                    None,
+                                    amount,
+                                    description,
+                                    reference,
                                 )
                                 cash_count += 1
                             except Exception:
@@ -584,19 +465,14 @@ class TraderAgent(Agent):
                     if amount > 0:
                         flow_type = classify_flow_type(description)
                         try:
-                            conn.execute(
-                                "INSERT OR IGNORE INTO cash_flows "
-                                "(date, flow_type, ticker, amount, "
-                                "description, reference) "
-                                "VALUES (?, ?, ?, ?, ?, ?)",
-                                (
-                                    date,
-                                    flow_type,
-                                    None,
-                                    amount,
-                                    description,
-                                    reference,
-                                ),
+                            self._cash_flows.insert_ignore(
+                                conn,
+                                date,
+                                flow_type,
+                                None,
+                                amount,
+                                description,
+                                reference,
                             )
                             cash_count += 1
                         except Exception:
@@ -634,23 +510,7 @@ class TraderAgent(Agent):
 
         currencies: optional {ticker: (original_price, currency_code)} for display.
         """
-        from datetime import datetime, timezone
-
-        fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        with self._conn() as conn:
-            for t, p in prices.items():
-                orig = currencies.get(t) if currencies else None
-                orig_price = orig[0] if orig else None
-                currency = orig[1] if orig else "GBP"
-                conn.execute(
-                    "INSERT INTO price_cache (ticker, price, fetched_at, currency, original_price)"
-                    " VALUES (?, ?, ?, ?, ?)"
-                    " ON CONFLICT(ticker) DO UPDATE SET"
-                    "  price=excluded.price, fetched_at=excluded.fetched_at,"
-                    "  currency=excluded.currency, original_price=excluded.original_price",
-                    (t, p, fetched_at, currency, orig_price),
-                )
-            conn.commit()
+        self._price_cache.upsert_many(prices, currencies)
 
     def load_price_cache(
         self,
@@ -659,10 +519,7 @@ class TraderAgent(Agent):
 
         display_info: {ticker: (original_price, currency_code)}
         """
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT ticker, price, fetched_at, currency, original_price FROM price_cache"
-            ).fetchall()
+        rows = self._price_cache.load_all()
         if not rows:
             return {}, None, {}
         prices = {r[0]: r[1] for r in rows}
@@ -674,24 +531,12 @@ class TraderAgent(Agent):
 
     def set_cash_balance(self, amount: float) -> None:
         """Persist the SIPP cash balance (Running Balance) to account_state."""
-        from datetime import datetime, timezone
-
-        updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO account_state (key, value, updated_at) VALUES (?, ?, ?)"
-                " ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-                ("cash_balance", str(amount), updated_at),
-            )
-            conn.commit()
+        self._account.set("cash_balance", str(amount))
 
     def get_cash_balance(self) -> float | None:
         """Return the stored SIPP cash balance, or None if not yet imported."""
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT value FROM account_state WHERE key='cash_balance'"
-            ).fetchone()
-        return float(row[0]) if row else None
+        value = self._account.get("cash_balance")
+        return float(value) if value is not None else None
 
     def refresh_portfolio_prices(
         self,
@@ -710,13 +555,7 @@ class TraderAgent(Agent):
         logger = logging.getLogger(__name__)
         logger.info("Starting portfolio price refresh")
 
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT ticker, action, shares, price, date, stop_loss, entry_price"
-                " FROM trades WHERE ticker NOT IN ('', 'n/a', 'N/A')"
-                " ORDER BY substr(date, 7, 4) || '/' || substr(date, 4, 2) || '/' || substr(date, 1, 2), id"
-            ).fetchall()
-
+        rows = self._trades.open_rows()
         state = self._replay_trades(rows)
         positions = []
 

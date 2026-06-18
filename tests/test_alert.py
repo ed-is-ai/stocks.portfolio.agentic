@@ -3,7 +3,6 @@ Unit tests for AlertAgent.
 """
 
 import pytest
-import sqlite3
 import os
 from unittest.mock import patch, MagicMock
 
@@ -28,7 +27,7 @@ class TestAlertAgent:
                 high_52w=150.0,
                 low_52w=50.0,
                 pct_from_52w_high=-10.0,
-                pct_change_week=5.0
+                pct_change_week=5.0,
             )
 
             analysis = StockAnalysis(
@@ -38,13 +37,12 @@ class TestAlertAgent:
                 fresh_breakout=True,
                 strengths=["Strong momentum"],
                 risks=[],
-                summary="High score stock"
+                summary="High score stock",
             )
 
-            record = StockRecord.model_validate({
-                **scan.model_dump(),
-                "analysis": analysis.model_dump()
-            })
+            record = StockRecord.model_validate(
+                {**scan.model_dump(), "analysis": analysis.model_dump()}
+            )
             stocks.append(record)
 
         return stocks
@@ -63,7 +61,7 @@ class TestAlertAgent:
                 high_52w=80.0,
                 low_52w=30.0,
                 pct_from_52w_high=-30.0,
-                pct_change_week=-2.0
+                pct_change_week=-2.0,
             )
 
             analysis = StockAnalysis(
@@ -72,13 +70,12 @@ class TestAlertAgent:
                 entry_zone="far",
                 strengths=[],
                 risks=["Weak momentum"],
-                summary="Low score stock"
+                summary="Low score stock",
             )
 
-            record = StockRecord.model_validate({
-                **scan.model_dump(),
-                "analysis": analysis.model_dump()
-            })
+            record = StockRecord.model_validate(
+                {**scan.model_dump(), "analysis": analysis.model_dump()}
+            )
             stocks.append(record)
 
         return stocks
@@ -86,86 +83,107 @@ class TestAlertAgent:
     def test_should_alert_high_score(self, sample_high_score_stocks):
         """Test that high-score stocks should trigger alerts."""
         agent = AlertAgent()
-        mock_conn = MagicMock()
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = None
 
-        for stock in sample_high_score_stocks:
-            assert agent.should_alert(stock, mock_conn) is True
+        with patch.object(AlertAgent, "was_recently_alerted", return_value=False):
+            for stock in sample_high_score_stocks:
+                assert agent.should_alert(stock) is True
 
     def test_should_alert_low_score(self, sample_low_score_stocks):
         """Test that low-score stocks should not trigger alerts."""
         agent = AlertAgent()
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = None
 
-        for stock in sample_low_score_stocks:
-            assert agent.should_alert(stock, mock_conn) is False
+        with patch.object(AlertAgent, "was_recently_alerted", return_value=False):
+            for stock in sample_low_score_stocks:
+                assert agent.should_alert(stock) is False
 
     def test_should_alert_boundary_cases(self):
         """Test that alerts fire on breakout events, not raw score."""
         agent = AlertAgent()
 
         scan = StockScan(
-            ticker="TEST", as_of="2024-01-01", price=100.0, volume=1000000,
-            rel_volume=1.0, high_52w=120.0, low_52w=80.0, pct_from_52w_high=-10.0, pct_change_week=0.0
+            ticker="TEST",
+            as_of="2024-01-01",
+            price=100.0,
+            volume=1000000,
+            rel_volume=1.0,
+            high_52w=120.0,
+            low_52w=80.0,
+            pct_from_52w_high=-10.0,
+            pct_change_week=0.0,
         )
-        mock_conn = MagicMock()
-        mock_conn.execute.return_value.fetchone.return_value = None
 
-        # Fresh breakout - should alert
-        analysis = StockAnalysis(
-            score=8, stage="Stage 2", entry_zone="approaching",
-            fresh_breakout=True, strengths=[], risks=[], summary="Test"
-        )
-        stock = StockRecord.model_validate({
-            **scan.model_dump(), "analysis": analysis.model_dump()
-        })
-        assert agent.should_alert(stock, mock_conn) is True
+        with patch.object(AlertAgent, "was_recently_alerted", return_value=False):
+            # Fresh breakout - should alert
+            analysis = StockAnalysis(
+                score=8,
+                stage="Stage 2",
+                entry_zone="approaching",
+                fresh_breakout=True,
+                strengths=[],
+                risks=[],
+                summary="Test",
+            )
+            stock = StockRecord.model_validate(
+                {**scan.model_dump(), "analysis": analysis.model_dump()}
+            )
+            assert agent.should_alert(stock) is True
 
-        # No breakout - should not alert (even with the same score)
-        analysis = StockAnalysis(
-            score=8, stage="Stage 2", entry_zone="approaching",
-            fresh_breakout=False, multiyear_breakout=False,
-            strengths=[], risks=[], summary="Test"
-        )
-        stock = StockRecord.model_validate({
-            **scan.model_dump(), "analysis": analysis.model_dump()
-        })
-        assert agent.should_alert(stock, mock_conn) is False
+            # No breakout - should not alert (even with the same score)
+            analysis = StockAnalysis(
+                score=8,
+                stage="Stage 2",
+                entry_zone="approaching",
+                fresh_breakout=False,
+                multiyear_breakout=False,
+                strengths=[],
+                risks=[],
+                summary="Test",
+            )
+            stock = StockRecord.model_validate(
+                {**scan.model_dump(), "analysis": analysis.model_dump()}
+            )
+            assert agent.should_alert(stock) is False
 
-    @patch('smtplib.SMTP')
+    @patch("smtplib.SMTP")
     def test_send_email_success(self, mock_smtp, sample_high_score_stocks):
         """Test successful email sending."""
         mock_server = MagicMock()
         mock_smtp.return_value.__enter__.return_value = mock_server
 
         email_cfg = EmailConfig(
-            host='localhost', port=1025, user='user@example.com',
-            password='pass', recipient='recipient@example.com')
+            host="localhost",
+            port=1025,
+            user="user@example.com",
+            password="pass",
+            recipient="recipient@example.com",
+        )
         agent = AlertAgent(email_config=email_cfg)
-        subject = 'Test Alert'
-        html_body = '<p>Test</p>'
-        text_body = 'Test'
+        subject = "Test Alert"
+        html_body = "<p>Test</p>"
+        text_body = "Test"
 
         agent.send_email(subject, html_body, text_body)
 
         # Verify SMTP was called correctly
-        mock_smtp.assert_called_once_with('localhost', 1025)
+        mock_smtp.assert_called_once_with("localhost", 1025)
         mock_server.sendmail.assert_called_once()
 
-    @patch('smtplib.SMTP')
+    @patch("smtplib.SMTP")
     def test_send_email_failure(self, mock_smtp, sample_high_score_stocks):
         """Test email sending failure handling."""
         mock_smtp.side_effect = Exception("SMTP Error")
 
         email_cfg = EmailConfig(
-            host='localhost', port=1025, user='user@example.com',
-            password='pass', recipient='recipient@example.com')
+            host="localhost",
+            port=1025,
+            user="user@example.com",
+            password="pass",
+            recipient="recipient@example.com",
+        )
         agent = AlertAgent(email_config=email_cfg)
-        subject = 'Test Alert'
-        html_body = '<p>Test</p>'
-        text_body = 'Test'
+        subject = "Test Alert"
+        html_body = "<p>Test</p>"
+        text_body = "Test"
 
         # Should not raise exception
         agent.send_email(subject, html_body, text_body)
@@ -200,10 +218,10 @@ class TestAlertAgent:
     def test_database_operations(self, sample_high_score_stocks):
         """Test database alert tracking."""
         # Clean up any existing test database
-        if os.path.exists('test_alerts.db'):
-            os.remove('test_alerts.db')
+        if os.path.exists("test_alerts.db"):
+            os.remove("test_alerts.db")
 
-        agent = AlertAgent(name='AlertAgent', db_path='test_alerts.db')
+        agent = AlertAgent(name="AlertAgent", db_path="test_alerts.db")
 
         # First alert should be sent
         agent.run(sample_high_score_stocks[:1])
@@ -211,10 +229,10 @@ class TestAlertAgent:
         agent.run(sample_high_score_stocks[:1])
 
         # Verify database was created
-        assert os.path.exists('test_alerts.db')
+        assert os.path.exists("test_alerts.db")
 
         # Clean up
-        os.remove('test_alerts.db')
+        os.remove("test_alerts.db")
 
     def test_run_method_empty_list(self):
         """Test run method with empty stock list."""

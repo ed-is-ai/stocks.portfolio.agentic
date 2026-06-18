@@ -7,12 +7,21 @@
 
 ## 2. Phase 2 — Repository layer (sole owner of trades.db)
 
-- [ ] 2.1 Create `app/repositories/db.py` with the connection factory and `_SCHEMA` (moved from `trader_agent.py`), including existing migrations
-- [ ] 2.2 Add `TradesRepository`, `CashFlowsRepository`, `PriceCacheRepository` with typed methods covering current SQL (positions, add/delete trade, cash flows, price cache, `account_state`)
-- [ ] 2.3 Add `ArtifactsRepository` for CSV/JSON read/write (`pipeline_runs.csv`, `*_results.json`, `portfolio_value.csv`)
-- [ ] 2.4 Point `trader_agent.py`, `alert_agent.py`, `analyst_agent.py`, and `ingestion/sipp.py` at repositories instead of raw `sqlite3`
-- [ ] 2.5 Add unit tests for each repository (in-memory / temp DB)
-- [ ] 2.6 `pyrefly check` + `uv run pytest` green; commit `refactor(repositories): extract trades.db access behind repositories`
+> **Scope note (deviation from original proposal):** The proposal assumed all
+> four sites open `trades.db`. In reality `alert_agent.py` owns a separate
+> `alerts.db` and `analyst_agent.py` owns a separate `results.db`. Per decision,
+> Phase 2 now builds repositories for **all three** databases so no agent imports
+> `sqlite3`. The `agents/trader/ingestion/` package was found to be **unwired
+> dead code** depending on a never-built multi-portfolio `TraderAgent` API; it is
+> **deleted** here rather than rewired, and multi-portfolio support is tracked as
+> a separate future change (see TODO in MEMORY / follow-up).
+
+- [x] 2.1 Create `app/repositories/db.py` with the connection factory and `_SCHEMA` (moved from `trader_agent.py`), including existing migrations
+- [x] 2.2 Add `TradesRepository`, `CashFlowsRepository`, `PriceCacheRepository`, `AccountStateRepository` with typed methods covering current SQL (positions, add/delete trade, cash flows, price cache, `account_state`)
+- [x] 2.3 Add `ArtifactsRepository` for CSV/JSON read/write (`pipeline_runs.csv`, `*_results.json`, `portfolio_value.csv`)
+- [x] 2.4 Point `trader_agent.py`, `alert_agent.py`, `analyst_agent.py` at repositories (incl. new `AlertsRepository` over `alerts.db` and `ResultsRepository` over `results.db`) instead of raw `sqlite3`; delete the dead `ingestion/` package
+- [x] 2.5 Add unit tests for each repository (in-memory / temp DB)
+- [x] 2.6 `pyrefly check` + `uv run pytest` green; commit `refactor(repositories): extract db access behind repositories`
 
 ## 3. Phase 3 — Split schemas
 

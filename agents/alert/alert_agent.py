@@ -6,21 +6,23 @@ Reads analysis results and fires alerts for near-entry setups.
 import json
 import os
 import smtplib
-import sqlite3
 from datetime import date, datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from pydantic import PrivateAttr
 
 from ms_agent_framework import Agent
 from models import EmailConfig, Position, StockRecord
+from app.core.config import ALERTS_DB
+from app.repositories import db
+from app.repositories.alerts_repo import AlertsRepository
+from app.repositories.db import Connect
 
 
 ALERT_COOLDOWN_HOURS = 24
-DB_PATH = str(Path(__file__).parent / "alerts.db")
+DB_PATH = str(ALERTS_DB)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -49,15 +51,18 @@ class AlertAgent(Agent):
     email_config: EmailConfig = EMAIL_CONFIG
 
     _buy_alerts: list[tuple[StockRecord, str]] = PrivateAttr(default_factory=list)
-    _sell_alerts: list[tuple[Position, StockRecord | None]] = PrivateAttr(default_factory=list)
+    _sell_alerts: list[tuple[Position, StockRecord | None]] = PrivateAttr(
+        default_factory=list
+    )
+    _alerts: AlertsRepository = PrivateAttr()
 
-    def check_positions(
-        self, stocks: list[StockRecord], conn: sqlite3.Connection
-    ) -> None:
+    def model_post_init(self, __context: Any) -> None:
+        connect: Connect = db.make_connect(lambda: self.db_path)
+        self._alerts = AlertsRepository(connect)
+
+    def check_positions(self, stocks: list[StockRecord]) -> None:
         """Fire follow-up alerts when a watching position crosses entry or stop loss."""
-        rows = conn.execute(
-            "SELECT rowid, ticker, entry_price, stop_loss FROM alerts WHERE status='watching'"
-        ).fetchall()
+        rows = self._alerts.watching()
         if not rows:
             return
         price_map = {s.ticker: s.price for s in stocks}
@@ -72,10 +77,7 @@ class AlertAgent(Agent):
                 )
                 print(f"\n{msg}")
                 self.send_email(f"Entry Triggered: {ticker}", f"<p>{msg}</p>", msg)
-                conn.execute(
-                    "UPDATE alerts SET status='entered' WHERE rowid=?", (rowid,)
-                )
-                conn.commit()
+                self._alerts.set_status(rowid, "entered")
             elif stop_loss is not None and current <= stop_loss:
                 msg = (
                     f"STOP LOSS HIT: {ticker} @ ${current:.2f} "
@@ -83,90 +85,53 @@ class AlertAgent(Agent):
                 )
                 print(f"\n{msg}")
                 self.send_email(f"Stop Loss Hit: {ticker}", f"<p>{msg}</p>", msg)
-                conn.execute(
-                    "UPDATE alerts SET status='stopped' WHERE rowid=?", (rowid,)
-                )
-                conn.commit()
+                self._alerts.set_status(rowid, "stopped")
 
     def run(self, payload: Iterable[StockRecord]) -> int:
         results = list(payload)
-        conn = self.init_db()
-        conn.execute("DELETE FROM alerts")
-        conn.commit()
-        self.check_positions(results, conn)
+        self._alerts.ensure_schema()
+        self._alerts.clear()
+        self.check_positions(results)
         self._buy_alerts.clear()
 
         for stock in results:
-            if not self.should_alert(stock, conn):
+            if not self.should_alert(stock):
                 continue
             trigger = self.alert_trigger(stock)
             assert trigger is not None
             print(f"\nALERT: {stock.ticker} [{trigger}]")
             self._buy_alerts.append((stock, trigger))
-            self.record_alert(conn, stock)
+            self.record_alert(stock)
 
-        conn.close()
         print(f"\n{len(self._buy_alerts)} buy alert(s) queued.")
         return len(self._buy_alerts)
 
-    def init_db(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS alerts (
-                ticker TEXT NOT NULL,
-                alerted_at TEXT NOT NULL,
-                score INTEGER,
-                stage TEXT,
-                summary TEXT
-            )
-            """
-        )
-        for col_sql in [
-            "ALTER TABLE alerts ADD COLUMN entry_price REAL",
-            "ALTER TABLE alerts ADD COLUMN stop_loss REAL",
-            "ALTER TABLE alerts ADD COLUMN status TEXT DEFAULT 'watching'",
-        ]:
-            try:
-                conn.execute(col_sql)
-            except sqlite3.OperationalError:
-                pass
-        conn.commit()
-        return conn
+    def init_db(self) -> None:
+        """Ensure the alerts schema exists (kept for backward compatibility)."""
+        self._alerts.ensure_schema()
 
-    def was_recently_alerted(self, conn: sqlite3.Connection, ticker: str) -> bool:
-        watching = conn.execute(
-            "SELECT 1 FROM alerts WHERE ticker=? AND status='watching' LIMIT 1",
-            (ticker,),
-        ).fetchone()
-        if watching:
+    def was_recently_alerted(self, ticker: str) -> bool:
+        if self._alerts.has_watching(ticker):
             return True
-        row = conn.execute(
-            "SELECT alerted_at FROM alerts WHERE ticker=? ORDER BY alerted_at DESC LIMIT 1",
-            (ticker,),
-        ).fetchone()
-        if not row:
+        last_alerted = self._alerts.last_alerted_at(ticker)
+        if not last_alerted:
             return False
-        last = row[0][:13]
-        diff = datetime.now(timezone.utc) - datetime.fromisoformat(last + ":00:00+00:00")
+        last = last_alerted[:13]
+        diff = datetime.now(timezone.utc) - datetime.fromisoformat(
+            last + ":00:00+00:00"
+        )
         return diff.total_seconds() < ALERT_COOLDOWN_HOURS * 3600
 
-    def record_alert(self, conn: sqlite3.Connection, stock: StockRecord) -> None:
-        conn.execute(
-            """INSERT INTO alerts
-               (ticker, alerted_at, score, stage, summary, entry_price, stop_loss, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'watching')""",
-            (
-                stock.ticker,
-                datetime.now(timezone.utc).isoformat(),
-                stock.analysis.score,
-                stock.analysis.stage,
-                stock.analysis.summary,
-                stock.analysis.entry_price,
-                stock.analysis.stop_loss,
-            ),
+    def record_alert(self, stock: StockRecord) -> None:
+        assert stock.analysis is not None
+        self._alerts.record(
+            stock.ticker,
+            stock.analysis.score,
+            stock.analysis.stage,
+            stock.analysis.summary,
+            stock.analysis.entry_price,
+            stock.analysis.stop_loss,
         )
-        conn.commit()
 
     def alert_trigger(self, stock: StockRecord) -> str | None:
         """Return a trigger label if this stock warrants an immediate alert, else None.
@@ -202,17 +167,16 @@ class AlertAgent(Agent):
         # --- Volume ---
         rv = stock.rel_volume
         if rv >= 1.5:
-            vol_line = f"Strong volume confirmation ({rv:.1f}x average) — institutions buying."
+            vol_line = (
+                f"Strong volume confirmation ({rv:.1f}x average) — institutions buying."
+            )
         elif rv >= 1.0:
             vol_line = f"Moderate volume ({rv:.1f}x average) — acceptable but watch for follow-through."
         else:
-            vol_line = (
-                f"Weak volume ({rv:.1f}x average) — breakout lacks conviction; wait for volume surge."
-            )
+            vol_line = f"Weak volume ({rv:.1f}x average) — breakout lacks conviction; wait for volume surge."
 
         # --- SEPA ---
         sepa_count = 0
-        sepa_detail = ""
         if a.sepa_template:
             t = a.sepa_template
             checks = {
@@ -228,7 +192,9 @@ class AlertAgent(Agent):
             sepa_count = sum(1 for v in checks.values() if v)
             failed = [k for k, v in checks.items() if not v]
             if sepa_count == 8:
-                sepa_line = "Perfect SEPA trend template (8/8) — textbook Stage 2 uptrend."
+                sepa_line = (
+                    "Perfect SEPA trend template (8/8) — textbook Stage 2 uptrend."
+                )
             elif sepa_count >= 6:
                 missing = ", ".join(failed)
                 sepa_line = f"Strong SEPA ({sepa_count}/8). Missing: {missing}."
@@ -261,9 +227,7 @@ class AlertAgent(Agent):
             elif cs.I == 0:
                 parts.append("low institutional ownership (I=0)")
             m_str = "market in uptrend (M=2)" if cs.M == 2 else "market headwind (M<2)"
-            canslim_line = (
-                f"CANSLIM {cs.total}/14: {'; '.join(parts)}; {m_str}."
-            )
+            canslim_line = f"CANSLIM {cs.total}/14: {'; '.join(parts)}; {m_str}."
         else:
             canslim_line = "CANSLIM data unavailable."
 
@@ -283,7 +247,11 @@ class AlertAgent(Agent):
                 mom_parts.append("elevated volume (S=2)")
             elif mo.S == 0:
                 mom_parts.append("low volume (S=0)")
-            mom_line = f"Momentum {mo.total}/14: {'; '.join(mom_parts)}." if mom_parts else f"Momentum {mo.total}/14."
+            mom_line = (
+                f"Momentum {mo.total}/14: {'; '.join(mom_parts)}."
+                if mom_parts
+                else f"Momentum {mo.total}/14."
+            )
         else:
             mom_line = "Momentum data unavailable."
 
@@ -306,10 +274,10 @@ class AlertAgent(Agent):
             "verdict": verdict,
         }
 
-    def should_alert(self, stock: StockRecord, conn: sqlite3.Connection) -> bool:
+    def should_alert(self, stock: StockRecord) -> bool:
         if self.alert_trigger(stock) is None:
             return False
-        if self.was_recently_alerted(conn, stock.ticker):
+        if self.was_recently_alerted(stock.ticker):
             print(f"  [skip] {stock.ticker}: already alerted recently")
             return False
         return True
@@ -323,7 +291,9 @@ class AlertAgent(Agent):
         entry = f"${analysis.entry_price:.2f}" if analysis.entry_price else "—"
         stop = f"${analysis.stop_loss:.2f}" if analysis.stop_loss else "—"
         if analysis.entry_price and analysis.stop_loss:
-            risk_pct = ((analysis.entry_price - analysis.stop_loss) / analysis.entry_price) * 100
+            risk_pct = (
+                (analysis.entry_price - analysis.stop_loss) / analysis.entry_price
+            ) * 100
             risk_str = f"{risk_pct:.1f}% below entry"
         else:
             risk_str = "—"
@@ -361,7 +331,9 @@ class AlertAgent(Agent):
     def format_alert_html(self, stock: StockRecord, trigger: str | None = None) -> str:
         analysis = stock.analysis
         assert analysis is not None
-        strengths_html = "".join(f"<li>&#10003; {item}</li>" for item in analysis.strengths)
+        strengths_html = "".join(
+            f"<li>&#10003; {item}</li>" for item in analysis.strengths
+        )
         risks_html = "".join(f"<li>&#9888; {item}</li>" for item in analysis.risks)
 
         if analysis.score >= 8:
@@ -371,13 +343,17 @@ class AlertAgent(Agent):
         else:
             score_color = "#e74c3c"
         risks_section = (
-            f"<ul style='padding-left:20px;color:#c0392b'>{risks_html}</ul>" if risks_html else ""
+            f"<ul style='padding-left:20px;color:#c0392b'>{risks_html}</ul>"
+            if risks_html
+            else ""
         )
 
         entry = f"${analysis.entry_price:.2f}" if analysis.entry_price else "—"
         stop = f"${analysis.stop_loss:.2f}" if analysis.stop_loss else "—"
         if analysis.entry_price and analysis.stop_loss:
-            risk_pct = ((analysis.entry_price - analysis.stop_loss) / analysis.entry_price) * 100
+            risk_pct = (
+                (analysis.entry_price - analysis.stop_loss) / analysis.entry_price
+            ) * 100
             risk_str = f"{risk_pct:.1f}%"
         else:
             risk_str = "—"
@@ -385,8 +361,10 @@ class AlertAgent(Agent):
         canslim_section = ""
         if analysis.canslim:
             cs = analysis.canslim
+
             def _bar(val: int) -> str:
                 return "&#9632;" * val + "&#9633;" * (2 - val)
+
             canslim_section = f"""
           <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:0.85em">
             <tr><td colspan="3" style="padding:4px 6px;background:#eee;font-weight:bold">
@@ -411,8 +389,8 @@ class AlertAgent(Agent):
         trigger_banner = ""
         if trigger:
             trigger_banner = (
-                f"<div style=\"background:#1e3a5f;color:white;padding:10px 16px;"
-                f"border-radius:4px;font-weight:bold;margin-bottom:16px;font-size:0.95em\">"
+                f'<div style="background:#1e3a5f;color:white;padding:10px 16px;'
+                f'border-radius:4px;font-weight:bold;margin-bottom:16px;font-size:0.95em">'
                 f"&#9889; {trigger}</div>"
             )
         return f"""
@@ -476,11 +454,7 @@ class AlertAgent(Agent):
 
         points = " ".join(f"{x(i):.1f},{y(v):.1f}" for i, v in enumerate(prices))
         # Filled area under the line
-        area_pts = (
-            f"{x(0):.1f},{h - pad} "
-            + points
-            + f" {x(n - 1):.1f},{h - pad}"
-        )
+        area_pts = f"{x(0):.1f},{h - pad} " + points + f" {x(n - 1):.1f},{h - pad}"
 
         return (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" '
@@ -489,13 +463,13 @@ class AlertAgent(Agent):
             f'<polygon points="{area_pts}" fill="{line_color}" opacity="0.12"/>'
             f'<polyline points="{points}" fill="none" stroke="{line_color}" '
             f'stroke-width="2" stroke-linejoin="round"/>'
-            f'<circle cx="{x(n-1):.1f}" cy="{y(prices[-1]):.1f}" r="3" fill="{line_color}"/>'
+            f'<circle cx="{x(n - 1):.1f}" cy="{y(prices[-1]):.1f}" r="3" fill="{line_color}"/>'
             f'<text x="{x(0)}" y="{h - 1}" font-size="9" fill="#aaa">52w ago</text>'
-            f'<text x="{x(n-1) - 20}" y="{h - 1}" font-size="9" fill="#aaa">now</text>'
+            f'<text x="{x(n - 1) - 20}" y="{h - 1}" font-size="9" fill="#aaa">now</text>'
             f'<text x="{pad + 2}" y="{y(hi) + 9}" font-size="9" fill="#888">'
-            f'${hi:,.2f}</text>'
+            f"${hi:,.2f}</text>"
             f'<text x="{pad + 2}" y="{y(lo) - 3}" font-size="9" fill="#888">'
-            f'${lo:,.2f}</text>'
+            f"${lo:,.2f}</text>"
             f"</svg>"
         )
 
@@ -509,11 +483,29 @@ class AlertAgent(Agent):
         sepa_count = 0
         if a and a.sepa_template:
             sepa_count = sum(1 for v in a.sepa_template.values() if v)
-        sepa_color = "#27ae60" if sepa_count >= 6 else "#f39c12" if sepa_count >= 4 else "#e74c3c"
+        sepa_color = (
+            "#27ae60"
+            if sepa_count >= 6
+            else "#f39c12"
+            if sepa_count >= 4
+            else "#e74c3c"
+        )
 
         score = a.score if a else 0
-        verdict_bg = "#d4edda" if score >= 8 and rv >= 1.5 else "#fff3cd" if score >= 7 else "#f8d7da"
-        verdict_border = "#27ae60" if score >= 8 and rv >= 1.5 else "#f39c12" if score >= 7 else "#e74c3c"
+        verdict_bg = (
+            "#d4edda"
+            if score >= 8 and rv >= 1.5
+            else "#fff3cd"
+            if score >= 7
+            else "#f8d7da"
+        )
+        verdict_border = (
+            "#27ae60"
+            if score >= 8 and rv >= 1.5
+            else "#f39c12"
+            if score >= 7
+            else "#e74c3c"
+        )
 
         def _row(label: str, text: str, color: str = "#333") -> str:
             return (
@@ -729,10 +721,22 @@ class AlertAgent(Agent):
             )
 
         rv = stock.rel_volume if stock else None
-        vol_color = "#e74c3c" if (rv or 0) >= 1.5 else "#f39c12" if (rv or 0) >= 1.0 else "#27ae60"
+        vol_color = (
+            "#e74c3c"
+            if (rv or 0) >= 1.5
+            else "#f39c12"
+            if (rv or 0) >= 1.0
+            else "#27ae60"
+        )
         a = stock.analysis if stock else None
         sepa_count = sum(1 for v in (a.sepa_template or {}).values() if v) if a else 0
-        trend_color = "#e74c3c" if sepa_count <= 4 else "#f39c12" if sepa_count <= 6 else "#27ae60"
+        trend_color = (
+            "#e74c3c"
+            if sepa_count <= 4
+            else "#f39c12"
+            if sepa_count <= 6
+            else "#27ae60"
+        )
 
         return f"""
         <html><body style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px">
@@ -798,8 +802,10 @@ class AlertAgent(Agent):
             if pos.current_price > pos.stop_loss:
                 continue
             stock = stock_map.get(pos.ticker)
-            print(f"\nSTOP LOSS: {pos.ticker} @ ${pos.current_price:.2f} "
-                  f"(stop ${pos.stop_loss:.2f})")
+            print(
+                f"\nSTOP LOSS: {pos.ticker} @ ${pos.current_price:.2f} "
+                f"(stop ${pos.stop_loss:.2f})"
+            )
             self._sell_alerts.append((pos, stock))
 
         print(f"\n{len(self._sell_alerts)} stop-loss alert(s) queued.")
@@ -816,20 +822,21 @@ class AlertAgent(Agent):
         buy_count = len(self._buy_alerts)
 
         if sell_count or buy_count:
-            subject = (
-                f"Stock Alerts {today} — "
-                + (f"{sell_count} SELL" + (f", {buy_count} BUY" if buy_count else "") if sell_count else f"{buy_count} BUY")
+            subject = f"Stock Alerts {today} — " + (
+                f"{sell_count} SELL" + (f", {buy_count} BUY" if buy_count else "")
+                if sell_count
+                else f"{buy_count} BUY"
             )
         else:
             subject = f"Stock Scanner {today} — No alerts"
 
         # ── Portfolio snapshot (text) ───────────────────────────────────────
-        text_parts: list[str] = [f"Stock Scanner Summary — {today}\n{'='*50}"]
+        text_parts: list[str] = [f"Stock Scanner Summary — {today}\n{'=' * 50}"]
         if positions:
             total_value = sum(p.current_value for p in positions if p.current_value)
-            total_cost  = sum(p.total_cost for p in positions)
-            total_pnl   = total_value - total_cost
-            pnl_pct     = total_pnl / total_cost * 100 if total_cost else 0.0
+            total_cost = sum(p.total_cost for p in positions)
+            total_pnl = total_value - total_cost
+            pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
             text_parts.append(
                 f"\n\nPORTFOLIO SNAPSHOT\n"
                 f"  Positions : {len(positions)}\n"
@@ -838,8 +845,14 @@ class AlertAgent(Agent):
                 f"  P&L       : ${total_pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
             )
             for p in positions:
-                pnl_str = f"${p.unrealised_pnl:+.2f} ({p.unrealised_pnl_pct:+.1f}%)" if p.unrealised_pnl is not None else "--"
-                text_parts.append(f"  {p.ticker:<6} {p.shares:>8.1f} shares  price ${p.current_price or 0:.2f}  P&L {pnl_str}")
+                pnl_str = (
+                    f"${p.unrealised_pnl:+.2f} ({p.unrealised_pnl_pct:+.1f}%)"
+                    if p.unrealised_pnl is not None
+                    else "--"
+                )
+                text_parts.append(
+                    f"  {p.ticker:<6} {p.shares:>8.1f} shares  price ${p.current_price or 0:.2f}  P&L {pnl_str}"
+                )
 
         if self._sell_alerts:
             text_parts.append("\n\n*** SELL / STOP LOSS ALERTS ***\n")
@@ -857,8 +870,11 @@ class AlertAgent(Agent):
             return 2
 
         strong_buys = sorted(
-            [(s, t) for s, t in self._buy_alerts
-             if "LOW CONVICTION" not in self._breakout_narrative(s)["verdict"]],
+            [
+                (s, t)
+                for s, t in self._buy_alerts
+                if "LOW CONVICTION" not in self._breakout_narrative(s)["verdict"]
+            ],
             key=_conviction_rank,
         )
         if strong_buys:
@@ -876,10 +892,10 @@ class AlertAgent(Agent):
         snapshot_html = ""
         if positions:
             total_value = sum(p.current_value for p in positions if p.current_value)
-            total_cost  = sum(p.total_cost for p in positions)
-            total_pnl   = total_value - total_cost
-            pnl_pct     = total_pnl / total_cost * 100 if total_cost else 0.0
-            pnl_color   = "#27ae60" if total_pnl >= 0 else "#c0392b"
+            total_cost = sum(p.total_cost for p in positions)
+            total_pnl = total_value - total_cost
+            pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
+            pnl_color = "#27ae60" if total_pnl >= 0 else "#c0392b"
             rows_html = "".join(
                 f"<tr>"
                 f"<td style='padding:5px 8px;font-weight:700'>{p.ticker}</td>"
@@ -889,7 +905,8 @@ class AlertAgent(Agent):
                 f"<td style='padding:5px 8px;text-align:right;color:{'#27ae60' if (p.unrealised_pnl or 0) >= 0 else '#c0392b'}'>"
                 f"{'%+.1f' % p.unrealised_pnl_pct}%</td>"
                 f"</tr>"
-                for p in positions if p.current_value
+                for p in positions
+                if p.current_value
             )
             snapshot_html = f"""
             <div style="margin:16px 0;padding:14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px">
@@ -918,16 +935,15 @@ class AlertAgent(Agent):
 
         # ── HTML body ──────────────────────────────────────────────────────
         html_parts: list[str] = [
-            "<html><body style=\"font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px\">"
-            f"<h2 style=\"color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px\">"
-            f"&#128200; Stock Scanner Summary &mdash; {today}</h2>"
-            + snapshot_html
+            '<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">'
+            f'<h2 style="color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px">'
+            f"&#128200; Stock Scanner Summary &mdash; {today}</h2>" + snapshot_html
         ]
 
         if self._sell_alerts:
             html_parts.append(
-                "<div style=\"margin:20px 0\">"
-                "<h3 style=\"color:#c0392b;margin-bottom:12px\">&#9888; SELL / STOP LOSS</h3>"
+                '<div style="margin:20px 0">'
+                '<h3 style="color:#c0392b;margin-bottom:12px">&#9888; SELL / STOP LOSS</h3>'
             )
             for pos, stock in self._sell_alerts:
                 n = self._stop_loss_narrative(pos, stock)
@@ -936,8 +952,8 @@ class AlertAgent(Agent):
 
         if strong_buys:
             html_parts.append(
-                "<div style=\"margin:20px 0\">"
-                "<h3 style=\"color:#27ae60;margin-bottom:12px\">&#9889; BUY / BREAKOUT</h3>"
+                '<div style="margin:20px 0">'
+                '<h3 style="color:#27ae60;margin-bottom:12px">&#9889; BUY / BREAKOUT</h3>'
             )
             for stock, trigger in strong_buys:
                 html_parts.append(self._buy_card_html(stock, trigger))
@@ -946,17 +962,17 @@ class AlertAgent(Agent):
         low_conviction_count = len(self._buy_alerts) - len(strong_buys)
         if low_conviction_count:
             html_parts.append(
-                f"<p style=\"color:#94a3b8;font-size:0.8em;font-style:italic\">"
+                f'<p style="color:#94a3b8;font-size:0.8em;font-style:italic">'
                 f"{low_conviction_count} low-conviction breakout(s) suppressed.</p>"
             )
 
         if not self._sell_alerts and not strong_buys:
             html_parts.append(
-                "<p style=\"color:#64748b;font-style:italic\">No actionable alerts this run.</p>"
+                '<p style="color:#64748b;font-style:italic">No actionable alerts this run.</p>'
             )
 
         html_parts.append(
-            f"<p style=\"color:#aaa;font-size:0.8em;margin-top:24px\">"
+            f'<p style="color:#aaa;font-size:0.8em;margin-top:24px">'
             f"{today} &mdash; Momentum Scanner</p></body></html>"
         )
         html_body = "\n".join(html_parts)
@@ -1018,7 +1034,9 @@ class AlertAgent(Agent):
         """Compact HTML card for one breakout alert."""
         a = stock.analysis
         assert a is not None
-        score_color = "#27ae60" if a.score >= 8 else "#f39c12" if a.score >= 6 else "#e74c3c"
+        score_color = (
+            "#27ae60" if a.score >= 8 else "#f39c12" if a.score >= 6 else "#e74c3c"
+        )
         entry = f"${a.entry_price:.2f}" if a.entry_price else "—"
         stop = f"${a.stop_loss:.2f}" if a.stop_loss else "—"
         if a.entry_price and a.stop_loss:
@@ -1027,8 +1045,20 @@ class AlertAgent(Agent):
         else:
             risk_str = "—"
         n = self._breakout_narrative(stock)
-        verdict_bg = "#d4edda" if a.score >= 8 and stock.rel_volume >= 1.5 else "#fff3cd" if a.score >= 7 else "#f8d7da"
-        verdict_border = "#27ae60" if a.score >= 8 and stock.rel_volume >= 1.5 else "#f39c12" if a.score >= 7 else "#e74c3c"
+        verdict_bg = (
+            "#d4edda"
+            if a.score >= 8 and stock.rel_volume >= 1.5
+            else "#fff3cd"
+            if a.score >= 7
+            else "#f8d7da"
+        )
+        verdict_border = (
+            "#27ae60"
+            if a.score >= 8 and stock.rel_volume >= 1.5
+            else "#f39c12"
+            if a.score >= 7
+            else "#e74c3c"
+        )
         url = self._yahoo_url(stock.ticker)
 
         return f"""
@@ -1075,7 +1105,11 @@ class AlertAgent(Agent):
         </div>"""
 
     def send_email(self, subject: str, html_body: str, text_body: str) -> None:
-        if not self.email_config.user or not self.email_config.password or not self.email_config.recipient:
+        if (
+            not self.email_config.user
+            or not self.email_config.password
+            or not self.email_config.recipient
+        ):
             print("  [email] (not configured)")
             return
 

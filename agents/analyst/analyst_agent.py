@@ -13,7 +13,6 @@ Falls back to rule-based inline logic when ohlcv_history is absent.
 
 import json
 import re
-import sqlite3
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -24,12 +23,18 @@ import openai
 from agents.analyst.historical_pivots import find_historical_pivots
 from ms_agent_framework import Agent
 from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
+from app.core.config import RESULTS_DB as _RESULTS_DB_PATH
+from app.repositories import db
+from app.repositories.results_repo import ResultRow, ResultsRepository
 
 _VCP_SCRIPTS = str(
     Path(__file__).parent.parent.parent / "skills" / "vcp-screener" / "scripts"
 )
 _BTP_SCRIPTS = str(
-    Path(__file__).parent.parent.parent / "skills" / "breakout-trade-planner" / "scripts"
+    Path(__file__).parent.parent.parent
+    / "skills"
+    / "breakout-trade-planner"
+    / "scripts"
 )
 
 FOUNDRY_BASE_URL = "http://localhost:5272/v1"
@@ -59,7 +64,8 @@ Scoring guide:
   Damaged = stop already breached, do not buy
 """
 
-RESULTS_DB = str(Path(__file__).parent / "results.db")
+RESULTS_DB = str(_RESULTS_DB_PATH)
+_results_repo = ResultsRepository(db.make_connect(lambda: RESULTS_DB))
 
 
 def _run_vcp_analysis(stock: StockRecord) -> dict | None:
@@ -145,6 +151,7 @@ def _run_btp_pricing(pivot: float, last_contraction_low: float) -> dict | None:
             calculate_risks,
             derive_trade_prices,
         )
+
         signal_entry, worst_entry, stop_loss = derive_trade_prices(
             pivot, last_contraction_low
         )
@@ -166,7 +173,7 @@ def _sma_slope(prices: list[float], window: int, lookback: int = 4) -> float | N
     if len(prices) < window + lookback:
         return None
     current_sma = sum(prices[-window:]) / window
-    past_sma = sum(prices[-(window + lookback):-lookback]) / window
+    past_sma = sum(prices[-(window + lookback) : -lookback]) / window
     return current_sma - past_sma
 
 
@@ -180,7 +187,7 @@ def _hh_hl_structure(prices: list[float], window: int = 4, periods: int = 3) -> 
     if len(prices) < needed:
         return False
     recent = prices[-needed:]
-    windows = [recent[i * window:(i + 1) * window] for i in range(periods)]
+    windows = [recent[i * window : (i + 1) * window] for i in range(periods)]
     highs = [max(w) for w in windows]
     lows = [min(w) for w in windows]
     hh = all(highs[i] > highs[i - 1] for i in range(1, periods))
@@ -198,7 +205,9 @@ def _vol_confirms_price(ohlcv: list[dict], lookback: int = 20) -> bool:
     if not recent:
         return False
     up_vols = [int(d["volume"]) for d in recent if float(d["close"]) > float(d["open"])]
-    dn_vols = [int(d["volume"]) for d in recent if float(d["close"]) <= float(d["open"])]
+    dn_vols = [
+        int(d["volume"]) for d in recent if float(d["close"]) <= float(d["open"])
+    ]
     if not up_vols or not dn_vols:
         return bool(up_vols)
     return sum(up_vols) / len(up_vols) > sum(dn_vols) / len(dn_vols)
@@ -284,20 +293,20 @@ def _sepa_assessment(stock: StockRecord, vcp: dict | None) -> dict[str, bool]:
 
         result: dict[str, bool] = {
             # 7-point trend template from calculator
-            "above_150_200":        _passed("c1_price_above_sma150_200"),
-            "sma150_above_200":     _passed("c2_sma150_above_sma200"),
-            "sma200_rising":        _sma200_rising(),
-            "above_sma50":          _passed("c4_price_above_sma50"),
-            "above_25pct_of_low":   _passed("c5_25pct_above_52w_low"),
+            "above_150_200": _passed("c1_price_above_sma150_200"),
+            "sma150_above_200": _passed("c2_sma150_above_sma200"),
+            "sma200_rising": _sma200_rising(),
+            "above_sma50": _passed("c4_price_above_sma50"),
+            "above_25pct_of_low": _passed("c5_25pct_above_52w_low"),
             "within_25pct_of_high": _passed("c6_within_25pct_52w_high"),
-            "rs_leader":            _passed("c7_rs_rank_above_70"),
+            "rs_leader": _passed("c7_rs_rank_above_70"),
             # Extra Minervini condition from returned SMA values
-            "sma50_above_150_200":  sma50_val > sma150_val and sma50_val > sma200_val,
+            "sma50_above_150_200": sma50_val > sma150_val and sma50_val > sma200_val,
             # VCP criteria
             "vcp_contractions": vcp_r.get("num_contractions", 0) >= 2,
-            "volume_dry_up":    (vol_r.get("dry_up_ratio") or 1.0) < 1.0,
-            "tight_action":     not vcp_r.get("wide_and_loose", True),
-            "near_pivot":       (piv_r.get("distance_from_pivot_pct") or -999.0) >= -8.0,
+            "volume_dry_up": (vol_r.get("dry_up_ratio") or 1.0) < 1.0,
+            "tight_action": not vcp_r.get("wide_and_loose", True),
+            "near_pivot": (piv_r.get("distance_from_pivot_pct") or -999.0) >= -8.0,
         }
     else:
         # ---- fallback: inline SMA arithmetic (no ohlcv_history) ----
@@ -308,38 +317,39 @@ def _sepa_assessment(stock: StockRecord, vcp: dict | None) -> dict[str, bool]:
         s200 = _sma_slope(stock.price_history, window=40, lookback=4)
 
         result = {
-            "above_150_200":        price > sma150_val and price > sma200_val,
-            "sma150_above_200":     sma150_val > sma200_val,
-            "sma200_rising":        s200 is not None and s200 > 0,
-            "sma50_above_150_200":  sma50_val > sma150_val and sma50_val > sma200_val,
-            "above_25pct_of_low":   price >= stock.low_52w * 1.25,
+            "above_150_200": price > sma150_val and price > sma200_val,
+            "sma150_above_200": sma150_val > sma200_val,
+            "sma200_rising": s200 is not None and s200 > 0,
+            "sma50_above_150_200": sma50_val > sma150_val and sma50_val > sma200_val,
+            "above_25pct_of_low": price >= stock.low_52w * 1.25,
             "within_25pct_of_high": stock.pct_from_52w_high >= -25,
-            "rs_leader":            (stock.rel_strength_vs_spy or -999) >= 0,
-            "above_sma50":          price > sma50_val,
+            "rs_leader": (stock.rel_strength_vs_spy or -999) >= 0,
+            "above_sma50": price > sma50_val,
             # VCP criteria — approximate from weekly data
             "vcp_contractions": False,
-            "volume_dry_up":    (stock.rel_volume or 1.0) < 1.0,
-            "tight_action":     stock.atr14 is not None and stock.atr14 < price * 0.02,
-            "near_pivot":       stock.high_base is not None and price >= stock.high_base * 0.92,
+            "volume_dry_up": (stock.rel_volume or 1.0) < 1.0,
+            "tight_action": stock.atr14 is not None and stock.atr14 < price * 0.02,
+            "near_pivot": stock.high_base is not None
+            and price >= stock.high_base * 0.92,
         }
 
     # Technical-analyst framework additions — same regardless of VCP data availability
-    result["hh_hl_uptrend"]      = _hh_hl_structure(stock.price_history)
+    result["hh_hl_uptrend"] = _hh_hl_structure(stock.price_history)
     result["vol_confirms_price"] = _vol_confirms_price(stock.ohlcv_history)
-    result["ma_compressed"]      = _ma_compressed(sma50_val, sma150_val)
+    result["ma_compressed"] = _ma_compressed(sma50_val, sma150_val)
     return result
 
 
 def _execution_state_to_entry_zone(state: str) -> str:
     """Map VCP execution state to the legacy entry_zone string."""
     _map = {
-        "Breakout":           "broken_out",
+        "Breakout": "broken_out",
         "Early-post-breakout": "broken_out",
-        "Pre-breakout":       "approaching",
-        "Extended":           "extended",
-        "Overextended":       "extended",
-        "Damaged":            "far",
-        "Invalid":            "far",
+        "Pre-breakout": "approaching",
+        "Extended": "extended",
+        "Overextended": "extended",
+        "Damaged": "far",
+        "Invalid": "far",
     }
     return _map.get(state, "far")
 
@@ -380,9 +390,7 @@ def _derive_rr(btp: dict, vcp: dict | None) -> float:
     if risk <= 0:
         return 2.0
 
-    contractions = (
-        vcp["vcp"].get("contractions", []) if vcp and vcp.get("vcp") else []
-    )
+    contractions = vcp["vcp"].get("contractions", []) if vcp and vcp.get("vcp") else []
     if len(contractions) >= 2:
         base_high = contractions[0]["high_price"]
         reward = base_high - entry
@@ -392,65 +400,28 @@ def _derive_rr(btp: dict, vcp: dict | None) -> float:
     return 2.0
 
 
-def _open_db() -> sqlite3.Connection:
-    """Open (or create) the results database and ensure the schema exists."""
-    conn = sqlite3.connect(RESULTS_DB)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS analysis_history (
-            ticker         TEXT NOT NULL,
-            as_of          TEXT NOT NULL,
-            score          INTEGER NOT NULL,
-            canslim_total  INTEGER,
-            momentum_total INTEGER,
-            stage          TEXT,
-            price          REAL,
-            entry_price    REAL,
-            stop_loss      REAL,
-            entry_zone     TEXT DEFAULT 'far',
-            PRIMARY KEY (ticker, as_of)
-        )
-    """)
-    try:
-        conn.execute("ALTER TABLE analysis_history ADD COLUMN entry_zone TEXT DEFAULT 'far'")
-    except Exception:
-        pass
-    conn.commit()
-    return conn
-
-
-def _load_previous_scores(conn: sqlite3.Connection) -> dict[str, int]:
-    """Return {ticker: last_score} for every ticker that has history."""
-    rows = conn.execute("""
-        SELECT ticker, score
-        FROM analysis_history
-        WHERE as_of = (
-            SELECT MAX(as_of) FROM analysis_history h2 WHERE h2.ticker = analysis_history.ticker
-        )
-    """).fetchall()
-    return {ticker: score for ticker, score in rows}
-
-
-def _save_results(conn: sqlite3.Connection, records: list[StockRecord], as_of: str) -> None:
-    """Persist this run's analysis results to the database."""
-    rows: list[tuple[str, str, int, int | None, int | None, str | None, float | None, float | None, float | None, str]] = []
+def _save_results(records: list[StockRecord], as_of: str) -> None:
+    """Persist this run's analysis results via the results repository."""
+    rows: list[ResultRow] = []
     for stock in records:
         a = stock.analysis
         if not a:
             continue
-        rows.append((
-            stock.ticker, as_of, a.score,
-            a.canslim.total if a.canslim else None,
-            a.momentum.total if a.momentum else None,
-            a.stage, stock.price, a.entry_price, a.stop_loss, a.entry_zone,
-        ))
-    conn.executemany(
-        """INSERT OR REPLACE INTO analysis_history
-           (ticker, as_of, score, canslim_total, momentum_total, stage,
-            price, entry_price, stop_loss, entry_zone)
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
-        rows,
-    )
-    conn.commit()
+        rows.append(
+            (
+                stock.ticker,
+                as_of,
+                a.score,
+                a.canslim.total if a.canslim else None,
+                a.momentum.total if a.momentum else None,
+                a.stage,
+                stock.price,
+                a.entry_price,
+                a.stop_loss,
+                a.entry_zone,
+            )
+        )
+    _results_repo.save_results(rows)
 
 
 class AnalystAgent(Agent):
@@ -469,8 +440,8 @@ class AnalystAgent(Agent):
         print(mode_line)
 
         as_of = datetime.now().strftime("%Y-%m-%d %H:%M")
-        conn = _open_db()
-        prev_scores = _load_previous_scores(conn)
+        _results_repo.ensure_schema()
+        prev_scores = _results_repo.latest_scores()
 
         total = len(scan_results)
         analysis_results: list[StockRecord] = []
@@ -484,7 +455,9 @@ class AnalystAgent(Agent):
                     analysis = self.score_stock(stock, llm)
                     stock.analysis = analysis
                     analysis_results.append(stock)
-                    canslim = f"{analysis.canslim.total}/14" if analysis.canslim else "—"
+                    canslim = (
+                        f"{analysis.canslim.total}/14" if analysis.canslim else "—"
+                    )
                     mom = f"{analysis.momentum.total}/14" if analysis.momentum else "—"
                     delta = _fmt_delta(stock.ticker, analysis.score, prev_scores)
                     line = (
@@ -503,14 +476,17 @@ class AnalystAgent(Agent):
             analysis_results,
             key=lambda record: (
                 record.analysis.score if record.analysis else 0,
-                record.analysis.canslim.total if record.analysis and record.analysis.canslim else 0,
-                record.analysis.momentum.total if record.analysis and record.analysis.momentum else 0,
+                record.analysis.canslim.total
+                if record.analysis and record.analysis.canslim
+                else 0,
+                record.analysis.momentum.total
+                if record.analysis and record.analysis.momentum
+                else 0,
             ),
             reverse=True,
         )
 
-        _save_results(conn, sorted_results, as_of)
-        conn.close()
+        _save_results(sorted_results, as_of)
 
         self._print_table(sorted_results, prev_scores)
         return sorted_results
@@ -549,13 +525,19 @@ class AnalystAgent(Agent):
             delta = _fmt_delta(stock.ticker, a.score, prev_scores)
             risk_pct = (
                 f"{(a.entry_price - a.stop_loss) / a.entry_price * 100:.1f}%"
-                if a.entry_price and a.stop_loss else "—"
+                if a.entry_price and a.stop_loss
+                else "—"
             )
             buyers = str(stock.funds_buying) if stock.funds_buying is not None else "—"
-            sellers = str(stock.funds_selling) if stock.funds_selling is not None else "—"
+            sellers = (
+                str(stock.funds_selling) if stock.funds_selling is not None else "—"
+            )
             net = (
-                f"+{stock.funds_net}" if stock.funds_net and stock.funds_net > 0
-                else str(stock.funds_net) if stock.funds_net is not None else "—"
+                f"+{stock.funds_net}"
+                if stock.funds_net and stock.funds_net > 0
+                else str(stock.funds_net)
+                if stock.funds_net is not None
+                else "—"
             )
             rec = recommendation(a)
             spark = AnalystAgent._sparkline(stock.price_history)
@@ -676,7 +658,9 @@ class AnalystAgent(Agent):
         payload = json.loads(raw)
         return StockAnalysis.model_validate(payload)
 
-    def rule_based_score(self, stock: StockRecord, vcp: dict | None = None) -> StockAnalysis:
+    def rule_based_score(
+        self, stock: StockRecord, vcp: dict | None = None
+    ) -> StockAnalysis:
         """Score on CANSLIM fundamentals + momentum technicals (50/50).
 
         VCP bonus (+1) when valid_vcp and volume dry-up are both confirmed.
@@ -766,7 +750,9 @@ class AnalystAgent(Agent):
         else:
             stop_loss = None
 
-        vcp_state = vcp["execution"]["state"] if vcp else _fallback_execution_state(stock)
+        vcp_state = (
+            vcp["execution"]["state"] if vcp else _fallback_execution_state(stock)
+        )
         entry_zone = _execution_state_to_entry_zone(vcp_state)
 
         return StockAnalysis(
@@ -808,14 +794,16 @@ class AnalystAgent(Agent):
         pct_in_range = (price - low_52w) / rng if rng > 0 else 0.5
         pct_above_low = (price - low_52w) / low_52w * 100 if low_52w > 0 else 0.0
         a = (
-            2 if pct_in_range >= 0.8 and pct_above_low >= 25
-            else 1 if pct_in_range >= 0.6
+            2
+            if pct_in_range >= 0.8 and pct_above_low >= 25
+            else 1
+            if pct_in_range >= 0.6
             else 0
         )
 
         n = 2 if pct_from_high >= -5 else 1 if pct_from_high >= -15 else 0
         s = 2 if rel_vol >= 1.5 else 1 if rel_vol >= 1.0 else 0
-        l = 2 if 60 <= rsi <= 80 else 1 if 40 <= rsi < 60 else 0
+        l = 2 if 60 <= rsi <= 80 else 1 if 40 <= rsi < 60 else 0  # noqa: E741
 
         s150 = _sma_slope(stock.price_history, window=30, lookback=4)
         s150_rising = s150 is None or s150 > 0
@@ -836,23 +824,41 @@ class AnalystAgent(Agent):
         rel_vol = stock.rel_volume or 1.0
 
         eps = stock.eps_growth
-        c = 2 if eps is not None and eps >= 0.25 else 1 if eps is not None and eps >= 0.10 else 0
+        c = (
+            2
+            if eps is not None and eps >= 0.25
+            else 1
+            if eps is not None and eps >= 0.10
+            else 0
+        )
 
         annual_eps = stock.annual_eps_growth
         roe = stock.roe
         if annual_eps is not None:
             a = 2 if annual_eps >= 0.25 else 1 if annual_eps >= 0.15 else 0
         else:
-            a = 2 if roe is not None and roe >= 0.17 else 1 if roe is not None and roe >= 0.10 else 0
+            a = (
+                2
+                if roe is not None and roe >= 0.17
+                else 1
+                if roe is not None and roe >= 0.10
+                else 0
+            )
 
         n = 2 if pct_from_high >= -5 else 1 if pct_from_high >= -15 else 0
         s = 2 if rel_vol >= 1.5 else 1 if rel_vol >= 1.0 else 0
 
         rs = stock.rel_strength_vs_spy
-        l = 2 if rs is not None and rs >= 20 else 1 if rs is not None and rs >= 0 else 0
+        l = 2 if rs is not None and rs >= 20 else 1 if rs is not None and rs >= 0 else 0  # noqa: E741
 
         inst = stock.inst_ownership_pct
-        i = 2 if inst is not None and inst >= 0.50 else 1 if inst is not None and inst >= 0.30 else 0
+        i = (
+            2
+            if inst is not None and inst >= 0.50
+            else 1
+            if inst is not None and inst >= 0.30
+            else 0
+        )
 
         m = 2 if stock.spy_uptrend else 0
 
@@ -889,7 +895,7 @@ def _fallback_execution_state(stock: StockRecord) -> str:
     return "far"
 
 
-_MYB_ABOVE_MAX = 8.0   # price must be no more than 8% above the pivot
+_MYB_ABOVE_MAX = 8.0  # price must be no more than 8% above the pivot
 _MYB_MIN_BASE_WEEKS = 26  # base must have lasted at least 26 weeks
 
 
@@ -909,7 +915,10 @@ def _detect_multiyear_breakout(ticker: str, price: float) -> dict | None:
         if p.get("status") == "open":
             continue
         pct_above = (price - p["pivot_price"]) / p["pivot_price"] * 100
-        if 0.0 <= pct_above <= _MYB_ABOVE_MAX and p["base_weeks"] >= _MYB_MIN_BASE_WEEKS:
+        if (
+            0.0 <= pct_above <= _MYB_ABOVE_MAX
+            and p["base_weeks"] >= _MYB_MIN_BASE_WEEKS
+        ):
             candidates.append((pct_above, p))
 
     if not candidates:
@@ -957,7 +966,9 @@ if __name__ == "__main__":
     with open(scan_file, encoding="utf-8") as handle:
         scan_data = json.load(handle)
 
-    results = AnalystAgent().run([StockRecord.model_validate(item) for item in scan_data])
+    results = AnalystAgent().run(
+        [StockRecord.model_validate(item) for item in scan_data]
+    )
 
     out = _Path(__file__).parent / "analysis_results.json"
     with open(out, "w", encoding="utf-8") as handle:

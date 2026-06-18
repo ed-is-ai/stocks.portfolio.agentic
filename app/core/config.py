@@ -12,8 +12,10 @@ from pathlib import Path
 # Repo root: app/core/config.py -> app/core -> app -> <root>
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 
-# --- SQLite database -------------------------------------------------------
+# --- SQLite databases ------------------------------------------------------
 TRADES_DB = ROOT_DIR / "agents" / "trader" / "trades.db"
+ALERTS_DB = ROOT_DIR / "agents" / "alert" / "alerts.db"
+RESULTS_DB = ROOT_DIR / "agents" / "analyst" / "results.db"
 
 # --- Pipeline artifacts ----------------------------------------------------
 ANALYSIS_JSON = ROOT_DIR / "agents" / "analyst" / "analysis_results.json"
