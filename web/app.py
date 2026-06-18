@@ -8,12 +8,13 @@ Run with:
 import csv
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Form, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
@@ -34,6 +35,23 @@ app = FastAPI(title="Stock Trader")
 templates = Jinja2Templates(directory=str(_ROOT / "web" / "templates"))
 trader = TraderAgent(name="TraderAgent")
 _evaluator = ExitEvaluator()
+
+
+def require_local_or_token(request: Request) -> None:
+    """Allow loopback clients, or any client with a valid shared secret.
+
+    Money-mutating endpoints use this. When ``APP_AUTH_TOKEN`` is unset (the
+    default local workflow), only loopback clients (127.0.0.1 / ::1) are
+    allowed. When it is set, a matching ``X-Auth-Token`` header is also
+    accepted from any host. Anything else gets HTTP 403.
+    """
+    token = os.getenv("APP_AUTH_TOKEN")
+    if token and request.headers.get("X-Auth-Token") == token:
+        return
+    client_host = request.client.host if request.client else None
+    if client_host in {"127.0.0.1", "::1", "localhost"}:
+        return
+    raise HTTPException(status_code=403, detail="Forbidden")
 
 
 _TICKER_ALIASES_JSON = _ROOT / "data" / "ticker_aliases.json"
@@ -201,7 +219,8 @@ async def refresh_portfolio_prices(request: Request) -> HTMLResponse:
         )
 
 
-@app.post("/refresh-data", response_class=HTMLResponse)
+@app.post("/refresh-data", response_class=HTMLResponse,
+          dependencies=[Depends(require_local_or_token)])
 async def refresh_data(request: Request) -> HTMLResponse:
     """Refresh the analysis dataset by running the orchestrator once."""
     import asyncio
@@ -408,7 +427,7 @@ async def partial_runlog(request: Request) -> HTMLResponse:
 # Trade actions
 # ---------------------------------------------------------------------------
 
-@app.post("/trades")
+@app.post("/trades", dependencies=[Depends(require_local_or_token)])
 async def record_trade(
     request: Request,
     ticker: Annotated[str, Form()],
@@ -432,7 +451,8 @@ async def record_trade(
     return await partial_portfolio(request)
 
 
-@app.delete("/trades/{trade_id}")
+@app.delete("/trades/{trade_id}",
+            dependencies=[Depends(require_local_or_token)])
 async def delete_trade(trade_id: int) -> RedirectResponse:
     """Delete a trade by ID and redirect to history partial."""
     trader.delete_trade(trade_id)

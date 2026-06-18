@@ -50,6 +50,13 @@ Add `--extract` to refresh the watchlist from WisdomWise on every scheduled run.
 
 `--interval` sets the polling frequency in minutes (default: 15). Press `Ctrl+C` to stop.
 
+### Security note
+
+The app binds to `127.0.0.1` by default (loopback only). Money-mutating
+endpoints (`POST /trades`, `DELETE /trades/{id}`, `POST /refresh-data`) reject
+non-loopback clients. To reach the app from another host, set `APP_AUTH_TOKEN`
+and send it as the `X-Auth-Token` header on those requests.
+
 ## Output
 
 - `agents/extraction/extraction_results.json` — grouped ticker list by source (StockTwits, WisdomWise)
