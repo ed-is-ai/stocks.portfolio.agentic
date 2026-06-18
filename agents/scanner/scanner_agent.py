@@ -111,7 +111,10 @@ def fetch_vcp_screener_tickers() -> list[str]:
     if not _VCP_SCRIPT.exists():
         print("  [skip] vcp_screener: screen_vcp.py not found")
         return []
-    uv = shutil.which("uv") or str(Path.home() / "AppData/Roaming/Python/Python314/Scripts/uv.exe")
+    uv = shutil.which("uv")
+    if not uv:
+        print("  [skip] vcp_screener: uv not found on PATH")
+        return []
     with tempfile.TemporaryDirectory() as tmpdir:
         result = subprocess.run(
             [
