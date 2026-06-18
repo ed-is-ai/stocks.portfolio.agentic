@@ -15,6 +15,8 @@ from typing import Any
 from ms_agent_framework import Agent
 from models import Position, Trade
 
+logger = logging.getLogger(__name__)
+
 _DB_PATH = Path(__file__).parent / "trades.db"
 
 _SCHEMA = """
@@ -91,8 +93,8 @@ class TraderAgent(Agent):
             for col_def in ("stop_loss REAL", "entry_price REAL", "reference TEXT"):
                 try:
                     conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
-                except Exception:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    logger.debug("schema migration step skipped: %s", exc)
             try:
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_reference "
@@ -103,8 +105,8 @@ class TraderAgent(Agent):
             for col_def in ("currency TEXT DEFAULT 'GBP'", "original_price REAL"):
                 try:
                     conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
-                except Exception:
-                    pass
+                except sqlite3.OperationalError as exc:
+                    logger.debug("schema migration step skipped: %s", exc)
             # Seed cash_balance from portfolio_value.csv if not yet stored
             has_cash = conn.execute(
                 "SELECT 1 FROM account_state WHERE key='cash_balance'"
@@ -134,8 +136,8 @@ class TraderAgent(Agent):
                         " VALUES ('cash_balance', ?, ?)",
                         (str(amount), updated_at),
                     )
-        except Exception:
-            pass
+        except (OSError, ValueError, KeyError, csv.Error) as exc:
+            logger.debug("cash seed from csv skipped: %s", exc)
 
     def record_buy(
         self,
@@ -411,8 +413,8 @@ class TraderAgent(Agent):
             try:
                 data = json.loads(analysis_json.read_text(encoding="utf-8"))
                 prices = {r["ticker"]: r["price"] for r in data}
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("price/value computation failed: %s", exc)
 
         positions = self.get_portfolio(prices if prices else None)
         total_cost = sum(p.total_cost for p in positions if p.total_cost is not None)
@@ -432,7 +434,10 @@ class TraderAgent(Agent):
                             cash_balance = float(rows[-1].get("cash_balance", "0"))
                         else:
                             cash_balance = 0.0
-                except Exception:
+                except (ValueError, TypeError, OSError, csv.Error) as exc:
+                    logger.warning(
+                        "could not parse cash balance, defaulting to 0.0: %s", exc
+                    )
                     cash_balance = 0.0
             else:
                 cash_balance = 0.0
