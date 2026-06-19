@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from agents.trader.trader_agent import TraderAgent
+from app.agents.trader.trader_agent import TraderAgent
 
 
 def test_record_multiple_buys(tmp_path: Path) -> None:

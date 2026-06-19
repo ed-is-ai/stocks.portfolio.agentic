@@ -12,7 +12,7 @@ import logging
 import math
 from datetime import datetime
 
-from agents.analyst.exit_evaluator import ExitEvaluator
+from app.agents.analyst.exit_evaluator import ExitEvaluator
 from app.core.config import (
     ANALYSIS_JSON,
     PORTFOLIO_VALUE_CSV,

@@ -25,19 +25,23 @@ from openpyxl.worksheet.hyperlink import Hyperlink
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from agents.analyst.analyst_agent import AnalystAgent, recommendation
-from agents.alert.alert_agent import AlertAgent
-from agents.extraction.extraction_agent import ExtractionAgent
-from agents.trader.trader_agent import TraderAgent
+from app.agents.analyst.analyst_agent import AnalystAgent, recommendation
+from app.agents.alert.alert_agent import AlertAgent
+from app.agents.extraction.extraction_agent import ExtractionAgent
+from app.agents.trader.trader_agent import TraderAgent
 from app.workflows.momentum import build_momentum_pipeline
-from agents.scanner.scanner_agent import ScannerAgent, load_watchlist, load_source_map
-from agents.scanner.scan_history import (
+from app.agents.scanner.scanner_agent import (
+    ScannerAgent,
+    load_watchlist,
+    load_source_map,
+)
+from app.agents.scanner.scan_history import (
     get_fresh_breakouts,
     get_new_tickers,
     load_history,
     save_history,
 )
-from models import StockRecord
+from app.schemas import StockRecord
 from app.core.config import (
     ANALYSIS_JSON,
     PIPELINE_RUNS_CSV,

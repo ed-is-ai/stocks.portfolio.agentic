@@ -1,9 +1,9 @@
 """Pipeline service — runs the scan/analyse/alert workflow once.
 
-Both the web ``/refresh-data`` endpoint and (after Phase 5) the scheduler invoke
-the pipeline through here instead of duplicating the run wiring. For now it
-shells out to the orchestrator's ``--once`` entry point, preserving the existing
-behaviour exactly; Phase 5 repoints this at ``build_momentum_pipeline``.
+Both the web ``/refresh-data`` endpoint and the scheduler invoke the pipeline
+through here instead of duplicating the run wiring. It shells out to the
+orchestrator's ``--once`` entry point so the run executes in its own process
+(matching the previous web behaviour).
 """
 
 import subprocess
@@ -27,7 +27,7 @@ class PipelineService:
     def run_once(self) -> PipelineRunResult:
         """Run the orchestrator pipeline once and capture its output."""
         result = subprocess.run(
-            [sys.executable, str(ROOT_DIR / "orchestrator.py"), "--once"],
+            [sys.executable, "-m", "app.orchestration.orchestrator", "--once"],
             cwd=str(ROOT_DIR),
             capture_output=True,
             text=True,

@@ -15,27 +15,21 @@ import json
 import re
 import sys
 from datetime import datetime
-from pathlib import Path
 from typing import ClassVar, Iterable
 
 import openai
 
-from agents.analyst.historical_pivots import find_historical_pivots
-from agents.base import Agent
-from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
+from app.agents.analyst.historical_pivots import find_historical_pivots
+from app.agents.base import Agent
+from app.core.config import ANALYSIS_JSON, ANALYSIS_PROGRESS_TXT, SCAN_RESULTS_JSON
 from app.core.config import RESULTS_DB as _RESULTS_DB_PATH
+from app.core.config import SKILLS_DIR
 from app.repositories import db
 from app.repositories.results_repo import ResultRow, ResultsRepository
+from app.schemas import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
 
-_VCP_SCRIPTS = str(
-    Path(__file__).parent.parent.parent / "skills" / "vcp-screener" / "scripts"
-)
-_BTP_SCRIPTS = str(
-    Path(__file__).parent.parent.parent
-    / "skills"
-    / "breakout-trade-planner"
-    / "scripts"
-)
+_VCP_SCRIPTS = str(SKILLS_DIR / "vcp-screener" / "scripts")
+_BTP_SCRIPTS = str(SKILLS_DIR / "breakout-trade-planner" / "scripts")
 
 FOUNDRY_BASE_URL = "http://localhost:5272/v1"
 FOUNDRY_MODEL = "phi-4-mini"
@@ -427,7 +421,7 @@ def _save_results(records: list[StockRecord], as_of: str) -> None:
 class AnalystAgent(Agent):
     name: str = "AnalystAgent"
 
-    PROGRESS_FILE: ClassVar[str] = str(Path(__file__).parent / "analysis_progress.txt")
+    PROGRESS_FILE: ClassVar[str] = str(ANALYSIS_PROGRESS_TXT)
 
     def run(self, payload: Iterable[StockRecord]) -> list[StockRecord]:
         scan_results = list(payload)
@@ -957,20 +951,14 @@ def _fmt_delta(ticker: str, score: int, prev_scores: dict[str, int]) -> str:
 
 
 if __name__ == "__main__":
-    import sys as _sys
-    from pathlib import Path as _Path
-
-    _sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
-
-    scan_file = _Path(__file__).parent.parent / "scanner" / "scan_results.json"
-    with open(scan_file, encoding="utf-8") as handle:
+    with open(SCAN_RESULTS_JSON, encoding="utf-8") as handle:
         scan_data = json.load(handle)
 
     results = AnalystAgent().run(
         [StockRecord.model_validate(item) for item in scan_data]
     )
 
-    out = _Path(__file__).parent / "analysis_results.json"
+    out = ANALYSIS_JSON
     with open(out, "w", encoding="utf-8") as handle:
         handle.write(json.dumps([item.model_dump() for item in results], indent=2))
 

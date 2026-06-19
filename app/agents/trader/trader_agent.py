@@ -13,9 +13,9 @@ from typing import Any
 
 from pydantic import PrivateAttr
 
-from agents.base import Agent
-from models import Position, Trade
+from app.agents.base import Agent
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
+from app.schemas import Position, Trade
 from app.repositories import db
 from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository

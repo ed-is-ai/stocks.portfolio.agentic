@@ -1,13 +1,18 @@
 """Regenerate Excel from cached analysis_results.json without re-scanning."""
+
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from orchestrator import EXCEL_OUTPUT, write_excel, load_source_map
-from agents.scanner.scan_history import get_fresh_breakouts, get_new_tickers, load_history
-from models import StockRecord
+from app.orchestration.orchestrator import EXCEL_OUTPUT, write_excel, load_source_map
+from app.agents.scanner.scan_history import (
+    get_fresh_breakouts,
+    get_new_tickers,
+    load_history,
+)
+from app.schemas import StockRecord
 
 records = [
     StockRecord.model_validate(r)

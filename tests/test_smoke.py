@@ -7,17 +7,21 @@ import json
 import os
 from unittest.mock import patch, MagicMock
 
-from orchestrator import pipeline
+from app.orchestration.orchestrator import pipeline
 from app.workflows.momentum import build_momentum_pipeline
 
 
 class TestSmokeTests:
     """Smoke tests for the complete pipeline."""
 
-    @patch("agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[])
-    @patch("agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[])
     @patch(
-        "agents.scanner.scanner_agent._fetch_fundamentals",
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[]
+    )
+    @patch(
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
+    )
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals",
         return_value={
             "eps_growth": None,
             "annual_eps_growth": None,
@@ -28,10 +32,13 @@ class TestSmokeTests:
             "sector": None,
         },
     )
-    @patch("agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[])
-    @patch("agents.scanner.scanner_agent._congress_client")
     @patch(
-        "agents.analyst.analyst_agent.AnalystAgent.get_llm_client", return_value=None
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[]
+    )
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch(
+        "app.agents.analyst.analyst_agent.AnalystAgent.get_llm_client",
+        return_value=None,
     )
     @patch("yfinance.download")
     def test_full_pipeline_execution(
@@ -46,7 +53,7 @@ class TestSmokeTests:
     ):
         """Test that the full pipeline runs without errors."""
         import tempfile
-        import orchestrator
+        import app.orchestration.orchestrator as orchestrator
 
         mock_congress.get_stats.return_value = None
 
@@ -100,10 +107,14 @@ class TestSmokeTests:
                 assert "analysis" in analysis_data[0]
                 assert "score" in analysis_data[0]["analysis"]
 
-    @patch("agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[])
-    @patch("agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[])
     @patch(
-        "agents.scanner.scanner_agent._fetch_fundamentals",
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[]
+    )
+    @patch(
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
+    )
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals",
         return_value={
             "eps_growth": None,
             "annual_eps_growth": None,
@@ -114,10 +125,13 @@ class TestSmokeTests:
             "sector": None,
         },
     )
-    @patch("agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[])
-    @patch("agents.scanner.scanner_agent._congress_client")
     @patch(
-        "agents.analyst.analyst_agent.AnalystAgent.get_llm_client", return_value=None
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[]
+    )
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch(
+        "app.agents.analyst.analyst_agent.AnalystAgent.get_llm_client",
+        return_value=None,
     )
     @patch("yfinance.download")
     def test_agent_chaining(
@@ -164,10 +178,10 @@ class TestSmokeTests:
 
     def test_market_hours_check(self):
         """Test market hours logic."""
-        from orchestrator import is_market_hours
+        from app.orchestration.orchestrator import is_market_hours
 
         # Mock datetime to be during market hours
-        with patch("orchestrator.datetime") as mock_datetime:
+        with patch("app.orchestration.orchestrator.datetime") as mock_datetime:
             mock_dt = MagicMock()
             mock_dt.hour = 10
             mock_dt.minute = 30
@@ -176,7 +190,7 @@ class TestSmokeTests:
             assert is_market_hours() is True
 
         # Mock datetime to be outside market hours
-        with patch("orchestrator.datetime") as mock_datetime:
+        with patch("app.orchestration.orchestrator.datetime") as mock_datetime:
             mock_dt = MagicMock()
             mock_dt.hour = 18
             mock_dt.minute = 0
@@ -185,7 +199,7 @@ class TestSmokeTests:
             assert is_market_hours() is False
 
         # Mock datetime to be weekend
-        with patch("orchestrator.datetime") as mock_datetime:
+        with patch("app.orchestration.orchestrator.datetime") as mock_datetime:
             mock_dt = MagicMock()
             mock_dt.hour = 10
             mock_dt.minute = 30

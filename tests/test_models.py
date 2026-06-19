@@ -3,7 +3,7 @@ Unit tests for data models.
 """
 
 import pytest
-from models import StockScan, StockAnalysis, StockRecord, EmailConfig
+from app.schemas import StockScan, StockAnalysis, StockRecord, EmailConfig
 
 
 class TestModels:
@@ -20,7 +20,7 @@ class TestModels:
             high_52w=200.0,
             low_52w=100.0,
             pct_from_52w_high=-25.0,
-            pct_change_week=5.0
+            pct_change_week=5.0,
         )
 
         assert scan.ticker == "AAPL"
@@ -35,7 +35,7 @@ class TestModels:
             entry_zone="approaching",
             strengths=["Strong momentum", "Good volume"],
             risks=["High valuation"],
-            summary="Excellent setup"
+            summary="Excellent setup",
         )
 
         assert analysis.score == 8
@@ -55,7 +55,7 @@ class TestModels:
             high_52w=300.0,
             low_52w=150.0,
             pct_from_52w_high=-33.3,
-            pct_change_week=-2.0
+            pct_change_week=-2.0,
         )
 
         analysis = StockAnalysis(
@@ -64,13 +64,12 @@ class TestModels:
             entry_zone="far",
             strengths=["Above SMA200"],
             risks=["Weak RSI", "Low volume"],
-            summary="Mixed signals"
+            summary="Mixed signals",
         )
 
-        record = StockRecord.model_validate({
-            **scan.model_dump(),
-            "analysis": analysis.model_dump()
-        })
+        record = StockRecord.model_validate(
+            {**scan.model_dump(), "analysis": analysis.model_dump()}
+        )
 
         assert record.ticker == "TSLA"
         assert record.price == 200.0
@@ -84,7 +83,7 @@ class TestModels:
             port=587,
             user="test@example.com",
             password="password123",
-            recipient="alerts@example.com"
+            recipient="alerts@example.com",
         )
 
         assert config.host == "smtp.gmail.com"
@@ -94,19 +93,37 @@ class TestModels:
     def test_score_validation(self):
         """Test score range validation."""
         # Valid score
-        analysis = StockAnalysis(score=7, stage="Stage 2", entry_zone="far",
-                               strengths=[], risks=[], summary="Test")
+        analysis = StockAnalysis(
+            score=7,
+            stage="Stage 2",
+            entry_zone="far",
+            strengths=[],
+            risks=[],
+            summary="Test",
+        )
         assert analysis.score == 7
 
         # Invalid score - too high
         with pytest.raises(ValueError):
-            StockAnalysis(score=15, stage="Stage 2", entry_zone="far",
-                         strengths=[], risks=[], summary="Test")
+            StockAnalysis(
+                score=15,
+                stage="Stage 2",
+                entry_zone="far",
+                strengths=[],
+                risks=[],
+                summary="Test",
+            )
 
         # Invalid score - too low
         with pytest.raises(ValueError):
-            StockAnalysis(score=0, stage="Stage 2", entry_zone="far",
-                         strengths=[], risks=[], summary="Test")
+            StockAnalysis(
+                score=0,
+                stage="Stage 2",
+                entry_zone="far",
+                strengths=[],
+                risks=[],
+                summary="Test",
+            )
 
     def test_model_serialization(self):
         """Test model JSON serialization."""
@@ -119,13 +136,13 @@ class TestModels:
             high_52w=600.0,
             low_52w=300.0,
             pct_from_52w_high=-16.7,
-            pct_change_week=10.0
+            pct_change_week=10.0,
         )
 
         # Test serialization
         data = scan.model_dump()
-        assert data['ticker'] == "NVDA"
-        assert data['price'] == 500.0
+        assert data["ticker"] == "NVDA"
+        assert data["price"] == 500.0
 
         # Test deserialization
         scan2 = StockScan.model_validate(data)

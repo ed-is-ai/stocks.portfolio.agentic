@@ -68,9 +68,11 @@ See [CLAUDE.md](.claude/CLAUDE.md) for detailed development guidelines.
 
 ### Key Files
 
-- `models.py` — Pydantic data models (StockRecord, StockAnalysis, Position, etc.)
-- `orchestrator.py` — Main scheduler, wires agents together
-- `agents/` — Individual agent implementations
+- `app/schemas/` — Pydantic data models (StockRecord, StockAnalysis, Position, etc.)
+- `app/orchestration/orchestrator.py` — Main scheduler, wires agents together
+- `app/agents/` — Individual agent implementations
+- `app/api/` — FastAPI web app (factory, routes, templates)
+- `app/main.py` — Entry point (`serve` for the web UI, `run-pipeline` for one run)
 - `skills/` — Reusable scoring/trading skill libraries
 - `openspec/specs/` — Formal specifications for all agents
 
@@ -80,9 +82,13 @@ Orchestrator runs on market schedule (9:30 AM - 4:00 PM ET, weekdays).
 
 ```bash
 # Run single pipeline execution
-uv run python orchestrator.py
+uv run python -m app.main run-pipeline
 
-# Or schedule via APScheduler (embedded in orchestrator)
+# Or run the scheduler directly (APScheduler, market-hours)
+uv run python -m app.orchestration.orchestrator
+
+# Serve the web UI
+uv run python -m app.main serve
 ```
 
 Output files:
@@ -126,12 +132,12 @@ Core models (StockRecord, StockAnalysis, Position) are designed for:
 
 ### Run the full pipeline
 ```bash
-uv run python orchestrator.py
+uv run python -m app.main run-pipeline
 ```
 
 ### Test a single agent
 ```bash
-uv run python agents/scanner/scanner_agent.py
+uv run python -m app.agents.scanner.scanner_agent
 ```
 
 ### Check recent alerts
@@ -155,7 +161,7 @@ The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pensi
 
 2. Run the import (via web UI portfolio tab or directly):
    ```python
-   from agents.trader.trader_agent import TraderAgent
+   from app.agents.trader.trader_agent import TraderAgent
    agent = TraderAgent()
    cash_balance = agent.import_sipp('data/processed/SIPP/merged.csv')
    ```

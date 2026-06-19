@@ -8,12 +8,16 @@ No authentication required. Uses the public heat map data endpoint.
 
 import json
 from datetime import datetime
-from pathlib import Path
 from typing import Any, cast
 
 import requests
 
-from agents.base import Agent
+from app.agents.base import Agent
+from app.core.config import (
+    EXTRACTION_RESULTS_JSON,
+    STOCKTWITS_WATCHLIST_JSON,
+    WW_CONTEXT_JSON,
+)
 
 
 HEAT_MAP_URL = "https://whalewisdom.com/api/heatmap_details.json"
@@ -33,11 +37,9 @@ _HEADERS = {
 
 HeatMapStock = dict[str, Any]
 
-_EXTRACTION_RESULTS = Path(__file__).parent / "extraction_results.json"
-_WW_CONTEXT = Path(__file__).parent / "ww_context.json"
-_ST_WATCHLIST = (
-    Path(__file__).parent.parent.parent / "config" / "stocktwits_watchlist.json"
-)
+_EXTRACTION_RESULTS = EXTRACTION_RESULTS_JSON
+_WW_CONTEXT = WW_CONTEXT_JSON
+_ST_WATCHLIST = STOCKTWITS_WATCHLIST_JSON
 
 
 class ExtractionAgent(Agent):
@@ -231,10 +233,6 @@ class ExtractionAgent(Agent):
 
 
 if __name__ == "__main__":
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
     agent = ExtractionAgent(name="ExtractionAgent")
     tickers = agent.run()
 

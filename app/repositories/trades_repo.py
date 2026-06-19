@@ -2,9 +2,8 @@
 
 from typing import Any
 
-from models import Trade
-
 from app.repositories.db import Connect, session
+from app.schemas import Trade
 
 # Replays sort DD/MM/YYYY dates by reconstructing YYYY/MM/DD, then id.
 _DATE_SORT = (

@@ -16,37 +16,26 @@ from typing import Any, Iterable
 import pandas as pd
 import yfinance as yf
 
-from agents.base import Agent
-from models import StockRecord
-
-try:
-    from alpha_vantage_client import AlphaVantageClient  # direct run
-except ImportError:
-    from agents.scanner.alpha_vantage_client import (
-        AlphaVantageClient,
-    )  # via orchestrator
-
-try:
-    from congress_client import CongressClient  # direct run
-except ImportError:
-    from agents.scanner.congress_client import CongressClient  # via orchestrator
-
-try:
-    from agents.extraction.tv_extractor import (
-        fetch_tv_screener_tickers,
-        fetch_tv_screener_tickers_uk,
-    )
-except ImportError:
-    from tv_extractor import fetch_tv_screener_tickers, fetch_tv_screener_tickers_uk  # type: ignore[no-redef]
+from app.agents.base import Agent
+from app.core.config import (
+    EXTRACTION_RESULTS_JSON,
+    SKILLS_DIR,
+    WW_CONTEXT_JSON,
+)
+from app.integrations.alpha_vantage import AlphaVantageClient
+from app.integrations.congress import CongressClient
+from app.integrations.tv_screener import (
+    fetch_tv_screener_tickers,
+    fetch_tv_screener_tickers_uk,
+)
+from app.schemas import StockRecord
 
 _av_client = AlphaVantageClient()
 _congress_client = CongressClient()
 
 
-_EXTRACTION_RESULTS = (
-    Path(__file__).parent.parent / "extraction" / "extraction_results.json"
-)
-_WW_CONTEXT = Path(__file__).parent.parent / "extraction" / "ww_context.json"
+_EXTRACTION_RESULTS = EXTRACTION_RESULTS_JSON
+_WW_CONTEXT = WW_CONTEXT_JSON
 
 
 def load_watchlist() -> list[str]:
@@ -96,7 +85,7 @@ def is_tv_source(source: str) -> bool:
 
 PERIOD_DAYS = 252  # ~1 trading year for stage analysis
 
-_SKILLS_DIR = Path(__file__).parent.parent.parent / "skills"
+_SKILLS_DIR = SKILLS_DIR
 _VCP_SCRIPT = _SKILLS_DIR / "vcp-screener" / "scripts" / "screen_vcp.py"
 
 
@@ -560,14 +549,11 @@ class ScannerAgent(Agent):
 
 
 if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from app.core.config import SCAN_RESULTS_JSON
 
     agent = ScannerAgent(name="ScannerAgent")
     scan_results = agent.run()
-    out = Path(__file__).parent / "scan_results.json"
+    out = SCAN_RESULTS_JSON
     with open(out, "w", encoding="utf-8") as handle:
         json.dump([item.model_dump() for item in scan_results], handle, indent=2)
     print(f"\nSaved {len(scan_results)} tickers to {out}")

@@ -1,5 +1,52 @@
 # Momentum Stock Agent Architecture
 
+## Layered Architecture (`app/` package)
+
+The codebase follows a layered package structure. Code lives under `app/`; the
+live data files (`trades.db`, `alerts.db`, `results.db`, and the JSON/CSV/XLSX
+artifacts) stay under the top-level `agents/` tree and are addressed only
+through `app/core/config.py`.
+
+```
+app/
+├── main.py            # entry point: `serve` (uvicorn) | `run-pipeline`
+├── core/              # config (all paths + env) + security
+├── api/               # FastAPI factory, dependencies, routes, templates
+├── services/          # business logic: trader / portfolio / pipeline
+├── agents/            # pipeline-stage agents — pure run(payload) -> result
+│   ├── scanner/ analyst/ alert/ extraction/ trader/
+├── integrations/      # external data clients (alpha_vantage, congress, tv_screener)
+├── repositories/      # sole owner of trades.db / alerts.db / results.db + artifacts
+├── schemas/           # Pydantic models (NOT ORM)
+├── workflows/         # typed linear Pipeline + momentum stage wiring
+└── orchestration/     # scheduler + Excel/CSV export; calls the pipeline
+```
+
+### Dependency-flow rules
+
+```mermaid
+flowchart LR
+    HTTP[HTTP] --> api
+    cron[cron / scheduler] --> orchestration
+    api --> services
+    orchestration --> services
+    services --> agents
+    agents --> integrations
+    services --> repositories
+    agents --> repositories
+    repositories --> store[(sqlite / files)]
+    integrations --> ext[(external data)]
+```
+
+- Both entry points (`api`, `orchestration`) funnel through `services`.
+- Agents never import each other, a service, `api`, or `workflows`; the typed
+  stage contract lives in `app/workflows/` Step adapters.
+- `repositories` never import upward (no `agents`/`services`/`api`/`workflows`).
+- Validation between pipeline stages is static-only (no runtime re-validation).
+
+> The C4 diagrams below describe the agent pipeline. The orchestrator now lives
+> at `app/orchestration/orchestrator.py` and the agents under `app/agents/**`.
+
 ## System Context
 
 ```mermaid

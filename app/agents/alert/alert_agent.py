@@ -13,9 +13,9 @@ from typing import Any, Iterable
 
 from pydantic import PrivateAttr
 
-from agents.base import Agent
-from models import AlertSummary, EmailConfig, Position, StockRecord
-from app.core.config import ALERTS_DB
+from app.agents.base import Agent
+from app.core.config import ALERTS_DB, ANALYSIS_JSON
+from app.schemas import AlertSummary, EmailConfig, Position, StockRecord
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.db import Connect
@@ -1138,12 +1138,7 @@ class AlertAgent(Agent):
 
 
 if __name__ == "__main__":
-    import sys
-    from pathlib import Path as _Path
-
-    sys.path.insert(0, str(_Path(__file__).parent.parent.parent))
-
-    analysis_file = _Path(__file__).parent.parent / "analyst" / "analysis_results.json"
+    analysis_file = ANALYSIS_JSON
     agent = AlertAgent()
     with open(analysis_file, encoding="utf-8") as handle:
         payload = [StockRecord.model_validate(item) for item in json.load(handle)]

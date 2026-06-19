@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_trader_service
-from web.app import app
+from app.api.app import app
 
 client = TestClient(app)
 

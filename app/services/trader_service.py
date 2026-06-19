@@ -8,7 +8,7 @@ but the rest of the app talks to persistence only through here.
 
 from pathlib import Path
 
-from agents.trader.trader_agent import TraderAgent
+from app.agents.trader.trader_agent import TraderAgent
 from app.schemas.trade import Position, Trade
 
 

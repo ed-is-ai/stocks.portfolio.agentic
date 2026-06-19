@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 from datetime import date
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from models import StockRecord
+from app.core.config import SCAN_HISTORY_JSON
 
-_HISTORY_FILE = Path(__file__).parent / "scan_history.json"
+if TYPE_CHECKING:
+    from app.schemas import StockRecord
+
+_HISTORY_FILE = SCAN_HISTORY_JSON
 _MAX_SNAPSHOTS = 30
 
 # Type alias: one snapshot maps ticker → entry_zone (or "" if zone unknown)

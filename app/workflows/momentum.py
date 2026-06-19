@@ -9,10 +9,10 @@ linear chain).
 
 from __future__ import annotations
 
-from agents.alert.alert_agent import AlertAgent
-from agents.analyst.analyst_agent import AnalystAgent
-from agents.extraction.extraction_agent import ExtractionAgent
-from agents.scanner.scanner_agent import ScannerAgent
+from app.agents.alert.alert_agent import AlertAgent
+from app.agents.analyst.analyst_agent import AnalystAgent
+from app.agents.extraction.extraction_agent import ExtractionAgent
+from app.agents.scanner.scanner_agent import ScannerAgent
 from app.schemas.alert import AlertSummary
 from app.schemas.record import StockRecord
 from app.workflows.pipeline import Pipeline

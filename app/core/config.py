@@ -18,8 +18,14 @@ ALERTS_DB = ROOT_DIR / "agents" / "alert" / "alerts.db"
 RESULTS_DB = ROOT_DIR / "agents" / "analyst" / "results.db"
 
 # --- Pipeline artifacts ----------------------------------------------------
+# Code lives under app/agents/, but the data/artifact files stay at the
+# top-level agents/ tree (the live DBs are never relocated).
 ANALYSIS_JSON = ROOT_DIR / "agents" / "analyst" / "analysis_results.json"
 SCAN_RESULTS_JSON = ROOT_DIR / "agents" / "scanner" / "scan_results.json"
+EXTRACTION_RESULTS_JSON = ROOT_DIR / "agents" / "extraction" / "extraction_results.json"
+WW_CONTEXT_JSON = ROOT_DIR / "agents" / "extraction" / "ww_context.json"
+SCAN_HISTORY_JSON = ROOT_DIR / "agents" / "scanner" / "scan_history.json"
+ANALYSIS_PROGRESS_TXT = ROOT_DIR / "agents" / "analyst" / "analysis_progress.txt"
 PORTFOLIO_VALUE_CSV = ROOT_DIR / "portfolio_value.csv"
 PIPELINE_RUNS_CSV = ROOT_DIR / "pipeline_runs.csv"
 
@@ -28,6 +34,10 @@ TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
 
 # --- Reference data --------------------------------------------------------
 TICKER_ALIASES_JSON = ROOT_DIR / "data" / "ticker_aliases.json"
+STOCKTWITS_WATCHLIST_JSON = ROOT_DIR / "config" / "stocktwits_watchlist.json"
+
+# --- Claude Code skill packages (used by scanner/analyst subprocesses) -----
+SKILLS_DIR = ROOT_DIR / "skills"
 
 
 def APP_AUTH_TOKEN() -> str | None:

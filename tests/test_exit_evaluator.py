@@ -1,7 +1,7 @@
 """Unit tests for ExitEvaluator."""
 
-from agents.analyst.exit_evaluator import ExitEvaluator
-from models import Position, StockAnalysis, StockRecord, StockScan
+from app.agents.analyst.exit_evaluator import ExitEvaluator
+from app.schemas import Position, StockAnalysis, StockRecord, StockScan
 
 
 def _make_position(**overrides) -> Position:

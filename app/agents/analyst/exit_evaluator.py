@@ -1,6 +1,6 @@
 """Portfolio signal evaluator — EXIT when stop is hit, ADD on a new pivot breakout."""
 
-from models import ExitSignal, Position, StockRecord
+from app.schemas import ExitSignal, Position, StockRecord
 
 
 class ExitEvaluator:

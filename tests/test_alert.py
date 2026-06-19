@@ -6,8 +6,8 @@ import pytest
 import os
 from unittest.mock import patch, MagicMock
 
-from agents.alert.alert_agent import AlertAgent
-from models import EmailConfig, StockRecord, StockScan, StockAnalysis
+from app.agents.alert.alert_agent import AlertAgent
+from app.schemas import EmailConfig, StockRecord, StockScan, StockAnalysis
 
 
 class TestAlertAgent:
@@ -250,7 +250,7 @@ class TestAlertAgent:
         monkeypatch.setenv("EMAIL_TO", "recipient@example.com")
 
         import importlib
-        import agents.alert.alert_agent as alert_agent_module
+        import app.agents.alert.alert_agent as alert_agent_module
 
         reload_module = importlib.reload(alert_agent_module)
 
