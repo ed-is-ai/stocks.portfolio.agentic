@@ -21,6 +21,9 @@ openspec specs.
 | 005  | Protect money-mutating web endpoints (localhost/shared-secret guard) | P3 | S | 001 | DONE (commit `d21669f`, pushed to origin) |
 | 006  | Replace silent `except Exception: pass` in trader money/data path | P3 | S | 001, 003 | DONE (commit `6df6f30`, pushed to origin; rebased onto 003) |
 | 007  | Tidy root-dir one-off scripts; ignore `tmp_*` debug files | P3 | S | — | SUPERSEDED by `openspec/changes/tidy-root-layout` (was DONE, PR #13; assumptions went stale after the layered-architecture refactor) |
+| 008  | Pin SIPP import & replay behavior with characterization tests | P1 | M | — | DONE (consolidated on `fix/sipp-import-logic` @ `8a78ea6`; the 3 characterization tests are part of the combined SIPP branch) |
+| 009  | Store all trade dates as ISO `YYYY-MM-DD` and sort by them directly | P1 | M | 008 | DONE (reviewed & approved; `fix/sipp-import-logic` @ `8a78ea6` = 008+009 combined — 009 source fix + all 5 SIPP tests, based on `main`; PR pending) |
+| 010  | Stop silently swallowing errors inside `import_sipp` | P2 | S | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
@@ -39,6 +42,52 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   paths, so 006 deliberately leaves those alone. Run 006 after 003 to avoid
   both touching the same region.
 - **007 is independent** — pure file organization, no application code.
+- **009 depends on 008.** 008 adds characterization tests that pin the current
+  correct-case SIPP replay behavior; 009 refactors the date storage/sort and
+  uses those tests as its regression net. Run 008 first.
+- **010 is independent** of 008/009 but touches the same `import_sipp` loop as
+  009. If running both, land 009 first, then re-locate 010's catch blocks by
+  content (line numbers shift).
+
+## SIPP import audit on 2026-06-19 (commit `6429330`) — plans 008–010
+
+Focused `improve` audit of the SIPP import path (`import_sipp` and its direct
+dependencies: `trades_repo` date sort, cash-flow inserts, replay). Findings
+turned into plans:
+
+- **Trade dates stored in two incompatible formats** (`DD/MM/YYYY` from
+  `import_sipp` vs ISO from `record_buy`/`record_sell`/`correct_trade`), while
+  `_DATE_SORT` only sorts `DD/MM/YYYY` — silently corrupting chronological replay
+  (wrong cost basis / entry date / P&L) when both formats coexist → **plan 009**,
+  with **plan 008** as its test safety net.
+- **`import_sipp` swallows per-row errors** (`except Exception: pass` at the two
+  cash-flow inserts; silent `except ValueError: pass` on the trade branch),
+  defeating the transactional rollback and hiding malformed rows → **plan 010**.
+  (Plan 006 deliberately left these import catches alone; this closes them.)
+
+Considered but **not** planned (lower leverage):
+
+- **Cash balance taken from the last CSV row in file order, not chronological
+  order** (`import_sipp` lines 481–485). Real but low-impact: the documented
+  workflow requires an oldest-first CSV, and the fix overlaps plan 009's date
+  work. Revisit if a mis-sorted export ever produces a wrong balance.
+- **Duplicated cash-flow insert block** (lines 445–460 ≈ 464–479) and deep
+  trade/cash branch nesting. Tech-debt only; safe to fold into a future refactor
+  once 008's characterization tests exist. Not worth a standalone plan now.
+
+Not audited in this pass: the web/service SIPP entry points
+(`app/services/trader_service.py`, `app/api/`), `cash_flows_repo` internals, and
+portfolio valuation beyond the replay.
+
+### Surfaced during execution of plan 008 (not yet planned)
+
+- **`python-multipart` is an undeclared dependency.** It is in neither
+  `pyproject.toml` nor `uv.lock`, but `tests/test_web_auth.py` (FastAPI form
+  data) requires it. It happens to be installed in the current dev venv, so
+  `uv run pytest` passes locally — but a clean `uv sync` (e.g. a fresh worktree
+  or CI) fails at collection with `RuntimeError: Form data requires
+  "python-multipart"`. Fix is one line (`uv add python-multipart`). Small DX/CI
+  reliability finding; worth a quick plan or a direct `uv add`.
 
 ## Findings turned into plans on 2026-06-18 (commit `ce96c93`)
 
