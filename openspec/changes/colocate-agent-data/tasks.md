@@ -30,7 +30,7 @@
 ## 6. Verify
 
 - [x] 6.1 Run `uv run ruff format .` and `uv run ruff check .` — clean
-- [ ] 6.2 Run `pyrefly check` and fix any path-related type errors — BLOCKED: `pyrefly` not installed in this environment (`program not found`)
+- [x] 6.2 Run `pyrefly check` and fix any path-related type errors — fixed `write_excel(path: str)` → `str | Path` (EXCEL_OUTPUT is a Path); 2 path errors cleared. Remaining 25 errors are pre-existing pandas/openpyxl typing noise, out of scope
 - [x] 6.3 Run `uv run pytest` — all 85 tests pass
 - [x] 6.4 Confirm relocated DBs open and row counts match the 1.1 baseline (no data loss) — md5 checksums identical before/after move
 - [x] 6.5 Run a smoke pipeline invocation and confirm artifacts read/write under `app/agents/<name>/` — verified all config paths resolve to existing colocated files and orchestrator imports cleanly

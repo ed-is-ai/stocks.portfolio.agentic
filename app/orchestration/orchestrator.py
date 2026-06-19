@@ -507,7 +507,7 @@ def _write_sheet(
 
 def write_excel(
     records: list[StockRecord],
-    path: str,
+    path: str | Path,
     portfolio_tickers: set[str] | None = None,
     new_tickers: set[str] | None = None,
 ) -> None:
