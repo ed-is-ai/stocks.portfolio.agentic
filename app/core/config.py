@@ -24,7 +24,7 @@ PORTFOLIO_VALUE_CSV = ROOT_DIR / "portfolio_value.csv"
 PIPELINE_RUNS_CSV = ROOT_DIR / "pipeline_runs.csv"
 
 # --- Web / static assets ---------------------------------------------------
-TEMPLATES_DIR = ROOT_DIR / "web" / "templates"
+TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
 
 # --- Reference data --------------------------------------------------------
 TICKER_ALIASES_JSON = ROOT_DIR / "data" / "ticker_aliases.json"

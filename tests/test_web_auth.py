@@ -1,8 +1,9 @@
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import get_trader_service
 from web.app import app
 
 client = TestClient(app)
@@ -17,15 +18,19 @@ def test_delete_trade_forbidden_for_non_loopback_without_token() -> None:
 
 
 def test_delete_trade_allowed_with_matching_token() -> None:
-    with patch.dict(os.environ, {"APP_AUTH_TOKEN": "s3cret"}):
-        with patch("web.app.trader") as mock_trader:
+    mock_trader = MagicMock()
+    app.dependency_overrides[get_trader_service] = lambda: mock_trader
+    try:
+        with patch.dict(os.environ, {"APP_AUTH_TOKEN": "s3cret"}):
             resp = client.delete(
                 "/trades/1",
                 headers={"X-Auth-Token": "s3cret"},
                 follow_redirects=False,
             )
-            assert resp.status_code != 403
-            mock_trader.delete_trade.assert_called_once_with(1)
+        assert resp.status_code != 403
+        mock_trader.delete_trade.assert_called_once_with(1)
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_refresh_data_forbidden_without_token() -> None:

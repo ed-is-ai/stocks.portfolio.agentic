@@ -31,13 +31,13 @@
 
 ## 4. Phase 4 — Services + thin API
 
-- [ ] 4.1 Create `app/services/trader_service.py` wrapping `TraderAgent` + repositories
-- [ ] 4.2 Create `app/services/portfolio_service.py` owning valuation + GBP/USD conversion (moved from `web/app.py` helpers)
-- [ ] 4.3 Create `app/services/pipeline_service.py` that builds and runs the workflow (used by both web `/refresh-data` and the scheduler)
-- [ ] 4.4 Move `require_local_or_token` to `app/core/security.py`
-- [ ] 4.5 Create `app/api/app.py` (FastAPI factory), `app/api/dependencies.py` (`get_trader_service`, `get_portfolio_service`), and `app/api/routes/{portfolio,trades,pipeline,views}.py`; routes call services via `Depends`
-- [ ] 4.6 Move `web/templates/` → `app/api/templates/`; keep a thin `web/app.py` shim importing the new app for existing run commands
-- [ ] 4.7 `pyrefly check` + `uv run pytest` (incl. `tests/test_web_auth.py`) green; commit `refactor(api): route web through service layer`
+- [x] 4.1 Create `app/services/trader_service.py` wrapping `TraderAgent` + repositories
+- [x] 4.2 Create `app/services/portfolio_service.py` owning valuation + GBP/USD conversion (moved from `web/app.py` helpers)
+- [x] 4.3 Create `app/services/pipeline_service.py` that builds and runs the workflow (used by both web `/refresh-data` and the scheduler)
+- [x] 4.4 Move `require_local_or_token` to `app/core/security.py`
+- [x] 4.5 Create `app/api/app.py` (FastAPI factory), `app/api/dependencies.py` (`get_trader_service`, `get_portfolio_service`), and `app/api/routes/{portfolio,trades,pipeline,views}.py`; routes call services via `Depends`
+- [x] 4.6 Move `web/templates/` → `app/api/templates/`; keep a thin `web/app.py` shim importing the new app for existing run commands
+- [x] 4.7 `pyrefly check` + `uv run pytest` (incl. `tests/test_web_auth.py`) green; commit `refactor(api): route web through service layer`
 
 ## 5. Phase 5 — Typed pipeline, agents, integrations, orchestration
 
