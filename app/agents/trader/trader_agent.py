@@ -105,7 +105,9 @@ class TraderAgent(Agent):
         entry_price: float | None = None,
     ) -> Trade:
         """Record a buy transaction and return the saved Trade."""
-        trade_date = date or datetime.today().strftime("%Y-%m-%d")
+        trade_date = (
+            _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
+        )
         trade_id = self._trades.insert(
             ticker.upper(),
             "BUY",
@@ -137,7 +139,9 @@ class TraderAgent(Agent):
         notes: str = "",
     ) -> Trade:
         """Record a sell transaction and return the saved Trade."""
-        trade_date = date or datetime.today().strftime("%Y-%m-%d")
+        trade_date = (
+            _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
+        )
         trade_id = self._trades.insert(
             ticker.upper(),
             "SELL",
@@ -167,7 +171,9 @@ class TraderAgent(Agent):
         entry_price: float | None = None,
     ) -> Trade:
         """Overwrite the position for a ticker: delete all trades and insert one BUY."""
-        trade_date = date or datetime.today().strftime("%Y-%m-%d")
+        trade_date = (
+            _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
+        )
         self._trades.delete_by_ticker(ticker.upper())
         trade_id = self._trades.insert(
             ticker.upper(),

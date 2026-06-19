@@ -214,6 +214,32 @@ def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
     assert cash == 500.0
 
 
+def test_record_buy_normalizes_ddmmyyyy_to_iso(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.record_buy("AAPL", 5.0, 100.0, "15/03/2024")
+
+    latest = agent.get_latest_trade("AAPL")
+    assert latest is not None
+    assert latest.date == "2024-03-15"  # stored ISO, not "15/03/2024"
+
+
+def test_replay_correct_when_record_buy_uses_ddmmyyyy(tmp_path: Path) -> None:
+    # A DD/MM/YYYY manual BUY (earlier) and an ISO manual SELL (later) for the
+    # same ticker must replay chronologically: BUY 10 then SELL 4 => 6 shares.
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.record_buy("AAPL", 10.0, 100.0, "01/02/2024")  # -> 2024-02-01
+    agent.record_sell("AAPL", 4.0, 110.0, "2024-03-15")  # later
+
+    portfolio = agent.get_portfolio()
+    assert len(portfolio) == 1
+    assert portfolio[0].shares == 6.0
+    assert portfolio[0].entry_date == "2024-02-01"
+
+
 def test_sipp_logs_and_skips_malformed_quantity(tmp_path: Path, caplog) -> None:  # type: ignore[type-arg]
     import logging
 
