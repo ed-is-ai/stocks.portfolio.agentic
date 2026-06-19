@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from app.agents.trader.trader_agent import TraderAgent
+from app.agents.trader.trader_agent import TraderAgent, _to_iso_date
 
 
 def test_record_multiple_buys(tmp_path: Path) -> None:
@@ -108,3 +108,107 @@ def test_import_sipp_rolls_back_on_error(tmp_path: Path) -> None:
     agent._init_db()
     agent.import_sipp(csv_path)
     assert len(agent.get_portfolio()) == 1
+
+
+def test_replay_orders_by_trade_date_not_file_order(tmp_path: Path) -> None:
+    # Two CSV rows: later date first (file order), earlier date second.
+    # Correct chronological replay = BUY 10 @ 2024-01-01, then SELL 4 @ 2024-02-01 => 6 shares.
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B1,4,110.00,Sell AAPL,REF-SELL,, 440.00,4560.00\n"
+        "01/01/2024,AAPL,B1,10,100.00,Buy AAPL,REF-BUY,1000.00,,5000.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp(csv_path)
+
+    portfolio = agent.get_portfolio()
+    assert len(portfolio) == 1
+    pos = portfolio[0]
+    assert pos.shares == 6.0
+    assert pos.entry_date == "2024-01-01"  # ISO date stored from DD/MM/YYYY input
+
+
+def test_replay_correct_with_mixed_date_formats(tmp_path: Path) -> None:
+    # Manual BUY (ISO date) is earlier; imported SELL (DD/MM/YYYY) is later.
+    # Correct chronological replay = BUY 10 then SELL 4 => 6 shares.
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.record_buy("AAPL", 10.0, 100.0, "2024-01-01")
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B1,4,110.00,Sell AAPL,REF-S1,,440.00,4560.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent.import_sipp(csv_path)
+
+    portfolio = agent.get_portfolio()
+    assert len(portfolio) == 1
+    assert portfolio[0].shares == 6.0
+    assert portfolio[0].entry_date == "2024-01-01"
+
+
+def test_to_iso_date_converts_known_formats() -> None:
+    assert _to_iso_date("01/02/2024") == "2024-02-01"
+    assert _to_iso_date("2024-02-01") == "2024-02-01"
+    assert _to_iso_date("  2024-03-15  ") == "2024-03-15"
+
+
+def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
+    import sqlite3
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Monthly contribution,REF-C1,,500.00,500.00\n"
+        "02/01/2024,n/a,,,,Tax relief,REF-T1,,125.00,625.00\n"
+        "03/01/2024,n/a,,,,AAPL dividend,REF-D1,,12.50,637.50\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp(csv_path)
+
+    conn = sqlite3.connect(agent.db_path)
+    rows = conn.execute(
+        "SELECT flow_type, amount FROM cash_flows ORDER BY id"
+    ).fetchall()
+    conn.close()
+
+    assert rows == [
+        ("CONTRIBUTION", 500.0),
+        ("TAX_RELIEF", 125.0),
+        ("DIVIDEND", 12.5),
+    ]
+    # None of these created phantom trade positions
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
+    # Rows in chronological (oldest-first) order, as the documented import
+    # expects. The returned cash balance is the last running balance.
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Contribution,REF-C1,,1000.00,1000.00\n"
+        "01/02/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B1,500.00,,500.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    cash = agent.import_sipp(csv_path)
+    assert cash == 500.0

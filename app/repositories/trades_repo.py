@@ -5,10 +5,8 @@ from typing import Any
 from app.repositories.db import Connect, session
 from app.schemas import Trade
 
-# Replays sort DD/MM/YYYY dates by reconstructing YYYY/MM/DD, then id.
-_DATE_SORT = (
-    "substr(date, 7, 4) || '/' || substr(date, 4, 2) || '/' || substr(date, 1, 2)"
-)
+# Dates are stored ISO (YYYY-MM-DD), which sorts chronologically as text.
+_DATE_SORT = "date"
 _REPLAY_COLUMNS = "ticker, action, shares, price, date, stop_loss, entry_price"
 
 
