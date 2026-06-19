@@ -6,7 +6,7 @@
 > report — do not improvise. When done, update the status row for this plan
 > in `plans/README.md`.
 >
-> **Drift check (run first)**: `git diff --stat 6429330..HEAD -- app/agents/trader/trader_agent.py tests/test_trader_agent.py`
+> **Drift check (run first)**: `git diff --stat dbf0d18..HEAD -- app/agents/trader/trader_agent.py tests/test_trader_agent.py`
 > If any in-scope file changed since this plan was written, compare the
 > "Current state" excerpts against the live code before proceeding; on a
 > mismatch, treat it as a STOP condition.
@@ -19,11 +19,12 @@
 - **Depends on**: none (independent; can land before or after 008/009)
 - **Category**: bug
 - **Planned at**: commit `6429330`, 2026-06-19
+- **Reconciled at**: commit `dbf0d18` (post-009), 2026-06-19 — line numbers refreshed after plan 009 landed in main; logic unchanged
 
 ## Why this matters
 
 `import_sipp` is wrapped in one transaction that rolls back on error
-(`trader_agent.py:487–492`, added by an earlier money-path-safety plan). But two
+(`trader_agent.py:504–509`, added by an earlier money-path-safety plan). But two
 inner blocks defeat that safety by swallowing **every** exception per row:
 
 ```python
@@ -31,8 +32,8 @@ except Exception:
     pass
 ```
 
-at `trader_agent.py:459` and `:478` (the two cash-flow insert sites), plus a
-silent `except ValueError: pass` at `:442` on the trade branch. The consequence:
+at `trader_agent.py:476` and `:495` (the two cash-flow insert sites), plus a
+silent `except ValueError: pass` at `:459` on the trade branch. The consequence:
 a genuine database error on a cash-flow row is caught and discarded, the loop
 continues, and `conn.commit()` still runs — so a partial import is silently
 committed instead of rolling back, and a malformed trade row vanishes with no log
@@ -48,7 +49,7 @@ handler, and makes malformed-data skips visible in the log.
 `app/agents/trader/trader_agent.py`, inside `import_sipp` (the row loop runs
 inside `try: ... except Exception: conn.rollback(); raise`).
 
-Trade branch (lines 416–443):
+Trade branch (lines 433–460):
 ```python
 try:
     shares = float(qty.replace("£", "").replace(",", ""))
@@ -65,7 +66,7 @@ except ValueError:
     pass
 ```
 
-First cash-flow site (lines 445–460):
+First cash-flow site (lines 462–477):
 ```python
 amount = credit if credit > 0 else debit
 if amount > 0:
@@ -77,9 +78,9 @@ if amount > 0:
         pass
 ```
 
-Second cash-flow site (lines 464–479) is identical in body to the first.
+Second cash-flow site (lines 481–496) is identical in body to the first.
 
-The whole loop is already protected by (lines 487–492):
+The whole loop is already protected by (lines 504–509):
 ```python
     conn.commit()
 except Exception:
@@ -116,7 +117,7 @@ abort and roll back the import.
 - `tests/test_trader_agent.py` (add one test)
 
 **Out of scope** (do NOT touch):
-- The outer transaction handler (lines 487–492) — it already does the right thing.
+- The outer transaction handler (lines 504–509) — it already does the right thing.
 - `record_buy` / `record_sell` / any non-import method.
 - The repositories.
 
@@ -145,7 +146,7 @@ if amount > 0:
     cash_count += 1
 ```
 
-Apply this to the site at lines 445–460 **and** the identical one at 464–479.
+Apply this to the site at lines 462–477 **and** the identical one at 481–496.
 
 **Verify**: `grep -n "except Exception" app/agents/trader/trader_agent.py` →
 returns **only** the outer handler line (the one immediately followed by
@@ -153,7 +154,7 @@ returns **only** the outer handler line (the one immediately followed by
 
 ### Step 2: Log (don't silently drop) malformed trade rows
 
-Replace the trade branch's `except ValueError: pass` (line 442) with a logged
+Replace the trade branch's `except ValueError: pass` (line 459) with a logged
 skip, so a row whose `Quantity` is non-numeric is visible:
 
 ```python
@@ -228,7 +229,7 @@ Machine-checkable. ALL must hold:
 - [ ] `grep -c "except Exception" app/agents/trader/trader_agent.py` returns `1`
       (only the outer rollback handler remains)
 - [ ] `grep -n "pass" app/agents/trader/trader_agent.py` shows no `except ...: pass`
-      inside `import_sipp` (lines ~440–480)
+      inside `import_sipp` (lines ~459–496)
 - [ ] `uv run pytest` exits 0; the new test exists and passes; idempotency and
       rollback tests still pass
 - [ ] `uv run ruff check .` → `All checks passed!`

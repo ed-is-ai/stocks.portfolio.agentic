@@ -21,9 +21,9 @@ openspec specs.
 | 005  | Protect money-mutating web endpoints (localhost/shared-secret guard) | P3 | S | 001 | DONE (commit `d21669f`, pushed to origin) |
 | 006  | Replace silent `except Exception: pass` in trader money/data path | P3 | S | 001, 003 | DONE (commit `6df6f30`, pushed to origin; rebased onto 003) |
 | 007  | Tidy root-dir one-off scripts; ignore `tmp_*` debug files | P3 | S | — | SUPERSEDED by `openspec/changes/tidy-root-layout` (was DONE, PR #13; assumptions went stale after the layered-architecture refactor) |
-| 008  | Pin SIPP import & replay behavior with characterization tests | P1 | M | — | DONE (consolidated on `fix/sipp-import-logic` @ `8a78ea6`; the 3 characterization tests are part of the combined SIPP branch) |
-| 009  | Store all trade dates as ISO `YYYY-MM-DD` and sort by them directly | P1 | M | 008 | DONE (reviewed & approved; `fix/sipp-import-logic` @ `8a78ea6` = 008+009 combined — 009 source fix + all 5 SIPP tests, based on `main`; PR pending) |
-| 010  | Stop silently swallowing errors inside `import_sipp` | P2 | S | — | TODO |
+| 008  | Pin SIPP import & replay behavior with characterization tests | P1 | M | — | DONE (merged, PR #18) |
+| 009  | Store all trade dates as ISO `YYYY-MM-DD` and sort by them directly | P1 | M | 008 | DONE (merged, PR #18) |
+| 010  | Stop silently swallowing errors inside `import_sipp` | P2 | S | — | DONE (reviewed & approved; executor branch `worktree-agent-a6d25b0bee0b80db7` @ `8f18135`, based on `main`; PR pending) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
