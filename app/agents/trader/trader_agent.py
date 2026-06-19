@@ -457,31 +457,15 @@ class TraderAgent(Agent):
                                     else:
                                         sell_count += 1
                         except ValueError:
-                            pass
+                            logger.warning(
+                                "skipping trade row with unparseable quantity %r (ref %s)",
+                                qty,
+                                reference or "",
+                            )
                     else:
                         amount = credit if credit > 0 else debit
                         if amount > 0:
                             flow_type = classify_flow_type(description)
-                            try:
-                                self._cash_flows.insert_ignore(
-                                    conn,
-                                    date,
-                                    flow_type,
-                                    None,
-                                    amount,
-                                    description,
-                                    reference,
-                                )
-                                cash_count += 1
-                            except Exception:
-                                pass
-                else:
-                    if symbol and symbol != "n/a":
-                        continue
-                    amount = credit if credit > 0 else debit
-                    if amount > 0:
-                        flow_type = classify_flow_type(description)
-                        try:
                             self._cash_flows.insert_ignore(
                                 conn,
                                 date,
@@ -492,8 +476,22 @@ class TraderAgent(Agent):
                                 reference,
                             )
                             cash_count += 1
-                        except Exception:
-                            pass
+                else:
+                    if symbol and symbol != "n/a":
+                        continue
+                    amount = credit if credit > 0 else debit
+                    if amount > 0:
+                        flow_type = classify_flow_type(description)
+                        self._cash_flows.insert_ignore(
+                            conn,
+                            date,
+                            flow_type,
+                            None,
+                            amount,
+                            description,
+                            reference,
+                        )
+                        cash_count += 1
 
                 running_balance = row.get("Running Balance", "").strip()
                 if running_balance and running_balance != "n/a":

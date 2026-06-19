@@ -212,3 +212,27 @@ def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
 
     cash = agent.import_sipp(csv_path)
     assert cash == 500.0
+
+
+def test_sipp_logs_and_skips_malformed_quantity(tmp_path: Path, caplog) -> None:  # type: ignore[type-arg]
+    import logging
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B1,notanumber,100.00,Buy AAPL,REF-BAD,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B2,5,200.00,Buy MSFT,REF-OK,1000.00,,4000.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    with caplog.at_level(logging.WARNING):
+        agent.import_sipp(csv_path)
+
+    # The malformed AAPL row was skipped (and logged); the valid MSFT row imported.
+    portfolio = agent.get_portfolio()
+    assert {p.ticker for p in portfolio} == {"MSFT"}
+    assert any("unparseable quantity" in r.message for r in caplog.records)
