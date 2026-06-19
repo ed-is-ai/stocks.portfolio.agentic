@@ -5,6 +5,7 @@ re-exports the schema classes so existing ``from models import ...`` keeps
 working during the layered-architecture migration.
 """
 
+from app.schemas.alert import AlertSummary
 from app.schemas.record import StockRecord
 from app.schemas.scan import (
     CANSLIMScore,
@@ -15,6 +16,7 @@ from app.schemas.scan import (
 from app.schemas.trade import EmailConfig, ExitSignal, Position, Trade
 
 __all__ = [
+    "AlertSummary",
     "CANSLIMScore",
     "EmailConfig",
     "ExitSignal",

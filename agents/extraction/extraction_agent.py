@@ -13,7 +13,7 @@ from typing import Any, cast
 
 import requests
 
-from ms_agent_framework import Agent
+from agents.base import Agent
 
 
 HEAT_MAP_URL = "https://whalewisdom.com/api/heatmap_details.json"

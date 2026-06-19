@@ -13,7 +13,7 @@ from typing import Any
 
 from pydantic import PrivateAttr
 
-from ms_agent_framework import Agent
+from agents.base import Agent
 from models import Position, Trade
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
 from app.repositories import db

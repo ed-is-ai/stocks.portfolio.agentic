@@ -13,8 +13,8 @@ from typing import Any, Iterable
 
 from pydantic import PrivateAttr
 
-from ms_agent_framework import Agent
-from models import EmailConfig, Position, StockRecord
+from agents.base import Agent
+from models import AlertSummary, EmailConfig, Position, StockRecord
 from app.core.config import ALERTS_DB
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
@@ -87,7 +87,7 @@ class AlertAgent(Agent):
                 self.send_email(f"Stop Loss Hit: {ticker}", f"<p>{msg}</p>", msg)
                 self._alerts.set_status(rowid, "stopped")
 
-    def run(self, payload: Iterable[StockRecord]) -> int:
+    def run(self, payload: Iterable[StockRecord]) -> AlertSummary:
         results = list(payload)
         self._alerts.ensure_schema()
         self._alerts.clear()
@@ -104,7 +104,10 @@ class AlertAgent(Agent):
             self.record_alert(stock)
 
         print(f"\n{len(self._buy_alerts)} buy alert(s) queued.")
-        return len(self._buy_alerts)
+        return AlertSummary(
+            buy_count=len(self._buy_alerts),
+            tickers=[stock.ticker for stock, _ in self._buy_alerts],
+        )
 
     def init_db(self) -> None:
         """Ensure the alerts schema exists (kept for backward compatibility)."""

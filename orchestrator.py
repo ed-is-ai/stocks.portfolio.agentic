@@ -29,7 +29,7 @@ from agents.analyst.analyst_agent import AnalystAgent, recommendation
 from agents.alert.alert_agent import AlertAgent
 from agents.extraction.extraction_agent import ExtractionAgent
 from agents.trader.trader_agent import TraderAgent
-from ms_agent_framework import AgentApp
+from app.workflows.momentum import build_momentum_pipeline
 from agents.scanner.scanner_agent import ScannerAgent, load_watchlist, load_source_map
 from agents.scanner.scan_history import (
     get_fresh_breakouts,
@@ -613,13 +613,13 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
         scanner = ScannerAgent(name="ScannerAgent")
         analyst = AnalystAgent()
         alerter = AlertAgent(name="AlertAgent")
-        app = AgentApp(name="MomentumStockAgent")
-        app.add_agent(scanner)
-        app.add_agent(analyst)
-        app.add_agent(alerter)
+        # Inject the agents so the same alerter is reused below for portfolio
+        # stop checks and the summary email.
+        momentum = build_momentum_pipeline(scanner, analyst, alerter)
 
-        _, intermediates = app.execute_with_intermediates(watchlist)
-        scan_results, analysis_results = intermediates
+        alert_summary, trace = momentum.run_traced(watchlist)
+        scan_results = trace[0][1]
+        analysis_results = trace[1][1]
         scanned = len(scan_results)
         analysed = len(analysis_results)
 
@@ -668,7 +668,7 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             _append_portfolio_snapshot(pf_value, pf_cost)
 
         sell_alerts = alerter.check_portfolio_stops(positions, stock_map)
-        buy_alerts = len(alerter._buy_alerts)
+        buy_alerts = alert_summary.buy_count
         alerter.send_summary_email(positions)
 
         current_tickers = [r.ticker for r in analysis_results]

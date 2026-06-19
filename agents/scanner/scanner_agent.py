@@ -16,13 +16,15 @@ from typing import Any, Iterable
 import pandas as pd
 import yfinance as yf
 
-from ms_agent_framework import Agent
+from agents.base import Agent
 from models import StockRecord
 
 try:
     from alpha_vantage_client import AlphaVantageClient  # direct run
 except ImportError:
-    from agents.scanner.alpha_vantage_client import AlphaVantageClient  # via orchestrator
+    from agents.scanner.alpha_vantage_client import (
+        AlphaVantageClient,
+    )  # via orchestrator
 
 try:
     from congress_client import CongressClient  # direct run
@@ -118,11 +120,18 @@ def fetch_vcp_screener_tickers() -> list[str]:
     with tempfile.TemporaryDirectory() as tmpdir:
         result = subprocess.run(
             [
-                uv, "run", "python", str(_VCP_SCRIPT),
-                "--api-key", api_key,
-                "--output-dir", tmpdir,
-                "--max-candidates", "250",
-                "--top", "100",
+                uv,
+                "run",
+                "python",
+                str(_VCP_SCRIPT),
+                "--api-key",
+                api_key,
+                "--output-dir",
+                tmpdir,
+                "--max-candidates",
+                "250",
+                "--top",
+                "100",
             ],
             capture_output=True,
             text=True,
@@ -139,7 +148,6 @@ def fetch_vcp_screener_tickers() -> list[str]:
         return [r["symbol"] for r in data.get("results", []) if r.get("symbol")]
 
 
-
 def _merge_results(*source_lists: list) -> list:
     """Merge StockRecord lists; combine source labels for duplicate tickers."""
     seen: dict[str, Any] = {}
@@ -152,7 +160,6 @@ def _merge_results(*source_lists: list) -> list:
             else:
                 seen[r.ticker] = r
     return list(seen.values())
-
 
 
 def _fetch_spy_context() -> tuple[bool, float]:
@@ -200,8 +207,12 @@ def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
         }
     except Exception:
         result = {
-            "eps_growth": None, "annual_eps_growth": None, "roe": None,
-            "inst_ownership_pct": None, "pe_ratio": None, "inst_count": None,
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
             "sector": None,
         }
 
@@ -255,8 +266,10 @@ def _quarterly_eps_growth(t: yf.Ticker, info: Any) -> float | None:
         qi = t.quarterly_income_stmt
         if qi.empty:
             return info.get("earningsGrowth")
-        eps_row = "Diluted EPS" if "Diluted EPS" in qi.index else (
-            "Basic EPS" if "Basic EPS" in qi.index else None
+        eps_row = (
+            "Diluted EPS"
+            if "Diluted EPS" in qi.index
+            else ("Basic EPS" if "Basic EPS" in qi.index else None)
         )
         if eps_row is None:
             return info.get("earningsGrowth")
@@ -283,8 +296,10 @@ def _annual_eps_growth(t: yf.Ticker) -> float | None:
         ai = t.income_stmt
         if ai.empty:
             return None
-        eps_row = "Diluted EPS" if "Diluted EPS" in ai.index else (
-            "Basic EPS" if "Basic EPS" in ai.index else None
+        eps_row = (
+            "Diluted EPS"
+            if "Diluted EPS" in ai.index
+            else ("Basic EPS" if "Basic EPS" in ai.index else None)
         )
         if eps_row is None:
             return None
@@ -326,22 +341,30 @@ class ScannerAgent(Agent):
 
         ww_tickers = list(payload) if payload else load_watchlist()
         print(f"\n[Scanner] WW extraction:    {len(ww_tickers)} tickers")
-        ww_results = self._scan_source(ww_tickers, spy_uptrend, spy_52w_return, "ww_extraction")
+        ww_results = self._scan_source(
+            ww_tickers, spy_uptrend, spy_52w_return, "ww_extraction"
+        )
 
         vcp_tickers = fetch_vcp_screener_tickers()
         print(f"[Scanner] VCP screener:     {len(vcp_tickers)} tickers")
-        vcp_results = self._scan_source(vcp_tickers, spy_uptrend, spy_52w_return, "vcp_screener")
+        vcp_results = self._scan_source(
+            vcp_tickers, spy_uptrend, spy_52w_return, "vcp_screener"
+        )
 
         print("[Scanner] TradingView screener (US)...")
         tv_tickers = fetch_tv_screener_tickers()
         print(f"[Scanner] TV screener US:   {len(tv_tickers)} tickers")
-        tv_results = self._scan_source(tv_tickers, spy_uptrend, spy_52w_return, "tv_screener")
+        tv_results = self._scan_source(
+            tv_tickers, spy_uptrend, spy_52w_return, "tv_screener"
+        )
 
         print("[Scanner] TradingView screener (UK)...")
         uk_raw = fetch_tv_screener_tickers_uk()
         uk_tickers = [t if t.endswith(".L") else f"{t}.L" for t in uk_raw]
         print(f"[Scanner] TV screener UK:   {len(uk_tickers)} tickers")
-        uk_results = self._scan_source(uk_tickers, spy_uptrend, spy_52w_return, "tv_screener_uk")
+        uk_results = self._scan_source(
+            uk_tickers, spy_uptrend, spy_52w_return, "tv_screener_uk"
+        )
 
         return _merge_results(ww_results, vcp_results, tv_results, uk_results)
 
@@ -372,7 +395,9 @@ class ScannerAgent(Agent):
             return None
         # Handle MultiIndex columns from yfinance
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)  # Get the field names (Close, High, etc.)
+            df.columns = df.columns.get_level_values(
+                0
+            )  # Get the field names (Close, High, etc.)
         df.columns = [c.lower() for c in df.columns]
         return df
 
@@ -386,21 +411,21 @@ class ScannerAgent(Agent):
         df["sma50"] = close.rolling(window=50).mean()
         df["sma150"] = close.rolling(window=150).mean()
         df["sma200"] = close.rolling(window=200).mean()
-        
+
         # Calculate RSI manually (simplified version)
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df["rsi"] = 100 - (100 / (1 + rs))
-        
+
         # Calculate ATR manually (simplified)
         high_low = df["high"] - df["low"]
         high_close = (df["high"] - close.shift()).abs()
         low_close = (df["low"] - close.shift()).abs()
         tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
         df["atr"] = tr.rolling(window=14).mean()
-        
+
         df["vol_ma50"] = volume.rolling(window=50).mean()
 
         latest = df.iloc[-1]
@@ -408,7 +433,9 @@ class ScannerAgent(Agent):
         year_slice = df.tail(252)
         high_52w = year_slice["high"].max()
         low_52w = year_slice["low"].min()
-        rel_volume = (latest["volume"] / latest["vol_ma50"]) if latest["vol_ma50"] > 0 else 1.0
+        rel_volume = (
+            (latest["volume"] / latest["vol_ma50"]) if latest["vol_ma50"] > 0 else 1.0
+        )
 
         # Weekly closes for the past 52 weeks (oldest → newest)
         weekly = df["close"].resample("W").last().dropna().tail(52)
@@ -417,34 +444,56 @@ class ScannerAgent(Agent):
         # Daily OHLCV in FMP-compatible format (most recent first) for VCP calculators
         ohlcv_history: list[dict[str, float | int | str]] = []
         for date, row in df.iloc[::-1].iterrows():
-            ohlcv_history.append({
-                "date": date.strftime("%Y-%m-%d"),
-                "open": round(float(row["open"]), 4),
-                "high": round(float(row["high"]), 4),
-                "low": round(float(row["low"]), 4),
-                "close": round(float(row["close"]), 4),
-                "volume": int(row["volume"]),
-            })
+            ohlcv_history.append(
+                {
+                    "date": date.strftime("%Y-%m-%d"),
+                    "open": round(float(row["open"]), 4),
+                    "high": round(float(row["high"]), 4),
+                    "low": round(float(row["low"]), 4),
+                    "close": round(float(row["close"]), 4),
+                    "volume": int(row["volume"]),
+                }
+            )
 
         return {
             "price": round(float(latest["close"]), 2),
             "price_history": price_history,
-            "sma10": round(float(latest["sma10"]), 2) if pd.notna(latest["sma10"]) else None,
-            "sma30": round(float(latest["sma30"]), 2) if pd.notna(latest["sma30"]) else None,
-            "sma50": round(float(latest["sma50"]), 2) if pd.notna(latest["sma50"]) else None,
-            "sma150": round(float(latest["sma150"]), 2) if pd.notna(latest["sma150"]) else None,
-            "sma200": round(float(latest["sma200"]), 2) if pd.notna(latest["sma200"]) else None,
-            "rsi14": round(float(latest["rsi"]), 1) if pd.notna(latest["rsi"]) else None,
-            "atr14": round(float(latest["atr"]), 2) if pd.notna(latest["atr"]) else None,
+            "sma10": round(float(latest["sma10"]), 2)
+            if pd.notna(latest["sma10"])
+            else None,
+            "sma30": round(float(latest["sma30"]), 2)
+            if pd.notna(latest["sma30"])
+            else None,
+            "sma50": round(float(latest["sma50"]), 2)
+            if pd.notna(latest["sma50"])
+            else None,
+            "sma150": round(float(latest["sma150"]), 2)
+            if pd.notna(latest["sma150"])
+            else None,
+            "sma200": round(float(latest["sma200"]), 2)
+            if pd.notna(latest["sma200"])
+            else None,
+            "rsi14": round(float(latest["rsi"]), 1)
+            if pd.notna(latest["rsi"])
+            else None,
+            "atr14": round(float(latest["atr"]), 2)
+            if pd.notna(latest["atr"])
+            else None,
             "volume": int(latest["volume"]),
-            "vol_ma50": int(latest["vol_ma50"]) if pd.notna(latest["vol_ma50"]) else None,
+            "vol_ma50": int(latest["vol_ma50"])
+            if pd.notna(latest["vol_ma50"])
+            else None,
             "rel_volume": round(float(rel_volume), 2),
             "high_52w": round(float(high_52w), 2),
             "low_52w": round(float(low_52w), 2),
             "high_base": round(float(df["high"].tail(50).max()), 2),
             "handle_low": round(float(df["low"].tail(15).min()), 2),
-            "pct_from_52w_high": round((float(latest["close"]) / float(high_52w) - 1) * 100, 1),
-            "pct_change_week": round((float(latest["close"]) / float(prev_week["close"]) - 1) * 100, 1),
+            "pct_from_52w_high": round(
+                (float(latest["close"]) / float(high_52w) - 1) * 100, 1
+            ),
+            "pct_change_week": round(
+                (float(latest["close"]) / float(prev_week["close"]) - 1) * 100, 1
+            ),
             "ohlcv_history": ohlcv_history,
         }
 
@@ -489,7 +538,8 @@ class ScannerAgent(Agent):
                     funds_selling=ww_data.get("filers_decreasing"),
                     funds_net=(
                         ww_data["filers_increasing"] - ww_data["filers_decreasing"]
-                        if "filers_increasing" in ww_data and "filers_decreasing" in ww_data
+                        if "filers_increasing" in ww_data
+                        and "filers_decreasing" in ww_data
                         else None
                     ),
                     congress_buys=congress.buys if congress else None,
@@ -512,6 +562,7 @@ class ScannerAgent(Agent):
 if __name__ == "__main__":
     import sys
     from pathlib import Path
+
     sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
     agent = ScannerAgent(name="ScannerAgent")

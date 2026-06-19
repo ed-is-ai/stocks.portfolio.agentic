@@ -21,7 +21,7 @@ from typing import ClassVar, Iterable
 import openai
 
 from agents.analyst.historical_pivots import find_historical_pivots
-from ms_agent_framework import Agent
+from agents.base import Agent
 from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
 from app.core.config import RESULTS_DB as _RESULTS_DB_PATH
 from app.repositories import db

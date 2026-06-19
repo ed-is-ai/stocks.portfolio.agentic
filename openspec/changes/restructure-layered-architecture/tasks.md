@@ -41,15 +41,24 @@
 
 ## 5. Phase 5 — Typed pipeline, agents, integrations, orchestration
 
-- [ ] 5.1 Create `app/workflows/pipeline.py` with `Step` (Protocol), `Pipeline` (generic builder: `start`, `then`, `run`, `run_traced`) — static-only contract, per-step timing/logging
-- [ ] 5.2 Create `app/workflows/momentum.py` with Step adapters (`ScanStep`, `AnalyseStep`, `AlertStep`) and `build_momentum_pipeline()`; keep `extraction` as an explicit pre-step
-- [ ] 5.3 Add an `AlertSummary` schema to replace `alert.run`'s bare `int` return
-- [ ] 5.4 Repoint `orchestrator.py` to `pipeline_service` / `build_momentum_pipeline`; use `run_traced` to feed the Excel export; delete `ms_agent_framework.py`
-- [ ] 5.5 Move `agents/**` → `app/agents/**`; move external clients (`alpha_vantage_client`, `congress_client`, FMP/yfinance helpers) → `app/integrations/*`
-- [ ] 5.6 Move `orchestrator.py` → `app/orchestration/orchestrator.py`; add `app/main.py` entry point (`serve` / `run-pipeline`)
-- [ ] 5.7 Remove the `models.py` and `web/app.py` shims; update `scripts/`, `backfill_portfolio_weekly.py`, `pytest.ini`, and run docs to new paths
-- [ ] 5.8 Verify agents do not import each other or `workflows`; repositories do not import upward
-- [ ] 5.9 `pyrefly check` + `uv run pytest` green; commit `refactor(workflows): typed linear pipeline + finalize app/ layout`
+> **Scope note:** Per decision, only the typed-pipeline portion (5.1–5.4) is
+> implemented here. The large directory move (5.5–5.7: `agents/` → `app/agents/`,
+> clients → `app/integrations/`, orchestrator → `app/orchestration/`, removing the
+> `models.py`/`web/app.py` shims) is deferred — the design flags it as optional
+> import churn that can land separately without losing the layering benefits. The
+> `Agent` base relocated from `ms_agent_framework` to `agents/base.py` (it moves
+> with the rest in 5.5). `pyrefly` was unavailable in this environment; verified
+> with `ruff` + `pytest`.
+
+- [x] 5.1 Create `app/workflows/pipeline.py` with `Step` (Protocol), `Pipeline` (generic builder: `start`, `then`, `run`, `run_traced`) — static-only contract, per-step timing/logging
+- [x] 5.2 Create `app/workflows/momentum.py` with Step adapters (`ScanStep`, `AnalyseStep`, `AlertStep`) and `build_momentum_pipeline()`; keep `extraction` as an explicit pre-step
+- [x] 5.3 Add an `AlertSummary` schema to replace `alert.run`'s bare `int` return
+- [x] 5.4 Repoint `orchestrator.py` to `build_momentum_pipeline`; use `run_traced` to feed the Excel export; delete `ms_agent_framework.py`
+- [ ] 5.5 Move `agents/**` → `app/agents/**`; move external clients (`alpha_vantage_client`, `congress_client`, FMP/yfinance helpers) → `app/integrations/*` _(deferred)_
+- [ ] 5.6 Move `orchestrator.py` → `app/orchestration/orchestrator.py`; add `app/main.py` entry point (`serve` / `run-pipeline`) _(deferred)_
+- [ ] 5.7 Remove the `models.py` and `web/app.py` shims; update `scripts/`, `backfill_portfolio_weekly.py`, `pytest.ini`, and run docs to new paths _(deferred)_
+- [ ] 5.8 Verify agents do not import each other or `workflows`; repositories do not import upward _(deferred)_
+- [ ] 5.9 `pyrefly check` + `uv run pytest` green; commit `refactor(workflows): typed linear pipeline + finalize app/ layout` _(deferred — committed the typed-pipeline portion separately)_
 
 ## 6. Verification
 

@@ -210,9 +210,9 @@ class TestAlertAgent:
     def test_run_method_with_alerts(self, tmp_path, sample_high_score_stocks):
         """Test run method queues a buy alert per breakout stock."""
         agent = AlertAgent(db_path=str(tmp_path / "alerts.db"))
-        count = agent.run(sample_high_score_stocks)
+        summary = agent.run(sample_high_score_stocks)
 
-        assert count == len(sample_high_score_stocks)
+        assert summary.buy_count == len(sample_high_score_stocks)
         assert len(agent._buy_alerts) == len(sample_high_score_stocks)
 
     def test_database_operations(self, sample_high_score_stocks):
