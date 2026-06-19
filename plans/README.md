@@ -14,13 +14,13 @@ openspec specs.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001  | Restore a green, network-free root test suite | P1 | M | — | TODO |
-| 002  | Make `import_sipp` idempotent (no duplicate trades on re-import) | P1 | M | 001 | TODO |
-| 003  | Trader money-path safety: transactional import + visible oversells | P2 | S | 001 | TODO |
-| 004  | Adopt `uv` + `pyproject.toml` + lockfile per project standard | P2 | S | — | TODO |
-| 005  | Protect money-mutating web endpoints (localhost/shared-secret guard) | P3 | S | 001 | TODO |
-| 006  | Replace silent `except Exception: pass` in trader money/data path | P3 | S | 001, 003 | TODO |
-| 007  | Tidy root-dir one-off scripts; ignore `tmp_*` debug files | P3 | S | — | TODO |
+| 001  | Restore a green, network-free root test suite | P1 | M | — | DONE (merged, PR #9) |
+| 002  | Make `import_sipp` idempotent (no duplicate trades on re-import) | P1 | M | 001 | DONE (merged, PR #10) |
+| 003  | Trader money-path safety: transactional import + visible oversells | P2 | S | 001 | DONE (merged, PR #11) |
+| 004  | Adopt `uv` + `pyproject.toml` + lockfile per project standard | P2 | S | — | DONE (merged, PR #12) |
+| 005  | Protect money-mutating web endpoints (localhost/shared-secret guard) | P3 | S | 001 | DONE (commit `d21669f`, pushed to origin) |
+| 006  | Replace silent `except Exception: pass` in trader money/data path | P3 | S | 001, 003 | DONE (commit `6df6f30`, pushed to origin; rebased onto 003) |
+| 007  | Tidy root-dir one-off scripts; ignore `tmp_*` debug files | P3 | S | — | SUPERSEDED by `openspec/changes/tidy-root-layout` (was DONE, PR #13; assumptions went stale after the layered-architecture refactor) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
@@ -53,9 +53,11 @@ original audit (001–004) was against `f823039`.
 - **`except Exception: pass` in money/data paths** → **plan 006**, scoped to
   `trader_agent.py` only (schema, value/price, and cash-parse catches), leaving
   the `import_sipp` catches to plan 003 and the other modules deferred.
-- **Root-dir clutter** → **plan 007**. Acknowledged lowest-value of the set;
-  moves the three tracked one-off scripts into `scripts/` and gitignores the
-  untracked `tmp_*` scratch files.
+- **Root-dir clutter** → **plan 007**, now **superseded by
+  `openspec/changes/tidy-root-layout`**. Plan 007 was written to protect
+  `orchestrator.py` / `models.py` / `web/app.py` as root entry points, all of
+  which the layered-architecture refactor has since moved or deleted; the
+  openspec change carries the work forward against the current layout.
 
 ## Findings still deferred (not planned)
 

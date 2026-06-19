@@ -26,7 +26,9 @@ class ArtifactsRepository:
 
     def write_json(self, path: str | Path, data: Any) -> None:
         """Write ``data`` as JSON to ``path``."""
-        Path(path).write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
     def read_csv_dicts(self, path: str | Path) -> list[dict[str, Any]]:
         """Return all rows of a CSV file as dicts (empty list if missing)."""
@@ -44,6 +46,7 @@ class ArtifactsRepository:
     ) -> None:
         """Append a row to a CSV, writing the header if the file is new/empty."""
         p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
         write_header = not p.exists() or p.stat().st_size == 0
         with open(p, "a", newline="", encoding="utf-8") as fh:
             writer = csv.DictWriter(fh, fieldnames=fieldnames)

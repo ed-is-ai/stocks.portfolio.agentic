@@ -47,15 +47,8 @@ app/agents/scanner/scan_history.json
 app/agents/trader/trades.db.backup
 **/scan_history.json
 
-# Intermediate/debug scripts and notebooks (may contain portfolio details)
-**/import_brokerage_trades.py
-**/merge_brokerage_history.py
-**/migrate_portfolio_col.py
-**/backfill_portfolio_history.py
-**/backfill_weekly.py
-**/debug_positions.py
-**/init_email_tracking.py
-**/query_alert_history.py
+# Intermediate/debug notebooks (may contain portfolio details).
+# One-off scripts now live under scratch/ (covered by the directory rule below).
 *_agent_refactor.ipynb
 
 # Local scratch directory (throwaway scripts/notebooks; never committed)
