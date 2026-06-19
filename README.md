@@ -92,12 +92,12 @@ uv run python -m app.main serve
 ```
 
 Output files:
-- `agents/scanner/scan_results.json` — Raw stock data
-- `agents/analyst/analysis_results.json` — Scores and recommendations
+- `app/agents/scanner/scan_results.json` — Raw stock data
+- `app/agents/analyst/analysis_results.json` — Scores and recommendations
 - `pipeline_runs.csv` — Execution log and metrics
 - `portfolio_value.csv` — Portfolio snapshots
-- `agents/alert/alerts.db` — Alert cooldown history
-- `agents/trader/positions.db` — Trade history
+- `app/agents/alert/alerts.db` — Alert cooldown history
+- `app/agents/trader/trades.db` — Trade history
 
 ## Architecture Decisions
 
@@ -142,7 +142,7 @@ uv run python -m app.agents.scanner.scanner_agent
 
 ### Check recent alerts
 ```bash
-sqlite3 agents/alert/alerts.db "SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 10;"
+sqlite3 app/agents/alert/alerts.db "SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 10;"
 ```
 
 ### Review portfolio

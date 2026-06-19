@@ -59,9 +59,9 @@ and send it as the `X-Auth-Token` header on those requests.
 
 ## Output
 
-- `agents/extraction/extraction_results.json` — grouped ticker list by source (StockTwits, WisdomWise)
-- `agents/scanner/scan_results.json` — raw scanner output for all tickers
-- `agents/analyst/analysis_results.json` — analyst scores and entry/stop levels
+- `app/agents/extraction/extraction_results.json` — grouped ticker list by source (StockTwits, WisdomWise)
+- `app/agents/scanner/scan_results.json` — raw scanner output for all tickers
+- `app/agents/analyst/analysis_results.json` — analyst scores and entry/stop levels
 - Console table — ranked by score with CANSLIM breakdown, entry price, stop loss, and risk %
 
 ## Notes
@@ -69,4 +69,4 @@ and send it as the `X-Auth-Token` header on those requests.
 - `uv` may not be on PATH; use `python` directly
 - Alerts are deduplicated — previously alerted tickers are skipped
 - `--extract` falls back to the default watchlist if WisdomWise returns no data
-- The watchlist is managed via `agents/extraction/extraction_results.json`; running with `--extract` appends any new WisdomWise tickers under a dated source group
+- The watchlist is managed via `app/agents/extraction/extraction_results.json`; running with `--extract` appends any new WisdomWise tickers under a dated source group

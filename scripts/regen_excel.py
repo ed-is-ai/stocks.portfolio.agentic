@@ -12,12 +12,10 @@ from app.agents.scanner.scan_history import (
     get_new_tickers,
     load_history,
 )
+from app.core.config import ANALYSIS_JSON
 from app.schemas import StockRecord
 
-records = [
-    StockRecord.model_validate(r)
-    for r in json.loads(Path("agents/analyst/analysis_results.json").read_text())
-]
+records = [StockRecord.model_validate(r) for r in json.loads(ANALYSIS_JSON.read_text())]
 
 source_map = load_source_map()
 for r in records:

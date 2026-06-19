@@ -44,6 +44,7 @@ from app.agents.scanner.scan_history import (
 from app.schemas import StockRecord
 from app.core.config import (
     ANALYSIS_JSON,
+    ANALYSIS_XLSX,
     PIPELINE_RUNS_CSV,
     PORTFOLIO_VALUE_CSV,
     SCAN_RESULTS_JSON,
@@ -73,7 +74,7 @@ _SOURCE_COMMENTS: dict[str, str] = {
     "tv_screener_uk": "TradingView screener – LSE Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
 }
 ANALYSIS_OUTPUT = ANALYSIS_JSON
-EXCEL_OUTPUT = ANALYSIS_JSON.with_suffix(".xlsx")
+EXCEL_OUTPUT = ANALYSIS_XLSX
 MARKET_OPEN_HOUR = 9
 MARKET_OPEN_MIN = 30
 MARKET_CLOSE_HOUR = 16
@@ -83,6 +84,7 @@ MARKET_CLOSE_MIN = 0
 def _append_portfolio_snapshot(total_value: float, total_cost: float) -> None:
     """Append one portfolio value snapshot (timestamped) to PORTFOLIO_VALUE_LOG."""
     log_path = Path(PORTFOLIO_VALUE_LOG)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not log_path.exists() or log_path.stat().st_size == 0
     with open(log_path, "a", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(
@@ -102,6 +104,7 @@ def _append_portfolio_snapshot(total_value: float, total_cost: float) -> None:
 def _append_run_log(entry: dict) -> None:
     """Append one run record to the CSV log, writing the header if the file is new."""
     log_path = Path(RUN_LOG)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = not log_path.exists() or log_path.stat().st_size == 0
     with open(log_path, "a", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=_RUN_LOG_FIELDS)

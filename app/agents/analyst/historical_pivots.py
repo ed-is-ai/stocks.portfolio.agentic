@@ -4,16 +4,15 @@ Identifies Minervini-style consolidation bases and the pivot price at the top of
 each base, along with confirmation of the subsequent breakout and advance.
 
 Usage:
-    python agents/analyst/historical_pivots.py WELL
-    python agents/analyst/historical_pivots.py WELL --period 7y --no-stage2
-    python agents/analyst/historical_pivots.py WELL --json
+    python app/agents/analyst/historical_pivots.py WELL
+    python app/agents/analyst/historical_pivots.py WELL --period 7y --no-stage2
+    python app/agents/analyst/historical_pivots.py WELL --json
 """
+
 from __future__ import annotations
 
 import argparse
 import json
-import sys
-from pathlib import Path
 from typing import Any
 
 import pandas as pd
@@ -24,21 +23,22 @@ import yfinance as yf
 # ---------------------------------------------------------------------------
 
 _DEFAULT_PERIOD = "10y"
-_HALF_WINDOW = 10          # weeks each side to qualify a local high as a peak
-_MIN_PROMINENCE = 0.08     # peak must be ≥8% above the lowest low in the window
-_MIN_BASE_WEEKS = 6        # consolidation must last at least 6 weeks
-_MAX_BASE_DEPTH = 35.0     # base cannot drop more than 35% from pivot (%)
-_MIN_ADVANCE_PCT = 8.0     # advance after breakout must be ≥8% to confirm
+_HALF_WINDOW = 10  # weeks each side to qualify a local high as a peak
+_MIN_PROMINENCE = 0.08  # peak must be ≥8% above the lowest low in the window
+_MIN_BASE_WEEKS = 6  # consolidation must last at least 6 weeks
+_MAX_BASE_DEPTH = 35.0  # base cannot drop more than 35% from pivot (%)
+_MIN_ADVANCE_PCT = 8.0  # advance after breakout must be ≥8% to confirm
 _BREAKOUT_SEARCH_WEEKS = 26
 _ADVANCE_WINDOW_WEEKS = 52
-_DEDUP_BAND = 0.05         # merge pivots within 5% of each other
+_DEDUP_BAND = 0.05  # merge pivots within 5% of each other
 _BREAKOUT_THRESHOLD = 1.005  # close must be > pivot * this to count as breakout
-_MIN_HISTORY_BARS = 60     # raise if fewer weekly bars than this
+_MIN_HISTORY_BARS = 60  # raise if fewer weekly bars than this
 
 
 # ---------------------------------------------------------------------------
 # Data fetch
 # ---------------------------------------------------------------------------
+
 
 def fetch_weekly_ohlcv(ticker: str, period: str = _DEFAULT_PERIOD) -> pd.DataFrame:
     """Return unadjusted weekly OHLCV with lowercase flat columns, index = date.
@@ -74,7 +74,10 @@ def fetch_weekly_ohlcv(ticker: str, period: str = _DEFAULT_PERIOD) -> pd.DataFra
 # Peak detection
 # ---------------------------------------------------------------------------
 
-def _find_peak_candidates(weekly: pd.DataFrame, half_window: int = _HALF_WINDOW) -> list[int]:
+
+def _find_peak_candidates(
+    weekly: pd.DataFrame, half_window: int = _HALF_WINDOW
+) -> list[int]:
     """Return row indices where the weekly high is a local maximum with sufficient prominence."""
     highs = weekly["high"].values
     lows = weekly["low"].values
@@ -82,8 +85,8 @@ def _find_peak_candidates(weekly: pd.DataFrame, half_window: int = _HALF_WINDOW)
     peaks: list[int] = []
 
     for i in range(half_window, n - half_window):
-        window_highs = highs[i - half_window: i + half_window + 1]
-        window_lows = lows[i - half_window: i + half_window + 1]
+        window_highs = highs[i - half_window : i + half_window + 1]
+        window_lows = lows[i - half_window : i + half_window + 1]
         if highs[i] < window_highs.max():
             continue
         # Prominence: peak must be meaningfully above the window's lowest low
@@ -101,6 +104,7 @@ def _find_peak_candidates(weekly: pd.DataFrame, half_window: int = _HALF_WINDOW)
 # ---------------------------------------------------------------------------
 # Base construction
 # ---------------------------------------------------------------------------
+
 
 def _build_base(
     weekly: pd.DataFrame,
@@ -127,7 +131,7 @@ def _build_base(
     if base_weeks < min_base_weeks:
         return None
 
-    base_lows = lows[base_start_idx: peak_idx + 1]
+    base_lows = lows[base_start_idx : peak_idx + 1]
     depth = (pivot_price - float(base_lows.min())) / pivot_price * 100.0
 
     return {
@@ -143,6 +147,7 @@ def _build_base(
 # ---------------------------------------------------------------------------
 # Breakout search
 # ---------------------------------------------------------------------------
+
 
 def _find_breakout(
     weekly: pd.DataFrame,
@@ -192,18 +197,20 @@ def _find_breakout(
 # Stage 2 filter
 # ---------------------------------------------------------------------------
 
+
 def _is_stage2_at_pivot(weekly: pd.DataFrame, peak_idx: int) -> bool:
     """Return True if price was above its 40-week SMA at the pivot week."""
     if peak_idx < 39:
         return False  # insufficient history for SMA40
     closes = weekly["close"].values
-    sma40 = float(closes[peak_idx - 39: peak_idx + 1].mean())
+    sma40 = float(closes[peak_idx - 39 : peak_idx + 1].mean())
     return float(closes[peak_idx]) > sma40
 
 
 # ---------------------------------------------------------------------------
 # Deduplication
 # ---------------------------------------------------------------------------
+
 
 def _deduplicate_pivots(
     pivots: list[dict[str, Any]],
@@ -237,6 +244,7 @@ def _deduplicate_pivots(
 # Open base detection (most recent base, not yet broken out)
 # ---------------------------------------------------------------------------
 
+
 def _detect_open_base(
     weekly: pd.DataFrame,
     confirmed_pivots: list[dict[str, Any]],
@@ -249,7 +257,7 @@ def _detect_open_base(
     n = len(weekly)
     # Look back up to 52 weeks from the end
     lookback = min(n, 52)
-    recent_slice = weekly["high"].iloc[n - lookback:]
+    recent_slice = weekly["high"].iloc[n - lookback :]
     recent_high_label = recent_slice.idxmax()
     recent_high_pos = int(weekly.index.get_loc(recent_high_label))  # type: ignore[arg-type]
 
@@ -257,8 +265,11 @@ def _detect_open_base(
     floor = pivot_price * (1.0 - max_depth_pct / 100.0)
 
     # Check price hasn't already broken out above this high
-    post_closes = closes[recent_high_pos + 1:]
-    if len(post_closes) and float(post_closes.max()) >= pivot_price * _BREAKOUT_THRESHOLD:
+    post_closes = closes[recent_high_pos + 1 :]
+    if (
+        len(post_closes)
+        and float(post_closes.max()) >= pivot_price * _BREAKOUT_THRESHOLD
+    ):
         return None  # already broken out — will be caught by confirmed pivots
 
     # Walk back to find base start
@@ -278,7 +289,7 @@ def _detect_open_base(
         if abs(cp["pivot_price"] - pivot_price) / pivot_price < _DEDUP_BAND:
             return None
 
-    base_lows = lows[base_start_idx: recent_high_pos + 1]
+    base_lows = lows[base_start_idx : recent_high_pos + 1]
     depth = (pivot_price - float(base_lows.min())) / pivot_price * 100.0
 
     return {
@@ -298,6 +309,7 @@ def _detect_open_base(
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 def find_historical_pivots(
     ticker: str,
@@ -329,16 +341,24 @@ def find_historical_pivots(
             continue
 
         breakout = _find_breakout(
-            weekly, idx, float(weekly["high"].iloc[idx]),
+            weekly,
+            idx,
+            float(weekly["high"].iloc[idx]),
             min_advance_pct=min_advance_pct,
         )
 
-        pivots.append({
-            "pivot_price": pivot_price,
-            **{k: v for k, v in base.items() if k not in ("base_start_idx", "base_end_idx")},
-            **breakout,
-            "stage2_at_pivot": _is_stage2_at_pivot(weekly, idx),
-        })
+        pivots.append(
+            {
+                "pivot_price": pivot_price,
+                **{
+                    k: v
+                    for k, v in base.items()
+                    if k not in ("base_start_idx", "base_end_idx")
+                },
+                **breakout,
+                "stage2_at_pivot": _is_stage2_at_pivot(weekly, idx),
+            }
+        )
 
     confirmed = _deduplicate_pivots(pivots)
 
@@ -353,28 +373,31 @@ def find_historical_pivots(
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def _print_pivots(ticker: str, pivots: list[dict[str, Any]]) -> None:
     """Pretty-print pivot table to stdout."""
     if not pivots:
         print(f"No historical pivots found for {ticker}")
         return
 
-    print(f"\n{'-'*80}")
+    print(f"\n{'-' * 80}")
     print(f"  Historical base pivots  {ticker.upper()}")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
     header = f"  {'Pivot':>8}  {'Base start':<12}  {'Base end':<12}  {'Wks':>4}  "
     header += f"{'Depth':>6}  {'Breakout date':<14}  {'Breakout $':>10}  {'Advance':>8}  Status"
     print(header)
-    print(f"  {'-'*74}")
+    print(f"  {'-' * 74}")
 
     status_labels = {
-        "confirmed":  "Confirmed",
-        "failed":     "Failed bo",
+        "confirmed": "Confirmed",
+        "failed": "Failed bo",
         "resistance": "Resistance",
-        "open":       "OPEN BASE",
+        "open": "OPEN BASE",
     }
     for p in pivots:
-        advance = f"{p['advance_pct']:.1f}%" if p.get("advance_pct") is not None else "--"
+        advance = (
+            f"{p['advance_pct']:.1f}%" if p.get("advance_pct") is not None else "--"
+        )
         bo_date = p.get("breakout_date") or "--"
         bo_close = f"${p['breakout_close']:.2f}" if p.get("breakout_close") else "--"
         label = status_labels.get(p.get("status", ""), p.get("status", ""))
@@ -385,7 +408,7 @@ def _print_pivots(ticker: str, pivots: list[dict[str, Any]]) -> None:
             f"{bo_close:>10}  {advance:>8}  {label}{s2}"
         )
 
-    print(f"{'-'*80}\n")
+    print(f"{'-' * 80}\n")
 
 
 def main() -> None:
@@ -394,14 +417,30 @@ def main() -> None:
         description="Find historical base pivot/breakout levels for a ticker"
     )
     parser.add_argument("ticker", help="Stock ticker symbol (e.g. WELL)")
-    parser.add_argument("--period", default=_DEFAULT_PERIOD, help="History period (e.g. 7y, 10y)")
-    parser.add_argument("--no-stage2", action="store_true", help="Include non-Stage-2 bases")
-    parser.add_argument("--min-advance", type=float, default=_MIN_ADVANCE_PCT,
-                        help="Minimum %% advance after breakout to confirm (default 8)")
-    parser.add_argument("--max-depth", type=float, default=_MAX_BASE_DEPTH,
-                        help="Maximum base depth %% (default 35)")
-    parser.add_argument("--json", action="store_true", dest="as_json",
-                        help="Output as JSON instead of table")
+    parser.add_argument(
+        "--period", default=_DEFAULT_PERIOD, help="History period (e.g. 7y, 10y)"
+    )
+    parser.add_argument(
+        "--no-stage2", action="store_true", help="Include non-Stage-2 bases"
+    )
+    parser.add_argument(
+        "--min-advance",
+        type=float,
+        default=_MIN_ADVANCE_PCT,
+        help="Minimum %% advance after breakout to confirm (default 8)",
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=float,
+        default=_MAX_BASE_DEPTH,
+        help="Maximum base depth %% (default 35)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        dest="as_json",
+        help="Output as JSON instead of table",
+    )
     args = parser.parse_args()
 
     pivots = find_historical_pivots(
