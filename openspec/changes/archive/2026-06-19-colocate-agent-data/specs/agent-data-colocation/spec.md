@@ -2,9 +2,10 @@
 
 ### Requirement: Agent data colocated with agent code
 
-Each agent's runtime data — its SQLite databases and JSON/XLSX/TXT artifacts —
-SHALL reside inside that agent's code package under `app/agents/<name>/`, rather
-than in a parallel top-level `agents/<name>/` tree.
+Each agent's runtime data SHALL reside inside that agent's code package under
+`app/agents/<name>/`. This covers its SQLite databases and JSON/XLSX/TXT
+artifacts, which live in the agent's package rather than a parallel top-level
+`agents/<name>/` tree.
 
 #### Scenario: Trader data lives with trader code
 
