@@ -210,4 +210,4 @@ See [CLAUDE.md](.claude/CLAUDE.md) for detailed workflow.
 
 ## License
 
-Internal use only.
+MIT
