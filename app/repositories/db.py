@@ -101,4 +101,14 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
         except sqlite3.OperationalError as exc:
             logger.debug("schema migration step skipped: %s", exc)
+    for table in ("trades", "cash_flows"):
+        try:
+            conn.execute(
+                f"UPDATE {table} SET date = "
+                "substr(date, 7, 4) || '-' || substr(date, 4, 2) || '-' "
+                "|| substr(date, 1, 2) "
+                "WHERE date LIKE '__/__/____'"
+            )
+        except sqlite3.OperationalError as exc:
+            logger.debug("date migration step skipped: %s", exc)
     conn.commit()

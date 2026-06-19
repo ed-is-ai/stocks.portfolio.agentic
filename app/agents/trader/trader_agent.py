@@ -29,6 +29,23 @@ logger = logging.getLogger(__name__)
 _DB_PATH = TRADES_DB
 
 
+def _to_iso_date(value: str) -> str:
+    """Return ``value`` as ISO ``YYYY-MM-DD``.
+
+    Accepts the SIPP CSV's ``DD/MM/YYYY`` and already-ISO ``YYYY-MM-DD``.
+    Unrecognized formats are logged and returned unchanged so a single odd
+    row never aborts an import.
+    """
+    value = value.strip()
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    logger.warning("unrecognized trade date format: %r (stored unchanged)", value)
+    return value
+
+
 class TraderAgent(Agent):
     """Records trades and computes portfolio P&L using average cost basis.
 
@@ -403,7 +420,7 @@ class TraderAgent(Agent):
                 debit = clean_amount(row.get("Debit", ""))
                 credit = clean_amount(row.get("Credit", ""))
                 price = clean_amount(row.get("Price", ""))
-                date = row.get("Date", "").strip()
+                date = _to_iso_date(row.get("Date", "").strip())
                 description = row.get("Description", "").strip()
                 reference = row.get("Reference", "").strip()
 
