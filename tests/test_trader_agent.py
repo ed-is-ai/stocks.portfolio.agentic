@@ -161,3 +161,54 @@ def test_to_iso_date_converts_known_formats() -> None:
     assert _to_iso_date("01/02/2024") == "2024-02-01"
     assert _to_iso_date("2024-02-01") == "2024-02-01"
     assert _to_iso_date("  2024-03-15  ") == "2024-03-15"
+
+
+def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
+    import sqlite3
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Monthly contribution,REF-C1,,500.00,500.00\n"
+        "02/01/2024,n/a,,,,Tax relief,REF-T1,,125.00,625.00\n"
+        "03/01/2024,n/a,,,,AAPL dividend,REF-D1,,12.50,637.50\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp(csv_path)
+
+    conn = sqlite3.connect(agent.db_path)
+    rows = conn.execute(
+        "SELECT flow_type, amount FROM cash_flows ORDER BY id"
+    ).fetchall()
+    conn.close()
+
+    assert rows == [
+        ("CONTRIBUTION", 500.0),
+        ("TAX_RELIEF", 125.0),
+        ("DIVIDEND", 12.5),
+    ]
+    # None of these created phantom trade positions
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
+    # Rows in chronological (oldest-first) order, as the documented import
+    # expects. The returned cash balance is the last running balance.
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Contribution,REF-C1,,1000.00,1000.00\n"
+        "01/02/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B1,500.00,,500.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    cash = agent.import_sipp(csv_path)
+    assert cash == 500.0
