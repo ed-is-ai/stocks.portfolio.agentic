@@ -10,6 +10,7 @@ import csv
 import json
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
@@ -132,23 +133,28 @@ class PortfolioService:
     def fetch_all_prices(
         self, tickers: list[str], aliases: dict[str, str], gbpusd: float
     ) -> tuple[dict[str, float], dict[str, tuple[float, str]]]:
-        """Fetch GBP-normalised prices for all portfolio tickers.
+        """Fetch GBP-normalised prices for all portfolio tickers (concurrently)."""
 
-        Returns (gbp_prices, display_info) where:
-        - gbp_prices: {ticker: gbp_price} for portfolio calculations
-        - display_info: {ticker: (original_price, currency)} for the UI
-        """
-        gbp_prices: dict[str, float] = {}
-        display_info: dict[str, tuple[float, str]] = {}
-        for t in tickers:
+        def _resolve(t: str) -> tuple[str, float, float, str] | None:
             yf_sym = aliases.get(t, t)
             result = self._fetch_price_gbp(yf_sym, gbpusd)
             if (result is None or result[0] < 0.01) and t not in aliases:
                 result = self._fetch_price_gbp(f"{t}.L", gbpusd)
             if result is not None and result[0] >= 0.01:
                 gbp_price, orig_price, currency = result
-                gbp_prices[t] = gbp_price
-                display_info[t] = (orig_price, currency)
+                return t, gbp_price, orig_price, currency
+            return None
+
+        gbp_prices: dict[str, float] = {}
+        display_info: dict[str, tuple[float, str]] = {}
+        if not tickers:
+            return gbp_prices, display_info
+        with ThreadPoolExecutor(max_workers=min(8, len(tickers))) as pool:
+            for res in pool.map(_resolve, tickers):
+                if res is not None:
+                    t, gbp_price, orig_price, currency = res
+                    gbp_prices[t] = gbp_price
+                    display_info[t] = (orig_price, currency)
         return gbp_prices, display_info
 
     # --- chart data -------------------------------------------------------

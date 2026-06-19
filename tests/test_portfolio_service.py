@@ -111,3 +111,46 @@ def test_position_without_current_value_excluded_from_value_totals(
     assert ctx["total_cost_gbp"] == 150.0
     assert ctx["total_value_gbp"] == 120.0
     assert ctx["total_pnl_gbp"] == 20.0
+
+
+def test_fetch_all_prices_assembles_results(monkeypatch) -> None:
+    svc = PortfolioService(_StubTrader(), _StubEvaluator())
+
+    def fake_fetch(yf_sym, gbpusd):
+        table = {"AAA": (10.0, 10.0, "GBP"), "BBB": (20.0, 20.0, "GBP")}
+        return table.get(yf_sym)
+
+    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    prices, display = svc.fetch_all_prices(["AAA", "BBB"], {}, 1.35)
+    assert prices == {"AAA": 10.0, "BBB": 20.0}
+    assert display == {"AAA": (10.0, "GBP"), "BBB": (20.0, "GBP")}
+
+
+def test_fetch_all_prices_retries_with_london_suffix(monkeypatch) -> None:
+    svc = PortfolioService(_StubTrader(), _StubEvaluator())
+    calls: list[str] = []
+
+    def fake_fetch(yf_sym, gbpusd):
+        calls.append(yf_sym)
+        if yf_sym == "VOD":
+            return None
+        if yf_sym == "VOD.L":
+            return (1.23, 123.0, "GBP")
+        return None
+
+    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    prices, display = svc.fetch_all_prices(["VOD"], {}, 1.35)
+    assert prices == {"VOD": 1.23}
+    assert "VOD.L" in calls
+
+
+def test_fetch_all_prices_drops_below_threshold(monkeypatch) -> None:
+    svc = PortfolioService(_StubTrader(), _StubEvaluator())
+
+    def fake_fetch(yf_sym, gbpusd):
+        return (0.0, 0.0, "GBP")
+
+    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    prices, display = svc.fetch_all_prices(["ZZZ"], {"ZZZ": "ZZZ"}, 1.35)
+    assert prices == {}
+    assert display == {}
