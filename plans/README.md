@@ -14,10 +14,13 @@ openspec specs.
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001  | Restore a green, network-free root test suite | P1 | M | — | TODO |
-| 002  | Make `import_sipp` idempotent (no duplicate trades on re-import) | P1 | M | 001 | TODO |
-| 003  | Trader money-path safety: transactional import + visible oversells | P2 | S | 001 | TODO |
-| 004  | Adopt `uv` + `pyproject.toml` + lockfile per project standard | P2 | S | — | TODO |
+| 001  | Restore a green, network-free root test suite | P1 | M | — | DONE (merged, PR #9) |
+| 002  | Make `import_sipp` idempotent (no duplicate trades on re-import) | P1 | M | 001 | DONE (merged, PR #10) |
+| 003  | Trader money-path safety: transactional import + visible oversells | P2 | S | 001 | DONE (merged, PR #11) |
+| 004  | Adopt `uv` + `pyproject.toml` + lockfile per project standard | P2 | S | — | DONE (merged, PR #12) |
+| 005  | Protect money-mutating web endpoints (localhost/shared-secret guard) | P3 | S | 001 | DONE (commit `d21669f`, pushed to origin) |
+| 006  | Replace silent `except Exception: pass` in trader money/data path | P3 | S | 001, 003 | DONE (commit `6df6f30`, pushed to origin; rebased onto 003) |
+| 007  | Tidy root-dir one-off scripts; ignore `tmp_*` debug files | P3 | S | — | SUPERSEDED by `openspec/changes/tidy-root-layout` (was DONE, PR #13; assumptions went stale after the layered-architecture refactor) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
@@ -29,21 +32,35 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
   there is no working gate to confirm these changes don't regress anything.
 - **004 is independent** of the others and can run in parallel. It changes
   packaging only, not application code.
+- **005 depends on 001** — it adds FastAPI endpoint tests and needs the green,
+  fast suite as a gate. Independent of 002/003/004 otherwise.
+- **006 depends on 001 and should follow 003.** It narrows the *remaining*
+  silent catches in `trader_agent.py`; plan 003 owns the `import_sipp` error
+  paths, so 006 deliberately leaves those alone. Run 006 after 003 to avoid
+  both touching the same region.
+- **007 is independent** — pure file organization, no application code.
 
-## Findings considered and rejected / deferred
+## Findings turned into plans on 2026-06-18 (commit `ce96c93`)
 
-These were surfaced in the audit but NOT turned into plans (recorded so they
-aren't re-audited):
+The three items previously deferred below were promoted to plans 005–007 at the
+maintainer's request. Plans 005–007 were written against commit `ce96c93`; the
+original audit (001–004) was against `f823039`.
 
-- **Web app has no auth/CSRF on money-mutating endpoints** (`web/app.py`
-  `POST /trades`, `DELETE /trades/{id}`, `POST /refresh-data`). Deferred, not
-  rejected: impact is low **if** the app is only ever bound to `localhost`
-  (its documented use). Revisit before any non-local deployment. Subprocess
-  args in `/refresh-data` are fixed (no injection), so there is no urgent hole.
-- **Pervasive `except Exception: pass` in money/data paths.** Real tech debt,
-  but broad and low-per-instance; better addressed opportunistically than as
-  one risky sweep. Plan 003 fixes the two highest-value cases (import error
-  handling, oversells); the rest is deferred.
-- **Root-dir clutter** (`patch_cash_history.py`, `regen_excel.py`,
-  `check_results.py`, untracked `tmp_*.py`). Cosmetic; LOW impact. Move to a
-  `scripts/` dir when convenient — not worth a dedicated plan.
+- **Web app auth/CSRF on money-mutating endpoints** → **plan 005**. Still
+  low-risk under the documented localhost-only run, but the plan enforces that
+  assumption (loopback-or-token guard) so an accidental `--host 0.0.0.0` is not
+  silently world-writable.
+- **`except Exception: pass` in money/data paths** → **plan 006**, scoped to
+  `trader_agent.py` only (schema, value/price, and cash-parse catches), leaving
+  the `import_sipp` catches to plan 003 and the other modules deferred.
+- **Root-dir clutter** → **plan 007**, now **superseded by
+  `openspec/changes/tidy-root-layout`**. Plan 007 was written to protect
+  `orchestrator.py` / `models.py` / `web/app.py` as root entry points, all of
+  which the layered-architecture refactor has since moved or deleted; the
+  openspec change carries the work forward against the current layout.
+
+## Findings still deferred (not planned)
+
+- **`except Exception` outside `trader_agent.py`** (`web/app.py`,
+  `analyst_agent.py`, `scanner_agent.py`). Mostly network-resilience best-effort
+  paths; address opportunistically. Plan 006 covers only the trader money path.

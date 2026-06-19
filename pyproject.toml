@@ -1,0 +1,29 @@
+[project]
+name = "agents-stocks"
+version = "0.1.0"
+description = "Multi-agent stock portfolio management (CANSLIM + Weinstein Stage analysis)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.0.0",
+    "yfinance>=0.2.40",
+    "pandas>=2.0.0",
+    "openai>=1.30.0",
+    "apscheduler>=3.10.0",
+    "requests>=2.31.0",
+    "openpyxl>=3.1.0",
+    "playwright>=1.44.0",
+    "python-dotenv>=1.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "jinja2>=3.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyrefly>=1.1.1",
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-json-report>=1.5.0",
+    "ruff>=0.15.18",
+]

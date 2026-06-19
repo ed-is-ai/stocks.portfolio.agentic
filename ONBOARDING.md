@@ -99,7 +99,7 @@ Read **Alert Agent Spec**: [openspec/specs/alert-agent/spec.md](openspec/specs/a
 
 **Real code to explore:**
 - `agents/alert/alert_agent.py` — Main alerting logic
-- `agents/alert/alerts.db` — SQLite alert history
+- `app/agents/alert/alerts.db` — SQLite alert history
 
 ---
 
@@ -180,10 +180,10 @@ uv run python orchestrator.py
 ### Check outputs
 ```bash
 # View scan results
-cat agents/scanner/scan_results.json | head -50
+cat app/agents/scanner/scan_results.json | head -50
 
 # View analysis results
-cat agents/analyst/analysis_results.json | head -50
+cat app/agents/analyst/analysis_results.json | head -50
 
 # View pipeline metrics
 tail -5 pipeline_runs.csv

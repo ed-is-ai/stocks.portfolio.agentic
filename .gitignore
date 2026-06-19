@@ -27,37 +27,32 @@ agents/ii_platform/debug/
 **/analysis_results.json
 **/analysis_results.xlsx
 **/analysis_progress.txt
-dashboard-data.json
 test-results.json
 orchestrator_out.txt
-tmp_import_check.py
 data/*/*
 reports/
 
+# Logs (generated; keep the directory, ignore its contents)
+logs/*
+!logs/.gitkeep
+
 # Ticker alias mapping (personal portfolio config - not for version control)
-data/ticker_aliases.json
+config/ticker_aliases.json
 
 # Portfolio & Runtime Data (contains personal investment details)
 portfolio_value.csv
 pipeline_runs.csv
-agents/extraction/ww_context.json
-agents/scanner/scan_history.json
-agents/trader/trades.db.backup
+app/agents/extraction/ww_context.json
+app/agents/scanner/scan_history.json
+app/agents/trader/trades.db.backup
 **/scan_history.json
 
-# Intermediate/debug scripts and notebooks (may contain portfolio details)
-**/import_brokerage_trades.py
-**/merge_brokerage_history.py
-**/migrate_portfolio_col.py
-**/backfill_portfolio_history.py
-**/backfill_weekly.py
-**/debug_positions.py
-**/init_email_tracking.py
-**/query_alert_history.py
-**/tmp_debug.py
+# Intermediate/debug notebooks (may contain portfolio details).
+# One-off scripts now live under scratch/ (covered by the directory rule below).
 *_agent_refactor.ipynb
-refresh_data.ipynb
-run_error.log
+
+# Local scratch directory (throwaway scripts/notebooks; never committed)
+scratch/
 
 # Claude Code internals
 .claude/

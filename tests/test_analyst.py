@@ -5,8 +5,19 @@ Unit tests for AnalystAgent.
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agents.analyst.analyst_agent import FOUNDRY_BASE_URL, AnalystAgent, _sepa_assessment, recommendation
-from models import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord, StockScan
+from app.agents.analyst.analyst_agent import (
+    FOUNDRY_BASE_URL,
+    AnalystAgent,
+    _sepa_assessment,
+    recommendation,
+)
+from app.schemas import (
+    CANSLIMScore,
+    MomentumScore,
+    StockAnalysis,
+    StockRecord,
+    StockScan,
+)
 
 
 def _make_scan(**overrides) -> StockRecord:
@@ -38,14 +49,14 @@ def _make_scan(**overrides) -> StockRecord:
 class TestAnalystAgent:
     """Test AnalystAgent functionality."""
 
-    @patch("agents.analyst.analyst_agent.openai.OpenAI")
+    @patch("app.agents.analyst.analyst_agent.openai.OpenAI")
     def test_get_llm_client_unavailable(self, mock_openai):
         """Test LLM client returns None when Foundry connection fails."""
         mock_openai.side_effect = Exception("connection refused")
         agent = AnalystAgent()
         assert agent.get_llm_client() is None
 
-    @patch("agents.analyst.analyst_agent.openai.OpenAI")
+    @patch("app.agents.analyst.analyst_agent.openai.OpenAI")
     def test_get_llm_client_available(self, mock_openai):
         """Test LLM client when Foundry is available."""
         mock_model = MagicMock()
@@ -60,14 +71,23 @@ class TestAnalystAgent:
         assert result is not None
         client, model_id = result
         assert model_id == "phi-4-mini-test"
-        mock_openai.assert_called_once_with(base_url=FOUNDRY_BASE_URL, api_key="foundry-local")
+        mock_openai.assert_called_once_with(
+            base_url=FOUNDRY_BASE_URL, api_key="foundry-local"
+        )
 
     def test_rule_based_score_high_score(self):
         """Analysis has both canslim and momentum scores for a strong stock."""
         record = _make_scan(
             price=100.0,
-            sma10=95.0, sma30=90.0, sma50=85.0, sma150=75.0, sma200=70.0,
-            rsi14=70.0, rel_volume=1.2, pct_from_52w_high=-5.0, pct_change_week=3.0,
+            sma10=95.0,
+            sma30=90.0,
+            sma50=85.0,
+            sma150=75.0,
+            sma200=70.0,
+            rsi14=70.0,
+            rel_volume=1.2,
+            pct_from_52w_high=-5.0,
+            pct_change_week=3.0,
         )
         agent = AnalystAgent()
         analysis = agent.rule_based_score(record)
@@ -75,7 +95,13 @@ class TestAnalystAgent:
         assert isinstance(analysis, StockAnalysis)
         assert 1 <= analysis.score <= 10
         assert analysis.stage in ["Stage 1", "Stage 2", "Stage 3", "Stage 4"]
-        assert analysis.entry_zone in ("broken_out", "approaching", "getting_close", "extended", "far")
+        assert analysis.entry_zone in (
+            "broken_out",
+            "approaching",
+            "getting_close",
+            "extended",
+            "far",
+        )
         assert isinstance(analysis.canslim, CANSLIMScore)
         assert isinstance(analysis.momentum, MomentumScore)
         assert isinstance(analysis.volume_confirmed, bool)
@@ -84,8 +110,15 @@ class TestAnalystAgent:
         """Low-scoring stock still produces valid analysis with both scores."""
         record = _make_scan(
             price=50.0,
-            sma10=60.0, sma30=65.0, sma50=70.0, sma150=80.0, sma200=85.0,
-            rsi14=30.0, rel_volume=0.5, pct_from_52w_high=-50.0, pct_change_week=-5.0,
+            sma10=60.0,
+            sma30=65.0,
+            sma50=70.0,
+            sma150=80.0,
+            sma200=85.0,
+            rsi14=30.0,
+            rel_volume=0.5,
+            pct_from_52w_high=-50.0,
+            pct_change_week=-5.0,
         )
         agent = AnalystAgent()
         analysis = agent.rule_based_score(record)
@@ -121,11 +154,19 @@ class TestAnalystAgent:
         mock_openai_class.return_value = mock_client
 
         agent = AnalystAgent()
-        analysis = agent.score_stock(sample_stock_record, (mock_client, "phi-4-mini-test"))
+        analysis = agent.score_stock(
+            sample_stock_record, (mock_client, "phi-4-mini-test")
+        )
 
         assert analysis.score == 8
         assert analysis.stage == "Stage 2"
-        assert analysis.entry_zone in ("broken_out", "approaching", "getting_close", "extended", "far")
+        assert analysis.entry_zone in (
+            "broken_out",
+            "approaching",
+            "getting_close",
+            "extended",
+            "far",
+        )
         assert len(analysis.strengths) == 2
         assert len(analysis.risks) == 1
 
@@ -153,7 +194,11 @@ class TestAnalystAgent:
         records = [_make_scan(ticker=f"T{i}", price=100.0 + i * 10) for i in range(3)]
         results = agent.run(records)
 
-        canslim_totals = [r.analysis.canslim.total for r in results if r.analysis and r.analysis.canslim]
+        canslim_totals = [
+            r.analysis.canslim.total
+            for r in results
+            if r.analysis and r.analysis.canslim
+        ]
         assert canslim_totals == sorted(canslim_totals, reverse=True)
 
     # --- True CANSLIM fundamental scoring ---
@@ -161,13 +206,13 @@ class TestAnalystAgent:
     def test_canslim_fundamental_score_strong(self):
         """High fundamentals produce a high CANSLIM score."""
         record = _make_scan(
-            eps_growth=0.35,          # C: 2 (≥25%)
-            roe=0.25,                 # A: 2 (≥17%)
+            eps_growth=0.35,  # C: 2 (≥25%)
+            roe=0.25,  # A: 2 (≥17%)
             pct_from_52w_high=-3.0,  # N: 2 (≥-5%)
-            rel_volume=1.8,           # S: 2 (≥1.5x)
-            rel_strength_vs_spy=25.0, # L: 2 (≥20pp)
+            rel_volume=1.8,  # S: 2 (≥1.5x)
+            rel_strength_vs_spy=25.0,  # L: 2 (≥20pp)
             inst_ownership_pct=0.60,  # I: 2 (≥50%)
-            spy_uptrend=True,         # M: 2
+            spy_uptrend=True,  # M: 2
         )
         agent = AnalystAgent()
         score = agent._canslim_fundamental_score(record)
@@ -202,13 +247,13 @@ class TestAnalystAgent:
     def test_canslim_fundamental_score_moderate(self):
         """Partial fundamentals produce mid-range CANSLIM score."""
         record = _make_scan(
-            eps_growth=0.12,          # C: 1 (≥10%)
-            roe=0.13,                 # A: 1 (≥10%)
-            pct_from_52w_high=-10.0, # N: 1 (≥-15%)
-            rel_volume=1.1,           # S: 1 (≥1.0x)
+            eps_growth=0.12,  # C: 1 (≥10%)
+            roe=0.13,  # A: 1 (≥10%)
+            pct_from_52w_high=-10.0,  # N: 1 (≥-15%)
+            rel_volume=1.1,  # S: 1 (≥1.0x)
             rel_strength_vs_spy=5.0,  # L: 1 (≥0pp)
             inst_ownership_pct=0.40,  # I: 1 (≥30%)
-            spy_uptrend=True,         # M: 2
+            spy_uptrend=True,  # M: 2
         )
         agent = AnalystAgent()
         score = agent._canslim_fundamental_score(record)
@@ -226,7 +271,7 @@ class TestAnalystAgent:
         """annual_eps_growth takes priority over ROE for A letter."""
         record = _make_scan(
             annual_eps_growth=0.30,  # A: 2 (≥25% CAGR)
-            roe=0.05,                # would give A: 0 if used
+            roe=0.05,  # would give A: 0 if used
         )
         agent = AnalystAgent()
         score = agent._canslim_fundamental_score(record)
@@ -250,7 +295,11 @@ class TestAnalystAgent:
         """Price above SMA150 (with no slope data) gives I=2 in momentum score."""
         record = _make_scan(
             price=100.0,
-            sma10=95.0, sma30=90.0, sma50=85.0, sma150=75.0, sma200=70.0,
+            sma10=95.0,
+            sma30=90.0,
+            sma50=85.0,
+            sma150=75.0,
+            sma200=70.0,
         )
         agent = AnalystAgent()
         analysis = agent.rule_based_score(record)
@@ -260,7 +309,7 @@ class TestAnalystAgent:
 
     def test_strip_think_removes_reasoning_block(self):
         """_strip_think removes <think>...</think> blocks from LLM output."""
-        raw = "<think>Let me reason...</think>\n{\"score\": 7}"
+        raw = '<think>Let me reason...</think>\n{"score": 7}'
         result = AnalystAgent._strip_think(raw)
         assert result == '{"score": 7}'
 
@@ -322,7 +371,11 @@ class TestAnalystAgent:
 
         assert analysis.r_multiples is not None
         assert set(analysis.r_multiples.keys()) == {"1.0R", "2.0R", "3.0R"}
-        assert analysis.r_multiples["2.0R"] > analysis.r_multiples["1.0R"] > analysis.entry_price
+        assert (
+            analysis.r_multiples["2.0R"]
+            > analysis.r_multiples["1.0R"]
+            > analysis.entry_price
+        )
         assert analysis.risk_pct is not None
         assert 0 < analysis.risk_pct < 1
         assert analysis.reward_risk_ratio == pytest.approx(2.0)

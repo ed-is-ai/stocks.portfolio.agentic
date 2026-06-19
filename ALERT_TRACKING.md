@@ -1,6 +1,6 @@
 # Alert Email Tracking
 
-Email alert send history is now tracked in the `agents/alert/alerts.db` database for future analysis.
+Email alert send history is now tracked in the `app/agents/alert/alerts.db` database for future analysis.
 
 ## Database Schema
 
