@@ -23,7 +23,16 @@ openspec specs.
 | 007  | Tidy root-dir one-off scripts; ignore `tmp_*` debug files | P3 | S | — | SUPERSEDED by `openspec/changes/tidy-root-layout` (was DONE, PR #13; assumptions went stale after the layered-architecture refactor) |
 | 008  | Pin SIPP import & replay behavior with characterization tests | P1 | M | — | DONE (merged, PR #18) |
 | 009  | Store all trade dates as ISO `YYYY-MM-DD` and sort by them directly | P1 | M | 008 | DONE (merged, PR #18) |
-| 010  | Stop silently swallowing errors inside `import_sipp` | P2 | S | — | DONE (reviewed & approved; executor branch `worktree-agent-a6d25b0bee0b80db7` @ `8f18135`, based on `main`; PR pending) |
+| 010  | Stop silently swallowing errors inside `import_sipp` | P2 | S | — | DONE (merged, PR #20) |
+| 011  | Declare `python-multipart` as an explicit dependency | P1 | S | — | DONE (merged, PR #21) |
+| 012  | Add a timeout to the pipeline subprocess | P1 | S | 011 | DONE (merged, PR #22) |
+| 013  | Characterize portfolio valuation / GBP-conversion math with tests | P2 | M | 011 | DONE (merged, PR #23) |
+| 014  | Normalize all trade-date writes to ISO (close the 009 invariant) | P2 | S | 011 | DONE (reviewed & approved; PR #25, pending merge) |
+| 015  | Parallelize per-ticker price fetching | P3 | M | 013 | DONE (reviewed & approved; PR #24, pending merge) |
+| 016  | Cover the historical-pivots detection math with unit tests | P1 | M | — | DONE (merged, PR #26) |
+| 017  | Pin the Alpha Vantage EPS-growth math with unit tests | P2 | S | — | DONE (reviewed & approved; PR #27, pending merge) |
+| 018  | Pin the congressional-trading HTML parser with fixture tests | P2 | S | — | DONE (reviewed & approved; PR #28, pending merge) |
+| 019  | Cover the scan-history transition-detection logic with tests | P3 | S | — | DONE (reviewed & approved; PR #29, pending merge) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
@@ -48,6 +57,14 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED 
 - **010 is independent** of 008/009 but touches the same `import_sipp` loop as
   009. If running both, land 009 first, then re-locate 010's catch blocks by
   content (line numbers shift).
+- **011 unblocks the 011–015 set.** It declares the missing `python-multipart`
+  dep so a clean `uv run pytest` (no `--ignore`) is green — the verification gate
+  the other plans rely on. Run it first and merge it before the rest (the Agent
+  worktree branches from `main`).
+- **012 / 013 / 014 are independent** of each other (different files); each only
+  needs 011 for a clean suite.
+- **015 depends on 013** — 013's valuation tests guard the file 015 refactors
+  (`portfolio_service.py`), and 015 extends the same test file.
 
 ## SIPP import audit on 2026-06-19 (commit `6429330`) — plans 008–010
 
@@ -79,15 +96,70 @@ Not audited in this pass: the web/service SIPP entry points
 (`app/services/trader_service.py`, `app/api/`), `cash_flows_repo` internals, and
 portfolio valuation beyond the replay.
 
-### Surfaced during execution of plan 008 (not yet planned)
+### Surfaced during execution of plan 008 → now **plan 011**
 
-- **`python-multipart` is an undeclared dependency.** It is in neither
-  `pyproject.toml` nor `uv.lock`, but `tests/test_web_auth.py` (FastAPI form
-  data) requires it. It happens to be installed in the current dev venv, so
-  `uv run pytest` passes locally — but a clean `uv sync` (e.g. a fresh worktree
-  or CI) fails at collection with `RuntimeError: Form data requires
-  "python-multipart"`. Fix is one line (`uv add python-multipart`). Small DX/CI
-  reliability finding; worth a quick plan or a direct `uv add`.
+- **`python-multipart` is an undeclared dependency.** Not in `pyproject.toml` or
+  `uv.lock`, but `tests/test_web_auth.py` (FastAPI form data) requires it; a clean
+  `uv sync` / CI / fresh clone fails test collection. Promoted to **plan 011**.
+
+## Standard audit on 2026-06-19 (commit `dbf0d18`) — plans 011–015
+
+Full-category `improve` audit focused on the areas the SIPP audit left
+un-audited: the service layer, API routes, and pipeline orchestration.
+
+- **`python-multipart` undeclared** → **plan 011** (also restores a green full
+  `uv run pytest`; prerequisite for 012–015).
+- **Pipeline subprocess has no timeout** — `PipelineService.run_once` shells out
+  to a full network pipeline with no `timeout`; the web `/refresh-data` thread and
+  the scheduler can hang forever → **plan 012**.
+- **Service layer untested** — `portfolio_service.py` (309 lines of money/FX math
+  shown on screen) has zero tests → **plan 013**.
+- **Web/API trade writes don't normalize dates to ISO** — `record_buy`/`sell`/
+  `correct_trade` store caller dates as-is; only `<input type="date">` keeps the
+  009 ISO-sort invariant intact today; a direct non-ISO API write re-breaks it →
+  **plan 014**.
+- **Sequential per-ticker price fetch** — `fetch_all_prices` does ~2–4N
+  sequential yfinance calls per refresh → **plan 015** (bounded thread pool; a
+  batched `yf.download` rewrite was deliberately deferred).
+
+Not audited in this pass: the `skills/*` screener libraries, the orchestrator's
+776-line body (swept, not deep-read), the analyst/alert/extraction agent
+internals (swept only), web templates/JS beyond the date inputs, and openspec
+specs.
+
+## Test-coverage audit on 2026-06-20 (commit `13074c8`) — plans 016–019
+
+Focused `improve tests` audit. Baseline was green and network-free
+(`uv run pytest` → 98 passed in ~31s); the gap is *breadth* — several sizable
+modules have zero direct coverage. Targeted the untested code with the highest
+correctness value and lowest mocking cost:
+
+- **`historical_pivots.py` — ~460 lines of pure pivot/breakout detection math,
+  zero coverage** (feeds the analyst's base/pivot signal at
+  `analyst_agent.py:903`; only `fetch_weekly_ohlcv` is network) → **plan 016**.
+- **Alpha Vantage EPS-growth math** (`get_quarterly_eps_growth`,
+  `get_annual_eps_cagr`) — real financial calcs with edge-case guards, pure given
+  the earnings dict → **plan 017**.
+- **`congress._parse_stats`** — brittle regex-over-HTML scraper parser; a markup
+  change silently zeros the signal. Pin against a synthetic HTML fixture →
+  **plan 018**.
+- **`scan_history` transition logic** (`get_new_tickers`, `get_fresh_breakouts`,
+  plus `load_history` old-format migration) — pure set/dict diff + JSON migration
+  → **plan 019**.
+
+All four are characterization plans (pin current behavior; do not modify source).
+They are independent of each other and of plans 001–015; run in any order.
+
+Considered and **rejected** (lower leverage):
+
+- **`app/services/trader_service.py`** — thin 1:1 pass-through to `TraderAgent`
+  (already tested). A test here only asserts delegation/forwarding. Not worth it.
+- **`extraction_agent.py`, `tv_screener._fetch`, `orchestrator.py`** — dominated
+  by network/file I/O and agent coordination; poor test ROI vs. mocking cost.
+  Swept, not planned.
+
+Not audited in this pass: the `skills/*` screener libraries (have their own
+`tests/`), web templates/JS, and the agent internals beyond the modules above.
 
 ## Findings turned into plans on 2026-06-18 (commit `ce96c93`)
 
