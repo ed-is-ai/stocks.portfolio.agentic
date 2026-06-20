@@ -186,3 +186,105 @@ def test_results_save_and_latest_scores(tmp_path):
         ]
     )
     assert repo.latest_scores() == {"AAPL": 8}
+
+
+def test_results_latest_scores_multi_ticker(tmp_path):
+    repo = ResultsRepository(db.make_connect(lambda: tmp_path / "results.db"))
+    repo.ensure_schema()
+    repo.save_results(
+        [
+            # AAPL: two rows — later date has score 9
+            (
+                "AAPL",
+                "2024-01-01 09:00",
+                7,
+                10,
+                9,
+                "Stage 2",
+                100.0,
+                101.0,
+                95.0,
+                "far",
+            ),
+            (
+                "AAPL",
+                "2024-01-03 09:00",
+                9,
+                12,
+                9,
+                "Stage 2",
+                104.0,
+                105.0,
+                97.0,
+                "near",
+            ),
+            # MSFT: two rows — later date has score 6
+            (
+                "MSFT",
+                "2024-01-02 09:00",
+                5,
+                8,
+                7,
+                "Stage 1",
+                200.0,
+                201.0,
+                190.0,
+                "far",
+            ),
+            (
+                "MSFT",
+                "2024-01-04 09:00",
+                6,
+                9,
+                7,
+                "Stage 1",
+                202.0,
+                203.0,
+                191.0,
+                "near",
+            ),
+        ]
+    )
+    # Each ticker must resolve to its own latest row, not a global MAX.
+    assert repo.latest_scores() == {"AAPL": 9, "MSFT": 6}
+
+
+def test_results_latest_scores_empty(tmp_path):
+    repo = ResultsRepository(db.make_connect(lambda: tmp_path / "results.db"))
+    repo.ensure_schema()
+    assert repo.latest_scores() == {}
+
+
+def test_results_latest_scores_single_row_per_ticker(tmp_path):
+    repo = ResultsRepository(db.make_connect(lambda: tmp_path / "results.db"))
+    repo.ensure_schema()
+    repo.save_results(
+        [
+            (
+                "AAPL",
+                "2024-01-01 09:00",
+                7,
+                10,
+                9,
+                "Stage 2",
+                100.0,
+                101.0,
+                95.0,
+                "far",
+            ),
+            (
+                "MSFT",
+                "2024-01-01 09:00",
+                5,
+                8,
+                7,
+                "Stage 1",
+                200.0,
+                201.0,
+                190.0,
+                "far",
+            ),
+        ]
+    )
+    # Both tickers must appear; a LIMIT 1 or global MAX would drop one.
+    assert repo.latest_scores() == {"AAPL": 7, "MSFT": 5}
