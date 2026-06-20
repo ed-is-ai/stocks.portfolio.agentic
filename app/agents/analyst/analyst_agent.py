@@ -14,8 +14,9 @@ Falls back to rule-based inline logic when ohlcv_history is absent.
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import ClassVar, Iterable
+from typing import Any, ClassVar, Iterable
 
 import openai
 
@@ -437,6 +438,8 @@ class AnalystAgent(Agent):
         _results_repo.ensure_schema()
         prev_scores = _results_repo.latest_scores()
 
+        pivots_by_ticker = self._prefetch_pivots([s.ticker for s in scan_results])
+
         total = len(scan_results)
         analysis_results: list[StockRecord] = []
         with open(self.PROGRESS_FILE, "w", encoding="utf-8") as progress:
@@ -446,7 +449,9 @@ class AnalystAgent(Agent):
 
             for idx, stock in enumerate(scan_results, 1):
                 try:
-                    analysis = self.score_stock(stock, llm)
+                    analysis = self.score_stock(
+                        stock, llm, pivots_by_ticker=pivots_by_ticker
+                    )
                     stock.analysis = analysis
                     analysis_results.append(stock)
                     canslim = (
@@ -555,8 +560,36 @@ class AnalystAgent(Agent):
         except Exception:
             return None
 
+    def _prefetch_pivots(
+        self, tickers: list[str]
+    ) -> dict[str, list[dict[str, Any]] | None]:
+        """Fetch historical pivots for every ticker concurrently.
+
+        Returns {ticker: pivots_list_or_None}. A None value means the fetch
+        failed or returned nothing — callers treat it the same as "no pivots".
+        Mirrors the bounded-pool pattern in
+        PortfolioService.fetch_all_prices.
+        """
+        result: dict[str, list[dict[str, Any]] | None] = {}
+        if not tickers:
+            return result
+
+        def _fetch(t: str) -> tuple[str, list[dict[str, Any]] | None]:
+            try:
+                return t, find_historical_pivots(t, require_stage2=False)
+            except Exception:
+                return t, None
+
+        with ThreadPoolExecutor(max_workers=min(8, len(tickers))) as pool:
+            for ticker, pivots in pool.map(_fetch, tickers):
+                result[ticker] = pivots
+        return result
+
     def score_stock(
-        self, stock: StockRecord, llm: tuple[openai.OpenAI, str] | None
+        self,
+        stock: StockRecord,
+        llm: tuple[openai.OpenAI, str] | None,
+        pivots_by_ticker: dict[str, list[dict[str, Any]] | None] | None = None,
     ) -> StockAnalysis:
         """Score a stock; VCP analysis from the vcp-screener calculators drives
         SEPA template, execution state, entry price, and stop loss.
@@ -614,8 +647,14 @@ class AnalystAgent(Agent):
         analysis.volume_confirmed = stock.rel_volume >= 1.4
         analysis.sepa_template = _sepa_assessment(stock, vcp)
 
-        # Multi-year base breakout detection
-        myb = _detect_multiyear_breakout(stock.ticker, stock.price)
+        # Multi-year base breakout detection. Use the concurrently prefetched
+        # pivots when the caller supplied them; otherwise fetch inline.
+        if pivots_by_ticker is not None and stock.ticker in pivots_by_ticker:
+            myb = _select_multiyear_breakout(
+                pivots_by_ticker[stock.ticker], stock.price
+            )
+        else:
+            myb = _detect_multiyear_breakout(stock.ticker, stock.price)
         if myb:
             analysis.multiyear_breakout = True
             analysis.multiyear_pivot = myb["pivot_price"]
@@ -893,17 +932,16 @@ _MYB_ABOVE_MAX = 8.0  # price must be no more than 8% above the pivot
 _MYB_MIN_BASE_WEEKS = 26  # base must have lasted at least 26 weeks
 
 
-def _detect_multiyear_breakout(ticker: str, price: float) -> dict | None:
-    """Return the most significant historical pivot that price has just cleared.
+def _select_multiyear_breakout(
+    pivots: list[dict[str, Any]] | None, price: float
+) -> dict | None:
+    """Pick the most significant cleared pivot from an already-fetched list.
 
-    Looks for a confirmed or resistance pivot where price is 0–8% above the
-    pivot level and the base lasted ≥26 weeks. Returns None on any error.
+    Pure: no network. Returns None when *pivots* is None/empty or nothing
+    qualifies.
     """
-    try:
-        pivots = find_historical_pivots(ticker, require_stage2=False)
-    except Exception:
+    if not pivots:
         return None
-
     candidates = []
     for p in pivots:
         if p.get("status") == "open":
@@ -914,12 +952,22 @@ def _detect_multiyear_breakout(ticker: str, price: float) -> dict | None:
             and p["base_weeks"] >= _MYB_MIN_BASE_WEEKS
         ):
             candidates.append((pct_above, p))
-
     if not candidates:
         return None
-
-    # Prefer the pivot with the longest base (most significant resistance)
     return max(candidates, key=lambda x: x[1]["base_weeks"])[1]
+
+
+def _detect_multiyear_breakout(ticker: str, price: float) -> dict | None:
+    """Fetch historical pivots for *ticker* and pick the cleared one.
+
+    Returns None on any fetch error. Behavior unchanged from before the
+    fetch/score split.
+    """
+    try:
+        pivots = find_historical_pivots(ticker, require_stage2=False)
+    except Exception:
+        return None
+    return _select_multiyear_breakout(pivots, price)
 
 
 def recommendation(a: StockAnalysis) -> str:

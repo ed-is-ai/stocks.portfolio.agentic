@@ -9,6 +9,7 @@ from app.agents.analyst.analyst_agent import (
     FOUNDRY_BASE_URL,
     AnalystAgent,
     _sepa_assessment,
+    _select_multiyear_breakout,
     recommendation,
 )
 from app.schemas import (
@@ -420,3 +421,67 @@ class TestAnalystAgent:
         sepa = _sepa_assessment(record, vcp)
 
         assert sepa["sma200_rising"] is True
+
+
+class TestSelectMultiyearBreakout:
+    """Tests for _select_multiyear_breakout (pure scoring helper)."""
+
+    def test_picks_longest_qualifying_base(self):
+        """Returns the pivot with the longest base when multiple qualify."""
+        price = 103.0  # ~3% above pivot_price of 100.0
+        pivots = [
+            {
+                "status": "open",
+                "pivot_price": 100.0,
+                "base_weeks": 50,
+            },  # open — must be ignored
+            {
+                "status": "closed",
+                "pivot_price": 100.0,
+                "base_weeks": 30,
+            },  # qualifies: 3% above, 30 weeks
+            {
+                "status": "closed",
+                "pivot_price": 100.0,
+                "base_weeks": 40,
+            },  # qualifies: 3% above, 40 weeks (longer)
+        ]
+        result = _select_multiyear_breakout(pivots, price)
+        assert result is not None
+        assert result["base_weeks"] == 40
+
+    def test_returns_none_on_empty_input(self):
+        """Returns None when pivots list is empty."""
+        assert _select_multiyear_breakout([], 100.0) is None
+
+    def test_returns_none_on_none_input(self):
+        """Returns None when pivots is None."""
+        assert _select_multiyear_breakout(None, 100.0) is None
+
+
+class TestPrefetchPivots:
+    """Tests for AnalystAgent._prefetch_pivots concurrent fetch."""
+
+    def test_maps_tickers_and_isolates_failures(self):
+        """Maps every ticker and returns None for failures."""
+        marker_pivots = [{"pivot_price": 50.0, "base_weeks": 30, "status": "closed"}]
+
+        def fake_find_historical_pivots(ticker: str, **kwargs):
+            if ticker == "AAA":
+                return marker_pivots
+            raise ValueError("network error")
+
+        with patch(
+            "app.agents.analyst.analyst_agent.find_historical_pivots",
+            side_effect=fake_find_historical_pivots,
+        ):
+            agent = AnalystAgent()
+            result = agent._prefetch_pivots(["AAA", "BBB"])
+
+        assert result == {"AAA": marker_pivots, "BBB": None}
+
+    def test_returns_empty_dict_for_no_tickers(self):
+        """Returns empty dict when tickers list is empty (no pool spawned)."""
+        agent = AnalystAgent()
+        result = agent._prefetch_pivots([])
+        assert result == {}
