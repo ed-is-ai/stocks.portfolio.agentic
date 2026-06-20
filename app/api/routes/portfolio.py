@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import get_portfolio_service, get_trader_service
 from app.api.templating import templates
+from app.core.security import require_local_or_token
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -18,7 +19,11 @@ TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
 
 
-@router.post("/api/portfolio/refresh", response_class=HTMLResponse)
+@router.post(
+    "/api/portfolio/refresh",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
 async def refresh_portfolio_prices(
     request: Request, trader: TraderDep, portfolio: PortfolioDep
 ) -> HTMLResponse:

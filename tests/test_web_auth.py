@@ -37,3 +37,9 @@ def test_refresh_data_forbidden_without_token() -> None:
     os.environ.pop("APP_AUTH_TOKEN", None)
     resp = client.post("/refresh-data")
     assert resp.status_code == 403
+
+
+def test_refresh_portfolio_forbidden_without_token() -> None:
+    os.environ.pop("APP_AUTH_TOKEN", None)
+    resp = client.post("/api/portfolio/refresh")
+    assert resp.status_code == 403

@@ -11,13 +11,22 @@ from fastapi import HTTPException, Request
 from app.core.security import require_local_or_token
 
 
-def _request(host: str | None, token_header: str | None = None) -> Request:
+def _request(
+    host: str | None,
+    token_header: str | None = None,
+    fetch_site: str | None = None,
+) -> Request:
     """Build a minimal stand-in for fastapi.Request.
 
-    The guard only reads request.headers.get("X-Auth-Token") and
-    request.client (.host, or None). A SimpleNamespace satisfies both.
+    The guard reads request.headers.get("X-Auth-Token"),
+    request.headers.get("Sec-Fetch-Site"), and request.client (.host, or None).
+    A SimpleNamespace satisfies all three.
     """
-    headers = {"X-Auth-Token": token_header} if token_header is not None else {}
+    headers: dict[str, str] = {}
+    if token_header is not None:
+        headers["X-Auth-Token"] = token_header
+    if fetch_site is not None:
+        headers["Sec-Fetch-Site"] = fetch_site
     client = SimpleNamespace(host=host) if host is not None else None
     return cast(Request, SimpleNamespace(headers=headers, client=client))
 
@@ -96,3 +105,57 @@ def test_loopback_still_allowed_with_token_configured_no_header(
     """Loopback host is still allowed even when APP_AUTH_TOKEN is set but no header sent."""
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     assert require_local_or_token(_request("127.0.0.1")) is None
+
+
+# ---------------------------------------------------------------------------
+# Cross-site (CSRF) fetch-metadata guard
+# ---------------------------------------------------------------------------
+
+
+def test_cross_site_fetch_rejected_from_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cross-site browser request is rejected even from loopback (CSRF)."""
+    monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
+    with pytest.raises(HTTPException) as exc_info:
+        require_local_or_token(_request("127.0.0.1", fetch_site="cross-site"))
+    assert exc_info.value.status_code == 403
+
+
+def test_same_site_fetch_rejected_from_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-site (different-origin) browser request is also rejected."""
+    monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
+    with pytest.raises(HTTPException) as exc_info:
+        require_local_or_token(_request("127.0.0.1", fetch_site="same-site"))
+    assert exc_info.value.status_code == 403
+
+
+def test_same_origin_fetch_allowed_from_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app's own (same-origin) htmx requests are allowed."""
+    monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
+    assert (
+        require_local_or_token(_request("127.0.0.1", fetch_site="same-origin")) is None
+    )
+
+
+def test_no_fetch_header_allowed_from_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-browser clients (curl, scheduler) send no Sec-Fetch-Site and pass."""
+    monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
+    assert require_local_or_token(_request("127.0.0.1")) is None
+
+
+def test_token_bypasses_cross_site(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A valid shared secret is trusted and bypasses the CSRF check."""
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    assert (
+        require_local_or_token(
+            _request("10.0.0.5", token_header="s3cret", fetch_site="cross-site")
+        )
+        is None
+    )
