@@ -196,3 +196,58 @@ class TestScannerAgent:
             results = agent.run()
             # Should return empty list for insufficient data
             assert isinstance(results, list)
+
+    @patch(
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers",
+        return_value=["AAPL"],
+    )
+    @patch(
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk",
+        return_value=[],
+    )
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals",
+        return_value={
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
+            "sector": None,
+        },
+    )
+    @patch(
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers",
+        return_value=["AAPL"],
+    )
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch("yfinance.download")
+    def test_run_dedups_cross_source_ticker_and_combines_labels(
+        self, mock_download, mock_congress, _mock_vcp, _mock_fund, _mock_tv_uk, _mock_tv
+    ):
+        """AAPL appears in WW payload, VCP screener, and TV screener; expect one record
+        with all three source labels combined."""
+        mock_congress.get_stats.return_value = None
+        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": [100 + i * 0.1 for i in range(100)],
+                "High": [105 + i * 0.1 for i in range(100)],
+                "Low": [95 + i * 0.1 for i in range(100)],
+                "Open": [99 + i * 0.1 for i in range(100)],
+                "Volume": [1000000] * 100,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        results = agent.run(["AAPL"])
+
+        assert len(results) == 1
+        assert results[0].ticker == "AAPL"
+        assert set(results[0].source.split(",")) == {
+            "ww_extraction",
+            "vcp_screener",
+            "tv_screener",
+        }

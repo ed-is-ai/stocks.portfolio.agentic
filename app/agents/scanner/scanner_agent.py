@@ -137,20 +137,6 @@ def fetch_vcp_screener_tickers() -> list[str]:
         return [r["symbol"] for r in data.get("results", []) if r.get("symbol")]
 
 
-def _merge_results(*source_lists: list) -> list:
-    """Merge StockRecord lists; combine source labels for duplicate tickers."""
-    seen: dict[str, Any] = {}
-    for records in source_lists:
-        for r in records:
-            if r.ticker in seen:
-                existing = seen[r.ticker]
-                if r.source not in existing.source.split(","):
-                    existing.source = f"{existing.source},{r.source}"
-            else:
-                seen[r.ticker] = r
-    return list(seen.values())
-
-
 def _fetch_spy_context() -> tuple[bool, float]:
     """Return (spy_uptrend, spy_52w_return_pct) from SPY price history.
 
@@ -330,44 +316,37 @@ class ScannerAgent(Agent):
 
         ww_tickers = list(payload) if payload else load_watchlist()
         print(f"\n[Scanner] WW extraction:    {len(ww_tickers)} tickers")
-        ww_results = self._scan_source(
-            ww_tickers, spy_uptrend, spy_52w_return, "ww_extraction"
-        )
 
         vcp_tickers = fetch_vcp_screener_tickers()
         print(f"[Scanner] VCP screener:     {len(vcp_tickers)} tickers")
-        vcp_results = self._scan_source(
-            vcp_tickers, spy_uptrend, spy_52w_return, "vcp_screener"
-        )
 
         print("[Scanner] TradingView screener (US)...")
         tv_tickers = fetch_tv_screener_tickers()
         print(f"[Scanner] TV screener US:   {len(tv_tickers)} tickers")
-        tv_results = self._scan_source(
-            tv_tickers, spy_uptrend, spy_52w_return, "tv_screener"
-        )
 
         print("[Scanner] TradingView screener (UK)...")
         uk_raw = fetch_tv_screener_tickers_uk()
         uk_tickers = [t if t.endswith(".L") else f"{t}.L" for t in uk_raw]
         print(f"[Scanner] TV screener UK:   {len(uk_tickers)} tickers")
-        uk_results = self._scan_source(
-            uk_tickers, spy_uptrend, spy_52w_return, "tv_screener_uk"
-        )
 
-        return _merge_results(ww_results, vcp_results, tv_results, uk_results)
+        # Build the deduplicated union, recording each ticker's sources in
+        # first-seen order. Each ticker is scanned exactly once.
+        sources_by_ticker: dict[str, list[str]] = {}
+        for label, tickers in (
+            ("ww_extraction", ww_tickers),
+            ("vcp_screener", vcp_tickers),
+            ("tv_screener", tv_tickers),
+            ("tv_screener_uk", uk_tickers),
+        ):
+            for ticker in tickers:
+                labels = sources_by_ticker.setdefault(ticker, [])
+                if label not in labels:
+                    labels.append(label)
 
-    def _scan_source(
-        self,
-        tickers: list[str],
-        spy_uptrend: bool,
-        spy_52w_return: float,
-        source: str,
-    ) -> list[StockRecord]:
-        """Scan a list of tickers and tag each result with the given source label."""
-        records = self.scan_watchlist(tickers, spy_uptrend, spy_52w_return)
+        all_tickers = list(sources_by_ticker)
+        records = self.scan_watchlist(all_tickers, spy_uptrend, spy_52w_return)
         for r in records:
-            r.source = source
+            r.source = ",".join(sources_by_ticker[r.ticker])
         return records
 
     def fetch_stock_data(self, ticker: str) -> pd.DataFrame | None:
