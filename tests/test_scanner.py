@@ -81,12 +81,13 @@ class TestScannerAgent:
         # Check volume
         assert result["volume"] == 1400000
 
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
     @patch(
-        "app.agents.scanner.scanner_agent._fetch_fundamentals",
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
         return_value={"eps_growth": None, "roe": None, "inst_ownership_pct": None},
     )
     @patch("yfinance.download")
-    def test_scan_watchlist(self, mock_download, _mock_fundamentals):
+    def test_scan_watchlist(self, mock_download, _mock_fundamentals_yf, _mock_fill):
         """Test scanning multiple tickers."""
         dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
         mock_download.return_value = pd.DataFrame(
@@ -117,8 +118,9 @@ class TestScannerAgent:
     @patch(
         "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
     )
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
     @patch(
-        "app.agents.scanner.scanner_agent._fetch_fundamentals",
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
         return_value={
             "eps_growth": None,
             "annual_eps_growth": None,
@@ -135,7 +137,14 @@ class TestScannerAgent:
     @patch("app.agents.scanner.scanner_agent._congress_client")
     @patch("yfinance.download")
     def test_run_method(
-        self, mock_download, mock_congress, _mock_vcp, _mock_fund, _mock_tv_uk, _mock_tv
+        self,
+        mock_download,
+        mock_congress,
+        _mock_vcp,
+        _mock_fund,
+        _mock_fill,
+        _mock_tv_uk,
+        _mock_tv,
     ):
         """Test the run method."""
         mock_congress.get_stats.return_value = None
@@ -166,8 +175,9 @@ class TestScannerAgent:
     @patch(
         "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
     )
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
     @patch(
-        "app.agents.scanner.scanner_agent._fetch_fundamentals",
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
         return_value={
             "eps_growth": None,
             "annual_eps_growth": None,
@@ -183,7 +193,7 @@ class TestScannerAgent:
     )
     @patch("app.agents.scanner.scanner_agent._congress_client")
     def test_run_method_default_watchlist(
-        self, mock_congress, _mock_vcp, _mock_fund, _mock_tv_uk, _mock_tv
+        self, mock_congress, _mock_vcp, _mock_fund, _mock_fill, _mock_tv_uk, _mock_tv
     ):
         """Test run method with default watchlist."""
         mock_congress.get_stats.return_value = None
@@ -205,8 +215,9 @@ class TestScannerAgent:
         "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk",
         return_value=[],
     )
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
     @patch(
-        "app.agents.scanner.scanner_agent._fetch_fundamentals",
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
         return_value={
             "eps_growth": None,
             "annual_eps_growth": None,
@@ -224,7 +235,14 @@ class TestScannerAgent:
     @patch("app.agents.scanner.scanner_agent._congress_client")
     @patch("yfinance.download")
     def test_run_dedups_cross_source_ticker_and_combines_labels(
-        self, mock_download, mock_congress, _mock_vcp, _mock_fund, _mock_tv_uk, _mock_tv
+        self,
+        mock_download,
+        mock_congress,
+        _mock_vcp,
+        _mock_fund,
+        _mock_fill,
+        _mock_tv_uk,
+        _mock_tv,
     ):
         """AAPL appears in WW payload, VCP screener, and TV screener; expect one record
         with all three source labels combined."""
@@ -251,3 +269,48 @@ class TestScannerAgent:
             "vcp_screener",
             "tv_screener",
         }
+
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
+        return_value={
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
+            "sector": None,
+        },
+    )
+    @patch("yfinance.download")
+    def test_scan_watchlist_assembles_records_after_parallel_fetch(
+        self, mock_download, _mock_fundamentals_yf, _mock_fill, mock_congress
+    ):
+        """Phase A runs concurrently; Phase B calls congress serially once per ticker.
+
+        Verifies that output order matches input order and that congress is called
+        exactly once per ticker through the serial Phase B assembly.
+        """
+        mock_congress.get_stats.return_value = None
+        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": [100 + i * 0.1 for i in range(100)],
+                "High": [105 + i * 0.1 for i in range(100)],
+                "Low": [95 + i * 0.1 for i in range(100)],
+                "Open": [99 + i * 0.1 for i in range(100)],
+                "Volume": [1000000] * 100,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        results = agent.scan_watchlist(
+            ["AAPL", "GOOGL", "MSFT"], spy_uptrend=True, spy_52w_return=10.0
+        )
+
+        assert len(results) == 3
+        assert [r.ticker for r in results] == ["AAPL", "GOOGL", "MSFT"]
+        assert mock_congress.get_stats.call_count == 3

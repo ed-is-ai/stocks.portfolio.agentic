@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -162,16 +163,16 @@ def _fetch_spy_context() -> tuple[bool, float]:
         return True, 0.0
 
 
-def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
-    """Return fundamental fields from yfinance with Alpha Vantage as fallback.
+def _fetch_fundamentals_yf(ticker: str) -> dict[str, Any]:
+    """Return fundamental fields from yfinance only (no Alpha Vantage).
 
-    yfinance is tried first (no API key required). For any field that comes
-    back as None, Alpha Vantage is queried if ALPHA_VANTAGE_API_KEY is set.
+    Network: yfinance only. Safe to call from worker threads. None fields are
+    left for the (rate-limited, serial) Alpha Vantage back-fill to fill later.
     """
     try:
         t = yf.Ticker(ticker)
         info: Any = t.info
-        result: dict[str, Any] = {
+        return {
             "eps_growth": _quarterly_eps_growth(t, info),
             "annual_eps_growth": _annual_eps_growth(t),
             "roe": info.get("returnOnEquity"),
@@ -181,7 +182,7 @@ def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
             "sector": info.get("sector"),
         }
     except Exception:
-        result = {
+        return {
             "eps_growth": None,
             "annual_eps_growth": None,
             "roe": None,
@@ -191,6 +192,14 @@ def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
             "sector": None,
         }
 
+
+def _fetch_fundamentals(ticker: str) -> dict[str, Any]:
+    """Return fundamentals from yfinance, back-filled from Alpha Vantage.
+
+    Behavior unchanged: yfinance first, then the (serial, rate-limited) Alpha
+    Vantage fallback for any field still None.
+    """
+    result = _fetch_fundamentals_yf(ticker)
     _fill_from_alpha_vantage(ticker, result)
     return result
 
@@ -478,52 +487,90 @@ class ScannerAgent(Agent):
         stock_52w_return = (newest / oldest - 1) * 100
         return round(stock_52w_return - spy_52w_return, 2)
 
+    def _fetch_ticker_yf(
+        self, ticker: str, spy_52w_return: float
+    ) -> dict[str, Any] | None:
+        """Phase A (thread-safe): fetch yfinance data + technicals for a ticker.
+
+        Returns a partial bundle, or None when data is insufficient or the
+        fetch errors (matching the old skip/err handling). No rate-limited
+        client (Alpha Vantage, congress) is touched here.
+        """
+        try:
+            df = self.fetch_stock_data(ticker)
+            if df is None:
+                print(f"  [skip] {ticker}: insufficient data")
+                return None
+            technicals = self.compute_technicals(df)
+            fundamentals = _fetch_fundamentals_yf(ticker)
+            rel_strength = self.compute_rel_strength(
+                technicals["price_history"], spy_52w_return
+            )
+            return {
+                "ticker": ticker,
+                "technicals": technicals,
+                "fundamentals": fundamentals,
+                "rel_strength": rel_strength,
+            }
+        except Exception as error:
+            print(f"  [err]  {ticker}: {error}")
+            return None
+
     def scan_watchlist(
         self, tickers: list[str], spy_uptrend: bool, spy_52w_return: float
     ) -> list[StockRecord]:
-        """Scan tickers, enriching each with fundamentals and SPY market context."""
+        """Scan tickers, enriching each with fundamentals and SPY market context.
+
+        Phase A fetches all yfinance data concurrently; Phase B applies the
+        serial, rate-limited Alpha Vantage back-fill and congress lookup and
+        builds each record in input order.
+        """
+        if not tickers:
+            return []
         ww = load_ww_context()
+
+        # Phase A: concurrent yfinance fetch (no rate-limited clients).
+        def _worker(t: str) -> dict[str, Any] | None:
+            return self._fetch_ticker_yf(t, spy_52w_return)
+
+        with ThreadPoolExecutor(max_workers=min(8, len(tickers))) as pool:
+            fetched = list(pool.map(_worker, tickers))
+
+        # Phase B: serial Alpha Vantage back-fill + congress + record assembly.
         results: list[StockRecord] = []
-        for ticker in tickers:
-            try:
-                df = self.fetch_stock_data(ticker)
-                if df is None:
-                    print(f"  [skip] {ticker}: insufficient data")
-                    continue
-                technicals = self.compute_technicals(df)
-                fundamentals = _fetch_fundamentals(ticker)
-                rel_strength = self.compute_rel_strength(
-                    technicals["price_history"], spy_52w_return
-                )
-                ww_data = ww.get(ticker, {})
-                congress = _congress_client.get_stats(ticker)
-                record = StockRecord(
-                    ticker=ticker,
-                    as_of=datetime.today().strftime("%Y-%m-%d"),
-                    spy_uptrend=spy_uptrend,
-                    rel_strength_vs_spy=rel_strength,
-                    funds_buying=ww_data.get("filers_increasing"),
-                    funds_selling=ww_data.get("filers_decreasing"),
-                    funds_net=(
-                        ww_data["filers_increasing"] - ww_data["filers_decreasing"]
-                        if "filers_increasing" in ww_data
-                        and "filers_decreasing" in ww_data
-                        else None
-                    ),
-                    congress_buys=congress.buys if congress else None,
-                    congress_sells=congress.sells if congress else None,
-                    senate_buys=congress.senate_buys if congress else None,
-                    senate_sells=congress.senate_sells if congress else None,
-                    **technicals,
-                    **fundamentals,
-                )
-                results.append(record)
-                print(
-                    f"  [ok]   {ticker}: ${record.price}  RSI={record.rsi14}  "
-                    f"RelVol={record.rel_volume}"
-                )
-            except Exception as error:
-                print(f"  [err]  {ticker}: {error}")
+        for data in fetched:
+            if data is None:
+                continue
+            ticker = data["ticker"]
+            technicals = data["technicals"]
+            fundamentals = data["fundamentals"]
+            _fill_from_alpha_vantage(ticker, fundamentals)
+            ww_data = ww.get(ticker, {})
+            congress = _congress_client.get_stats(ticker)
+            record = StockRecord(
+                ticker=ticker,
+                as_of=datetime.today().strftime("%Y-%m-%d"),
+                spy_uptrend=spy_uptrend,
+                rel_strength_vs_spy=data["rel_strength"],
+                funds_buying=ww_data.get("filers_increasing"),
+                funds_selling=ww_data.get("filers_decreasing"),
+                funds_net=(
+                    ww_data["filers_increasing"] - ww_data["filers_decreasing"]
+                    if "filers_increasing" in ww_data and "filers_decreasing" in ww_data
+                    else None
+                ),
+                congress_buys=congress.buys if congress else None,
+                congress_sells=congress.sells if congress else None,
+                senate_buys=congress.senate_buys if congress else None,
+                senate_sells=congress.senate_sells if congress else None,
+                **technicals,
+                **fundamentals,
+            )
+            results.append(record)
+            print(
+                f"  [ok]   {ticker}: ${record.price}  RSI={record.rsi14}  "
+                f"RelVol={record.rel_volume}"
+            )
         return results
 
 
