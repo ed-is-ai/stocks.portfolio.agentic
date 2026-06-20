@@ -30,9 +30,12 @@ openspec specs.
 | 014  | Normalize all trade-date writes to ISO (close the 009 invariant) | P2 | S | 011 | DONE (reviewed & approved; PR #25, pending merge) |
 | 015  | Parallelize per-ticker price fetching | P3 | M | 013 | DONE (reviewed & approved; PR #24, pending merge) |
 | 016  | Cover the historical-pivots detection math with unit tests | P1 | M | — | DONE (merged, PR #26) |
-| 017  | Pin the Alpha Vantage EPS-growth math with unit tests | P2 | S | — | DONE (reviewed & approved; PR #27, pending merge) |
-| 018  | Pin the congressional-trading HTML parser with fixture tests | P2 | S | — | DONE (reviewed & approved; PR #28, pending merge) |
-| 019  | Cover the scan-history transition-detection logic with tests | P3 | S | — | DONE (reviewed & approved; PR #29, pending merge) |
+| 017  | Pin the Alpha Vantage EPS-growth math with unit tests | P2 | S | — | DONE (merged, PR #27) |
+| 018  | Pin the congressional-trading HTML parser with fixture tests | P2 | S | — | DONE (merged, PR #28) |
+| 019  | Cover the scan-history transition-detection logic with tests | P3 | S | — | DONE (merged, PR #29) |
+| 020  | Unit-test the `require_local_or_token` security guard directly | P2 | S | — | DONE (merged, PR #31) |
+| 021  | Characterize the `POST /trades` action-dispatch route | P3 | S | — | DONE (merged, PR #32) |
+| 022  | Cover `ResultsRepository.latest_scores` for multiple tickers | P3 | S | — | DONE (merged, PR #33) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
@@ -160,6 +163,54 @@ Considered and **rejected** (lower leverage):
 
 Not audited in this pass: the `skills/*` screener libraries (have their own
 `tests/`), web templates/JS, and the agent internals beyond the modules above.
+
+## Test-coverage audit on 2026-06-20 (commit `7bfeee7`) — plans 020–022
+
+Second focused `improve tests` audit, run after plans 016–019 closed the big
+pure-logic gaps (historical pivots, Alpha Vantage EPS, congress parser,
+scan-history). Two read-only Explore agents fanned out over the repository layer
+and the API/web layer; every finding was vetted against the source before
+planning. The remaining gaps are thinner than the first pass — the standout is
+the security guard; the rest are modest coverage top-ups.
+
+- **`require_local_or_token` guard branches untested** — the only authz guard on
+  money-mutating endpoints is reached only via `TestClient` (host `"testclient"`,
+  non-loopback), so the loopback-allow, token-set-but-loopback, and
+  `request.client is None`→403 branches have zero coverage. A typo in the
+  loopback set would silently lock out localhost or weaken the guard →
+  **plan 020** (direct unit test with a synthetic request).
+- **`POST /trades` action dispatch untested** — only the auth guard is covered;
+  the BUY/SELL/CORRECT dispatch (and the silent-200 no-op on an unknown action)
+  is not → **plan 021** (TestClient characterization, template render stubbed).
+- **`ResultsRepository.latest_scores` single-ticker-only** — the existing test
+  never exercises the per-ticker `MAX(as_of)` correlation across tickers, nor the
+  empty table → **plan 022** (multi-ticker + empty-table cases).
+
+All three are characterization plans (pin current behavior; do not modify
+source), independent of each other and of plans 001–019.
+
+Considered and **rejected** (vetted, lower or no leverage):
+
+- **`portfolio.py:62` "crashes on `None`"** (flagged by the API scan) — *false
+  positive*. `trader.load_price_cache()` returns `{}` not `None`
+  (`trader_agent.py:544-545`), so `cached_prices.get("__GBPUSD__")` is safe.
+- **`dependencies.py` lru_cache providers** — a test asserting `get_x() is
+  get_x()` only exercises stdlib `functools.lru_cache`. No value.
+- **View pass-through routes** (`index`, `partial_watchlist/portfolio/history`)
+  — literal delegation to already-tested services; route tests add no assertion
+  power.
+- **`db.py` invalid-month date migration, `init_trades_db` idempotency,
+  `alerts_repo`/`results_repo` `ensure_schema` swallowed errors, `artifacts_repo`
+  CSV fieldname drift, `price_cache` currency-on-update overwrite, pipeline /
+  portfolio thin route branches** — robustness/correctness smells or low-leverage
+  characterization; the date-migration items overlap shipped work (plans
+  008/009/014). The `price_cache` currency overwrite (real surprising behavior)
+  was offered to the maintainer but not selected. Left as notes, not plans.
+
+Not audited in this pass: the `skills/*` screener libraries (own `tests/`), the
+analyst/alert/scanner agent internals (already have substantial tests), and the
+network-heavy extraction / tv_screener / orchestrator paths (rejected in the
+prior pass for poor test ROI).
 
 ## Findings turned into plans on 2026-06-18 (commit `ce96c93`)
 
