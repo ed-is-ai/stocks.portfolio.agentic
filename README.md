@@ -1,213 +1,282 @@
-# Agents.Stocks
+Agents.Stocks
+A multi-agent pipeline for screening, scoring, and tracking US growth stocks using CANSLIM, Weinstein Stage Analysis, and Mark Minervini's VCP (Volatility Contraction Pattern) methodology.
 
-A multi-agent stock portfolio management system for identifying, analyzing, and trading promising growth stocks using CANSLIM and Weinstein Stage analysis.
+What this is: a research and portfolio-tracking tool. It surfaces high-probability swing-trade setups, scores them with a deterministic technical-analysis engine (with an optional LLM second opinion), sends alerts, and tracks a manually-maintained portfolio.
 
-## Quick Start
+What this is not: an automated trading bot. It does not connect to a broker and does not place live orders. The "trader" component records trades you enter yourself and computes P&L — all execution is manual and out-of-band. See Trading & portfolio.
 
-### For New Team Members: Onboarding
 
-Start here to understand the system:
-1. Read [System Architecture Spec](openspec/specs/system-architecture/) — Overview of the 5 agents and how they work together
-2. Read [Data Models Spec](openspec/specs/data-models/) — Understand the key data structures
-3. Choose an agent to focus on:
-   - [Scanner Agent](openspec/specs/scanner-agent/) — Data collection
-   - [Analyst Agent](openspec/specs/analyst-agent/) — Stock scoring
-   - [Alert Agent](openspec/specs/alert-agent/) — Notifications
-   - [Trader Agent](openspec/specs/trader-agent/) — Trade execution
-   - [Extraction Agent](openspec/specs/extraction-agent/) — Watchlist sourcing
+Table of contents
+How it works
+The five agents
+Scoring methodology
+Architecture
+Quick start
+Configuration
+Running the app
+Trading & portfolio
+Skills
+Testing
+Project status & limitations
+License
 
-Each spec includes design decisions, constraints, and extension points.
 
-### For Feature Development
+How it works
+Extraction → Scanner → Analyst → Alert        (the scan pipeline)
 
-When adding new capabilities, follow the extension guides:
-- **Add a new data source?** See [Scanner Extension Guide](openspec/specs/scanner-agent/extension-guide.md)
-- **Add a new scoring framework?** See [Analyst Extension Guide](openspec/specs/analyst-agent/extension-guide.md)
-- **Add a new alert channel (Slack, SMS)?** See [Alert Extension Guide](openspec/specs/alert-agent/extension-guide.md)
-- **Integrate a new broker?** See [Trader Extension Guide](openspec/specs/trader-agent/extension-guide.md)
-- **Add a new watchlist source?** See [Extraction Extension Guide](openspec/specs/extraction-agent/extension-guide.md)
+                                    │
 
-## System Architecture
+                          Trader (separate)    (manual portfolio tracking)
 
-```
-Orchestrator (schedules agents on market hours)
-    ↓
-Extraction Agent → Scanner Agent → Analyst Agent → Alert Agent → Trader Agent
-    ↓                ↓               ↓               ↓             ↓
-extraction_results  scan_results    analysis_       email alerts  trades
-.json               .json           results.json    alerts.db     positions.db
-```
+The scan pipeline runs end-to-end on demand or on a schedule. It sources a watchlist, fetches market data, scores each candidate, and alerts on actionable setups. The Trader agent is intentionally decoupled from the scan pipeline — it powers the portfolio view in the web UI and is driven by trades you record manually.
 
-**Data Flow:**
-1. **Extraction**: Sources watchlist from multiple screeners (TradingView, StockTwits, WhaleWisdom)
-2. **Scanner**: Fetches price/volume, computes technicals, enriches with fundamentals
-3. **Analyst**: Scores stocks using CANSLIM + Weinstein Stage analysis
-4. **Alert**: Sends notifications for actionable setups
-5. **Trader**: Executes buy/sell orders, manages portfolio
+Data flow:
 
-## Development
+Extraction assembles a watchlist from institutional-holdings (WhaleWisdom) and quarterly-curated StockTwits momentum lists, deduplicated to a single ticker set.
+Scanner fetches price/volume history (yfinance), computes technicals, and enriches with fundamentals (Alpha Vantage fallback).
+Analyst scores each stock with the deterministic SEPA/VCP engine, optionally adding an LLM second opinion.
+Alert emails actionable setups (subject to a per-ticker cooldown).
+Trader (separate) records buy/sell trades you enter and computes portfolio P&L.
 
-### Setup
 
-```bash
-# Install dependencies (resolves from pyproject.toml / uv.lock)
+The five agents
+Agent
+Responsibility
+Depends on
+Extraction
+Sources & deduplicates the watchlist
+WhaleWisdom, StockTwits config
+Scanner
+Fetches price/volume, computes technicals, enriches fundamentals
+yfinance, Alpha Vantage
+Analyst
+Scores setups (CANSLIM + Weinstein + VCP); optional LLM opinion
+scoring skills, optional OpenAI-compatible LLM
+Alert
+Emails actionable setups with a cooldown
+SMTP
+Trader
+Records manual trades, computes P&L, imports SIPP CSVs
+SQLite only
+
+
+Each agent lives under app/agents/<name>/ and can be run and tested independently.
+
+
+Scoring methodology
+The Analyst is deterministic-first: all scoring is computed in Python from price/volume data. An LLM is an optional layer on top, never the system of record.
+
+Computed signals include:
+
+Weinstein stage classification (Stage 1–4) from SMA50/150/200 levels and slope.
+Minervini 7-point trend template — price vs. SMA150/200, SMA alignment, SMA200 rising, distance from 52-week high/low, relative-strength rank.
+VCP detection — contraction counting, pivot-price derivation, tightness (not "wide and loose").
+Volume analysis — dry-up ratio into the base, up-day vs. down-day volume confirmation, breakout-volume detection.
+Pivot proximity & execution state — distance from pivot, stop placement below the last contraction low, and a state label (Pre-breakout / Breakout / Extended / Damaged, etc.).
+Risk framing — entry/stop/worst-case prices and 1R/2R/3R multiples via the breakout-trade-planner skill.
+
+When full OHLCV history is unavailable, the engine falls back to conservative approximations from weekly data rather than failing.
+
+Optional LLM second opinion. If configured, the Analyst can call an OpenAI-compatible endpoint for a structured JSON verdict (score, stage, entry zone, strengths/risks). This is designed to run against a local model (e.g. phi-4-mini via a Foundry Local endpoint at http://localhost:5272/v1) and is supplementary to the deterministic score.
+
+⚠️ No backtest is included. The methodology is faithfully implemented, but this repo does not ship evidence that it is profitable. Treat scores as a research signal, not a recommendation. This is not financial advice.
+
+
+Architecture
+The codebase is organised as a layered app/ package:
+
+app/
+
+├── agents/          # The five agents (extraction, scanner, analyst, alert, trader)
+
+├── api/             # FastAPI app, routes, Jinja2 templating
+
+│   └── routes/      # pipeline, portfolio, trades, views (HTML partials)
+
+├── core/            # config.py (single owner of paths + env), security.py
+
+├── integrations/    # alpha_vantage, congress, tv_screener
+
+├── orchestration/   # orchestrator.py — wires agents, schedules on market hours
+
+├── repositories/    # one repo per SQLite table (trades, alerts, results, cash flows, …)
+
+├── schemas/         # Pydantic models (StockRecord, StockAnalysis, Trade, Position, …)
+
+├── services/        # pipeline / portfolio / trader business logic
+
+└── workflows/       # momentum pipeline assembly
+
+config/              # ticker aliases, StockTwits watchlist
+
+skills/              # standalone calculator skill packages (see Skills)
+
+tests/               # pytest suite (204 tests)
+
+Design notes:
+
+Repository pattern over SQLite — data access is isolated behind per-table repositories.
+Centralised config — app/core/config.py is the single owner of all filesystem paths and environment access; modules import resolved paths rather than deriving them.
+Pydantic schemas validate data at boundaries and for inter-agent JSON.
+Authenticated mutations — money-mutating endpoints are gated by require_local_or_token (see Configuration).
+
+
+Quick start
+Requirements: Python 3.12+. uv is recommended.
+
+# Clone
+
+git clone https://github.com/ed-is-ai/Agents.stocks.git
+
+cd Agents.stocks
+
+# Install (uv reads pyproject.toml / uv.lock)
+
 uv sync
 
-# Run tests
-uv run pytest
+# Copy and fill in environment variables
 
-# Type checking
-uv run pyrefly check
+cp .env.example .env
 
-# Code formatting
-uv run ruff format .
-uv run ruff check . --fix
-```
+#   …edit .env…
 
-See [CLAUDE.md](.claude/CLAUDE.md) for detailed development guidelines.
+# Run the web app
 
-### Key Files
-
-- `app/schemas/` — Pydantic data models (StockRecord, StockAnalysis, Position, etc.)
-- `app/orchestration/orchestrator.py` — Main scheduler, wires agents together
-- `app/agents/` — Individual agent implementations
-- `app/api/` — FastAPI web app (factory, routes, templates)
-- `app/main.py` — Entry point (`serve` for the web UI, `run-pipeline` for one run)
-- `skills/` — Reusable scoring/trading skill libraries
-- `openspec/specs/` — Formal specifications for all agents
-
-## Deployment
-
-Orchestrator runs on market schedule (9:30 AM - 4:00 PM ET, weekdays).
-
-```bash
-# Run single pipeline execution
-uv run python -m app.main run-pipeline
-
-# Or run the scheduler directly (APScheduler, market-hours)
-uv run python -m app.orchestration.orchestrator
-
-# Serve the web UI
 uv run python -m app.main serve
-```
 
-Output files:
-- `app/agents/scanner/scan_results.json` — Raw stock data
-- `app/agents/analyst/analysis_results.json` — Scores and recommendations
-- `pipeline_runs.csv` — Execution log and metrics
-- `portfolio_value.csv` — Portfolio snapshots
-- `app/agents/alert/alerts.db` — Alert cooldown history
-- `app/agents/trader/trades.db` — Trade history
+# → http://127.0.0.1:8000
 
-## Architecture Decisions
+Using plain pip instead of uv:
 
-### Why 5 Agents?
+python -m venv .venv && source .venv/bin/activate
 
-Separation of concerns:
-- **Extraction**: Data sourcing (depends on external screeners)
-- **Scanner**: Data collection (depends on yfinance, APIs)
-- **Analyst**: Signal generation (depends on methodologies)
-- **Alert**: Notification (depends on channels)
-- **Trader**: Execution (depends on broker)
+pip install -e .          # installs from pyproject (preferred)
 
-Each agent can be independently updated, tested, and deployed.
+# or: pip install -r requirements.txt
 
-### Why CANSLIM + Weinstein?
+Note: requirements.txt is generated from pyproject.toml via uv export and can lag behind it. Installing from pyproject.toml (pip install -e . or uv sync) is the reliable path — it guarantees python-multipart (needed by the web form routes) is present.
 
-- **CANSLIM**: Proven growth stock framework by William O'Neil
-- **Weinstein Stage Analysis**: Identifies stage of market cycle (1-4)
-- **VCP Pattern**: Mark Minervini's breakout methodology for entry timing
 
-Combination captures growth + momentum + technicals.
+Configuration
+All configuration is via environment variables (loaded from .env). Copy .env.example and fill in what you need — everything is optional except where a feature you want requires it.
 
-### Why This Data Structure?
+Variable
+Used for
+Required?
+ALPHA_VANTAGE_API_KEY
+Fundamental-data fallback
+Optional (leave blank to disable)
+APP_AUTH_TOKEN
+Shared secret gating money-mutating API endpoints
+Recommended if exposing the app beyond localhost
+EMAIL_USER / EMAIL_PASSWORD
+SMTP sender credentials (Gmail: use an app password)
+Required for email alerts
+EMAIL_TO
+Alert recipient
+Required for email alerts
+EMAIL_HOST / EMAIL_PORT
+SMTP server (defaults to Gmail smtp.gmail.com:587)
+Optional
 
-Core models (StockRecord, StockAnalysis, Position) are designed for:
-- Type safety (Pydantic validation)
-- Extensibility (optional fields, new fields added without breaking)
-- Serializability (JSON for inter-agent communication)
-- Querying (fields enable filtering and analysis)
 
-## Common Tasks
+Some screener skills read their own keys (e.g. FMP_API_KEY for the VCP screener) — see .env.example and the individual skill READMEs.
 
-### Run the full pipeline
-```bash
-uv run python -m app.main run-pipeline
-```
+Endpoint auth. Trade- and portfolio-mutating routes depend on require_local_or_token: requests from localhost are allowed, and remote requests must present APP_AUTH_TOKEN. Set the token before exposing the app on a network.
 
-### Test a single agent
-```bash
-uv run python -m app.agents.scanner.scanner_agent
-```
 
-### Check recent alerts
-```bash
-sqlite3 app/agents/alert/alerts.db "SELECT * FROM alerts ORDER BY timestamp DESC LIMIT 10;"
-```
+Running the app
+The entry point is app/main.py with two sub-commands:
 
-### Review portfolio
-```bash
-tail portfolio_value.csv
-```
+# Serve the FastAPI web UI (uvicorn)
 
-### Quarterly SIPP Portfolio Update
+python -m app.main serve [--host 127.0.0.1] [--port 8000] [--reload]
 
-The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pension) CSV imports.
+# Run the scan pipeline once
 
-**Process:**
-1. Export SIPP CSV from your provider (Interactive Investor, AJ Bell, etc.)
-   - Expected columns: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance
-   - Save as `data/processed/SIPP/merged.csv`
+python -m app.main run-pipeline [--extract]
 
-2. Run the import (via web UI portfolio tab or directly):
-   ```python
-   from app.agents.trader.trader_agent import TraderAgent
-   agent = TraderAgent()
-   cash_balance = agent.import_sipp('data/processed/SIPP/merged.csv')
-   ```
+#   --extract  refreshes the watchlist (Extraction) before scanning
 
-3. Verify results:
-   - Check portfolio shows correct number of open positions
-   - Confirm cash balance matches account statement
-   - Review average cost basis and unrealised P&L
+Scheduled runs. app/orchestration/orchestrator.py can run the pipeline on a cron schedule (via APScheduler) aligned to US market hours, writing results and a per-run metrics log.
 
-**Import Logic:**
-- **Trades**: Only rows with valid Symbol field (not 'n/a') imported as stock trades
-- **Special case**: HSBC GLOB funds (Symbol='n/a', description contains "HSBC GLOB") use fixed ticker 'HSFWA'
-- **Cash flows**: Non-trade entries (contributions, tax relief, interest, dividends) stored in separate cash_flows table
-- **Chronological ordering**: Trades replayed in date order (DD/MM/YYYY format)
-- **Cash position**: Final Running Balance used as authoritative cash balance
+Web UI. The app serves an HTML dashboard at / with live partials for the watchlist, portfolio, run history, and run log. Pipeline and trade actions are exposed as API routes under /pipeline, /trades, and /portfolio.
 
-**Troubleshooting SIPP imports:**
-- Too many positions? Ensure Symbol column is filled for all trades (not 'n/a')
-- Negative shares? Check for over-sells or missing buy transactions
-- Cash mismatch? Verify final Running Balance matches account statement
+Output artifacts (paths centralised in app/core/config.py):
 
-## Troubleshooting
+app/agents/scanner/scan_results.json — raw scan output
+app/agents/analyst/analysis_results.json / .xlsx — scores & recommendations
+app/agents/alert/alerts.db — alert cooldown history
+app/agents/trader/trades.db — recorded trades & cash flows
+logs/pipeline_runs.csv — per-run metrics
+data/portfolio_value.csv — portfolio snapshots
 
-**Scanner returns 0 tickers:**
-- Check extraction_results.json exists
-- Verify yfinance is accessible
 
-**No alerts despite high scores:**
-- Check alert cooldown (alerts.db)
-- Verify email configuration (.env EMAIL_* vars)
-- Check ALERT_THRESHOLD in alert_agent.py
+Trading & portfolio
+There is no brokerage integration and no automated order execution. The Trader agent:
 
-**Trader not executing orders:**
-- Verify Alpaca API credentials (.env ALPACA_* vars)
-- Check portfolio has sufficient cash
-- Review trader_agent.py logs
+Records buy/sell trades that you enter (via the web UI or programmatically) into SQLite.
+Computes P&L on an average-cost basis and maintains open positions.
+Imports SIPP CSVs — quarterly Self-Invested Personal Pension exports are parsed, separating stock trades from non-trade cash flows (contributions, dividends, tax relief, interest).
+Quarterly SIPP import
+Export a SIPP CSV from your provider (e.g. Interactive Investor, AJ Bell). Expected columns: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance. Save as data/processed/SIPP/merged.csv.
+Import via the web UI portfolio tab, or directly:
 
-## Contributing
+from app.agents.trader.trader_agent import TraderAgent
 
-1. Reference relevant spec before starting work
-2. Check extension guide if adding new capability
-3. Run tests and type checks before opening PR
-4. Update spec if behavior changes (use openspec propose/apply)
+agent = TraderAgent()
 
-See [CLAUDE.md](.claude/CLAUDE.md) for detailed workflow.
+cash_balance = agent.import_sipp("data/processed/SIPP/merged.csv")
 
-## License
+Verify open-position count, cash balance vs. your statement, and unrealised P&L.
 
-MIT
+Import behaviour: only rows with a valid Symbol become trades; non-trade rows are stored as cash flows; trades are replayed in chronological (DD/MM/YYYY) order; and the final Running Balance is treated as the authoritative cash position. Unrecognised date formats are logged and the row is kept rather than aborting the import.
+
+
+Skills
+skills/ contains standalone calculator packages (used by the scanner/analyst, and runnable on their own):
+
+Skill
+Purpose
+vcp-screener
+Trend template, VCP pattern, volume pattern, pivot proximity, execution state
+breakout-trade-planner
+Entry/stop/target pricing and R-multiples
+canslim-screener
+CANSLIM growth-criteria screening
+technical-analyst
+HH/HL structure, volume confirmation, MA compression
+vcp-screener, finviz-screener
+Candidate screening from external sources
+institutional-flow-tracker
+Institutional holdings signals
+market-top-detector
+Broad-market risk context
+
+
+
+Testing
+uv run pytest                 # run the suite (204 tests)
+
+uv run pytest --cov=app       # with coverage
+
+uv run pyrefly check          # type checking
+
+uv run ruff check .           # lint
+
+uv run ruff format .          # format
+
+The suite covers the analyst scoring engine, historical pivots, scan history, repositories, the security/auth layer, the trader, and the web routes.
+
+
+Project status & limitations
+Personal project, not externally validated. Built and maintained by one author for their own use.
+No backtest / performance data. The methodology is implemented faithfully but its profitability is unproven here. Not financial advice.
+Manual execution only. No broker connection; you place trades yourself.
+Data-source fragility. Watchlist and fundamental sources are third-party (yfinance/WhaleWisdom/StockTwits/Alpha Vantage) and can change or rate-limit.
+Some screener skills require their own API keys (e.g. FMP).
+
+
+License
+MIT — see LICENSE. Copyright (c) 2026 Ed Yau.
+
