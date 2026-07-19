@@ -16,7 +16,7 @@ import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, ClassVar, Iterable
+from typing import Any, Callable, ClassVar, Iterable
 
 import openai
 
@@ -421,6 +421,7 @@ def _save_results(records: list[StockRecord], as_of: str) -> None:
 
 class AnalystAgent(Agent):
     name: str = "AnalystAgent"
+    progress_callback: Callable[[int, int], None] | None = None
 
     PROGRESS_FILE: ClassVar[str] = str(ANALYSIS_PROGRESS_TXT)
 
@@ -470,6 +471,8 @@ class AnalystAgent(Agent):
 
                 progress.write(line + "\n")
                 progress.flush()
+                if self.progress_callback:
+                    self.progress_callback(idx, total)
 
         sorted_results = sorted(
             analysis_results,

@@ -174,7 +174,10 @@ class TestAnalystAgent:
     @patch.object(AnalystAgent, "get_llm_client", return_value=None)
     def test_run_method(self, _mock_llm, sample_stock_record):
         """run() produces analysis with both canslim and momentum scores."""
-        agent = AnalystAgent()
+        progress: list[tuple[int, int]] = []
+        agent = AnalystAgent(
+            progress_callback=lambda current, total: progress.append((current, total))
+        )
         results = agent.run([sample_stock_record])
 
         assert len(results) == 1
@@ -182,6 +185,7 @@ class TestAnalystAgent:
         assert 1 <= results[0].analysis.score <= 10
         assert isinstance(results[0].analysis.canslim, CANSLIMScore)
         assert isinstance(results[0].analysis.momentum, MomentumScore)
+        assert progress == [(1, 1)]
 
     def test_run_method_empty_list(self):
         """run() with empty input returns empty list."""

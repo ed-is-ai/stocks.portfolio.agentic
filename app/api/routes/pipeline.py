@@ -12,6 +12,7 @@ from app.api.dependencies import (
     get_trader_service,
 )
 from app.api.templating import templates
+from app.api.watchlist_context import build_watchlist_context
 from app.core.security import require_local_or_token
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
@@ -56,21 +57,19 @@ async def refresh_data(
         response.headers["HX-Reswap"] = "innerHTML"
         return response
     result = await asyncio.to_thread(pipeline.run_once)
-    records = portfolio.load_analysis()
-    portfolio_tickers = {p.ticker for p in trader.get_portfolio()}
     refresh_status = (
         "Data refreshed successfully" if result.success else "Data refresh failed"
     )
     return templates.TemplateResponse(
         request,
         "_watchlist.html",
-        context={
-            "records": records,
-            "portfolio_tickers": portfolio_tickers,
-            "refresh_status": refresh_status,
-            "refresh_success": result.success,
-            "refresh_details": "" if result.success else result.details,
-            "refresh_stages": (
+        context=build_watchlist_context(
+            trader,
+            portfolio,
+            refresh_status=refresh_status,
+            refresh_success=result.success,
+            refresh_details="" if result.success else result.details,
+            refresh_stages=(
                 [
                     "Sources and market data collected",
                     "Stocks analysed and scored",
@@ -79,5 +78,5 @@ async def refresh_data(
                 if result.success
                 else []
             ),
-        },
+        ),
     )

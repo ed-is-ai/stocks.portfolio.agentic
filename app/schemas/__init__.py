@@ -13,6 +13,13 @@ from app.schemas.scan import (
     StockScan,
 )
 from app.schemas.trade import EmailConfig, ExitSignal, Position, Trade
+from app.schemas.pipeline_status import (
+    PipelineStage,
+    PipelineState,
+    PipelineStatus,
+    StageState,
+    StageStatus,
+)
 
 __all__ = [
     "AlertSummary",
@@ -21,8 +28,13 @@ __all__ = [
     "ExitSignal",
     "MomentumScore",
     "Position",
+    "PipelineStage",
+    "PipelineState",
+    "PipelineStatus",
     "StockAnalysis",
     "StockRecord",
     "StockScan",
+    "StageState",
+    "StageStatus",
     "Trade",
 ]

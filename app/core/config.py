@@ -33,9 +33,13 @@ ANALYSIS_PROGRESS_TXT = (
 )
 PORTFOLIO_VALUE_CSV = ROOT_DIR / "data" / "portfolio_value.csv"
 PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
+PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"
+PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "1800"))
+PIPELINE_STALE_GRACE_SECONDS = int(os.getenv("PIPELINE_STALE_GRACE_SECONDS", "60"))
 
 # --- Web / static assets ---------------------------------------------------
 TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
+STATIC_DIR = ROOT_DIR / "app" / "api" / "static"
 
 # --- Reference data --------------------------------------------------------
 TICKER_ALIASES_JSON = ROOT_DIR / "config" / "ticker_aliases.json"

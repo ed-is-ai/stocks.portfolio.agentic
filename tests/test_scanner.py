@@ -311,7 +311,12 @@ class TestScannerAgent:
             index=dates,
         )
 
-        agent = ScannerAgent()
+        events: list[tuple[str, str, int | None]] = []
+        agent = ScannerAgent(
+            progress_callback=lambda stage, state, count: events.append(
+                (stage, state, count)
+            )
+        )
         results = agent.scan_watchlist(
             ["AAPL", "GOOGL", "MSFT"], spy_uptrend=True, spy_52w_return=10.0
         )
@@ -319,3 +324,9 @@ class TestScannerAgent:
         assert len(results) == 3
         assert [r.ticker for r in results] == ["AAPL", "GOOGL", "MSFT"]
         assert mock_congress.get_stats.call_count == 3
+        assert events == [
+            ("market_data", "running", 3),
+            ("market_data", "complete", 3),
+            ("enrichment", "running", 3),
+            ("enrichment", "complete", 3),
+        ]

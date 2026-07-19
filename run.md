@@ -20,30 +20,30 @@ All commands must be run from the **project root** directory.
 ### Run once with default watchlist (ignores market hours)
 
 ```powershell
-python orchestrator.py --once
+python -m app.main run-pipeline
 ```
 
 ### Run once pulling live top-50 holdings from WisdomWise
 
 ```powershell
-python orchestrator.py --once --extract
+python -m app.main run-pipeline --extract
 ```
 
 ### Run individual agents standalone
 
 ```powershell
-python -m agents.extraction.extraction_agent
-python -m agents.scanner.scanner_agent
-python -m agents.analyst.analyst_agent
-python -m agents.alert.alert_agent
+python -m app.agents.extraction.extraction_agent
+python -m app.agents.scanner.scanner_agent
+python -m app.agents.analyst.analyst_agent
+python -m app.agents.alert.alert_agent
 ```
 
-> Use `python -m agents.<name>.<name>_agent` (not `python agents/...`) so imports resolve correctly.
+> Use `python -m app.agents.<name>.<name>_agent` (not `python app/agents/...`) so imports resolve correctly.
 
 ### Run on a schedule (market hours only, Mon–Fri 9:30–16:00 ET)
 
 ```powershell
-python orchestrator.py --interval 15
+python -m app.orchestration.orchestrator --interval 15
 ```
 
 Add `--extract` to refresh the watchlist from WisdomWise on every scheduled run.

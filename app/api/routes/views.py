@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import get_portfolio_service, get_trader_service
 from app.api.templating import templates
+from app.api.watchlist_context import build_watchlist_context
 from app.core.config import PIPELINE_RUNS_CSV
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
@@ -27,12 +28,10 @@ async def index(request: Request) -> HTMLResponse:
 async def partial_watchlist(
     request: Request, trader: TraderDep, portfolio: PortfolioDep
 ) -> HTMLResponse:
-    records = portfolio.load_analysis()
-    portfolio_tickers = {p.ticker for p in trader.get_portfolio()}
     return templates.TemplateResponse(
         request,
         "_watchlist.html",
-        context={"records": records, "portfolio_tickers": portfolio_tickers},
+        context=build_watchlist_context(trader, portfolio),
     )
 
 

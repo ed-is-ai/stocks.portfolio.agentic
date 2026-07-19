@@ -12,7 +12,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import pandas as pd
 import yfinance as yf
@@ -321,6 +321,13 @@ def _inst_count(ticker_obj: yf.Ticker) -> int | None:
 class ScannerAgent(Agent):
     name: str = "ScannerAgent"
     source_status: dict[str, str] = {}
+    progress_callback: Callable[[str, str, int | None], None] | None = None
+
+    def _report_progress(
+        self, stage: str, state: str, count: int | None = None
+    ) -> None:
+        if self.progress_callback:
+            self.progress_callback(stage, state, count)
 
     def run(self, payload: Iterable[str] | None = None) -> list[StockRecord]:
         ww_tickers = list(payload) if payload else load_watchlist()
@@ -381,6 +388,7 @@ class ScannerAgent(Agent):
                     labels.append(label)
 
         all_tickers = list(sources_by_ticker)
+        self._report_progress("sources", "complete", len(all_tickers))
         records = self.scan_watchlist(all_tickers, spy_uptrend, spy_52w_return)
         for r in records:
             r.source = ",".join(sources_by_ticker[r.ticker])
@@ -559,6 +567,7 @@ class ScannerAgent(Agent):
         ww = load_ww_context()
 
         # Phase A: concurrent yfinance fetch (no rate-limited clients).
+        self._report_progress("market_data", "running", len(tickers))
         def _worker(t: str) -> dict[str, Any] | None:
             return self._fetch_ticker_yf(t, spy_52w_return)
 
@@ -569,6 +578,8 @@ class ScannerAgent(Agent):
         # two independent, rate-limited providers.  Running them one after the
         # other makes a large watchlist pay both wait budgets end-to-end.
         valid_fetched = [data for data in fetched if data is not None]
+        self._report_progress("market_data", "complete", len(valid_fetched))
+        self._report_progress("enrichment", "running", len(valid_fetched))
 
         def _fill_all_from_alpha_vantage() -> None:
             for data in valid_fetched:
@@ -586,6 +597,7 @@ class ScannerAgent(Agent):
             # Propagate an unexpected provider/programming failure as before.
             alpha_future.result()
             congress_by_ticker = congress_future.result()
+        self._report_progress("enrichment", "complete", len(valid_fetched))
 
         # Phase C: record assembly preserves the watchlist order.
         results: list[StockRecord] = []

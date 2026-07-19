@@ -49,6 +49,23 @@ def test_run_traced_exposes_every_stage() -> None:
     assert [out for _, out in trace] == [10, "<10>", "<10>!"]
 
 
+def test_run_traced_reports_typed_step_progress_without_changing_trace() -> None:
+    events = []
+    pipe = Pipeline.start(_Double()).then(_ToStr())
+
+    final, trace = pipe.run_traced(5, progress=events.append)
+
+    assert final == "<10>"
+    assert trace == [("double", 10), ("to_str", "<10>")]
+    assert [(event.step_name, event.phase) for event in events] == [
+        ("double", "started"),
+        ("double", "completed"),
+        ("to_str", "started"),
+        ("to_str", "completed"),
+    ]
+    assert events[1].output_count == 1
+
+
 def test_then_is_immutable() -> None:
     """`.then` returns a new pipeline; the original is unchanged."""
     base = Pipeline.start(_Double())

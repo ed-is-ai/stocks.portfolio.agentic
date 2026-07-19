@@ -11,13 +11,26 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Generic, Protocol, TypeVar
+from dataclasses import dataclass
+from typing import Any, Callable, Generic, Literal, Protocol, Sized, TypeVar
 
 logger = logging.getLogger(__name__)
 
 TIn = TypeVar("TIn")
 TOut = TypeVar("TOut")
 TNext = TypeVar("TNext")
+
+
+@dataclass(frozen=True)
+class PipelineStepEvent:
+    """A typed lifecycle notification emitted around a pipeline step."""
+
+    step_name: str
+    phase: Literal["started", "completed"]
+    output_count: int | None = None
+
+
+ProgressCallback = Callable[[PipelineStepEvent], None]
 
 
 class Step(Protocol[TIn, TOut]):
@@ -54,7 +67,9 @@ class Pipeline(Generic[TIn, TOut]):
         result, _ = self.run_traced(payload)
         return result
 
-    def run_traced(self, payload: TIn) -> tuple[TOut, list[tuple[str, object]]]:
+    def run_traced(
+        self, payload: TIn, *, progress: ProgressCallback | None = None
+    ) -> tuple[TOut, list[tuple[str, object]]]:
         """Run the pipeline, returning the final output and a per-stage trace.
 
         The trace is an ordered list of ``(stage_name, stage_output)`` for every
@@ -63,9 +78,20 @@ class Pipeline(Generic[TIn, TOut]):
         current: Any = payload
         trace: list[tuple[str, object]] = []
         for step in self._steps:
+            if progress:
+                progress(PipelineStepEvent(step_name=step.name, phase="started"))
             started = time.perf_counter()
             current = step.run(current)
             elapsed = time.perf_counter() - started
             logger.info("pipeline step '%s' completed in %.2fs", step.name, elapsed)
             trace.append((step.name, current))
+            if progress:
+                count = len(current) if isinstance(current, Sized) else 1
+                progress(
+                    PipelineStepEvent(
+                        step_name=step.name,
+                        phase="completed",
+                        output_count=count,
+                    )
+                )
         return current, trace
