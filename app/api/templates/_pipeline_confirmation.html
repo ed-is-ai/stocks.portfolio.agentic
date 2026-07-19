@@ -1,0 +1,22 @@
+<div class="pipeline-confirmation" role="alertdialog" aria-modal="true" aria-labelledby="pipeline-confirm-title">
+  <div class="pipeline-confirmation-card">
+    <h2 id="pipeline-confirm-title"><i class="bi bi-exclamation-triangle-fill"></i> Pipeline warnings</h2>
+    <p>This refresh will have reduced coverage because:</p>
+    <ul>
+      {% for warning in warnings %}
+      <li><strong>{{ warning.name }}</strong><br><span>{{ warning.impact }}</span></li>
+      {% endfor %}
+    </ul>
+    <p class="small">Add the missing configuration to <code>.env</code> for full coverage, or continue with this partial refresh.</p>
+    <div class="pipeline-confirmation-actions">
+      <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('pipeline-confirmation').innerHTML=''">Cancel</button>
+      <button class="btn btn-sm btn-primary"
+              hx-post="/refresh-data"
+              hx-vals='{"confirm_missing": true}'
+              hx-target="#tab-content" hx-swap="innerHTML"
+              hx-on::before-request="document.getElementById('pipeline-confirmation').innerHTML=''">
+        Continue with partial refresh
+      </button>
+    </div>
+  </div>
+</div>

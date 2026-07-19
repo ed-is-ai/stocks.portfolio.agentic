@@ -653,7 +653,8 @@ def pipeline(force: bool = False, extract: bool = False) -> None:
             json.dump(scan_payload, stream, indent=2)
 
         src_summary = ", ".join(
-            f"{k}:{len(v['results'])}"  # type: ignore[index]
+            f"{k}:{len(v['results'])}"
+            f" ({scanner.source_status.get(k, 'ok')})"  # type: ignore[index]
             for k, v in scan_payload.items()
             if isinstance(v, dict)
         )

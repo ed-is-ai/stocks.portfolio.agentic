@@ -9,16 +9,19 @@ from unittest.mock import patch, MagicMock
 
 from app.orchestration.orchestrator import pipeline
 from app.workflows.momentum import build_momentum_pipeline
+from app.integrations.tv_screener import ScreenerResult
 
 
 class TestSmokeTests:
     """Smoke tests for the complete pipeline."""
 
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result_uk",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch(
         "app.agents.scanner.scanner_agent._fetch_fundamentals",
@@ -108,10 +111,12 @@ class TestSmokeTests:
                 assert "score" in analysis_data[0]["analysis"]
 
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result_uk",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch(
         "app.agents.scanner.scanner_agent._fetch_fundamentals",

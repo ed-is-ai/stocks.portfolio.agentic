@@ -324,6 +324,23 @@
     .form-label { font-size: 0.76rem; font-weight: 600; color: #374151; margin-bottom: 0.3rem; }
     .form-control, .form-select { font-size: 0.85rem; border-color: var(--border); }
     .form-control:focus, .form-select:focus { border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
+    .pipeline-status-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); }
+    .pipeline-status { min-height: 2.35rem; display: flex; align-items: center; gap: .55rem; padding: .45rem 1.25rem; font-size: .78rem; color: var(--muted); }
+    .pipeline-status.running { color: var(--blue); background: linear-gradient(100deg, var(--blue-bg) 0%, #eff6ff 45%, var(--blue-bg) 80%); background-size: 220% 100%; animation: pipeline-sheen 1.8s linear infinite; }
+    .pipeline-status.running .bi { animation: pipeline-spin 1s linear infinite; }
+    .pipeline-status.failed { color: var(--red); background: var(--red-bg); }
+    .pipeline-status.complete { color: var(--green); background: var(--green-bg); }
+    @keyframes pipeline-sheen { to { background-position: -220% 0; } }
+    @keyframes pipeline-spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .pipeline-status.running, .pipeline-status.running .bi { animation: none; } }
+    body { padding-bottom: 2.5rem; }
+    .pipeline-confirmation { position: fixed; inset: 0; z-index: 1050; display: grid; place-items: center; background: rgba(15, 23, 42, .42); padding: 1rem; }
+    .pipeline-confirmation-card { width: min(32rem, 100%); background: white; border-radius: .65rem; box-shadow: 0 20px 50px rgba(0,0,0,.24); padding: 1.3rem; }
+    .pipeline-confirmation h2 { font-size: 1rem; font-weight: 700; color: var(--amber); margin: 0 0 .75rem; }
+    .pipeline-confirmation ul { padding-left: 1.2rem; margin-bottom: .9rem; font-size: .85rem; }
+    .pipeline-confirmation li { margin-bottom: .55rem; }
+    .pipeline-confirmation li span { color: var(--muted); }
+    .pipeline-confirmation-actions { display: flex; justify-content: flex-end; gap: .5rem; }
   </style>
 </head>
 <body>
@@ -344,7 +361,6 @@
             hx-indicator="#spinner">
       <i class="bi bi-arrow-clockwise"></i> Refresh Data
     </button>
-    <span id="refresh-feedback" class="text-white small"></span>
     <span id="spinner" class="htmx-indicator spinner-border spinner-border-sm text-light"></span>
   </div>
 </nav>
@@ -390,6 +406,10 @@
   </div>
 
 </div>
+
+<div id="pipeline-status" class="pipeline-status-bar"
+     hx-get="/pipeline-status" hx-trigger="load, every 2s" hx-swap="innerHTML"></div>
+<div id="pipeline-confirmation"></div>
 
 <!-- Buy Modal -->
 <div class="modal fade" id="buyModal" tabindex="-1">
@@ -615,13 +635,11 @@
   });
 
   const refreshButton = document.getElementById('refresh-data-button');
-  const refreshFeedback = document.getElementById('refresh-feedback');
 
   document.body.addEventListener('htmx:beforeRequest', function(e) {
     if (e.detail.elt === refreshButton) {
       refreshButton.disabled = true;
       refreshButton.classList.add('loading');
-      refreshFeedback.textContent = 'Refreshing data…';
     }
   });
 
@@ -629,15 +647,23 @@
     if (e.detail.elt === refreshButton) {
       refreshButton.disabled = false;
       refreshButton.classList.remove('loading');
-      refreshFeedback.textContent = '';
     }
+  });
+
+  // The status bar is authoritative: prevent accidental duplicate refreshes,
+  // including clicks made after the preflight dialog has opened.
+  document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target.id !== 'pipeline-status') return;
+    const state = e.detail.target.querySelector('[data-pipeline-state]')?.dataset.pipelineState;
+    const running = state === 'running';
+    refreshButton.disabled = running;
+    refreshButton.classList.toggle('loading', running);
   });
 
   document.body.addEventListener('htmx:responseError', function(e) {
     if (e.detail.elt === refreshButton) {
       refreshButton.disabled = false;
       refreshButton.classList.remove('loading');
-      refreshFeedback.textContent = 'Refresh failed. See console for details.';
     }
   });
 

@@ -1,0 +1,5 @@
+<div class="pipeline-status {{ status.state }}" data-pipeline-state="{{ status.state }}">
+  <i class="bi bi-{% if status.state == 'running' %}arrow-repeat{% elif status.state == 'failed' %}exclamation-triangle-fill{% elif status.state == 'complete' %}check-circle-fill{% else %}info-circle{% endif %}"></i>
+  <strong>{% if status.state == 'running' %}Pipeline running{% elif status.state == 'complete' %}Pipeline complete{% elif status.state == 'failed' %}Pipeline failed{% else %}Pipeline idle{% endif %}</strong>
+  <span>{{ status.message }}</span>
+</div>

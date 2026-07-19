@@ -1,7 +1,7 @@
 {% if not records %}
 <div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-exclamation-triangle-fill text-warning fs-5"></i>
-  <span>No analysis results found. Run the pipeline first: <code>python orchestrator.py --once</code></span>
+  <span>No analysis results found. Use <strong>Refresh Data</strong> to run the pipeline.</span>
 </div>
 {% else %}
 {% if refresh_status is defined %}
@@ -9,7 +9,13 @@
   <i class="bi bi-{{ 'check-circle-fill' if refresh_success else 'exclamation-triangle-fill' }}"></i>
   <div>
     <strong>{{ refresh_status }}.</strong>
-    {% if refresh_details %}
+    {% if refresh_success and refresh_stages %}
+      <div class="small text-muted mt-1">
+        {% for stage in refresh_stages %}
+          <span class="me-3"><i class="bi bi-check-circle-fill text-success me-1"></i>{{ stage }}</span>
+        {% endfor %}
+      </div>
+    {% elif refresh_details %}
       <div class="small text-muted">{{ refresh_details }}</div>
     {% endif %}
   </div>

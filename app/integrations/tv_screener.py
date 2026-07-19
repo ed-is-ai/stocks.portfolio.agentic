@@ -28,6 +28,7 @@ Soft filter (both markets):
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 
 _MIN_CALL_INTERVAL = 2.0       # seconds between calls (polite rate limit)
 _PCT_FROM_HIGH_THRESHOLD = 0.65  # close must be >= 65% of 52w high
@@ -47,6 +48,15 @@ _UK_MIN_AVG_VOL = 100_000
 _UK_MIN_PRICE = 100.0              # 100p = £1 minimum
 
 
+@dataclass(frozen=True)
+class ScreenerResult:
+    """A screener outcome that distinguishes no matches from an unavailable feed."""
+
+    tickers: list[str]
+    status: str  # "ok", "empty", or "failed"
+    detail: str = ""
+
+
 def _fetch(
     exchanges: list[str],
     min_market_cap: int,
@@ -54,13 +64,13 @@ def _fetch(
     min_price: float,
     max_rows: int,
     label: str,
-) -> list[str]:
+) -> ScreenerResult:
     """Core screener fetch — shared by US and UK callers."""
     try:
         from tradingview_screener import Query, col  # type: ignore[import]
     except ImportError:
         print(f"  [skip] {label}: tradingview-screener not installed")
-        return []
+        return ScreenerResult([], "failed", "tradingview-screener not installed")
 
     try:
         time.sleep(_MIN_CALL_INTERVAL)
@@ -91,7 +101,7 @@ def _fetch(
         )
     except Exception as exc:
         print(f"  [warn] {label}: screener call failed -- {exc}")
-        return []
+        return ScreenerResult([], "failed", str(exc))
 
     mask = df["close"] >= df["price_52_week_high"] * _PCT_FROM_HIGH_THRESHOLD
     filtered = df[mask]
@@ -104,11 +114,16 @@ def _fetch(
         f"(from {count} server-side, {len(df)} fetched, "
         f"{len(filtered)} after 52w-high filter)"
     )
-    return tickers
+    return ScreenerResult(tickers, "ok" if tickers else "empty")
 
 
 def fetch_tv_screener_tickers(max_rows: int = _US_MAX_ROWS) -> list[str]:
     """Return US tickers (NYSE/NASDAQ) matching the Minervini pre-filter."""
+    return fetch_tv_screener_result(max_rows).tickers
+
+
+def fetch_tv_screener_result(max_rows: int = _US_MAX_ROWS) -> ScreenerResult:
+    """Return the US screen output together with a machine-readable status."""
     return _fetch(
         exchanges=_US_EXCHANGES,
         min_market_cap=_US_MIN_MARKET_CAP,
@@ -128,6 +143,11 @@ def fetch_tv_screener_tickers_uk(max_rows: int = _UK_MAX_ROWS) -> list[str]:
     Note: yfinance requires ".L" suffix for LSE tickers (e.g. "ULVR.L");
     the scanner appends this automatically.
     """
+    return fetch_tv_screener_result_uk(max_rows).tickers
+
+
+def fetch_tv_screener_result_uk(max_rows: int = _UK_MAX_ROWS) -> ScreenerResult:
+    """Return the UK screen output together with a machine-readable status."""
     return _fetch(
         exchanges=_UK_EXCHANGES,
         min_market_cap=_UK_MIN_MARKET_CAP,

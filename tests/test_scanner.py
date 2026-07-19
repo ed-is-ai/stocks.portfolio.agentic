@@ -6,6 +6,7 @@ import pandas as pd
 from unittest.mock import patch
 
 from app.agents.scanner.scanner_agent import ScannerAgent
+from app.integrations.tv_screener import ScreenerResult
 
 
 class TestScannerAgent:
@@ -113,10 +114,12 @@ class TestScannerAgent:
         assert all(r.volume > 0 for r in results)
 
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result_uk",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
     @patch(
@@ -170,10 +173,12 @@ class TestScannerAgent:
         assert results[0].price > 0
 
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result_uk",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
     @patch(
@@ -208,12 +213,12 @@ class TestScannerAgent:
             assert isinstance(results, list)
 
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers",
-        return_value=["AAPL"],
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result",
+        return_value=ScreenerResult(["AAPL"], "ok"),
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_tv_screener_tickers_uk",
-        return_value=[],
+        "app.agents.scanner.scanner_agent.fetch_tv_screener_result_uk",
+        return_value=ScreenerResult([], "empty"),
     )
     @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
     @patch(
@@ -288,10 +293,10 @@ class TestScannerAgent:
     def test_scan_watchlist_assembles_records_after_parallel_fetch(
         self, mock_download, _mock_fundamentals_yf, _mock_fill, mock_congress
     ):
-        """Phase A runs concurrently; Phase B calls congress serially once per ticker.
+        """Phase A runs concurrently; congress is called once per ticker.
 
         Verifies that output order matches input order and that congress is called
-        exactly once per ticker through the serial Phase B assembly.
+        exactly once per ticker while provider enrichments are overlapped.
         """
         mock_congress.get_stats.return_value = None
         dates = pd.date_range(start="2023-01-01", periods=100, freq="D")

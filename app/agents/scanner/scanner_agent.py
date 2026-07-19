@@ -26,8 +26,9 @@ from app.core.config import (
 from app.integrations.alpha_vantage import AlphaVantageClient
 from app.integrations.congress import CongressClient
 from app.integrations.tv_screener import (
-    fetch_tv_screener_tickers,
-    fetch_tv_screener_tickers_uk,
+    ScreenerResult,
+    fetch_tv_screener_result,
+    fetch_tv_screener_result_uk,
 )
 from app.schemas import StockRecord
 
@@ -319,24 +320,51 @@ def _inst_count(ticker_obj: yf.Ticker) -> int | None:
 
 class ScannerAgent(Agent):
     name: str = "ScannerAgent"
+    source_status: dict[str, str] = {}
 
     def run(self, payload: Iterable[str] | None = None) -> list[StockRecord]:
-        spy_uptrend, spy_52w_return = _fetch_spy_context()
-
         ww_tickers = list(payload) if payload else load_watchlist()
         print(f"\n[Scanner] WW extraction:    {len(ww_tickers)} tickers")
 
-        vcp_tickers = fetch_vcp_screener_tickers()
+        def _fetch_tradingview_sources() -> tuple[ScreenerResult, ScreenerResult]:
+            # Keep TradingView requests serial: its polite rate limit applies to
+            # the shared endpoint, unlike the independent Yahoo and FMP work.
+            print("[Scanner] TradingView screener (US)...")
+            tv_result = fetch_tv_screener_result()
+            print(
+                f"[Scanner] TV screener US:   {len(tv_result.tickers)} tickers "
+                f"({tv_result.status})"
+            )
+
+            print("[Scanner] TradingView screener (UK)...")
+            uk_result = fetch_tv_screener_result_uk()
+            print(
+                f"[Scanner] TV screener UK:   {len(uk_result.tickers)} tickers "
+                f"({uk_result.status})"
+            )
+            return tv_result, uk_result
+
+        # These are independent network-bound tasks.  Running them together
+        # avoids making the scan wait for Yahoo, FMP, and TradingView in turn.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            spy_future = pool.submit(_fetch_spy_context)
+            vcp_future = pool.submit(fetch_vcp_screener_tickers)
+            tv_future = pool.submit(_fetch_tradingview_sources)
+            spy_uptrend, spy_52w_return = spy_future.result()
+            vcp_tickers = vcp_future.result()
+            tv_result, uk_result = tv_future.result()
+
+        tv_tickers = tv_result.tickers
+        uk_tickers = [
+            ticker if ticker.endswith(".L") else f"{ticker}.L"
+            for ticker in uk_result.tickers
+        ]
+        self.source_status = {
+            "tv_screener": tv_result.status,
+            "tv_screener_uk": uk_result.status,
+        }
+
         print(f"[Scanner] VCP screener:     {len(vcp_tickers)} tickers")
-
-        print("[Scanner] TradingView screener (US)...")
-        tv_tickers = fetch_tv_screener_tickers()
-        print(f"[Scanner] TV screener US:   {len(tv_tickers)} tickers")
-
-        print("[Scanner] TradingView screener (UK)...")
-        uk_raw = fetch_tv_screener_tickers_uk()
-        uk_tickers = [t if t.endswith(".L") else f"{t}.L" for t in uk_raw]
-        print(f"[Scanner] TV screener UK:   {len(uk_tickers)} tickers")
 
         # Build the deduplicated union, recording each ticker's sources in
         # first-seen order. Each ticker is scanned exactly once.
@@ -521,9 +549,10 @@ class ScannerAgent(Agent):
     ) -> list[StockRecord]:
         """Scan tickers, enriching each with fundamentals and SPY market context.
 
-        Phase A fetches all yfinance data concurrently; Phase B applies the
-        serial, rate-limited Alpha Vantage back-fill and congress lookup and
-        builds each record in input order.
+        Phase A fetches all yfinance data concurrently.  The Alpha Vantage and
+        congressional enrichments are each serial to honour their provider
+        limits, but run alongside one another because they use independent
+        clients.  Records are assembled in input order.
         """
         if not tickers:
             return []
@@ -536,17 +565,36 @@ class ScannerAgent(Agent):
         with ThreadPoolExecutor(max_workers=min(8, len(tickers))) as pool:
             fetched = list(pool.map(_worker, tickers))
 
-        # Phase B: serial Alpha Vantage back-fill + congress + record assembly.
+        # Phase B: keep each provider's requests serial, while overlapping the
+        # two independent, rate-limited providers.  Running them one after the
+        # other makes a large watchlist pay both wait budgets end-to-end.
+        valid_fetched = [data for data in fetched if data is not None]
+
+        def _fill_all_from_alpha_vantage() -> None:
+            for data in valid_fetched:
+                _fill_from_alpha_vantage(data["ticker"], data["fundamentals"])
+
+        def _fetch_all_congress() -> dict[str, Any]:
+            return {
+                data["ticker"]: _congress_client.get_stats(data["ticker"])
+                for data in valid_fetched
+            }
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            alpha_future = pool.submit(_fill_all_from_alpha_vantage)
+            congress_future = pool.submit(_fetch_all_congress)
+            # Propagate an unexpected provider/programming failure as before.
+            alpha_future.result()
+            congress_by_ticker = congress_future.result()
+
+        # Phase C: record assembly preserves the watchlist order.
         results: list[StockRecord] = []
-        for data in fetched:
-            if data is None:
-                continue
+        for data in valid_fetched:
             ticker = data["ticker"]
             technicals = data["technicals"]
             fundamentals = data["fundamentals"]
-            _fill_from_alpha_vantage(ticker, fundamentals)
             ww_data = ww.get(ticker, {})
-            congress = _congress_client.get_stats(ticker)
+            congress = congress_by_ticker[ticker]
             record = StockRecord(
                 ticker=ticker,
                 as_of=datetime.today().strftime("%Y-%m-%d"),
