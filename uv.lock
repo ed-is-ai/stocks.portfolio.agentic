@@ -26,6 +26,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "requests" },
+    { name = "tradingview-screener" },
     { name = "uvicorn" },
     { name = "yfinance" },
 ]
@@ -52,6 +53,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "requests", specifier = ">=2.31.0" },
+    { name = "tradingview-screener", specifier = ">=3.2.1" },
     { name = "uvicorn", specifier = ">=0.29.0" },
     { name = "yfinance", specifier = ">=0.2.40" },
 ]
@@ -1196,6 +1198,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/87/d7/0535a28b1f5f24f6612fb3ff1e89fb1a8d160fee0f976e0aa6803862134b/tqdm-4.68.3.tar.gz", hash = "sha256:00dfa48452b6b6cfae3dd9885636c23d3422d1ec97c66d96818cbd5e0821d482", size = 170596, upload-time = "2026-06-17T07:36:52.105Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d8/8e/bb97bb0c71802080bfc8952937d174e49cfc50de5c951dd47b2496f0dcdb/tqdm-4.68.3-py3-none-any.whl", hash = "sha256:39832cc2def2789a6f29df83f172db7416cea70052c0907a57801c5f2fdccb03", size = 78337, upload-time = "2026-06-17T07:36:50.132Z" },
+]
+
+[[package]]
+name = "tradingview-screener"
+version = "3.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pandas" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f1/ec/3866844b321e95c28b87894f6fd6ae4d5778141f1b2980e25bf280c1a683/tradingview_screener-3.2.1.tar.gz", hash = "sha256:5144ecd8ccb7559e9e1a38365fd8c8a625758bc4dd3788863b5d8a1284732854", size = 99963, upload-time = "2026-06-20T23:01:09.498Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d9/56/6864a2ab4c70cf1c1aaf5e88576b8dbdf010c2398c1b04a1e6945e3e5dd3/tradingview_screener-3.2.1-py3-none-any.whl", hash = "sha256:93e4b9844dc8977408794891dce69078838a01f2efc2cb75d04a37e1a0faffb3", size = 22199, upload-time = "2026-06-20T23:01:07.729Z" },
 ]
 
 [[package]]
