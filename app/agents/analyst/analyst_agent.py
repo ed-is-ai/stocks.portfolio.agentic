@@ -22,7 +22,12 @@ import openai
 
 from app.agents.analyst.historical_pivots import find_historical_pivots
 from app.agents.base import Agent
-from app.core.config import ANALYSIS_JSON, ANALYSIS_PROGRESS_TXT, SCAN_RESULTS_JSON
+from app.core.config import (
+    ANALYSIS_JSON,
+    ANALYSIS_PROGRESS_TXT,
+    ANALYST_LLM_SCORING_ENABLED,
+    SCAN_RESULTS_JSON,
+)
 from app.core.config import RESULTS_DB as _RESULTS_DB_PATH
 from app.core.config import SKILLS_DIR
 from app.repositories import db
@@ -427,12 +432,16 @@ class AnalystAgent(Agent):
 
     def run(self, payload: Iterable[StockRecord]) -> list[StockRecord]:
         scan_results = list(payload)
-        llm = self.get_llm_client()
-        mode_line = (
-            f"Using Foundry Local ({llm[1]}) for analysis"
-            if llm
-            else "Foundry Local unavailable — using rule-based scoring"
-        )
+        if ANALYST_LLM_SCORING_ENABLED():
+            llm = self.get_llm_client()
+            mode_line = (
+                f"Using Foundry Local ({llm[1]}) for analysis"
+                if llm
+                else "Foundry Local unavailable — using rule-based scoring"
+            )
+        else:
+            llm = None
+            mode_line = "LLM scoring disabled — using rule-based scoring"
         print(mode_line)
 
         as_of = datetime.now().strftime("%Y-%m-%d %H:%M")

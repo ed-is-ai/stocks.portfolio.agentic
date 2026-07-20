@@ -76,6 +76,29 @@ class TestAnalystAgent:
             base_url=FOUNDRY_BASE_URL, api_key="foundry-local"
         )
 
+    @patch.object(AnalystAgent, "get_llm_client")
+    def test_run_skips_llm_client_when_scoring_disabled(
+        self, mock_get_llm_client, sample_stock_record
+    ):
+        """run() never probes Foundry Local when the flag is off (the default)."""
+        agent = AnalystAgent()
+        results = agent.run([sample_stock_record])
+
+        mock_get_llm_client.assert_not_called()
+        assert results[0].analysis is not None
+
+    @patch.object(AnalystAgent, "get_llm_client")
+    def test_run_uses_llm_client_when_scoring_enabled(
+        self, mock_get_llm_client, sample_stock_record, monkeypatch
+    ):
+        """run() probes Foundry Local when ANALYST_LLM_SCORING_ENABLED is set."""
+        monkeypatch.setenv("ANALYST_LLM_SCORING_ENABLED", "true")
+        mock_get_llm_client.return_value = None
+        agent = AnalystAgent()
+        agent.run([sample_stock_record])
+
+        mock_get_llm_client.assert_called_once()
+
     def test_rule_based_score_high_score(self):
         """Analysis has both canslim and momentum scores for a strong stock."""
         record = _make_scan(

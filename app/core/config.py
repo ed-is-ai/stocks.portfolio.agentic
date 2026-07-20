@@ -52,3 +52,18 @@ SKILLS_DIR = ROOT_DIR / "skills"
 def APP_AUTH_TOKEN() -> str | None:
     """Return the shared-secret token for money-mutating endpoints, if set."""
     return os.getenv("APP_AUTH_TOKEN")
+
+
+def ANALYST_LLM_SCORING_ENABLED() -> bool:
+    """Return whether the analyst should score stocks via Foundry Local.
+
+    Off by default: per-ticker LLM calls run sequentially in the scoring
+    loop, so enabling this on a large scan makes the analysis stage much
+    slower. Rule-based scoring is the default until that loop is
+    parallelized.
+    """
+    return os.getenv("ANALYST_LLM_SCORING_ENABLED", "false").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
