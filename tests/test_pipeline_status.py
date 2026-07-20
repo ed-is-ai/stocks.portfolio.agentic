@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta, timezone
 import json
 import multiprocessing
-from pathlib import Path
 
 import pytest
 
@@ -12,55 +11,12 @@ from app.repositories.pipeline_status_repo import (
     PipelineStatusRepository,
 )
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
-
-
-def _stalled_start(path: str, ready, release) -> None:
-    """Pause process A after reading idle but before committing its lease."""
-    repo = PipelineStatusRepository(Path(path))
-    write = repo._write
-
-    def wait_then_write(status) -> None:
-        ready.set()
-        if not release.wait(timeout=5):
-            raise TimeoutError("race test was not released")
-        write(status)
-
-    repo._write = wait_then_write  # type: ignore[method-assign]
-    repo.start(run_id="run-a")
-
-
-def _stalled_transition(path: str, ready, release) -> None:
-    """Pause run A's mutation after ownership check but before commit."""
-    repo = PipelineStatusRepository(Path(path))
-    write = repo._write
-
-    def wait_then_write(status) -> None:
-        ready.set()
-        if not release.wait(timeout=5):
-            raise TimeoutError("race test was not released")
-        write(status)
-
-    repo._write = wait_then_write  # type: ignore[method-assign]
-    repo.transition(
-        PipelineStage.SOURCES,
-        StageState.RUNNING,
-        expected_run_id="run-a",
-    )
-
-
-def _start_replacement_run(path: str, attempting, refused) -> None:
-    attempting.set()
-    try:
-        PipelineStatusRepository(Path(path)).start(run_id="run-b")
-    except PipelineRunActiveError:
-        refused.set()
-
-
-def _finish_then_start_replacement(path: str, attempting) -> None:
-    attempting.set()
-    repo = PipelineStatusRepository(Path(path))
-    repo.finish(PipelineState.FAILED, expected_run_id="run-a")
-    repo.start(run_id="run-b")
+from tests._pipeline_status_workers import (
+    finish_then_start_replacement as _finish_then_start_replacement,
+    stalled_start as _stalled_start,
+    stalled_transition as _stalled_transition,
+    start_replacement_run as _start_replacement_run,
+)
 
 
 def test_repository_round_trip_preserves_order_and_timing(tmp_path) -> None:
@@ -127,8 +83,10 @@ def test_missing_corrupt_and_unknown_schema_return_idle(tmp_path) -> None:
 
 def test_structurally_incomplete_stage_list_returns_full_idle_model(tmp_path) -> None:
     path = tmp_path / "pipeline_status.json"
-    payload = PipelineStatusRepository(path).start(run_id="incomplete").model_dump(
-        mode="json"
+    payload = (
+        PipelineStatusRepository(path)
+        .start(run_id="incomplete")
+        .model_dump(mode="json")
     )
     payload["stages"] = payload["stages"][:-1]
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -208,7 +166,7 @@ def test_naive_persisted_timestamp_falls_back_to_idle(tmp_path) -> None:
 def test_only_one_concurrent_process_acquires_the_run_lease(tmp_path) -> None:
     """Concurrent idle readers cannot both believe they acquired the lease."""
     path = tmp_path / "pipeline_status.json"
-    context = multiprocessing.get_context("fork")
+    context = multiprocessing.get_context("spawn")
     ready = context.Event()
     release = context.Event()
     replacement_attempting = context.Event()
@@ -246,7 +204,7 @@ def test_stale_transition_cannot_overwrite_a_successor_run(tmp_path) -> None:
     """A's delayed mutation cannot land after A is finished and B starts."""
     path = tmp_path / "pipeline_status.json"
     PipelineStatusRepository(path).start(run_id="run-a")
-    context = multiprocessing.get_context("fork")
+    context = multiprocessing.get_context("spawn")
     ready = context.Event()
     release = context.Event()
     replacement_attempting = context.Event()
@@ -318,12 +276,8 @@ def test_new_run_can_acquire_after_stale_running_status(tmp_path) -> None:
 def test_finish_retains_stage_durations_and_terminal_counts(tmp_path) -> None:
     repo = PipelineStatusRepository(tmp_path / "pipeline_status.json")
     repo.start(run_id="done")
-    repo.transition(
-        PipelineStage.SOURCES, StageState.RUNNING, expected_run_id="done"
-    )
-    repo.transition(
-        PipelineStage.SOURCES, StageState.COMPLETE, expected_run_id="done"
-    )
+    repo.transition(PipelineStage.SOURCES, StageState.RUNNING, expected_run_id="done")
+    repo.transition(PipelineStage.SOURCES, StageState.COMPLETE, expected_run_id="done")
 
     finished = repo.finish(
         PipelineState.COMPLETE,

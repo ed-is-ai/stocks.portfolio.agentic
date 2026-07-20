@@ -1,21 +1,24 @@
 """Atomic JSON persistence for cross-process pipeline progress.
 
-The application is supported on macOS and Linux. Both provide ``flock(2)``,
-which is used here to serialize each complete read-check-write transaction.
-The lock is advisory, so all status writers must go through this repository.
+The application is supported on Windows, macOS, and Linux. Each platform
+serializes complete read-check-write transactions with its native file lock
+(``msvcrt.locking`` on Windows, ``flock(2)`` elsewhere). The POSIX lock is
+advisory and the Windows lock is mandatory; either way, all status writers
+must go through this repository.
 """
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
-import fcntl
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 import threading
-from typing import Iterator
+import time
+from typing import IO, Iterator
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -26,6 +29,36 @@ from app.schemas.pipeline_status import (
     PipelineStatus,
     StageState,
 )
+
+_LOCK_TIMEOUT_SECONDS = 30.0
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _acquire_lock(stream: IO[bytes]) -> None:
+        """Block until the mandatory byte-range lock is acquired."""
+        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
+        while True:
+            stream.seek(0)
+            try:
+                msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+    def _release_lock(stream: IO[bytes]) -> None:
+        stream.seek(0)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+else:
+    import fcntl
+
+    def _acquire_lock(stream: IO[bytes]) -> None:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+
+    def _release_lock(stream: IO[bytes]) -> None:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 class PipelineRunActiveError(RuntimeError):
@@ -63,14 +96,14 @@ class PipelineStatusRepository:
 
     @contextmanager
     def _transaction(self) -> Iterator[None]:
-        """Hold the in-process and POSIX interprocess locks until commit."""
+        """Hold the in-process and interprocess file locks until commit."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self._lock, open(self.lock_path, "a+b") as lock_stream:
-            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+            _acquire_lock(lock_stream)
             try:
                 yield
             finally:
-                fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+                _release_lock(lock_stream)
 
     def load(self) -> PipelineStatus:
         with self._transaction():
