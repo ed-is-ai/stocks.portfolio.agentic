@@ -568,6 +568,7 @@ class ScannerAgent(Agent):
 
         # Phase A: concurrent yfinance fetch (no rate-limited clients).
         self._report_progress("market_data", "running", len(tickers))
+
         def _worker(t: str) -> dict[str, Any] | None:
             return self._fetch_ticker_yf(t, spy_52w_return)
 
@@ -586,10 +587,9 @@ class ScannerAgent(Agent):
                 _fill_from_alpha_vantage(data["ticker"], data["fundamentals"])
 
         def _fetch_all_congress() -> dict[str, Any]:
-            return {
-                data["ticker"]: _congress_client.get_stats(data["ticker"])
-                for data in valid_fetched
-            }
+            return _congress_client.get_stats_many(
+                [data["ticker"] for data in valid_fetched]
+            )
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             alpha_future = pool.submit(_fill_all_from_alpha_vantage)

@@ -150,7 +150,7 @@ class TestScannerAgent:
         _mock_tv,
     ):
         """Test the run method."""
-        mock_congress.get_stats.return_value = None
+        mock_congress.get_stats_many.return_value = {"TSLA": None}
         # Mock yfinance response
         dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
         mock_download.return_value = pd.DataFrame(
@@ -201,7 +201,7 @@ class TestScannerAgent:
         self, mock_congress, _mock_vcp, _mock_fund, _mock_fill, _mock_tv_uk, _mock_tv
     ):
         """Test run method with default watchlist."""
-        mock_congress.get_stats.return_value = None
+        mock_congress.get_stats_many.return_value = {}
         agent = ScannerAgent()
 
         # This would normally fetch data, but we'll just check it doesn't crash
@@ -251,7 +251,7 @@ class TestScannerAgent:
     ):
         """AAPL appears in WW payload, VCP screener, and TV screener; expect one record
         with all three source labels combined."""
-        mock_congress.get_stats.return_value = None
+        mock_congress.get_stats_many.return_value = {"AAPL": None}
         dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
         mock_download.return_value = pd.DataFrame(
             {
@@ -293,12 +293,17 @@ class TestScannerAgent:
     def test_scan_watchlist_assembles_records_after_parallel_fetch(
         self, mock_download, _mock_fundamentals_yf, _mock_fill, mock_congress
     ):
-        """Phase A runs concurrently; congress is called once per ticker.
+        """Phase A runs concurrently; congress is fetched in one batched call.
 
-        Verifies that output order matches input order and that congress is called
-        exactly once per ticker while provider enrichments are overlapped.
+        Verifies that output order matches input order and that congress stats
+        are fetched via a single get_stats_many call for all tickers while
+        provider enrichments are overlapped.
         """
-        mock_congress.get_stats.return_value = None
+        mock_congress.get_stats_many.return_value = {
+            "AAPL": None,
+            "GOOGL": None,
+            "MSFT": None,
+        }
         dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
         mock_download.return_value = pd.DataFrame(
             {
@@ -323,7 +328,7 @@ class TestScannerAgent:
 
         assert len(results) == 3
         assert [r.ticker for r in results] == ["AAPL", "GOOGL", "MSFT"]
-        assert mock_congress.get_stats.call_count == 3
+        mock_congress.get_stats_many.assert_called_once_with(["AAPL", "GOOGL", "MSFT"])
         assert events == [
             ("market_data", "running", 3),
             ("market_data", "complete", 3),

@@ -17,6 +17,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 TRADES_DB = ROOT_DIR / "app" / "agents" / "trader" / "trades.db"
 ALERTS_DB = ROOT_DIR / "app" / "agents" / "alert" / "alerts.db"
 RESULTS_DB = ROOT_DIR / "app" / "agents" / "analyst" / "results.db"
+CONGRESS_CACHE_DB = ROOT_DIR / "app" / "agents" / "scanner" / "congress_cache.db"
 
 # --- Pipeline artifacts ----------------------------------------------------
 # Data/artifact files are colocated with each agent's code under app/agents/.
@@ -34,7 +35,7 @@ ANALYSIS_PROGRESS_TXT = (
 PORTFOLIO_VALUE_CSV = ROOT_DIR / "data" / "portfolio_value.csv"
 PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
 PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"
-PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "1800"))
+PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "3600"))
 PIPELINE_STALE_GRACE_SECONDS = int(os.getenv("PIPELINE_STALE_GRACE_SECONDS", "60"))
 
 # --- Web / static assets ---------------------------------------------------

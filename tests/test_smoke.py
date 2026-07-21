@@ -58,7 +58,9 @@ class TestSmokeTests:
         import tempfile
         import app.orchestration.orchestrator as orchestrator
 
-        mock_congress.get_stats.return_value = None
+        mock_congress.get_stats_many.side_effect = lambda tickers: dict.fromkeys(
+            tickers
+        )
 
         # Mock yfinance to return sample data
         import pandas as pd
@@ -87,8 +89,7 @@ class TestSmokeTests:
                 with open(status_out) as status_stream:
                     running_status = json.load(status_stream)
                 by_stage = {
-                    stage["stage"]: stage["state"]
-                    for stage in running_status["stages"]
+                    stage["stage"]: stage["state"] for stage in running_status["stages"]
                 }
                 alert_lifecycle.append((by_stage["alerts"], by_stage["export"]))
 
@@ -231,7 +232,9 @@ class TestSmokeTests:
         _mock_tv,
     ):
         """Test that stages chain correctly through the typed pipeline."""
-        mock_congress.get_stats.return_value = None
+        mock_congress.get_stats_many.side_effect = lambda tickers: dict.fromkeys(
+            tickers
+        )
         # Mock yfinance
         import pandas as pd
 
