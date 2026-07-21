@@ -86,10 +86,14 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
     )
 
     assert initial.template.name == refreshed.template.name == "_watchlist.html"
-    assert initial.context["records"] is refreshed.context["records"] is records
-    assert initial.context["portfolio_tickers"] == refreshed.context[
-        "portfolio_tickers"
-    ] == {"AAPL"}
+    # Records are sorted actionable-first, so both paths return an equivalent
+    # (equal) list rather than the same object as load_analysis returned.
+    assert initial.context["records"] == refreshed.context["records"] == records
+    assert (
+        initial.context["portfolio_tickers"]
+        == refreshed.context["portfolio_tickers"]
+        == {"AAPL"}
+    )
 
 
 def test_watchlist_frontend_assets_are_served() -> None:

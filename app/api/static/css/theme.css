@@ -1,0 +1,90 @@
+/* Typography theme: self-hosted Inter, type scale, and numeric treatment.
+ * Loaded before component styles so tokens are available everywhere.
+ */
+
+/* ── Self-hosted Inter (no external CDN, no FOUT) ─────────────── */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/static/fonts/inter-latin-700-normal.woff2") format("woff2");
+}
+
+/* ── Typography tokens ───────────────────────────────────────── */
+:root {
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+  /* System monospace stack for aligned numerics where a mono face reads best */
+  --font-num: "Inter", ui-monospace, "SF Mono", SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  /* Modular type scale (~1.15 ratio), documented steps */
+  --fs-2xs: 0.7rem;
+  --fs-xs: 0.74rem;
+  --fs-sm: 0.82rem;
+  --fs-base: 0.9rem;
+  --fs-md: 1rem;
+  --fs-lg: 1.15rem;
+  --fs-xl: 1.4rem;
+
+  /* Weights */
+  --fw-normal: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* Rhythm */
+  --lh-tight: 1.25;
+  --lh-base: 1.5;
+  --tracking-tight: -0.011em;
+}
+
+/* ── Base rendering ──────────────────────────────────────────── */
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  letter-spacing: var(--tracking-tight);
+  font-feature-settings: "cv05" 1, "ss03" 1;
+  font-optical-sizing: auto;
+}
+
+/* Tabular, lining figures so numeric columns align cleanly. */
+table,
+.sval,
+.metric-value,
+.mono-num {
+  font-variant-numeric: tabular-nums lining-nums;
+}
+
+.mono-num {
+  font-family: var(--font-num);
+}

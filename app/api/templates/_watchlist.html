@@ -37,21 +37,16 @@
     <thead>
       <tr>
         <th>Ticker</th>
-        <th>Score</th>
-        <th>CANSLIM</th>
-        <th>Momentum</th>
+        <th>Rec</th>
+        <th title="Overall score /10 · CANSLIM /14 · Momentum /14">Score</th>
         <th>Stage</th>
         <th>Sector</th>
         <th>Price</th>
-        <th>Entry</th>
-        <th>vs Entry</th>
-        <th>Stop</th>
-        <th>vs Stop</th>
-        <th>Risk%</th>
+        <th title="Entry price · current price vs entry">Entry</th>
+        <th title="Stop price · cushion above stop · position risk %">Stop</th>
         <th title="1R/2R price targets &amp; reward:risk ratio">Targets</th>
         <th>RSI</th>
         <th title="Minervini SEPA trend template (8 conditions) — hover for breakdown">SEPA</th>
-        <th>Rec</th>
         <th></th>
       </tr>
     </thead>
@@ -96,27 +91,39 @@
           {% endif %}
         </td>
 
-        <!-- Score /10 -->
+        <!-- Recommendation (moved to front so the conclusion reads first) -->
+        <td>
+          {% if a %}
+            {% if a.stage in ["Stage 3", "Stage 4"] or a.score <= 3 %}
+              {% if r.ticker in portfolio_tickers %}
+                <span class="rec rec-sell">Sell</span>
+              {% else %}
+                <span class="rec rec-avoid">Avoid</span>
+              {% endif %}
+            {% elif a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 and not a.volume_confirmed %}
+              <span class="rec rec-lowvol">Buy · low vol</span>
+            {% elif a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 %}
+              <span class="rec rec-buy">Buy</span>
+            {% elif a.stage == "Stage 2" and a.entry_zone == "extended" %}
+              <span class="rec rec-extended">Extended</span>
+            {% elif a.stage == "Stage 2" and a.entry_zone == "approaching" and a.score >= 5 %}
+              <span class="rec rec-alert">Stay Alert</span>
+            {% elif a.stage == "Stage 2" and a.entry_zone == "getting_close" %}
+              <span class="rec rec-watch">Watch</span>
+            {% else %}
+              <span class="rec-none">No action</span>
+            {% endif %}
+          {% endif %}
+        </td>
+
+        <!-- Score /10 (CANSLIM / Momentum folded in as a sub-line) -->
         <td>
           {% if a %}
             {% set s = a.score %}
             <span class="sc {% if s >= 8 %}sc-hi{% elif s >= 5 %}sc-mid{% else %}sc-lo{% endif %}">{{ s }}/10</span>
-          {% endif %}
-        </td>
-
-        <!-- CANSLIM /14 -->
-        <td>
-          {% if a and a.canslim %}
-            {% set c = a.canslim.total %}
-            <span class="sc {% if c >= 11 %}sc-hi{% elif c >= 7 %}sc-mid{% else %}sc-lo{% endif %}">{{ c }}/14</span>
-          {% endif %}
-        </td>
-
-        <!-- Momentum /14 -->
-        <td>
-          {% if a and a.momentum %}
-            {% set m = a.momentum.total %}
-            <span class="sc {% if m >= 11 %}sc-hi{% elif m >= 7 %}sc-mid{% else %}sc-lo{% endif %}">{{ m }}/14</span>
+            {% if a.canslim or a.momentum %}
+              <span class="cell-sub">C {{ a.canslim.total if a.canslim else "–" }}/14 &middot; M {{ a.momentum.total if a.momentum else "–" }}/14</span>
+            {% endif %}
           {% endif %}
         </td>
 
@@ -134,57 +141,43 @@
         <!-- Price -->
         <td class="fw-semibold">${{ "%.2f"|format(r.price) }}</td>
 
-        <!-- Entry -->
+        <!-- Entry (price + current price vs entry) -->
         <td>
           {% if a and a.entry_price %}
             <span class="text-muted">${{ "%.2f"|format(a.entry_price) }}</span>
-          {% endif %}
-        </td>
-
-        <!-- vs Entry -->
-        <td>
-          {% if a and a.entry_price %}
             {% set vs = (a.entry_price - r.price) / r.price * 100 %}
             {% if vs < -5 %}
-              <span class="dl dl-ext">{{ "%.1f"|format(vs|abs) }}% extended</span>
+              <span class="cell-sub"><span class="dl dl-ext">{{ "%.1f"|format(vs|abs) }}% extended</span></span>
             {% elif vs < 0 %}
-              <span class="dl dl-great">{{ "%.1f"|format(vs|abs) }}% above</span>
+              <span class="cell-sub"><span class="dl dl-great">{{ "%.1f"|format(vs|abs) }}% above</span></span>
             {% elif vs <= 3 %}
-              <span class="dl dl-good">{{ "%.1f"|format(vs) }}% below</span>
+              <span class="cell-sub"><span class="dl dl-good">{{ "%.1f"|format(vs) }}% below</span></span>
             {% elif vs <= 8 %}
-              <span class="dl dl-ok">{{ "%.1f"|format(vs) }}% below</span>
+              <span class="cell-sub"><span class="dl dl-ok">{{ "%.1f"|format(vs) }}% below</span></span>
             {% else %}
-              <span class="dl dl-muted">{{ "%.1f"|format(vs) }}% below</span>
+              <span class="cell-sub"><span class="dl dl-muted">{{ "%.1f"|format(vs) }}% below</span></span>
             {% endif %}
           {% endif %}
         </td>
 
-        <!-- Stop -->
+        <!-- Stop (price + cushion above stop + position risk %) -->
         <td>
           {% if a and a.stop_loss %}
             <span class="text-muted">${{ "%.2f"|format(a.stop_loss) }}</span>
-          {% endif %}
-        </td>
-
-        <!-- vs Stop -->
-        <td>
-          {% if a and a.stop_loss %}
-            {% set vs_s = (r.price - a.stop_loss) / r.price * 100 %}
-            {% if vs_s < 3 %}
-              <span class="dl dl-danger">{{ "%.1f"|format(vs_s) }}%</span>
-            {% elif vs_s < 8 %}
-              <span class="dl dl-ok">{{ "%.1f"|format(vs_s) }}%</span>
-            {% else %}
-              <span class="text-muted" style="font-size:0.76rem">{{ "%.1f"|format(vs_s) }}%</span>
-            {% endif %}
-          {% endif %}
-        </td>
-
-        <!-- Risk% -->
-        <td>
-          {% if a and a.entry_price and a.stop_loss %}
-            {% set risk = (a.entry_price - a.stop_loss) / a.entry_price * 100 %}
-            <span style="font-size:0.76rem" class="{% if risk > 20 %}neg{% elif risk > 12 %}text-warning fw-semibold{% else %}text-muted{% endif %}">{{ "%.1f"|format(risk) }}%</span>
+            <span class="cell-sub">
+              {% set vs_s = (r.price - a.stop_loss) / r.price * 100 %}
+              {% if vs_s < 3 %}
+                <span class="dl dl-danger">{{ "%.1f"|format(vs_s) }}%</span>
+              {% elif vs_s < 8 %}
+                <span class="dl dl-ok">{{ "%.1f"|format(vs_s) }}%</span>
+              {% else %}
+                {{ "%.1f"|format(vs_s) }}%
+              {% endif %}
+              {% if a.entry_price %}
+                {% set risk = (a.entry_price - a.stop_loss) / a.entry_price * 100 %}
+                &middot; <span class="{% if risk > 20 %}lo{% elif risk > 12 %}text-warning fw-semibold{% endif %}">R {{ "%.1f"|format(risk) }}%</span>
+              {% endif %}
+            </span>
           {% endif %}
         </td>
 
@@ -228,31 +221,6 @@
                   title="{{ sepa_tip }}" style="cursor:help; min-width:2.2rem">{{ sepa_count }}/8</span>
           {% else %}
             <span class="text-muted">—</span>
-          {% endif %}
-        </td>
-
-        <!-- Recommendation -->
-        <td>
-          {% if a %}
-            {% if a.stage in ["Stage 3", "Stage 4"] or a.score <= 3 %}
-              {% if r.ticker in portfolio_tickers %}
-                <span class="rec rec-sell">Sell</span>
-              {% else %}
-                <span class="rec rec-avoid">Avoid</span>
-              {% endif %}
-            {% elif a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 and not a.volume_confirmed %}
-              <span class="rec rec-lowvol">Buy · low vol</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 %}
-              <span class="rec rec-buy">Buy</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "extended" %}
-              <span class="rec rec-extended">Extended</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "approaching" and a.score >= 5 %}
-              <span class="rec rec-alert">Stay Alert</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "getting_close" %}
-              <span class="rec rec-watch">Watch</span>
-            {% else %}
-              <span class="rec-none">No action</span>
-            {% endif %}
           {% endif %}
         </td>
 

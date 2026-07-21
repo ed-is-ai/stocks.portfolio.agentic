@@ -30,6 +30,7 @@ from app.core.config import (
 )
 from app.core.config import RESULTS_DB as _RESULTS_DB_PATH
 from app.core.config import SKILLS_DIR
+from app.core.recommendation import actionability_sort_key
 from app.repositories import db
 from app.repositories.results_repo import ResultRow, ResultsRepository
 from app.schemas import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
@@ -485,15 +486,7 @@ class AnalystAgent(Agent):
 
         sorted_results = sorted(
             analysis_results,
-            key=lambda record: (
-                record.analysis.score if record.analysis else 0,
-                record.analysis.canslim.total
-                if record.analysis and record.analysis.canslim
-                else 0,
-                record.analysis.momentum.total
-                if record.analysis and record.analysis.momentum
-                else 0,
-            ),
+            key=actionability_sort_key,
             reverse=True,
         )
 

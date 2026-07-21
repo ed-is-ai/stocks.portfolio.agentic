@@ -1,8 +1,22 @@
 /* Watchlist-specific presentation. Keep discovery and responsive UI here. */
+
+/* Secondary line inside a merged cell (e.g. CANSLIM/Momentum under Score,
+ * the vs-entry / vs-stop delta under a price). */
+.cell-sub {
+  display: block;
+  margin-top: 0.15rem;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.cell-sub .hi { color: var(--green); font-weight: var(--fw-semibold); }
+.cell-sub .lo { color: var(--red); font-weight: var(--fw-semibold); }
+
 a.ticker {
   color: var(--primary);
-  font-weight: 700;
-  font-size: 0.85rem;
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-sm);
   text-decoration: none;
 }
 
@@ -15,8 +29,8 @@ a.ticker:hover {
   display: inline-block;
   padding: 0.12rem 0.38rem;
   border-radius: 0.3rem;
-  font-weight: 700;
-  font-size: 0.76rem;
+  font-weight: var(--fw-bold);
+  font-size: var(--fs-xs);
   min-width: 2.6rem;
   text-align: center;
 }
@@ -29,8 +43,8 @@ a.ticker:hover {
   display: inline-block;
   padding: 0.12rem 0.45rem;
   border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 600;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
   white-space: nowrap;
 }
 
@@ -43,8 +57,8 @@ a.ticker:hover {
   display: inline-block;
   padding: 0.1rem 0.38rem;
   border-radius: 0.25rem;
-  font-size: 0.74rem;
-  font-weight: 600;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
   white-space: nowrap;
 }
 
@@ -59,8 +73,8 @@ a.ticker:hover {
   display: inline-block;
   padding: 0.18rem 0.52rem;
   border-radius: 999px;
-  font-size: 0.68rem;
-  font-weight: 700;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
   letter-spacing: 0.03em;
   text-transform: uppercase;
 }
@@ -72,7 +86,7 @@ a.ticker:hover {
 .rec-extended { background: var(--orange-bg); color: var(--orange); }
 .rec-alert { background: var(--blue-bg); color: var(--blue); }
 .rec-watch { background: var(--purple-bg); color: var(--purple); }
-.rec-none { color: #94a3b8; font-size: 0.74rem; font-style: italic; }
+.rec-none { color: #94a3b8; font-size: var(--fs-xs); font-style: italic; }
 
 .badge-vcp,
 .badge-myb {
@@ -80,8 +94,8 @@ a.ticker:hover {
   margin-left: 0.3rem;
   padding: 0.08rem 0.32rem;
   border-radius: 0.25rem;
-  font-size: 0.62rem;
-  font-weight: 700;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
   letter-spacing: 0.04em;
   cursor: help;
   vertical-align: middle;
@@ -89,14 +103,14 @@ a.ticker:hover {
 
 .badge-vcp { background: var(--orange-bg); color: var(--orange); }
 .badge-myb { background: var(--purple-bg); color: var(--purple); }
-.badge-uk { font-size: 0.75rem; vertical-align: middle; margin-left: 0.25rem; }
+.badge-uk { font-size: var(--fs-xs); vertical-align: middle; margin-left: 0.25rem; }
 
 .btn-filter {
   border: 1px solid var(--border);
   background: white;
   color: var(--muted);
-  font-size: 0.72rem;
-  font-weight: 600;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
   padding: 0.2rem 0.6rem;
   border-radius: 999px;
   cursor: pointer;
