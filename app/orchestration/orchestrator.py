@@ -32,6 +32,8 @@ from app.agents.analyst.analyst_agent import AnalystAgent, recommendation
 from app.agents.alert.alert_agent import AlertAgent
 from app.agents.extraction.extraction_agent import ExtractionAgent
 from app.agents.trader.trader_agent import TraderAgent
+from app.services.portfolio_service import PortfolioService
+from app.services.trader_service import TraderService
 from app.workflows.momentum import build_momentum_pipeline
 from app.agents.scanner.scanner_agent import (
     ScannerAgent,
@@ -647,9 +649,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         state = StageState(state_name)
         status_repo.transition(stage, state, expected_run_id=run_id)
         if stage is PipelineStage.ENRICHMENT and state is StageState.COMPLETE:
-            status_repo.update_counts(
-                scanned=count or 0, expected_run_id=run_id
-            )
+            status_repo.update_counts(scanned=count or 0, expected_run_id=run_id)
 
     def report_analysis(current: int, total: int) -> None:
         nonlocal last_analysis_update
@@ -673,9 +673,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         }
         stage = mapping[event.step_name]
         if event.phase == "started":
-            status_repo.transition(
-                stage, StageState.RUNNING, expected_run_id=run_id
-            )
+            status_repo.transition(stage, StageState.RUNNING, expected_run_id=run_id)
             return
         if event.step_name == "scan":
             # Empty scans do not enter ScannerAgent.scan_watchlist; make their
@@ -700,9 +698,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
                 expected_run_id=run_id,
             )
         elif event.step_name != "alert":
-            status_repo.transition(
-                stage, StageState.COMPLETE, expected_run_id=run_id
-            )
+            status_repo.transition(stage, StageState.COMPLETE, expected_run_id=run_id)
             if event.step_name == "analyse":
                 status_repo.update_counts(
                     analysed=event.output_count or 0,
@@ -726,9 +722,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         watchlist = load_watchlist()
         source_map = load_source_map()
 
-        scanner = ScannerAgent(
-            name="ScannerAgent", progress_callback=report_scanner
-        )
+        scanner = ScannerAgent(name="ScannerAgent", progress_callback=report_scanner)
         analyst = AnalystAgent(progress_callback=report_analysis)
         alerter = AlertAgent(name="AlertAgent")
         # Inject the agents so the same alerter is reused below for portfolio
@@ -761,8 +755,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             }
 
         src_summary = ", ".join(
-            f"{k}:{len(v['results'])}"
-            f" ({scanner.source_status.get(k, 'ok')})"  # type: ignore[index]
+            f"{k}:{len(v['results'])} ({scanner.source_status.get(k, 'ok')})"  # type: ignore[index]
             for k, v in scan_payload.items()
             if isinstance(v, dict)
         )
@@ -770,11 +763,19 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
 
         _trader = TraderAgent(name="TraderAgent")
         stock_map = {r.ticker: r for r in analysis_results}
-        prices = {r.ticker: r.price for r in analysis_results}
-        positions = _trader.get_portfolio(prices)
+
+        # Price every actual holding (not just this run's scanned watchlist)
+        # cache-first, sharing the same price cache the web UI reads/writes,
+        # so the email snapshot and the /portfolio route always agree.
+        portfolio_service = PortfolioService(TraderService(_trader))
+        held_tickers = [p.ticker for p in _trader.get_portfolio()]
+        prices, display_info, gbpusd = portfolio_service.get_prices_for_holdings(
+            held_tickers
+        )
+        positions = _trader.get_portfolio(prices, display_info)
         held = {p.ticker for p in positions}
-        pf_value = sum(p.current_value for p in positions if p.current_value)
-        pf_cost = sum(p.total_cost for p in positions)
+        gbp_totals = PortfolioService.gbp_totals(positions, gbpusd)
+        pf_value, pf_cost, _pf_pnl = gbp_totals
         if pf_value > 0:
             _append_portfolio_snapshot(pf_value, pf_cost)
 
@@ -784,7 +785,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             actionable=buy_alerts + sell_alerts,
             expected_run_id=run_id,
         )
-        alerter.send_summary_email(positions)
+        alerter.send_summary_email(positions, gbp_totals=gbp_totals)
 
         status_repo.transition(
             PipelineStage.ALERTS,

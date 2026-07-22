@@ -157,6 +157,67 @@ class PortfolioService:
                     display_info[t] = (orig_price, currency)
         return gbp_prices, display_info
 
+    # --- headless pricing (shared by the orchestrator's email/snapshot) --
+
+    def get_prices_for_holdings(
+        self, tickers: list[str]
+    ) -> tuple[dict[str, float], dict[str, tuple[float, str]], float]:
+        """Return cache-first GBP prices, display_info, and GBP/USD rate.
+
+        Reads the shared price cache (the same one the web UI reads and
+        writes); any ticker missing from it is live-fetched via
+        ``fetch_all_prices`` and the result is persisted back to the cache so
+        the fetch is never repeated. This is the pricing core used headlessly
+        by the orchestrator (no request/DB-session coupling) so the email
+        snapshot and the ``/portfolio`` route always agree on price.
+
+        Held tickers already cached cost zero net-new price calls; only the
+        misses (e.g. holdings outside the current scan watchlist) trigger a
+        live fetch. When nothing is missing, the GBP/USD rate is also taken
+        from the cache rather than re-fetched live.
+        """
+        cached_prices, _, cached_display = self._trader.load_price_cache()
+        missing = [t for t in tickers if t not in cached_prices]
+        if not missing:
+            gbpusd = cached_prices.get("__GBPUSD__", _DEFAULT_GBPUSD)
+            return cached_prices, cached_display, gbpusd
+
+        gbpusd = self.gbpusd_rate()
+        aliases = self.load_ticker_aliases()
+        fetched_prices, fetched_display = self.fetch_all_prices(
+            missing, aliases, gbpusd
+        )
+        if fetched_prices:
+            self._trader.save_price_cache(fetched_prices, fetched_display)
+
+        prices = {**cached_prices, **fetched_prices}
+        display_info = {**cached_display, **fetched_display}
+        return prices, display_info, gbpusd
+
+    @staticmethod
+    def gbp_totals(
+        positions: list[Position], gbpusd: float
+    ) -> tuple[float, float, float]:
+        """Return (total_value_gbp, total_cost_gbp, total_pnl_gbp) for positions.
+
+        Converts each position's native-currency ``total_cost``/
+        ``current_value`` to GBP before summing, so USD holdings don't
+        distort the aggregate the way a naive cross-currency sum would.
+        ``total_cost`` includes every position; ``total_value`` only those
+        with a known ``current_value`` (unpriced positions are excluded).
+        """
+        total_cost_gbp = sum(
+            PortfolioService._to_gbp(p.total_cost, p.price_currency, gbpusd)
+            for p in positions
+        )
+        total_value_gbp = sum(
+            PortfolioService._to_gbp(p.current_value, p.price_currency, gbpusd)
+            for p in positions
+            if p.current_value is not None
+        )
+        total_pnl_gbp = total_value_gbp - total_cost_gbp
+        return total_value_gbp, total_cost_gbp, total_pnl_gbp
+
     # --- chart data -------------------------------------------------------
 
     def _load_portfolio_history(self) -> dict:

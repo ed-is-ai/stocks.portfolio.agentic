@@ -814,11 +814,26 @@ class AlertAgent(Agent):
         print(f"\n{len(self._sell_alerts)} stop-loss alert(s) queued.")
         return len(self._sell_alerts)
 
-    def send_summary_email(self, positions: list[Position] | None = None) -> None:
+    @staticmethod
+    def _currency_symbol(currency: str) -> str:
+        """Return the display symbol for a position's price currency."""
+        return "$" if currency == "USD" else "£"
+
+    def send_summary_email(
+        self,
+        positions: list[Position] | None = None,
+        gbp_totals: tuple[float, float, float] | None = None,
+    ) -> None:
         """Send one consolidated daily summary email.
 
         Always sends: starts with a portfolio snapshot, then SELL alerts (top),
         then BUY alerts. positions is optional — used for the snapshot section.
+        gbp_totals is an optional (total_value_gbp, total_cost_gbp,
+        total_pnl_gbp), pre-converted across currencies (see
+        ``PortfolioService.gbp_totals``) so the aggregate figures match the
+        web UI's summary cards. When omitted, totals fall back to a naive
+        same-currency sum of ``positions`` (e.g. for callers/tests with an
+        all-GBP portfolio).
         """
         today = date.today().isoformat()
         sell_count = len(self._sell_alerts)
@@ -836,25 +851,30 @@ class AlertAgent(Agent):
         # ── Portfolio snapshot (text) ───────────────────────────────────────
         text_parts: list[str] = [f"Stock Scanner Summary — {today}\n{'=' * 50}"]
         if positions:
-            total_value = sum(p.current_value for p in positions if p.current_value)
-            total_cost = sum(p.total_cost for p in positions)
-            total_pnl = total_value - total_cost
+            if gbp_totals is not None:
+                total_value, total_cost, total_pnl = gbp_totals
+            else:
+                total_value = sum(p.current_value for p in positions if p.current_value)
+                total_cost = sum(p.total_cost for p in positions)
+                total_pnl = total_value - total_cost
             pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
             text_parts.append(
                 f"\n\nPORTFOLIO SNAPSHOT\n"
                 f"  Positions : {len(positions)}\n"
-                f"  Mkt Value : ${total_value:,.2f}\n"
-                f"  Cost Basis: ${total_cost:,.2f}\n"
-                f"  P&L       : ${total_pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+                f"  Mkt Value : £{total_value:,.2f}\n"
+                f"  Cost Basis: £{total_cost:,.2f}\n"
+                f"  P&L       : £{total_pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
             )
             for p in positions:
+                sym = self._currency_symbol(p.price_currency)
                 pnl_str = (
-                    f"${p.unrealised_pnl:+.2f} ({p.unrealised_pnl_pct:+.1f}%)"
+                    f"{sym}{p.unrealised_pnl:+.2f} ({p.unrealised_pnl_pct:+.1f}%)"
                     if p.unrealised_pnl is not None
                     else "--"
                 )
                 text_parts.append(
-                    f"  {p.ticker:<6} {p.shares:>8.1f} shares  price ${p.current_price or 0:.2f}  P&L {pnl_str}"
+                    f"  {p.ticker:<6} {p.shares:>8.1f} shares"
+                    f"  price {sym}{p.current_price or 0:.2f}  P&L {pnl_str}"
                 )
 
         if self._sell_alerts:
@@ -894,17 +914,22 @@ class AlertAgent(Agent):
         # ── Portfolio snapshot (HTML) ───────────────────────────────────────
         snapshot_html = ""
         if positions:
-            total_value = sum(p.current_value for p in positions if p.current_value)
-            total_cost = sum(p.total_cost for p in positions)
-            total_pnl = total_value - total_cost
+            if gbp_totals is not None:
+                total_value, total_cost, total_pnl = gbp_totals
+            else:
+                total_value = sum(p.current_value for p in positions if p.current_value)
+                total_cost = sum(p.total_cost for p in positions)
+                total_pnl = total_value - total_cost
             pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
             pnl_color = "#27ae60" if total_pnl >= 0 else "#c0392b"
             rows_html = "".join(
                 f"<tr>"
                 f"<td style='padding:5px 8px;font-weight:700'>{p.ticker}</td>"
                 f"<td style='padding:5px 8px;text-align:right'>{p.shares:g}</td>"
-                f"<td style='padding:5px 8px;text-align:right'>${p.current_price or 0:.2f}</td>"
-                f"<td style='padding:5px 8px;text-align:right'>${p.current_value or 0:,.2f}</td>"
+                f"<td style='padding:5px 8px;text-align:right'>"
+                f"{self._currency_symbol(p.price_currency)}{p.current_price or 0:.2f}</td>"
+                f"<td style='padding:5px 8px;text-align:right'>"
+                f"{self._currency_symbol(p.price_currency)}{p.current_value or 0:,.2f}</td>"
                 f"<td style='padding:5px 8px;text-align:right;color:{'#27ae60' if (p.unrealised_pnl or 0) >= 0 else '#c0392b'}'>"
                 f"{'%+.1f' % p.unrealised_pnl_pct}%</td>"
                 f"</tr>"
@@ -918,11 +943,11 @@ class AlertAgent(Agent):
               </div>
               <div style="display:flex;gap:24px;margin-bottom:10px;flex-wrap:wrap">
                 <div><div style="font-size:0.72em;color:#64748b">Market Value</div>
-                     <div style="font-weight:700;font-size:1.1em">${total_value:,.2f}</div></div>
+                     <div style="font-weight:700;font-size:1.1em">£{total_value:,.2f}</div></div>
                 <div><div style="font-size:0.72em;color:#64748b">Cost Basis</div>
-                     <div style="font-weight:700;font-size:1.1em">${total_cost:,.2f}</div></div>
+                     <div style="font-weight:700;font-size:1.1em">£{total_cost:,.2f}</div></div>
                 <div><div style="font-size:0.72em;color:#64748b">Unrealised P&amp;L</div>
-                     <div style="font-weight:700;font-size:1.1em;color:{pnl_color}">${total_pnl:+,.2f} ({pnl_pct:+.1f}%)</div></div>
+                     <div style="font-weight:700;font-size:1.1em;color:{pnl_color}">£{total_pnl:+,.2f} ({pnl_pct:+.1f}%)</div></div>
               </div>
               <table style="width:100%;border-collapse:collapse;font-size:0.82em">
                 <tr style="background:#e2e8f0">
