@@ -28,9 +28,11 @@ Soft filter (both markets):
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from datetime import datetime, timezone
 
-_MIN_CALL_INTERVAL = 2.0       # seconds between calls (polite rate limit)
+from app.schemas.source_health import SourceName, SourceResult, SourceState
+
+_MIN_CALL_INTERVAL = 2.0  # seconds between calls (polite rate limit)
 _PCT_FROM_HIGH_THRESHOLD = 0.65  # close must be >= 65% of 52w high
 
 # US defaults
@@ -43,18 +45,25 @@ _US_MIN_PRICE = 10.0
 # UK defaults — LSE prices are in pence (GBp), market cap field is USD on TV
 _UK_MAX_ROWS = 200
 _UK_EXCHANGES = ["LSE"]
-_UK_MIN_MARKET_CAP = 200_000_000   # ~£160M at current rates
+_UK_MIN_MARKET_CAP = 200_000_000  # ~£160M at current rates
 _UK_MIN_AVG_VOL = 100_000
-_UK_MIN_PRICE = 100.0              # 100p = £1 minimum
+_UK_MIN_PRICE = 100.0  # 100p = £1 minimum
 
 
-@dataclass(frozen=True)
-class ScreenerResult:
-    """A screener outcome that distinguishes no matches from an unavailable feed."""
-
-    tickers: list[str]
-    status: str  # "ok", "empty", or "failed"
-    detail: str = ""
+def ScreenerResult(  # noqa: N802
+    tickers: list[str], status: str, detail: str = ""
+) -> SourceResult:
+    """Backward-compatible constructor for callers of the former local type."""
+    if status in {"ok", "empty"}:
+        return SourceResult.from_items(
+            SourceName.TRADINGVIEW_US, tickers, display_message=detail
+        )
+    return SourceResult.unavailable(
+        SourceName.TRADINGVIEW_US,
+        SourceState(status),
+        "provider_failure",
+        detail,
+    )
 
 
 def _fetch(
@@ -64,13 +73,25 @@ def _fetch(
     min_price: float,
     max_rows: int,
     label: str,
-) -> ScreenerResult:
+) -> SourceResult:
     """Core screener fetch — shared by US and UK callers."""
+    started_at = datetime.now(timezone.utc)
+    source = (
+        SourceName.TRADINGVIEW_UK
+        if exchanges == _UK_EXCHANGES
+        else SourceName.TRADINGVIEW_US
+    )
     try:
         from tradingview_screener import Query, col  # type: ignore[import]
     except ImportError:
         print(f"  [skip] {label}: tradingview-screener not installed")
-        return ScreenerResult([], "failed", "tradingview-screener not installed")
+        return SourceResult.unavailable(
+            source,
+            SourceState.SKIPPED,
+            "dependency_missing",
+            "TradingView screener dependency is not installed.",
+            started_at=started_at,
+        )
 
     try:
         time.sleep(_MIN_CALL_INTERVAL)
@@ -101,7 +122,13 @@ def _fetch(
         )
     except Exception as exc:
         print(f"  [warn] {label}: screener call failed -- {exc}")
-        return ScreenerResult([], "failed", str(exc))
+        return SourceResult.unavailable(
+            source,
+            SourceState.FAILED,
+            "provider_failure",
+            f"{label} request failed.",
+            started_at=started_at,
+        )
 
     mask = df["close"] >= df["price_52_week_high"] * _PCT_FROM_HIGH_THRESHOLD
     filtered = df[mask]
@@ -114,7 +141,7 @@ def _fetch(
         f"(from {count} server-side, {len(df)} fetched, "
         f"{len(filtered)} after 52w-high filter)"
     )
-    return ScreenerResult(tickers, "ok" if tickers else "empty")
+    return SourceResult.from_items(source, tickers, started_at=started_at)
 
 
 def fetch_tv_screener_tickers(max_rows: int = _US_MAX_ROWS) -> list[str]:
@@ -122,7 +149,7 @@ def fetch_tv_screener_tickers(max_rows: int = _US_MAX_ROWS) -> list[str]:
     return fetch_tv_screener_result(max_rows).tickers
 
 
-def fetch_tv_screener_result(max_rows: int = _US_MAX_ROWS) -> ScreenerResult:
+def fetch_tv_screener_result(max_rows: int = _US_MAX_ROWS) -> SourceResult:
     """Return the US screen output together with a machine-readable status."""
     return _fetch(
         exchanges=_US_EXCHANGES,
@@ -146,7 +173,7 @@ def fetch_tv_screener_tickers_uk(max_rows: int = _UK_MAX_ROWS) -> list[str]:
     return fetch_tv_screener_result_uk(max_rows).tickers
 
 
-def fetch_tv_screener_result_uk(max_rows: int = _UK_MAX_ROWS) -> ScreenerResult:
+def fetch_tv_screener_result_uk(max_rows: int = _UK_MAX_ROWS) -> SourceResult:
     """Return the UK screen output together with a machine-readable status."""
     return _fetch(
         exchanges=_UK_EXCHANGES,
@@ -160,6 +187,7 @@ def fetch_tv_screener_result_uk(max_rows: int = _UK_MAX_ROWS) -> ScreenerResult:
 
 if __name__ == "__main__":
     import sys
+
     market = sys.argv[1].upper() if len(sys.argv) > 1 else "US"
     if market == "UK":
         tickers = fetch_tv_screener_tickers_uk()

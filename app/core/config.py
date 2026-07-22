@@ -37,6 +37,7 @@ PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
 PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"
 PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "3600"))
 PIPELINE_STALE_GRACE_SECONDS = int(os.getenv("PIPELINE_STALE_GRACE_SECONDS", "60"))
+DEFAULT_PIPELINE_STALE_AFTER_HOURS = 24.0
 
 # --- Web / static assets ---------------------------------------------------
 TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
@@ -68,3 +69,22 @@ def ANALYST_LLM_SCORING_ENABLED() -> bool:
         "true",
         "yes",
     )
+
+
+def pipeline_stale_after_hours() -> float:
+    """Return the validated analysis freshness threshold, in hours.
+
+    Falls back to ``DEFAULT_PIPELINE_STALE_AFTER_HOURS`` for a missing,
+    non-numeric, or non-positive value so a bad environment cannot make
+    every refresh look permanently stale (or never stale).
+    """
+    try:
+        value = float(
+            os.getenv(
+                "PIPELINE_STALE_AFTER_HOURS",
+                str(DEFAULT_PIPELINE_STALE_AFTER_HOURS),
+            )
+        )
+    except ValueError:
+        return DEFAULT_PIPELINE_STALE_AFTER_HOURS
+    return value if value > 0 else DEFAULT_PIPELINE_STALE_AFTER_HOURS

@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
@@ -26,11 +26,16 @@ from app.core.config import (
 from app.integrations.alpha_vantage import AlphaVantageClient
 from app.integrations.congress import CongressClient
 from app.integrations.tv_screener import (
-    ScreenerResult,
     fetch_tv_screener_result,
     fetch_tv_screener_result_uk,
 )
 from app.schemas import StockRecord
+from app.schemas.source_health import (
+    SourceHealth,
+    SourceName,
+    SourceResult,
+    SourceState,
+)
 
 _av_client = AlphaVantageClient()
 _congress_client = CongressClient()
@@ -91,52 +96,111 @@ _SKILLS_DIR = SKILLS_DIR
 _VCP_SCRIPT = _SKILLS_DIR / "vcp-screener" / "scripts" / "screen_vcp.py"
 
 
+class VcpScreenerError(RuntimeError):
+    """Raised when the VCP/FMP subprocess ran but its output can't be trusted.
+
+    Callers must not treat this the same as a genuine zero-candidate result
+    — a subprocess failure or missing/unreadable output means the screen
+    never actually completed, so reporting it as "empty" would hide a real
+    outage behind what looks like a quiet, successful run.
+    """
+
+    def __init__(self, detail_code: str, message: str) -> None:
+        self.detail_code = detail_code
+        super().__init__(message)
+
+
+def _vcp_unavailable_reason() -> tuple[str, str] | None:
+    """Return (detail_code, message) if VCP/FMP cannot run at all, else None."""
+    if not os.environ.get("FMP_API_KEY"):
+        return "missing_configuration", "FMP API key is not configured."
+    if not _VCP_SCRIPT.exists() or not shutil.which("uv"):
+        return "dependency_missing", "VCP screener dependency is unavailable."
+    return None
+
+
 def fetch_vcp_screener_tickers() -> list[str]:
     """Run vcp-screener against S&P 500 via FMP API and return candidate symbols.
 
-    Requires FMP_API_KEY env var. Returns empty list and prints a skip notice
-    when the key is absent or the subprocess fails.
+    Returns an empty list only when preconditions are missing (no API key,
+    no script, no ``uv`` on PATH) or when the screen genuinely found zero
+    candidates. Raises ``VcpScreenerError`` when the subprocess ran but
+    failed, timed out, or produced no readable output — those cases must
+    not be silently reported as zero candidates.
     """
-    api_key = os.environ.get("FMP_API_KEY", "")
-    if not api_key:
-        print("  [skip] vcp_screener: FMP_API_KEY not set")
-        return []
-    if not _VCP_SCRIPT.exists():
-        print("  [skip] vcp_screener: screen_vcp.py not found")
+    reason = _vcp_unavailable_reason()
+    if reason is not None:
+        _code, message = reason
+        print(f"  [skip] vcp_screener: {message}")
         return []
     uv = shutil.which("uv")
-    if not uv:
-        print("  [skip] vcp_screener: uv not found on PATH")
-        return []
+    assert uv is not None  # guaranteed by _vcp_unavailable_reason() above
+    api_key = os.environ["FMP_API_KEY"]
     with tempfile.TemporaryDirectory() as tmpdir:
-        result = subprocess.run(
-            [
-                uv,
-                "run",
-                "python",
-                str(_VCP_SCRIPT),
-                "--api-key",
-                api_key,
-                "--output-dir",
-                tmpdir,
-                "--max-candidates",
-                "250",
-                "--top",
-                "100",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    uv,
+                    "run",
+                    "python",
+                    str(_VCP_SCRIPT),
+                    "--api-key",
+                    api_key,
+                    "--output-dir",
+                    tmpdir,
+                    "--max-candidates",
+                    "250",
+                    "--top",
+                    "100",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VcpScreenerError("timeout", "VCP / FMP timed out.") from exc
         if result.returncode != 0:
-            print(f"  [warn] vcp_screener subprocess failed: {result.stderr[:200]}")
-            return []
+            message = f"vcp_screener subprocess failed: {result.stderr[:200]}"
+            print(f"  [warn] {message}")
+            raise VcpScreenerError("provider_failure", message)
         json_files = _glob.glob(f"{tmpdir}/vcp_screener_*.json")
         if not json_files:
-            print("  [warn] vcp_screener: no output JSON found")
-            return []
-        data = json.loads(Path(json_files[0]).read_text(encoding="utf-8"))
+            message = "vcp_screener produced no output JSON"
+            print(f"  [warn] {message}")
+            raise VcpScreenerError("output_missing", message)
+        try:
+            data = json.loads(Path(json_files[0]).read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            message = "vcp_screener output was not valid JSON"
+            print(f"  [warn] {message}")
+            raise VcpScreenerError("invalid_output", message) from exc
         return [r["symbol"] for r in data.get("results", []) if r.get("symbol")]
+
+
+def fetch_vcp_screener_result() -> SourceResult:
+    """Return VCP candidates with an explicit unavailable/empty/failed distinction."""
+    started_at = datetime.now(timezone.utc)
+    reason = _vcp_unavailable_reason()
+    if reason is not None:
+        code, message = reason
+        return SourceResult.unavailable(
+            SourceName.VCP_FMP,
+            SourceState.SKIPPED,
+            code,
+            message,
+            started_at=started_at,
+        )
+    try:
+        tickers = fetch_vcp_screener_tickers()
+    except VcpScreenerError as exc:
+        return SourceResult.unavailable(
+            SourceName.VCP_FMP,
+            SourceState.FAILED,
+            exc.detail_code,
+            str(exc),
+            started_at=started_at,
+        )
+    return SourceResult.from_items(SourceName.VCP_FMP, tickers, started_at=started_at)
 
 
 def _fetch_spy_context() -> tuple[bool, float]:
@@ -320,7 +384,7 @@ def _inst_count(ticker_obj: yf.Ticker) -> int | None:
 
 class ScannerAgent(Agent):
     name: str = "ScannerAgent"
-    source_status: dict[str, str] = {}
+    source_health: dict[SourceName, SourceHealth] = {}
     progress_callback: Callable[[str, str, int | None], None] | None = None
 
     def _report_progress(
@@ -333,7 +397,7 @@ class ScannerAgent(Agent):
         ww_tickers = list(payload) if payload else load_watchlist()
         print(f"\n[Scanner] WW extraction:    {len(ww_tickers)} tickers")
 
-        def _fetch_tradingview_sources() -> tuple[ScreenerResult, ScreenerResult]:
+        def _fetch_tradingview_sources() -> tuple[SourceResult, SourceResult]:
             # Keep TradingView requests serial: its polite rate limit applies to
             # the shared endpoint, unlike the independent Yahoo and FMP work.
             print("[Scanner] TradingView screener (US)...")
@@ -355,20 +419,26 @@ class ScannerAgent(Agent):
         # avoids making the scan wait for Yahoo, FMP, and TradingView in turn.
         with ThreadPoolExecutor(max_workers=3) as pool:
             spy_future = pool.submit(_fetch_spy_context)
-            vcp_future = pool.submit(fetch_vcp_screener_tickers)
+            vcp_future = pool.submit(fetch_vcp_screener_result)
             tv_future = pool.submit(_fetch_tradingview_sources)
             spy_uptrend, spy_52w_return = spy_future.result()
-            vcp_tickers = vcp_future.result()
+            vcp_result = vcp_future.result()
             tv_result, uk_result = tv_future.result()
 
+        vcp_tickers = vcp_result.tickers
         tv_tickers = tv_result.tickers
         uk_tickers = [
             ticker if ticker.endswith(".L") else f"{ticker}.L"
             for ticker in uk_result.tickers
         ]
-        self.source_status = {
-            "tv_screener": tv_result.status,
-            "tv_screener_uk": uk_result.status,
+        self.source_health = {
+            SourceName.VCP_FMP: vcp_result.health,
+            SourceName.TRADINGVIEW_US: tv_result.health.model_copy(
+                update={"source": SourceName.TRADINGVIEW_US}
+            ),
+            SourceName.TRADINGVIEW_UK: uk_result.health.model_copy(
+                update={"source": SourceName.TRADINGVIEW_UK}
+            ),
         }
 
         print(f"[Scanner] VCP screener:     {len(vcp_tickers)} tickers")
@@ -582,13 +652,40 @@ class ScannerAgent(Agent):
         self._report_progress("market_data", "complete", len(valid_fetched))
         self._report_progress("enrichment", "running", len(valid_fetched))
 
+        yahoo_failures = len(tickers) - len(valid_fetched)
+        yahoo_state = (
+            SourceState.FAILED
+            if tickers and not valid_fetched
+            else (SourceState.OK if valid_fetched else SourceState.EMPTY)
+        )
+        self.source_health[SourceName.YAHOO_MARKET_DATA] = SourceHealth(
+            source=SourceName.YAHOO_MARKET_DATA,
+            state=yahoo_state,
+            count=len(valid_fetched),
+            detail_code=(
+                "partial_ticker_failures"
+                if yahoo_failures and valid_fetched
+                else ("ticker_failures" if yahoo_failures else "")
+            ),
+            display_message=(
+                f"{yahoo_failures} ticker request(s) failed; "
+                f"{len(valid_fetched)} succeeded."
+                if yahoo_failures
+                else "Yahoo market data completed successfully."
+            ),
+        )
+
         def _fill_all_from_alpha_vantage() -> None:
+            _av_client.reset_call_stats()
             for data in valid_fetched:
                 _fill_from_alpha_vantage(data["ticker"], data["fundamentals"])
 
+        failed_congress_tickers: list[str] = []
+
         def _fetch_all_congress() -> dict[str, Any]:
             return _congress_client.get_stats_many(
-                [data["ticker"] for data in valid_fetched]
+                [data["ticker"] for data in valid_fetched],
+                failed_tickers=failed_congress_tickers,
             )
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -598,6 +695,82 @@ class ScannerAgent(Agent):
             alpha_future.result()
             congress_by_ticker = congress_future.result()
         self._report_progress("enrichment", "complete", len(valid_fetched))
+
+        av_attempts, av_failures = _av_client.call_stats
+        if not _av_client.enabled:
+            av_state, av_code, av_message = (
+                SourceState.SKIPPED,
+                "missing_configuration",
+                "Alpha Vantage API key is not configured.",
+            )
+        elif av_attempts == 0:
+            av_state, av_code, av_message = (
+                SourceState.EMPTY,
+                "",
+                "No Alpha Vantage backfill was required.",
+            )
+        elif av_failures >= av_attempts:
+            av_state, av_code, av_message = (
+                SourceState.FAILED,
+                "provider_failure",
+                "All Alpha Vantage requests failed.",
+            )
+        elif av_failures:
+            av_state, av_code, av_message = (
+                SourceState.OK,
+                "partial_ticker_failures",
+                f"{av_failures} of {av_attempts} Alpha Vantage requests failed.",
+            )
+        else:
+            av_state, av_code, av_message = (
+                SourceState.OK,
+                "",
+                "Alpha Vantage backfill completed.",
+            )
+        self.source_health[SourceName.ALPHA_VANTAGE] = SourceHealth(
+            source=SourceName.ALPHA_VANTAGE,
+            state=av_state,
+            count=max(0, av_attempts - av_failures),
+            detail_code=av_code,
+            display_message=av_message,
+        )
+
+        congress_success = sum(
+            value is not None for value in congress_by_ticker.values()
+        )
+        congress_failed = len(failed_congress_tickers)
+        if congress_failed and congress_failed >= len(valid_fetched):
+            congress_state, congress_code = SourceState.FAILED, "provider_failure"
+            congress_message = "All Congress requests failed."
+        elif congress_failed:
+            congress_state, congress_code = (
+                SourceState.FAILED,
+                "partial_ticker_failures",
+            )
+            congress_message = (
+                f"{congress_failed} of {len(valid_fetched)} Congress requests failed; "
+                f"{congress_success} ticker(s) had data."
+            )
+        elif congress_success:
+            congress_state, congress_code = SourceState.OK, ""
+            congress_message = (
+                f"Congress data completed for {congress_success} of "
+                f"{len(valid_fetched)} tickers."
+            )
+        else:
+            congress_state, congress_code = SourceState.EMPTY, ""
+            congress_message = (
+                "No congressional trading data found for these tickers."
+                if valid_fetched
+                else "No tickers required Congress enrichment."
+            )
+        self.source_health[SourceName.CONGRESS] = SourceHealth(
+            source=SourceName.CONGRESS,
+            state=congress_state,
+            count=congress_success,
+            detail_code=congress_code,
+            display_message=congress_message,
+        )
 
         # Phase C: record assembly preserves the watchlist order.
         results: list[StockRecord] = []

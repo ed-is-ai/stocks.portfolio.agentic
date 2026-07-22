@@ -3,13 +3,16 @@ Smoke tests for the stock agent pipeline.
 These tests verify end-to-end functionality works correctly.
 """
 
+from datetime import datetime
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from app.orchestration.orchestrator import pipeline
 from app.workflows.momentum import build_momentum_pipeline
 from app.integrations.tv_screener import ScreenerResult
+from app.schemas.source_health import SourceName, SourceResult, SourceState
 
 
 class TestSmokeTests:
@@ -36,7 +39,13 @@ class TestSmokeTests:
         },
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_result",
+        return_value=SourceResult.unavailable(
+            SourceName.VCP_FMP,
+            SourceState.SKIPPED,
+            "missing_configuration",
+            "FMP API key is not configured.",
+        ),
     )
     @patch("app.agents.scanner.scanner_agent._congress_client")
     @patch(
@@ -58,8 +67,8 @@ class TestSmokeTests:
         import tempfile
         import app.orchestration.orchestrator as orchestrator
 
-        mock_congress.get_stats_many.side_effect = lambda tickers: dict.fromkeys(
-            tickers
+        mock_congress.get_stats_many.side_effect = lambda tickers, failed_tickers=None: (
+            dict.fromkeys(tickers)
         )
 
         # Mock yfinance to return sample data
@@ -125,13 +134,26 @@ class TestSmokeTests:
 
             with open(analysis_out) as f:
                 analysis_data = json.load(f)
-                assert len(analysis_data) > 0
-                assert "analysis" in analysis_data[0]
-                assert "score" in analysis_data[0]["analysis"]
+                # The artifact is a self-describing envelope (run ownership
+                # metadata + records) rather than a bare list — see
+                # app.schemas.analysis_artifact for why that matters for
+                # freshness/ownership correctness.
+                assert analysis_data["meta"]["run_id"]
+                assert analysis_data["meta"]["generated_at"]
+                records = analysis_data["records"]
+                assert len(records) > 0
+                assert "analysis" in records[0]
+                assert "score" in records[0]["analysis"]
 
             with open(status_out) as f:
                 status_data = json.load(f)
-                assert status_data["state"] == "complete"
+                # This environment has no FMP/Alpha Vantage keys configured,
+                # so VCP and Alpha Vantage are legitimately "skipped" —
+                # coverage is reduced, so the run is "partial" rather than
+                # "complete" (see derive_pipeline_outcome).
+                assert status_data["state"] == "partial"
+                assert status_data["analysis_artifact_produced"] is True
+                assert status_data["source_health"]["vcp_fmp"]["state"] == "skipped"
                 assert [stage["stage"] for stage in status_data["stages"]] == [
                     "sources",
                     "market_data",
@@ -149,6 +171,73 @@ class TestSmokeTests:
                     assert previous["completed_at"] <= current["started_at"]
                 assert status_data["scanned"] == status_data["analysed"]
                 assert alert_lifecycle == [("running", "pending")]
+
+            # --- Regression: a crash right after analysis-artifact promotion
+            # must not leave freshness/ownership pointing at the previous run.
+            #
+            # The bug this guards against: an earlier design promoted the
+            # analysis artifact with `os.replace`, then made a *separate*
+            # call to record "this run produced a usable artifact" in the
+            # status repo. A crash between those two steps left the file on
+            # disk legitimately belonging to the new run while every
+            # consumer of "last usable run" kept reporting the *previous*
+            # run's (older) timestamp — a silent mismatch between what was
+            # displayed and what was true. The fix embeds run ownership
+            # inside the artifact payload itself, so promoting the file and
+            # publishing its ownership are the same atomic write.
+            first_run_meta = json.loads(Path(analysis_out).read_text())["meta"]
+
+            original_replace = os.replace
+            crashed = {"done": False}
+
+            def _replace_then_crash(src, dst, *args, **kwargs):
+                result = original_replace(src, dst, *args, **kwargs)
+                if not crashed["done"] and str(dst) == str(analysis_out):
+                    crashed["done"] = True
+                    raise RuntimeError("simulated crash after artifact promotion")
+                return result
+
+            with (
+                patch.object(orchestrator, "SCAN_OUTPUT", scan_out),
+                patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
+                patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
+                patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
+                patch.object(
+                    orchestrator.os, "replace", side_effect=_replace_then_crash
+                ),
+                patch.object(orchestrator, "_append_run_log"),
+            ):
+                assert pipeline(force=True) is False
+
+            assert crashed["done"], "the injected crash point was never reached"
+
+            second_run_meta = json.loads(Path(analysis_out).read_text())["meta"]
+            assert second_run_meta["run_id"] != first_run_meta["run_id"]
+
+            with open(status_out) as status_stream:
+                second_status = json.load(status_stream)
+            # The bug's precondition: status bookkeeping for the new run
+            # never reached a usable terminal state...
+            assert second_status["run_id"] == second_run_meta["run_id"]
+            assert second_status["state"] == "failed"
+
+            # ...yet the artifact's own embedded ownership is what freshness
+            # must be derived from, so it still correctly reflects run B.
+            from app.schemas.analysis_artifact import read_analysis_artifact_meta
+            from app.services.freshness_service import (
+                FreshnessState,
+                calculate_freshness,
+            )
+
+            owner = read_analysis_artifact_meta(Path(analysis_out))
+            assert owner is not None
+            assert owner.run_id == second_run_meta["run_id"]
+            freshness = calculate_freshness(owner.generated_at)
+            assert freshness.state is FreshnessState.FRESH
+            expected_generated_at = datetime.fromisoformat(
+                second_run_meta["generated_at"].replace("Z", "+00:00")
+            )
+            assert freshness.refreshed_at == expected_generated_at
 
             failed_status_out = os.path.join(tmp, "failed_pipeline_status.json")
             with (
@@ -213,7 +302,13 @@ class TestSmokeTests:
         },
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_result",
+        return_value=SourceResult.unavailable(
+            SourceName.VCP_FMP,
+            SourceState.SKIPPED,
+            "missing_configuration",
+            "FMP API key is not configured.",
+        ),
     )
     @patch("app.agents.scanner.scanner_agent._congress_client")
     @patch(
@@ -232,8 +327,8 @@ class TestSmokeTests:
         _mock_tv,
     ):
         """Test that stages chain correctly through the typed pipeline."""
-        mock_congress.get_stats_many.side_effect = lambda tickers: dict.fromkeys(
-            tickers
+        mock_congress.get_stats_many.side_effect = lambda tickers, failed_tickers=None: (
+            dict.fromkeys(tickers)
         )
         # Mock yfinance
         import pandas as pd

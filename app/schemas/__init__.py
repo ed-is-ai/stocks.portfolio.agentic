@@ -20,6 +20,12 @@ from app.schemas.pipeline_status import (
     StageState,
     StageStatus,
 )
+from app.schemas.source_health import (
+    SourceHealth,
+    SourceName,
+    SourceResult,
+    SourceState,
+)
 
 __all__ = [
     "AlertSummary",
@@ -34,6 +40,10 @@ __all__ = [
     "StockAnalysis",
     "StockRecord",
     "StockScan",
+    "SourceHealth",
+    "SourceName",
+    "SourceResult",
+    "SourceState",
     "StageState",
     "StageStatus",
     "Trade",

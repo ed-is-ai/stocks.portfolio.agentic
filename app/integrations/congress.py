@@ -78,7 +78,16 @@ class _Lane:
         self._session.headers.update(_HEADERS)
         self._last_call: float = 0.0
 
-    def fetch_html(self, ticker: str) -> str | None:
+    def fetch_html(self, ticker: str) -> tuple[str | None, bool]:
+        """Return ``(html, request_failed)``.
+
+        ``request_failed`` distinguishes a genuine "no filings" response
+        (HTTP 404 — ``request_failed=False``) from a real network/HTTP
+        failure (timeout, connection error, 5xx — ``request_failed=True``).
+        Both return ``html=None``, but only the former is safe to report as
+        "no data available"; the latter must surface as a failed source
+        rather than being silently folded into "empty".
+        """
         elapsed = time.monotonic() - self._last_call
         if elapsed < _MIN_CALL_INTERVAL:
             time.sleep(_MIN_CALL_INTERVAL - elapsed)
@@ -87,12 +96,12 @@ class _Lane:
             resp = self._session.get(url, timeout=20)
             self._last_call = time.monotonic()
             if resp.status_code == 404:
-                return None
+                return None, False
             resp.raise_for_status()
-            return resp.text
+            return resp.text, False
         except Exception as exc:
             print(f"[congress] {ticker}: request error — {exc}")
-            return None
+            return None, True
 
 
 class CongressClient:
@@ -204,12 +213,17 @@ class CongressClient:
         hit, cached = self._cache_get(ticker)
         if hit:
             return cached
-        html = self._default_lane.fetch_html(ticker)
+        html, _request_failed = self._default_lane.fetch_html(ticker)
         result = self._parse_stats(html) if html else None
         self._cache_put(ticker, result)
         return result
 
-    def get_stats_many(self, tickers: list[str]) -> dict[str, CongressStats | None]:
+    def get_stats_many(
+        self,
+        tickers: list[str],
+        *,
+        failed_tickers: list[str] | None = None,
+    ) -> dict[str, CongressStats | None]:
         """Return stats for many tickers, using the cache and parallel lanes.
 
         Cache hits are resolved immediately. Cache misses are fetched across
@@ -217,6 +231,12 @@ class CongressClient:
         ``_MIN_CALL_INTERVAL``) so a large, mostly-uncached ticker universe
         doesn't pay the full serial cost. Results are returned keyed by
         ticker; the caller is responsible for any output ordering.
+
+        When *failed_tickers* is given, any ticker whose fetch genuinely
+        failed (network/HTTP error, not a clean "no filings" 404) is
+        appended to it. This lets a caller distinguish "no congressional
+        data exists for these tickers" (a real, reportable result) from "the
+        request to fetch congressional data failed" (a source outage).
         """
         results: dict[str, CongressStats | None] = {}
         misses: list[str] = []
@@ -234,17 +254,21 @@ class CongressClient:
 
         def _fetch_one(
             index_and_ticker: tuple[int, str],
-        ) -> tuple[str, CongressStats | None]:
+        ) -> tuple[str, CongressStats | None, bool]:
             index, ticker = index_and_ticker
             lane = lanes[index % len(lanes)]
-            html = lane.fetch_html(ticker)
+            html, request_failed = lane.fetch_html(ticker)
             stats = self._parse_stats(html) if html else None
-            return ticker, stats
+            return ticker, stats, request_failed
 
         with ThreadPoolExecutor(max_workers=len(lanes)) as pool:
-            for ticker, stats in pool.map(_fetch_one, enumerate(misses)):
+            for ticker, stats, request_failed in pool.map(
+                _fetch_one, enumerate(misses)
+            ):
                 results[ticker] = stats
                 self._cache_put(ticker, stats)
+                if request_failed and failed_tickers is not None:
+                    failed_tickers.append(ticker)
 
         return results
 

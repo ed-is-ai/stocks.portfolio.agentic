@@ -19,6 +19,7 @@ from app.core.config import (
     PORTFOLIO_VALUE_CSV,
     TICKER_ALIASES_JSON,
 )
+from app.schemas.analysis_artifact import read_analysis_records
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.trader_service import TraderService
@@ -42,9 +43,14 @@ class PortfolioService:
     # --- analysis + aliases ----------------------------------------------
 
     def load_analysis(self) -> list[StockRecord]:
-        """Load latest analysis results, returning empty list on any error."""
+        """Load latest analysis results, returning empty list on any error.
+
+        Supports both the current self-describing artifact envelope
+        (``{"meta": ..., "records": [...]}``) and a legacy bare JSON list,
+        via ``read_analysis_records``.
+        """
         try:
-            data = json.loads(ANALYSIS_JSON.read_text(encoding="utf-8"))
+            data = read_analysis_records(ANALYSIS_JSON)
             return [StockRecord.model_validate(r) for r in data]
         except Exception:
             return []

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import csv
+from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -18,10 +21,14 @@ from app.api.dependencies import (
     get_trader_service,
 )
 from app.api.routes.pipeline import refresh_data
-from app.api.routes.views import partial_watchlist
+from app.api.routes.views import partial_runlog, partial_watchlist
 from app.api.templating import templates
+from app.repositories.pipeline_status_repo import PipelineStatusRepository
+from app.schemas.analysis_artifact import build_analysis_payload
+from app.schemas.pipeline_status import PipelineState
 from app.schemas.record import StockRecord
 from app.schemas.scan import CANSLIMScore, MomentumScore, StockAnalysis
+from app.schemas.source_health import SourceHealth, SourceName, SourceState
 from app.services.pipeline_service import PipelineRunResult
 
 
@@ -85,8 +92,32 @@ def _sample_records() -> list[StockRecord]:
 
 
 def _render_watchlist() -> str:
+    from app.core.alerting import build_alert_ui_state
+    from app.core.recommendation import classify_recommendation
+    from app.services.freshness_service import calculate_freshness
+
+    records = _sample_records()
+    portfolio_tickers = {"AAPL.L"}
+    recommendations = {
+        record.ticker: classify_recommendation(
+            record, is_portfolio_holding=record.ticker in portfolio_tickers
+        )
+        for record in records
+    }
+    alert_states = {
+        record.ticker: build_alert_ui_state(
+            record, has_watching=False, last_alerted_at=None
+        )
+        for record in records
+    }
     return templates.get_template("_watchlist.html").render(
-        records=_sample_records(), portfolio_tickers={"AAPL.L"}
+        records=records,
+        portfolio_tickers=portfolio_tickers,
+        recommendations=recommendations,
+        alert_states=alert_states,
+        freshness=calculate_freshness(None),
+        source_health=[],
+        latest_attempt_error=None,
     )
 
 
@@ -128,8 +159,9 @@ def test_watchlist_cells_carry_canonical_numeric_data_values() -> None:
     assert 'data-col="momentum" data-val="11"' in html
     assert 'data-col="sepa" data-val="8"' in html
     assert 'data-col="risk" data-val="8.0000"' in html
-    # The Buy-recommendation row exposes its actionability rank for sorting.
-    assert 'data-col="rec" data-val="6"' in html
+    # The Buy-recommendation row exposes its actionability rank for sorting
+    # (mirrors app.core.recommendation._BUCKET_RANK, the canonical source).
+    assert 'data-col="rec" data-val="5"' in html
 
 
 def test_watchlist_missing_values_render_empty_data_val() -> None:
@@ -278,3 +310,180 @@ def test_watchlist_and_refresh_http_paths_render_canonical_partial(
     for response in (initial, refreshed):
         assert "No analysis results found" in response.text
         assert 'id="refresh-data-button"' not in response.text
+
+
+def test_watchlist_displays_unknown_freshness_when_no_artifact_exists(
+    tmp_path, monkeypatch
+) -> None:
+    """No analysis artifact on disk at all -> freshness unknown, no source badges."""
+    import app.api.watchlist_context as context_module
+
+    monkeypatch.setattr(context_module, "ANALYSIS_JSON", tmp_path / "missing.json")
+    monkeypatch.setattr(
+        context_module,
+        "_status_repository",
+        PipelineStatusRepository(tmp_path / "status.json"),
+    )
+    trader = MagicMock()
+    trader.get_portfolio.return_value = []
+    portfolio = MagicMock()
+    portfolio.load_analysis.return_value = []
+    alerts = MagicMock()
+    alerts.has_watching.return_value = False
+    alerts.last_alerted_at.return_value = None
+
+    response = __import__("asyncio").run(
+        partial_watchlist(_request("/partials/watchlist"), trader, portfolio, alerts)
+    )
+
+    assert "Last successful refresh unknown" in response.body.decode()
+
+
+def test_watchlist_shows_freshness_and_source_badges_for_owning_run(
+    tmp_path, monkeypatch
+) -> None:
+    """Freshness/source badges reflect the run that owns the on-disk artifact."""
+    import app.api.watchlist_context as context_module
+
+    analysis_path = tmp_path / "analysis_results.json"
+    generated_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    analysis_path.write_text(
+        json.dumps(
+            build_analysis_payload([], run_id="run-a", generated_at=generated_at)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(context_module, "ANALYSIS_JSON", analysis_path)
+
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    repo.start(run_id="run-a")
+    repo.update_source_health(
+        {
+            SourceName.TRADINGVIEW_US: SourceHealth(
+                source=SourceName.TRADINGVIEW_US,
+                state=SourceState.EMPTY,
+                count=0,
+                display_message="No stocks matched.",
+            ),
+            SourceName.VCP_FMP: SourceHealth(
+                source=SourceName.VCP_FMP,
+                state=SourceState.SKIPPED,
+                count=0,
+                detail_code="missing_configuration",
+                display_message="FMP API key is not configured.",
+            ),
+        },
+        expected_run_id="run-a",
+    )
+    repo.finish(PipelineState.PARTIAL, expected_run_id="run-a", artifact_produced=True)
+    monkeypatch.setattr(context_module, "_status_repository", repo)
+
+    trader = MagicMock()
+    trader.get_portfolio.return_value = []
+    portfolio = MagicMock()
+    portfolio.load_analysis.return_value = []
+    alerts = MagicMock()
+    alerts.has_watching.return_value = False
+    alerts.last_alerted_at.return_value = None
+
+    response = __import__("asyncio").run(
+        partial_watchlist(_request("/partials/watchlist"), trader, portfolio, alerts)
+    )
+    markup = response.body.decode()
+
+    assert "Last successful refresh" in markup
+    assert 'datetime="' in markup
+    assert "TradingView US" in markup
+    assert "Empty" in markup
+    assert "Skipped" in markup
+
+
+def test_failed_attempt_keeps_prior_refresh_time_and_separate_warning(
+    tmp_path, monkeypatch
+) -> None:
+    """A failed latest attempt must not hide the last usable refresh time."""
+    import app.api.watchlist_context as context_module
+
+    analysis_path = tmp_path / "analysis_results.json"
+    generated_at = datetime.now(timezone.utc) - timedelta(hours=2)
+    analysis_path.write_text(
+        json.dumps(
+            build_analysis_payload([], run_id="usable", generated_at=generated_at)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(context_module, "ANALYSIS_JSON", analysis_path)
+
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    repo.start(run_id="usable")
+    repo.finish(
+        PipelineState.COMPLETE, expected_run_id="usable", artifact_produced=True
+    )
+    repo.start(run_id="failed")
+    repo.finish(
+        PipelineState.FAILED,
+        expected_run_id="failed",
+        error_summary="Latest provider request failed.",
+    )
+    monkeypatch.setattr(context_module, "_status_repository", repo)
+
+    trader = MagicMock()
+    trader.get_portfolio.return_value = []
+    portfolio = MagicMock()
+    portfolio.load_analysis.return_value = []
+    alerts = MagicMock()
+    alerts.has_watching.return_value = False
+    alerts.last_alerted_at.return_value = None
+
+    response = __import__("asyncio").run(
+        partial_watchlist(_request("/partials/watchlist"), trader, portfolio, alerts)
+    )
+    markup = response.body.decode()
+
+    assert "Last successful refresh" in markup
+    assert "Latest refresh failed: Latest provider request failed." in markup
+
+
+def test_runlog_renders_structured_partial_coverage_and_legacy_fallback(
+    tmp_path, monkeypatch
+) -> None:
+    import app.api.routes.views as views_module
+
+    path = tmp_path / "runs.csv"
+    fields = ["start", "duration_seconds", "status", "sources", "source_health_json"]
+    health = SourceHealth(
+        source=SourceName.TRADINGVIEW_UK,
+        state=SourceState.FAILED,
+        count=0,
+        display_message="TradingView UK did not respond.",
+    )
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(
+            {
+                "start": "2026-07-18T12:00:00+00:00",
+                "duration_seconds": "1",
+                "status": "ok",
+                "sources": "legacy source summary",
+                "source_health_json": "not-json",
+            }
+        )
+        writer.writerow(
+            {
+                "start": "2026-07-19T12:00:00+00:00",
+                "duration_seconds": "2",
+                "status": "partial",
+                "source_health_json": json.dumps(
+                    {"tradingview_uk": health.model_dump(mode="json")}
+                ),
+            }
+        )
+    monkeypatch.setattr(views_module, "PIPELINE_RUNS_CSV", path)
+
+    response = __import__("asyncio").run(partial_runlog(_request("/partials/runlog")))
+    markup = response.body.decode()
+
+    assert "PARTIAL" in markup
+    assert "TradingView UK" in markup
+    assert "legacy source summary" in markup

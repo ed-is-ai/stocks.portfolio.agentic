@@ -1,4 +1,30 @@
 {%- macro dval(x) -%}{{ '%.4f'|format(x) if x is number else '' }}{%- endmacro -%}
+<div class="data-coverage" aria-label="Analysis freshness and source coverage">
+  <div class="freshness freshness-{{ freshness.state }}">
+    <i class="bi bi-{% if freshness.state == 'stale' %}exclamation-circle-fill{% elif freshness.state == 'fresh' %}clock-fill{% else %}question-circle{% endif %}"></i>
+    {% if freshness.refreshed_at %}
+      <span>Last successful refresh
+        <time class="local-time" datetime="{{ freshness.refreshed_at.isoformat() }}" title="{{ freshness.refreshed_at.isoformat() }} (UTC source; displayed locally in browser)">{{ freshness.refreshed_at.strftime('%Y-%m-%d %H:%M UTC') }}</time>
+      </span>
+      {% if freshness.state == 'stale' %}<span class="visually-hidden">Analysis data is stale and should be used with caution.</span>{% endif %}
+    {% else %}
+      <span>Last successful refresh unknown</span>
+    {% endif %}
+  </div>
+  {% if latest_attempt_error %}
+  <div class="latest-attempt-warning"><i class="bi bi-exclamation-triangle-fill"></i> Latest refresh failed: {{ latest_attempt_error }}</div>
+  {% endif %}
+  {% if source_health %}
+  <div class="source-health" aria-label="Source coverage">
+    {% for source in source_health %}
+    <span class="source-badge source-{{ source.state }}" title="{{ source.display_message }}">
+      <i class="bi bi-{% if source.state == 'ok' %}check-circle-fill{% elif source.state == 'empty' %}dash-circle{% elif source.state == 'skipped' %}skip-forward-circle{% else %}x-circle-fill{% endif %}"></i>
+      {{ source.label }}: {{ source.state_label }} &middot; {{ source.count }}
+    </span>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
 {% if not records %}
 <div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-exclamation-triangle-fill text-warning fs-5"></i>
@@ -82,26 +108,6 @@
         {% set sepa_count = 0 %}
       {% endif %}
       {% set is_uk = r.ticker.endswith('.L') %}
-      {% set in_port = r.ticker in portfolio_tickers %}
-      {# ── Recommendation bucket: one source of rank, class, label, filter key ── #}
-      {% if a and (a.stage in ["Stage 3", "Stage 4"] or a.score <= 3) %}
-        {% set rec_rank = 1 %}
-        {% set rec_class = 'rec-sell' if in_port else 'rec-avoid' %}
-        {% set rec_text = 'Sell' if in_port else 'Avoid' %}
-        {% set rec_key = 'other' %}
-      {% elif a and a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 and not a.volume_confirmed %}
-        {% set rec_rank = 5 %}{% set rec_class = 'rec-lowvol' %}{% set rec_text = 'Buy · low vol' %}{% set rec_key = 'buy' %}
-      {% elif a and a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 %}
-        {% set rec_rank = 6 %}{% set rec_class = 'rec-buy' %}{% set rec_text = 'Buy' %}{% set rec_key = 'buy' %}
-      {% elif a and a.stage == "Stage 2" and a.entry_zone == "extended" %}
-        {% set rec_rank = 3 %}{% set rec_class = 'rec-extended' %}{% set rec_text = 'Extended' %}{% set rec_key = 'other' %}
-      {% elif a and a.stage == "Stage 2" and a.entry_zone == "approaching" and a.score >= 5 %}
-        {% set rec_rank = 4 %}{% set rec_class = 'rec-alert' %}{% set rec_text = 'Stay Alert' %}{% set rec_key = 'alert' %}
-      {% elif a and a.stage == "Stage 2" and a.entry_zone == "getting_close" %}
-        {% set rec_rank = 2 %}{% set rec_class = 'rec-watch' %}{% set rec_text = 'Watch' %}{% set rec_key = 'other' %}
-      {% else %}
-        {% set rec_rank = 0 %}{% set rec_class = '' %}{% set rec_text = 'No action' if a else '' %}{% set rec_key = 'other' %}
-      {% endif %}
       {# ── Canonical numeric values (sorting/filtering read these, never text) ── #}
       {% set stage_num = a.stage.split(' ')[1] | int if a and a.stage and ' ' in a.stage else '' %}
       {% set canslim_val = a.canslim.total if a and a.canslim else '' %}
@@ -110,13 +116,13 @@
       {% set vsstop_val = ((r.price - a.stop_loss) / r.price * 100) if a and a.stop_loss and r.price else '' %}
       {% set risk_val = ((a.entry_price - a.stop_loss) / a.entry_price * 100) if a and a.entry_price and a.stop_loss else '' %}
       {% set targets_val = a.reward_risk_ratio if a and a.reward_risk_ratio else '' %}
-      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec_key }}"
       {# Recommendation bucket — precomputed in Python (app.core.recommendation)
          so the Rec column, filter buttons, and AlertAgent's email triggers
          all derive from the same thresholds. See #58. #}
       {% set rec = recommendations[r.ticker] %}
       {% set alert_state = alert_states[r.ticker] %}
-      {% set is_uk = r.ticker.endswith('.L') %}
+      {# Mirrors app.core.recommendation._BUCKET_RANK — higher sorts first. #}
+      {% set rank_by_bucket = {"no_analysis": 0, "sell": 0, "avoid": 0, "none": 1, "extended": 2, "watch": 3, "alert": 4, "buy_lowvol": 5, "buy": 5} %}
       <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec.filter_key }}"
           data-breakout="{{ 'true' if a and a.fresh_breakout else 'false' }}"
           data-myb="{{ 'true' if a and a.multiyear_breakout else 'false' }}"
@@ -137,14 +143,10 @@
         </td>
 
         <!-- Recommendation -->
-        <td data-col="rec" data-val="{{ rec_rank }}">
+        <td data-col="rec" data-val="{{ rank_by_bucket[rec.bucket] }}">
           {% if a %}
-            {% if rec_class %}
-              <span class="rec {{ rec_class }}">{{ rec_text }}</span>
-            {% else %}
-              <span class="rec-none">{{ rec_text }}</span>
             {% if rec.bucket in ("none", "no_analysis") %}
-              <span class="rec-none">{{ rec.text or "No action" }}</span>
+              <span class="rec-none">{{ rec.text }}</span>
             {% else %}
               <span class="rec {{ rec.css_class }}">{{ rec.text }}</span>
             {% endif %}

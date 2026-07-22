@@ -11,6 +11,7 @@ import argparse
 import csv
 import json
 import os
+import tempfile
 import time
 import traceback
 from datetime import datetime, timezone
@@ -62,7 +63,14 @@ from app.repositories.pipeline_status_repo import (
     PipelineRunInactiveError,
     PipelineStatusRepository,
 )
+from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
+from app.schemas.source_health import (
+    SourceHealth,
+    SourceName,
+    SourceState,
+    derive_pipeline_outcome,
+)
 from app.workflows.pipeline import PipelineStepEvent
 
 
@@ -70,6 +78,7 @@ SCAN_OUTPUT = SCAN_RESULTS_JSON
 RUN_LOG = PIPELINE_RUNS_CSV
 PORTFOLIO_VALUE_LOG = PORTFOLIO_VALUE_CSV
 _RUN_LOG_FIELDS = [
+    "run_id",
     "start",
     "end",
     "duration_seconds",
@@ -79,6 +88,7 @@ _RUN_LOG_FIELDS = [
     "sell_alerts",
     "actionable",
     "sources",
+    "source_health_json",
     "status",
     "errors",
 ]
@@ -116,16 +126,76 @@ def _append_portfolio_snapshot(total_value: float, total_cost: float) -> None:
         )
 
 
+def _migrate_run_log_header(log_path: Path) -> None:
+    """Rewrite an existing run log onto the current field set, in place.
+
+    Older logs may be missing columns (``run_id``, ``source_health_json``)
+    added by #40/#42. Rows are preserved; missing fields read back as empty
+    strings so legacy history keeps displaying.
+    """
+    with open(log_path, newline="", encoding="utf-8") as existing:
+        reader = csv.DictReader(existing)
+        existing_fields = reader.fieldnames or []
+        if existing_fields == _RUN_LOG_FIELDS:
+            return
+        prior_rows = [dict(row) for row in reader]
+    fd, temporary_name = tempfile.mkstemp(
+        dir=log_path.parent, prefix=f".{log_path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as migrated:
+            writer = csv.DictWriter(migrated, fieldnames=_RUN_LOG_FIELDS)
+            writer.writeheader()
+            for row in prior_rows:
+                writer.writerow({key: row.get(key, "") for key in _RUN_LOG_FIELDS})
+            migrated.flush()
+            os.fsync(migrated.fileno())
+        os.replace(temporary_name, log_path)
+    finally:
+        Path(temporary_name).unlink(missing_ok=True)
+
+
 def _append_run_log(entry: dict) -> None:
     """Append one run record to the CSV log, writing the header if the file is new."""
     log_path = Path(RUN_LOG)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    if log_path.exists() and log_path.stat().st_size:
+        _migrate_run_log_header(log_path)
     write_header = not log_path.exists() or log_path.stat().st_size == 0
     with open(log_path, "a", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=_RUN_LOG_FIELDS)
         if write_header:
             writer.writeheader()
         writer.writerow({k: entry.get(k, "") for k in _RUN_LOG_FIELDS})
+
+
+def _cached_extraction_health(
+    source_map: dict[str, tuple[bool, bool]],
+) -> dict[SourceName, SourceHealth]:
+    """Return SKIPPED health for extraction sources reused from a cached run.
+
+    When ``pipeline(extract=False)`` runs, WhaleWisdom/StockTwits were not
+    refreshed this run; their counts come from the cached extraction file so
+    they must not be reported as a freshly-successful "ok" source.
+    """
+    stocktwits = sum(stocktwits for stocktwits, _ in source_map.values())
+    whale_wisdom = sum(whale for _, whale in source_map.values())
+    return {
+        SourceName.WHALE_WISDOM: SourceHealth(
+            source=SourceName.WHALE_WISDOM,
+            state=SourceState.SKIPPED,
+            count=whale_wisdom,
+            detail_code="cached_input",
+            display_message="Using cached WhaleWisdom input; this source was not refreshed.",
+        ),
+        SourceName.STOCKTWITS: SourceHealth(
+            source=SourceName.STOCKTWITS,
+            state=SourceState.SKIPPED,
+            count=stocktwits,
+            detail_code="cached_input",
+            display_message="Using cached StockTwits input; this source was not refreshed.",
+        ),
+    }
 
 
 _SEPA_LABELS = {
@@ -616,6 +686,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         print(f"[{start_dt.strftime('%H:%M')}] Outside market hours — skipping")
         _append_run_log(
             {
+                "run_id": run_id,
                 "start": start_dt.isoformat(timespec="seconds"),
                 "end": start_dt.isoformat(timespec="seconds"),
                 "duration_seconds": 0,
@@ -625,6 +696,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
                 "sell_alerts": 0,
                 "actionable": 0,
                 "sources": "",
+                "source_health_json": "{}",
                 "errors": "",
                 "status": "skipped",
             }
@@ -642,6 +714,9 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
     buy_alerts = 0
     sell_alerts = 0
     src_summary = ""
+    source_health: dict[SourceName, SourceHealth] = {}
+    terminal_state = PipelineState.FAILED
+    temporary_artifacts: list[Path] = []
     last_analysis_update = 0.0
 
     def report_scanner(stage_name: str, state_name: str, count: int | None) -> None:
@@ -718,9 +793,13 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
                 expected_run_id=run_id,
                 substage="extraction",
             )
-            ExtractionAgent(name="ExtractionAgent").run()
+            extractor = ExtractionAgent(name="ExtractionAgent")
+            extractor.run()
+            source_health.update(extractor.source_health)
         watchlist = load_watchlist()
         source_map = load_source_map()
+        if not extract:
+            source_health.update(_cached_extraction_health(source_map))
 
         scanner = ScannerAgent(name="ScannerAgent", progress_callback=report_scanner)
         analyst = AnalystAgent(progress_callback=report_analysis)
@@ -734,6 +813,18 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         analysis_results = trace[1][1]
         scanned = len(scan_results)
         analysed = len(analysis_results)
+        source_health.update(scanner.source_health)
+        for source in SourceName:
+            source_health.setdefault(
+                source,
+                SourceHealth(
+                    source=source,
+                    state=SourceState.EMPTY,
+                    count=0,
+                    display_message="No records were available for this source.",
+                ),
+            )
+        status_repo.update_source_health(source_health, expected_run_id=run_id)
 
         for r in analysis_results:
             st, ww = source_map.get(r.ticker, (False, False))
@@ -755,9 +846,8 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             }
 
         src_summary = ", ".join(
-            f"{k}:{len(v['results'])} ({scanner.source_status.get(k, 'ok')})"  # type: ignore[index]
-            for k, v in scan_payload.items()
-            if isinstance(v, dict)
+            f"{health.source.label}:{health.count} ({health.state.value})"
+            for health in source_health.values()
         )
         print(f"      Scanned {scanned} tickers ({src_summary})")
 
@@ -799,13 +889,58 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             expected_run_id=run_id,
         )
 
-        with open(SCAN_OUTPUT, "w", encoding="utf-8") as stream:
+        if not analysis_results:
+            errors.append("No usable analysis records were produced.")
+            status_repo.transition(
+                PipelineStage.EXPORT,
+                StageState.SKIPPED,
+                expected_run_id=run_id,
+            )
+            terminal_state = derive_pipeline_outcome(
+                source_health,
+                analysed=analysed,
+                artifact_produced=False,
+            )
+            status_repo.finish(
+                terminal_state,
+                expected_run_id=run_id,
+                scanned=scanned,
+                analysed=analysed,
+                actionable=buy_alerts + sell_alerts,
+                error_summary="No usable analysis records were produced.",
+                artifact_produced=False,
+            )
+            print("\nPipeline failed: no usable analysis records were produced.")
+            return False
+
+        def _temporary_output(path: str | Path) -> Path:
+            """Return a run-scoped temp path next to *path*, tracked for cleanup."""
+            target = Path(path)
+            temporary = target.with_name(f".{target.stem}.{run_id}.tmp{target.suffix}")
+            temporary.parent.mkdir(parents=True, exist_ok=True)
+            temporary_artifacts.append(temporary)
+            return temporary
+
+        scan_temporary = _temporary_output(SCAN_OUTPUT)
+        analysis_temporary = _temporary_output(ANALYSIS_OUTPUT)
+        excel_temporary = _temporary_output(EXCEL_OUTPUT)
+
+        with open(scan_temporary, "w", encoding="utf-8") as stream:
             json.dump(scan_payload, stream, indent=2)
 
-        with open(ANALYSIS_OUTPUT, "w", encoding="utf-8") as stream:
-            json.dump(
-                [item.model_dump() for item in analysis_results], stream, indent=2
-            )
+        # Embed run ownership + generation time *inside* the artifact payload
+        # so the single os.replace below atomically publishes both the data
+        # and the fact that this run produced it. A separate follow-up write
+        # to record ownership would leave a crash window where the file is
+        # promoted but its owner is unrecorded (or vice versa) — see
+        # app.schemas.analysis_artifact for the full rationale.
+        analysis_payload = build_analysis_payload(
+            [item.model_dump(mode="json") for item in analysis_results],
+            run_id=run_id,
+            generated_at=datetime.now(timezone.utc),
+        )
+        with open(analysis_temporary, "w", encoding="utf-8") as stream:
+            json.dump(analysis_payload, stream, indent=2)
 
         current_tickers = [r.ticker for r in analysis_results]
         history = load_history()
@@ -826,23 +961,36 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
                 f"{'...' if len(breakouts) > 8 else ''})"
             )
 
-        write_excel(analysis_results, EXCEL_OUTPUT, held, new_tickers=new)
+        write_excel(analysis_results, excel_temporary, held, new_tickers=new)
+        # Publish scan/excel first; the analysis artifact is promoted last so
+        # a failure partway through export can never leave a *new* analysis
+        # file paired with stale scan/excel siblings.
+        os.replace(scan_temporary, SCAN_OUTPUT)
+        os.replace(excel_temporary, EXCEL_OUTPUT)
+        os.replace(analysis_temporary, ANALYSIS_OUTPUT)
         status_repo.transition(
             PipelineStage.EXPORT,
             StageState.COMPLETE,
             expected_run_id=run_id,
         )
+        terminal_state = derive_pipeline_outcome(
+            source_health,
+            analysed=analysed,
+            artifact_produced=True,
+        )
         status_repo.finish(
-            PipelineState.COMPLETE,
+            terminal_state,
             expected_run_id=run_id,
             scanned=scanned,
             analysed=analysed,
             actionable=buy_alerts + sell_alerts,
+            artifact_produced=True,
         )
-        print("\nPipeline complete.")
+        print(f"\nPipeline {terminal_state.value}.")
 
     except Exception as error:
         errors.append(traceback.format_exc())
+        terminal_state = PipelineState.FAILED
         status_repo.finish(
             PipelineState.FAILED,
             expected_run_id=run_id,
@@ -854,9 +1002,12 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         print(f"\n[ERROR] Pipeline failed:\n{errors[-1]}")
 
     finally:
+        for temporary in temporary_artifacts:
+            temporary.unlink(missing_ok=True)
         end_dt = datetime.now(timezone.utc)
         duration = round((end_dt - start_dt).total_seconds(), 1)
         log_entry = {
+            "run_id": run_id,
             "start": start_dt.isoformat(timespec="seconds"),
             "end": end_dt.isoformat(timespec="seconds"),
             "duration_seconds": duration,
@@ -866,8 +1017,18 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             "sell_alerts": sell_alerts,
             "actionable": buy_alerts + sell_alerts,
             "sources": src_summary,
+            "source_health_json": json.dumps(
+                {
+                    source.value: health.model_dump(mode="json")
+                    for source, health in source_health.items()
+                }
+            ),
             "errors": " | ".join(errors) if errors else "",
-            "status": "error" if errors else "ok",
+            "status": (
+                "error"
+                if terminal_state is PipelineState.FAILED
+                else terminal_state.value
+            ),
         }
         _append_run_log(log_entry)
         print(
@@ -875,7 +1036,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             f"{duration}s | scanned={scanned} analysed={analysed} "
             f"actionable={log_entry['actionable']} (buy={buy_alerts} sell={sell_alerts})"
         )
-    return not errors
+    return terminal_state in {PipelineState.COMPLETE, PipelineState.PARTIAL}
 
 
 def main() -> None:

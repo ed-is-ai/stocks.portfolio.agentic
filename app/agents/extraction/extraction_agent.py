@@ -7,7 +7,7 @@ No authentication required. Uses the public heat map data endpoint.
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, cast
 
 import requests
@@ -18,6 +18,7 @@ from app.core.config import (
     STOCKTWITS_WATCHLIST_JSON,
     WW_CONTEXT_JSON,
 )
+from app.schemas.source_health import SourceHealth, SourceName, SourceState
 
 
 HEAT_MAP_URL = "https://whalewisdom.com/api/heatmap_details.json"
@@ -49,6 +50,8 @@ class ExtractionAgent(Agent):
 
     name: str = "ExtractionAgent"
     last_quarter: str = ""
+    source_health: dict[SourceName, SourceHealth] = {}
+    stocktwits_error: bool = False
 
     def run(self, payload: Any = None) -> list[str]:  # noqa: ARG002
         """Fetch WhaleWisdom and StockTwits tickers, merge, and update results.
@@ -56,10 +59,13 @@ class ExtractionAgent(Agent):
         Returns combined list of tickers from both sources.
         """
         print("Fetching extraction sources...")
+        self.stocktwits_error = False
 
         # Fetch WhaleWisdom
         print(f"  WhaleWisdom: Fetching top {TOP_N} holdings...")
         ww_result = []
+        ww_started = datetime.now(timezone.utc)
+        ww_error = False
         try:
             stocks = self._fetch_heat_map()
             if stocks:
@@ -73,16 +79,57 @@ class ExtractionAgent(Agent):
                 )
                 self._save_ww_context(ranked)
         except Exception as exc:
+            ww_error = True
             print(f"    [err] {exc}")
+        ww_completed = datetime.now(timezone.utc)
+        self.source_health = {
+            SourceName.WHALE_WISDOM: SourceHealth(
+                source=SourceName.WHALE_WISDOM,
+                state=(
+                    SourceState.FAILED
+                    if ww_error
+                    else (SourceState.OK if ww_result else SourceState.EMPTY)
+                ),
+                count=len(ww_result),
+                detail_code="provider_failure" if ww_error else "",
+                display_message=(
+                    "WhaleWisdom request failed."
+                    if ww_error
+                    else "WhaleWisdom completed successfully."
+                ),
+                started_at=ww_started,
+                completed_at=ww_completed,
+                duration_seconds=(ww_completed - ww_started).total_seconds(),
+            )
+        }
 
         # Load StockTwits
         print("  StockTwits: Loading quarterly watchlist...")
         st_by_index = self._load_stocktwits_config()
+        st_total = sum(len(t) for t in st_by_index.values())
         if st_by_index:
-            st_total = sum(len(t) for t in st_by_index.values())
             print(f"    [ok] {st_total} tickers from config")
         else:
             print("    [warn] No StockTwits data loaded")
+        if not _ST_WATCHLIST.exists():
+            st_state = SourceState.SKIPPED
+            st_code = "missing_configuration"
+            st_message = "StockTwits watchlist configuration is missing."
+        elif self.stocktwits_error:
+            st_state = SourceState.FAILED
+            st_code = "invalid_configuration"
+            st_message = "StockTwits watchlist configuration could not be read."
+        else:
+            st_state = SourceState.OK if st_total else SourceState.EMPTY
+            st_code = ""
+            st_message = "StockTwits watchlist loaded successfully."
+        self.source_health[SourceName.STOCKTWITS] = SourceHealth(
+            source=SourceName.STOCKTWITS,
+            state=st_state,
+            count=st_total,
+            detail_code=st_code,
+            display_message=st_message,
+        )
 
         # Update results with both sources
         self._update_results_with_sources(ww_result, st_by_index)
@@ -118,6 +165,7 @@ class ExtractionAgent(Agent):
                     result[index_name] = [str(t) for t in tickers]
             return result
         except (OSError, json.JSONDecodeError) as exc:
+            self.stocktwits_error = True
             print(f"  [err] Failed to load StockTwits config: {exc}")
             return {}
 

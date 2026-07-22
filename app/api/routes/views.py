@@ -1,6 +1,7 @@
 """Read-only view routes — the main page and htmx partials."""
 
 import csv
+import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
@@ -15,6 +16,7 @@ from app.api.templating import templates
 from app.api.watchlist_context import build_watchlist_context
 from app.core.config import PIPELINE_RUNS_CSV
 from app.repositories.alerts_repo import AlertsRepository
+from app.schemas.source_health import SourceHealth
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -61,5 +63,29 @@ async def partial_runlog(request: Request) -> HTMLResponse:
     if PIPELINE_RUNS_CSV.exists():
         with open(PIPELINE_RUNS_CSV, newline="", encoding="utf-8") as fh:
             runs = list(csv.DictReader(fh))
+    for run in runs:
+        # Legacy CSV rows (written before a header field existed) simply
+        # lack that key rather than having it as "" — fill in safe defaults
+        # so the template can render them without a KeyError/Undefined.
+        for field in (
+            "duration_seconds",
+            "scanned",
+            "analysed",
+            "buy_alerts",
+            "sell_alerts",
+            "actionable",
+        ):
+            run.setdefault(field, "0")
+        run.setdefault("errors", "")
+        run.setdefault("sources", "")
+        try:
+            payload = json.loads(run.get("source_health_json") or "{}")
+            if not isinstance(payload, dict):
+                raise ValueError("source health must be an object")
+            run["source_health"] = [
+                SourceHealth.model_validate(value) for value in payload.values()
+            ]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            run["source_health"] = []
     runs.reverse()  # most recent first
     return templates.TemplateResponse(request, "_runlog.html", context={"runs": runs})

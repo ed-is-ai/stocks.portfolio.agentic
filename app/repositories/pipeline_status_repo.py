@@ -29,6 +29,7 @@ from app.schemas.pipeline_status import (
     PipelineStatus,
     StageState,
 )
+from app.schemas.source_health import SourceHealth, SourceName
 
 _LOCK_TIMEOUT_SECONDS = 30.0
 
@@ -86,6 +87,9 @@ class PipelineStatusRepository:
 
     def __init__(self, path: Path, *, stale_after_seconds: float = 1860) -> None:
         self.path = Path(path)
+        self.history_path = self.path.with_name(
+            f"{self.path.stem}_history{self.path.suffix}"
+        )
         self.lock_path = self.path.with_name(f".{self.path.name}.lock")
         self.stale_after_seconds = stale_after_seconds
         self._lock = threading.RLock()
@@ -129,19 +133,90 @@ class PipelineStatusRepository:
             return PipelineStatus.idle()
 
     def _write(self, status: PipelineStatus) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_payload(self.path, status.model_dump(mode="json"))
+
+    def _write_payload(self, path: Path, payload: object) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary_name = tempfile.mkstemp(
-            dir=self.path.parent, prefix=f".{self.path.name}.", suffix=".tmp"
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
         temporary_path = Path(temporary_name)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(status.model_dump(mode="json"), stream, indent=2)
+                json.dump(payload, stream, indent=2)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary_path, self.path)
+            os.replace(temporary_path, path)
         finally:
             temporary_path.unlink(missing_ok=True)
+
+    def _read_history(self) -> list[PipelineStatus]:
+        """Return archived terminal runs, skipping any unreadable entries."""
+        try:
+            payload = json.loads(self.history_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, list):
+                return []
+            history: list[PipelineStatus] = []
+            for item in payload:
+                try:
+                    history.append(PipelineStatus.model_validate(item))
+                except (TypeError, ValidationError):
+                    continue
+            return history
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+
+    def _archive(self, status: PipelineStatus) -> None:
+        """Append a terminal run to bounded history, keeping the newest 100."""
+        history = self._read_history()
+        history = [item for item in history if item.run_id != status.run_id]
+        history.append(status.model_copy(deep=True))
+        self._write_payload(
+            self.history_path,
+            [item.model_dump(mode="json") for item in history[-100:]],
+        )
+
+    def find_run(self, run_id: str) -> PipelineStatus | None:
+        """Return the current or archived status for *run_id*, if any.
+
+        Used to enrich the freshness display with a run's source-health
+        coverage. Freshness *timing* itself must come from the analysis
+        artifact's own embedded ownership metadata (see
+        ``app.schemas.analysis_artifact``), not from this lookup — see that
+        module's docstring for why a second, separately-written fact about
+        artifact ownership is unsafe to rely on across a crash.
+        """
+        with self._transaction():
+            current = self._read()
+            if current.run_id == run_id:
+                return current
+            for item in self._read_history():
+                if item.run_id == run_id:
+                    return item
+            return None
+
+    def update_source_health(
+        self,
+        source_health: dict[SourceName | str, SourceHealth],
+        *,
+        expected_run_id: str,
+    ) -> PipelineStatus:
+        """Persist per-source coverage for the active run, if it still owns it."""
+        with self._transaction():
+            status = self._read()
+            if (
+                status.run_id != expected_run_id
+                or status.state is not PipelineState.RUNNING
+            ):
+                return status
+            status.source_health = {
+                SourceName(source): health for source, health in source_health.items()
+            }
+            now = self._now()
+            status.updated_at = now
+            status.elapsed_seconds = self._elapsed(status, now)
+            self._write(status)
+            return status
 
     def start(
         self,
@@ -259,7 +334,18 @@ class PipelineStatusRepository:
         analysed: int | None = None,
         actionable: int | None = None,
         error_summary: str | None = None,
+        artifact_produced: bool = False,
     ) -> PipelineStatus:
+        """Record the terminal outcome for *expected_run_id* and archive it.
+
+        ``artifact_produced`` is informational only (surfaced in run history
+        for diagnostics); it is set synchronously by the caller in the same
+        breath as computing ``state``, so there is no separate write for it
+        to race against. It must never be used as the sole signal for "is
+        this run's analysis artifact the one currently on disk" — that
+        question is answered by reading the artifact's own embedded
+        ownership metadata (see ``app.schemas.analysis_artifact``).
+        """
         if state not in {
             PipelineState.COMPLETE,
             PipelineState.PARTIAL,
@@ -301,6 +387,7 @@ class PipelineStatusRepository:
             status.updated_at = now
             status.elapsed_seconds = self._elapsed(status, now)
             status.error_summary = self._safe_error(error_summary)
+            status.analysis_artifact_produced = artifact_produced
             if scanned is not None:
                 status.scanned = scanned
             if analysed is not None:
@@ -308,6 +395,7 @@ class PipelineStatusRepository:
             if actionable is not None:
                 status.actionable = actionable
             self._write(status)
+            self._archive(status)
             return status
 
     def _recover_interrupted(self, status: PipelineStatus) -> PipelineStatus:

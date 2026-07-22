@@ -192,7 +192,7 @@ def test_get_stats_caches_result_and_skips_second_fetch(tmp_path) -> None:
     client = CongressClient(cache_db_path=tmp_path / "cache.db")
     html = _html(_row("House", "Purchase", _recent()))
 
-    with patch.object(_Lane, "fetch_html", return_value=html) as mock_fetch:
+    with patch.object(_Lane, "fetch_html", return_value=(html, False)) as mock_fetch:
         first = client.get_stats("AAPL")
         second = client.get_stats("AAPL")
 
@@ -204,7 +204,7 @@ def test_get_stats_caches_result_and_skips_second_fetch(tmp_path) -> None:
 def test_get_stats_caches_no_data_result_and_skips_second_fetch(tmp_path) -> None:
     client = CongressClient(cache_db_path=tmp_path / "cache.db")
 
-    with patch.object(_Lane, "fetch_html", return_value=None) as mock_fetch:
+    with patch.object(_Lane, "fetch_html", return_value=(None, False)) as mock_fetch:
         first = client.get_stats("ZZZZ")
         second = client.get_stats("ZZZZ")
 
@@ -218,7 +218,7 @@ def test_get_stats_refetches_after_cache_entry_goes_stale(tmp_path) -> None:
     client = CongressClient(cache_db_path=db_path)
     html = _html(_row("House", "Purchase", _recent()))
 
-    with patch.object(_Lane, "fetch_html", return_value=html):
+    with patch.object(_Lane, "fetch_html", return_value=(html, False)):
         client.get_stats("AAPL")
 
     stale_timestamp = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
@@ -230,7 +230,7 @@ def test_get_stats_refetches_after_cache_entry_goes_stale(tmp_path) -> None:
     conn.commit()
     conn.close()
 
-    with patch.object(_Lane, "fetch_html", return_value=html) as mock_fetch:
+    with patch.object(_Lane, "fetch_html", return_value=(html, False)) as mock_fetch:
         client.get_stats("AAPL")
 
     mock_fetch.assert_called_once()
@@ -240,10 +240,10 @@ def test_get_stats_many_resolves_cache_hits_without_fetching(tmp_path) -> None:
     client = CongressClient(cache_db_path=tmp_path / "cache.db")
     html = _html(_row("House", "Purchase", _recent()))
 
-    with patch.object(_Lane, "fetch_html", return_value=html):
+    with patch.object(_Lane, "fetch_html", return_value=(html, False)):
         client.get_stats("AAPL")  # warm the cache
 
-    with patch.object(_Lane, "fetch_html", return_value=html) as mock_fetch:
+    with patch.object(_Lane, "fetch_html", return_value=(html, False)) as mock_fetch:
         result = client.get_stats_many(["AAPL"])
 
     assert result == {"AAPL": CongressStats(1, 0, 0, 0)}
@@ -254,14 +254,16 @@ def test_get_stats_many_fetches_misses_then_caches_them(tmp_path) -> None:
     client = CongressClient(cache_db_path=tmp_path / "cache.db")
     html = _html(_row("House", "Purchase", _recent()))
 
-    with patch.object(_Lane, "fetch_html", return_value=html) as mock_fetch:
+    with patch.object(_Lane, "fetch_html", return_value=(html, False)) as mock_fetch:
         result = client.get_stats_many(["AAPL", "GOOGL", "MSFT"])
 
     assert set(result) == {"AAPL", "GOOGL", "MSFT"}
     assert all(stats == CongressStats(1, 0, 0, 0) for stats in result.values())
     assert mock_fetch.call_count == 3
 
-    with patch.object(_Lane, "fetch_html", return_value=html) as mock_fetch_again:
+    with patch.object(
+        _Lane, "fetch_html", return_value=(html, False)
+    ) as mock_fetch_again:
         client.get_stats_many(["AAPL", "GOOGL", "MSFT"])
 
     mock_fetch_again.assert_not_called()
@@ -270,3 +272,27 @@ def test_get_stats_many_fetches_misses_then_caches_them(tmp_path) -> None:
 def test_get_stats_many_returns_empty_dict_for_no_tickers(tmp_path) -> None:
     client = CongressClient(cache_db_path=tmp_path / "cache.db")
     assert client.get_stats_many([]) == {}
+
+
+def test_get_stats_many_reports_request_failures_separately_from_no_data(
+    tmp_path,
+) -> None:
+    """A real fetch failure must be distinguishable from a genuine 404.
+
+    Both surface as ``None`` in the results dict (no data to show), but only
+    a request failure should be reported via ``failed_tickers`` — collapsing
+    the two would hide provider outages behind an innocent "no data" state.
+    """
+    client = CongressClient(cache_db_path=tmp_path / "cache.db")
+
+    def _fake_fetch(ticker: str) -> tuple[str | None, bool]:
+        if ticker == "BADCO":
+            return None, True  # request failed
+        return None, False  # genuine no-filings 404
+
+    with patch.object(_Lane, "fetch_html", side_effect=_fake_fetch):
+        failed: list[str] = []
+        result = client.get_stats_many(["BADCO", "NODATA"], failed_tickers=failed)
+
+    assert result == {"BADCO": None, "NODATA": None}
+    assert failed == ["BADCO"]

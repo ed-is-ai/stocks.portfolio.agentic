@@ -41,8 +41,10 @@
 
         <!-- Status -->
         <td>
-          {% if r.status == "ok" %}
+          {% if r.status == "ok" or r.status == "complete" %}
             <span class="badge-status status-ok">OK</span>
+          {% elif r.status == "partial" %}
+            <span class="badge-status status-partial"><i class="bi bi-exclamation-circle-fill"></i> PARTIAL</span>
           {% elif r.status == "skipped" %}
             <span class="badge-status status-skip">SKIP</span>
           {% else %}
@@ -84,7 +86,22 @@
         </td>
 
         <!-- Sources -->
-        <td style="font-size:0.72rem;color:#64748b">{{ r.sources }}</td>
+        <td style="font-size:0.72rem;color:#64748b">
+          {% if r.source_health %}
+          <details>
+            <summary>{{ r.source_health|length }} sources</summary>
+            <div class="run-source-health">
+            {% for source in r.source_health %}
+              <span class="source-badge source-{{ source.state }}" title="{{ source.display_message }}">
+                {{ source.label }}: {{ source.state_label }} &middot; {{ source.count }}
+              </span>
+            {% endfor %}
+            </div>
+          </details>
+          {% else %}
+            {{ r.sources }}
+          {% endif %}
+        </td>
 
         <!-- Errors -->
         <td style="max-width:260px">

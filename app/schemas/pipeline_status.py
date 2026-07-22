@@ -8,6 +8,8 @@ from typing import Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.schemas.source_health import SourceHealth, SourceName
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -77,7 +79,8 @@ class PipelineStatus(BaseModel):
     stages: list[StageStatus] = Field(
         default_factory=lambda: [StageStatus(stage=stage) for stage in PipelineStage]
     )
-    source_health: dict[str, object] = Field(default_factory=dict)
+    source_health: dict[SourceName, SourceHealth] = Field(default_factory=dict)
+    analysis_artifact_produced: bool = False
     scanned: int = 0
     analysed: int = 0
     actionable: int = 0

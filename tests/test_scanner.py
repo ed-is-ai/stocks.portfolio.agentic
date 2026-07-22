@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from app.agents.scanner.scanner_agent import ScannerAgent
 from app.integrations.tv_screener import ScreenerResult
+from app.schemas.source_health import SourceName, SourceResult, SourceState
 
 
 class TestScannerAgent:
@@ -135,7 +136,13 @@ class TestScannerAgent:
         },
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_result",
+        return_value=SourceResult.unavailable(
+            SourceName.VCP_FMP,
+            SourceState.SKIPPED,
+            "missing_configuration",
+            "FMP API key is not configured.",
+        ),
     )
     @patch("app.agents.scanner.scanner_agent._congress_client")
     @patch("yfinance.download")
@@ -194,7 +201,13 @@ class TestScannerAgent:
         },
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers", return_value=[]
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_result",
+        return_value=SourceResult.unavailable(
+            SourceName.VCP_FMP,
+            SourceState.SKIPPED,
+            "missing_configuration",
+            "FMP API key is not configured.",
+        ),
     )
     @patch("app.agents.scanner.scanner_agent._congress_client")
     def test_run_method_default_watchlist(
@@ -234,8 +247,8 @@ class TestScannerAgent:
         },
     )
     @patch(
-        "app.agents.scanner.scanner_agent.fetch_vcp_screener_tickers",
-        return_value=["AAPL"],
+        "app.agents.scanner.scanner_agent.fetch_vcp_screener_result",
+        return_value=SourceResult.from_items(SourceName.VCP_FMP, ["AAPL"]),
     )
     @patch("app.agents.scanner.scanner_agent._congress_client")
     @patch("yfinance.download")
@@ -328,7 +341,9 @@ class TestScannerAgent:
 
         assert len(results) == 3
         assert [r.ticker for r in results] == ["AAPL", "GOOGL", "MSFT"]
-        mock_congress.get_stats_many.assert_called_once_with(["AAPL", "GOOGL", "MSFT"])
+        mock_congress.get_stats_many.assert_called_once_with(
+            ["AAPL", "GOOGL", "MSFT"], failed_tickers=[]
+        )
         assert events == [
             ("market_data", "running", 3),
             ("market_data", "complete", 3),

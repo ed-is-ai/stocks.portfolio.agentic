@@ -30,11 +30,35 @@ class AlphaVantageClient:
         self.api_key = api_key or os.getenv("ALPHA_VANTAGE_API_KEY")
         self._cache: dict[str, Any] = {}
         self._last_call: float = 0.0
+        self._call_attempts = 0
+        self._call_failures = 0
 
     @property
     def enabled(self) -> bool:
         """Return True when an API key is configured."""
         return bool(self.api_key)
+
+    def reset_call_stats(self) -> None:
+        """Reset the per-run request/failure counters used for source health.
+
+        Call once at the start of a scan so ``call_stats`` reflects only
+        this run's requests, not a running total across the process
+        lifetime (the client is a long-lived singleton).
+        """
+        self._call_attempts = 0
+        self._call_failures = 0
+
+    @property
+    def call_stats(self) -> tuple[int, int]:
+        """Return (attempts, failures) since the last ``reset_call_stats()``.
+
+        A "failure" is a request that errored, timed out, or came back with
+        a rate-limit/invalid-key message — distinct from a request that
+        succeeded but had no data for that symbol. Without this distinction
+        a provider outage and a quiet, fully-successful run both surface as
+        "no data", which is exactly the ambiguity #40 asks to remove.
+        """
+        return self._call_attempts, self._call_failures
 
     def _get(self, params: dict[str, str]) -> dict[str, Any] | None:
         """Issue a rate-limited GET request and return the JSON body."""
@@ -46,6 +70,7 @@ class AlphaVantageClient:
             time.sleep(_MIN_CALL_INTERVAL - elapsed)
 
         params["apikey"] = self.api_key  # type: ignore[assignment]
+        self._call_attempts += 1
         try:
             resp = requests.get(_BASE_URL, params=params, timeout=15)
             self._last_call = time.monotonic()
@@ -55,10 +80,12 @@ class AlphaVantageClient:
                 # Rate-limit or invalid key message from Alpha Vantage
                 msg = data.get("Note") or data.get("Information", "")
                 print(f"[alpha_vantage] API warning: {msg[:120]}")
+                self._call_failures += 1
                 return None
             return data
         except Exception as exc:
             print(f"[alpha_vantage] Request error: {exc}")
+            self._call_failures += 1
             return None
 
     def get_overview(self, symbol: str) -> dict[str, Any] | None:
@@ -117,7 +144,9 @@ class AlphaVantageClient:
 
         return {
             "eps_growth": _pct("QuarterlyEarningsGrowthYOY"),
-            "annual_eps_growth": _pct("EPS"),  # TTM EPS; CAGR computed separately if needed
+            "annual_eps_growth": _pct(
+                "EPS"
+            ),  # TTM EPS; CAGR computed separately if needed
             "roe": _pct("ReturnOnEquityTTM"),
             "pe_ratio": _pct("PERatio"),
             "sector": overview.get("Sector") or None,

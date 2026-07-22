@@ -502,3 +502,19 @@
   if (document.readyState !== 'loading') init();
   else document.addEventListener('DOMContentLoaded', init);
 })();
+
+function renderLocalTimes(root = document) {
+  root.querySelectorAll("time.local-time[datetime]").forEach((element) => {
+    const instant = new Date(element.dateTime);
+    if (Number.isNaN(instant.getTime())) return;
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
+    const zoneName = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
+      .formatToParts(instant)
+      .find((part) => part.type === "timeZoneName")?.value || zone;
+    element.textContent = `${instant.toLocaleString()} ${zoneName}`;
+    element.title = `${element.dateTime} UTC source; displayed in ${zone}`;
+  });
+}
+
+document.addEventListener("DOMContentLoaded", () => renderLocalTimes());
+document.body.addEventListener("htmx:afterSwap", (event) => renderLocalTimes(event.target));
