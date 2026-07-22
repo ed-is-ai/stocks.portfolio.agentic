@@ -128,6 +128,14 @@
 
     /* ── Tables ────────────────────────────────────── */
     .tbl-wrap { overflow-y: auto; max-height: 72vh; border-radius: 0.4rem; border: 1px solid var(--border); }
+    /* Short viewports (e.g. landscape phones): leave enough room
+       above the fixed pipeline status bar that its own horizontal
+       scrollbar never lands under it. Scoped to the watchlist wrap
+       (.wl-tbl-wrap, set in watchlist.css) so portfolio/history
+       tables keep their existing 72vh behavior. */
+    @media (max-height: 480px) {
+      .wl-tbl-wrap { max-height: 58vh; }
+    }
     .table { font-size: var(--fs-sm); margin-bottom: 0; }
     .table thead th {
       background: var(--primary);
@@ -261,7 +269,7 @@
     .form-label { font-size: 0.76rem; font-weight: 600; color: #374151; margin-bottom: 0.3rem; }
     .form-control, .form-select { font-size: 0.85rem; border-color: var(--border); }
     .form-control:focus, .form-select:focus { border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
-    .pipeline-status-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); }
+    .pipeline-status-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); padding-bottom: env(safe-area-inset-bottom, 0px); }
     .pipeline-status { min-height: 2.35rem; display: flex; align-items: center; gap: 1rem; padding: .45rem 1.25rem; font-size: .78rem; color: var(--muted); overflow-x: auto; }
     .pipeline-status-summary, .pipeline-stages, .pipeline-stage { display: flex; align-items: center; gap: .4rem; white-space: nowrap; }
     .pipeline-stages { list-style: none; margin: 0; padding: 0; gap: .75rem; }
@@ -277,7 +285,9 @@
     @keyframes pipeline-sheen { to { background-position: -220% 0; } }
     @keyframes pipeline-spin { to { transform: rotate(360deg); } }
     @media (prefers-reduced-motion: reduce) { .pipeline-status.running, .pipeline-status.running .pipeline-status-summary > .bi { animation: none; } }
-    body { padding-bottom: 2.5rem; }
+    /* Reserve room for the fixed pipeline status bar (incl. its own
+       safe-area padding) so it never sits over the last table row. */
+    body { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
     .pipeline-confirmation { position: fixed; inset: 0; z-index: 1050; display: grid; place-items: center; background: rgba(15, 23, 42, .42); padding: 1rem; }
     .pipeline-confirmation-card { width: min(32rem, 100%); background: white; border-radius: .65rem; box-shadow: 0 20px 50px rgba(0,0,0,.24); padding: 1.3rem; }
     .pipeline-confirmation h2 { font-size: 1rem; font-weight: 700; color: var(--amber); margin: 0 0 .75rem; }
@@ -357,7 +367,7 @@
 
 <!-- Buy Modal -->
 <div class="modal fade" id="buyModal" tabindex="-1">
-  <div class="modal-dialog">
+  <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header" style="background:#166534;">
         <h5 class="modal-title text-white"><i class="bi bi-cart-plus me-2"></i>Record Buy</h5>
@@ -403,7 +413,7 @@
 
 <!-- Sell Modal -->
 <div class="modal fade" id="sellModal" tabindex="-1">
-  <div class="modal-dialog">
+  <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header" style="background:#991b1b;">
         <h5 class="modal-title text-white"><i class="bi bi-dash-circle me-2"></i>Record Sell</h5>
@@ -447,7 +457,7 @@
 
 <!-- Adjust Modal -->
 <div class="modal fade" id="adjustModal" tabindex="-1">
-  <div class="modal-dialog">
+  <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header" style="background:#0f4c81;">
         <h5 class="modal-title text-white"><i class="bi bi-pencil-square me-2"></i>Adjust Position</h5>

@@ -74,27 +74,27 @@
     <div class="wl-adv" id="wl-adv"></div>
   </div>
 </div>
-<div class="tbl-wrap">
-  <table class="table table-hover align-middle" id="watchlist-table">
+<div class="tbl-wrap wl-tbl-wrap">
+  <table class="table table-hover align-middle wl-table" id="watchlist-table">
     <thead>
       <tr>
-        <th data-col="ticker"><button class="wl-sort" data-col="ticker" type="button">Ticker<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="rec"><button class="wl-sort" data-col="rec" type="button">Rec<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="score" title="Overall score /10"><button class="wl-sort" data-col="score" type="button">Score<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="canslim" title="CANSLIM fundamental score /14"><button class="wl-sort" data-col="canslim" type="button">CANSLIM<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="momentum" title="Technical momentum score /14"><button class="wl-sort" data-col="momentum" type="button">Momentum<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="stage"><button class="wl-sort" data-col="stage" type="button">Stage<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="sector"><button class="wl-sort" data-col="sector" type="button">Sector<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="price"><button class="wl-sort" data-col="price" type="button">Price<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="entry" title="Next entry price"><button class="wl-sort" data-col="entry" type="button">Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="vsentry" title="Current price distance to entry"><button class="wl-sort" data-col="vsentry" type="button">vs Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="stop" title="Stop-loss price"><button class="wl-sort" data-col="stop" type="button">Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="vsstop" title="Cushion above stop"><button class="wl-sort" data-col="vsstop" type="button">vs Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="risk" title="Position risk % (entry to stop)"><button class="wl-sort" data-col="risk" type="button">Risk %<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="targets" title="1R/2R price targets &amp; reward:risk ratio"><button class="wl-sort" data-col="targets" type="button">Targets<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="rsi"><button class="wl-sort" data-col="rsi" type="button">RSI<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="sepa" title="Minervini SEPA trend template (8 conditions)"><button class="wl-sort" data-col="sepa" type="button">SEPA<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th data-col="buy"></th>
+        <th class="wl-col wl-col-ticker" data-col="ticker"><button class="wl-sort" data-col="ticker" type="button">Ticker<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-rec" data-col="rec"><button class="wl-sort" data-col="rec" type="button">Rec<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-score" data-col="score" title="Overall score /10"><button class="wl-sort" data-col="score" type="button">Score<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-canslim" data-col="canslim" title="CANSLIM fundamental score /14"><button class="wl-sort" data-col="canslim" type="button">CANSLIM<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-momentum" data-col="momentum" title="Technical momentum score /14"><button class="wl-sort" data-col="momentum" type="button">Momentum<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-stage" data-col="stage"><button class="wl-sort" data-col="stage" type="button">Stage<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-sector" data-col="sector"><button class="wl-sort" data-col="sector" type="button">Sector<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-price" data-col="price"><button class="wl-sort" data-col="price" type="button">Price<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-entry" data-col="entry" title="Next entry price"><button class="wl-sort" data-col="entry" type="button">Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-vsentry" data-col="vsentry" title="Current price distance to entry"><button class="wl-sort" data-col="vsentry" type="button">vs Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-stop" data-col="stop" title="Stop-loss price"><button class="wl-sort" data-col="stop" type="button">Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-vsstop" data-col="vsstop" title="Cushion above stop"><button class="wl-sort" data-col="vsstop" type="button">vs Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-risk" data-col="risk" title="Position risk % (entry to stop)"><button class="wl-sort" data-col="risk" type="button">Risk %<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-targets" data-col="targets" title="1R/2R price targets &amp; reward:risk ratio"><button class="wl-sort" data-col="targets" type="button">Targets<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-rsi" data-col="rsi"><button class="wl-sort" data-col="rsi" type="button">RSI<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-sepa" data-col="sepa" title="Minervini SEPA trend template (8 conditions)"><button class="wl-sort" data-col="sepa" type="button">SEPA<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-buy" data-col="buy"></th>
       </tr>
     </thead>
     <tbody>
@@ -129,7 +129,7 @@
           data-market="{{ 'uk' if is_uk else 'us' }}">
 
         <!-- Ticker -->
-        <td data-col="ticker" data-val="{{ r.ticker }}">
+        <td class="wl-col wl-col-ticker" data-col="ticker" data-val="{{ r.ticker }}">
           <a href="{{ yahoo_url }}" target="_blank" rel="noopener" class="ticker">{{ r.ticker }}</a>
           {% if a and a.fresh_breakout %}
             <span class="badge-vcp" title="VCP breakout — entry zone just transitioned to broken_out this run">VCP</span>
@@ -143,7 +143,7 @@
         </td>
 
         <!-- Recommendation -->
-        <td data-col="rec" data-val="{{ rank_by_bucket[rec.bucket] }}">
+        <td class="wl-col wl-col-rec" data-col="rec" data-val="{{ rank_by_bucket[rec.bucket] }}">
           {% if a %}
             {% if rec.bucket in ("none", "no_analysis") %}
               <span class="rec-none">{{ rec.text }}</span>
@@ -168,7 +168,7 @@
         </td>
 
         <!-- Score /10 -->
-        <td data-col="score" data-val="{{ a.score if a else '' }}">
+        <td class="wl-col wl-col-score" data-col="score" data-val="{{ a.score if a else '' }}">
           {% if a %}
             {% set s = a.score %}
             <span class="sc {% if s >= 8 %}sc-hi{% elif s >= 5 %}sc-mid{% else %}sc-lo{% endif %}">{{ s }}/10</span>
@@ -176,7 +176,7 @@
         </td>
 
         <!-- CANSLIM /14 -->
-        <td data-col="canslim" data-val="{{ canslim_val }}">
+        <td class="wl-col wl-col-canslim" data-col="canslim" data-val="{{ canslim_val }}">
           {% if canslim_val != '' %}
             <span class="sc {% if canslim_val >= 10 %}sc-hi{% elif canslim_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ canslim_val }}/14</span>
           {% else %}
@@ -185,7 +185,7 @@
         </td>
 
         <!-- Momentum /14 -->
-        <td data-col="momentum" data-val="{{ momentum_val }}">
+        <td class="wl-col wl-col-momentum" data-col="momentum" data-val="{{ momentum_val }}">
           {% if momentum_val != '' %}
             <span class="sc {% if momentum_val >= 10 %}sc-hi{% elif momentum_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ momentum_val }}/14</span>
           {% else %}
@@ -194,7 +194,7 @@
         </td>
 
         <!-- Stage -->
-        <td data-col="stage" data-val="{{ stage_num }}">
+        <td class="wl-col wl-col-stage" data-col="stage" data-val="{{ stage_num }}">
           {% if a %}
             {% set stg = a.stage %}
             <span class="stage {% if stg == 'Stage 1' %}stage-1{% elif stg == 'Stage 2' %}stage-2{% elif stg == 'Stage 3' %}stage-3{% elif stg == 'Stage 4' %}stage-4{% endif %}">{{ stg }}</span>
@@ -202,13 +202,13 @@
         </td>
 
         <!-- Sector -->
-        <td data-col="sector" data-val="{{ r.sector or '' }}"><span class="text-muted" style="font-size:0.76rem">{{ r.sector or "" }}</span></td>
+        <td class="wl-col wl-col-sector" data-col="sector" data-val="{{ r.sector or '' }}"><span class="text-muted" style="font-size:0.76rem">{{ r.sector or "" }}</span></td>
 
         <!-- Price -->
-        <td data-col="price" data-val="{{ dval(r.price) }}" class="fw-semibold">${{ "%.2f"|format(r.price) }}</td>
+        <td data-col="price" data-val="{{ dval(r.price) }}" class="wl-col wl-col-price fw-semibold">${{ "%.2f"|format(r.price) }}</td>
 
         <!-- Entry price -->
-        <td data-col="entry" data-val="{{ dval(a.entry_price) if a and a.entry_price else '' }}">
+        <td class="wl-col wl-col-entry" data-col="entry" data-val="{{ dval(a.entry_price) if a and a.entry_price else '' }}">
           {% if a and a.entry_price %}
             <span class="text-muted">${{ "%.2f"|format(a.entry_price) }}</span>
           {% else %}
@@ -217,7 +217,7 @@
         </td>
 
         <!-- Current price vs entry -->
-        <td data-col="vsentry" data-val="{{ dval(vsentry_val) }}">
+        <td class="wl-col wl-col-vsentry" data-col="vsentry" data-val="{{ dval(vsentry_val) }}">
           {% if vsentry_val != '' %}
             {% set vs = vsentry_val %}
             {% if vs < -5 %}
@@ -237,7 +237,7 @@
         </td>
 
         <!-- Stop price -->
-        <td data-col="stop" data-val="{{ dval(a.stop_loss) if a and a.stop_loss else '' }}">
+        <td class="wl-col wl-col-stop" data-col="stop" data-val="{{ dval(a.stop_loss) if a and a.stop_loss else '' }}">
           {% if a and a.stop_loss %}
             <span class="text-muted">${{ "%.2f"|format(a.stop_loss) }}</span>
           {% else %}
@@ -246,7 +246,7 @@
         </td>
 
         <!-- Cushion above stop -->
-        <td data-col="vsstop" data-val="{{ dval(vsstop_val) }}">
+        <td class="wl-col wl-col-vsstop" data-col="vsstop" data-val="{{ dval(vsstop_val) }}">
           {% if vsstop_val != '' %}
             {% set vs_s = vsstop_val %}
             {% if vs_s < 3 %}
@@ -262,7 +262,7 @@
         </td>
 
         <!-- Position risk % -->
-        <td data-col="risk" data-val="{{ dval(risk_val) }}">
+        <td class="wl-col wl-col-risk" data-col="risk" data-val="{{ dval(risk_val) }}">
           {% if risk_val != '' %}
             {% set risk = risk_val %}
             <span class="{% if risk > 20 %}lo{% elif risk > 12 %}text-warning fw-semibold{% endif %}">{{ "%.1f"|format(risk) }}%</span>
@@ -272,7 +272,7 @@
         </td>
 
         <!-- Targets -->
-        <td data-col="targets" data-val="{{ dval(targets_val) }}">
+        <td class="wl-col wl-col-targets" data-col="targets" data-val="{{ dval(targets_val) }}">
           {% if a and a.r_multiples %}
             <span class="text-muted" style="font-size:0.74rem; line-height:1.5; white-space:nowrap">
               1R ${{ "%.2f"|format(a.r_multiples["1.0R"]) }}<br>
@@ -285,14 +285,14 @@
         </td>
 
         <!-- RSI -->
-        <td data-col="rsi" data-val="{{ dval(r.rsi14) if r.rsi14 else '' }}">
+        <td class="wl-col wl-col-rsi" data-col="rsi" data-val="{{ dval(r.rsi14) if r.rsi14 else '' }}">
           {% if r.rsi14 %}
             <span style="font-size:0.76rem" class="{% if r.rsi14 > 70 %}neg{% elif r.rsi14 < 30 %}pos{% else %}text-muted{% endif %}">{{ r.rsi14 }}</span>
           {% endif %}
         </td>
 
         <!-- SEPA -->
-        <td data-col="sepa" data-val="{{ sepa_count if a and a.sepa_template else '' }}">
+        <td class="wl-col wl-col-sepa" data-col="sepa" data-val="{{ sepa_count if a and a.sepa_template else '' }}">
           {% if a and a.sepa_template %}
             {% set t = a.sepa_template %}
             {% set sepa_tip = "P>SMA150&200:" ~ ("✓" if t.above_150_200 else "✗")
@@ -311,7 +311,7 @@
         </td>
 
         <!-- Buy button -->
-        <td data-col="buy">
+        <td class="wl-col wl-col-buy" data-col="buy">
           <button class="btn-buy-sm"
                   onclick="openBuy('{{ r.ticker }}', {{ r.price }}, {{ a.entry_price if a and a.entry_price else 'null' }}, {{ a.stop_loss if a and a.stop_loss else 'null' }})">
             <i class="bi bi-plus-lg"></i> Buy

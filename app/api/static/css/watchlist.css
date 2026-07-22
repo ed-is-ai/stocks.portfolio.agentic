@@ -318,3 +318,110 @@ a.ticker:hover {
   gap: 0.25rem;
   margin-top: 0.35rem;
 }
+
+/* ── Responsive table shell (issue #43) ──────────────────────────
+ * One table at every breakpoint: it scrolls horizontally instead of
+ * collapsing into a second card-based layout. Ticker stays pinned
+ * left and the Buy action stays pinned right via the semantic
+ * wl-col-* classes below, so ticker/action context survives the
+ * scroll regardless of column order or visibility toggles. */
+.wl-tbl-wrap {
+  overflow-x: auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  max-width: 100%;
+}
+
+/* Keep dense metric columns legible rather than letting them get
+ * crushed; the wrapper's own horizontal scroll takes over below
+ * this width instead of squeezing text. */
+.wl-table { min-width: 62rem; }
+
+/* Sticky Ticker (left) / Buy action (right). Selectors key off the
+ * semantic wl-col-* class, never column position, so sticky offsets
+ * keep working if columns are hidden or reordered later. */
+#watchlist-table th.wl-col-ticker,
+#watchlist-table td.wl-col-ticker,
+#watchlist-table th.wl-col-buy,
+#watchlist-table td.wl-col-buy {
+  position: sticky;
+  z-index: 3;
+  background: white;
+}
+/* The header row is itself sticky (top: 0, see index.html); at the
+ * corner where a sticky column meets the sticky header it needs a
+ * higher stacking context so neither edge shows a seam. */
+#watchlist-table thead th.wl-col-ticker,
+#watchlist-table thead th.wl-col-buy {
+  z-index: 4;
+  background: var(--primary);
+}
+#watchlist-table td.wl-col-ticker,
+#watchlist-table th.wl-col-ticker {
+  left: 0;
+  white-space: nowrap;
+  box-shadow: 2px 0 4px rgba(15, 23, 42, 0.08);
+}
+#watchlist-table td.wl-col-buy,
+#watchlist-table th.wl-col-buy {
+  right: 0;
+  box-shadow: -2px 0 4px rgba(15, 23, 42, 0.08);
+}
+/* Sync the pinned cells' background with row hover so they never
+ * look "cut out" of the row while scrolled. */
+#watchlist-table tbody tr:hover td.wl-col-ticker,
+#watchlist-table tbody tr:hover td.wl-col-buy {
+  background: #f8fafc;
+}
+
+/* ── Focus-visible states (keyboard access) ──────────────────────
+ * Ticker links, sort headers, filter/dropdown toggles and row
+ * actions all need a visible ring — the table's own background/
+ * sticky layers can otherwise swallow the browser default. */
+a.ticker:focus-visible,
+.wl-sort:focus-visible,
+.btn-filter:focus-visible,
+.wl-dd-toggle:focus-visible,
+.wl-view-apply:focus-visible,
+.wl-view-del:focus-visible,
+.wl-panel-action:focus-visible,
+.wl-range-input:focus-visible,
+.wl-view-name:focus-visible,
+.btn-buy-sm:focus-visible,
+#wl-search:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+
+/* ── Medium widths (tablet / small laptop) ───────────────────────
+ * Trim padding and drop the low-priority sort hint text; never hide
+ * a data column here — that only ever happens via the labeled
+ * Columns control. */
+@media (max-width: 1024px) {
+  #watchlist-table thead th { padding: 0.5rem 0.55rem; }
+  #watchlist-table tbody td { padding: 0.36rem 0.55rem; }
+  .wl-hint { display: none; }
+}
+
+/* ── Phone widths ─────────────────────────────────────────────────
+ * Stack the match count above the controls, let the toggle-filter
+ * chips wrap, and keep every primary toolbar control at a 44px
+ * minimum touch target. */
+@media (max-width: 576px) {
+  .wl-toolbar { flex-direction: column; align-items: stretch; }
+  .wl-toolbar-info { order: 1; }
+  .wl-toolbar-controls { order: 2; margin-left: 0; }
+  .wl-search { min-height: 44px; flex: 1 1 auto; }
+  .btn-filter,
+  .wl-dd-toggle,
+  .wl-reset {
+    min-height: 44px;
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+  #watchlist-table .btn-buy-sm {
+    min-height: 44px;
+    padding-left: 0.8rem;
+    padding-right: 0.8rem;
+  }
+}

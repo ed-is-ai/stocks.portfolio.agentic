@@ -179,6 +179,56 @@ def test_watchlist_toolbar_exposes_search_and_control_mount() -> None:
     assert 'id="wl-match-count"' in html
 
 
+def test_watchlist_columns_carry_semantic_classes_not_nth_child() -> None:
+    """Every header and data cell gets a stable wl-col-<name> class.
+
+    Sticky positioning (and any other column-specific styling) keys off
+    these semantic classes instead of nth-child, so it survives column
+    hiding/reordering. Regression test for issue #43.
+    """
+    html = _render_watchlist()
+    for col in (*SORTABLE_COLUMNS, "buy"):
+        assert f'class="wl-col wl-col-{col}' in html, (
+            f"missing semantic class for {col}"
+        )
+    assert "nth-child" not in html
+
+
+def test_watchlist_table_wrap_and_ticker_buy_columns_are_sticky() -> None:
+    """The table wrapper scrolls both axes; Ticker/Buy stay pinned.
+
+    One table at every breakpoint (per issue #43): the wrapper scrolls
+    horizontally on narrow screens, Ticker stays pinned on the left and
+    the Buy action stays pinned on the right.
+    """
+    html = _render_watchlist()
+    assert 'class="tbl-wrap wl-tbl-wrap"' in html
+    assert "wl-table" in html
+    assert 'class="wl-col wl-col-ticker" data-col="ticker"' in html
+    assert 'class="wl-col wl-col-buy" data-col="buy"' in html
+
+    css = (ROOT / "app" / "api" / "static" / "css" / "watchlist.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".wl-tbl-wrap" in css
+    assert "overflow-x: auto" in css
+    assert "th.wl-col-ticker" in css and "td.wl-col-ticker" in css
+    assert "th.wl-col-buy" in css and "td.wl-col-buy" in css
+    assert "position: sticky" in css
+    assert "nth-child" not in css
+
+
+def test_watchlist_css_has_focus_visible_and_touch_target_rules() -> None:
+    """Keyboard focus rings and 44px phone touch targets are present."""
+    css = (ROOT / "app" / "api" / "static" / "css" / "watchlist.css").read_text(
+        encoding="utf-8"
+    )
+    assert ":focus-visible" in css
+    assert "a.ticker:focus-visible" in css
+    assert ".wl-sort:focus-visible" in css
+    assert "min-height: 44px" in css
+
+
 def test_watchlist_js_persists_state_and_seeds_presets() -> None:
     js = (ROOT / "app" / "api" / "static" / "js" / "watchlist.js").read_text(
         encoding="utf-8"
