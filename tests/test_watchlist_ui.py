@@ -19,11 +19,142 @@ from app.api.dependencies import (
 )
 from app.api.routes.pipeline import refresh_data
 from app.api.routes.views import partial_watchlist
+from app.api.templating import templates
+from app.schemas.record import StockRecord
+from app.schemas.scan import CANSLIMScore, MomentumScore, StockAnalysis
 from app.services.pipeline_service import PipelineRunResult
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "app" / "api" / "templates"
+
+
+def _sample_records() -> list[StockRecord]:
+    analysis = StockAnalysis(
+        score=8,
+        stage="Stage 2",
+        entry_zone="broken_out",
+        entry_price=100.0,
+        stop_loss=92.0,
+        risk_pct=0.08,
+        r_multiples={"1.0R": 108.0, "2.0R": 116.0},
+        reward_risk_ratio=2.0,
+        volume_confirmed=True,
+        fresh_breakout=True,
+        sepa_template={
+            "above_150_200": True,
+            "sma150_above_200": True,
+            "sma200_rising": True,
+            "sma50_above_150_200": True,
+            "above_25pct_of_low": True,
+            "within_25pct_of_high": True,
+            "rs_leader": True,
+            "above_sma50": True,
+        },
+        canslim=CANSLIMScore(C=2, A=2, N=2, S=2, L=2, I=1, M=1),
+        momentum=MomentumScore(C=2, A=2, N=2, S=1, L=2, I=1, M=1),
+        summary="test",
+    )
+    with_analysis = StockRecord(
+        ticker="AAPL.L",
+        as_of="2026-01-01",
+        price=98.0,
+        rsi14=62.0,
+        volume=1000,
+        rel_volume=1.2,
+        high_52w=120.0,
+        low_52w=60.0,
+        pct_from_52w_high=-18.0,
+        pct_change_week=2.0,
+        sector="Technology",
+        analysis=analysis,
+    )
+    without_analysis = StockRecord(
+        ticker="TSLA",
+        as_of="2026-01-01",
+        price=200.0,
+        volume=1000,
+        rel_volume=1.0,
+        high_52w=300.0,
+        low_52w=100.0,
+        pct_from_52w_high=-33.0,
+        pct_change_week=-1.0,
+        analysis=None,
+    )
+    return [with_analysis, without_analysis]
+
+
+def _render_watchlist() -> str:
+    return templates.get_template("_watchlist.html").render(
+        records=_sample_records(), portfolio_tickers={"AAPL.L"}
+    )
+
+
+SORTABLE_COLUMNS = (
+    "ticker",
+    "rec",
+    "score",
+    "canslim",
+    "momentum",
+    "stage",
+    "sector",
+    "price",
+    "entry",
+    "vsentry",
+    "stop",
+    "vsstop",
+    "risk",
+    "targets",
+    "rsi",
+    "sepa",
+)
+
+
+def test_watchlist_splits_score_entry_stop_into_sortable_columns() -> None:
+    html = _render_watchlist()
+    # Each split-out metric now owns a header cell with a stable data-col key.
+    for col in (*SORTABLE_COLUMNS, "buy"):
+        assert f'data-col="{col}"' in html, f"missing column {col}"
+    # Every sortable column has a keyboard-operable sort control.
+    for col in SORTABLE_COLUMNS:
+        assert f'class="wl-sort" data-col="{col}"' in html, f"no sort button for {col}"
+
+
+def test_watchlist_cells_carry_canonical_numeric_data_values() -> None:
+    html = _render_watchlist()
+    # Sorting/filtering read these data-val attributes, never the rendered text.
+    assert 'data-col="score" data-val="8"' in html
+    assert 'data-col="canslim" data-val="12"' in html
+    assert 'data-col="momentum" data-val="11"' in html
+    assert 'data-col="sepa" data-val="8"' in html
+    assert 'data-col="risk" data-val="8.0000"' in html
+    # The Buy-recommendation row exposes its actionability rank for sorting.
+    assert 'data-col="rec" data-val="6"' in html
+
+
+def test_watchlist_missing_values_render_empty_data_val() -> None:
+    html = _render_watchlist()
+    # The analysis-less TSLA row must leave numeric data-val empty so those
+    # cells sort last and are excluded from active range filters.
+    assert 'data-col="score" data-val=""' in html
+    assert 'data-col="canslim" data-val=""' in html
+
+
+def test_watchlist_toolbar_exposes_search_and_control_mount() -> None:
+    html = _render_watchlist()
+    assert 'id="wl-search"' in html
+    assert 'id="wl-adv"' in html
+    assert 'id="wl-match-count"' in html
+
+
+def test_watchlist_js_persists_state_and_seeds_presets() -> None:
+    js = (ROOT / "app" / "api" / "static" / "js" / "watchlist.js").read_text(
+        encoding="utf-8"
+    )
+    assert "wl-state-v1" in js
+    assert "wl-presets-v1" in js
+    for preset in ("Buy-ready", "UK breakouts", "Low-risk Stage 2"):
+        assert preset in js, f"missing built-in preset {preset}"
 
 
 def _request(path: str, method: str = "GET") -> Request:

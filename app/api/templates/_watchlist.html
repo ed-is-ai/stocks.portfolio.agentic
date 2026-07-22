@@ -1,3 +1,4 @@
+{%- macro dval(x) -%}{{ '%.4f'|format(x) if x is number else '' }}{%- endmacro -%}
 {% if not records %}
 <div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-exclamation-triangle-fill text-warning fs-5"></i>
@@ -21,33 +22,53 @@
   </div>
 </div>
 {% endif %}
-<div class="tbl-toolbar">
-  <span><i class="bi bi-bar-chart-line me-1"></i>{{ records|length }} stocks analysed &middot; click ticker for Yahoo Finance</span>
-  <div class="d-flex align-items-center gap-2">
-    <span class="text-muted" style="font-size:0.76rem">CANSLIM /14 &middot; Momentum /14 &middot; SEPA /8 &mdash; hover cells for detail</span>
-    <button class="btn-filter" data-filter="breakout">VCP Breakout</button>
-    <button class="btn-filter" data-filter="myb">MYB</button>
-    <button class="btn-filter" data-filter="sepa8">SEPA 8</button>
-    <button class="btn-filter" data-filter="alert">Stay Alert</button>
-            <button class="btn-filter" data-filter="uk">UK</button>
+<div class="tbl-toolbar wl-toolbar" id="wl-toolbar">
+  <div class="wl-toolbar-info">
+    <i class="bi bi-bar-chart-line me-1"></i>
+    <span id="wl-match-count">{{ records|length }}</span> of {{ records|length }} shown
+    <span class="wl-hint">&middot; CANSLIM /14 &middot; Momentum /14 &middot; SEPA /8 &mdash; click headers to sort, shift-click for multi-sort</span>
+  </div>
+  <div class="wl-toolbar-controls">
+    <label class="wl-search">
+      <i class="bi bi-search" aria-hidden="true"></i>
+      <input type="search" id="wl-search" placeholder="Search ticker / sector"
+             aria-label="Search ticker or sector" autocomplete="off">
+    </label>
+    <button class="btn-filter" data-filter="breakout" type="button" aria-pressed="false"
+            title="Entry zone transitioned to broken_out this run">Fresh VCP breakout</button>
+    <button class="btn-filter" data-filter="myb" type="button" aria-pressed="false"
+            title="Cleared its multi-year base pivot price">Multi-year base breakout</button>
+    <button class="btn-filter" data-filter="sepa8" type="button" aria-pressed="false"
+            title="Meets all 8/8 Minervini SEPA trend template conditions">SEPA trend template 8/8</button>
+    <button class="btn-filter" data-filter="alert" type="button" aria-pressed="false"
+            title="Stage 2, approaching entry with score ≥ 5 — watch for a breakout">Approaching entry</button>
+    <button class="btn-filter" data-filter="uk" type="button" aria-pressed="false"
+            title="Tickers listed on the London Stock Exchange (.L)">UK listings</button>
+    <!-- Ranges / Columns / Views / Reset controls are mounted here by watchlist.js -->
+    <div class="wl-adv" id="wl-adv"></div>
   </div>
 </div>
 <div class="tbl-wrap">
-  <table class="table table-hover align-middle">
+  <table class="table table-hover align-middle" id="watchlist-table">
     <thead>
       <tr>
-        <th>Ticker</th>
-        <th>Rec</th>
-        <th title="Overall score /10 · CANSLIM /14 · Momentum /14">Score</th>
-        <th>Stage</th>
-        <th>Sector</th>
-        <th>Price</th>
-        <th title="Entry price · current price vs entry">Entry</th>
-        <th title="Stop price · cushion above stop · position risk %">Stop</th>
-        <th title="1R/2R price targets &amp; reward:risk ratio">Targets</th>
-        <th>RSI</th>
-        <th title="Minervini SEPA trend template (8 conditions) — hover for breakdown">SEPA</th>
-        <th></th>
+        <th data-col="ticker"><button class="wl-sort" data-col="ticker" type="button">Ticker<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="rec"><button class="wl-sort" data-col="rec" type="button">Rec<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="score" title="Overall score /10"><button class="wl-sort" data-col="score" type="button">Score<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="canslim" title="CANSLIM fundamental score /14"><button class="wl-sort" data-col="canslim" type="button">CANSLIM<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="momentum" title="Technical momentum score /14"><button class="wl-sort" data-col="momentum" type="button">Momentum<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="stage"><button class="wl-sort" data-col="stage" type="button">Stage<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="sector"><button class="wl-sort" data-col="sector" type="button">Sector<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="price"><button class="wl-sort" data-col="price" type="button">Price<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="entry" title="Next entry price"><button class="wl-sort" data-col="entry" type="button">Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="vsentry" title="Current price distance to entry"><button class="wl-sort" data-col="vsentry" type="button">vs Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="stop" title="Stop-loss price"><button class="wl-sort" data-col="stop" type="button">Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="vsstop" title="Cushion above stop"><button class="wl-sort" data-col="vsstop" type="button">vs Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="risk" title="Position risk % (entry to stop)"><button class="wl-sort" data-col="risk" type="button">Risk %<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="targets" title="1R/2R price targets &amp; reward:risk ratio"><button class="wl-sort" data-col="targets" type="button">Targets<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="rsi"><button class="wl-sort" data-col="rsi" type="button">RSI<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="sepa" title="Minervini SEPA trend template (8 conditions)"><button class="wl-sort" data-col="sepa" type="button">SEPA<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th data-col="buy"></th>
       </tr>
     </thead>
     <tbody>
@@ -60,6 +81,36 @@
       {% else %}
         {% set sepa_count = 0 %}
       {% endif %}
+      {% set is_uk = r.ticker.endswith('.L') %}
+      {% set in_port = r.ticker in portfolio_tickers %}
+      {# ── Recommendation bucket: one source of rank, class, label, filter key ── #}
+      {% if a and (a.stage in ["Stage 3", "Stage 4"] or a.score <= 3) %}
+        {% set rec_rank = 1 %}
+        {% set rec_class = 'rec-sell' if in_port else 'rec-avoid' %}
+        {% set rec_text = 'Sell' if in_port else 'Avoid' %}
+        {% set rec_key = 'other' %}
+      {% elif a and a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 and not a.volume_confirmed %}
+        {% set rec_rank = 5 %}{% set rec_class = 'rec-lowvol' %}{% set rec_text = 'Buy · low vol' %}{% set rec_key = 'buy' %}
+      {% elif a and a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 %}
+        {% set rec_rank = 6 %}{% set rec_class = 'rec-buy' %}{% set rec_text = 'Buy' %}{% set rec_key = 'buy' %}
+      {% elif a and a.stage == "Stage 2" and a.entry_zone == "extended" %}
+        {% set rec_rank = 3 %}{% set rec_class = 'rec-extended' %}{% set rec_text = 'Extended' %}{% set rec_key = 'other' %}
+      {% elif a and a.stage == "Stage 2" and a.entry_zone == "approaching" and a.score >= 5 %}
+        {% set rec_rank = 4 %}{% set rec_class = 'rec-alert' %}{% set rec_text = 'Stay Alert' %}{% set rec_key = 'alert' %}
+      {% elif a and a.stage == "Stage 2" and a.entry_zone == "getting_close" %}
+        {% set rec_rank = 2 %}{% set rec_class = 'rec-watch' %}{% set rec_text = 'Watch' %}{% set rec_key = 'other' %}
+      {% else %}
+        {% set rec_rank = 0 %}{% set rec_class = '' %}{% set rec_text = 'No action' if a else '' %}{% set rec_key = 'other' %}
+      {% endif %}
+      {# ── Canonical numeric values (sorting/filtering read these, never text) ── #}
+      {% set stage_num = a.stage.split(' ')[1] | int if a and a.stage and ' ' in a.stage else '' %}
+      {% set canslim_val = a.canslim.total if a and a.canslim else '' %}
+      {% set momentum_val = a.momentum.total if a and a.momentum else '' %}
+      {% set vsentry_val = ((a.entry_price - r.price) / r.price * 100) if a and a.entry_price and r.price else '' %}
+      {% set vsstop_val = ((r.price - a.stop_loss) / r.price * 100) if a and a.stop_loss and r.price else '' %}
+      {% set risk_val = ((a.entry_price - a.stop_loss) / a.entry_price * 100) if a and a.entry_price and a.stop_loss else '' %}
+      {% set targets_val = a.reward_risk_ratio if a and a.reward_risk_ratio else '' %}
+      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec_key }}"
       {# Recommendation bucket — precomputed in Python (app.core.recommendation)
          so the Rec column, filter buttons, and AlertAgent's email triggers
          all derive from the same thresholds. See #58. #}
@@ -72,7 +123,7 @@
           data-market="{{ 'uk' if is_uk else 'us' }}">
 
         <!-- Ticker -->
-        <td>
+        <td data-col="ticker" data-val="{{ r.ticker }}">
           <a href="{{ yahoo_url }}" target="_blank" rel="noopener" class="ticker">{{ r.ticker }}</a>
           {% if a and a.fresh_breakout %}
             <span class="badge-vcp" title="VCP breakout — entry zone just transitioned to broken_out this run">VCP</span>
@@ -85,9 +136,13 @@
           {% endif %}
         </td>
 
-        <!-- Recommendation (moved to front so the conclusion reads first) -->
-        <td>
+        <!-- Recommendation -->
+        <td data-col="rec" data-val="{{ rec_rank }}">
           {% if a %}
+            {% if rec_class %}
+              <span class="rec {{ rec_class }}">{{ rec_text }}</span>
+            {% else %}
+              <span class="rec-none">{{ rec_text }}</span>
             {% if rec.bucket in ("none", "no_analysis") %}
               <span class="rec-none">{{ rec.text or "No action" }}</span>
             {% else %}
@@ -110,19 +165,34 @@
           {% endif %}
         </td>
 
-        <!-- Score /10 (CANSLIM / Momentum folded in as a sub-line) -->
-        <td>
+        <!-- Score /10 -->
+        <td data-col="score" data-val="{{ a.score if a else '' }}">
           {% if a %}
             {% set s = a.score %}
             <span class="sc {% if s >= 8 %}sc-hi{% elif s >= 5 %}sc-mid{% else %}sc-lo{% endif %}">{{ s }}/10</span>
-            {% if a.canslim or a.momentum %}
-              <span class="cell-sub">C {{ a.canslim.total if a.canslim else "–" }}/14 &middot; M {{ a.momentum.total if a.momentum else "–" }}/14</span>
-            {% endif %}
+          {% endif %}
+        </td>
+
+        <!-- CANSLIM /14 -->
+        <td data-col="canslim" data-val="{{ canslim_val }}">
+          {% if canslim_val != '' %}
+            <span class="sc {% if canslim_val >= 10 %}sc-hi{% elif canslim_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ canslim_val }}/14</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Momentum /14 -->
+        <td data-col="momentum" data-val="{{ momentum_val }}">
+          {% if momentum_val != '' %}
+            <span class="sc {% if momentum_val >= 10 %}sc-hi{% elif momentum_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ momentum_val }}/14</span>
+          {% else %}
+            <span class="text-muted">—</span>
           {% endif %}
         </td>
 
         <!-- Stage -->
-        <td>
+        <td data-col="stage" data-val="{{ stage_num }}">
           {% if a %}
             {% set stg = a.stage %}
             <span class="stage {% if stg == 'Stage 1' %}stage-1{% elif stg == 'Stage 2' %}stage-2{% elif stg == 'Stage 3' %}stage-3{% elif stg == 'Stage 4' %}stage-4{% endif %}">{{ stg }}</span>
@@ -130,53 +200,77 @@
         </td>
 
         <!-- Sector -->
-        <td><span class="text-muted" style="font-size:0.76rem">{{ r.sector or "" }}</span></td>
+        <td data-col="sector" data-val="{{ r.sector or '' }}"><span class="text-muted" style="font-size:0.76rem">{{ r.sector or "" }}</span></td>
 
         <!-- Price -->
-        <td class="fw-semibold">${{ "%.2f"|format(r.price) }}</td>
+        <td data-col="price" data-val="{{ dval(r.price) }}" class="fw-semibold">${{ "%.2f"|format(r.price) }}</td>
 
-        <!-- Entry (price + current price vs entry) -->
-        <td>
+        <!-- Entry price -->
+        <td data-col="entry" data-val="{{ dval(a.entry_price) if a and a.entry_price else '' }}">
           {% if a and a.entry_price %}
             <span class="text-muted">${{ "%.2f"|format(a.entry_price) }}</span>
-            {% set vs = (a.entry_price - r.price) / r.price * 100 %}
-            {% if vs < -5 %}
-              <span class="cell-sub"><span class="dl dl-ext">{{ "%.1f"|format(vs|abs) }}% extended</span></span>
-            {% elif vs < 0 %}
-              <span class="cell-sub"><span class="dl dl-great">{{ "%.1f"|format(vs|abs) }}% above</span></span>
-            {% elif vs <= 3 %}
-              <span class="cell-sub"><span class="dl dl-good">{{ "%.1f"|format(vs) }}% below</span></span>
-            {% elif vs <= 8 %}
-              <span class="cell-sub"><span class="dl dl-ok">{{ "%.1f"|format(vs) }}% below</span></span>
-            {% else %}
-              <span class="cell-sub"><span class="dl dl-muted">{{ "%.1f"|format(vs) }}% below</span></span>
-            {% endif %}
+          {% else %}
+            <span class="text-muted">—</span>
           {% endif %}
         </td>
 
-        <!-- Stop (price + cushion above stop + position risk %) -->
-        <td>
+        <!-- Current price vs entry -->
+        <td data-col="vsentry" data-val="{{ dval(vsentry_val) }}">
+          {% if vsentry_val != '' %}
+            {% set vs = vsentry_val %}
+            {% if vs < -5 %}
+              <span class="dl dl-ext">{{ "%.1f"|format(vs|abs) }}% extended</span>
+            {% elif vs < 0 %}
+              <span class="dl dl-great">{{ "%.1f"|format(vs|abs) }}% above</span>
+            {% elif vs <= 3 %}
+              <span class="dl dl-good">{{ "%.1f"|format(vs) }}% below</span>
+            {% elif vs <= 8 %}
+              <span class="dl dl-ok">{{ "%.1f"|format(vs) }}% below</span>
+            {% else %}
+              <span class="dl dl-muted">{{ "%.1f"|format(vs) }}% below</span>
+            {% endif %}
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Stop price -->
+        <td data-col="stop" data-val="{{ dval(a.stop_loss) if a and a.stop_loss else '' }}">
           {% if a and a.stop_loss %}
             <span class="text-muted">${{ "%.2f"|format(a.stop_loss) }}</span>
-            <span class="cell-sub">
-              {% set vs_s = (r.price - a.stop_loss) / r.price * 100 %}
-              {% if vs_s < 3 %}
-                <span class="dl dl-danger">{{ "%.1f"|format(vs_s) }}%</span>
-              {% elif vs_s < 8 %}
-                <span class="dl dl-ok">{{ "%.1f"|format(vs_s) }}%</span>
-              {% else %}
-                {{ "%.1f"|format(vs_s) }}%
-              {% endif %}
-              {% if a.entry_price %}
-                {% set risk = (a.entry_price - a.stop_loss) / a.entry_price * 100 %}
-                &middot; <span class="{% if risk > 20 %}lo{% elif risk > 12 %}text-warning fw-semibold{% endif %}">R {{ "%.1f"|format(risk) }}%</span>
-              {% endif %}
-            </span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Cushion above stop -->
+        <td data-col="vsstop" data-val="{{ dval(vsstop_val) }}">
+          {% if vsstop_val != '' %}
+            {% set vs_s = vsstop_val %}
+            {% if vs_s < 3 %}
+              <span class="dl dl-danger">{{ "%.1f"|format(vs_s) }}%</span>
+            {% elif vs_s < 8 %}
+              <span class="dl dl-ok">{{ "%.1f"|format(vs_s) }}%</span>
+            {% else %}
+              <span class="text-muted">{{ "%.1f"|format(vs_s) }}%</span>
+            {% endif %}
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Position risk % -->
+        <td data-col="risk" data-val="{{ dval(risk_val) }}">
+          {% if risk_val != '' %}
+            {% set risk = risk_val %}
+            <span class="{% if risk > 20 %}lo{% elif risk > 12 %}text-warning fw-semibold{% endif %}">{{ "%.1f"|format(risk) }}%</span>
+          {% else %}
+            <span class="text-muted">—</span>
           {% endif %}
         </td>
 
         <!-- Targets -->
-        <td>
+        <td data-col="targets" data-val="{{ dval(targets_val) }}">
           {% if a and a.r_multiples %}
             <span class="text-muted" style="font-size:0.74rem; line-height:1.5; white-space:nowrap">
               1R ${{ "%.2f"|format(a.r_multiples["1.0R"]) }}<br>
@@ -189,20 +283,16 @@
         </td>
 
         <!-- RSI -->
-        <td>
+        <td data-col="rsi" data-val="{{ dval(r.rsi14) if r.rsi14 else '' }}">
           {% if r.rsi14 %}
             <span style="font-size:0.76rem" class="{% if r.rsi14 > 70 %}neg{% elif r.rsi14 < 30 %}pos{% else %}text-muted{% endif %}">{{ r.rsi14 }}</span>
           {% endif %}
         </td>
 
         <!-- SEPA -->
-        <td>
+        <td data-col="sepa" data-val="{{ sepa_count if a and a.sepa_template else '' }}">
           {% if a and a.sepa_template %}
             {% set t = a.sepa_template %}
-            {% set sepa_count = [t.above_150_200, t.sma150_above_200, t.sma200_rising,
-                                  t.sma50_above_150_200, t.above_25pct_of_low,
-                                  t.within_25pct_of_high, t.rs_leader, t.above_sma50]
-                                 | select | list | length %}
             {% set sepa_tip = "P>SMA150&200:" ~ ("✓" if t.above_150_200 else "✗")
                 ~ " | SMA150>200:" ~ ("✓" if t.sma150_above_200 else "✗")
                 ~ " | SMA200↑:" ~ ("✓" if t.sma200_rising else "✗")
@@ -219,7 +309,7 @@
         </td>
 
         <!-- Buy button -->
-        <td>
+        <td data-col="buy">
           <button class="btn-buy-sm"
                   onclick="openBuy('{{ r.ticker }}', {{ r.price }}, {{ a.entry_price if a and a.entry_price else 'null' }}, {{ a.stop_loss if a and a.stop_loss else 'null' }})">
             <i class="bi bi-plus-lg"></i> Buy
