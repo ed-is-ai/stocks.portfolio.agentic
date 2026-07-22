@@ -48,6 +48,21 @@ class AlertsRepository:
             conn.execute("DELETE FROM alerts")
             conn.commit()
 
+    def clear_terminal(self) -> None:
+        """Delete rows whose status is no longer 'watching' (#58).
+
+        ``run()`` used to call ``clear()`` unconditionally at the start of
+        every run, which wiped 'watching' rows before the same run's
+        cooldown check and ``check_positions()`` follow-up could read them
+        — so cross-run cooldowns and entry/stop-loss follow-ups never
+        actually fired. Only pruning terminal rows (entered/stopped) keeps
+        the table from growing unbounded while preserving the state both
+        features depend on.
+        """
+        with session(self._connect) as conn:
+            conn.execute("DELETE FROM alerts WHERE status != 'watching'")
+            conn.commit()
+
     def watching(self) -> list[tuple[Any, ...]]:
         """Return (rowid, ticker, entry_price, stop_loss) for watching alerts."""
         with session(self._connect) as conn:

@@ -60,19 +60,13 @@
       {% else %}
         {% set sepa_count = 0 %}
       {% endif %}
-      {% if a %}
-        {% if a.stage == "Stage 2" and a.entry_zone == "approaching" and a.score >= 5 %}
-          {% set rec_key = "alert" %}
-        {% elif a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 %}
-          {% set rec_key = "buy" %}
-        {% else %}
-          {% set rec_key = "other" %}
-        {% endif %}
-      {% else %}
-        {% set rec_key = "other" %}
-      {% endif %}
+      {# Recommendation bucket — precomputed in Python (app.core.recommendation)
+         so the Rec column, filter buttons, and AlertAgent's email triggers
+         all derive from the same thresholds. See #58. #}
+      {% set rec = recommendations[r.ticker] %}
+      {% set alert_state = alert_states[r.ticker] %}
       {% set is_uk = r.ticker.endswith('.L') %}
-      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec_key }}"
+      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec.filter_key }}"
           data-breakout="{{ 'true' if a and a.fresh_breakout else 'false' }}"
           data-myb="{{ 'true' if a and a.multiyear_breakout else 'false' }}"
           data-market="{{ 'uk' if is_uk else 'us' }}">
@@ -94,24 +88,24 @@
         <!-- Recommendation (moved to front so the conclusion reads first) -->
         <td>
           {% if a %}
-            {% if a.stage in ["Stage 3", "Stage 4"] or a.score <= 3 %}
-              {% if r.ticker in portfolio_tickers %}
-                <span class="rec rec-sell">Sell</span>
-              {% else %}
-                <span class="rec rec-avoid">Avoid</span>
-              {% endif %}
-            {% elif a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 and not a.volume_confirmed %}
-              <span class="rec rec-lowvol">Buy · low vol</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "broken_out" and a.score >= 7 %}
-              <span class="rec rec-buy">Buy</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "extended" %}
-              <span class="rec rec-extended">Extended</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "approaching" and a.score >= 5 %}
-              <span class="rec rec-alert">Stay Alert</span>
-            {% elif a.stage == "Stage 2" and a.entry_zone == "getting_close" %}
-              <span class="rec rec-watch">Watch</span>
+            {% if rec.bucket in ("none", "no_analysis") %}
+              <span class="rec-none">{{ rec.text or "No action" }}</span>
             {% else %}
-              <span class="rec-none">No action</span>
+              <span class="rec {{ rec.css_class }}">{{ rec.text }}</span>
+            {% endif %}
+            {% if alert_state.email_eligible %}
+              {% if alert_state.suppressed %}
+                <span class="cell-sub" style="font-size:0.68rem"
+                      title="Already alerted — the same event won't email again until the cooldown clears. This explains why the badge is still showing without a new email.">
+                  <i class="bi bi-envelope-slash"></i> already alerted{% if alert_state.next_eligible_at %},
+                  next eligible {{ alert_state.next_eligible_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}
+                </span>
+              {% else %}
+                <span class="cell-sub" style="font-size:0.68rem"
+                      title="Meets the email-alert criteria and isn't on cooldown — will be included in the next alert run.">
+                  <i class="bi bi-envelope"></i> will email next run
+                </span>
+              {% endif %}
             {% endif %}
           {% endif %}
         </td>

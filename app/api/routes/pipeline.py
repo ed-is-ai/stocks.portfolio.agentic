@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
+    get_alerts_repository,
     get_pipeline_service,
     get_portfolio_service,
     get_trader_service,
@@ -14,6 +15,7 @@ from app.api.dependencies import (
 from app.api.templating import templates
 from app.api.watchlist_context import build_watchlist_context
 from app.core.security import require_local_or_token
+from app.repositories.alerts_repo import AlertsRepository
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
@@ -23,6 +25,7 @@ router = APIRouter()
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
 PipelineDep = Annotated[PipelineService, Depends(get_pipeline_service)]
+AlertsDep = Annotated[AlertsRepository, Depends(get_alerts_repository)]
 
 
 @router.get("/pipeline-status", response_class=HTMLResponse)
@@ -43,6 +46,7 @@ async def refresh_data(
     trader: TraderDep,
     portfolio: PortfolioDep,
     pipeline: PipelineDep,
+    alerts: AlertsDep,
     confirm_missing: bool = Form(False),
 ) -> HTMLResponse:
     """Refresh the analysis dataset by running the pipeline once."""
@@ -66,6 +70,7 @@ async def refresh_data(
         context=build_watchlist_context(
             trader,
             portfolio,
+            alerts,
             refresh_status=refresh_status,
             refresh_success=result.success,
             refresh_details="" if result.success else result.details,

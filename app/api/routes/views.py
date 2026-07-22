@@ -6,10 +6,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
-from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.api.dependencies import (
+    get_alerts_repository,
+    get_portfolio_service,
+    get_trader_service,
+)
 from app.api.templating import templates
 from app.api.watchlist_context import build_watchlist_context
 from app.core.config import PIPELINE_RUNS_CSV
+from app.repositories.alerts_repo import AlertsRepository
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -17,6 +22,7 @@ router = APIRouter()
 
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
+AlertsDep = Annotated[AlertsRepository, Depends(get_alerts_repository)]
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -26,12 +32,12 @@ async def index(request: Request) -> HTMLResponse:
 
 @router.get("/partials/watchlist", response_class=HTMLResponse)
 async def partial_watchlist(
-    request: Request, trader: TraderDep, portfolio: PortfolioDep
+    request: Request, trader: TraderDep, portfolio: PortfolioDep, alerts: AlertsDep
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "_watchlist.html",
-        context=build_watchlist_context(trader, portfolio),
+        context=build_watchlist_context(trader, portfolio, alerts),
     )
 
 

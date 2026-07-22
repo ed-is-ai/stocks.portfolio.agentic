@@ -12,6 +12,7 @@ from starlette.requests import Request
 
 from app.api.app import app
 from app.api.dependencies import (
+    get_alerts_repository,
     get_pipeline_service,
     get_portfolio_service,
     get_trader_service,
@@ -73,15 +74,19 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
     pipeline = MagicMock()
     pipeline.missing_configuration.return_value = []
     pipeline.run_once.return_value = PipelineRunResult(success=True, details="done")
+    alerts = MagicMock()
+    alerts.has_watching.return_value = False
+    alerts.last_alerted_at.return_value = None
 
     initial = await partial_watchlist(
-        _request("/partials/watchlist"), trader, portfolio
+        _request("/partials/watchlist"), trader, portfolio, alerts
     )
     refreshed = await refresh_data(
         _request("/refresh-data", method="POST"),
         trader,
         portfolio,
         pipeline,
+        alerts,
         confirm_missing=False,
     )
 
@@ -118,9 +123,13 @@ def test_watchlist_and_refresh_http_paths_render_canonical_partial(
     pipeline = MagicMock()
     pipeline.missing_configuration.return_value = []
     pipeline.run_once.return_value = PipelineRunResult(success=True, details="done")
+    alerts = MagicMock()
+    alerts.has_watching.return_value = False
+    alerts.last_alerted_at.return_value = None
     app.dependency_overrides[get_trader_service] = lambda: trader
     app.dependency_overrides[get_portfolio_service] = lambda: portfolio
     app.dependency_overrides[get_pipeline_service] = lambda: pipeline
+    app.dependency_overrides[get_alerts_repository] = lambda: alerts
     monkeypatch.setenv("APP_AUTH_TOKEN", "test-token")
 
     try:

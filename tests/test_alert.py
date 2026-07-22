@@ -97,7 +97,16 @@ class TestAlertAgent:
                 assert agent.should_alert(stock) is False
 
     def test_should_alert_boundary_cases(self):
-        """Test that alerts fire on breakout events, not raw score."""
+        """Test that breakout events alert regardless of raw score, and that
+        Stay Alert candidates (Stage 2, approaching, score >= 5) also alert
+        even without a breakout flag.
+
+        Per #58, "Stay Alert" is a deliberate product decision: it should be
+        emailable (at lower priority/frequency — see cooldown_hours in
+        app.core.alerting) so the on-screen "Stay Alert" badge and the
+        inbox agree on what's alert-worthy. This updates the previous
+        expectation that a non-breakout "approaching" stock never alerts.
+        """
         agent = AlertAgent()
 
         scan = StockScan(
@@ -128,9 +137,27 @@ class TestAlertAgent:
             )
             assert agent.should_alert(stock) is True
 
-            # No breakout - should not alert (even with the same score)
+            # No breakout, but Stay Alert eligible (approaching, score >= 5)
+            # - should still alert under the shared classification.
             analysis = StockAnalysis(
                 score=8,
+                stage="Stage 2",
+                entry_zone="approaching",
+                fresh_breakout=False,
+                multiyear_breakout=False,
+                strengths=[],
+                risks=[],
+                summary="Test",
+            )
+            stock = StockRecord.model_validate(
+                {**scan.model_dump(), "analysis": analysis.model_dump()}
+            )
+            assert agent.should_alert(stock) is True
+
+            # No breakout and below the Stay Alert score threshold - should
+            # not alert.
+            analysis = StockAnalysis(
+                score=4,
                 stage="Stage 2",
                 entry_zone="approaching",
                 fresh_breakout=False,

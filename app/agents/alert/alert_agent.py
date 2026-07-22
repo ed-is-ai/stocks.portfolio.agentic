@@ -6,7 +6,7 @@ Reads analysis results and fires alerts for near-entry setups.
 import json
 import os
 import smtplib
-from datetime import date, datetime, timezone
+from datetime import date
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Any, Iterable
@@ -14,6 +14,8 @@ from typing import Any, Iterable
 from pydantic import PrivateAttr
 
 from app.agents.base import Agent
+from app.core.alerting import classify_alert, is_on_cooldown
+from app.core.alerting import BREAKOUT_COOLDOWN_HOURS as ALERT_COOLDOWN_HOURS
 from app.core.config import ALERTS_DB, ANALYSIS_JSON
 from app.schemas import AlertSummary, EmailConfig, Position, StockRecord
 from app.repositories import db
@@ -21,7 +23,6 @@ from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.db import Connect
 
 
-ALERT_COOLDOWN_HOURS = 24
 DB_PATH = str(ALERTS_DB)
 
 
@@ -90,7 +91,7 @@ class AlertAgent(Agent):
     def run(self, payload: Iterable[StockRecord]) -> AlertSummary:
         results = list(payload)
         self._alerts.ensure_schema()
-        self._alerts.clear()
+        self._alerts.clear_terminal()
         self.check_positions(results)
         self._buy_alerts.clear()
 
@@ -113,17 +114,18 @@ class AlertAgent(Agent):
         """Ensure the alerts schema exists (kept for backward compatibility)."""
         self._alerts.ensure_schema()
 
-    def was_recently_alerted(self, ticker: str) -> bool:
+    def was_recently_alerted(
+        self, ticker: str, cooldown_hours: int = ALERT_COOLDOWN_HOURS
+    ) -> bool:
+        """Return True if ``ticker`` is watching or within ``cooldown_hours``.
+
+        ``cooldown_hours`` varies by alert kind (see
+        ``app.core.alerting.classify_alert``) — breakouts use a short
+        cooldown, Stay Alert candidates a much longer one.
+        """
         if self._alerts.has_watching(ticker):
             return True
-        last_alerted = self._alerts.last_alerted_at(ticker)
-        if not last_alerted:
-            return False
-        last = last_alerted[:13]
-        diff = datetime.now(timezone.utc) - datetime.fromisoformat(
-            last + ":00:00+00:00"
-        )
-        return diff.total_seconds() < ALERT_COOLDOWN_HOURS * 3600
+        return is_on_cooldown(self._alerts.last_alerted_at(ticker), cooldown_hours)
 
     def record_alert(self, stock: StockRecord) -> None:
         assert stock.analysis is not None
@@ -137,25 +139,19 @@ class AlertAgent(Agent):
         )
 
     def alert_trigger(self, stock: StockRecord) -> str | None:
-        """Return a trigger label if this stock warrants an immediate alert, else None.
+        """Return a trigger label if this stock warrants an alert, else None.
 
-        Only fires for genuinely actionable breakout events:
-          - fresh_breakout: VCP entry_zone just transitioned to broken_out this run
-          - multiyear_breakout: price cleared a significant multi-year base pivot
+        Delegates to ``app.core.alerting.classify_alert`` — the single
+        source of truth shared with the watchlist UI (#58). Fires for:
+          - fresh_breakout: VCP entry_zone just transitioned to broken_out
+          - multiyear_breakout: price cleared a significant multi-year base
+            pivot
+          - Stay Alert candidates: Stage 2, approaching entry, score >= 5
+            (emailed at lower priority — see ``cooldown_hours``)
         """
         if not stock.analysis:
             return None
-        a = stock.analysis
-        is_fresh = a.fresh_breakout
-        is_myb = a.multiyear_breakout
-        if is_fresh and is_myb:
-            return "VCP + Multi-Year Base Breakout"
-        if is_fresh:
-            return "VCP Breakout"
-        if is_myb:
-            pivot = f"${a.multiyear_pivot:.2f}" if a.multiyear_pivot else ""
-            return f"Multi-Year Base Breakout {pivot}"
-        return None
+        return classify_alert(stock).label
 
     @staticmethod
     def _breakout_narrative(stock: StockRecord) -> dict[str, str]:
@@ -278,9 +274,11 @@ class AlertAgent(Agent):
         }
 
     def should_alert(self, stock: StockRecord) -> bool:
-        if self.alert_trigger(stock) is None:
+        """Return True if ``stock`` is email-eligible and not on cooldown."""
+        classification = classify_alert(stock)
+        if not classification.email_eligible:
             return False
-        if self.was_recently_alerted(stock.ticker):
+        if self.was_recently_alerted(stock.ticker, classification.cooldown_hours):
             print(f"  [skip] {stock.ticker}: already alerted recently")
             return False
         return True
