@@ -362,37 +362,10 @@ def test_watchlist_and_refresh_http_paths_render_canonical_partial(
         assert 'id="refresh-data-button"' not in response.text
 
 
-def test_watchlist_displays_unknown_freshness_when_no_artifact_exists(
+def test_watchlist_no_longer_renders_freshness_or_source_badges(
     tmp_path, monkeypatch
 ) -> None:
-    """No analysis artifact on disk at all -> freshness unknown, no source badges."""
-    import app.api.watchlist_context as context_module
-
-    monkeypatch.setattr(context_module, "ANALYSIS_JSON", tmp_path / "missing.json")
-    monkeypatch.setattr(
-        context_module,
-        "_status_repository",
-        PipelineStatusRepository(tmp_path / "status.json"),
-    )
-    trader = MagicMock()
-    trader.get_portfolio.return_value = []
-    portfolio = MagicMock()
-    portfolio.load_analysis.return_value = []
-    alerts = MagicMock()
-    alerts.has_watching.return_value = False
-    alerts.last_alerted_at.return_value = None
-
-    response = __import__("asyncio").run(
-        partial_watchlist(_request("/partials/watchlist"), trader, portfolio, alerts)
-    )
-
-    assert "Last successful refresh unknown" in response.body.decode()
-
-
-def test_watchlist_shows_freshness_and_source_badges_for_owning_run(
-    tmp_path, monkeypatch
-) -> None:
-    """Freshness/source badges reflect the run that owns the on-disk artifact."""
+    """Freshness/source coverage moved to the bottom status bar (#71)."""
     import app.api.watchlist_context as context_module
 
     analysis_path = tmp_path / "analysis_results.json"
@@ -415,13 +388,6 @@ def test_watchlist_shows_freshness_and_source_badges_for_owning_run(
                 count=0,
                 display_message="No stocks matched.",
             ),
-            SourceName.VCP_FMP: SourceHealth(
-                source=SourceName.VCP_FMP,
-                state=SourceState.SKIPPED,
-                count=0,
-                detail_code="missing_configuration",
-                display_message="FMP API key is not configured.",
-            ),
         },
         expected_run_id="run-a",
     )
@@ -441,57 +407,9 @@ def test_watchlist_shows_freshness_and_source_badges_for_owning_run(
     )
     markup = response.body.decode()
 
-    assert "Last successful refresh" in markup
-    assert 'datetime="' in markup
-    assert "TradingView US" in markup
-    assert "Empty" in markup
-    assert "Skipped" in markup
-
-
-def test_failed_attempt_keeps_prior_refresh_time_and_separate_warning(
-    tmp_path, monkeypatch
-) -> None:
-    """A failed latest attempt must not hide the last usable refresh time."""
-    import app.api.watchlist_context as context_module
-
-    analysis_path = tmp_path / "analysis_results.json"
-    generated_at = datetime.now(timezone.utc) - timedelta(hours=2)
-    analysis_path.write_text(
-        json.dumps(
-            build_analysis_payload([], run_id="usable", generated_at=generated_at)
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(context_module, "ANALYSIS_JSON", analysis_path)
-
-    repo = PipelineStatusRepository(tmp_path / "status.json")
-    repo.start(run_id="usable")
-    repo.finish(
-        PipelineState.COMPLETE, expected_run_id="usable", artifact_produced=True
-    )
-    repo.start(run_id="failed")
-    repo.finish(
-        PipelineState.FAILED,
-        expected_run_id="failed",
-        error_summary="Latest provider request failed.",
-    )
-    monkeypatch.setattr(context_module, "_status_repository", repo)
-
-    trader = MagicMock()
-    trader.get_portfolio.return_value = []
-    portfolio = MagicMock()
-    portfolio.load_analysis.return_value = []
-    alerts = MagicMock()
-    alerts.has_watching.return_value = False
-    alerts.last_alerted_at.return_value = None
-
-    response = __import__("asyncio").run(
-        partial_watchlist(_request("/partials/watchlist"), trader, portfolio, alerts)
-    )
-    markup = response.body.decode()
-
-    assert "Last successful refresh" in markup
-    assert "Latest refresh failed: Latest provider request failed." in markup
+    assert "Last successful refresh" not in markup
+    assert "data-coverage" not in markup
+    assert "TradingView US" not in markup
 
 
 def test_runlog_renders_structured_partial_coverage_and_legacy_fallback(

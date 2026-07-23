@@ -72,6 +72,9 @@ def build_watchlist_context(
     Also precomputes, per ticker, the canonical recommendation bucket and
     the alert cooldown/suppression state (#58) so the template only renders
     fields rather than re-deriving the underlying thresholds in Jinja.
+
+    Freshness and source-health context live on the bottom status bar
+    (`/pipeline-status`, see `app.api.routes.pipeline`) instead of here (#71).
     """
     records = sorted(
         portfolio.load_analysis(), key=actionability_sort_key, reverse=True
@@ -95,8 +98,6 @@ def build_watchlist_context(
         "portfolio_tickers": portfolio_tickers,
         "recommendations": recommendations,
         "alert_states": alert_states,
-        "source_health": list(load_source_health().values()),
-        **build_freshness_context(),
     }
     context.update(updates)
     return context

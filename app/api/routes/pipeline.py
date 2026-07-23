@@ -13,7 +13,11 @@ from app.api.dependencies import (
     get_trader_service,
 )
 from app.api.templating import templates
-from app.api.watchlist_context import build_watchlist_context
+from app.api.watchlist_context import (
+    build_freshness_context,
+    build_watchlist_context,
+    load_source_health,
+)
 from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
 from app.services.pipeline_service import PipelineService
@@ -32,7 +36,13 @@ AlertsDep = Annotated[AlertsRepository, Depends(get_alerts_repository)]
 async def pipeline_status(request: Request) -> HTMLResponse:
     """Render the bottom status bar without blocking a running refresh."""
     return templates.TemplateResponse(
-        request, "_pipeline_status.html", {"status": PipelineService.status()}
+        request,
+        "_pipeline_status.html",
+        {
+            "status": PipelineService.status(),
+            "source_health": list(load_source_health().values()),
+            **build_freshness_context(),
+        },
     )
 
 
