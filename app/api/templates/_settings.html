@@ -1,0 +1,139 @@
+{% macro status_badge(configured) -%}
+{% if configured %}<span class="badge bg-success">Configured</span>{% else %}<span class="badge bg-secondary">Missing</span>{% endif %}
+{%- endmacro %}
+
+<div class="settings-panel">
+  {% if save_status is defined %}
+  <div class="alert alert-{{ 'success' if save_success else 'danger' }} border-0 d-flex align-items-center gap-2 mt-1" role="status">
+    <i class="bi bi-{{ 'check-circle-fill' if save_success else 'exclamation-triangle-fill' }}"></i>
+    <span>{{ save_status }}</span>
+  </div>
+  {% endif %}
+
+  {% if revealed_token is defined %}
+  <div class="alert alert-warning border-0 mt-1" role="alert">
+    <div class="d-flex align-items-center gap-2 mb-1">
+      <i class="bi bi-key-fill"></i>
+      <strong>New access token generated</strong>
+    </div>
+    <p class="small mb-2">Copy it now — it will not be shown again. Any client using the previous token will stop working.</p>
+    <div class="input-group input-group-sm" style="max-width: 32rem;">
+      <input type="text" class="form-control" id="settings-revealed-token" value="{{ revealed_token }}" readonly aria-label="New access token">
+      <button class="btn btn-outline-secondary" type="button" id="settings-copy-token"><i class="bi bi-clipboard"></i> Copy</button>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var btn = document.getElementById('settings-copy-token');
+      var input = document.getElementById('settings-revealed-token');
+      if (!btn || !input || !navigator.clipboard) return;
+      btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(input.value).then(function () {
+          btn.innerHTML = '<i class="bi bi-check2"></i> Copied';
+        });
+      });
+    })();
+  </script>
+  {% endif %}
+
+  <p class="text-muted small">
+    Configure the pipeline's integrations. Existing secret values are never shown here — only whether a key is
+    <strong>Configured</strong> or <strong>Missing</strong>. Leave a field blank to keep its current value unchanged.
+  </p>
+
+  <form hx-post="/settings" hx-target="#tab-content" hx-swap="innerHTML">
+    <div class="settings-section">
+      <h3 class="settings-section-title">Market data</h3>
+      <div class="settings-field">
+        <label class="form-label" for="fmp_api_key">FMP API key {{ status_badge(fields.FMP_API_KEY.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="password" class="form-control" id="fmp_api_key" name="fmp_api_key" autocomplete="new-password" placeholder="{{ 'Leave blank to keep current value' if fields.FMP_API_KEY.configured else 'Not configured' }}">
+          {% if fields.FMP_API_KEY.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "FMP_API_KEY"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured FMP API key? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+      </div>
+      <div class="settings-field">
+        <label class="form-label" for="alpha_vantage_api_key">Alpha Vantage API key {{ status_badge(fields.ALPHA_VANTAGE_API_KEY.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="password" class="form-control" id="alpha_vantage_api_key" name="alpha_vantage_api_key" autocomplete="new-password" placeholder="{{ 'Leave blank to keep current value' if fields.ALPHA_VANTAGE_API_KEY.configured else 'Not configured' }}">
+          {% if fields.ALPHA_VANTAGE_API_KEY.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "ALPHA_VANTAGE_API_KEY"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured Alpha Vantage API key? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <h3 class="settings-section-title">Email alerts</h3>
+      <div class="settings-field">
+        <label class="form-label" for="email_user">Email username {{ status_badge(fields.EMAIL_USER.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="password" class="form-control" id="email_user" name="email_user" autocomplete="new-password" placeholder="{{ 'Leave blank to keep current value' if fields.EMAIL_USER.configured else 'Not configured' }}">
+          {% if fields.EMAIL_USER.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "EMAIL_USER"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured email username? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+      </div>
+      <div class="settings-field">
+        <label class="form-label" for="email_password">Email password {{ status_badge(fields.EMAIL_PASSWORD.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="password" class="form-control" id="email_password" name="email_password" autocomplete="new-password" placeholder="{{ 'Leave blank to keep current value' if fields.EMAIL_PASSWORD.configured else 'Not configured' }}">
+          {% if fields.EMAIL_PASSWORD.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "EMAIL_PASSWORD"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured email password? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+      </div>
+      <div class="settings-field">
+        <label class="form-label" for="email_to">Alert recipient {{ status_badge(fields.EMAIL_TO.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="password" class="form-control" id="email_to" name="email_to" autocomplete="new-password" placeholder="{{ 'Leave blank to keep current value' if fields.EMAIL_TO.configured else 'Not configured' }}">
+          {% if fields.EMAIL_TO.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "EMAIL_TO"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured alert recipient? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+      </div>
+      <div class="settings-field">
+        <label class="form-label" for="email_host">SMTP host {{ status_badge(fields.EMAIL_HOST.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="text" class="form-control" id="email_host" name="email_host" autocomplete="off" value="{{ fields.EMAIL_HOST.value if fields.EMAIL_HOST.configured else '' }}" placeholder="smtp.example.com">
+          {% if fields.EMAIL_HOST.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "EMAIL_HOST"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured SMTP host? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+      </div>
+      <div class="settings-field">
+        <label class="form-label" for="email_port">SMTP port {{ status_badge(fields.EMAIL_PORT.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="text" inputmode="numeric" class="form-control" id="email_port" name="email_port" autocomplete="off" value="{{ fields.EMAIL_PORT.value if fields.EMAIL_PORT.configured else '' }}" placeholder="587">
+          {% if fields.EMAIL_PORT.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "EMAIL_PORT"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured SMTP port? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <button type="submit" class="btn btn-sm btn-primary mt-2"><i class="bi bi-check-lg"></i> Save integration settings</button>
+  </form>
+
+  <div class="settings-section">
+    <h3 class="settings-section-title">Local API access token</h3>
+    <p class="small text-muted">
+      Lets a non-local client call money-mutating endpoints by sending it as an <code>X-Auth-Token</code> header.
+      Without one, only requests from this machine are allowed.
+      {{ status_badge(fields.APP_AUTH_TOKEN.configured) }}
+    </p>
+    <button type="button" class="btn btn-sm btn-outline-primary"
+            hx-post="/settings/token/rotate" hx-target="#tab-content" hx-swap="innerHTML"
+            hx-confirm="{{ 'Rotate the access token? Any client using the current token will stop working.' if fields.APP_AUTH_TOKEN.configured else 'Generate a new access token?' }}">
+      <i class="bi bi-arrow-repeat"></i> {{ 'Rotate token' if fields.APP_AUTH_TOKEN.configured else 'Generate token' }}
+    </button>
+    {% if fields.APP_AUTH_TOKEN.configured %}
+    <button type="button" class="btn btn-sm btn-outline-danger"
+            hx-post="/settings/clear" hx-vals='{"key": "APP_AUTH_TOKEN"}' hx-target="#tab-content" hx-swap="innerHTML"
+            hx-confirm="Clear the access token? Only requests from this machine will be allowed afterwards.">
+      <i class="bi bi-x-lg"></i> Clear token
+    </button>
+    {% endif %}
+  </div>
+</div>

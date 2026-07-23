@@ -10,7 +10,7 @@ Run with:
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import pipeline, portfolio, trades, views
+from app.api.routes import pipeline, portfolio, settings, trades, views
 from app.core.config import STATIC_DIR
 
 
@@ -21,6 +21,7 @@ def create_app() -> FastAPI:
     app.include_router(portfolio.router)
     app.include_router(trades.router)
     app.include_router(pipeline.router)
+    app.include_router(settings.router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app
 

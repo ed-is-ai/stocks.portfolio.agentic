@@ -11,6 +11,7 @@ from functools import lru_cache
 from app.core.config import ALERTS_DB
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
+from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
@@ -46,3 +47,9 @@ def get_portfolio_service() -> PortfolioService:
 def get_pipeline_service() -> PipelineService:
     """Return the shared ``PipelineService`` instance."""
     return PipelineService()
+
+
+@lru_cache
+def get_integration_config_service() -> IntegrationConfigService:
+    """Return the shared ``IntegrationConfigService`` instance."""
+    return IntegrationConfigService()
