@@ -27,6 +27,10 @@ from app.repositories.notifications_repo import (
     NotificationsRepository,
     build_notifications_repository,
 )
+from app.repositories.position_state_repo import (
+    PositionStateRepository,
+    build_position_state_repository,
+)
 
 DB_PATH = str(ALERTS_DB)
 
