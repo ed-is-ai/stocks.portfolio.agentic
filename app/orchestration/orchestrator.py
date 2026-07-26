@@ -58,12 +58,14 @@ from app.core.config import (
     PORTFOLIO_VALUE_CSV,
     SCAN_RESULTS_JSON,
 )
+from app.repositories.notifications_repo import build_notifications_repository
 from app.repositories.pipeline_status_repo import (
     PipelineRunActiveError,
     PipelineRunInactiveError,
     PipelineStatusRepository,
 )
 from app.schemas.analysis_artifact import build_analysis_payload
+from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
 from app.schemas.source_health import (
     SourceHealth,
@@ -167,6 +169,76 @@ def _append_run_log(entry: dict) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow({k: entry.get(k, "") for k in _RUN_LOG_FIELDS})
+
+
+#: How each terminal pipeline state renders as a refresh notification (#80).
+_REFRESH_NOTIFICATION: dict[PipelineState, tuple[str, NotificationSeverity, str]] = {
+    PipelineState.COMPLETE: (
+        "refresh_complete",
+        NotificationSeverity.INFO,
+        "Data refresh complete",
+    ),
+    PipelineState.PARTIAL: (
+        "refresh_partial",
+        NotificationSeverity.WARNING,
+        "Data refresh partially complete",
+    ),
+    PipelineState.FAILED: (
+        "refresh_failed",
+        NotificationSeverity.ERROR,
+        "Data refresh failed",
+    ),
+}
+
+
+def _emit_run_notifications(
+    terminal_state: PipelineState,
+    source_health: dict[SourceName, SourceHealth],
+    *,
+    run_id: str,
+    scanned: int,
+    analysed: int,
+    buy_alerts: int,
+    sell_alerts: int,
+    duration: float,
+) -> None:
+    """Record refresh + source-health notifications for one finished run (#80).
+
+    Best-effort: a notification-store failure must never break the pipeline,
+    so everything here is wrapped. Only genuine source *failures* are surfaced
+    (empty/skipped are routine and already shown in the status bar), keeping
+    the feed signal-rich.
+    """
+    try:
+        repo = build_notifications_repository()
+        mapping = _REFRESH_NOTIFICATION.get(terminal_state)
+        if mapping is not None:
+            event_type, severity, title = mapping
+            repo.record(
+                NotificationCategory.REFRESH,
+                event_type,
+                title,
+                severity=severity,
+                body=(
+                    f"Scanned {scanned}, analysed {analysed}"
+                    f" — {buy_alerts} buy / {sell_alerts} sell"
+                    f" alert(s) in {duration:g}s."
+                ),
+                run_id=run_id,
+            )
+        for health in source_health.values():
+            if health.state is not SourceState.FAILED:
+                continue
+            repo.record(
+                NotificationCategory.SOURCE,
+                "source_failed",
+                f"Source failed — {health.source.label}",
+                severity=NotificationSeverity.ERROR,
+                body=health.display_message or "This data source failed.",
+                run_id=run_id,
+            )
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"[notify] run notification error: {error}")
 
 
 def _cached_extraction_health(
@@ -1031,6 +1103,16 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             ),
         }
         _append_run_log(log_entry)
+        _emit_run_notifications(
+            terminal_state,
+            source_health,
+            run_id=run_id,
+            scanned=scanned,
+            analysed=analysed,
+            buy_alerts=buy_alerts,
+            sell_alerts=sell_alerts,
+            duration=duration,
+        )
         print(
             f"[log] run {log_entry['status'].upper()} | "
             f"{duration}s | scanned={scanned} analysed={analysed} "

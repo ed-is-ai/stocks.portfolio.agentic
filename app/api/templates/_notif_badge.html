@@ -1,0 +1,12 @@
+{#- Unread bell badge. Polls itself so the count stays current; also returned
+    out-of-band (oob=True) whenever the panel re-renders after a read/dismiss. -#}
+<span id="notif-badge"
+      class="notif-badge{{ ' has-unread' if unread_count else '' }}"
+      {% if oob %}hx-swap-oob="true"{% endif %}
+      hx-get="/notifications/count"
+      hx-trigger="every 20s"
+      hx-swap="outerHTML"
+      aria-live="polite"
+      aria-label="{{ unread_count }} unread notifications">
+  {%- if unread_count -%}{{ unread_count if unread_count <= 99 else '99+' }}{%- endif -%}
+</span>

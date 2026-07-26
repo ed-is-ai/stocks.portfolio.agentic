@@ -1,0 +1,49 @@
+{#- Notification-centre dropdown panel. Rendered into #notif-list on open and
+    after every read/dismiss. Carries an out-of-band badge refresh so the bell
+    count updates in lockstep. -#}
+{%- set oob = true -%}
+{% include "_notif_badge.html" %}
+
+<div class="notif-head">
+  <span class="notif-head-title"><i class="bi bi-bell me-1"></i>Notifications</span>
+  {% if unread_count %}
+  <button type="button" class="notif-mark-all"
+          hx-post="/notifications/read-all"
+          hx-target="#notif-list" hx-swap="innerHTML">
+    Mark all read
+  </button>
+  {% endif %}
+</div>
+
+{% if not notifications %}
+<div class="notif-empty">
+  <i class="bi bi-check2-circle"></i>
+  <span>You're all caught up.</span>
+</div>
+{% else %}
+<ul class="notif-list">
+  {% for n in notifications %}
+  <li class="notif-item notif-{{ n.severity.value }}{{ '' if n.is_read else ' unread' }}"
+      hx-post="/notifications/{{ n.id }}/read"
+      hx-target="#notif-list" hx-swap="innerHTML"
+      hx-on::after-request="notifDeepLink('{{ n.deep_link_tab }}')"
+      role="button" tabindex="0">
+    <i class="notif-icon bi {{ n.icon }}"></i>
+    <div class="notif-body">
+      <div class="notif-title">
+        {{ n.title }}
+        {% if n.ticker %}<span class="notif-ticker">{{ n.ticker }}</span>{% endif %}
+      </div>
+      {% if n.body %}<div class="notif-text">{{ n.body }}</div>{% endif %}
+      <div class="notif-meta">{{ n.created_at.strftime('%b %d %H:%M') }} UTC</div>
+    </div>
+    <button type="button" class="notif-dismiss" title="Dismiss"
+            hx-post="/notifications/{{ n.id }}/dismiss"
+            hx-target="#notif-list" hx-swap="innerHTML"
+            onclick="event.stopPropagation()">
+      <i class="bi bi-x"></i>
+    </button>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

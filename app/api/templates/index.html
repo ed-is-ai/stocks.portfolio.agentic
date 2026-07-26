@@ -313,6 +313,24 @@
     <span class="navbar-tag">Portfolio Manager</span>
   </div>
   <div class="d-flex align-items-center gap-2">
+    <!-- Notification centre (#80) -->
+    <div class="nav-bell dropdown">
+      <button id="nav-bell-btn" class="btn btn-sm nav-bell-btn" type="button"
+              data-bs-toggle="dropdown" data-bs-auto-close="outside"
+              aria-expanded="false" title="Notifications"
+              hx-get="/partials/notifications" hx-target="#notif-list"
+              hx-swap="innerHTML" hx-trigger="click">
+        <i class="bi bi-bell"></i>
+        <span id="notif-badge" class="notif-badge"
+              hx-get="/notifications/count" hx-trigger="load, every 20s"
+              hx-swap="outerHTML"></span>
+      </button>
+      <div class="dropdown-menu dropdown-menu-end notif-dropdown p-0">
+        <div id="notif-list">
+          <div class="notif-empty"><span>Loading…</span></div>
+        </div>
+      </div>
+    </div>
     <button id="refresh-data-button" class="btn btn-sm btn-light btn-refresh"
             hx-post="/refresh-data"
             hx-target="#tab-content" hx-swap="innerHTML"
@@ -551,6 +569,18 @@
     document.getElementById('sell-price').value  = price || '';
     document.getElementById('sell-date').value   = new Date().toISOString().slice(0,10);
     new bootstrap.Modal(document.getElementById('sellModal')).show();
+  }
+
+  // Notification centre: mark-read deep-links to the relevant tab, then
+  // closes the bell dropdown (#80).
+  function notifDeepLink(tabId) {
+    const link = document.getElementById(tabId);
+    if (link) { link.click(); }
+    const bell = document.getElementById('nav-bell-btn');
+    if (bell && window.bootstrap) {
+      const dd = bootstrap.Dropdown.getInstance(bell);
+      if (dd) { dd.hide(); }
+    }
   }
 
   // Keep active tab in sync with navigation clicks

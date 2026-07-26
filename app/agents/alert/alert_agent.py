@@ -18,9 +18,14 @@ from app.core.alerting import classify_alert, is_on_cooldown
 from app.core.alerting import BREAKOUT_COOLDOWN_HOURS as ALERT_COOLDOWN_HOURS
 from app.core.config import ALERTS_DB, ANALYSIS_JSON
 from app.schemas import AlertSummary, EmailConfig, Position, StockRecord
+from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.db import Connect
+from app.repositories.notifications_repo import (
+    NotificationsRepository,
+    build_notifications_repository,
+)
 
 
 DB_PATH = str(ALERTS_DB)
@@ -55,14 +60,54 @@ class AlertAgent(Agent):
     _sell_alerts: list[tuple[Position, StockRecord | None]] = PrivateAttr(
         default_factory=list
     )
+    # Watched-setup signals folded into the per-run digest (#81), not emailed
+    # individually. Each tuple is (ticker, current_price, level).
+    _entry_triggered: list[tuple[str, float, float]] = PrivateAttr(default_factory=list)
+    _watched_stops: list[tuple[str, float, float]] = PrivateAttr(default_factory=list)
     _alerts: AlertsRepository = PrivateAttr()
+    _notifications: NotificationsRepository = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
         self._alerts = AlertsRepository(connect)
+        self._notifications = build_notifications_repository()
+
+    def _notify(
+        self,
+        event_type: str,
+        title: str,
+        *,
+        severity: NotificationSeverity = NotificationSeverity.INFO,
+        body: str = "",
+        ticker: str | None = None,
+    ) -> None:
+        """Record an alert notification, never letting it break email flow.
+
+        Watched-setup events are recorded only when the digest is actually
+        dispatched (mirrors "alerts sent"), whereas held-portfolio critical
+        events are recorded unconditionally so they are never lost (#81).
+        """
+        try:
+            self._notifications.record(
+                NotificationCategory.ALERT,
+                event_type,
+                title,
+                severity=severity,
+                body=body,
+                ticker=ticker,
+            )
+        except Exception as error:  # pragma: no cover - defensive
+            print(f"  [notify] error: {error}")
 
     def check_positions(self, stocks: list[StockRecord]) -> None:
-        """Fire follow-up alerts when a watching position crosses entry or stop loss."""
+        """Queue watched-setup entry/stop signals for the per-run digest.
+
+        These watchlist candidates are folded into ``send_summary_email`` (#81)
+        rather than emailed individually. The DB status transitions
+        (``entered``/``stopped``) still fire so rows don't re-alert.
+        """
+        self._entry_triggered.clear()
+        self._watched_stops.clear()
         rows = self._alerts.watching()
         if not rows:
             return
@@ -72,20 +117,18 @@ class AlertAgent(Agent):
             if current is None:
                 continue
             if entry_price is not None and current >= entry_price:
-                msg = (
-                    f"ENTRY TRIGGERED: {ticker} @ ${current:.2f} "
+                print(
+                    f"\nENTRY TRIGGERED: {ticker} @ ${current:.2f} "
                     f"(entry was ${entry_price:.2f})"
                 )
-                print(f"\n{msg}")
-                self.send_email(f"Entry Triggered: {ticker}", f"<p>{msg}</p>", msg)
+                self._entry_triggered.append((ticker, current, entry_price))
                 self._alerts.set_status(rowid, "entered")
             elif stop_loss is not None and current <= stop_loss:
-                msg = (
-                    f"STOP LOSS HIT: {ticker} @ ${current:.2f} "
+                print(
+                    f"\nSTOP LOSS HIT: {ticker} @ ${current:.2f} "
                     f"(stop was ${stop_loss:.2f})"
                 )
-                print(f"\n{msg}")
-                self.send_email(f"Stop Loss Hit: {ticker}", f"<p>{msg}</p>", msg)
+                self._watched_stops.append((ticker, current, stop_loss))
                 self._alerts.set_status(rowid, "stopped")
 
     def run(self, payload: Iterable[StockRecord]) -> AlertSummary:
@@ -791,26 +834,82 @@ class AlertAgent(Agent):
         positions: list[Position],
         stock_map: dict[str, StockRecord],
     ) -> int:
-        """Check all open portfolio positions against their stop loss.
+        """Check held positions for stop-loss hits and profit targets (#81).
 
-        Queues stop-loss alerts into self._sell_alerts for inclusion in the
-        summary email. Returns the count of positions breaching their stop.
+        For each held critical event this sends an *immediate individual* email
+        and queues the position into self._sell_alerts so it also appears in the
+        run digest (the digest stays a complete record). A notification is
+        recorded regardless of whether the email actually sent, so an
+        unconfigured/failed SMTP still leaves an in-app record.
+
+        The held-position path is authoritative for its ticker: a ticker that is
+        also a watched row is de-duplicated in the digest (see
+        ``send_summary_email``). Positions with NULL stop_loss/profit_target are
+        skipped gracefully. Returns the count of held critical events.
         """
         self._sell_alerts.clear()
         for pos in positions:
-            if pos.stop_loss is None or pos.current_price is None:
+            if pos.current_price is None:
                 continue
-            if pos.current_price > pos.stop_loss:
+            hit_stop = pos.stop_loss is not None and pos.current_price <= pos.stop_loss
+            hit_target = (
+                pos.profit_target_20 is not None
+                and pos.current_price >= pos.profit_target_20
+            )
+            if not hit_stop and not hit_target:
                 continue
             stock = stock_map.get(pos.ticker)
-            print(
-                f"\nSTOP LOSS: {pos.ticker} @ ${pos.current_price:.2f} "
-                f"(stop ${pos.stop_loss:.2f})"
-            )
             self._sell_alerts.append((pos, stock))
+            if hit_stop:
+                self._alert_held_stop(pos, stock)
+            else:
+                self._alert_held_target(pos, stock)
 
-        print(f"\n{len(self._sell_alerts)} stop-loss alert(s) queued.")
+        print(f"\n{len(self._sell_alerts)} held critical event(s) queued.")
         return len(self._sell_alerts)
+
+    def _alert_held_stop(self, pos: Position, stock: StockRecord | None) -> None:
+        """Send an immediate stop-loss email for a held position (#81).
+
+        Records the notification unconditionally so the event survives an
+        unconfigured or failed send.
+        """
+        price = pos.current_price or 0.0
+        stop = pos.stop_loss or 0.0
+        print(f"\nHELD STOP LOSS: {pos.ticker} @ ${price:.2f} (stop ${stop:.2f})")
+        n = self._stop_loss_narrative(pos, stock)
+        self.send_email(
+            f"Stop Loss Hit: {pos.ticker}",
+            self._format_stop_loss_html(pos, stock, n),
+            self._format_stop_loss_text(pos, stock, n),
+        )
+        self._notify(
+            "stop_loss_hit",
+            f"Stop loss hit — {pos.ticker}",
+            severity=NotificationSeverity.WARNING,
+            body=f"{pos.ticker} @ ${price:.2f} breached its stop ${stop:.2f}.",
+            ticker=pos.ticker,
+        )
+
+    def _alert_held_target(self, pos: Position, stock: StockRecord | None) -> None:
+        """Send an immediate profit-target email for a held position (#81).
+
+        Records the notification unconditionally so the event survives an
+        unconfigured or failed send.
+        """
+        price = pos.current_price or 0.0
+        target = pos.profit_target_20 or 0.0
+        msg = (
+            f"PROFIT TARGET REACHED: {pos.ticker} @ ${price:.2f} (target ${target:.2f})"
+        )
+        print(f"\n{msg}")
+        self.send_email(f"Profit Target Reached: {pos.ticker}", f"<p>{msg}</p>", msg)
+        self._notify(
+            "profit_target",
+            f"Profit target reached — {pos.ticker}",
+            body=msg,
+            ticker=pos.ticker,
+        )
 
     @staticmethod
     def _currency_symbol(currency: str) -> str:
@@ -834,8 +933,18 @@ class AlertAgent(Agent):
         all-GBP portfolio).
         """
         today = date.today().isoformat()
+        # Held positions are authoritative for their ticker: drop any watched
+        # stop that duplicates a held sell so the digest shows one SELL entry.
+        held_tickers = {pos.ticker for pos, _ in self._sell_alerts}
+        watched_stops = [
+            row for row in self._watched_stops if row[0] not in held_tickers
+        ]
+        entry_triggered = [
+            row for row in self._entry_triggered if row[0] not in held_tickers
+        ]
         sell_count = len(self._sell_alerts)
         buy_count = len(self._buy_alerts)
+        watched_count = len(entry_triggered) + len(watched_stops)
 
         if sell_count or buy_count:
             subject = f"Stock Alerts {today} — " + (
@@ -843,6 +952,8 @@ class AlertAgent(Agent):
                 if sell_count
                 else f"{buy_count} BUY"
             )
+        elif watched_count:
+            subject = f"Stock Alerts {today} — {watched_count} watchlist signal(s)"
         else:
             subject = f"Stock Scanner {today} — No alerts"
 
@@ -882,6 +993,18 @@ class AlertAgent(Agent):
                 text_parts.append(self._format_stop_loss_text(pos, stock, n))
                 text_parts.append("\n" + "-" * 40)
 
+        if entry_triggered:
+            text_parts.append("\n\n*** WATCHLIST ENTRIES TRIGGERED ***\n")
+            for ticker, current, entry in entry_triggered:
+                text_parts.append(
+                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}"
+                )
+
+        if watched_stops:
+            text_parts.append("\n\n*** WATCHLIST STOP LOSSES ***\n")
+            for ticker, current, stop in watched_stops:
+                text_parts.append(f"  {ticker}: ${current:.2f} hit stop ${stop:.2f}")
+
         def _conviction_rank(item: tuple[StockRecord, str]) -> int:
             verdict = self._breakout_narrative(item[0])["verdict"]
             if "HIGH CONVICTION" in verdict:
@@ -904,7 +1027,7 @@ class AlertAgent(Agent):
                 text_parts.append(self.format_alert_text(stock, trigger))
                 text_parts.append("\n" + "-" * 40)
 
-        if not self._sell_alerts and not self._buy_alerts:
+        if not self._sell_alerts and not self._buy_alerts and not watched_count:
             text_parts.append("\n\nNo actionable alerts this run.")
 
         text_body = "\n".join(text_parts)
@@ -976,6 +1099,28 @@ class AlertAgent(Agent):
                 html_parts.append(self._sell_card_html(pos, stock, n))
             html_parts.append("</div>")
 
+        if entry_triggered:
+            html_parts.append(
+                '<div style="margin:20px 0">'
+                '<h3 style="color:#27ae60;margin-bottom:12px">'
+                "&#9889; WATCHLIST ENTRIES TRIGGERED</h3>"
+            )
+            for ticker, current, entry in entry_triggered:
+                html_parts.append(self._watched_row_html(ticker, current, entry))
+            html_parts.append("</div>")
+
+        if watched_stops:
+            html_parts.append(
+                '<div style="margin:20px 0">'
+                '<h3 style="color:#c0392b;margin-bottom:12px">'
+                "&#9888; WATCHLIST STOP LOSSES</h3>"
+            )
+            for ticker, current, stop in watched_stops:
+                html_parts.append(
+                    self._watched_row_html(ticker, current, stop, stop=True)
+                )
+            html_parts.append("</div>")
+
         if strong_buys:
             html_parts.append(
                 '<div style="margin:20px 0">'
@@ -992,7 +1137,7 @@ class AlertAgent(Agent):
                 f"{low_conviction_count} low-conviction breakout(s) suppressed.</p>"
             )
 
-        if not self._sell_alerts and not strong_buys:
+        if not self._sell_alerts and not strong_buys and not watched_count:
             html_parts.append(
                 '<p style="color:#64748b;font-style:italic">No actionable alerts this run.</p>'
             )
@@ -1003,11 +1148,56 @@ class AlertAgent(Agent):
         )
         html_body = "\n".join(html_parts)
 
-        self.send_email(subject, html_body, text_body)
+        if not self.send_email(subject, html_body, text_body):
+            return
+        # Digest actually went out: mirror the watched-setup signals it carried
+        # into the notification centre (#80/#81). Held critical events are
+        # already recorded unconditionally in check_portfolio_stops, so they are
+        # not re-notified here.
+        for ticker, current, entry in entry_triggered:
+            self._notify(
+                "entry_triggered",
+                f"Entry triggered — {ticker}",
+                body=f"{ticker} @ ${current:.2f} crossed entry ${entry:.2f}.",
+                ticker=ticker,
+            )
+        for ticker, current, stop in watched_stops:
+            self._notify(
+                "stop_loss_hit",
+                f"Stop loss hit — {ticker}",
+                severity=NotificationSeverity.WARNING,
+                body=f"{ticker} @ ${current:.2f} hit stop ${stop:.2f}.",
+                ticker=ticker,
+            )
+        for stock, trigger in strong_buys:
+            self._notify(
+                "breakout",
+                f"{trigger} — {stock.ticker}",
+                body=f"{stock.ticker} qualified as a buy ({trigger}).",
+                ticker=stock.ticker,
+            )
 
     @staticmethod
     def _yahoo_url(ticker: str) -> str:
         return f"https://finance.yahoo.com/quote/{ticker.replace('.', '-')}"
+
+    def _watched_row_html(
+        self, ticker: str, current: float, level: float, stop: bool = False
+    ) -> str:
+        """Compact HTML row for one watched-setup entry/stop signal (#81)."""
+        color = "#c0392b" if stop else "#27ae60"
+        label = "hit stop" if stop else "crossed entry"
+        bg = "#fff8f8" if stop else "#f8fff9"
+        border = "#f5c6cb" if stop else "#c3e6cb"
+        url = self._yahoo_url(ticker)
+        return (
+            f'<div style="border:1px solid {border};border-radius:6px;'
+            f'padding:10px 14px;margin-bottom:10px;background:{bg}">'
+            f'<a href="{url}" style="color:{color};text-decoration:none;'
+            f'font-weight:700" target="_blank">{ticker}</a>'
+            f'<span style="color:#555;font-size:0.88em;margin-left:8px">'
+            f"${current:.2f} {label} ${level:.2f}</span></div>"
+        )
 
     def _sell_card_html(
         self, pos: Position, stock: StockRecord | None, n: dict[str, str]
@@ -1130,14 +1320,19 @@ class AlertAgent(Agent):
           {self._svg_chart(stock.price_history, score_color)}
         </div>"""
 
-    def send_email(self, subject: str, html_body: str, text_body: str) -> None:
+    def send_email(self, subject: str, html_body: str, text_body: str) -> bool:
+        """Send one email; return True only if it was actually dispatched.
+
+        Returns False when SMTP is unconfigured or the send raises, so callers
+        can record "alerts sent" notifications (#80) that mirror reality.
+        """
         if (
             not self.email_config.user
             or not self.email_config.password
             or not self.email_config.recipient
         ):
             print("  [email] (not configured)")
-            return
+            return False
 
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
@@ -1156,8 +1351,10 @@ class AlertAgent(Agent):
                     msg.as_string(),
                 )
             print(f"  [email] sent to {self.email_config.recipient}")
+            return True
         except Exception as error:
             print(f"  [email] error: {error}")
+            return False
 
 
 if __name__ == "__main__":

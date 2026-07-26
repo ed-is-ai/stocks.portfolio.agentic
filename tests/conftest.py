@@ -8,6 +8,19 @@ import pandas as pd
 from app.schemas import StockRecord, StockAnalysis, StockScan
 
 
+@pytest.fixture(autouse=True)
+def isolate_notifications_db(tmp_path, monkeypatch):
+    """Point the notification store at a temp file for every test (#80).
+
+    ``AlertAgent`` and the orchestrator build the notifications repository on
+    construction/finish, so without this any test exercising them would write
+    to the real ``notifications.db``.
+    """
+    monkeypatch.setattr(
+        "app.core.config.NOTIFICATIONS_DB", tmp_path / "notifications.db"
+    )
+
+
 @pytest.fixture
 def sample_stock_data():
     """Sample stock data for testing (needs DatetimeIndex for resample)."""
