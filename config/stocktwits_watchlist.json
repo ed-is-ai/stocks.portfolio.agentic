@@ -1,22 +1,22 @@
 {
-  "_comment": "Update quarterly from https://thedailyrip.stocktwits.com/. Next refresh due: 2026-08-10",
+  "_comment": "Update quarterly from https://thedailyrip.stocktwits.com/. Next refresh due: 2026-10-26",
   "source": "StockTwits Daily Rip - Top 25 Momentum",
-  "last_updated": "2026-05-10",
+  "last_updated": "2026-07-26",
   "refresh_cadence": "quarterly",
   "description": "Curated top 25 momentum stocks from StockTwits for S&P 500, NASDAQ 100, and Russell 2000 indices. Updated quarterly by manually checking https://thedailyrip.stocktwits.com/",
   "indices": {
     "sp500": {
       "tickers": [
-        "SNDK", "INTC", "STX", "WDC", "MU", "LITE", "GDRX", "OLW", "AMD",
-        "VRT", "FIX", "DRI", "GNRC", "ON", "TER", "MRNA", "COHR", "O",
-        "KEYS", "MPWR", "PWR", "DVA", "LRCX", "AMAT", "ASML"
+        "SNDK", "DELL", "MU", "STX", "WDC", "INTC", "AMD", "MRVL", "AMAT",
+        "DVA", "LITE", "HPE", "FTNT", "MPC", "VLO", "FIX", "MRNA", "DDOG",
+        "TER", "VRT", "LRCX", "PANW", "GLW", "CIEN", "Q"
       ]
     },
     "nasdaq100": {
       "tickers": [
-        "SNDK", "INTC", "STX", "WDC", "MU", "AMD", "MRVL", "ARM", "MPWR",
-        "LRCX", "AMAT", "TSM", "MCHP", "KLAC", "ADI", "ASML", "DDOC",
-        "FTNT", "BKR", "MSFT", "QCOM", "GOOGL", "GOOG", "ODFL", "FANG"
+        "SNDK", "MU", "STX", "WDC", "INTC", "AMD", "ARM", "MRVL", "NBIS",
+        "AMAT", "LITE", "FTNT", "DDOG", "TER", "LRCX", "PANW", "ALAB",
+        "ASML", "TXN", "ODFL", "CSCO", "MPWR", "CSX", "ADI", "FANG"
       ]
     },
     "russell2000": {
