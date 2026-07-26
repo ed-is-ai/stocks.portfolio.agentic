@@ -8,6 +8,8 @@ from unittest.mock import patch, MagicMock
 from app.agents.analyst.analyst_agent import (
     FOUNDRY_BASE_URL,
     AnalystAgent,
+    _congress_bias,
+    _congress_net,
     _sepa_assessment,
     _select_multiyear_breakout,
     recommendation,
@@ -512,3 +514,61 @@ class TestPrefetchPivots:
         agent = AnalystAgent()
         result = agent._prefetch_pivots([])
         assert result == {}
+
+
+class TestCongressSignal:
+    """Congressional trading feeds net counts and a small score nudge (#78)."""
+
+    def test_net_none_when_no_data(self):
+        """No congressional data at all yields a None net (not zero)."""
+        assert _congress_net(_make_scan()) is None
+
+    def test_net_uses_combined_totals(self):
+        """Net is congress_buys − congress_sells (Senate is a subset, ignored)."""
+        rec = _make_scan(congress_buys=5, congress_sells=2, senate_buys=3)
+        assert _congress_net(rec) == 3
+
+    def test_net_treats_missing_side_as_zero(self):
+        """A present buy count with no sell count still produces a net."""
+        assert _congress_net(_make_scan(congress_buys=4)) == 4
+
+    def test_bias_positive_on_net_buying(self):
+        """Net buying at/above the threshold nudges the score up by one."""
+        assert _congress_bias(_make_scan(congress_buys=3, congress_sells=0)) == 1
+
+    def test_bias_negative_on_net_selling(self):
+        """Net selling at/beyond the threshold nudges the score down by one."""
+        assert _congress_bias(_make_scan(congress_buys=1, congress_sells=13)) == -1
+
+    def test_bias_neutral_when_balanced(self):
+        """Balanced or light activity is not a signal."""
+        assert _congress_bias(_make_scan(congress_buys=2, congress_sells=1)) == 0
+
+    def test_bias_neutral_when_no_data(self):
+        """Missing data never moves the score."""
+        assert _congress_bias(_make_scan()) == 0
+
+    def test_score_reflects_congress_bias(self):
+        """Two identical stocks differ by the congressional net-buying nudge."""
+        agent = AnalystAgent()
+        base = dict(
+            price=100.0,
+            sma10=95.0,
+            sma30=90.0,
+            sma50=85.0,
+            sma150=75.0,
+            sma200=70.0,
+            rsi14=70.0,
+            rel_volume=1.2,
+            pct_from_52w_high=-5.0,
+            pct_change_week=3.0,
+        )
+        neutral = agent.rule_based_score(_make_scan(**base))
+        buying = agent.rule_based_score(
+            _make_scan(**base, congress_buys=8, congress_sells=0)
+        )
+        # The nudge can be clamped at the 1..10 ceiling, so assert it never hurts
+        # and lifts the score whenever there's headroom.
+        assert buying.score >= neutral.score
+        if neutral.score < 10:
+            assert buying.score == neutral.score + 1

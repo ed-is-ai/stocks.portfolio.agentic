@@ -74,6 +74,10 @@ def _sample_records() -> list[StockRecord]:
         pct_from_52w_high=-18.0,
         pct_change_week=2.0,
         sector="Technology",
+        congress_buys=3,
+        congress_sells=13,
+        senate_buys=1,
+        senate_sells=4,
         analysis=analysis,
     )
     without_analysis = StockRecord(
@@ -138,6 +142,7 @@ SORTABLE_COLUMNS = (
     "targets",
     "rsi",
     "sepa",
+    "congress",
 )
 
 
@@ -170,6 +175,20 @@ def test_watchlist_missing_values_render_empty_data_val() -> None:
     # cells sort last and are excluded from active range filters.
     assert 'data-col="score" data-val=""' in html
     assert 'data-col="canslim" data-val=""' in html
+
+
+def test_watchlist_congress_column_renders_net_and_tooltip() -> None:
+    html = _render_watchlist()
+    # Net = combined buys − sells (3 − 13 = -10); Senate counts appear in the tip.
+    assert 'data-col="congress" data-val="-10"' in html
+    assert "Congress: 3 buys / 13 sells" in html
+    assert "Senate: 1 buys / 4 sells" in html
+
+
+def test_watchlist_congress_empty_when_no_data() -> None:
+    html = _render_watchlist()
+    # The analysis-less TSLA row has no congressional data → empty, sorts last.
+    assert 'data-col="congress" data-val=""' in html
 
 
 def test_watchlist_toolbar_exposes_search_and_control_mount() -> None:

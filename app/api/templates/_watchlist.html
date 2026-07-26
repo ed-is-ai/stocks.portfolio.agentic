@@ -68,6 +68,7 @@
         <th class="wl-col wl-col-targets" data-col="targets" title="1R/2R price targets &amp; reward:risk ratio"><button class="wl-sort" data-col="targets" type="button">Targets<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-rsi" data-col="rsi"><button class="wl-sort" data-col="rsi" type="button">RSI<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-sepa" data-col="sepa" title="Minervini SEPA trend template (8 conditions)"><button class="wl-sort" data-col="sepa" type="button">SEPA<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-congress" data-col="congress" title="Net congressional trades (buys − sells, trailing 12 months). ±3 net nudges the score."><button class="wl-sort" data-col="congress" type="button">Congress<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-buy" data-col="buy"></th>
       </tr>
     </thead>
@@ -90,6 +91,10 @@
       {% set vsstop_val = ((r.price - a.stop_loss) / r.price * 100) if a and a.stop_loss and r.price else '' %}
       {% set risk_val = ((a.entry_price - a.stop_loss) / a.entry_price * 100) if a and a.entry_price and a.stop_loss else '' %}
       {% set targets_val = a.reward_risk_ratio if a and a.reward_risk_ratio else '' %}
+      {# Net congressional trades (buys − sells, trailing 12mo). Uses the
+         chamber-combined totals; Senate counts are a subset shown in the tooltip. #}
+      {% set has_congress = r.congress_buys is not none or r.congress_sells is not none %}
+      {% set congress_net = (r.congress_buys or 0) - (r.congress_sells or 0) if has_congress else none %}
       {# Recommendation bucket — precomputed in Python (app.core.recommendation)
          so the Rec column, filter buttons, and AlertAgent's email triggers
          all derive from the same thresholds. See #58. #}
@@ -279,6 +284,21 @@
                 ~ " | P>SMA50:" ~ ("✓" if t.above_sma50 else "✗") %}
             <span class="sc {% if sepa_count == 8 %}sc-hi{% elif sepa_count >= 6 %}sc-mid{% else %}sc-lo{% endif %}"
                   title="{{ sepa_tip }}" style="cursor:help; min-width:2.2rem">{{ sepa_count }}/8</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Congressional trading -->
+        <td class="wl-col wl-col-congress" data-col="congress" data-val="{{ congress_net if congress_net is not none else '' }}">
+          {% if congress_net is not none %}
+            {% set c_tip = "Congress: " ~ (r.congress_buys or 0) ~ " buys / " ~ (r.congress_sells or 0) ~ " sells (12mo)"
+                ~ " | Senate: " ~ (r.senate_buys or 0) ~ " buys / " ~ (r.senate_sells or 0) ~ " sells" %}
+            <span class="cong {% if congress_net > 0 %}pos{% elif congress_net < 0 %}neg{% else %}text-muted{% endif %}"
+                  title="{{ c_tip }}" style="cursor:help; white-space:nowrap; font-size:0.76rem">
+              <i class="bi bi-bank" aria-hidden="true"></i>
+              {{ '+' if congress_net > 0 else '' }}{{ congress_net }}
+            </span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}

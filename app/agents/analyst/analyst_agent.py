@@ -355,6 +355,41 @@ def _execution_state_to_entry_zone(state: str) -> str:
     return _map.get(state, "far")
 
 
+#: Net congressional transactions (buys minus sells, trailing 12 months) at or
+#: beyond which the rule-based score is nudged by a point. Set high enough that a
+#: couple of stray filings don't move the score, but a clear tilt does.
+_CONGRESS_BIAS_THRESHOLD = 3
+
+
+def _congress_net(stock: StockRecord) -> int | None:
+    """Net congressional transactions (buys minus sells) over 12 months.
+
+    Uses the chamber-combined totals (``congress_buys``/``congress_sells``); the
+    Senate-only counts are a subset and would double-count. Returns None when
+    neither count is available (no congressional data fetched for the ticker).
+    """
+    buys = stock.congress_buys
+    sells = stock.congress_sells
+    if buys is None and sells is None:
+        return None
+    return (buys or 0) - (sells or 0)
+
+
+def _congress_bias(stock: StockRecord) -> int:
+    """Score nudge from congressional trading: +1 net buying, -1 net selling.
+
+    Returns 0 when there's no data or activity is too balanced to be a signal.
+    """
+    net = _congress_net(stock)
+    if net is None:
+        return 0
+    if net >= _CONGRESS_BIAS_THRESHOLD:
+        return 1
+    if net <= -_CONGRESS_BIAS_THRESHOLD:
+        return -1
+    return 0
+
+
 def _compute_vcp_stop(
     entry_price: float,
     handle_low: float | None,
@@ -772,7 +807,14 @@ class AnalystAgent(Agent):
             0.5 * (canslim.total / 14 * 10) + 0.5 * (momentum.total / 14 * 10)
         )
         vcp_bonus = 1 if (vcp_valid and vol_dry_up) else 0
-        score = max(1, min(10, base_score + vcp_bonus))
+        congress_bias = _congress_bias(stock)
+        if congress_bias > 0:
+            net = _congress_net(stock)
+            strengths.append(f"Congress net buying (+{net} txns, 12mo)")
+        elif congress_bias < 0:
+            net = _congress_net(stock)
+            risks.append(f"Congress net selling ({net} txns, 12mo)")
+        score = max(1, min(10, base_score + vcp_bonus + congress_bias))
 
         # Entry price from VCP pivot; stop from pivot proximity calculator
         pivot = vcp["vcp"].get("pivot_price") if vcp else None

@@ -17,6 +17,7 @@
     { col: 'risk', label: 'Risk %', min: 0, max: 100 },
     { col: 'vsentry', label: 'vs Entry %', min: -50, max: 50 },
     { col: 'sepa', label: 'SEPA', min: 0, max: 8 },
+    { col: 'congress', label: 'Congress net', min: -20, max: 20 },
   ];
 
   // Every column in table order. `locked` columns can never be hidden.
@@ -37,6 +38,7 @@
     { col: 'targets', label: 'Targets' },
     { col: 'rsi', label: 'RSI' },
     { col: 'sepa', label: 'SEPA' },
+    { col: 'congress', label: 'Congress' },
     { col: 'buy', label: 'Action', locked: true },
   ];
 
