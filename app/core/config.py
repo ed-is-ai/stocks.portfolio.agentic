@@ -16,10 +16,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 # Each agent's data lives alongside its code under app/agents/<name>/.
 TRADES_DB = ROOT_DIR / "app" / "agents" / "trader" / "trades.db"
 ALERTS_DB = ROOT_DIR / "app" / "agents" / "alert" / "alerts.db"
-# In-app notification centre store (#80). Co-located with the alert agent,
-# which is the primary writer, though the orchestrator writes refresh/source
-# events too.
 NOTIFICATIONS_DB = ROOT_DIR / "app" / "agents" / "alert" / "notifications.db"
+POSITION_STATE_DB = ROOT_DIR / "app" / "agents" / "alert" / "position_state.db"
 RESULTS_DB = ROOT_DIR / "app" / "agents" / "analyst" / "results.db"
 CONGRESS_CACHE_DB = ROOT_DIR / "app" / "agents" / "scanner" / "congress_cache.db"
 
@@ -42,6 +40,9 @@ PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"
 PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "3600"))
 PIPELINE_STALE_GRACE_SECONDS = int(os.getenv("PIPELINE_STALE_GRACE_SECONDS", "60"))
 DEFAULT_PIPELINE_STALE_AFTER_HOURS = 24.0
+# Portfolio-wide trailing-stop threshold: a held position that falls this
+# fraction from its high-water-mark triggers a large-adverse-move alert (#82).
+DEFAULT_TRAILING_STOP_PCT = 0.15
 
 # --- Web / static assets ---------------------------------------------------
 TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
@@ -92,3 +93,21 @@ def pipeline_stale_after_hours() -> float:
     except ValueError:
         return DEFAULT_PIPELINE_STALE_AFTER_HOURS
     return value if value > 0 else DEFAULT_PIPELINE_STALE_AFTER_HOURS
+
+
+def trailing_stop_pct() -> float | None:
+    """Return the portfolio-wide trailing-stop fraction, or None if disabled.
+
+    Unset falls back to ``DEFAULT_TRAILING_STOP_PCT``. A non-numeric or
+    out-of-range value (outside the open interval ``0 < pct < 1``) returns
+    None so callers skip trailing-stop detection gracefully rather than
+    firing false alerts.
+    """
+    raw = os.getenv("TRAILING_STOP_PCT")
+    if raw is None:
+        return DEFAULT_TRAILING_STOP_PCT
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if 0 < value < 1 else None

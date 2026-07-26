@@ -942,6 +942,10 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             _append_portfolio_snapshot(pf_value, pf_cost)
 
         sell_alerts = alerter.check_portfolio_stops(positions, stock_map)
+        # Trailing-stop detection runs after the hard-stop check so a ticker
+        # already alerting this run is skipped (no duplicate email/digest), and
+        # updates the persistent high-water-mark per held position (#82).
+        sell_alerts += alerter.check_trailing_stops(positions)
         buy_alerts = alert_summary.buy_count
         status_repo.update_counts(
             actionable=buy_alerts + sell_alerts,

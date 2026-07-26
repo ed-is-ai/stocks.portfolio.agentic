@@ -16,6 +16,7 @@ from pydantic import PrivateAttr
 from app.agents.base import Agent
 from app.core.alerting import classify_alert, is_on_cooldown
 from app.core.alerting import BREAKOUT_COOLDOWN_HOURS as ALERT_COOLDOWN_HOURS
+from app.core import config
 from app.core.config import ALERTS_DB, ANALYSIS_JSON
 from app.schemas import AlertSummary, EmailConfig, Position, StockRecord
 from app.schemas.notification import NotificationCategory, NotificationSeverity
@@ -26,7 +27,6 @@ from app.repositories.notifications_repo import (
     NotificationsRepository,
     build_notifications_repository,
 )
-
 
 DB_PATH = str(ALERTS_DB)
 
@@ -66,11 +66,13 @@ class AlertAgent(Agent):
     _watched_stops: list[tuple[str, float, float]] = PrivateAttr(default_factory=list)
     _alerts: AlertsRepository = PrivateAttr()
     _notifications: NotificationsRepository = PrivateAttr()
+    _position_state: PositionStateRepository = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
         self._alerts = AlertsRepository(connect)
         self._notifications = build_notifications_repository()
+        self._position_state = build_position_state_repository()
 
     def _notify(
         self,
@@ -907,6 +909,92 @@ class AlertAgent(Agent):
         self._notify(
             "profit_target",
             f"Profit target reached — {pos.ticker}",
+            body=msg,
+            ticker=pos.ticker,
+        )
+
+    def check_trailing_stops(
+        self,
+        positions: list[Position],
+        trailing_stop_pct: float | None = None,
+    ) -> int:
+        """Detect large adverse moves from each held position's peak (#82).
+
+        Maintains a persistent high-water-mark (the highest price seen since
+        entry) per held position and, once per run, fires when a position has
+        fallen ``trailing_stop_pct`` from that peak:
+        ``current_price <= high_water_mark * (1 - trailing_stop_pct)``. Each
+        trigger sends an immediate individual email, queues the position into
+        ``self._sell_alerts`` so it also appears in the run digest, and records
+        an in-app notification unconditionally (mirrors the #81 held path).
+
+        ``trailing_stop_pct`` defaults to ``config.trailing_stop_pct()``. When
+        it is unset/invalid the peak is still updated (so state stays warm) but
+        no trigger is evaluated. The HWM is seeded from ``entry_price`` when
+        present, else from the first observed ``current_price`` (SIPP-imported
+        positions have ``entry_price = None``).
+
+        Must run *after* ``check_portfolio_stops`` in the same run: a ticker
+        already queued in ``self._sell_alerts`` (a hard stop-loss or profit
+        target this run) is skipped here, so one ticker never yields two emails
+        or two digest entries in a single run. Returns the trailing-trigger
+        count.
+        """
+        pct = (
+            trailing_stop_pct
+            if trailing_stop_pct is not None
+            else config.trailing_stop_pct()
+        )
+        valid_pct = pct is not None and 0 < pct < 1
+        already_alerted = {pos.ticker for pos, _ in self._sell_alerts}
+        triggered = 0
+        for pos in positions:
+            if pos.current_price is None:
+                continue
+            price = pos.current_price
+            existing = self._position_state.get_hwm(pos.ticker)
+            if existing is None and pos.entry_price is not None:
+                self._position_state.record_high(pos.ticker, pos.entry_price)
+            hwm = self._position_state.record_high(pos.ticker, price)
+            if not valid_pct or pos.ticker in already_alerted:
+                continue
+            assert pct is not None  # narrowed by valid_pct
+            if price <= hwm * (1 - pct):
+                self._sell_alerts.append((pos, None))
+                self._alert_trailing_stop(pos, hwm, pct)
+                already_alerted.add(pos.ticker)
+                triggered += 1
+        print(f"\n{triggered} trailing-stop trigger(s) queued.")
+        return triggered
+
+    def _alert_trailing_stop(
+        self,
+        pos: Position,
+        hwm: float,
+        pct: float,
+    ) -> None:
+        """Send an immediate trailing-stop email for a held position (#82).
+
+        Records the notification unconditionally so the event survives an
+        unconfigured or failed send.
+        """
+        price = pos.current_price or 0.0
+        drop_pct = (hwm - price) / hwm * 100 if hwm else 0.0
+        msg = (
+            f"TRAILING STOP: {pos.ticker} @ ${price:.2f} is "
+            f"{drop_pct:.1f}% below its peak ${hwm:.2f} "
+            f"(threshold {pct * 100:.0f}%)"
+        )
+        print(f"\n{msg}")
+        self.send_email(
+            f"Trailing Stop: {pos.ticker}",
+            f"<p>{msg}</p>",
+            msg,
+        )
+        self._notify(
+            "trailing_stop",
+            f"Trailing stop — {pos.ticker}",
+            severity=NotificationSeverity.WARNING,
             body=msg,
             ticker=pos.ticker,
         )

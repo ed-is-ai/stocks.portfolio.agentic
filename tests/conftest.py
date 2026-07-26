@@ -19,6 +19,9 @@ def isolate_notifications_db(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.core.config.NOTIFICATIONS_DB", tmp_path / "notifications.db"
     )
+    monkeypatch.setattr(
+        "app.core.config.POSITION_STATE_DB", tmp_path / "position_state.db"
+    )
 
 
 @pytest.fixture
