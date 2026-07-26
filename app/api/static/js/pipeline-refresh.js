@@ -1,11 +1,18 @@
-// One global refresh binding controls the sole top-level Refresh Data button.
+// One global refresh binding controls the top-level refresh buttons — the
+// fast cached "Refresh Data" and the slower "Refresh Institutional Data".
 (function () {
-  const refreshButton = document.getElementById('refresh-data-button');
-  if (!refreshButton) return;
+  const refreshButtons = [
+    document.getElementById('refresh-data-button'),
+    document.getElementById('refresh-institutional-button'),
+  ].filter(Boolean);
+  if (!refreshButtons.length) return;
 
   function setRunning(running) {
-    refreshButton.disabled = running;
-    refreshButton.classList.toggle('loading', running);
+    // A run started from either button blocks both — only one pipeline runs.
+    for (const button of refreshButtons) {
+      button.disabled = running;
+      button.classList.toggle('loading', running);
+    }
   }
 
   document.body.addEventListener('htmx:beforeRequest', (event) => {
@@ -22,11 +29,11 @@
         });
       }, 250);
     }
-    if (event.detail.elt === refreshButton) setRunning(true);
+    if (refreshButtons.includes(event.detail.elt)) setRunning(true);
   });
 
   document.body.addEventListener('htmx:afterRequest', (event) => {
-    if (event.detail.elt === refreshButton) setRunning(false);
+    if (refreshButtons.includes(event.detail.elt)) setRunning(false);
   });
 
   document.body.addEventListener('htmx:afterSwap', (event) => {
@@ -36,6 +43,6 @@
   });
 
   document.body.addEventListener('htmx:responseError', (event) => {
-    if (event.detail.elt === refreshButton) setRunning(false);
+    if (refreshButtons.includes(event.detail.elt)) setRunning(false);
   });
 })();

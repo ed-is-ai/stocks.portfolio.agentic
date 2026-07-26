@@ -337,6 +337,14 @@
             hx-indicator="#spinner">
       <i class="bi bi-arrow-clockwise"></i> Refresh Data
     </button>
+    <button id="refresh-institutional-button" class="btn btn-sm btn-light btn-refresh"
+            hx-post="/refresh-data"
+            hx-vals='{"extract": true}'
+            hx-target="#tab-content" hx-swap="innerHTML"
+            hx-indicator="#spinner"
+            title="Pull WhaleWisdom / StockTwits fresh — slower, hits external sources">
+      <i class="bi bi-bank"></i> Refresh Institutional Data
+    </button>
     <span id="spinner" class="htmx-indicator spinner-border spinner-border-sm text-light"></span>
   </div>
 </nav>

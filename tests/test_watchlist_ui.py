@@ -333,6 +333,39 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
     )
 
 
+@pytest.mark.asyncio
+async def test_refresh_data_threads_extract_flag_to_run_once() -> None:
+    trader = MagicMock()
+    trader.get_portfolio.return_value = []
+    portfolio = MagicMock()
+    portfolio.load_analysis.return_value = []
+    pipeline = MagicMock()
+    pipeline.missing_configuration.return_value = []
+    pipeline.run_once.return_value = PipelineRunResult(success=True, details="done")
+    alerts = MagicMock()
+    alerts.has_watching.return_value = False
+    alerts.last_alerted_at.return_value = None
+
+    await refresh_data(
+        _request("/refresh-data", method="POST"),
+        trader,
+        portfolio,
+        pipeline,
+        alerts,
+        confirm_missing=True,
+        extract=True,
+    )
+
+    pipeline.run_once.assert_called_once_with(True)
+
+
+def test_dashboard_has_institutional_refresh_control() -> None:
+    markup = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(TEMPLATES.rglob("*.html"))
+    )
+    assert markup.count('id="refresh-institutional-button"') == 1
+
+
 def test_watchlist_frontend_assets_are_served() -> None:
     client = TestClient(app)
     for path in (

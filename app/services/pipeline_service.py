@@ -49,19 +49,24 @@ class PipelineRunResult(BaseModel):
 class PipelineService:
     """Runs the momentum pipeline once and reports the outcome."""
 
-    def run_once(self) -> PipelineRunResult:
-        """Run the orchestrator pipeline once and capture its output."""
+    def run_once(self, extract: bool = False) -> PipelineRunResult:
+        """Run the orchestrator pipeline once and capture its output.
+
+        When ``extract`` is true the run passes ``--extract`` to the
+        orchestrator so WhaleWisdom/StockTwits are pulled fresh instead of
+        reusing the cached extraction file.
+        """
         if not _run_lock.acquire(blocking=False):
             return PipelineRunResult(
                 success=False,
                 details="A pipeline refresh is already running.",
             )
         try:
-            return self._run_once_locked()
+            return self._run_once_locked(extract=extract)
         finally:
             _run_lock.release()
 
-    def _run_once_locked(self) -> PipelineRunResult:
+    def _run_once_locked(self, extract: bool = False) -> PipelineRunResult:
         """Run one refresh while holding the process-wide single-run lock."""
         run_id = str(uuid4())
         try:
@@ -70,9 +75,12 @@ class PipelineService:
             return PipelineRunResult(success=False, details=str(error))
         environment = os.environ.copy()
         environment["PIPELINE_RUN_ID"] = run_id
+        argv = [sys.executable, "-m", "app.orchestration.orchestrator", "--once"]
+        if extract:
+            argv.append("--extract")
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "app.orchestration.orchestrator", "--once"],
+                argv,
                 cwd=str(ROOT_DIR),
                 capture_output=True,
                 text=True,

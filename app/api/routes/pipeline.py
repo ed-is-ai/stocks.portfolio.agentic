@@ -58,19 +58,24 @@ async def refresh_data(
     pipeline: PipelineDep,
     alerts: AlertsDep,
     confirm_missing: bool = Form(False),
+    extract: bool = Form(False),
 ) -> HTMLResponse:
-    """Refresh the analysis dataset by running the pipeline once."""
+    """Refresh the analysis dataset by running the pipeline once.
+
+    When ``extract`` is set the run refreshes institutional sources
+    (WhaleWisdom/StockTwits) instead of reusing the cached extraction file.
+    """
     warnings = pipeline.missing_configuration()
     if warnings and not confirm_missing:
         response = templates.TemplateResponse(
             request,
             "_pipeline_confirmation.html",
-            context={"warnings": warnings},
+            context={"warnings": warnings, "extract": extract},
         )
         response.headers["HX-Retarget"] = "#pipeline-confirmation"
         response.headers["HX-Reswap"] = "innerHTML"
         return response
-    result = await asyncio.to_thread(pipeline.run_once)
+    result = await asyncio.to_thread(pipeline.run_once, extract)
     refresh_status = (
         "Data refreshed successfully" if result.success else "Data refresh failed"
     )
