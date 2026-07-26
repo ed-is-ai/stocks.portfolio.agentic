@@ -520,3 +520,18 @@ function renderLocalTimes(root = document) {
 
 document.addEventListener("DOMContentLoaded", () => renderLocalTimes());
 document.body.addEventListener("htmx:afterSwap", (event) => renderLocalTimes(event.target));
+
+// Activate Bootstrap tooltips (opt-in via data-bs-toggle="tooltip"). Native
+// title tooltips are slow to appear and easy to miss — only the help cursor
+// shows. Re-run after each HTMX swap, disposing any stale instance first so a
+// re-rendered row doesn't accumulate duplicate tooltips.
+function initTooltips(root = document) {
+  if (!window.bootstrap) return;
+  root.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((element) => {
+    bootstrap.Tooltip.getInstance(element)?.dispose();
+    new bootstrap.Tooltip(element);
+  });
+}
+
+document.addEventListener("DOMContentLoaded", () => initTooltips());
+document.body.addEventListener("htmx:afterSwap", (event) => initTooltips(event.target));

@@ -295,7 +295,8 @@
             {% set c_tip = "Congress: " ~ (r.congress_buys or 0) ~ " buys / " ~ (r.congress_sells or 0) ~ " sells (12mo)"
                 ~ " | Senate: " ~ (r.senate_buys or 0) ~ " buys / " ~ (r.senate_sells or 0) ~ " sells" %}
             <span class="cong {% if congress_net > 0 %}pos{% elif congress_net < 0 %}neg{% else %}text-muted{% endif %}"
-                  title="{{ c_tip }}" style="cursor:help; white-space:nowrap; font-size:0.76rem">
+                  data-bs-toggle="tooltip" title="{{ c_tip }}"
+                  style="cursor:help; white-space:nowrap; font-size:0.76rem">
               <i class="bi bi-bank" aria-hidden="true"></i>
               {{ '+' if congress_net > 0 else '' }}{{ congress_net }}
             </span>
