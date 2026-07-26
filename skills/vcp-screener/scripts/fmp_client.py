@@ -13,15 +13,21 @@ Features:
 - S&P 500 constituents fetching
 """
 
+import json
 import os
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 try:
     import requests
 except ImportError:
-    print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
+    print(
+        "ERROR: requests library not found. Install with: pip install requests",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -58,8 +64,14 @@ _FMP_ENDPOINTS = {
         ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
     "historical": [
-        ("https://financialmodelingprep.com/stable/historical-price-eod/full", _stable_hist_url),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
+        (
+            "https://financialmodelingprep.com/stable/historical-price-eod/full",
+            _stable_hist_url,
+        ),
+        (
+            "https://financialmodelingprep.com/api/v3/historical-price-full",
+            _v3_hist_url,
+        ),
     ],
 }
 
@@ -71,6 +83,11 @@ class FMPClient:
     RATE_LIMIT_DELAY = 0.3  # 300ms between requests
 
     _ENDPOINT_FAILURE_THRESHOLD = 3  # disable endpoint after N consecutive failures
+
+    # Last-known-good S&P 500 constituent list, so one failed fetch doesn't take
+    # down the whole run. Lives alongside the script to survive across runs (the
+    # scanner invokes us with an ephemeral --output-dir).
+    _CONSTITUENTS_CACHE = Path(__file__).parent / ".cache" / "sp500_constituents.json"
 
     def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or os.getenv("FMP_API_KEY")
@@ -87,6 +104,9 @@ class FMPClient:
         self.retry_count = 0
         self.max_retries = 1
         self.api_calls_made = 0
+        # Most recent request failure detail (status code + body, or exception),
+        # recorded even for quiet calls so callers can surface the real cause.
+        self.last_error: Optional[str] = None
         # Circuit breaker: track consecutive failures per endpoint URL prefix
         self._endpoint_failures: dict[str, int] = {}
         self._disabled_endpoints: set[str] = set()
@@ -115,14 +135,21 @@ class FMPClient:
             elif response.status_code == 429:
                 self.retry_count += 1
                 if self.retry_count <= self.max_retries:
-                    print("WARNING: Rate limit exceeded. Waiting 60 seconds...", file=sys.stderr)
+                    print(
+                        "WARNING: Rate limit exceeded. Waiting 60 seconds...",
+                        file=sys.stderr,
+                    )
                     time.sleep(60)
                     return self._rate_limited_get(url, params, quiet=quiet)
                 else:
+                    self.last_error = "daily API rate limit reached"
                     print("ERROR: Daily API rate limit reached.", file=sys.stderr)
                     self.rate_limit_reached = True
                     return None
             else:
+                # Record the real cause even when quiet, so callers that exhaust
+                # a fallback chain can still report why every attempt failed.
+                self.last_error = f"HTTP {response.status_code} - {response.text[:200]}"
                 if not quiet:
                     print(
                         f"ERROR: API request failed: {response.status_code} - {response.text[:200]}",
@@ -130,6 +157,7 @@ class FMPClient:
                     )
                 return None
         except requests.exceptions.RequestException as e:
+            self.last_error = f"request exception: {e}"
             print(f"ERROR: Request exception: {e}", file=sys.stderr)
             return None
 
@@ -163,7 +191,8 @@ class FMPClient:
                 if not isinstance(data, list) or len(data) == 0:
                     valid = False
                 elif is_single and not any(
-                    q.get("symbol", "").replace("-", ".") == symbols_str.replace("-", ".")
+                    q.get("symbol", "").replace("-", ".")
+                    == symbols_str.replace("-", ".")
                     for q in data
                 ):
                     valid = False
@@ -171,7 +200,10 @@ class FMPClient:
             if endpoint_key == "historical":
                 # stable/historical-price-eod/full returns a flat list — normalise to v3 shape
                 if isinstance(data, list) and data:
-                    data = {"symbol": data[0].get("symbol", symbols_str), "historical": data}
+                    data = {
+                        "symbol": data[0].get("symbol", symbols_str),
+                        "historical": data,
+                    }
                 if not isinstance(data, dict):
                     valid = False
                 elif "historicalStockList" in data:
@@ -192,7 +224,9 @@ class FMPClient:
                 elif "historical" not in data:
                     valid = False
                 elif is_single and data.get("symbol"):
-                    if data["symbol"].replace("-", ".") != symbols_str.replace("-", "."):
+                    if data["symbol"].replace("-", ".") != symbols_str.replace(
+                        "-", "."
+                    ):
                         valid = False
 
             if valid:
@@ -211,23 +245,81 @@ class FMPClient:
     def get_sp500_constituents(self) -> Optional[list[dict]]:
         """Fetch S&P 500 constituent list.
 
+        Tries the stable endpoint first, then the legacy v3 endpoint. On a fresh
+        success the list is cached to disk as last-known-good. If every live
+        attempt fails, falls back to that cached list (with a staleness warning)
+        so a single upstream failure doesn't take down the whole run.
+
         Returns:
             List of dicts with keys: symbol, name, sector, subSector
-            or None on failure.
+            or None if no live fetch and no cached fallback are available.
         """
         cache_key = "sp500_constituents"
         if cache_key in self.cache:
             return self.cache[cache_key]
 
+        self.last_error = None
         for url in [
             "https://financialmodelingprep.com/stable/sp500-constituent",
             f"{self.BASE_URL}/sp500_constituent",
         ]:
+            # quiet=True suppresses per-URL stderr spam (the stable endpoint 403s
+            # for legacy accounts); last_error still captures the real cause.
+            # The constituent endpoints return a JSON array; _rate_limited_get is
+            # annotated Optional[dict] for the common object-shaped responses.
             data = self._rate_limited_get(url, quiet=True)
-            if data:
+            if isinstance(data, list) and data:
                 self.cache[cache_key] = data
+                self._save_constituents_cache(data)
                 return data
+
+        reason = self.last_error or "no data returned from any endpoint"
+        print(
+            f"ERROR: Unable to fetch S&P 500 constituents ({reason})",
+            file=sys.stderr,
+        )
+        fallback = self._load_constituents_cache()
+        if fallback is not None:
+            constituents, cached_at = fallback
+            print(
+                f"WARNING: falling back to cached S&P 500 constituents from "
+                f"{cached_at} ({len(constituents)} symbols)",
+                file=sys.stderr,
+            )
+            self.cache[cache_key] = constituents
+            return constituents
         return None
+
+    def _save_constituents_cache(self, constituents: list[dict]) -> None:
+        """Persist a freshly-fetched constituent list as last-known-good."""
+        try:
+            self._CONSTITUENTS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "cached_at": datetime.now(timezone.utc).isoformat(),
+                "constituents": constituents,
+            }
+            self._CONSTITUENTS_CACHE.write_text(json.dumps(payload), encoding="utf-8")
+        except OSError as e:
+            print(
+                f"WARNING: could not cache S&P 500 constituents: {e}",
+                file=sys.stderr,
+            )
+
+    def _load_constituents_cache(self) -> Optional[tuple[list[dict], str]]:
+        """Load the last-known-good constituent list, if present and valid."""
+        try:
+            raw = self._CONSTITUENTS_CACHE.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        try:
+            payload = json.loads(raw)
+            constituents = payload["constituents"]
+            cached_at = payload.get("cached_at", "unknown time")
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
+        if not isinstance(constituents, list) or not constituents:
+            return None
+        return constituents, cached_at
 
     def get_quote(self, symbols: str) -> Optional[list[dict]]:
         """Fetch real-time quote data for one or more symbols (comma-separated)"""
@@ -261,7 +353,9 @@ class FMPClient:
                     results[q["symbol"]] = q
         return results
 
-    def get_batch_historical(self, symbols: list[str], days: int = 260) -> dict[str, list[dict]]:
+    def get_batch_historical(
+        self, symbols: list[str], days: int = 260
+    ) -> dict[str, list[dict]]:
         """Fetch historical prices for multiple symbols"""
         results = {}
         for symbol in symbols:

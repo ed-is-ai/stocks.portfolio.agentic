@@ -61,9 +61,14 @@ def parse_arguments():
         help="Max stocks for full VCP analysis after pre-filter (default: 100)",
     )
     parser.add_argument(
-        "--top", type=int, default=20, help="Top results to include in report (default: 20)"
+        "--top",
+        type=int,
+        default=20,
+        help="Top results to include in report (default: 20)",
     )
-    parser.add_argument("--output-dir", default="reports/", help="Output directory for reports")
+    parser.add_argument(
+        "--output-dir", default="reports/", help="Output directory for reports"
+    )
     parser.add_argument(
         "--universe", nargs="+", help="Custom symbols to screen (overrides S&P 500)"
     )
@@ -85,7 +90,10 @@ def parse_arguments():
         help="Max %% above pivot for entry_ready (default: 3.0)",
     )
     parser.add_argument(
-        "--max-risk", type=float, default=15.0, help="Max risk %% for entry_ready (default: 15.0)"
+        "--max-risk",
+        type=float,
+        default=15.0,
+        help="Max risk %% for entry_ready (default: 15.0)",
     )
     parser.add_argument(
         "--no-require-valid-vcp",
@@ -222,17 +230,17 @@ def fetch_quotes_yfinance(symbols: list[str]) -> dict[str, dict]:
     multi = len(symbols) > 1
     for sym in symbols:
         try:
-            close  = data["Close"][sym].dropna()  if multi else data["Close"].dropna()
-            high   = data["High"][sym].dropna()   if multi else data["High"].dropna()
-            low    = data["Low"][sym].dropna()    if multi else data["Low"].dropna()
+            close = data["Close"][sym].dropna() if multi else data["Close"].dropna()
+            high = data["High"][sym].dropna() if multi else data["High"].dropna()
+            low = data["Low"][sym].dropna() if multi else data["Low"].dropna()
             volume = data["Volume"][sym].dropna() if multi else data["Volume"].dropna()
             if close.empty:
                 continue
             results[sym] = {
-                "symbol":    sym,
-                "price":     float(close.iloc[-1]),
-                "yearHigh":  float(high.max()),
-                "yearLow":   float(low.min()),
+                "symbol": sym,
+                "price": float(close.iloc[-1]),
+                "yearHigh": float(high.max()),
+                "yearLow": float(low.min()),
                 "avgVolume": float(volume.tail(50).mean()),
                 "marketCap": 0,
             }
@@ -489,7 +497,13 @@ def compute_entry_ready(
     """
     # State-based immediate rejection
     state = result.get("execution_state")
-    if state in ("Invalid", "Damaged", "Overextended", "Extended", "Early-post-breakout"):
+    if state in (
+        "Invalid",
+        "Damaged",
+        "Overextended",
+        "Extended",
+        "Early-post-breakout",
+    ):
         return False
 
     valid_vcp = result.get("valid_vcp", False)
@@ -518,7 +532,10 @@ def main():
     args = parse_arguments()
 
     if not (0 < args.ext_threshold < 50):
-        print("ERROR: --ext-threshold must be between 0 and 50 (exclusive)", file=sys.stderr)
+        print(
+            "ERROR: --ext-threshold must be between 0 and 50 (exclusive)",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     print("=" * 70)
@@ -552,7 +569,11 @@ def main():
         constituents = client.get_sp500_constituents()
         if not constituents:
             print("FAILED")
-            print("ERROR: Unable to fetch S&P 500 constituents", file=sys.stderr)
+            reason = client.last_error or "no data returned from any endpoint"
+            print(
+                f"ERROR: Unable to fetch S&P 500 constituents ({reason})",
+                file=sys.stderr,
+            )
             sys.exit(1)
         symbols = [c["symbol"] for c in constituents]
         universe_desc = f"S&P 500 ({len(symbols)} stocks)"
