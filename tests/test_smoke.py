@@ -52,10 +52,12 @@ class TestSmokeTests:
         "app.agents.analyst.analyst_agent.AnalystAgent.get_llm_client",
         return_value=None,
     )
+    @patch("app.orchestration.orchestrator.AnthropicNarrativeClient")
     @patch("yfinance.download")
     def test_full_pipeline_execution(
         self,
         mock_download,
+        mock_anthropic_client_cls,
         _mock_llm,
         mock_congress,
         _mock_vcp,
@@ -64,6 +66,9 @@ class TestSmokeTests:
         _mock_tv,
     ):
         """Test that the full pipeline runs without errors."""
+        # Never hit the real Anthropic API from a smoke test, regardless of
+        # whether ANTHROPIC_API_KEY happens to be set in the local .env.
+        mock_anthropic_client_cls.return_value.enabled = False
         import tempfile
         import app.orchestration.orchestrator as orchestrator
 
@@ -315,10 +320,12 @@ class TestSmokeTests:
         "app.agents.analyst.analyst_agent.AnalystAgent.get_llm_client",
         return_value=None,
     )
+    @patch("app.orchestration.orchestrator.AnthropicNarrativeClient")
     @patch("yfinance.download")
     def test_agent_chaining(
         self,
         mock_download,
+        mock_anthropic_client_cls,
         _mock_llm,
         mock_congress,
         _mock_vcp,
@@ -327,6 +334,9 @@ class TestSmokeTests:
         _mock_tv,
     ):
         """Test that stages chain correctly through the typed pipeline."""
+        # Never hit the real Anthropic API from a smoke test, regardless of
+        # whether ANTHROPIC_API_KEY happens to be set in the local .env.
+        mock_anthropic_client_cls.return_value.enabled = False
         mock_congress.get_stats_many.side_effect = lambda tickers, failed_tickers=None: (
             dict.fromkeys(tickers)
         )

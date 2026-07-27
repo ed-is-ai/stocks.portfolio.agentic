@@ -130,6 +130,16 @@ class PipelineService:
                     "impact": "Missing Yahoo fundamental fields will not be backfilled.",
                 }
             )
+        if not os.getenv("ANTHROPIC_API_KEY"):
+            warnings.append(
+                {
+                    "name": "Anthropic API key",
+                    "impact": (
+                        "Claude market-narrative summary disabled; the "
+                        "deterministic fallback summary is used instead."
+                    ),
+                }
+            )
         if not all(
             os.getenv(key) for key in ("EMAIL_USER", "EMAIL_PASSWORD", "EMAIL_TO")
         ):

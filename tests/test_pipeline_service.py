@@ -202,6 +202,7 @@ def test_missing_configuration_reports_capability_impacts(monkeypatch) -> None:
     for key in (
         "FMP_API_KEY",
         "ALPHA_VANTAGE_API_KEY",
+        "ANTHROPIC_API_KEY",
         "EMAIL_USER",
         "EMAIL_PASSWORD",
         "EMAIL_TO",
@@ -213,5 +214,6 @@ def test_missing_configuration_reports_capability_impacts(monkeypatch) -> None:
     # FMP is no longer a capability dependency (VCP uses DataHub + yfinance).
     assert [warning["name"] for warning in warnings] == [
         "Alpha Vantage API key",
+        "Anthropic API key",
         "Email alert settings",
     ]

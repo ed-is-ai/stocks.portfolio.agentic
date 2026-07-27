@@ -5,12 +5,20 @@ composed scan+analysis record), and ``trade`` (portfolio/trading models).
 """
 
 from app.schemas.alert import AlertSummary
+from app.schemas.market_cycle import FomcMeeting, MarketCycleContext
+from app.schemas.market_narrative import MarketNarrative, MarketNarrativeSource
 from app.schemas.record import StockRecord
 from app.schemas.scan import (
     CANSLIMScore,
     MomentumScore,
     StockAnalysis,
     StockScan,
+)
+from app.schemas.sector_allocation import (
+    PortfolioSectorWeight,
+    SectorAllocationSnapshot,
+    SectorDelta,
+    SectorShare,
 )
 from app.schemas.trade import EmailConfig, ExitSignal, Position, Trade
 from app.schemas.pipeline_status import (
@@ -32,11 +40,19 @@ __all__ = [
     "CANSLIMScore",
     "EmailConfig",
     "ExitSignal",
+    "FomcMeeting",
+    "MarketCycleContext",
+    "MarketNarrative",
+    "MarketNarrativeSource",
     "MomentumScore",
     "Position",
+    "PortfolioSectorWeight",
     "PipelineStage",
     "PipelineState",
     "PipelineStatus",
+    "SectorAllocationSnapshot",
+    "SectorDelta",
+    "SectorShare",
     "StockAnalysis",
     "StockRecord",
     "StockScan",

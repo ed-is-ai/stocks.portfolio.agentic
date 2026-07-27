@@ -159,6 +159,59 @@ def test_annual_cagr_get_earnings_none_returns_none(
     assert client.get_annual_eps_cagr("X") is None
 
 
+# ---------------------------------------------------------------------------
+# get_news_sentiment
+# ---------------------------------------------------------------------------
+
+
+def test_news_sentiment_disabled_client_returns_empty_list() -> None:
+    """No API key → enabled is False → [] without ever calling _get."""
+    client = AlphaVantageClient(api_key=None)
+    assert client.get_news_sentiment() == []
+
+
+def test_news_sentiment_parses_feed(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AlphaVantageClient(api_key="test")
+    feed = [{"title": "Fed holds rates", "url": "https://example.com/a"}]
+    monkeypatch.setattr(client, "_get", lambda params: {"feed": feed})
+    assert client.get_news_sentiment() == feed
+
+
+def test_news_sentiment_missing_feed_key_returns_empty_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = AlphaVantageClient(api_key="test")
+    monkeypatch.setattr(client, "_get", lambda params: {})
+    assert client.get_news_sentiment() == []
+
+
+def test_news_sentiment_get_returns_none_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_get returning None (rate-limit/error) → [] rather than raising."""
+    client = AlphaVantageClient(api_key="test")
+    monkeypatch.setattr(client, "_get", lambda params: None)
+    assert client.get_news_sentiment() == []
+
+
+def test_news_sentiment_builds_expected_params(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = AlphaVantageClient(api_key="test")
+    captured: dict = {}
+
+    def _fake_get(params: dict) -> dict:
+        captured.update(params)
+        return {"feed": []}
+
+    monkeypatch.setattr(client, "_get", _fake_get)
+    client.get_news_sentiment(tickers=["AAPL", "MSFT"], topics=["technology"], limit=25)
+    assert captured["function"] == "NEWS_SENTIMENT"
+    assert captured["tickers"] == "AAPL,MSFT"
+    assert captured["topics"] == "technology"
+    assert captured["limit"] == "25"
+    assert captured["sort"] == "LATEST"
+    assert "time_from" in captured
+
+
 def test_annual_cagr_more_than_4_uses_first_4(monkeypatch: pytest.MonkeyPatch) -> None:
     """With 6 annual entries n=min(6,4)=4; base is index 3, index 5 is ignored.
 

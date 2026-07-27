@@ -27,6 +27,7 @@ ConfigDep = Annotated[IntegrationConfigService, Depends(get_integration_config_s
 _FORM_TO_ENV = {
     "fmp_api_key": "FMP_API_KEY",
     "alpha_vantage_api_key": "ALPHA_VANTAGE_API_KEY",
+    "anthropic_api_key": "ANTHROPIC_API_KEY",
     "email_user": "EMAIL_USER",
     "email_password": "EMAIL_PASSWORD",
     "email_to": "EMAIL_TO",
@@ -61,6 +62,7 @@ async def save_settings(
     config: ConfigDep,
     fmp_api_key: Annotated[str, Form()] = "",
     alpha_vantage_api_key: Annotated[str, Form()] = "",
+    anthropic_api_key: Annotated[str, Form()] = "",
     email_user: Annotated[str, Form()] = "",
     email_password: Annotated[str, Form()] = "",
     email_to: Annotated[str, Form()] = "",
@@ -71,6 +73,7 @@ async def save_settings(
     submitted = {
         "fmp_api_key": fmp_api_key,
         "alpha_vantage_api_key": alpha_vantage_api_key,
+        "anthropic_api_key": anthropic_api_key,
         "email_user": email_user,
         "email_password": email_password,
         "email_to": email_to,

@@ -49,6 +49,8 @@ app/agents/extraction/ww_context.json
 app/agents/scanner/scan_history.json
 app/agents/trader/trades.db.backup
 **/scan_history.json
+**/sector_allocation_history.json
+**/market_narrative.json
 
 # Intermediate/debug notebooks (may contain portfolio details).
 # One-off scripts now live under scratch/ (covered by the directory rule below).

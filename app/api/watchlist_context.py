@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.agents.scanner.market_narrative import load_market_narrative
 from app.core.alerting import AlertUiState, build_alert_ui_state
 from app.core.config import ANALYSIS_JSON, PIPELINE_STATUS_JSON
 from app.core.recommendation import (
@@ -98,6 +99,7 @@ def build_watchlist_context(
         "portfolio_tickers": portfolio_tickers,
         "recommendations": recommendations,
         "alert_states": alert_states,
+        "market_narrative": load_market_narrative(),
     }
     context.update(updates)
     return context

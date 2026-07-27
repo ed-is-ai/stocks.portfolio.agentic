@@ -65,6 +65,20 @@
     </div>
 
     <div class="settings-section">
+      <h3 class="settings-section-title">Market narrative</h3>
+      <div class="settings-field">
+        <label class="form-label" for="anthropic_api_key">Anthropic (Claude) API key {{ status_badge(fields.ANTHROPIC_API_KEY.configured) }}</label>
+        <div class="input-group input-group-sm">
+          <input type="password" class="form-control" id="anthropic_api_key" name="anthropic_api_key" autocomplete="new-password" placeholder="{{ 'Leave blank to keep current value' if fields.ANTHROPIC_API_KEY.configured else 'Not configured' }}">
+          {% if fields.ANTHROPIC_API_KEY.configured %}
+          <button class="btn btn-outline-danger" type="button" hx-post="/settings/clear" hx-vals='{"key": "ANTHROPIC_API_KEY"}' hx-target="#tab-content" hx-swap="innerHTML" hx-confirm="Clear the configured Anthropic API key? This cannot be undone.">Clear</button>
+          {% endif %}
+        </div>
+        <div class="form-text">Enables the Claude-generated sector-allocation summary. When unset, a deterministic summary is used instead.</div>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <h3 class="settings-section-title">Email alerts</h3>
       <div class="settings-field">
         <label class="form-label" for="email_user">Email username {{ status_badge(fields.EMAIL_USER.configured) }}</label>

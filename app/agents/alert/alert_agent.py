@@ -18,7 +18,13 @@ from app.core.alerting import classify_alert, is_on_cooldown
 from app.core.alerting import BREAKOUT_COOLDOWN_HOURS as ALERT_COOLDOWN_HOURS
 from app.core import config
 from app.core.config import ALERTS_DB, ANALYSIS_JSON
-from app.schemas import AlertSummary, EmailConfig, Position, StockRecord
+from app.schemas import (
+    AlertSummary,
+    EmailConfig,
+    MarketNarrative,
+    Position,
+    StockRecord,
+)
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
@@ -1046,6 +1052,7 @@ class AlertAgent(Agent):
         self,
         positions: list[Position] | None = None,
         gbp_totals: tuple[float, float, float] | None = None,
+        market_narrative: MarketNarrative | None = None,
     ) -> None:
         """Send one consolidated daily summary email.
 
@@ -1057,6 +1064,13 @@ class AlertAgent(Agent):
         web UI's summary cards. When omitted, totals fall back to a naive
         same-currency sum of ``positions`` (e.g. for callers/tests with an
         all-GBP portfolio).
+
+        ``market_narrative``, when given, is rendered at the very top of the
+        digest (before the portfolio snapshot). It is a typed, provider-
+        agnostic object — Phase 1 passes a deterministic sector-allocation +
+        market-cycle blurb (see ``app.agents.scanner.market_narrative``); a
+        later phase can pass a Claude-generated one instead without this
+        method changing.
         """
         today = date.today().isoformat()
         # Held positions are authoritative for their ticker: drop any watched
@@ -1083,8 +1097,21 @@ class AlertAgent(Agent):
         else:
             subject = f"Stock Scanner {today} — No alerts"
 
-        # ── Portfolio snapshot (text) ───────────────────────────────────────
+        # ── Market narrative (text) ─────────────────────────────────────────
         text_parts: list[str] = [f"Stock Scanner Summary — {today}\n{'=' * 50}"]
+        if market_narrative:
+            narrative_lines = [f"\n\nMARKET NARRATIVE\n{market_narrative.headline}"]
+            narrative_lines.extend(f"  - {b}" for b in market_narrative.bullets)
+            narrative_lines.append(f"  ({market_narrative.not_advice})")
+            if market_narrative.sources:
+                sources_str = ", ".join(
+                    f"{s.label} ({s.url})" if s.url else s.label
+                    for s in market_narrative.sources
+                )
+                narrative_lines.append(f"  Sources: {sources_str}")
+            text_parts.append("\n".join(narrative_lines))
+
+        # ── Portfolio snapshot (text) ───────────────────────────────────────
         if positions:
             if gbp_totals is not None:
                 total_value, total_cost, total_pnl = gbp_totals
@@ -1208,11 +1235,40 @@ class AlertAgent(Agent):
               </table>
             </div>"""
 
+        # ── Market narrative (HTML) ─────────────────────────────────────────
+        narrative_html = ""
+        if market_narrative:
+            bullets_html = "".join(f"<li>{b}</li>" for b in market_narrative.bullets)
+            sources_html = ""
+            if market_narrative.sources:
+                links_html = ", ".join(
+                    f'<a href="{s.url}" style="color:#4338ca">{s.label}</a>'
+                    if s.url
+                    else s.label
+                    for s in market_narrative.sources
+                )
+                sources_html = (
+                    '<div style="font-size:0.7em;color:#94a3b8;margin-top:4px">'
+                    f"Sources: {links_html}</div>"
+                )
+            narrative_html = f"""
+            <div style="margin:16px 0;padding:14px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px">
+              <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;color:#4338ca;margin-bottom:6px">
+                Market Narrative
+              </div>
+              <div style="font-weight:700;margin-bottom:6px">{market_narrative.headline}</div>
+              <ul style="margin:0 0 6px 18px;padding:0;font-size:0.88em">{bullets_html}</ul>
+              <div style="font-size:0.72em;color:#64748b;font-style:italic">{market_narrative.not_advice}</div>
+              {sources_html}
+            </div>"""
+
         # ── HTML body ──────────────────────────────────────────────────────
         html_parts: list[str] = [
             '<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">'
             f'<h2 style="color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px">'
-            f"&#128200; Stock Scanner Summary &mdash; {today}</h2>" + snapshot_html
+            f"&#128200; Stock Scanner Summary &mdash; {today}</h2>"
+            + narrative_html
+            + snapshot_html
         ]
 
         if self._sell_alerts:

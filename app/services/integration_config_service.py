@@ -26,6 +26,7 @@ ENV_PATH_DEFAULT: Final[Path] = ROOT_DIR / ".env"
 ALLOWED_KEYS: Final[tuple[str, ...]] = (
     "FMP_API_KEY",
     "ALPHA_VANTAGE_API_KEY",
+    "ANTHROPIC_API_KEY",
     "EMAIL_USER",
     "EMAIL_PASSWORD",
     "EMAIL_TO",

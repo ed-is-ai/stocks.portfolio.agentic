@@ -5,6 +5,26 @@
   <span>No analysis results found. Use <strong>Refresh Data</strong> to run the pipeline.</span>
 </div>
 {% else %}
+{% if market_narrative %}
+<div class="alert border-0 mt-1" style="background:#eef2ff;border:1px solid #c7d2fe" role="note" aria-label="Market narrative">
+  <div class="fw-bold small text-uppercase mb-1" style="letter-spacing:.06em;color:#4338ca">Market Narrative</div>
+  <div class="fw-bold mb-1">{{ market_narrative.headline }}</div>
+  <ul class="mb-1 small">
+    {% for bullet in market_narrative.bullets %}
+    <li>{{ bullet }}</li>
+    {% endfor %}
+  </ul>
+  <div class="small fst-italic text-muted">{{ market_narrative.not_advice }}</div>
+  {% if market_narrative.sources %}
+  <div class="small mt-1" style="color:#94a3b8">
+    Sources:
+    {% for source in market_narrative.sources %}
+    {% if source.url %}<a href="{{ source.url }}" style="color:#4338ca">{{ source.label }}</a>{% else %}{{ source.label }}{% endif %}{% if not loop.last %}, {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+{% endif %}
 {% if refresh_status is defined %}
 <div class="alert alert-{{ 'success' if refresh_success else 'danger' }} border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-{{ 'check-circle-fill' if refresh_success else 'exclamation-triangle-fill' }}"></i>

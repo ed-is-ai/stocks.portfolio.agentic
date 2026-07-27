@@ -96,6 +96,18 @@ def test_save_settings_allowed_with_matching_token(config_service) -> None:
     assert config_service.status()["FMP_API_KEY"]["configured"] is True
 
 
+def test_save_settings_persists_anthropic_api_key(config_service) -> None:
+    with patch.dict(os.environ, {"APP_AUTH_TOKEN": "s3cret"}):
+        response = client.post(
+            "/settings",
+            data={"anthropic_api_key": "sk-ant-123"},
+            headers={"X-Auth-Token": "s3cret"},
+        )
+        assert response.status_code == 200
+        assert "sk-ant-123" not in response.text
+        assert config_service.status()["ANTHROPIC_API_KEY"]["configured"] is True
+
+
 def test_save_settings_rejected_with_invalid_token(config_service) -> None:
     with patch.dict(os.environ, {"APP_AUTH_TOKEN": "s3cret"}):
         response = client.post(

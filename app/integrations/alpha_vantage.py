@@ -4,8 +4,9 @@ Used as a fallback when yfinance returns None for key fields.
 Free tier: 25 API calls/day, 5 calls/minute.
 
 Supported endpoints:
-  - OVERVIEW  → sector, PE, ROE, quarterly EPS growth, annual EPS growth
-  - EARNINGS  → full quarterly/annual EPS history for precise YoY calculation
+  - OVERVIEW       → sector, PE, ROE, quarterly EPS growth, annual EPS growth
+  - EARNINGS       → full quarterly/annual EPS history for precise YoY calc
+  - NEWS_SENTIMENT → headline-level news/sentiment for the narrative layer
 
 Set ALPHA_VANTAGE_API_KEY in your .env to enable.
 """
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -21,6 +23,25 @@ import requests
 
 _BASE_URL = "https://www.alphavantage.co/query"
 _MIN_CALL_INTERVAL = 12.0  # 5 calls/min → 12 s between calls
+_NEWS_WINDOW_HOURS = 24
+
+# Maps our sector labels (as used in SectorAllocationSnapshot) to Alpha
+# Vantage's NEWS_SENTIMENT `topics` vocabulary. Sectors with no reasonable
+# AV topic are simply omitted from the query rather than guessed at.
+SECTOR_TO_AV_TOPIC: dict[str, str] = {
+    "Technology": "technology",
+    "Information Technology": "technology",
+    "Financial Services": "finance",
+    "Financials": "finance",
+    "Energy": "energy",
+    "Healthcare": "life_sciences",
+    "Health Care": "life_sciences",
+    "Real Estate": "real_estate",
+    "Industrials": "manufacturing",
+    "Consumer Cyclical": "retail_wholesale",
+    "Consumer Defensive": "retail_wholesale",
+    "Communication Services": "technology",
+}
 
 
 class AlphaVantageClient:
@@ -151,6 +172,41 @@ class AlphaVantageClient:
             "pe_ratio": _pct("PERatio"),
             "sector": overview.get("Sector") or None,
         }
+
+    def get_news_sentiment(
+        self,
+        tickers: list[str] | None = None,
+        topics: list[str] | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Fetch recent NEWS_SENTIMENT items, restricted to the last 24h.
+
+        Returns the raw ``feed`` array (each item a dict with at least
+        ``title``, ``url``, ``source``/``domain``, ``overall_sentiment_score``,
+        and ``time_published``) so the caller can map it into ``NewsItem``.
+        Returns ``[]`` when the client is disabled, the request fails, or no
+        feed is present — never raises.
+        """
+        if not self.enabled:
+            return []
+        time_from = (
+            datetime.now(timezone.utc) - timedelta(hours=_NEWS_WINDOW_HOURS)
+        ).strftime("%Y%m%dT%H%M")
+        params: dict[str, str] = {
+            "function": "NEWS_SENTIMENT",
+            "time_from": time_from,
+            "sort": "LATEST",
+            "limit": str(limit),
+        }
+        if tickers:
+            params["tickers"] = ",".join(tickers)
+        if topics:
+            params["topics"] = ",".join(topics)
+        data = self._get(params)
+        if not data:
+            return []
+        feed = data.get("feed", [])
+        return feed if isinstance(feed, list) else []
 
     def get_quarterly_eps_growth(self, symbol: str) -> float | None:
         """Return MRQ YoY EPS growth from EARNINGS endpoint.

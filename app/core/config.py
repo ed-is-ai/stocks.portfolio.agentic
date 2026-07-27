@@ -31,6 +31,17 @@ EXTRACTION_RESULTS_JSON = (
 )
 WW_CONTEXT_JSON = ROOT_DIR / "app" / "agents" / "extraction" / "ww_context.json"
 SCAN_HISTORY_JSON = ROOT_DIR / "app" / "agents" / "scanner" / "scan_history.json"
+# Sector-prevalence-per-run snapshots, kept separate from scan_history's
+# ticker/zone snapshots so run-over-run sector deltas (#109) don't entangle
+# with breakout-transition tracking.
+SECTOR_ALLOCATION_HISTORY_JSON = (
+    ROOT_DIR / "app" / "agents" / "scanner" / "sector_allocation_history.json"
+)
+# Cached deterministic (or, later, Claude-generated) MarketNarrative for the
+# current run, so digest/web re-renders don't recompute it (#109).
+MARKET_NARRATIVE_JSON = (
+    ROOT_DIR / "app" / "agents" / "scanner" / "market_narrative.json"
+)
 # Last-known GICS sector per ticker, reused when yfinance throttling drops the
 # sector on a given run (see app.agents.scanner.sector_cache).
 SECTOR_CACHE_JSON = ROOT_DIR / "app" / "agents" / "scanner" / "sector_cache.json"
