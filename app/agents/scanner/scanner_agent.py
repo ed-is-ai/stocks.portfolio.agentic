@@ -93,6 +93,10 @@ PERIOD_DAYS = 252  # ~1 trading year for stage analysis
 
 _SKILLS_DIR = SKILLS_DIR
 _VCP_SCRIPT = _SKILLS_DIR / "vcp-screener" / "scripts" / "screen_vcp.py"
+# Effectively-unlimited ``--top`` so the screener never truncates its scored
+# candidates; the real bound is the pre-filter, and results never exceed the
+# S&P 500 universe. Paired with ``--full-sp500`` (no candidate cap). #101
+_VCP_RESULT_LIMIT = "10000"
 
 
 class VcpScreenerError(RuntimeError):
@@ -147,10 +151,13 @@ def fetch_vcp_screener_tickers() -> list[str]:
                     str(_VCP_SCRIPT),
                     "--output-dir",
                     tmpdir,
-                    "--max-candidates",
-                    "250",
+                    # Screen the entire pre-filtered universe (no candidate cap)
+                    # and report every scored candidate, so the source count
+                    # reflects the true number that passed VCP detection rather
+                    # than an arbitrary top-N (was pinned at 100). #101
+                    "--full-sp500",
                     "--top",
-                    "100",
+                    _VCP_RESULT_LIMIT,
                 ],
                 capture_output=True,
                 text=True,
