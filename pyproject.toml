@@ -21,6 +21,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "python-multipart>=0.0.32",
     "tradingview-screener>=3.2.1",
+    "tenacity>=9.1.4",
 ]
 
 [dependency-groups]

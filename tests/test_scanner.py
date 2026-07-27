@@ -383,3 +383,139 @@ class TestScannerAgent:
             ("enrichment", "running", 3),
             ("enrichment", "complete", 3),
         ]
+
+
+class _StubTicker:
+    """Yields queued ``.info`` payloads to exercise the retry backoff."""
+
+    def __init__(self, payloads):
+        self._payloads = list(payloads)
+
+    @property
+    def info(self):
+        return self._payloads.pop(0)
+
+
+def test_fetch_ticker_info_retries_until_non_empty():
+    """An empty first read is retried and the recovered payload is returned."""
+    from app.agents.scanner.scanner_agent import _fetch_ticker_info
+
+    stub = _StubTicker([{}, {}, {"sector": "Technology"}])
+    with patch("tenacity.nap.time.sleep") as mock_sleep:
+        info = _fetch_ticker_info(stub)
+
+    assert info == {"sector": "Technology"}
+    assert mock_sleep.call_count == 2  # backed off before each retry
+
+
+def test_fetch_ticker_info_gives_up_after_retries():
+    """Persistent throttling returns an empty dict rather than raising."""
+    from app.agents.scanner.scanner_agent import _fetch_ticker_info
+
+    stub = _StubTicker([{}, {}, {}])
+    with patch("tenacity.nap.time.sleep"):
+        assert _fetch_ticker_info(stub) == {}
+
+
+def test_fetch_ticker_info_recovers_from_exception():
+    """A raised .info (throttling) is retried, then the good payload returns."""
+    from app.agents.scanner.scanner_agent import _fetch_ticker_info
+
+    class _RaisingTicker:
+        def __init__(self):
+            self._calls = 0
+
+        @property
+        def info(self):
+            self._calls += 1
+            if self._calls == 1:
+                raise RuntimeError("rate limited")
+            return {"sector": "Energy"}
+
+    with patch("tenacity.nap.time.sleep"):
+        assert _fetch_ticker_info(_RaisingTicker()) == {"sector": "Energy"}
+
+
+class TestSectorCacheBackfill:
+    """scan_watchlist reuses cached sectors when yfinance drops them (#106)."""
+
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
+        return_value={
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
+            "sector": None,  # simulate a throttled run: no sector this time
+        },
+    )
+    @patch("yfinance.download")
+    def test_null_sector_backfilled_from_cache(
+        self, mock_download, _fund, _fill, mock_congress, tmp_path
+    ):
+        cache_path = tmp_path / "sector_cache.json"
+        cache_path.write_text('{"AAPL": "Technology"}', encoding="utf-8")
+        mock_congress.get_stats_many.return_value = {"AAPL": None}
+        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": [100 + i * 0.1 for i in range(100)],
+                "High": [105 + i * 0.1 for i in range(100)],
+                "Low": [95 + i * 0.1 for i in range(100)],
+                "Open": [99 + i * 0.1 for i in range(100)],
+                "Volume": [1000000] * 100,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        with patch("app.agents.scanner.scanner_agent.SECTOR_CACHE_JSON", cache_path):
+            results = agent.scan_watchlist(
+                ["AAPL"], spy_uptrend=True, spy_52w_return=10.0
+            )
+
+        assert results[0].sector == "Technology"
+
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
+        return_value={
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
+            "sector": "Healthcare",  # a fresh, populated run
+        },
+    )
+    @patch("yfinance.download")
+    def test_fresh_sector_persisted_to_cache(
+        self, mock_download, _fund, _fill, mock_congress, tmp_path
+    ):
+        cache_path = tmp_path / "sector_cache.json"
+        mock_congress.get_stats_many.return_value = {"DGX": None}
+        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": [100 + i * 0.1 for i in range(100)],
+                "High": [105 + i * 0.1 for i in range(100)],
+                "Low": [95 + i * 0.1 for i in range(100)],
+                "Open": [99 + i * 0.1 for i in range(100)],
+                "Volume": [1000000] * 100,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        with patch("app.agents.scanner.scanner_agent.SECTOR_CACHE_JSON", cache_path):
+            agent.scan_watchlist(["DGX"], spy_uptrend=True, spy_52w_return=10.0)
+
+        from app.agents.scanner.sector_cache import SectorCache
+
+        assert SectorCache(cache_path).get("DGX") == "Healthcare"

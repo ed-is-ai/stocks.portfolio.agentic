@@ -31,6 +31,9 @@ EXTRACTION_RESULTS_JSON = (
 )
 WW_CONTEXT_JSON = ROOT_DIR / "app" / "agents" / "extraction" / "ww_context.json"
 SCAN_HISTORY_JSON = ROOT_DIR / "app" / "agents" / "scanner" / "scan_history.json"
+# Last-known GICS sector per ticker, reused when yfinance throttling drops the
+# sector on a given run (see app.agents.scanner.sector_cache).
+SECTOR_CACHE_JSON = ROOT_DIR / "app" / "agents" / "scanner" / "sector_cache.json"
 ANALYSIS_PROGRESS_TXT = (
     ROOT_DIR / "app" / "agents" / "analyst" / "analysis_progress.txt"
 )

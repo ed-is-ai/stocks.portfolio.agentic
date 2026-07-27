@@ -26,6 +26,7 @@ agents/ii_platform/debug/
 # VCP screener last-known-good constituent cache (regenerated at runtime)
 skills/vcp-screener/scripts/.cache/
 **/scan_results.json
+**/sector_cache.json
 **/analysis_results.json
 **/analysis_results.xlsx
 **/analysis_progress.txt

@@ -15,10 +15,19 @@ from typing import Any, Callable, Iterable
 
 import pandas as pd
 import yfinance as yf
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    retry_if_result,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from app.agents.base import Agent
+from app.agents.scanner.sector_cache import SectorCache
 from app.core.config import (
     EXTRACTION_RESULTS_JSON,
+    SECTOR_CACHE_JSON,
     SKILLS_DIR,
     WW_CONTEXT_JSON,
 )
@@ -38,6 +47,13 @@ from app.schemas.source_health import (
 
 _av_client = AlphaVantageClient()
 _congress_client = CongressClient()
+
+# yfinance ``.info`` is rate-limited. Keep the concurrent fetch below Yahoo's
+# throttle threshold and retry an empty payload (the throttling signature)
+# with a short backoff, trading a little scan speed for fundamentals coverage.
+_YF_FETCH_WORKERS = 4
+_YF_INFO_RETRIES = 3
+_YF_INFO_BACKOFF_SECONDS = 0.5
 
 
 _EXTRACTION_RESULTS = EXTRACTION_RESULTS_JSON
@@ -234,6 +250,23 @@ def _fetch_spy_context() -> tuple[bool, float]:
         return True, 0.0
 
 
+@retry(
+    retry=(retry_if_exception_type(Exception) | retry_if_result(lambda info: not info)),
+    wait=wait_exponential(multiplier=_YF_INFO_BACKOFF_SECONDS),
+    stop=stop_after_attempt(_YF_INFO_RETRIES),
+    retry_error_callback=lambda _state: {},
+)
+def _fetch_ticker_info(t: yf.Ticker) -> dict[str, Any]:
+    """Read ``t.info``, retrying with exponential backoff on an empty payload.
+
+    An empty payload (or a raised exception) is yfinance's throttling
+    signature; tenacity pauses and retries, recovering the full fundamentals
+    block instead of leaving every field None. After the final attempt it
+    returns an empty dict rather than raising.
+    """
+    return t.info or {}
+
+
 def _fetch_fundamentals_yf(ticker: str) -> dict[str, Any]:
     """Return fundamental fields from yfinance only (no Alpha Vantage).
 
@@ -242,7 +275,7 @@ def _fetch_fundamentals_yf(ticker: str) -> dict[str, Any]:
     """
     try:
         t = yf.Ticker(ticker)
-        info: Any = t.info
+        info: Any = _fetch_ticker_info(t)
         return {
             "eps_growth": _quarterly_eps_growth(t, info),
             "annual_eps_growth": _annual_eps_growth(t),
@@ -655,7 +688,9 @@ class ScannerAgent(Agent):
         def _worker(t: str) -> dict[str, Any] | None:
             return self._fetch_ticker_yf(t, spy_52w_return)
 
-        with ThreadPoolExecutor(max_workers=min(8, len(tickers))) as pool:
+        with ThreadPoolExecutor(
+            max_workers=min(_YF_FETCH_WORKERS, len(tickers))
+        ) as pool:
             fetched = list(pool.map(_worker, tickers))
 
         # Phase B: keep each provider's requests serial, while overlapping the
@@ -708,6 +743,21 @@ class ScannerAgent(Agent):
             alpha_future.result()
             congress_by_ticker = congress_future.result()
         self._report_progress("enrichment", "complete", len(valid_fetched))
+
+        # Reconcile sectors against the persistent cache: remember any fresh
+        # non-null sector, and back-fill tickers that yfinance throttling left
+        # null with their last-known value (#106).
+        sector_cache = SectorCache(SECTOR_CACHE_JSON)
+        cache_dirty = False
+        for data in valid_fetched:
+            fundamentals = data["fundamentals"]
+            sector = fundamentals.get("sector")
+            if sector:
+                cache_dirty |= sector_cache.remember(data["ticker"], sector)
+            else:
+                fundamentals["sector"] = sector_cache.get(data["ticker"])
+        if cache_dirty:
+            sector_cache.save()
 
         av_attempts, av_failures = _av_client.call_stats
         if not _av_client.enabled:
