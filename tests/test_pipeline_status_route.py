@@ -143,6 +143,55 @@ def test_pipeline_status_shows_freshness_and_toast_for_owning_run(
     assert "Skipped" in markup
 
 
+def test_pipeline_status_cached_source_labelled_cached_not_skipped(
+    monkeypatch, tmp_path
+) -> None:
+    """A cached_input source reads 'Cached' inline, not bare 'Skipped' (#103)."""
+    analysis_path = tmp_path / "analysis_results.json"
+    generated_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    analysis_path.write_text(
+        json.dumps(
+            build_analysis_payload([], run_id="run-c", generated_at=generated_at)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(watchlist_context_module, "ANALYSIS_JSON", analysis_path)
+
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    repo.start(run_id="run-c")
+    repo.update_source_health(
+        {
+            SourceName.WHALE_WISDOM: SourceHealth(
+                source=SourceName.WHALE_WISDOM,
+                state=SourceState.SKIPPED,
+                count=45,
+                detail_code="cached_input",
+                display_message="Using cached WhaleWisdom input; not refreshed.",
+            ),
+            SourceName.VCP_FMP: SourceHealth(
+                source=SourceName.VCP_FMP,
+                state=SourceState.SKIPPED,
+                count=0,
+                detail_code="missing_configuration",
+                display_message="FMP API key is not configured.",
+            ),
+        },
+        expected_run_id="run-c",
+    )
+    repo.finish(PipelineState.PARTIAL, expected_run_id="run-c", artifact_produced=True)
+    monkeypatch.setattr(watchlist_context_module, "_status_repository", repo)
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+
+    markup = client.get("/pipeline-status").text
+
+    # The cached source names its state and de-emphasises the count.
+    assert "WhaleWisdom: Cached" in markup
+    assert "source-cached" in markup
+    assert "source-count-stale" in markup
+    # A genuinely skipped (non-cached) source keeps the "Skipped" label.
+    assert "Skipped" in markup
+
+
 def test_pipeline_status_failed_attempt_keeps_prior_refresh_and_shows_toast(
     monkeypatch, tmp_path
 ) -> None:

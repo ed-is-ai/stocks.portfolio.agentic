@@ -302,6 +302,10 @@ a.ticker:hover {
 .source-empty { color: var(--muted); }
 .source-skipped { color: var(--amber); background: var(--amber-bg); }
 .source-failed { color: var(--red); background: var(--red-bg); }
+/* Cached (skipped) sources: neutral tone, and de-emphasise the count so the
+   reused figure does not read as a fresh pull. */
+.source-cached { color: var(--muted); background: var(--bg-subtle, rgba(148, 163, 184, 0.15)); }
+.source-cached .source-count-stale { opacity: 0.7; font-style: italic; }
 .status-partial { color: var(--amber); background: var(--amber-bg); }
 .run-source-health {
   display: flex;
