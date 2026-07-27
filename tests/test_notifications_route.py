@@ -39,6 +39,22 @@ def test_count_badge_reflects_unread(repo) -> None:
     assert ">1<" in response.text.replace(" ", "")
 
 
+def test_count_badge_targets_itself_not_inherited_list(repo) -> None:
+    """The badge must swap itself, never inherit the bell button's target.
+
+    The badge span sits inside the bell button, which sets
+    ``hx-target="#notif-list"``. Without its own explicit target the badge's
+    ``outerHTML`` self-poll would inherit that and replace the whole
+    notification list with the tiny count span (regression: dropdown collapsed
+    to a 2px strip). An explicit ``hx-target="this"`` prevents the inheritance.
+    """
+    repo.record(NotificationCategory.ALERT, "breakout", "NVDA")
+
+    response = client.get("/notifications/count")
+
+    assert 'hx-target="this"' in response.text
+
+
 def test_count_badge_hidden_when_all_read(repo) -> None:
     repo.record(NotificationCategory.ALERT, "breakout", "NVDA")
     repo.mark_all_read()

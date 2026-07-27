@@ -5,6 +5,7 @@
       {% if oob %}hx-swap-oob="true"{% endif %}
       hx-get="/notifications/count"
       hx-trigger="every 20s"
+      hx-target="this"
       hx-swap="outerHTML"
       aria-live="polite"
       aria-label="{{ unread_count }} unread notifications">

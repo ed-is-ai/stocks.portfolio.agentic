@@ -359,6 +359,19 @@ async def test_refresh_data_threads_extract_flag_to_run_once() -> None:
     pipeline.run_once.assert_called_once_with(True)
 
 
+def test_notif_badge_targets_itself_inside_bell_button() -> None:
+    """The badge must not inherit the bell button's hx-target="#notif-list".
+
+    The bell button targets #notif-list; the nested badge's outerHTML poll
+    would inherit that and clobber the whole notification list. The badge
+    carries an explicit hx-target="this" to swap only itself.
+    """
+    markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+    badge_start = markup.index('id="notif-badge"')
+    badge_tag = markup[badge_start : markup.index(">", badge_start)]
+    assert 'hx-target="this"' in badge_tag
+
+
 def test_dashboard_has_institutional_refresh_control() -> None:
     markup = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(TEMPLATES.rglob("*.html"))
