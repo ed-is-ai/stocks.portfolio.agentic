@@ -108,8 +108,9 @@ def test_watched_signals_appear_in_digest(mock_smtp, tmp_path) -> None:
         captured["text"] = text
         return True
 
+    # AMD is held, so its watched stop is a real, actionable SELL signal (#113).
     with patch.object(AlertAgent, "send_email", side_effect=_capture):
-        agent.send_summary_email()
+        agent.send_summary_email(positions=[_position("AMD", 175.0)])
 
     assert "WATCHLIST ENTRIES TRIGGERED" in captured["html"]
     assert "WATCHLIST STOP LOSSES" in captured["html"]
@@ -118,6 +119,44 @@ def test_watched_signals_appear_in_digest(mock_smtp, tmp_path) -> None:
 
     events = {i.event_type for i in build_notifications_repository().recent()}
     assert events == {"entry_triggered", "stop_loss_hit"}
+
+
+@patch("smtplib.SMTP")
+def test_non_held_watched_stop_is_suppressed(mock_smtp, tmp_path) -> None:
+    # #113: a watched setup that breaks its stop while NOT held is noise — no
+    # SELL line, no notification — but the entry (buy) side is unaffected and
+    # the row is still marked "stopped" in the DB (watchlist bookkeeping).
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    agent._alerts.record(
+        "NVDA", 8, "Stage 2", "setup", entry_price=100.0, stop_loss=90.0
+    )
+    agent._alerts.record(
+        "AMD", 8, "Stage 2", "setup", entry_price=200.0, stop_loss=180.0
+    )
+    agent.check_positions([_stock("NVDA", 105.0), _stock("AMD", 175.0)])
+    assert agent._watched_stops == [("AMD", 175.0, 180.0)]
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        return True
+
+    # Nothing held → AMD's stop is suppressed; NVDA's entry still fires.
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[])
+
+    assert "WATCHLIST ENTRIES TRIGGERED" in captured["html"]
+    assert "WATCHLIST STOP LOSSES" not in captured["html"]
+
+    events = {i.event_type for i in build_notifications_repository().recent()}
+    assert "entry_triggered" in events
+    assert "stop_loss_hit" not in events
+
+    # Bookkeeping retained: AMD left the watchlist (row marked "stopped").
+    watching = {ticker for _rowid, ticker, _entry, _stop in agent._alerts.watching()}
+    assert "AMD" not in watching
 
 
 # ── Held-position critical events → immediate individual email ─────────────

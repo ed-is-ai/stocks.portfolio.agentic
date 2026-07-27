@@ -1073,14 +1073,25 @@ class AlertAgent(Agent):
         method changing.
         """
         today = date.today().isoformat()
-        # Held positions are authoritative for their ticker: drop any watched
-        # stop that duplicates a held sell so the digest shows one SELL entry.
-        held_tickers = {pos.ticker for pos, _ in self._sell_alerts}
+        # A held critical event (hard stop / trailing / target) is authoritative
+        # for its ticker, so a watched-list row duplicating it is dropped.
+        critical_tickers = {pos.ticker for pos, _ in self._sell_alerts}
+        # #113: a stop/sell signal is only actionable for a stock you actually
+        # hold — a watched-list setup breaking its stop when it isn't owned is
+        # noise. Gate watched stops on portfolio membership so only held names
+        # produce a SELL line. check_positions still marks the row "stopped" in
+        # the DB, so watchlist bookkeeping is untouched — only the alert is
+        # suppressed. Buy/breakout entries are not gated. positions is optional;
+        # when absent the held set is empty, so no watched-stop lines are shown
+        # (genuine held sells still flow via the authoritative _sell_alerts path).
+        held_tickers = {pos.ticker for pos in positions} if positions else set()
         watched_stops = [
-            row for row in self._watched_stops if row[0] not in held_tickers
+            row
+            for row in self._watched_stops
+            if row[0] in held_tickers and row[0] not in critical_tickers
         ]
         entry_triggered = [
-            row for row in self._entry_triggered if row[0] not in held_tickers
+            row for row in self._entry_triggered if row[0] not in critical_tickers
         ]
         sell_count = len(self._sell_alerts)
         buy_count = len(self._buy_alerts)
