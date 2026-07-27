@@ -137,17 +137,20 @@ def test_legacy_run_log_is_migrated_with_structured_health(
 # ---------------------------------------------------------------------------
 
 
-def test_vcp_missing_key_is_skipped_but_true_zero_is_empty(
+def test_vcp_missing_dependency_is_skipped_but_true_zero_is_empty(
     tmp_path, monkeypatch
 ) -> None:
+    # No FMP key required anymore (universe from DataHub, prices from yfinance);
+    # the screener is skipped only when its script/uv dependency is missing.
     monkeypatch.delenv("FMP_API_KEY", raising=False)
+    monkeypatch.setattr(scanner_agent, "_VCP_SCRIPT", tmp_path / "missing.py")
 
     missing = scanner_agent.fetch_vcp_screener_result()
 
     assert missing.health.state is SourceState.SKIPPED
-    assert missing.health.detail_code == "missing_configuration"
+    assert missing.health.detail_code == "dependency_missing"
 
-    monkeypatch.setenv("FMP_API_KEY", "configured")
+    # With the script + uv present, a genuine zero-candidate screen is EMPTY.
     script = tmp_path / "screen_vcp.py"
     script.touch()
     monkeypatch.setattr(scanner_agent, "_VCP_SCRIPT", script)

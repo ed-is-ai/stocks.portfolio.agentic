@@ -210,8 +210,8 @@ def test_missing_configuration_reports_capability_impacts(monkeypatch) -> None:
 
     warnings = PipelineService.missing_configuration()
 
+    # FMP is no longer a capability dependency (VCP uses DataHub + yfinance).
     assert [warning["name"] for warning in warnings] == [
-        "FMP API key",
         "Alpha Vantage API key",
         "Email alert settings",
     ]

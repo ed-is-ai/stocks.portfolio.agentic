@@ -121,13 +121,8 @@ class PipelineService:
         import os
 
         warnings: list[dict[str, str]] = []
-        if not os.getenv("FMP_API_KEY"):
-            warnings.append(
-                {
-                    "name": "FMP API key",
-                    "impact": "The S&P 500 VCP screener will be skipped.",
-                }
-            )
+        # The VCP screener no longer needs an FMP key (universe from DataHub,
+        # prices from yfinance), so a missing FMP key is not a warning.
         if not os.getenv("ALPHA_VANTAGE_API_KEY"):
             warnings.append(
                 {

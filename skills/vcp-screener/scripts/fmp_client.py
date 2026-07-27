@@ -100,14 +100,13 @@ class FMPClient:
     _CONSTITUENTS_CACHE = Path(__file__).parent / ".cache" / "sp500_constituents.json"
 
     def __init__(self, api_key: Optional[str] = None):
+        # The constituent list now comes from DataHub (free, keyless) and all
+        # price/quote data from yfinance, so an FMP key is optional — the client
+        # is retained only as the constituents + cache source.
         self.api_key = api_key or os.getenv("FMP_API_KEY")
-        if not self.api_key:
-            raise ValueError(
-                "FMP API key required. Set FMP_API_KEY environment variable "
-                "or pass api_key parameter."
-            )
         self.session = requests.Session()
-        self.session.headers.update({"apikey": self.api_key})
+        if self.api_key:
+            self.session.headers.update({"apikey": self.api_key})
         self.cache = {}
         self.last_call_time = 0
         self.rate_limit_reached = False

@@ -249,6 +249,55 @@ def fetch_quotes_yfinance(symbols: list[str]) -> dict[str, dict]:
     return results
 
 
+def fetch_histories_yfinance(
+    symbols: list[str], period: str = "2y"
+) -> dict[str, list[dict]]:
+    """Batch-fetch daily OHLCV histories via yfinance (free, no API key).
+
+    Returns ``{symbol: [{date, open, high, low, close, volume}, ...]}`` with the
+    most recent bar first — the shape and ordering the calculators expect from
+    the old FMP ``historical`` payload. yfinance is used because FMP's historical
+    endpoint is plan-restricted for many S&P 500 symbols (HTTP 402), which
+    starved the screener of data and produced zero candidates.
+    """
+    if not symbols:
+        return {}
+    data = yf.download(
+        " ".join(symbols), period=period, progress=False, auto_adjust=True
+    )
+    if data.empty:
+        return {}
+
+    # yfinance returns MultiIndex columns (Field, Ticker) for batches — and, in
+    # recent versions, even for a single ticker — so key off the column shape
+    # rather than the symbol count.
+    multi = data.columns.nlevels > 1
+    histories: dict[str, list[dict]] = {}
+    for sym in symbols:
+        try:
+            frame = data.xs(sym, axis=1, level=1) if multi else data
+        except KeyError:
+            continue
+        # Drop any bar missing a real OHLC price (e.g. a trailing partial day).
+        frame = frame.dropna(subset=["Open", "High", "Low", "Close"])
+        if frame.empty:
+            continue
+        bars = [
+            {
+                "date": index.strftime("%Y-%m-%d"),
+                "open": float(row["Open"]),
+                "high": float(row["High"]),
+                "low": float(row["Low"]),
+                "close": float(row["Close"]),
+                "volume": int(row["Volume"]),
+            }
+            for index, row in frame.iterrows()
+        ]
+        bars.reverse()  # yfinance is oldest-first; calculators want newest-first
+        histories[sym] = bars
+    return histories
+
+
 def pre_filter_stock(quote: dict) -> tuple:
     """
     Cheap pre-filter using quote data only.
@@ -617,26 +666,18 @@ def main():
     print("Phase 2: Trend Template Filter")
     print("-" * 70)
 
-    # Fetch SPY historical for RS calculation
-    print("  Fetching SPY 260-day history...", end=" ", flush=True)
-    spy_data = client.get_historical_prices("SPY", days=260)
-    sp500_history = spy_data.get("historical", []) if spy_data else []
+    # Fetch SPY historical for RS calculation (yfinance — free, no API key).
+    print("  Fetching SPY history...", end=" ", flush=True)
+    sp500_history = fetch_histories_yfinance(["SPY"]).get("SPY", [])
     if sp500_history:
         print(f"OK ({len(sp500_history)} days)")
     else:
         print("WARN - SPY data unavailable, RS calculations will be limited")
 
-    # Fetch historical data for candidates
+    # Batch-fetch candidate histories via yfinance in one download.
     candidate_symbols = [c[0] for c in candidates]
-    print(f"  Fetching 260-day histories for {len(candidate_symbols)} candidates...")
-
-    candidate_histories = {}
-    for i, sym in enumerate(candidate_symbols):
-        if (i + 1) % 20 == 0 or i == len(candidate_symbols) - 1:
-            print(f"    Progress: {i + 1}/{len(candidate_symbols)}", flush=True)
-        data = client.get_historical_prices(sym, days=260)
-        if data and "historical" in data:
-            candidate_histories[sym] = data["historical"]
+    print(f"  Fetching histories for {len(candidate_symbols)} candidates...")
+    candidate_histories = fetch_histories_yfinance(candidate_symbols)
 
     # Apply Trend Template filter
     print("  Applying 7-point Trend Template...", end=" ", flush=True)

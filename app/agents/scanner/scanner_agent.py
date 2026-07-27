@@ -5,7 +5,6 @@ Outputs typed scan results for the Analyst Agent using the local MS Agent framew
 
 import glob as _glob
 import json
-import os
 import shutil
 import subprocess
 import tempfile
@@ -111,19 +110,22 @@ class VcpScreenerError(RuntimeError):
 
 
 def _vcp_unavailable_reason() -> tuple[str, str] | None:
-    """Return (detail_code, message) if VCP/FMP cannot run at all, else None."""
-    if not os.environ.get("FMP_API_KEY"):
-        return "missing_configuration", "FMP API key is not configured."
+    """Return (detail_code, message) if the VCP screener cannot run, else None.
+
+    The screener now sources its universe from DataHub and all price data from
+    yfinance, so no FMP API key is required — only the script and ``uv``.
+    """
     if not _VCP_SCRIPT.exists() or not shutil.which("uv"):
         return "dependency_missing", "VCP screener dependency is unavailable."
     return None
 
 
 def fetch_vcp_screener_tickers() -> list[str]:
-    """Run vcp-screener against S&P 500 via FMP API and return candidate symbols.
+    """Run the vcp-screener over the S&P 500 and return candidate symbols.
 
-    Returns an empty list only when preconditions are missing (no API key,
-    no script, no ``uv`` on PATH) or when the screen genuinely found zero
+    The universe comes from DataHub and price data from yfinance, so no FMP
+    key is needed. Returns an empty list when preconditions are missing (no
+    script, no ``uv`` on PATH) or when the screen genuinely found zero
     candidates. Raises ``VcpScreenerError`` when the subprocess ran but
     failed, timed out, or produced no readable output — those cases must
     not be silently reported as zero candidates.
@@ -135,7 +137,6 @@ def fetch_vcp_screener_tickers() -> list[str]:
         return []
     uv = shutil.which("uv")
     assert uv is not None  # guaranteed by _vcp_unavailable_reason() above
-    api_key = os.environ["FMP_API_KEY"]
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             result = subprocess.run(
@@ -144,8 +145,6 @@ def fetch_vcp_screener_tickers() -> list[str]:
                     "run",
                     "python",
                     str(_VCP_SCRIPT),
-                    "--api-key",
-                    api_key,
                     "--output-dir",
                     tmpdir,
                     "--max-candidates",
