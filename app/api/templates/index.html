@@ -326,7 +326,8 @@
               hx-swap="outerHTML"></span>
       </button>
       <div class="dropdown-menu dropdown-menu-end notif-dropdown p-0">
-        <div id="notif-list">
+        <div id="notif-list" hx-get="/partials/notifications"
+             hx-trigger="load" hx-swap="innerHTML">
           <div class="notif-empty"><span>Loading…</span></div>
         </div>
       </div>

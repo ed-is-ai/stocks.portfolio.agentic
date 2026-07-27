@@ -48,12 +48,22 @@ class PortfolioService:
         Supports both the current self-describing artifact envelope
         (``{"meta": ..., "records": [...]}``) and a legacy bare JSON list,
         via ``read_analysis_records``.
+
+        Individual records that fail validation are skipped rather than
+        discarding the whole set — one malformed row (e.g. a null price from a
+        bad market-data bar) must not blank out the entire watchlist.
         """
         try:
             data = read_analysis_records(ANALYSIS_JSON)
-            return [StockRecord.model_validate(r) for r in data]
         except Exception:
             return []
+        records: list[StockRecord] = []
+        for row in data:
+            try:
+                records.append(StockRecord.model_validate(row))
+            except Exception:
+                continue
+        return records
 
     @staticmethod
     def current_prices(records: list[StockRecord]) -> dict[str, float]:

@@ -474,7 +474,7 @@ class ScannerAgent(Agent):
             progress=False,
             auto_adjust=True,
         )
-        if df.empty or len(df) < 50:
+        if df.empty:
             return None
         # Handle MultiIndex columns from yfinance
         if isinstance(df.columns, pd.MultiIndex):
@@ -482,6 +482,13 @@ class ScannerAgent(Agent):
                 0
             )  # Get the field names (Close, High, etc.)
         df.columns = [c.lower() for c in df.columns]
+        # yfinance can append a trailing partial bar carrying volume but NaN
+        # OHLC. Left in, ``iloc[-1]["close"]`` is NaN → ``price`` serializes as
+        # null and every record fails StockRecord validation. Drop any bar
+        # missing a real OHLC price before computing technicals.
+        df = df.dropna(subset=["open", "high", "low", "close"])
+        if len(df) < 50:
+            return None
         return df
 
     def compute_technicals(self, df: pd.DataFrame) -> dict:

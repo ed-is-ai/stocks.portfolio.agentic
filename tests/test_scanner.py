@@ -41,6 +41,39 @@ class TestScannerAgent:
         assert "volume" in df.columns
 
     @patch("yfinance.download")
+    def test_fetch_stock_data_drops_trailing_nan_ohlc_bar(self, mock_download):
+        """A trailing partial bar (volume only, NaN OHLC) must be dropped.
+
+        Left in, ``iloc[-1]["close"]`` is NaN, ``price`` serializes as null,
+        and every record fails StockRecord validation — blanking the watchlist.
+        """
+        dates = pd.date_range(start="2023-01-01", periods=101, freq="D")
+        closes = [100 + i * 0.1 for i in range(101)]
+        highs = [105 + i * 0.1 for i in range(101)]
+        lows = [95 + i * 0.1 for i in range(101)]
+        opens = [99 + i * 0.1 for i in range(101)]
+        volumes = [1000000] * 101
+        # Final bar carries volume but NaN OHLC, mimicking yfinance's partial row.
+        closes[-1] = highs[-1] = lows[-1] = opens[-1] = float("nan")
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": closes,
+                "High": highs,
+                "Low": lows,
+                "Open": opens,
+                "Volume": volumes,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        df = agent.fetch_stock_data("AAPL")
+
+        assert df is not None
+        assert len(df) == 100  # the NaN bar was dropped
+        assert not df[["open", "high", "low", "close"]].isna().any().any()
+
+    @patch("yfinance.download")
     def test_fetch_stock_data_insufficient_data(self, mock_download):
         """Test handling of insufficient data."""
         mock_download.return_value = pd.DataFrame()  # Empty DataFrame

@@ -36,6 +36,29 @@ def test_current_prices_maps_ticker_to_price() -> None:
     assert PortfolioService.current_prices(records) == {"AAA": 10.0, "BBB": 20.0}
 
 
+def test_load_analysis_skips_invalid_records_without_dropping_valid(
+    monkeypatch,
+) -> None:
+    """One malformed record (e.g. null price) must not blank the watchlist."""
+    valid = {
+        "ticker": "AAA",
+        "price": 10.0,
+        "as_of": "2024-01-01",
+        "volume": 1000.0,
+        "rel_volume": 1.0,
+        "high_52w": 20.0,
+        "low_52w": 5.0,
+        "pct_from_52w_high": -5.0,
+        "pct_change_week": 1.0,
+    }
+    invalid = {**valid, "ticker": "BAD", "price": None}
+    import app.services.portfolio_service as module
+
+    monkeypatch.setattr(module, "read_analysis_records", lambda _path: [invalid, valid])
+    records = PortfolioService(_StubTrader(), _StubEvaluator()).load_analysis()
+    assert [record.ticker for record in records] == ["AAA"]
+
+
 class _StubTrader:
     def get_trade_history(self, ticker=None):
         return []
