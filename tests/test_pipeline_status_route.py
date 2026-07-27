@@ -190,6 +190,10 @@ def test_pipeline_status_cached_source_labelled_cached_not_skipped(
     assert "source-count-stale" in markup
     # A genuinely skipped (non-cached) source keeps the "Skipped" label.
     assert "Skipped" in markup
+    # Both sources here are Discovery-stage; the funnel heading groups them
+    # under a single "Discovery" subheading (#108).
+    assert "source-stage-label" in markup
+    assert "Discovery" in markup
 
 
 def test_pipeline_status_failed_attempt_keeps_prior_refresh_and_shows_toast(

@@ -314,6 +314,26 @@ a.ticker:hover {
   gap: 0.25rem;
   margin-top: 0.35rem;
 }
+/* Stage groups (#108): headings for the Discovery / Market data /
+   Enrichment funnel above each row of source badges. */
+.source-stage-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+}
+.source-stage-label {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+}
+.source-stage-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
 
 /* ── Responsive table shell (issue #43) ──────────────────────────
  * One table at every breakpoint: it scrolls horizontally instead of

@@ -1,3 +1,4 @@
+{% import "_macros.html" as macros %}
 {% if not runs %}
 <div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-exclamation-triangle-fill text-warning fs-5"></i>
@@ -91,13 +92,13 @@
           <details>
             <summary>{{ r.source_health|length }} sources</summary>
             <div class="run-source-health">
-            {% for source in r.source_health %}
+            {% call(source) macros.source_stage_groups(r.source_health) %}
               {% set is_cached = source.detail_code == 'cached_input' %}
               <span class="source-badge source-{{ source.state }}{% if is_cached %} source-cached{% endif %}" title="{{ source.display_message }}">
                 {{ source.label }}: {% if is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
                 <span class="source-count{% if is_cached %} source-count-stale{% endif %}">&middot; {{ source.count }}</span>
               </span>
-            {% endfor %}
+            {% endcall %}
             </div>
           </details>
           {% else %}

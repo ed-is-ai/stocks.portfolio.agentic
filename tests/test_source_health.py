@@ -12,6 +12,7 @@ from app.schemas.source_health import (
     SourceHealth,
     SourceName,
     SourceResult,
+    SourceStage,
     SourceState,
     derive_pipeline_outcome,
 )
@@ -45,6 +46,43 @@ def test_source_result_distinguishes_empty_skipped_and_failed() -> None:
     assert all(
         item.health.completed_at is not None for item in (empty, skipped, failed)
     )
+
+
+def test_every_source_maps_to_a_pipeline_stage() -> None:
+    """Every SourceName must map to exactly one funnel stage (#108)."""
+    expected = {
+        SourceName.WHALE_WISDOM: SourceStage.DISCOVERY,
+        SourceName.STOCKTWITS: SourceStage.DISCOVERY,
+        SourceName.VCP_FMP: SourceStage.DISCOVERY,
+        SourceName.TRADINGVIEW_US: SourceStage.DISCOVERY,
+        SourceName.TRADINGVIEW_UK: SourceStage.DISCOVERY,
+        SourceName.YAHOO_MARKET_DATA: SourceStage.MARKET_DATA,
+        SourceName.ALPHA_VANTAGE: SourceStage.ENRICHMENT,
+        SourceName.CONGRESS: SourceStage.ENRICHMENT,
+    }
+
+    assert set(expected) == set(SourceName)
+    for source, stage in expected.items():
+        assert source.stage is stage
+
+
+def test_stage_labels_and_order_reflect_the_pipeline_funnel() -> None:
+    assert SourceStage.DISCOVERY.label == "Discovery"
+    assert SourceStage.MARKET_DATA.label == "Market data"
+    assert SourceStage.ENRICHMENT.label == "Enrichment"
+    assert (
+        SourceStage.DISCOVERY.order
+        < SourceStage.MARKET_DATA.order
+        < SourceStage.ENRICHMENT.order
+    )
+
+
+def test_source_health_stage_properties_delegate_to_source() -> None:
+    health = SourceHealth(source=SourceName.CONGRESS, state=SourceState.OK, count=5)
+
+    assert health.stage is SourceStage.ENRICHMENT
+    assert health.stage_label == "Enrichment"
+    assert health.stage_order == SourceStage.ENRICHMENT.order
 
 
 def test_source_health_redacts_secrets_from_serialized_messages() -> None:

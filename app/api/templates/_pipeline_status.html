@@ -1,3 +1,4 @@
+{% import "_macros.html" as macros %}
 <div class="pipeline-status {{ status.state }}"
      data-pipeline-state="{{ status.state }}"
      {% if status.state == 'running' %}
@@ -55,14 +56,14 @@
         {% endif %}
         {% if source_health %}
         <div class="source-health" aria-label="Source coverage">
-          {% for source in source_health %}
+          {% call(source) macros.source_stage_groups(source_health) %}
           {% set is_cached = source.detail_code == 'cached_input' %}
           <span class="source-badge source-{{ source.state }}{% if is_cached %} source-cached{% endif %}" title="{{ source.display_message }}">
             <i class="bi bi-{% if source.state == 'ok' %}check-circle-fill{% elif source.state == 'empty' %}dash-circle{% elif is_cached %}clock-history{% elif source.state == 'skipped' %}skip-forward-circle{% else %}x-circle-fill{% endif %}"></i>
             {{ source.label }}: {% if is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
             <span class="source-count{% if is_cached %} source-count-stale{% endif %}">&middot; {{ source.count }}</span>
           </span>
-          {% endfor %}
+          {% endcall %}
         </div>
         {% endif %}
       </div>

@@ -520,3 +520,7 @@ def test_runlog_renders_structured_partial_coverage_and_legacy_fallback(
     assert "PARTIAL" in markup
     assert "TradingView UK" in markup
     assert "legacy source summary" in markup
+    # TradingView UK is a Discovery-stage source; the funnel heading groups
+    # it under a "Discovery" subheading (#108).
+    assert "source-stage-label" in markup
+    assert "Discovery" in markup

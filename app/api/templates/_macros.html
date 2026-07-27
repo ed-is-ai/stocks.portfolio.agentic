@@ -1,0 +1,16 @@
+{# Shared Jinja macros for the pipeline UI (#108). #}
+
+{% macro source_stage_groups(source_health) %}
+{# Render one .source-stage-group per pipeline stage (Discovery, Market
+   data, Enrichment), in stage order. The caller block renders one badge
+   per source; this macro only supplies the grouping/heading structure so
+   badge markup can stay wherever it already lives. #}
+{% for _, group in source_health|groupby('stage_order') %}
+<div class="source-stage-group">
+  <div class="source-stage-label">{{ group[0].stage_label }}</div>
+  <div class="source-stage-badges">
+    {% for source in group %}{{ caller(source) }}{% endfor %}
+  </div>
+</div>
+{% endfor %}
+{% endmacro %}

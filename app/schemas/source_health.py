@@ -40,6 +40,46 @@ class SourceName(StrEnum):
             self.CONGRESS: "Congress",
         }[self]
 
+    @property
+    def stage(self) -> SourceStage:
+        """Return the pipeline funnel stage this source belongs to."""
+        return {
+            self.WHALE_WISDOM: SourceStage.DISCOVERY,
+            self.STOCKTWITS: SourceStage.DISCOVERY,
+            self.VCP_FMP: SourceStage.DISCOVERY,
+            self.TRADINGVIEW_US: SourceStage.DISCOVERY,
+            self.TRADINGVIEW_UK: SourceStage.DISCOVERY,
+            self.YAHOO_MARKET_DATA: SourceStage.MARKET_DATA,
+            self.ALPHA_VANTAGE: SourceStage.ENRICHMENT,
+            self.CONGRESS: SourceStage.ENRICHMENT,
+        }[self]
+
+
+class SourceStage(StrEnum):
+    """Pipeline funnel stage a source belongs to, for grouped display."""
+
+    DISCOVERY = "discovery"
+    MARKET_DATA = "market_data"
+    ENRICHMENT = "enrichment"
+
+    @property
+    def label(self) -> str:
+        """Return the human-readable display name for this stage."""
+        return {
+            self.DISCOVERY: "Discovery",
+            self.MARKET_DATA: "Market data",
+            self.ENRICHMENT: "Enrichment",
+        }[self]
+
+    @property
+    def order(self) -> int:
+        """Return the display order for this stage in the pipeline funnel."""
+        return {
+            self.DISCOVERY: 0,
+            self.MARKET_DATA: 1,
+            self.ENRICHMENT: 2,
+        }[self]
+
 
 class SourceState(StrEnum):
     """Explicit, safe outcome states for one source in one pipeline run."""
@@ -104,6 +144,21 @@ class SourceHealth(BaseModel):
     def state_label(self) -> str:
         """Return the state's human-readable display label."""
         return self.state.label
+
+    @property
+    def stage(self) -> SourceStage:
+        """Return the pipeline funnel stage this source belongs to."""
+        return self.source.stage
+
+    @property
+    def stage_label(self) -> str:
+        """Return the stage's human-readable display label."""
+        return self.source.stage.label
+
+    @property
+    def stage_order(self) -> int:
+        """Return the stage's display order for stage-ordered rendering."""
+        return self.source.stage.order
 
 
 class SourceResult(BaseModel):
