@@ -332,6 +332,24 @@ class AlertAgent(Agent):
             return False
         return True
 
+    @staticmethod
+    def _congress_summary(stock: StockRecord) -> str | None:
+        """Net congressional trades + Senate breakdown, or None when uncovered.
+
+        Mirrors the watchlist's presence/net rule: rendered only when either
+        congressional count is present; ``net = buys - sells``.
+        """
+        if stock.congress_buys is None and stock.congress_sells is None:
+            return None
+        buys = stock.congress_buys or 0
+        sells = stock.congress_sells or 0
+        net = buys - sells
+        return (
+            f"Congress: {net:+d} net ({buys} buys / {sells} sells, 12mo) "
+            f"| Senate: {stock.senate_buys or 0} buys / "
+            f"{stock.senate_sells or 0} sells"
+        )
+
     def format_alert_text(self, stock: StockRecord, trigger: str | None = None) -> str:
         analysis = stock.analysis
         assert analysis is not None
@@ -358,10 +376,13 @@ class AlertAgent(Agent):
 
         n = self._breakout_narrative(stock)
         trigger_line = f"** {trigger} **\n\n" if trigger else ""
+        congress = self._congress_summary(stock)
+        congress_line = f"{congress}\n" if congress else ""
         body = (
             f"{trigger_line}{stock.ticker} — Score {analysis.score}/10 | {analysis.stage}\n"
             f"Price: ${stock.price}  |  RSI: {stock.rsi14}  |  RelVol: {stock.rel_volume}x\n"
             f"Distance from 52w high: {stock.pct_from_52w_high}%\n"
+            f"{congress_line}"
             f"Entry: {entry}  |  Stop: {stop}  |  Risk: {risk_str}\n"
             f"\n{analysis.summary}\n"
             f"{canslim_str}\n"
@@ -436,6 +457,18 @@ class AlertAgent(Agent):
                 <td style="padding:3px 6px">{_bar(cs.M)}</td><td style="padding:3px 6px">{cs.M}/2</td></tr>
           </table>"""
 
+        congress_row = ""
+        congress = self._congress_summary(stock)
+        if congress:
+            net = (stock.congress_buys or 0) - (stock.congress_sells or 0)
+            net_color = "#27ae60" if net > 0 else "#c0392b" if net < 0 else "#555"
+            congress_row = (
+                f'<tr><td style="padding:6px;background:#f8f8f8" colspan="2">'
+                f"<b>Congress</b></td>"
+                f'<td style="padding:6px;color:{net_color}" colspan="2">'
+                f"{congress}</td></tr>"
+            )
+
         trigger_banner = ""
         if trigger:
             trigger_banner = (
@@ -475,6 +508,7 @@ class AlertAgent(Agent):
               <td style=\"padding:6px;background:#f8f8f8\" colspan="2"><b>Risk to Stop</b></td>
               <td style=\"padding:6px\" colspan="2">{risk_str} below entry</td>
             </tr>
+            {congress_row}
           </table>
           <p style=\"font-style:italic;color:#555\">{analysis.summary}</p>
           {self._narrative_html(stock)}
@@ -1369,6 +1403,16 @@ class AlertAgent(Agent):
         )
         url = self._yahoo_url(stock.ticker)
 
+        congress = self._congress_summary(stock)
+        congress_line = ""
+        if congress:
+            net = (stock.congress_buys or 0) - (stock.congress_sells or 0)
+            net_color = "#27ae60" if net > 0 else "#c0392b" if net < 0 else "#555"
+            congress_line = (
+                f'<div style="font-size:0.82em;color:{net_color};margin-bottom:8px">'
+                f"{congress}</div>"
+            )
+
         return f"""
         <div style="border:1px solid #c3e6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#f8fff9">
           <div style="font-weight:700;font-size:1em;color:#1e3a5f;margin-bottom:4px">
@@ -1387,6 +1431,7 @@ class AlertAgent(Agent):
             RSI <b>{stock.rsi14}</b> &nbsp;|&nbsp;
             RelVol <b>{stock.rel_volume}x</b>
           </div>
+          {congress_line}
           <table style="width:100%;border-collapse:collapse;font-size:0.82em">
             <tr>
               <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;width:80px;color:#555;vertical-align:top">Volume</td>

@@ -226,6 +226,35 @@ class TestAlertAgent:
         assert "</html>" in html
         assert "table" in html
 
+    def test_congress_summary_present(self, sample_high_score_stocks):
+        """Congress net + Senate breakdown render across all alert formats."""
+        agent = AlertAgent()
+        stock = sample_high_score_stocks[0].model_copy(
+            update={
+                "congress_buys": 7,
+                "congress_sells": 2,
+                "senate_buys": 3,
+                "senate_sells": 1,
+            }
+        )
+        expected = (
+            "Congress: +5 net (7 buys / 2 sells, 12mo) | Senate: 3 buys / 1 sells"
+        )
+
+        assert expected in agent.format_alert_text(stock)
+        assert expected in agent.format_alert_html(stock)
+        assert expected in agent._buy_card_html(stock, "Breakout")
+
+    def test_congress_summary_absent(self, sample_high_score_stocks):
+        """No congressional line when the record has no coverage."""
+        agent = AlertAgent()
+        stock = sample_high_score_stocks[0]  # all congress fields default to None
+
+        assert agent._congress_summary(stock) is None
+        assert "Congress:" not in agent.format_alert_text(stock)
+        assert "Congress" not in agent.format_alert_html(stock)
+        assert "Congress" not in agent._buy_card_html(stock, "Breakout")
+
     def test_run_method_no_alerts(self, sample_low_score_stocks):
         """Test run method with no alerts triggered."""
         agent = AlertAgent()
