@@ -13,6 +13,8 @@ Features:
 - S&P 500 constituents fetching
 """
 
+import csv
+import io
 import json
 import os
 import sys
@@ -83,6 +85,14 @@ class FMPClient:
     RATE_LIMIT_DELAY = 0.3  # 300ms between requests
 
     _ENDPOINT_FAILURE_THRESHOLD = 3  # disable endpoint after N consecutive failures
+
+    # S&P 500 universe source. FMP's constituent endpoints are unavailable on
+    # the free plan (stable -> HTTP 402, legacy v3 -> HTTP 403), so the list is
+    # sourced from the free, keyless DataHub open dataset.
+    _CONSTITUENTS_URL = (
+        "https://datahub.io/core/s-and-p-500-companies-financials/_r/-/"
+        "data/constituents-financials.csv"
+    )
 
     # Last-known-good S&P 500 constituent list, so one failed fetch doesn't take
     # down the whole run. Lives alongside the script to survive across runs (the
@@ -243,37 +253,31 @@ class FMPClient:
             self._disabled_endpoints.add(base_url)
 
     def get_sp500_constituents(self) -> Optional[list[dict]]:
-        """Fetch S&P 500 constituent list.
+        """Fetch the S&P 500 constituent list from the DataHub open dataset.
 
-        Tries the stable endpoint first, then the legacy v3 endpoint. On a fresh
-        success the list is cached to disk as last-known-good. If every live
-        attempt fails, falls back to that cached list (with a staleness warning)
-        so a single upstream failure doesn't take down the whole run.
+        FMP's own constituent endpoints are unavailable on the free plan
+        (``stable`` -> HTTP 402, legacy ``v3`` -> HTTP 403), so the universe is
+        sourced from the free, keyless DataHub ``s-and-p-500-companies`` CSV.
+        On a fresh success the list is cached to disk as last-known-good; if the
+        live fetch fails, falls back to that cache (with a staleness warning) so
+        a single upstream failure doesn't take down the whole run.
 
         Returns:
             List of dicts with keys: symbol, name, sector, subSector
-            or None if no live fetch and no cached fallback are available.
+            or None if neither a live fetch nor a cached fallback is available.
         """
         cache_key = "sp500_constituents"
         if cache_key in self.cache:
             return self.cache[cache_key]
 
         self.last_error = None
-        for url in [
-            "https://financialmodelingprep.com/stable/sp500-constituent",
-            f"{self.BASE_URL}/sp500_constituent",
-        ]:
-            # quiet=True suppresses per-URL stderr spam (the stable endpoint 403s
-            # for legacy accounts); last_error still captures the real cause.
-            # The constituent endpoints return a JSON array; _rate_limited_get is
-            # annotated Optional[dict] for the common object-shaped responses.
-            data = self._rate_limited_get(url, quiet=True)
-            if isinstance(data, list) and data:
-                self.cache[cache_key] = data
-                self._save_constituents_cache(data)
-                return data
+        constituents = self._fetch_datahub_constituents()
+        if constituents:
+            self.cache[cache_key] = constituents
+            self._save_constituents_cache(constituents)
+            return constituents
 
-        reason = self.last_error or "no data returned from any endpoint"
+        reason = self.last_error or "no data returned from DataHub"
         print(
             f"ERROR: Unable to fetch S&P 500 constituents ({reason})",
             file=sys.stderr,
@@ -289,6 +293,39 @@ class FMPClient:
             self.cache[cache_key] = constituents
             return constituents
         return None
+
+    def _fetch_datahub_constituents(self) -> Optional[list[dict]]:
+        """Download and parse the DataHub S&P 500 constituents CSV.
+
+        Maps the CSV columns to FMP's constituent shape so downstream callers
+        (symbol/name/sector lookups) are unchanged. Returns None on any
+        network or parse failure, recording the cause in ``last_error``.
+        """
+        try:
+            response = requests.get(self._CONSTITUENTS_URL, timeout=30)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            self.last_error = f"DataHub request failed: {exc}"
+            return None
+        try:
+            reader = csv.DictReader(io.StringIO(response.text))
+            constituents = [
+                {
+                    "symbol": row["Symbol"].strip(),
+                    "name": (row.get("Name") or row["Symbol"]).strip(),
+                    "sector": (row.get("Sector") or "Unknown").strip(),
+                    "subSector": (row.get("Sub-Industry") or "").strip(),
+                }
+                for row in reader
+                if (row.get("Symbol") or "").strip()
+            ]
+        except (csv.Error, KeyError) as exc:
+            self.last_error = f"DataHub CSV parse failed: {exc}"
+            return None
+        if not constituents:
+            self.last_error = "DataHub CSV contained no rows"
+            return None
+        return constituents
 
     def _save_constituents_cache(self, constituents: list[dict]) -> None:
         """Persist a freshly-fetched constituent list as last-known-good."""
