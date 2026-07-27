@@ -18,35 +18,58 @@ import os
 from typing import Any
 
 from app.schemas.llm_narrative import LlmNarrativeDraft
+from app.schemas.market_breadth import MarketBreadth
 from app.schemas.market_cycle import MarketCycleContext
 from app.schemas.news_context import NewsContext
 from app.schemas.sector_allocation import (
+    CongressionalBuy,
     PortfolioSectorWeight,
     SectorAllocationSnapshot,
 )
 
 _MODEL = "claude-sonnet-5"
-_MAX_TOKENS = 1024
-_TOP_N = 3
+_MAX_TOKENS = 1536
+_TOP_N = 4
 
 _SYSTEM_PROMPT = (
     "You are writing a short, factual market-context blurb for a personal "
-    "stock-portfolio digest email. You will be given: (1) how the scanner's "
-    "sector mix has shifted run-over-run, (2) the user's current portfolio "
-    "sector weights, (3) where we are in the FOMC meeting cycle, and (4) a "
-    "handful of recent news headlines with their source domain and URL. "
-    "Write one headline and a few bullets covering: how the sector "
-    "allocation has changed, how that reads against the current point in "
-    "the market/financial cycle, and any world-events context — but ONLY "
-    "using the headlines you were given. Do not name any news outlet, "
-    "publication, event, or claim that is not directly present in the "
-    "supplied headlines — if you have no relevant headline for a point, "
-    "omit it rather than filling in from general knowledge. For every "
-    "bullet that draws on a headline, list the exact domain string of that "
-    "headline in cited_domains; leave cited_domains empty for bullets based "
-    "only on the sector/cycle data. This is informational market context "
-    "only, not financial advice or a recommendation to buy or sell — do not "
-    "phrase anything as a recommendation."
+    "stock-portfolio digest email. You are given deterministic, trustworthy "
+    "figures — treat them as facts you may state directly: (1) sector "
+    "prevalence in this scan run, including each sector's share of the whole "
+    "scanned universe that is high-conviction (scoring 7/10 or higher), and "
+    "how the sector mix has shifted week-on-week over the stated lookback "
+    "window; (2) which sectors show the most multi-year base breakouts this "
+    "run; (3) the user's current portfolio sector weights; (4) an S&P 500 "
+    "market-breadth reading — the percentage of members above their 200-day "
+    "average — a whole-market participation gauge the scan's filtered "
+    "candidate list cannot provide; (5) which individual stocks are being "
+    "most heavily net-bought by US Congress / Senate filers; (6) where we sit "
+    "in the FOMC meeting cycle; and (7) a handful of recent news headlines "
+    "with their source domain and URL.\n\n"
+    "Write one headline and a few bullets that: describe the sector "
+    "allocation and its week-on-week shift, leading with sectors most "
+    "prevalent among high-conviction (7/10+) names; read the market's likely "
+    "cycle position and risk posture from the mix — e.g. whether leadership "
+    "looks defensive / late-cycle (utilities, staples, healthcare, REITs) or "
+    "risk-on / early-to-mid-cycle (technology, discretionary, industrials) — "
+    "framed against breadth and the FOMC position, hedged as 'likely' or "
+    "'consistent with', never as certainty; note whether market breadth is "
+    "broad or narrow / diverging and what that implies alongside the tilt; "
+    "call out which sectors are seeing the most multi-year breakouts; flag "
+    "the stocks lawmakers are most heavily buying, if any; and weave in "
+    "relevant world-events context to help explain the rotation — but ONLY "
+    "using the headlines you were given.\n\n"
+    "Do not name any news outlet, publication, event, or news claim that is "
+    "not directly present in the supplied headlines; if you have no relevant "
+    "headline for a point, omit that world-events angle rather than filling "
+    "it in from general knowledge. The sector, breadth, congressional, cycle "
+    "and multi-year-breakout figures above are supplied facts you may state "
+    "directly. For every bullet that draws on a news headline, list the exact "
+    "domain string(s) of that headline in cited_domains; leave cited_domains "
+    "empty for bullets based only on the supplied figures. This is "
+    "informational market context only, not financial advice or a "
+    "recommendation to buy or sell — do not phrase anything as a "
+    "recommendation."
 )
 
 _NARRATIVE_SCHEMA: dict[str, Any] = {
@@ -81,20 +104,72 @@ def _build_user_prompt(
     portfolio_weights: list[PortfolioSectorWeight],
     cycle: MarketCycleContext,
     news_context: NewsContext,
+    breadth: MarketBreadth | None,
+    congress: list[CongressionalBuy],
 ) -> str:
     """Render the structured context into a plain-text user prompt."""
     lines: list[str] = []
 
     lines.append(f"As of: {scan_snapshot.as_of}")
-    lines.append("Sector prevalence this run (share of scanned candidates):")
+    lines.append(
+        "Sector prevalence this run "
+        "(share of candidates | high-conviction 7/10+ share of universe | "
+        "multi-year breakouts):"
+    )
     for share in scan_snapshot.shares[:_TOP_N]:
-        lines.append(f"- {share.sector}: {_pct(share.count_share)}")
+        lines.append(
+            f"- {share.sector}: {_pct(share.count_share)} | "
+            f"{_pct(share.strong_share)} 7/10+ | {share.myb_count} MYB"
+        )
+
     if scan_snapshot.deltas:
-        lines.append("Run-over-run sector-prevalence change:")
+        window = scan_snapshot.lookback_days
+        label = (
+            f"Week-on-week sector-prevalence shift (over ~{window} days):"
+            if window is not None
+            else "Sector-prevalence shift vs. the prior run:"
+        )
+        lines.append(label)
         for delta in scan_snapshot.deltas[:_TOP_N]:
             lines.append(f"- {delta.sector}: {_pct(delta.delta)} change")
     else:
-        lines.append("No prior run to compare against yet.")
+        lines.append("No prior ~7-day baseline yet (first sector snapshot).")
+
+    top_myb = sorted(
+        (s for s in scan_snapshot.shares if s.myb_count > 0),
+        key=lambda s: -s.myb_count,
+    )[:_TOP_N]
+    if top_myb:
+        lines.append("Sectors with the most multi-year breakouts this run:")
+        for share in top_myb:
+            lines.append(f"- {share.sector}: {share.myb_count}")
+
+    if breadth is not None:
+        trend = (
+            "rising"
+            if breadth.trend_rising
+            else "falling"
+            if breadth.trend_rising is False
+            else "flat/unknown"
+        )
+        stale = "" if breadth.is_fresh else " (stale)"
+        bearish = "; bearish-divergence flag set" if breadth.bearish_signal else ""
+        lines.append(
+            f"S&P 500 market breadth: {breadth.pct_above_200dma:.0f}% of members "
+            f"above their 200DMA, trend {trend}{bearish} "
+            f"(as of {breadth.as_of}{stale})."
+        )
+
+    if congress:
+        lines.append(
+            "Stocks most heavily net-bought by Congress/Senate "
+            "(ticker | sector | congress net | senate net):"
+        )
+        for buy in congress:
+            lines.append(
+                f"- {buy.ticker} | {buy.sector} | {buy.congress_net:+d} | "
+                f"{buy.senate_net:+d}"
+            )
 
     if portfolio_weights:
         lines.append("Current portfolio sector weights:")
@@ -139,6 +214,8 @@ class AnthropicNarrativeClient:
         portfolio_weights: list[PortfolioSectorWeight],
         cycle: MarketCycleContext,
         news_context: NewsContext,
+        breadth: MarketBreadth | None = None,
+        congress: list[CongressionalBuy] | None = None,
     ) -> LlmNarrativeDraft | None:
         """Ask Claude for a narrative draft, or ``None`` on any failure.
 
@@ -165,7 +242,12 @@ class AnthropicNarrativeClient:
                     {
                         "role": "user",
                         "content": _build_user_prompt(
-                            scan_snapshot, portfolio_weights, cycle, news_context
+                            scan_snapshot,
+                            portfolio_weights,
+                            cycle,
+                            news_context,
+                            breadth,
+                            congress or [],
                         ),
                     }
                 ],

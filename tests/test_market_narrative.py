@@ -10,8 +10,10 @@ from app.agents.scanner.market_narrative import (
     load_market_narrative,
     save_market_narrative,
 )
+from app.schemas.market_breadth import MarketBreadth
 from app.schemas.market_narrative import MarketNarrative
 from app.schemas.sector_allocation import (
+    CongressionalBuy,
     PortfolioSectorWeight,
     SectorAllocationSnapshot,
     SectorDelta,
@@ -72,6 +74,52 @@ class TestBuildDeterministicNarrative:
         cycle = get_market_cycle_context(date(2026, 2, 15))
         narrative = build_deterministic_narrative(_snapshot(), weights, cycle)
         assert any("Current holdings concentrated in" in b for b in narrative.bullets)
+
+    def test_week_on_week_wording_uses_lookback_days(self) -> None:
+        deltas = [
+            SectorDelta(
+                sector="Technology",
+                prior_share=0.5,
+                current_share=0.75,
+                delta=0.25,
+            )
+        ]
+        snapshot = _snapshot(deltas).model_copy(update={"lookback_days": 7})
+        cycle = get_market_cycle_context(date(2026, 2, 15))
+        narrative = build_deterministic_narrative(snapshot, [], cycle)
+        assert any("over the past ~7d" in b for b in narrative.bullets)
+
+    def test_breadth_and_congress_and_myb_bullets(self) -> None:
+        snapshot = _snapshot().model_copy(
+            update={
+                "shares": [
+                    SectorShare(
+                        sector="Energy",
+                        count=2,
+                        count_share=0.5,
+                        score_share=0.5,
+                        myb_count=2,
+                    )
+                ]
+            }
+        )
+        breadth = MarketBreadth(
+            pct_above_200dma=42.0, trend_rising=False, bearish_signal=True, as_of="x"
+        )
+        congress = [
+            CongressionalBuy(
+                ticker="AAA", sector="Energy", congress_net=8, senate_net=1
+            )
+        ]
+        cycle = get_market_cycle_context(date(2026, 2, 15))
+        narrative = build_deterministic_narrative(
+            snapshot, [], cycle, breadth, congress
+        )
+        joined = " ".join(narrative.bullets)
+        assert "S&P 500 breadth: 42% of members above their 200DMA" in joined
+        assert "breadth-divergence flag set" in joined
+        assert "Most heavily net-bought by Congress/Senate: AAA (+8)" in joined
+        assert "Most multi-year breakouts by sector: Energy (2)" in joined
 
     def test_not_advice_note_always_present(self) -> None:
         cycle = get_market_cycle_context(date(2026, 2, 15))

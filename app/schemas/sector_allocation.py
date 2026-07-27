@@ -19,6 +19,10 @@ class SectorShare(BaseModel):
     count: int
     count_share: float  # fraction (0..1) of total scored candidates
     score_share: float  # fraction (0..1) of total analyst-score mass
+    strong_count: int = 0  # candidates in this sector scoring >= 7/10
+    strong_share: float = 0.0  # fraction (0..1) of the whole universe that is
+    # this sector AND high-conviction (>= 7/10)
+    myb_count: int = 0  # candidates in this sector flagged multi-year breakout
 
 
 class SectorDelta(BaseModel):
@@ -42,6 +46,8 @@ class SectorAllocationSnapshot(BaseModel):
     total_candidates: int
     shares: list[SectorShare] = []
     deltas: list[SectorDelta] = []
+    lookback_days: int | None = None  # gap to the delta baseline snapshot
+    # (week-on-week ~= 7); None when there is no prior baseline to compare to
 
 
 class PortfolioSectorWeight(BaseModel):
@@ -50,3 +56,17 @@ class PortfolioSectorWeight(BaseModel):
     sector: str
     count: int  # number of held positions in this sector
     value_share: float  # fraction (0..1) of total portfolio GBP value
+
+
+class CongressionalBuy(BaseModel):
+    """A scanned name's net congressional/Senate buying over the last 12 months.
+
+    ``congress_net`` and ``senate_net`` are buys minus sells (QuiverQuant
+    transaction counts); only net-bought names are surfaced, so the narrative
+    can call out which stocks lawmakers are accumulating.
+    """
+
+    ticker: str
+    sector: str
+    congress_net: int  # congress_buys - congress_sells
+    senate_net: int  # senate_buys - senate_sells

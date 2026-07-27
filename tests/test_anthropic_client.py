@@ -18,9 +18,14 @@ import pytest
 
 from app.integrations.anthropic_client import AnthropicNarrativeClient
 from app.schemas.llm_narrative import LlmNarrativeDraft
+from app.schemas.market_breadth import MarketBreadth
 from app.schemas.market_cycle import MarketCycleContext
 from app.schemas.news_context import NewsContext
-from app.schemas.sector_allocation import SectorAllocationSnapshot, SectorShare
+from app.schemas.sector_allocation import (
+    CongressionalBuy,
+    SectorAllocationSnapshot,
+    SectorShare,
+)
 
 
 def _snapshot() -> SectorAllocationSnapshot:
@@ -172,6 +177,35 @@ class TestGenerateMarketNarrative:
         assert messages.last_kwargs["output_config"]["format"]["type"] == "json_schema"
         assert "temperature" not in messages.last_kwargs
         assert "top_p" not in messages.last_kwargs
+
+    def test_prompt_includes_breadth_and_congress(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        response = SimpleNamespace(
+            stop_reason="end_turn",
+            content=[_FakeTextBlock('{"headline": "H", "bullets": []}')],
+        )
+        messages = _FakeMessages(response=response)
+        _patch_anthropic(monkeypatch, messages)
+
+        breadth = MarketBreadth(
+            pct_above_200dma=42.0, trend_rising=False, bearish_signal=True, as_of="x"
+        )
+        congress = [
+            CongressionalBuy(
+                ticker="AAA", sector="Energy", congress_net=8, senate_net=1
+            )
+        ]
+        client = AnthropicNarrativeClient(api_key="sk-test")
+        client.generate_market_narrative(
+            _snapshot(), [], _cycle(), _news_context(), breadth, congress
+        )
+
+        assert messages.last_kwargs is not None
+        prompt = messages.last_kwargs["messages"][0]["content"]
+        assert "S&P 500 market breadth: 42%" in prompt
+        assert "most heavily net-bought by congress/senate" in prompt.lower()
+        assert "AAA | Energy | +8" in prompt
 
     def test_sdk_exception_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_anthropic(monkeypatch, _FakeMessages(error=RuntimeError("network down")))

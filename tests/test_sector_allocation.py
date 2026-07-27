@@ -250,3 +250,118 @@ class TestComputePortfolioSectorWeights:
         )
         weights = sa.compute_portfolio_sector_weights([pos], {"A": "Technology"}, 1.35)
         assert weights == []
+
+
+# ---------------------------------------------------------------------------
+# high-conviction (7/10+) universe share + multi-year breakout counts
+# ---------------------------------------------------------------------------
+
+
+class TestStrongAndMybCounts:
+    def test_strong_share_is_fraction_of_whole_universe(self) -> None:
+        records = [
+            _record("A", "Technology", score=8),
+            _record("B", "Technology", score=5),
+            _record("C", "Technology", score=7),
+            _record("D", "Healthcare", score=9),
+        ]
+        by_sector = {s.sector: s for s in sa.compute_sector_prevalence(records).shares}
+        # Tech: 2 of 4 records are >= 7/10 -> 0.5 of the whole universe.
+        assert by_sector["Technology"].strong_count == 2
+        assert by_sector["Technology"].strong_share == 0.5
+        assert by_sector["Healthcare"].strong_count == 1
+        assert by_sector["Healthcare"].strong_share == 0.25
+
+    def test_myb_count_tallies_multiyear_breakouts(self) -> None:
+        a = _record("A", "Energy", score=8)
+        a.analysis = StockAnalysis(
+            score=8, stage="Stage 2", summary="", multiyear_breakout=True
+        )
+        b = _record("B", "Energy", score=8)
+        by_sector = {s.sector: s for s in sa.compute_sector_prevalence([a, b]).shares}
+        assert by_sector["Energy"].myb_count == 1
+
+
+# ---------------------------------------------------------------------------
+# week-on-week baseline + deltas
+# ---------------------------------------------------------------------------
+
+
+def _dated_snapshot(as_of: str) -> SectorAllocationSnapshot:
+    return SectorAllocationSnapshot(
+        as_of=as_of,
+        total_candidates=2,
+        shares=[
+            SectorShare(sector="Technology", count=1, count_share=0.5, score_share=0.5)
+        ],
+    )
+
+
+class TestWeekBaseline:
+    def test_picks_snapshot_nearest_seven_days_ago(self) -> None:
+        history = {
+            "2026-07-01": _dated_snapshot("2026-07-01"),  # 26d before -> far
+            "2026-07-19": _dated_snapshot("2026-07-19"),  # 8d before -> nearest ~7
+        }
+        baseline, lookback = sa.week_baseline(history, "2026-07-27")
+        assert baseline is not None
+        assert baseline.as_of == "2026-07-19"
+        assert lookback == 8
+
+    def test_excludes_current_and_future_dates(self) -> None:
+        history = {
+            "2026-07-27": _dated_snapshot("2026-07-27"),  # same day -> excluded
+            "2026-07-30": _dated_snapshot("2026-07-30"),  # future -> excluded
+        }
+        baseline, lookback = sa.week_baseline(history, "2026-07-27")
+        assert baseline is None
+        assert lookback is None
+
+    def test_with_week_deltas_sets_lookback_days(self) -> None:
+        current = _dated_snapshot("2026-07-27")
+        history = {"2026-07-20": _dated_snapshot("2026-07-20")}
+        result = sa.with_week_deltas(current, history)
+        assert result.lookback_days == 7
+        assert result.deltas != []
+
+
+# ---------------------------------------------------------------------------
+# top congressional / senate net buys
+# ---------------------------------------------------------------------------
+
+
+def _congress_record(
+    ticker: str,
+    sector: str,
+    congress_buys: int,
+    congress_sells: int = 0,
+    senate_buys: int = 0,
+    senate_sells: int = 0,
+) -> StockRecord:
+    rec = _record(ticker, sector)
+    rec.congress_buys = congress_buys
+    rec.congress_sells = congress_sells
+    rec.senate_buys = senate_buys
+    rec.senate_sells = senate_sells
+    return rec
+
+
+class TestTopCongressionalBuys:
+    def test_ranks_by_net_and_excludes_non_positive(self) -> None:
+        records = [
+            _congress_record("AAA", "Technology", congress_buys=10, congress_sells=2),
+            _congress_record("BBB", "Energy", congress_buys=5),
+            _congress_record("CCC", "Healthcare", congress_buys=1, congress_sells=4),
+        ]
+        rows = sa.top_congressional_buys(records)
+        tickers = [r.ticker for r in rows]
+        assert tickers == ["AAA", "BBB"]  # CCC net -3 excluded
+        assert rows[0].congress_net == 8
+
+    def test_limit_caps_results(self) -> None:
+        records = [
+            _congress_record(f"T{i}", "Technology", congress_buys=i + 1)
+            for i in range(6)
+        ]
+        rows = sa.top_congressional_buys(records, limit=3)
+        assert len(rows) == 3

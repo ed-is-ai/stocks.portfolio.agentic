@@ -36,6 +36,7 @@ Extraction assembles a watchlist from institutional-holdings (WhaleWisdom) and q
 Scanner fetches price/volume history (yfinance), computes technicals, and enriches with fundamentals (Alpha Vantage fallback).
 Analyst scores each stock with the deterministic SEPA/VCP engine, optionally adding an LLM second opinion.
 Alert emails actionable setups (subject to a per-ticker cooldown).
+Market narrative — each run summarises the scan's sector allocation and its context at the top of the digest email and the web watchlist header: sector prevalence (including the high-conviction ≥7/10 share of the universe), the week-on-week rotation, which sectors show the most multi-year breakouts, S&P 500 market breadth (% above 200DMA, keyless public feed), the stocks Congress/Senate are net-buying, the FOMC-cycle position, and recent headlines. With ANTHROPIC_API_KEY set, Claude (Sonnet 5) writes it — grounded strictly in the supplied figures and headlines via a hallucination guard; otherwise a deterministic summary is rendered. Informational only, not financial advice.
 Trader (separate) records buy/sell trades you enter and computes portfolio P&L.
 
 
@@ -95,7 +96,7 @@ app/
 
 ├── core/            # config.py (single owner of paths + env), security.py
 
-├── integrations/    # alpha_vantage, congress, tv_screener
+├── integrations/    # alpha_vantage, congress, tv_screener, gdelt, market_breadth, anthropic_client
 
 ├── orchestration/   # orchestrator.py — wires agents, schedules on market hours
 
@@ -164,8 +165,11 @@ Variable
 Used for
 Required?
 ALPHA_VANTAGE_API_KEY
-Fundamental-data fallback
+Fundamental-data fallback; also the NEWS_SENTIMENT feed for the market narrative
 Optional (leave blank to disable)
+ANTHROPIC_API_KEY
+Claude (Sonnet 5) market-narrative summary — set via Settings ▸ Market narrative or .env
+Optional (a deterministic summary is used when unset)
 APP_AUTH_TOKEN
 Shared secret gating money-mutating API endpoints
 Recommended if exposing the app beyond localhost

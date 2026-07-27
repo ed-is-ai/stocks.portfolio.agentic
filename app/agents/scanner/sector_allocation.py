@@ -13,11 +13,12 @@ scan signal against current holdings.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from app.core.config import SECTOR_ALLOCATION_HISTORY_JSON
 from app.schemas.sector_allocation import (
+    CongressionalBuy,
     PortfolioSectorWeight,
     SectorAllocationSnapshot,
     SectorDelta,
@@ -30,6 +31,9 @@ if TYPE_CHECKING:
 _HISTORY_FILE = SECTOR_ALLOCATION_HISTORY_JSON
 _MAX_SNAPSHOTS = 30
 _UNKNOWN_SECTOR = "Unknown"
+_STRONG_SCORE = 7  # analyst score (out of 10) at/above which a name is "high
+# conviction" — the threshold that drives the universe-share signal
+_WEEK_DAYS = 7  # target lookback for the week-on-week prevalence delta
 
 
 def compute_sector_prevalence(
@@ -45,12 +49,17 @@ def compute_sector_prevalence(
     total = len(records)
     counts: dict[str, int] = {}
     scores: dict[str, int] = {}
+    strong: dict[str, int] = {}
+    mybs: dict[str, int] = {}
     for record in records:
         sector = record.sector or _UNKNOWN_SECTOR
         counts[sector] = counts.get(sector, 0) + 1
-        scores[sector] = scores.get(sector, 0) + (
-            record.analysis.score if record.analysis else 0
-        )
+        analysis = record.analysis
+        scores[sector] = scores.get(sector, 0) + (analysis.score if analysis else 0)
+        if analysis and analysis.score >= _STRONG_SCORE:
+            strong[sector] = strong.get(sector, 0) + 1
+        if analysis and analysis.multiyear_breakout:
+            mybs[sector] = mybs.get(sector, 0) + 1
     total_score = sum(scores.values())
     shares = [
         SectorShare(
@@ -58,6 +67,9 @@ def compute_sector_prevalence(
             count=count,
             count_share=(count / total) if total else 0.0,
             score_share=(scores[sector] / total_score) if total_score else 0.0,
+            strong_count=strong.get(sector, 0),
+            strong_share=(strong.get(sector, 0) / total) if total else 0.0,
+            myb_count=mybs.get(sector, 0),
         )
         for sector, count in sorted(counts.items(), key=lambda kv: -kv[1])
     ]
@@ -100,6 +112,58 @@ def with_deltas(
     return current.model_copy(update={"deltas": compute_sector_deltas(current, prior)})
 
 
+def week_baseline(
+    history: dict[str, SectorAllocationSnapshot],
+    as_of: str,
+    target_days: int = _WEEK_DAYS,
+) -> tuple[SectorAllocationSnapshot | None, int | None]:
+    """Return the prior snapshot closest to *target_days* before *as_of*.
+
+    Picks the run whose date is nearest ``as_of - target_days`` (a week-on-week
+    baseline) from among snapshots strictly older than *as_of*, so intraday
+    re-runs never compare against themselves. Returns ``(snapshot, lookback)``
+    where ``lookback`` is the actual day gap to that baseline, or
+    ``(None, None)`` when there is no earlier snapshot at all (first run).
+    """
+    try:
+        current_date = date.fromisoformat(as_of)
+    except ValueError:
+        return None, None
+    target = current_date - timedelta(days=target_days)
+    earlier: list[tuple[date, SectorAllocationSnapshot]] = []
+    for key, snapshot in history.items():
+        try:
+            snapshot_date = date.fromisoformat(key)
+        except ValueError:
+            continue
+        if snapshot_date < current_date:
+            earlier.append((snapshot_date, snapshot))
+    if not earlier:
+        return None, None
+    chosen_date, chosen = min(earlier, key=lambda ds: abs((ds[0] - target).days))
+    return chosen, (current_date - chosen_date).days
+
+
+def with_week_deltas(
+    current: SectorAllocationSnapshot,
+    history: dict[str, SectorAllocationSnapshot],
+    target_days: int = _WEEK_DAYS,
+) -> SectorAllocationSnapshot:
+    """Return *current* with week-on-week ``deltas`` and ``lookback_days`` set.
+
+    Compares against the snapshot nearest ``target_days`` ago (see
+    ``week_baseline``) rather than merely the previous run, so the narrative
+    reflects a week-over-week rotation rather than a day-to-day wobble.
+    """
+    baseline, lookback = week_baseline(history, current.as_of, target_days)
+    return current.model_copy(
+        update={
+            "deltas": compute_sector_deltas(current, baseline),
+            "lookback_days": lookback,
+        }
+    )
+
+
 def load_sector_history() -> dict[str, SectorAllocationSnapshot]:
     """Return {date_str: snapshot} for all past runs."""
     try:
@@ -139,6 +203,34 @@ def save_sector_snapshot(
             del history[key]
     payload = {k: v.model_dump(mode="json") for k, v in history.items()}
     _HISTORY_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def top_congressional_buys(
+    records: list[StockRecord],
+    limit: int = 5,
+) -> list[CongressionalBuy]:
+    """Return the most heavily net-bought names by congressional filers.
+
+    Net = buys minus sells over the last 12 months (QuiverQuant), missing
+    counts treated as zero. Only net-positive names are returned, ranked by
+    congressional net then Senate net, capped at *limit*.
+    """
+    rows: list[CongressionalBuy] = []
+    for record in records:
+        congress_net = (record.congress_buys or 0) - (record.congress_sells or 0)
+        senate_net = (record.senate_buys or 0) - (record.senate_sells or 0)
+        if congress_net <= 0 and senate_net <= 0:
+            continue
+        rows.append(
+            CongressionalBuy(
+                ticker=record.ticker,
+                sector=record.sector or _UNKNOWN_SECTOR,
+                congress_net=congress_net,
+                senate_net=senate_net,
+            )
+        )
+    rows.sort(key=lambda r: (-r.congress_net, -r.senate_net))
+    return rows[:limit]
 
 
 def compute_portfolio_sector_weights(

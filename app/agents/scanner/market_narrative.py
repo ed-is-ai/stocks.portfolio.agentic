@@ -24,10 +24,12 @@ from app.agents.scanner.market_cycle import (
 from app.agents.scanner.narrative_guard import validate_against_context
 from app.core.config import MARKET_NARRATIVE_JSON
 from app.integrations.anthropic_client import AnthropicNarrativeClient
+from app.schemas.market_breadth import MarketBreadth
 from app.schemas.market_cycle import MarketCycleContext
 from app.schemas.market_narrative import MarketNarrative, MarketNarrativeSource
 from app.schemas.news_context import NewsContext
 from app.schemas.sector_allocation import (
+    CongressionalBuy,
     PortfolioSectorWeight,
     SectorAllocationSnapshot,
 )
@@ -56,33 +58,79 @@ def _prevalence_bullet(snapshot: SectorAllocationSnapshot) -> str | None:
     top_shares = snapshot.shares[:_TOP_N]
     if not top_shares:
         return None
-    leaders = ", ".join(f"{s.sector} ({_pct(s.count_share)})" for s in top_shares)
+    leaders = ", ".join(
+        f"{s.sector} ({_pct(s.count_share)}, {_pct(s.strong_share)} at 7/10+)"
+        for s in top_shares
+    )
     return f"Most-prevalent scan sectors this run: {leaders}."
 
 
 def _delta_bullets(snapshot: SectorAllocationSnapshot) -> list[str]:
-    """Return gaining/losing-prevalence bullets, or a first-run note."""
+    """Return gaining/losing week-on-week bullets, or a first-run note."""
     if not snapshot.deltas:
         return [
-            "No prior run to compare against yet — this is the first "
+            "No prior ~7-day baseline yet — this is the first "
             "sector-prevalence snapshot."
         ]
+    window = snapshot.lookback_days
+    suffix = f" over the past ~{window}d" if window is not None else ""
     bullets: list[str] = []
     gainers = [d for d in snapshot.deltas if d.delta > 0][:_TOP_N]
     losers = [d for d in snapshot.deltas if d.delta < 0][:_TOP_N]
     if gainers:
         bullets.append(
-            "Gaining prevalence vs. the prior run: "
+            f"Gaining prevalence{suffix}: "
             + ", ".join(f"{d.sector} (+{_pct(d.delta)})" for d in gainers)
             + "."
         )
     if losers:
         bullets.append(
-            "Losing prevalence vs. the prior run: "
+            f"Losing prevalence{suffix}: "
             + ", ".join(f"{d.sector} ({_pct(d.delta)})" for d in losers)
             + "."
         )
     return bullets
+
+
+def _myb_bullet(snapshot: SectorAllocationSnapshot) -> str | None:
+    """Return the "sectors with most multi-year breakouts" bullet, or None."""
+    ranked = sorted(
+        (s for s in snapshot.shares if s.myb_count > 0),
+        key=lambda s: -s.myb_count,
+    )[:_TOP_N]
+    if not ranked:
+        return None
+    return (
+        "Most multi-year breakouts by sector: "
+        + ", ".join(f"{s.sector} ({s.myb_count})" for s in ranked)
+        + "."
+    )
+
+
+def _breadth_bullet(breadth: MarketBreadth | None) -> str | None:
+    """Return the S&P 500 market-breadth bullet, or None when unavailable."""
+    if breadth is None:
+        return None
+    trend = (
+        "rising"
+        if breadth.trend_rising
+        else "falling"
+        if breadth.trend_rising is False
+        else "flat"
+    )
+    divergence = " — breadth-divergence flag set" if breadth.bearish_signal else ""
+    return (
+        f"S&P 500 breadth: {breadth.pct_above_200dma:.0f}% of members above "
+        f"their 200DMA ({trend}){divergence}."
+    )
+
+
+def _congress_bullet(congress: list[CongressionalBuy]) -> str | None:
+    """Return the "most heavily bought by lawmakers" bullet, or None if empty."""
+    if not congress:
+        return None
+    names = ", ".join(f"{c.ticker} (+{c.congress_net})" for c in congress[:_TOP_N])
+    return f"Most heavily net-bought by Congress/Senate: {names}."
 
 
 def _portfolio_bullet(weights: list[PortfolioSectorWeight]) -> str | None:
@@ -112,21 +160,28 @@ def build_deterministic_narrative(
     scan_snapshot: SectorAllocationSnapshot,
     portfolio_weights: list[PortfolioSectorWeight],
     cycle: MarketCycleContext,
+    breadth: MarketBreadth | None = None,
+    congress: list[CongressionalBuy] | None = None,
 ) -> MarketNarrative:
     """Build the deterministic sector-allocation + market-cycle blurb.
 
     Fully rule-based: no API keys, no network, no LLM. This is the evergreen
     fallback rendered whenever a later, Claude-generated narrative isn't
-    available.
+    available. Breadth and congressional signals are folded in when supplied.
     """
     bullets: list[str] = []
     prevalence = _prevalence_bullet(scan_snapshot)
     if prevalence:
         bullets.append(prevalence)
     bullets.extend(_delta_bullets(scan_snapshot))
-    portfolio_bullet = _portfolio_bullet(portfolio_weights)
-    if portfolio_bullet:
-        bullets.append(portfolio_bullet)
+    for optional in (
+        _myb_bullet(scan_snapshot),
+        _breadth_bullet(breadth),
+        _congress_bullet(congress or []),
+        _portfolio_bullet(portfolio_weights),
+    ):
+        if optional:
+            bullets.append(optional)
     bullets.append(_cycle_bullet(cycle))
 
     headline = (
@@ -169,6 +224,8 @@ def build_llm_narrative(
     cycle: MarketCycleContext,
     news_context: NewsContext,
     anthropic_client: AnthropicNarrativeClient,
+    breadth: MarketBreadth | None = None,
+    congress: list[CongressionalBuy] | None = None,
 ) -> MarketNarrative | None:
     """Attempt a Claude-generated ``MarketNarrative``; ``None`` on any degraded path.
 
@@ -187,7 +244,7 @@ def build_llm_narrative(
         return None
 
     draft = anthropic_client.generate_market_narrative(
-        scan_snapshot, portfolio_weights, cycle, news_context
+        scan_snapshot, portfolio_weights, cycle, news_context, breadth, congress
     )
     if draft is None:
         return None

@@ -16,6 +16,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -59,11 +60,12 @@ from app.integrations.anthropic_client import AnthropicNarrativeClient
 from app.agents.scanner.sector_allocation import (
     compute_portfolio_sector_weights,
     compute_sector_prevalence,
-    latest_snapshot,
     load_sector_history,
     save_sector_snapshot,
-    with_deltas,
+    top_congressional_buys,
+    with_week_deltas,
 )
+from app.integrations.market_breadth import fetch_market_breadth
 from app.schemas import StockRecord
 from app.core.config import (
     ANALYSIS_JSON,
@@ -898,8 +900,8 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         momentum = build_momentum_pipeline(scanner, analyst, alerter)
 
         alert_summary, trace = momentum.run_traced(watchlist, progress=report_step)
-        scan_results = trace[0][1]
-        analysis_results = trace[1][1]
+        scan_results = cast(list[StockRecord], trace[0][1])
+        analysis_results = cast(list[StockRecord], trace[1][1])
         scanned = len(scan_results)
         analysed = len(analysis_results)
         source_health.update(scanner.source_health)
@@ -975,14 +977,21 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         # disk so the web banner and this digest render the same snapshot
         # without recomputing.
         sector_history = load_sector_history()
-        sector_snapshot = with_deltas(
+        sector_snapshot = with_week_deltas(
             compute_sector_prevalence(analysis_results),
-            latest_snapshot(sector_history),
+            sector_history,
         )
         ticker_sector = {r.ticker: r.sector or "Unknown" for r in analysis_results}
         portfolio_sector_weights = compute_portfolio_sector_weights(
             positions, ticker_sector, gbpusd
         )
+        # Whole-market context the filtered candidate list can't provide:
+        # S&P 500 breadth (keyless public feed) and the names lawmakers are
+        # buying most (already on each record from QuiverQuant). Both feed the
+        # deterministic and Claude narratives; breadth degrades to None on any
+        # fetch failure.
+        market_breadth = fetch_market_breadth()
+        congress_buys = top_congressional_buys(analysis_results)
         market_cycle = get_market_cycle_context()
         # Claude Sonnet 5 narrative (#109 Phase 3), guarded against
         # hallucinated outlets/events, falling back to the deterministic
@@ -1003,10 +1012,16 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
                 market_cycle,
                 news_context,
                 anthropic_client,
+                market_breadth,
+                congress_buys,
             )
         if market_narrative is None:
             market_narrative = build_deterministic_narrative(
-                sector_snapshot, portfolio_sector_weights, market_cycle
+                sector_snapshot,
+                portfolio_sector_weights,
+                market_cycle,
+                market_breadth,
+                congress_buys,
             )
         save_market_narrative(market_narrative)
 
