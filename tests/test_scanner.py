@@ -664,6 +664,37 @@ class TestCurrencyNormalization:
                 "High": [105 + i * 0.1 for i in range(100)],
                 "Low": [95 + i * 0.1 for i in range(100)],
                 "Open": [99 + i * 0.1 for i in range(100)],
+                "Volume": [1000000] * 100,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        with patch("app.agents.scanner.scanner_agent.SECTOR_CACHE_JSON", cache_path):
+            results = agent.scan_watchlist(
+                ["ULVR.L"],
+                spy_uptrend=True,
+                spy_52w_return=10.0,
+                screener_sectors={"ULVR.L": "Consumer Defensive"},
+            )
+
+        assert results[0].sector == "Consumer Defensive"
+
+        from app.agents.scanner.sector_cache import SectorCache
+
+        assert SectorCache(cache_path).get("ULVR.L") == "Consumer Defensive"
+
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
+        return_value={
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
             "sector": None,
             "currency": "GBp",  # LSE pence
         },
@@ -687,19 +718,6 @@ class TestCurrencyNormalization:
         )
 
         agent = ScannerAgent()
-        with patch("app.agents.scanner.scanner_agent.SECTOR_CACHE_JSON", cache_path):
-            results = agent.scan_watchlist(
-                ["ULVR.L"],
-                spy_uptrend=True,
-                spy_52w_return=10.0,
-                screener_sectors={"ULVR.L": "Consumer Defensive"},
-            )
-
-        assert results[0].sector == "Consumer Defensive"
-
-        from app.agents.scanner.sector_cache import SectorCache
-
-        assert SectorCache(cache_path).get("ULVR.L") == "Consumer Defensive"
         results = agent.scan_watchlist(
             ["ULVR.L"], spy_uptrend=True, spy_52w_return=10.0
         )
