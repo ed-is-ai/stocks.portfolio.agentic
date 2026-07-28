@@ -25,23 +25,6 @@
   {% endif %}
 </div>
 {% endif %}
-{% if refresh_status is defined %}
-<div class="alert alert-{{ 'success' if refresh_success else 'danger' }} border-0 d-flex align-items-center gap-2 mt-1">
-  <i class="bi bi-{{ 'check-circle-fill' if refresh_success else 'exclamation-triangle-fill' }}"></i>
-  <div>
-    <strong>{{ refresh_status }}.</strong>
-    {% if refresh_success and refresh_stages %}
-      <div class="small text-muted mt-1">
-        {% for stage in refresh_stages %}
-          <span class="me-3"><i class="bi bi-check-circle-fill text-success me-1"></i>{{ stage }}</span>
-        {% endfor %}
-      </div>
-    {% elif refresh_details %}
-      <div class="small text-muted">{{ refresh_details }}</div>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
 <div class="tbl-toolbar wl-toolbar" id="wl-toolbar">
   <div class="wl-toolbar-info">
     <i class="bi bi-bar-chart-line me-1"></i>

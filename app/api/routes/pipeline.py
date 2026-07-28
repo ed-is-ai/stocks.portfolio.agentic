@@ -75,28 +75,11 @@ async def refresh_data(
         response.headers["HX-Retarget"] = "#pipeline-confirmation"
         response.headers["HX-Reswap"] = "innerHTML"
         return response
-    result = await asyncio.to_thread(pipeline.run_once, extract)
-    refresh_status = (
-        "Data refreshed successfully" if result.success else "Data refresh failed"
-    )
+    # The run outcome (success or failure) is surfaced by the live
+    # /pipeline-status bar; no inline completion banner is rendered here.
+    await asyncio.to_thread(pipeline.run_once, extract)
     return templates.TemplateResponse(
         request,
         "_watchlist.html",
-        context=build_watchlist_context(
-            trader,
-            portfolio,
-            alerts,
-            refresh_status=refresh_status,
-            refresh_success=result.success,
-            refresh_details="" if result.success else result.details,
-            refresh_stages=(
-                [
-                    "Sources and market data collected",
-                    "Stocks analysed and scored",
-                    "Alerts, history, and exports updated",
-                ]
-                if result.success
-                else []
-            ),
-        ),
+        context=build_watchlist_context(trader, portfolio, alerts),
     )
