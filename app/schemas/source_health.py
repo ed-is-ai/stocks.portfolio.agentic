@@ -166,6 +166,9 @@ class SourceResult(BaseModel):
 
     items: list[str] = Field(default_factory=list)
     health: SourceHealth
+    # Optional per-ticker sector, when the source can supply one (e.g. the
+    # TradingView UK screener). Empty for sources that carry only tickers.
+    sectors: dict[str, str] = Field(default_factory=dict)
 
     @property
     def tickers(self) -> list[str]:
@@ -191,12 +194,14 @@ class SourceResult(BaseModel):
         started_at: datetime | None = None,
         display_message: str = "",
         detail_code: str = "",
+        sectors: dict[str, str] | None = None,
     ) -> SourceResult:
         """Build a result for a source call that completed successfully."""
         completed = _utc_now()
         started = started_at or completed
         return cls(
             items=items,
+            sectors=sectors or {},
             health=SourceHealth(
                 source=source,
                 state=SourceState.OK if items else SourceState.EMPTY,

@@ -647,6 +647,23 @@ class TestCurrencyNormalization:
             "inst_ownership_pct": None,
             "pe_ratio": None,
             "inst_count": None,
+            "sector": None,  # yfinance has no sector for the LSE ticker
+        },
+    )
+    @patch("yfinance.download")
+    def test_uk_sector_filled_from_screener_and_cached(
+        self, mock_download, _fund, _fill, mock_congress, tmp_path
+    ):
+        """A UK ticker with no yfinance sector uses the screener sector (#122)."""
+        cache_path = tmp_path / "sector_cache.json"
+        mock_congress.get_stats_many.return_value = {"ULVR.L": None}
+        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": [100 + i * 0.1 for i in range(100)],
+                "High": [105 + i * 0.1 for i in range(100)],
+                "Low": [95 + i * 0.1 for i in range(100)],
+                "Open": [99 + i * 0.1 for i in range(100)],
             "sector": None,
             "currency": "GBp",  # LSE pence
         },
@@ -670,6 +687,19 @@ class TestCurrencyNormalization:
         )
 
         agent = ScannerAgent()
+        with patch("app.agents.scanner.scanner_agent.SECTOR_CACHE_JSON", cache_path):
+            results = agent.scan_watchlist(
+                ["ULVR.L"],
+                spy_uptrend=True,
+                spy_52w_return=10.0,
+                screener_sectors={"ULVR.L": "Consumer Defensive"},
+            )
+
+        assert results[0].sector == "Consumer Defensive"
+
+        from app.agents.scanner.sector_cache import SectorCache
+
+        assert SectorCache(cache_path).get("ULVR.L") == "Consumer Defensive"
         results = agent.scan_watchlist(
             ["ULVR.L"], spy_uptrend=True, spy_52w_return=10.0
         )

@@ -49,6 +49,45 @@ _UK_MIN_MARKET_CAP = 200_000_000  # ~£160M at current rates
 _UK_MIN_AVG_VOL = 100_000
 _UK_MIN_PRICE = 100.0  # 100p = £1 minimum
 
+# TradingView's `sector` column uses a TRBC economic-sector taxonomy that
+# differs from the yfinance/GICS labels the rest of the app uses (US records,
+# SECTOR_TO_AV_TOPIC). Map it so UK sectors bucket alongside US ones. Values
+# with no clean GICS equivalent map to None and fall through to Unknown.
+# REITs surface under TRBC "Finance", so they land in Financial Services.
+_TRBC_TO_GICS: dict[str, str] = {
+    "Technology Services": "Technology",
+    "Electronic Technology": "Technology",
+    "Finance": "Financial Services",
+    "Health Technology": "Healthcare",
+    "Health Services": "Healthcare",
+    "Retail Trade": "Consumer Cyclical",
+    "Consumer Durables": "Consumer Cyclical",
+    "Consumer Services": "Consumer Cyclical",
+    "Consumer Non-Durables": "Consumer Defensive",
+    "Energy Minerals": "Energy",
+    "Non-Energy Minerals": "Basic Materials",
+    "Process Industries": "Basic Materials",
+    "Producer Manufacturing": "Industrials",
+    "Industrial Services": "Industrials",
+    "Commercial Services": "Industrials",
+    "Distribution Services": "Industrials",
+    "Transportation": "Industrials",
+    "Communications": "Communication Services",
+    "Utilities": "Utilities",
+}
+
+
+def map_sector(raw_sector: object) -> str | None:
+    """Map a TradingView TRBC sector string to the app's GICS label, or None.
+
+    Unknown, empty, or non-string values (e.g. NaN) return None so the caller
+    falls back to its existing sector resolution rather than storing a label
+    the rest of the app doesn't recognise.
+    """
+    if not isinstance(raw_sector, str):
+        return None
+    return _TRBC_TO_GICS.get(raw_sector.strip())
+
 
 def ScreenerResult(  # noqa: N802
     tickers: list[str], status: str, detail: str = ""
@@ -111,6 +150,7 @@ def _fetch(
                 "average_volume_30d_calc",
                 "price_52_week_high",
                 "market_cap_basic",
+                "sector",
             )
             .where(
                 col("exchange").isin(exchanges),
@@ -141,12 +181,25 @@ def _fetch(
     # Strip exchange prefix: "NASDAQ:AAPL" -> "AAPL", "LSE:ULVR" -> "ULVR"
     tickers = [str(name).split(":")[-1] for name in filtered["name"]]
 
+    # UK sectors are unreliable via yfinance/Alpha Vantage (US-only), so carry
+    # the TradingView-provided sector (mapped to GICS) for the scanner to use
+    # as a fallback. US records already get a reliable yfinance sector.
+    sectors: dict[str, str] = {}
+    if is_uk and "sector" in filtered.columns:
+        for name, raw_sector in zip(filtered["name"], filtered["sector"]):
+            ticker = str(name).split(":")[-1]
+            mapped = map_sector(raw_sector)
+            if mapped:
+                sectors[ticker] = mapped
+
     print(
         f"  [ok] {label}: {len(tickers)} tickers "
         f"(from {count} server-side, {len(df)} fetched, "
         f"{len(filtered)} after 52w-high filter)"
     )
-    return SourceResult.from_items(source, tickers, started_at=started_at)
+    return SourceResult.from_items(
+        source, tickers, started_at=started_at, sectors=sectors
+    )
 
 
 def fetch_tv_screener_tickers(max_rows: int = _US_MAX_ROWS) -> list[str]:

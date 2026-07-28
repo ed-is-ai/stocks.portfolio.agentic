@@ -548,9 +548,18 @@ class ScannerAgent(Agent):
                 if label not in labels:
                     labels.append(label)
 
+        # TradingView-provided UK sectors, keyed to the ".L" form used below,
+        # so scan_watchlist can fill sectors yfinance/Alpha Vantage can't (#122).
+        uk_sectors = {
+            (t if t.endswith(".L") else f"{t}.L"): sector
+            for t, sector in uk_result.sectors.items()
+        }
+
         all_tickers = list(sources_by_ticker)
         self._report_progress("sources", "complete", len(all_tickers))
-        records = self.scan_watchlist(all_tickers, spy_uptrend, spy_52w_return)
+        records = self.scan_watchlist(
+            all_tickers, spy_uptrend, spy_52w_return, screener_sectors=uk_sectors
+        )
         for r in records:
             r.source = ",".join(sources_by_ticker[r.ticker])
         return records
@@ -721,7 +730,11 @@ class ScannerAgent(Agent):
             return None
 
     def scan_watchlist(
-        self, tickers: list[str], spy_uptrend: bool, spy_52w_return: float
+        self,
+        tickers: list[str],
+        spy_uptrend: bool,
+        spy_52w_return: float,
+        screener_sectors: dict[str, str] | None = None,
     ) -> list[StockRecord]:
         """Scan tickers, enriching each with fundamentals and SPY market context.
 
@@ -798,13 +811,17 @@ class ScannerAgent(Agent):
 
         # Reconcile sectors against the persistent cache: remember any fresh
         # non-null sector, and back-fill tickers that yfinance throttling left
-        # null with their last-known value (#106).
+        # null with their last-known value (#106). When yfinance/Alpha Vantage
+        # give nothing (typically UK/LSE tickers), fall back to the screener's
+        # sector before the cache, and remember it so it persists (#122).
+        screener_sectors = screener_sectors or {}
         sector_cache = SectorCache(SECTOR_CACHE_JSON)
         cache_dirty = False
         for data in valid_fetched:
             fundamentals = data["fundamentals"]
-            sector = fundamentals.get("sector")
+            sector = fundamentals.get("sector") or screener_sectors.get(data["ticker"])
             if sector:
+                fundamentals["sector"] = sector
                 cache_dirty |= sector_cache.remember(data["ticker"], sector)
             else:
                 fundamentals["sector"] = sector_cache.get(data["ticker"])
