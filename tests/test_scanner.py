@@ -384,6 +384,64 @@ class TestScannerAgent:
             ("enrichment", "complete", 3),
         ]
 
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
+        return_value={
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
+            "sector": None,
+        },
+    )
+    @patch("yfinance.download")
+    def test_partial_congress_failures_stay_ok(
+        self, mock_download, _mock_fundamentals_yf, _mock_fill, mock_congress
+    ):
+        """A few per-ticker Congress failures must not mark the source FAILED.
+
+        A near-complete run (only some tickers failing) should report OK with a
+        ``partial_ticker_failures`` code so it never raises a "Source failed"
+        alert — only an all-failed run is a genuine outage.
+        """
+
+        def _partial(tickers, failed_tickers=None):
+            # One ticker's request fails; the rest return data.
+            from app.integrations.congress import CongressStats
+
+            if failed_tickers is not None:
+                failed_tickers.append(tickers[0])
+            return {
+                t: (None if t == tickers[0] else CongressStats(buys=1)) for t in tickers
+            }
+
+        mock_congress.get_stats_many.side_effect = _partial
+        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": [100 + i * 0.1 for i in range(100)],
+                "High": [105 + i * 0.1 for i in range(100)],
+                "Low": [95 + i * 0.1 for i in range(100)],
+                "Open": [99 + i * 0.1 for i in range(100)],
+                "Volume": [1000000] * 100,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        agent.scan_watchlist(
+            ["AAPL", "GOOGL", "MSFT"], spy_uptrend=True, spy_52w_return=10.0
+        )
+
+        health = agent.source_health[SourceName.CONGRESS]
+        assert health.state is SourceState.OK
+        assert health.detail_code == "partial_ticker_failures"
+        assert "1 of 3 Congress requests failed" in health.display_message
+
 
 class _StubTicker:
     """Yields queued ``.info`` payloads to exercise the retry backoff."""

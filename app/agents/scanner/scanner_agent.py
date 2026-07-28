@@ -806,8 +806,12 @@ class ScannerAgent(Agent):
             congress_state, congress_code = SourceState.FAILED, "provider_failure"
             congress_message = "All Congress requests failed."
         elif congress_failed:
+            # A handful of per-ticker failures is not a source outage — the
+            # source clearly worked for the rest. Mirror the Alpha Vantage
+            # partial-failure handling above (OK + partial_ticker_failures) so
+            # a near-complete run does not raise a "Source failed" alert.
             congress_state, congress_code = (
-                SourceState.FAILED,
+                SourceState.OK,
                 "partial_ticker_failures",
             )
             congress_message = (
