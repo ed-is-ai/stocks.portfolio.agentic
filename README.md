@@ -1,5 +1,10 @@
 # Agents.Stocks
 
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+![Purpose: Research](https://img.shields.io/badge/Purpose-Research-6f42c1)
+![Execution: Manual](https://img.shields.io/badge/Execution-Manual-orange)
+
 A multi-agent research and portfolio-tracking application for growth and momentum traders. It combines CANSLIM, Weinstein Stage Analysis, and Mark Minervini-style Volatility Contraction Pattern (VCP) analysis to turn a broad stock universe into a smaller, ranked list of setups worth reviewing.
 
 > This is a decision-support tool, not an automated trading bot. It does not connect to a broker or place orders. You remain responsible for validating every setup, sizing risk, and executing trades.
