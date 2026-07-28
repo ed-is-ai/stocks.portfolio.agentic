@@ -93,11 +93,16 @@ def _fetch(
             started_at=started_at,
         )
 
+    is_uk = exchanges == _UK_EXCHANGES
     try:
         time.sleep(_MIN_CALL_INTERVAL)
+        query = Query()
+        # LSE lives in TradingView's "uk" market region; the default query
+        # only scans US listings, so an LSE filter would match nothing.
+        if is_uk:
+            query = query.set_markets("uk")
         count, df = (
-            Query()
-            .select(
+            query.select(
                 "name",
                 "close",
                 "SMA50",
