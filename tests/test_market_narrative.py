@@ -158,3 +158,29 @@ class TestMarketNarrativePersistence:
         f.write_text("not json", encoding="utf-8")
         monkeypatch.setattr(mn, "MARKET_NARRATIVE_JSON", f)
         assert load_market_narrative() is None
+
+
+def _skill_prompt_text() -> str:
+    """Extract the fenced prompt body from the market-narrative skill reference."""
+    from app.core.config import SKILLS_DIR
+
+    ref = SKILLS_DIR / "market-narrative" / "references" / "system_prompt.md"
+    body = ref.read_text(encoding="utf-8")
+    marker = "```text\n"
+    start = body.index(marker) + len(marker)
+    end = body.index("\n```", start)
+    return body[start:end]
+
+
+class TestSystemPromptDriftGuard:
+    """The skill reference must mirror the live `_SYSTEM_PROMPT` verbatim.
+
+    The market-narrative skill (skills/market-narrative/) documents the prompt
+    as the versioned source of truth; this asserts it never drifts from the
+    prompt the pipeline actually sends.
+    """
+
+    def test_skill_reference_matches_live_prompt(self) -> None:
+        from app.integrations.anthropic_client import _SYSTEM_PROMPT
+
+        assert _skill_prompt_text() == _SYSTEM_PROMPT

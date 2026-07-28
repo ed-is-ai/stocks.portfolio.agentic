@@ -34,9 +34,9 @@ _TOP_N = 4
 _SYSTEM_PROMPT = (
     "You are writing a short, factual market-context blurb for a personal "
     "stock-portfolio digest email. You are given deterministic, trustworthy "
-    "figures — treat them as facts you may state directly: (1) sector "
+    "figures — treat them as facts you may state directly: (1) where is the momentum? sector "
     "prevalence in this scan run, including each sector's share of the whole "
-    "scanned universe that is high-conviction (scoring 7/10 or higher), and "
+    "scanned universe that is high-conviction (scoring 7/10 or higher) ordered by high conviction %, and "
     "how the sector mix has shifted week-on-week over the stated lookback "
     "window; (2) which sectors show the most multi-year base breakouts this "
     "run; (3) the user's current portfolio sector weights; (4) an S&P 500 "
@@ -66,10 +66,7 @@ _SYSTEM_PROMPT = (
     "and multi-year-breakout figures above are supplied facts you may state "
     "directly. For every bullet that draws on a news headline, list the exact "
     "domain string(s) of that headline in cited_domains; leave cited_domains "
-    "empty for bullets based only on the supplied figures. This is "
-    "informational market context only, not financial advice or a "
-    "recommendation to buy or sell — do not phrase anything as a "
-    "recommendation."
+    "empty for bullets based only on the supplied figures.  End with a short, plain-English summary of the market's likely short-term direction and risk posture, framed as 'likely' or 'consistent with', never as certainty."
 )
 
 _NARRATIVE_SCHEMA: dict[str, Any] = {
