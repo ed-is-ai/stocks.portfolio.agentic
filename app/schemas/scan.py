@@ -29,6 +29,10 @@ class StockScan(BaseModel):
         None  # Lowest daily low over the past 3 weeks (handle stop reference)
     )
     sector: str | None = None  # GICS sector from yfinance (e.g. "Technology")
+    # Quote currency of price and all monetary fields below. UK (LSE) prices are
+    # normalised from pence (GBp) to pounds (GBP) at the scanner boundary, so a
+    # "GBP" record's price/levels are already in pounds.
+    currency: str = "USD"
     pct_from_52w_high: float
     pct_change_week: float
     # Fundamental data (fetched from yfinance Ticker.info)

@@ -577,3 +577,103 @@ class TestSectorCacheBackfill:
         from app.agents.scanner.sector_cache import SectorCache
 
         assert SectorCache(cache_path).get("DGX") == "Healthcare"
+
+
+class TestCurrencyNormalization:
+    """LSE pence (GBp) prices are normalised to pounds and stamped (#123)."""
+
+    def test_gbp_pence_converted_to_pounds(self):
+        from app.agents.scanner.scanner_agent import _resolve_currency
+
+        technicals = {
+            "price": 4500.0,
+            "sma50": 4200.0,
+            "atr14": 50.0,
+            "high_52w": 5000.0,
+            "low_52w": 3000.0,
+            "high_base": 4800.0,
+            "handle_low": 4100.0,
+            "price_history": [4000.0, 4500.0],
+            "ohlcv_history": [
+                {
+                    "open": 4400.0,
+                    "high": 4600.0,
+                    "low": 4300.0,
+                    "close": 4500.0,
+                    "volume": 1000,
+                },
+            ],
+        }
+        currency = _resolve_currency("ULVR.L", technicals, "GBp")
+
+        assert currency == "GBP"
+        assert technicals["price"] == 45.0
+        assert technicals["sma50"] == 42.0
+        assert technicals["high_52w"] == 50.0
+        assert technicals["price_history"] == [40.0, 45.0]
+        assert technicals["ohlcv_history"][0]["close"] == 45.0
+        # Non-monetary fields (volume) are untouched.
+        assert technicals["ohlcv_history"][0]["volume"] == 1000
+
+    def test_usd_passes_through_unchanged(self):
+        from app.agents.scanner.scanner_agent import _resolve_currency
+
+        technicals = {"price": 100.0}
+        assert _resolve_currency("AAPL", technicals, "USD") == "USD"
+        assert technicals["price"] == 100.0
+
+    def test_unknown_currency_uk_ticker_defaults_to_pence(self):
+        from app.agents.scanner.scanner_agent import _resolve_currency
+
+        technicals = {"price": 250.0}
+        assert _resolve_currency("BP.L", technicals, None) == "GBP"
+        assert technicals["price"] == 2.5
+
+    def test_unknown_currency_us_ticker_defaults_to_usd(self):
+        from app.agents.scanner.scanner_agent import _resolve_currency
+
+        technicals = {"price": 100.0}
+        assert _resolve_currency("AAPL", technicals, None) == "USD"
+        assert technicals["price"] == 100.0
+
+    @patch("app.agents.scanner.scanner_agent._congress_client")
+    @patch("app.agents.scanner.scanner_agent._fill_from_alpha_vantage")
+    @patch(
+        "app.agents.scanner.scanner_agent._fetch_fundamentals_yf",
+        return_value={
+            "eps_growth": None,
+            "annual_eps_growth": None,
+            "roe": None,
+            "inst_ownership_pct": None,
+            "pe_ratio": None,
+            "inst_count": None,
+            "sector": None,
+            "currency": "GBp",  # LSE pence
+        },
+    )
+    @patch("yfinance.download")
+    def test_uk_record_stamped_gbp_and_price_in_pounds(
+        self, mock_download, _fund, _fill, mock_congress
+    ):
+        mock_congress.get_stats_many.return_value = {"ULVR.L": None}
+        dates = pd.date_range(start="2023-01-01", periods=100, freq="D")
+        # Pence-scale OHLC (~4500p): after /100 the price should read ~£45.
+        mock_download.return_value = pd.DataFrame(
+            {
+                "Close": [4500 + i for i in range(100)],
+                "High": [4550 + i for i in range(100)],
+                "Low": [4450 + i for i in range(100)],
+                "Open": [4480 + i for i in range(100)],
+                "Volume": [1000000] * 100,
+            },
+            index=dates,
+        )
+
+        agent = ScannerAgent()
+        results = agent.scan_watchlist(
+            ["ULVR.L"], spy_uptrend=True, spy_52w_return=10.0
+        )
+
+        assert results[0].currency == "GBP"
+        # Latest close ~4599p → ~£45.99, i.e. converted out of pence.
+        assert 40 < results[0].price < 60

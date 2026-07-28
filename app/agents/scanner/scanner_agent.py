@@ -284,6 +284,8 @@ def _fetch_fundamentals_yf(ticker: str) -> dict[str, Any]:
             "pe_ratio": info.get("trailingPE"),
             "inst_count": _inst_count(t),
             "sector": info.get("sector"),
+            # yfinance quote currency: "USD", "GBP", or "GBp" (pence) for LSE.
+            "currency": info.get("currency"),
         }
     except Exception:
         return {
@@ -294,6 +296,7 @@ def _fetch_fundamentals_yf(ticker: str) -> dict[str, Any]:
             "pe_ratio": None,
             "inst_count": None,
             "sector": None,
+            "currency": None,
         }
 
 
@@ -341,6 +344,55 @@ def _fill_from_alpha_vantage(ticker: str, result: dict[str, Any]) -> None:
             result["sector"] = av_data.get("sector")
         if result.get("eps_growth") is None:
             result["eps_growth"] = av_data.get("eps_growth")
+
+
+# Monetary technical fields quoted in the ticker's currency; these are the
+# scalar values divided by 100 when converting LSE pence (GBp) to pounds.
+_MONETARY_TECHNICAL_KEYS = (
+    "price",
+    "sma10",
+    "sma30",
+    "sma50",
+    "sma150",
+    "sma200",
+    "atr14",
+    "high_52w",
+    "low_52w",
+    "high_base",
+    "handle_low",
+)
+
+
+def _resolve_currency(
+    ticker: str, technicals: dict[str, Any], raw_currency: str | None
+) -> str:
+    """Return the record's currency, converting pence technicals to pounds in place.
+
+    yfinance quotes LSE prices in pence with currency ``"GBp"``. When we see
+    that (or, as a fallback, a ``.L`` ticker whose currency is unknown), every
+    monetary field is divided by 100 and the currency recorded as ``"GBP"`` so
+    the watchlist, analyst-derived levels, and buy flow are all in pounds.
+    Any other currency (e.g. ``"USD"``, ``"GBP"``) is passed through unchanged.
+    """
+    currency = raw_currency or ("GBp" if ticker.endswith(".L") else "USD")
+    if currency != "GBp":
+        return currency
+
+    for key in _MONETARY_TECHNICAL_KEYS:
+        value = technicals.get(key)
+        if isinstance(value, (int, float)):
+            technicals[key] = round(value / 100, 4)
+    history = technicals.get("price_history")
+    if isinstance(history, list):
+        technicals["price_history"] = [round(v / 100, 4) for v in history]
+    ohlcv = technicals.get("ohlcv_history")
+    if isinstance(ohlcv, list):
+        for bar in ohlcv:
+            for field in ("open", "high", "low", "close"):
+                value = bar.get(field)
+                if isinstance(value, (int, float)):
+                    bar[field] = round(value / 100, 4)
+    return "GBP"
 
 
 def _quarterly_eps_growth(t: yf.Ticker, info: Any) -> float | None:
@@ -847,6 +899,10 @@ class ScannerAgent(Agent):
             fundamentals = data["fundamentals"]
             ww_data = ww.get(ticker, {})
             congress = congress_by_ticker[ticker]
+            # Normalise LSE pence to pounds and stamp the quote currency (#123).
+            fundamentals["currency"] = _resolve_currency(
+                ticker, technicals, fundamentals.get("currency")
+            )
             record = StockRecord(
                 ticker=ticker,
                 as_of=datetime.today().strftime("%Y-%m-%d"),

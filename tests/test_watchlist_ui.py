@@ -169,6 +169,48 @@ def test_watchlist_cells_carry_canonical_numeric_data_values() -> None:
     assert 'data-col="rec" data-val="5"' in html
 
 
+def test_watchlist_prices_use_currency_symbol() -> None:
+    """UK (GBP) rows render £, US (USD) rows render $ (#123)."""
+    from app.core.alerting import build_alert_ui_state
+    from app.core.recommendation import classify_recommendation
+    from app.services.freshness_service import calculate_freshness
+
+    def _row(ticker: str, currency: str, price: float) -> StockRecord:
+        return StockRecord(
+            ticker=ticker,
+            as_of="2026-01-01",
+            price=price,
+            currency=currency,
+            volume=1000,
+            rel_volume=1.0,
+            high_52w=price * 1.2,
+            low_52w=price * 0.5,
+            pct_from_52w_high=-10.0,
+            pct_change_week=1.0,
+            analysis=None,
+        )
+
+    records = [_row("ULVR.L", "GBP", 45.0), _row("AAPL", "USD", 100.0)]
+    html = templates.get_template("_watchlist.html").render(
+        records=records,
+        portfolio_tickers=set(),
+        recommendations={
+            r.ticker: classify_recommendation(r, is_portfolio_holding=False)
+            for r in records
+        },
+        alert_states={
+            r.ticker: build_alert_ui_state(r, has_watching=False, last_alerted_at=None)
+            for r in records
+        },
+        freshness=calculate_freshness(None),
+        source_health=[],
+        latest_attempt_error=None,
+    )
+
+    assert "£45.00" in html
+    assert "$100.00" in html
+
+
 def test_watchlist_missing_values_render_empty_data_val() -> None:
     html = _render_watchlist()
     # The analysis-less TSLA row must leave numeric data-val empty so those
