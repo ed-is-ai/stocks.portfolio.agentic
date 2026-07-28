@@ -30,6 +30,7 @@ import json
 import os
 import sys
 from datetime import datetime
+from collections.abc import Mapping
 from typing import Optional
 
 # Add parent directory to path for imports
@@ -82,7 +83,10 @@ def parse_arguments():
         help="Percent of S&P 500 stocks above 50DMA (e.g., 55.0)",
     )
     parser.add_argument(
-        "--put-call", type=float, default=None, help="CBOE equity put/call ratio (e.g., 0.67)"
+        "--put-call",
+        type=float,
+        default=None,
+        help="CBOE equity put/call ratio (e.g., 0.67)",
     )
     parser.add_argument(
         "--vix-term",
@@ -99,10 +103,14 @@ def parse_arguments():
 
     # Data freshness dates
     parser.add_argument(
-        "--breadth-200dma-date", default=None, help="Date of breadth 200DMA data (YYYY-MM-DD)"
+        "--breadth-200dma-date",
+        default=None,
+        help="Date of breadth 200DMA data (YYYY-MM-DD)",
     )
     parser.add_argument(
-        "--breadth-50dma-date", default=None, help="Date of breadth 50DMA data (YYYY-MM-DD)"
+        "--breadth-50dma-date",
+        default=None,
+        help="Date of breadth 50DMA data (YYYY-MM-DD)",
     )
     parser.add_argument(
         "--put-call-date", default=None, help="Date of put/call ratio data (YYYY-MM-DD)"
@@ -134,7 +142,9 @@ def parse_arguments():
     )
 
     # Output
-    parser.add_argument("--output-dir", default="reports/", help="Output directory for reports")
+    parser.add_argument(
+        "--output-dir", default="reports/", help="Output directory for reports"
+    )
 
     return parser.parse_args()
 
@@ -221,7 +231,10 @@ def _load_previous_report(output_dir: str) -> Optional[dict]:
         return None
 
 
-def _compute_deltas(current_scores: dict[str, float], previous_report: Optional[dict]) -> dict:
+def _compute_deltas(
+    current_scores: Mapping[str, float | int],
+    previous_report: Optional[dict],
+) -> dict:
     """
     Compute delta between current and previous component scores.
 
@@ -262,7 +275,11 @@ def _compute_deltas(current_scores: dict[str, float], previous_report: Optional[
             direction = "worsening"
         else:
             direction = "improving"
-        deltas[key] = {"delta": round(delta, 1), "direction": direction, "previous": prev_score}
+        deltas[key] = {
+            "delta": round(delta, 1),
+            "direction": direction,
+            "previous": prev_score,
+        }
 
     prev_date = previous_report.get("metadata", {}).get("generated_at", None)
 
@@ -304,7 +321,9 @@ def main():
     sp500_quote_list = client.get_quote("^GSPC")
     sp500_quote = sp500_quote_list[0] if sp500_quote_list else None
     sp500_history_data = client.get_historical_prices("^GSPC", days=260)
-    sp500_history = sp500_history_data.get("historical", []) if sp500_history_data else []
+    sp500_history = (
+        sp500_history_data.get("historical", []) if sp500_history_data else []
+    )
     if sp500_quote and sp500_history:
         print(f"OK (${sp500_quote.get('price', 0):.2f}, {len(sp500_history)} days)")
     else:
@@ -352,13 +371,19 @@ def main():
         leading_quotes = client.get_batch_quotes(selected_basket)
         leading_historical = client.get_batch_historical(selected_basket, days=60)
     else:
-        print("  Fetching candidate pool quotes for dynamic basket...", end=" ", flush=True)
+        print(
+            "  Fetching candidate pool quotes for dynamic basket...",
+            end=" ",
+            flush=True,
+        )
         candidate_quotes = client.get_batch_quotes(CANDIDATE_POOL)
         print(f"OK ({len(candidate_quotes)} candidates)")
         selected_basket = select_dynamic_basket(candidate_quotes)
         print(f"  Selected dynamic basket: {selected_basket}")
         print("  Fetching Leading ETFs (dynamic basket)...", end=" ", flush=True)
-        leading_quotes = {s: candidate_quotes[s] for s in selected_basket if s in candidate_quotes}
+        leading_quotes = {
+            s: candidate_quotes[s] for s in selected_basket if s in candidate_quotes
+        }
         leading_historical = client.get_batch_historical(selected_basket, days=60)
     print(f"OK ({len(leading_quotes)} quotes, {len(leading_historical)} histories)")
 
@@ -411,9 +436,13 @@ def main():
             breadth_source = "auto"
             breadth_auto_date = auto_result["date"]
             fresh_str = (
-                "fresh" if auto_result["is_fresh"] else f"STALE ({auto_result['days_old']}d old)"
+                "fresh"
+                if auto_result["is_fresh"]
+                else f"STALE ({auto_result['days_old']}d old)"
             )
-            print(f"OK ({effective_breadth_200dma}%, {auto_result['date']}, {fresh_str})")
+            print(
+                f"OK ({effective_breadth_200dma}%, {auto_result['date']}, {fresh_str})"
+            )
             if not auto_result["is_fresh"]:
                 print(f"  WARNING: Breadth data is {auto_result['days_old']} days old")
         else:

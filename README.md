@@ -298,6 +298,19 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
+The root Pyrefly command checks `app/` and `tests/`. Standalone skills have
+package-local configurations so their generic module names (such as
+`calculators` and `scorer`) resolve within the correct package:
+
+```bash
+(cd skills/vcp-screener && uv run pyrefly check)
+(cd skills/breakout-trade-planner && uv run pyrefly check)
+(cd skills/canslim-screener && uv run pyrefly check)
+(cd skills/finviz-screener && uv run pyrefly check)
+(cd skills/institutional-flow-tracker && uv run pyrefly check)
+(cd skills/market-top-detector && uv run pyrefly check)
+```
+
 The tests cover the scoring engine, historical pivots, market context, source health, repositories, security, portfolio accounting, alerts, pipeline orchestration, and web routes.
 
 ## Limitations

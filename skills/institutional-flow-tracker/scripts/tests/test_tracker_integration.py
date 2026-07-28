@@ -48,7 +48,9 @@ def _make_grade_a_holders(symbol):
     holders = []
     # Current quarter: 50 genuine holders
     for i in range(50):
-        holders.append(_make_holder(f"Fund{i}", 100_000 + i * 1000, 5_000, "2025-12-31"))
+        holders.append(
+            _make_holder(f"Fund{i}", 100_000 + i * 1000, 5_000, "2025-12-31")
+        )
     # Previous quarter: 45 of the same holders (match_ratio = 45/50 = 0.9)
     for i in range(45):
         holders.append(_make_holder(f"Fund{i}", 95_000 + i * 1000, 3_000, "2025-09-30"))
@@ -117,7 +119,9 @@ class TestETFFiltering:
             lambda **kw: [
                 _make_screener_stock("AAPL", is_etf=False),
                 _make_screener_stock("SPY", company_name="SPDR S&P 500", is_etf=True),
-                _make_screener_stock("VFINX", company_name="Vanguard Fund", is_fund=True),
+                _make_screener_stock(
+                    "VFINX", company_name="Vanguard Fund", is_fund=True
+                ),
             ],
         )
 
@@ -148,7 +152,11 @@ class TestScreenerMissingFields:
             tracker,
             "get_stock_screener",
             lambda **kw: [
-                {"symbol": "NEWCO", "companyName": "New Corp", "marketCap": 5_000_000_000},
+                {
+                    "symbol": "NEWCO",
+                    "companyName": "New Corp",
+                    "marketCap": 5_000_000_000,
+                },
             ],
         )
         monkeypatch.setattr(
@@ -323,6 +331,7 @@ class TestScreeningReport:
         results = self._make_mock_results()
         report = tracker.generate_report(results, output_dir=str(tmp_path))
 
+        assert report is not None
         assert "Grade A" in report or "Grade B" in report
 
     def test_report_detailed_results_exclude_grade_c(self, tmp_path):
@@ -331,6 +340,7 @@ class TestScreeningReport:
         results = self._make_mock_results()
         report = tracker.generate_report(results, output_dir=str(tmp_path))
 
+        assert report is not None
         # Extract the Detailed Results section
         detailed = report.split("## Detailed Results")[1].split("## Methodology")[0]
         assert "Grade C" not in detailed
@@ -340,4 +350,5 @@ class TestScreeningReport:
         results = self._make_mock_results()
         report = tracker.generate_report(results, output_dir=str(tmp_path))
 
+        assert report is not None
         assert "match ratio" in report.lower() or "match" in report.lower()

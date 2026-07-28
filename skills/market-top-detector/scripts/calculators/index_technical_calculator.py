@@ -85,19 +85,26 @@ def calculate_index_technical(
     }
 
 
-def _evaluate_index(name: str, history: list[dict], quote: Optional[dict] = None) -> dict:
+def _evaluate_index(
+    name: str, history: list[dict], quote: Optional[dict] = None
+) -> dict:
     """Evaluate a single index's technical condition"""
     if not history or len(history) < 21:
-        return {"raw_score": 0, "flags": ["Insufficient data"], "mas": {}, "data_available": False}
+        return {
+            "raw_score": 0,
+            "flags": ["Insufficient data"],
+            "mas": {},
+            "data_available": False,
+        }
 
-    closes = [d.get("close", d.get("adjClose", 0)) for d in history]
-    highs = [d.get("high", d.get("close", 0)) for d in history]
+    closes = [float(d.get("close", d.get("adjClose", 0)) or 0) for d in history]
+    highs = [float(d.get("high", d.get("close", 0)) or 0) for d in history]
     [d.get("low", d.get("close", 0)) for d in history]
-    volumes = [d.get("volume", 0) for d in history]
+    volumes = [int(d.get("volume", 0) or 0) for d in history]
 
     # Current price (from quote or most recent close)
     if quote:
-        price = quote.get("price", closes[0])
+        price = float(quote.get("price", closes[0]) or closes[0])
     else:
         price = closes[0]
 
@@ -168,7 +175,9 @@ def _evaluate_index(name: str, history: list[dict], quote: Optional[dict] = None
     }
 
 
-def _detect_failed_rally(closes: list[float], volumes: list[int], lookback: int = 15) -> bool:
+def _detect_failed_rally(
+    closes: list[float], volumes: list[int], lookback: int = 15
+) -> bool:
     """
     Detect failed rally: price bounces then fails to make new high
     within recent lookback period.
@@ -199,7 +208,10 @@ def _detect_lower_highs(highs: list[float], lookback: int = 20) -> bool:
     # Find swing highs (local maxima)
     swing_highs = []
     for i in range(1, len(recent_highs) - 1):
-        if recent_highs[i] > recent_highs[i - 1] and recent_highs[i] > recent_highs[i + 1]:
+        if (
+            recent_highs[i] > recent_highs[i - 1]
+            and recent_highs[i] > recent_highs[i + 1]
+        ):
             swing_highs.append(recent_highs[i])
 
     if len(swing_highs) < 2:

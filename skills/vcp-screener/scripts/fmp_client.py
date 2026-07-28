@@ -108,7 +108,7 @@ class FMPClient:
         if self.api_key:
             self.session.headers.update({"apikey": self.api_key})
         self.cache = {}
-        self.last_call_time = 0
+        self.last_call_time = 0.0
         self.rate_limit_reached = False
         self.retry_count = 0
         self.max_retries = 1

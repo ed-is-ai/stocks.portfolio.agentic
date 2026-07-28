@@ -12,6 +12,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import Any, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
 from app.core.config import (
@@ -85,7 +86,10 @@ class PortfolioService:
         try:
             import yfinance as yf
 
-            return float(yf.Ticker("GBPUSD=X").fast_info.last_price)
+            last_price = yf.Ticker("GBPUSD=X").fast_info.last_price
+            if last_price is None:
+                return None
+            return float(cast(Any, last_price))
         except Exception:
             return None
 

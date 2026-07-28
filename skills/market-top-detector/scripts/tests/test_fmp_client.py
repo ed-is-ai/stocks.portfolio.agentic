@@ -24,7 +24,9 @@ class TestVixTermStructure:
         """VIX/VIX3M < 0.85 -> steep_contango."""
         client = self._make_client()
         client.get_quote = MagicMock(
-            side_effect=lambda s: [{"price": 12.0}] if "VIX3M" not in s else [{"price": 16.0}]
+            side_effect=lambda s: (
+                [{"price": 12.0}] if "VIX3M" not in s else [{"price": 16.0}]
+            )
         )
         result = client.get_vix_term_structure()
         assert result is not None
@@ -35,27 +37,36 @@ class TestVixTermStructure:
         """VIX/VIX3M 0.85-0.95 -> contango."""
         client = self._make_client()
         client.get_quote = MagicMock(
-            side_effect=lambda s: [{"price": 14.0}] if "VIX3M" not in s else [{"price": 15.5}]
+            side_effect=lambda s: (
+                [{"price": 14.0}] if "VIX3M" not in s else [{"price": 15.5}]
+            )
         )
         result = client.get_vix_term_structure()
+        assert result is not None
         assert result["classification"] == "contango"
 
     def test_flat(self):
         """VIX/VIX3M 0.95-1.05 -> flat."""
         client = self._make_client()
         client.get_quote = MagicMock(
-            side_effect=lambda s: [{"price": 15.0}] if "VIX3M" not in s else [{"price": 15.2}]
+            side_effect=lambda s: (
+                [{"price": 15.0}] if "VIX3M" not in s else [{"price": 15.2}]
+            )
         )
         result = client.get_vix_term_structure()
+        assert result is not None
         assert result["classification"] == "flat"
 
     def test_backwardation(self):
         """VIX/VIX3M > 1.05 -> backwardation."""
         client = self._make_client()
         client.get_quote = MagicMock(
-            side_effect=lambda s: [{"price": 22.0}] if "VIX3M" not in s else [{"price": 18.0}]
+            side_effect=lambda s: (
+                [{"price": 22.0}] if "VIX3M" not in s else [{"price": 18.0}]
+            )
         )
         result = client.get_vix_term_structure()
+        assert result is not None
         assert result["classification"] == "backwardation"
 
     def test_unavailable(self):
@@ -106,7 +117,7 @@ class TestEndpointFallback:
                 return _mock_response(200, quote_data)
             return _mock_response(403, text="Forbidden")
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_quote("^GSPC")
 
         assert result == quote_data
@@ -123,7 +134,7 @@ class TestEndpointFallback:
                 return _mock_response(403, text="Forbidden")
             return _mock_response(200, v3_data)
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_quote("^GSPC")
         assert result == v3_data
 
@@ -134,22 +145,26 @@ class TestEndpointFallback:
         def mock_get(url, params=None, timeout=None):
             return _mock_response(403, text="Forbidden")
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_quote("^GSPC")
         assert result is None
 
     def test_historical_fallback_to_v3(self):
         """Stable 403, v3 200 returns v3 data for historical."""
         client = self._make_client()
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        v3_data = {
+            "symbol": "^GSPC",
+            "historical": [{"date": "2026-03-20", "close": 5500.0}],
+        }
 
         def mock_get(url, params=None, timeout=None):
             if "stable" in url:
                 return _mock_response(403, text="Forbidden")
             return _mock_response(200, v3_data)
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_historical_prices("^GSPC", days=80)
+        assert result is not None
         assert result == v3_data
         assert "historical" in result
 
@@ -160,12 +175,15 @@ class TestEndpointFallback:
     def test_historical_stable_v3_format_passthrough(self):
         """Stable returns v3-compatible format {'historical': [...]} — returned as-is."""
         client = self._make_client()
-        data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        data = {
+            "symbol": "^GSPC",
+            "historical": [{"date": "2026-03-20", "close": 5500.0}],
+        }
 
         def mock_get(url, params=None, timeout=None):
             return _mock_response(200, data)
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_historical_prices("^GSPC", days=80)
         assert result == data
 
@@ -184,7 +202,7 @@ class TestEndpointFallback:
         def mock_get(url, params=None, timeout=None):
             return _mock_response(200, batch_data)
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_historical_prices("^GSPC", days=80)
         assert result is not None
         assert "historical" in result
@@ -201,14 +219,17 @@ class TestEndpointFallback:
                 }
             ]
         }
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        v3_data = {
+            "symbol": "^GSPC",
+            "historical": [{"date": "2026-03-20", "close": 5500.0}],
+        }
 
         def mock_get(url, params=None, timeout=None):
             if "stable" in url:
                 return _mock_response(200, batch_data)
             return _mock_response(200, v3_data)
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_historical_prices("^GSPC", days=80)
         assert result == v3_data
 
@@ -229,7 +250,7 @@ class TestEndpointFallback:
                 return _mock_response(200, batch_data)
             return _mock_response(403, text="Forbidden")
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_historical_prices("^GSPC", days=80)
         assert result is None
 
@@ -248,7 +269,7 @@ class TestEndpointFallback:
                 return _mock_response(200, error_dict)
             return _mock_response(200, v3_data)
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_quote("^GSPC")
         assert result == v3_data
 
@@ -256,14 +277,17 @@ class TestEndpointFallback:
         """Stable returns truthy list — skipped, falls back to v3."""
         client = self._make_client()
         bad_data = [1, 2, 3]
-        v3_data = {"symbol": "^GSPC", "historical": [{"date": "2026-03-20", "close": 5500.0}]}
+        v3_data = {
+            "symbol": "^GSPC",
+            "historical": [{"date": "2026-03-20", "close": 5500.0}],
+        }
 
         def mock_get(url, params=None, timeout=None):
             if "stable" in url:
                 return _mock_response(200, bad_data)
             return _mock_response(200, v3_data)
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_historical_prices("^GSPC", days=80)
         assert result == v3_data
 
@@ -276,7 +300,7 @@ class TestEndpointFallback:
         client = self._make_client()
         wrong = _mock_response(200, [{"symbol": "SPY", "price": 500.0}])
         correct = _mock_response(200, [{"symbol": "^GSPC", "price": 5000.0}])
-        client.session.get = MagicMock(side_effect=[wrong, correct])
+        client.session.get = MagicMock(side_effect=[wrong, correct])  # type: ignore[bad-assignment]
 
         result = client.get_quote("^GSPC")
         assert result == [{"symbol": "^GSPC", "price": 5000.0}]
@@ -286,19 +310,25 @@ class TestEndpointFallback:
         """Single-symbol historical returning wrong symbol is rejected."""
         client = self._make_client()
         wrong = _mock_response(200, {"symbol": "SPY", "historical": [{"close": 500}]})
-        correct = _mock_response(200, {"symbol": "^GSPC", "historical": [{"close": 5000}]})
-        client.session.get = MagicMock(side_effect=[wrong, correct])
+        correct = _mock_response(
+            200, {"symbol": "^GSPC", "historical": [{"close": 5000}]}
+        )
+        client.session.get = MagicMock(side_effect=[wrong, correct])  # type: ignore[bad-assignment]
 
         result = client.get_historical_prices("^GSPC", days=80)
+        assert result is not None
         assert result["symbol"] == "^GSPC"
         assert client.session.get.call_count == 2
 
     def test_batch_quote_skips_symbol_check(self):
         """Multi-symbol (batch) quote does not apply symbol mismatch check."""
         client = self._make_client()
-        batch_data = [{"symbol": "^GSPC", "price": 5000}, {"symbol": "^VIX", "price": 20}]
+        batch_data = [
+            {"symbol": "^GSPC", "price": 5000},
+            {"symbol": "^VIX", "price": 20},
+        ]
         resp = _mock_response(200, batch_data)
-        client.session.get = MagicMock(return_value=resp)
+        client.session.get = MagicMock(return_value=resp)  # type: ignore[bad-assignment]
 
         result = client.get_quote("^GSPC,^VIX")
         assert result == batch_data
@@ -325,7 +355,7 @@ class TestEndpointFallback:
                 return _mock_response(200, vix_data)
             return _mock_response(404, text="Not Found")
 
-        client.session.get = mock_get
+        client.session.get = mock_get  # type: ignore[bad-assignment]
         result = client.get_vix_term_structure()
 
         assert result is not None
@@ -470,7 +500,9 @@ class TestEndpointFallback:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with (
-                patch.dict(os.environ, {"FMP_API_KEY": "test_key"}),  # pragma: allowlist secret
+                patch.dict(
+                    os.environ, {"FMP_API_KEY": "test_key"}
+                ),  # pragma: allowlist secret
                 patch(
                     "sys.argv",
                     [
@@ -492,9 +524,15 @@ class TestEndpointFallback:
 
                 with (
                     patch.object(FMPClient, "get_quote", side_effect=mock_quote),
-                    patch.object(FMPClient, "get_historical_prices", side_effect=mock_hist),
-                    patch.object(FMPClient, "get_batch_quotes", side_effect=mock_batch_quotes),
-                    patch.object(FMPClient, "get_batch_historical", side_effect=mock_batch_hist),
+                    patch.object(
+                        FMPClient, "get_historical_prices", side_effect=mock_hist
+                    ),
+                    patch.object(
+                        FMPClient, "get_batch_quotes", side_effect=mock_batch_quotes
+                    ),
+                    patch.object(
+                        FMPClient, "get_batch_historical", side_effect=mock_batch_hist
+                    ),
                 ):
                     import importlib
 

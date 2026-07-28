@@ -91,7 +91,7 @@ def calculate_composite_score(
 
     # Identify weakest component
     components = {"C": c_score, "A": a_score, "N": n_score, "M": m_score}
-    weakest_component = min(components, key=components.get)
+    weakest_component = min(components, key=lambda key: components[key])
     weakest_score = components[weakest_component]
 
     # Get rating and interpretation
@@ -186,7 +186,9 @@ def check_minimum_thresholds(
     thresholds = {"C": 60, "A": 50, "N": 40, "M": 40}
     scores = {"C": c_score, "A": a_score, "N": n_score, "M": m_score}
 
-    failed = [comp for comp, threshold in thresholds.items() if scores[comp] < threshold]
+    failed = [
+        comp for comp, threshold in thresholds.items() if scores[comp] < threshold
+    ]
 
     # Special case: M score = 0 (bear market) overrides everything
     if m_score == 0:
@@ -221,7 +223,12 @@ def check_minimum_thresholds(
 
 
 def calculate_composite_score_phase2(
-    c_score: float, a_score: float, n_score: float, s_score: float, i_score: float, m_score: float
+    c_score: float,
+    a_score: float,
+    n_score: float,
+    s_score: float,
+    i_score: float,
+    m_score: float,
 ) -> dict:
     """
     Calculate weighted composite CANSLIM score for Phase 2 (6 components)
@@ -269,7 +276,7 @@ def calculate_composite_score_phase2(
         "I": i_score,
         "M": m_score,
     }
-    weakest_component = min(components, key=components.get)
+    weakest_component = min(components, key=lambda key: components[key])
     weakest_score = components[weakest_component]
 
     # Get rating and interpretation
@@ -294,7 +301,12 @@ def calculate_composite_score_phase2(
 
 
 def check_minimum_thresholds_phase2(
-    c_score: float, a_score: float, n_score: float, s_score: float, i_score: float, m_score: float
+    c_score: float,
+    a_score: float,
+    n_score: float,
+    s_score: float,
+    i_score: float,
+    m_score: float,
 ) -> dict:
     """
     Check if stock meets minimum CANSLIM thresholds (Phase 2: 6 components)
@@ -317,9 +329,18 @@ def check_minimum_thresholds_phase2(
             - recommendation: "buy", "watchlist", or "avoid"
     """
     thresholds = {"C": 60, "A": 50, "N": 40, "S": 40, "I": 40, "M": 40}
-    scores = {"C": c_score, "A": a_score, "N": n_score, "S": s_score, "I": i_score, "M": m_score}
+    scores = {
+        "C": c_score,
+        "A": a_score,
+        "N": n_score,
+        "S": s_score,
+        "I": i_score,
+        "M": m_score,
+    }
 
-    failed = [comp for comp, threshold in thresholds.items() if scores[comp] < threshold]
+    failed = [
+        comp for comp, threshold in thresholds.items() if scores[comp] < threshold
+    ]
 
     # Special case: M score = 0 (bear market) overrides everything
     if m_score == 0:
@@ -414,7 +435,7 @@ def calculate_composite_score_phase3(
         "I": i_score,
         "M": m_score,
     }
-    weakest_component = min(components, key=components.get)
+    weakest_component = min(components, key=lambda key: components[key])
     weakest_score = components[weakest_component]
 
     # Get rating and interpretation
@@ -480,7 +501,9 @@ def check_minimum_thresholds_phase3(
         "M": m_score,
     }
 
-    failed = [comp for comp, threshold in thresholds.items() if scores[comp] < threshold]
+    failed = [
+        comp for comp, threshold in thresholds.items() if scores[comp] < threshold
+    ]
 
     # Special case: M score = 0 (bear market) overrides everything
     if m_score == 0:
@@ -576,12 +599,16 @@ if __name__ == "__main__":
 
     # Test 1: Exceptional stock (NVDA-like)
     print("Test 1: Exceptional Stock (All Components Strong)")
-    result1 = calculate_composite_score(c_score=100, a_score=95, n_score=98, m_score=100)
+    result1 = calculate_composite_score(
+        c_score=100, a_score=95, n_score=98, m_score=100
+    )
     print(f"  Composite Score: {result1['composite_score']}/100")
     print(f"  Rating: {result1['rating']}")
     print(f"  Description: {result1['rating_description']}")
     print(f"  Guidance: {result1['guidance']}")
-    print(f"  Weakest Component: {result1['weakest_component']} ({result1['weakest_score']})\n")
+    print(
+        f"  Weakest Component: {result1['weakest_component']} ({result1['weakest_score']})\n"
+    )
 
     full1 = compare_to_full_canslim(result1["composite_score"])
     print(f"  Estimated Full CANSLIM Range: {full1['estimated_full_range']}\n")
@@ -591,7 +618,9 @@ if __name__ == "__main__":
     result2 = calculate_composite_score(c_score=85, a_score=78, n_score=88, m_score=80)
     print(f"  Composite Score: {result2['composite_score']}/100")
     print(f"  Rating: {result2['rating']}")
-    print(f"  Weakest Component: {result2['weakest_component']} ({result2['weakest_score']})\n")
+    print(
+        f"  Weakest Component: {result2['weakest_component']} ({result2['weakest_score']})\n"
+    )
 
     # Test 3: Average stock (marginal)
     print("Test 3: Average Stock (Meets Minimums)")
@@ -606,17 +635,23 @@ if __name__ == "__main__":
     print(f"  Composite Score: {result4['composite_score']}/100")
     print(f"  Rating: {result4['rating']}")
 
-    threshold_check = check_minimum_thresholds(c_score=95, a_score=90, n_score=92, m_score=0)
+    threshold_check = check_minimum_thresholds(
+        c_score=95, a_score=90, n_score=92, m_score=0
+    )
     print(f"  Threshold Check: {threshold_check['recommendation']}")
     print(f"  Reason: {threshold_check['reason']}\n")
 
     # Test 5: Minimum threshold checking
     print("Test 5: Threshold Validation")
-    threshold_pass = check_minimum_thresholds(c_score=70, a_score=60, n_score=65, m_score=70)
+    threshold_pass = check_minimum_thresholds(
+        c_score=70, a_score=60, n_score=65, m_score=70
+    )
     print(f"  All thresholds met: {threshold_pass['passes_all']}")
     print(f"  Recommendation: {threshold_pass['recommendation']}\n")
 
-    threshold_fail = check_minimum_thresholds(c_score=50, a_score=45, n_score=35, m_score=60)
+    threshold_fail = check_minimum_thresholds(
+        c_score=50, a_score=45, n_score=35, m_score=60
+    )
     print(f"  All thresholds met: {threshold_fail['passes_all']}")
     print(f"  Failed components: {threshold_fail['failed_components']}")
     print(f"  Recommendation: {threshold_fail['recommendation']}")

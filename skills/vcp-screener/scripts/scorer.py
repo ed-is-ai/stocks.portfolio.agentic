@@ -96,8 +96,8 @@ def calculate_composite_score(
     composite = round(composite, 1)
 
     # Find weakest and strongest
-    weakest_key = min(component_scores, key=component_scores.get)
-    strongest_key = max(component_scores, key=component_scores.get)
+    weakest_key = min(component_scores, key=lambda key: component_scores[key])
+    strongest_key = max(component_scores, key=lambda key: component_scores[key])
 
     # Rating (raw — before any caps)
     rating_info = _get_rating(composite)
@@ -126,7 +126,9 @@ def calculate_composite_score(
 
     # Wide-and-loose cap: max Developing VCP
     if wide_and_loose and rating in ("Textbook VCP", "Strong VCP", "Good VCP"):
-        cap_reason = (cap_reason or "") + f" | Wide-and-loose: {rating} → Developing VCP"
+        cap_reason = (
+            cap_reason or ""
+        ) + f" | Wide-and-loose: {rating} → Developing VCP"
         rating = "Developing VCP"
         cap_applied = True
         rating_info = _get_rating_info_for(rating)

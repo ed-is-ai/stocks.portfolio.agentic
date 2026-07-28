@@ -73,6 +73,7 @@ class TestModels:
 
         assert record.ticker == "TSLA"
         assert record.price == 200.0
+        assert record.analysis is not None
         assert record.analysis.score == 6
         assert record.analysis.stage == "Stage 1"
 
@@ -105,24 +106,28 @@ class TestModels:
 
         # Invalid score - too high
         with pytest.raises(ValueError):
-            StockAnalysis(
-                score=15,
-                stage="Stage 2",
-                entry_zone="far",
-                strengths=[],
-                risks=[],
-                summary="Test",
+            StockAnalysis.model_validate(
+                {
+                    "score": 15,
+                    "stage": "Stage 2",
+                    "entry_zone": "far",
+                    "strengths": [],
+                    "risks": [],
+                    "summary": "Test",
+                }
             )
 
         # Invalid score - too low
         with pytest.raises(ValueError):
-            StockAnalysis(
-                score=0,
-                stage="Stage 2",
-                entry_zone="far",
-                strengths=[],
-                risks=[],
-                summary="Test",
+            StockAnalysis.model_validate(
+                {
+                    "score": 0,
+                    "stage": "Stage 2",
+                    "entry_zone": "far",
+                    "strengths": [],
+                    "risks": [],
+                    "summary": "Test",
+                }
             )
 
     def test_model_serialization(self):

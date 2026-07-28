@@ -23,6 +23,7 @@ class TestLoadPreviousReport:
                 with open(path, "w") as f:
                     json.dump({"timestamp": ts}, f)
             result = _load_previous_report(tmpdir)
+            assert result is not None
             assert result["timestamp"] == "2026-02-19_100000"
 
     def test_invalid_json_returns_none(self):

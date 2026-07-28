@@ -32,14 +32,18 @@ MULTI_PERIOD_WEIGHTS = {10: 0.2, 20: 0.5, 40: 0.3}
 def _calc_return(symbol_hist: list[dict], days: int) -> Optional[float]:
     if not symbol_hist or len(symbol_hist) < days + 1:
         return None
-    recent = symbol_hist[0].get("close", symbol_hist[0].get("adjClose", 0))
-    past = symbol_hist[days].get("close", symbol_hist[days].get("adjClose", 0))
+    recent = float(symbol_hist[0].get("close", symbol_hist[0].get("adjClose", 0)) or 0)
+    past = float(
+        symbol_hist[days].get("close", symbol_hist[days].get("adjClose", 0)) or 0
+    )
     if past == 0:
         return None
     return (recent - past) / past * 100
 
 
-def _compute_period_rotation(historical: dict[str, list[dict]], lookback: int) -> Optional[dict]:
+def _compute_period_rotation(
+    historical: dict[str, list[dict]], lookback: int
+) -> Optional[dict]:
     """Compute defensive vs offensive rotation for a single period."""
     def_returns = []
     off_returns = []
@@ -74,7 +78,9 @@ def _compute_period_rotation(historical: dict[str, list[dict]], lookback: int) -
     }
 
 
-def calculate_defensive_rotation(historical: dict[str, list[dict]], lookback: int = 20) -> dict:
+def calculate_defensive_rotation(
+    historical: dict[str, list[dict]], lookback: int = 20
+) -> dict:
     """
     Calculate defensive vs offensive sector rotation score using multi-period analysis.
 
@@ -106,7 +112,9 @@ def calculate_defensive_rotation(historical: dict[str, list[dict]], lookback: in
             off_details[symbol] = round(ret, 2)
             fetch_successes += 1
 
-    fetch_success_rate = fetch_successes / total_attempted if total_attempted > 0 else 0.0
+    fetch_success_rate = (
+        fetch_successes / total_attempted if total_attempted > 0 else 0.0
+    )
 
     if not def_details or not off_details:
         return {

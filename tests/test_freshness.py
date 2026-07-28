@@ -145,9 +145,12 @@ def test_find_run_locates_current_and_archived_runs(tmp_path) -> None:
     repo.finish(PipelineState.COMPLETE, expected_run_id="old", artifact_produced=True)
     repo.start(run_id="current")
 
-    assert repo.find_run("old") is not None
-    assert repo.find_run("old").run_id == "old"
-    assert repo.find_run("current").run_id == "current"
+    old_run = repo.find_run("old")
+    current_run = repo.find_run("current")
+    assert old_run is not None
+    assert current_run is not None
+    assert old_run.run_id == "old"
+    assert current_run.run_id == "current"
     assert repo.find_run("nonexistent") is None
 
 

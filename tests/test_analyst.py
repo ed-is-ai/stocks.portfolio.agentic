@@ -400,6 +400,7 @@ class TestAnalystAgent:
         analysis = agent.score_stock(record, None)
 
         assert analysis.r_multiples is not None
+        assert analysis.entry_price is not None
         assert set(analysis.r_multiples.keys()) == {"1.0R", "2.0R", "3.0R"}
         assert (
             analysis.r_multiples["2.0R"]

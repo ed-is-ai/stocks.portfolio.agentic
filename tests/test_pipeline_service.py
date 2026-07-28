@@ -30,7 +30,7 @@ def test_run_once_success(monkeypatch, tmp_path) -> None:
 
 def test_run_once_omits_extract_flag_by_default(monkeypatch, tmp_path) -> None:
     _use_status_repo(monkeypatch, tmp_path)
-    captured: dict[str, object] = {}
+    captured: dict[str, list[str]] = {}
 
     def fake_run(argv, *args, **kwargs):
         captured["argv"] = argv
@@ -43,7 +43,7 @@ def test_run_once_omits_extract_flag_by_default(monkeypatch, tmp_path) -> None:
 
 def test_run_once_passes_extract_flag_when_requested(monkeypatch, tmp_path) -> None:
     _use_status_repo(monkeypatch, tmp_path)
-    captured: dict[str, object] = {}
+    captured: dict[str, list[str]] = {}
 
     def fake_run(argv, *args, **kwargs):
         captured["argv"] = argv

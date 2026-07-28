@@ -2,6 +2,7 @@
 
 import os
 import tempfile
+from typing import Any
 
 from report_generator import _delta_arrow, generate_markdown_report
 
@@ -48,7 +49,11 @@ class TestMarkdownReportWithDelta:
                     "score": 80,
                     "component": "distribution_days",
                 },
-                "weakest_warning": {"label": "Sentiment", "score": 10, "component": "sentiment"},
+                "weakest_warning": {
+                    "label": "Sentiment",
+                    "score": 10,
+                    "component": "sentiment",
+                },
                 "data_quality": {
                     "label": "Complete (6/6)",
                     "available_count": 6,
@@ -93,11 +98,31 @@ class TestMarkdownReportWithDelta:
         """Report with delta should include Δ column."""
         delta = {
             "components": {
-                "distribution_days": {"delta": 10, "direction": "worsening", "previous": 40},
-                "leading_stocks": {"delta": -5, "direction": "improving", "previous": 55},
-                "defensive_rotation": {"delta": 0, "direction": "stable", "previous": 50},
-                "breadth_divergence": {"delta": 2, "direction": "stable", "previous": 48},
-                "index_technical": {"delta": -20, "direction": "improving", "previous": 70},
+                "distribution_days": {
+                    "delta": 10,
+                    "direction": "worsening",
+                    "previous": 40,
+                },
+                "leading_stocks": {
+                    "delta": -5,
+                    "direction": "improving",
+                    "previous": 55,
+                },
+                "defensive_rotation": {
+                    "delta": 0,
+                    "direction": "stable",
+                    "previous": 50,
+                },
+                "breadth_divergence": {
+                    "delta": 2,
+                    "direction": "stable",
+                    "previous": 48,
+                },
+                "index_technical": {
+                    "delta": -20,
+                    "direction": "improving",
+                    "previous": 70,
+                },
                 "sentiment": {"delta": 5, "direction": "worsening", "previous": 45},
             },
             "composite_delta": 3.5,
@@ -137,7 +162,7 @@ class TestMarkdownReportWithDelta:
 
     def test_report_with_none_strongest_weakest(self):
         """Report should handle None component for strongest/weakest."""
-        analysis = self._make_analysis()
+        analysis: dict[str, Any] = self._make_analysis()
         # Override strongest/weakest to None
         analysis["composite"]["strongest_warning"] = {
             "component": None,
@@ -164,7 +189,7 @@ class TestMarkdownReportWithDelta:
 
     def test_report_with_partial_data_count(self):
         """Report should include partial data note when partial_data_count > 0."""
-        analysis = self._make_analysis()
+        analysis: dict[str, Any] = self._make_analysis()
         analysis["components"]["leading_stocks"] = {
             "score": 50,
             "signal": "TEST",

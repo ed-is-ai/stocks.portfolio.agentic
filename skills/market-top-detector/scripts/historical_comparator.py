@@ -7,6 +7,8 @@ historical market tops (2000, 2007, 2018, 2022) using Sum of Squared
 Differences (SSD) to find the closest match.
 """
 
+from collections.abc import Mapping
+
 # Component weights (must match scorer.py)
 COMPONENT_WEIGHTS = {
     "distribution_days": 0.25,
@@ -64,7 +66,10 @@ COMPONENT_KEYS = [
 ]
 
 
-def _compute_ssd(current: dict[str, float], historical: dict[str, float]) -> float:
+def _compute_ssd(
+    current: Mapping[str, float | int],
+    historical: Mapping[str, float | int],
+) -> float:
     """Compute weighted sum of squared differences between two score dicts.
 
     Each component's squared difference is multiplied by its weight,
@@ -78,7 +83,7 @@ def _compute_ssd(current: dict[str, float], historical: dict[str, float]) -> flo
     return ssd
 
 
-def compare_to_historical(current_scores: dict[str, float]) -> dict:
+def compare_to_historical(current_scores: Mapping[str, float | int]) -> dict:
     """
     Compare current scores to historical top patterns.
 
@@ -112,7 +117,9 @@ def compare_to_historical(current_scores: dict[str, float]) -> dict:
     }
 
 
-def _generate_narrative(current_scores: dict[str, float], closest: dict) -> str:
+def _generate_narrative(
+    current_scores: Mapping[str, float | int], closest: dict
+) -> str:
     """Generate a textual comparison highlighting key differences."""
     hist_scores = closest["scores"]
     name = closest["name"]

@@ -6,11 +6,14 @@ Generates 4 sensitivity scenarios by perturbing component scores
 and re-running the composite scoring engine.
 """
 
+from collections.abc import Mapping
+
 from scorer import calculate_composite_score
 
 
 def generate_scenarios(
-    component_scores: dict[str, float], data_availability: dict[str, bool] = None
+    component_scores: Mapping[str, float | int],
+    data_availability: dict[str, bool] | None = None,
 ) -> list[dict]:
     """
     Generate 4 what-if scenarios based on current component scores.
@@ -42,7 +45,8 @@ def generate_scenarios(
             "new_score": s1_result["composite_score"],
             "new_zone": s1_result["zone"],
             "delta": round(
-                s1_result["composite_score"] - _current_score(component_scores, data_availability),
+                s1_result["composite_score"]
+                - _current_score(component_scores, data_availability),
                 1,
             ),
         }
@@ -60,7 +64,8 @@ def generate_scenarios(
             "new_score": s2_result["composite_score"],
             "new_zone": s2_result["zone"],
             "delta": round(
-                s2_result["composite_score"] - _current_score(component_scores, data_availability),
+                s2_result["composite_score"]
+                - _current_score(component_scores, data_availability),
                 1,
             ),
         }
@@ -83,7 +88,8 @@ def generate_scenarios(
             "new_score": s3_result["composite_score"],
             "new_zone": s3_result["zone"],
             "delta": round(
-                s3_result["composite_score"] - _current_score(component_scores, data_availability),
+                s3_result["composite_score"]
+                - _current_score(component_scores, data_availability),
                 1,
             ),
         }
@@ -106,7 +112,8 @@ def generate_scenarios(
             "new_score": s4_result["composite_score"],
             "new_zone": s4_result["zone"],
             "delta": round(
-                s4_result["composite_score"] - _current_score(component_scores, data_availability),
+                s4_result["composite_score"]
+                - _current_score(component_scores, data_availability),
                 1,
             ),
         }
@@ -116,7 +123,8 @@ def generate_scenarios(
 
 
 def _current_score(
-    component_scores: dict[str, float], data_availability: dict[str, bool] = None
+    component_scores: Mapping[str, float | int],
+    data_availability: dict[str, bool] | None = None,
 ) -> float:
     """Helper to get the current composite score."""
     result = calculate_composite_score(component_scores, data_availability)

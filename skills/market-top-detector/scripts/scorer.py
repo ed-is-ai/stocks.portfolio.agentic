@@ -21,6 +21,7 @@ Risk Zone Mapping:
   81-100:Critical(Top Formation)      - Risk Budget: 20-35%
 """
 
+from collections.abc import Mapping
 from typing import Optional
 
 COMPONENT_WEIGHTS = {
@@ -47,7 +48,9 @@ CORRELATION_THRESHOLD = 80
 CORRELATION_DISCOUNT = 0.8
 
 
-def _apply_correlation_adjustment(component_scores: dict[str, float]) -> dict:
+def _apply_correlation_adjustment(
+    component_scores: Mapping[str, float | int],
+) -> dict:
     """
     Discount correlated components when both are extreme.
 
@@ -57,7 +60,7 @@ def _apply_correlation_adjustment(component_scores: dict[str, float]) -> dict:
     Returns:
         Dict with 'adjusted_scores' and 'adjustments' details.
     """
-    adjusted = dict(component_scores)
+    adjusted = {key: float(value) for key, value in component_scores.items()}
     adjustments = []
 
     for comp_a, comp_b in CORRELATION_PAIRS:
@@ -88,7 +91,8 @@ def _apply_correlation_adjustment(component_scores: dict[str, float]) -> dict:
 
 
 def calculate_composite_score(
-    component_scores: dict[str, float], data_availability: Optional[dict[str, bool]] = None
+    component_scores: Mapping[str, float | int],
+    data_availability: Optional[dict[str, bool]] = None,
 ) -> dict:
     """
     Calculate weighted composite market top probability score.
@@ -120,7 +124,9 @@ def calculate_composite_score(
     effective_weights = {}
     for key, weight in COMPONENT_WEIGHTS.items():
         if data_availability.get(key, True):
-            effective_weights[key] = weight / available_weight if available_weight > 0 else weight
+            effective_weights[key] = (
+                weight / available_weight if available_weight > 0 else weight
+            )
 
     # Calculate weighted composite using adjusted scores and effective weights
     composite = 0.0
@@ -131,11 +137,13 @@ def calculate_composite_score(
     composite = round(composite, 1)
 
     # Identify strongest and weakest from available components only
-    available_scores = {k: v for k, v in component_scores.items() if k in effective_weights}
+    available_scores = {
+        k: v for k, v in component_scores.items() if k in effective_weights
+    }
 
     if available_scores:
-        strongest_warning = max(available_scores, key=available_scores.get)
-        weakest_warning = min(available_scores, key=available_scores.get)
+        strongest_warning = max(available_scores, key=lambda key: available_scores[key])
+        weakest_warning = min(available_scores, key=lambda key: available_scores[key])
     else:
         strongest_warning = None
         weakest_warning = None
@@ -151,19 +159,17 @@ def calculate_composite_score(
     )
     total_components = len(COMPONENT_WEIGHTS)
     missing_components = [
-        COMPONENT_LABELS[k] for k in COMPONENT_WEIGHTS if not data_availability.get(k, True)
+        COMPONENT_LABELS[k]
+        for k in COMPONENT_WEIGHTS
+        if not data_availability.get(k, True)
     ]
 
     if available_count == total_components:
         quality_label = f"Complete ({available_count}/{total_components} components)"
     elif available_count >= total_components - 2:
-        quality_label = (
-            f"Partial ({available_count}/{total_components} components) - interpret with caution"
-        )
+        quality_label = f"Partial ({available_count}/{total_components} components) - interpret with caution"
     else:
-        quality_label = (
-            f"Limited ({available_count}/{total_components} components) - low confidence"
-        )
+        quality_label = f"Limited ({available_count}/{total_components} components) - low confidence"
 
     data_quality = {
         "available_count": available_count,
@@ -207,7 +213,9 @@ def calculate_composite_score(
                 "score": component_scores.get(k, 0),
                 "adjusted_score": adjusted_scores.get(k, component_scores.get(k, 0)),
                 "weight": w,
-                "weighted_contribution": round(adjusted_scores.get(k, 0) * effective_weights[k], 1)
+                "weighted_contribution": round(
+                    adjusted_scores.get(k, 0) * effective_weights[k], 1
+                )
                 if k in effective_weights
                 else 0.0,
                 "label": COMPONENT_LABELS[k],
@@ -288,7 +296,9 @@ def _interpret_zone(composite: float) -> dict:
         }
 
 
-def detect_follow_through_day(index_history: list[dict], composite_score: float) -> dict:
+def detect_follow_through_day(
+    index_history: list[dict], composite_score: float
+) -> dict:
     """
     Detect Follow-Through Day (FTD) signal for bottom confirmation.
     Only relevant when composite > 40 (Orange zone or worse).
@@ -383,6 +393,7 @@ def detect_follow_through_day(index_history: list[dict], composite_score: float)
             "reason": "No qualifying swing low found (need 3%+ decline with 3+ down days)",
             "rally_day_count": 0,
         }
+    assert swing_low_price is not None
 
     # Step 2 & 3: Find Rally Day 1 and count rally days with reset handling
     # Uses seeking_rally_day_1 flag to properly re-seek Day 1 after resets.
@@ -396,8 +407,8 @@ def detect_follow_through_day(index_history: list[dict], composite_score: float)
     reset_count = 0
 
     for i in range(swing_low_idx + 1, n):
-        curr_close = history[i].get("close", 0)
-        prev_close = history[i - 1].get("close", 0) if i > 0 else 0
+        curr_close = float(history[i].get("close", 0) or 0)
+        prev_close = float(history[i - 1].get("close", 0) or 0) if i > 0 else 0.0
 
         # Check for rally reset: price closes below swing low
         if curr_close < swing_low_price:
@@ -414,8 +425,8 @@ def detect_follow_through_day(index_history: list[dict], composite_score: float)
         if seeking_rally_day_1:
             if prev_close <= 0:
                 continue
-            high = history[i].get("high", curr_close)
-            low = history[i].get("low", curr_close)
+            high = float(history[i].get("high", curr_close) or curr_close)
+            low = float(history[i].get("low", curr_close) or curr_close)
             bar_range = high - low
             range_position = (curr_close - low) / bar_range if bar_range > 0 else 0
             if curr_close > prev_close or range_position >= 0.5:

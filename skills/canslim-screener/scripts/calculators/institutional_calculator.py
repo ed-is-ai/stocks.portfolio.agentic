@@ -164,15 +164,21 @@ def calculate_institutional_sponsorship(
                     file=sys.stderr,
                 )
             else:
-                quality_warning += " Finviz fallback also unavailable. Score reduced by 50%."
+                quality_warning = (
+                    quality_warning or "Institutional ownership unavailable."
+                ) + " Finviz fallback also unavailable. Score reduced by 50%."
         except Exception as e:
             print(f"WARNING: Finviz fallback failed for {symbol}: {e}", file=sys.stderr)
-            quality_warning += " Finviz fallback failed. Score reduced by 50%."
+            quality_warning = (
+                quality_warning or "Institutional ownership unavailable."
+            ) + " Finviz fallback failed. Score reduced by 50%."
 
     # Final warning if ownership % still unavailable
     if ownership_pct is None:
         if not quality_warning:
-            quality_warning = "Ownership % unavailable from all sources. Score reduced by 50%."
+            quality_warning = (
+                "Ownership % unavailable from all sources. Score reduced by 50%."
+            )
         else:
             quality_warning += " Score reduced by 50%."
 

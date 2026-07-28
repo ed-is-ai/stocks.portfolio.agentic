@@ -61,8 +61,10 @@ def calculate_volume_pattern(
             "error": "Insufficient data (need 20+ days)",
         }
 
-    volumes = [d.get("volume", 0) for d in historical_prices]
-    closes = [d.get("close", d.get("adjClose", 0)) for d in historical_prices]
+    volumes = [int(d.get("volume", 0) or 0) for d in historical_prices]
+    closes = [
+        float(d.get("close", d.get("adjClose", 0)) or 0) for d in historical_prices
+    ]
 
     # 50-day average volume (or available)
     vol_period = min(50, len(volumes))
@@ -218,13 +220,19 @@ def _zone_volume_analysis(
     zone_c_ratio = None
     if pivot_price and n > 0 and closes[0] > pivot_price:
         zone_c_vol = volumes[0]
-        zone_c_ratio = round(zone_c_vol / avg_volume_50d, 3) if avg_volume_50d > 0 else None
+        zone_c_ratio = (
+            round(zone_c_vol / avg_volume_50d, 3) if avg_volume_50d > 0 else None
+        )
 
     zone_analysis = {
         "zone_a_avg_volume": zone_a_avg,
-        "zone_a_ratio": round(zone_a_avg / avg_volume_50d, 3) if avg_volume_50d > 0 else None,
+        "zone_a_ratio": round(zone_a_avg / avg_volume_50d, 3)
+        if avg_volume_50d > 0
+        else None,
         "zone_b_avg_volume": zone_b_avg,
-        "zone_b_ratio": round(zone_b_avg / avg_volume_50d, 3) if avg_volume_50d > 0 else None,
+        "zone_b_ratio": round(zone_b_avg / avg_volume_50d, 3)
+        if avg_volume_50d > 0
+        else None,
         "zone_c_volume": zone_c_vol,
         "zone_c_ratio": zone_c_ratio,
     }
@@ -243,7 +251,8 @@ def _zone_volume_analysis(
     declining = False
     if len(contraction_avgs) >= 2:
         declining = all(
-            contraction_avgs[i] > contraction_avgs[i + 1] for i in range(len(contraction_avgs) - 1)
+            contraction_avgs[i] > contraction_avgs[i + 1]
+            for i in range(len(contraction_avgs) - 1)
         )
 
     contraction_volume_trend = {

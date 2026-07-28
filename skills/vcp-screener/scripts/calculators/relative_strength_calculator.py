@@ -62,8 +62,12 @@ def calculate_relative_strength(
             "error": "Insufficient S&P 500 price data (need 63+ days)",
         }
 
-    stock_closes = [d.get("close", d.get("adjClose", 0)) for d in stock_prices]
-    sp500_closes = [d.get("close", d.get("adjClose", 0)) for d in sp500_prices]
+    stock_closes = [
+        float(d.get("close", d.get("adjClose", 0)) or 0) for d in stock_prices
+    ]
+    sp500_closes = [
+        float(d.get("close", d.get("adjClose", 0)) or 0) for d in sp500_prices
+    ]
 
     weighted_rs = 0.0
     total_weight = 0.0
@@ -87,7 +91,10 @@ def calculate_relative_strength(
                     "relative_pct": round(relative, 2),
                 }
             )
-        elif len(stock_closes) > period_days // 2 and len(sp500_closes) > period_days // 2:
+        elif (
+            len(stock_closes) > period_days // 2
+            and len(sp500_closes) > period_days // 2
+        ):
             # Partial data: use available days with reduced weight
             available = min(len(stock_closes) - 1, len(sp500_closes) - 1)
             stock_return = _period_return(stock_closes, available)
@@ -156,8 +163,12 @@ def rank_relative_strength_universe(rs_results: dict[str, dict]) -> dict[str, di
         return {}
 
     # Separate valid (weighted_rs is not None) from invalid
-    valid_symbols = [s for s in rs_results if rs_results[s].get("weighted_rs") is not None]
-    invalid_symbols = [s for s in rs_results if rs_results[s].get("weighted_rs") is None]
+    valid_symbols = [
+        s for s in rs_results if rs_results[s].get("weighted_rs") is not None
+    ]
+    invalid_symbols = [
+        s for s in rs_results if rs_results[s].get("weighted_rs") is None
+    ]
 
     # Handle invalid stocks: score=0, rs_percentile=0
     result = {}

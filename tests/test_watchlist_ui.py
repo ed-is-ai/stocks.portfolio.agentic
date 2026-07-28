@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -364,18 +365,28 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
         confirm_missing=False,
     )
 
-    assert initial.template.name == refreshed.template.name == "_watchlist.html"
+    initial_response = cast(Any, initial)
+    refreshed_response = cast(Any, refreshed)
+    assert (
+        initial_response.template.name
+        == refreshed_response.template.name
+        == "_watchlist.html"
+    )
     # Records are sorted actionable-first, so both paths return an equivalent
     # (equal) list rather than the same object as load_analysis returned.
-    assert initial.context["records"] == refreshed.context["records"] == records
     assert (
-        initial.context["portfolio_tickers"]
-        == refreshed.context["portfolio_tickers"]
+        initial_response.context["records"]
+        == refreshed_response.context["records"]
+        == records
+    )
+    assert (
+        initial_response.context["portfolio_tickers"]
+        == refreshed_response.context["portfolio_tickers"]
         == {"AAPL"}
     )
     # The post-refresh completion banner was removed (#124); the route no
     # longer injects any refresh_status context.
-    assert "refresh_status" not in refreshed.context
+    assert "refresh_status" not in refreshed_response.context
 
 
 @pytest.mark.asyncio

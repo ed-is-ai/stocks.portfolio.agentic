@@ -47,7 +47,9 @@ def calculate_trend_template(
             "error": "Insufficient historical data (need 50+ days)",
         }
 
-    closes = [d.get("close", d.get("adjClose", 0)) for d in historical_prices]
+    closes = [
+        float(d.get("close", d.get("adjClose", 0)) or 0) for d in historical_prices
+    ]
     price = quote_data.get("price", closes[0] if closes else 0)
     year_high = quote_data.get("yearHigh", 0)
     year_low = quote_data.get("yearLow", 0)
@@ -120,7 +122,9 @@ def calculate_trend_template(
         c4_pass = price > sma50
     criteria["c4_price_above_sma50"] = {
         "passed": c4_pass,
-        "detail": f"Price ${price:.2f} vs SMA50 ${sma50:.2f}" if sma50 else "Insufficient data",
+        "detail": f"Price ${price:.2f} vs SMA50 ${sma50:.2f}"
+        if sma50
+        else "Insufficient data",
     }
 
     # Criterion 5: Price at least 25% above 52-week low

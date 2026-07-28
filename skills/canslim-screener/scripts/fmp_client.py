@@ -15,12 +15,15 @@ Features:
 import os
 import sys
 import time
-from typing import Optional
+from typing import Any, Optional
 
 try:
     import requests
 except ImportError:
-    print("ERROR: requests library not found. Install with: pip install requests", file=sys.stderr)
+    print(
+        "ERROR: requests library not found. Install with: pip install requests",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
@@ -55,8 +58,14 @@ _FMP_ENDPOINTS = {
         ("https://financialmodelingprep.com/api/v3/quote", _v3_quote_url),
     ],
     "historical": [
-        ("https://financialmodelingprep.com/stable/historical-price-full", _stable_hist_url),
-        ("https://financialmodelingprep.com/api/v3/historical-price-full", _v3_hist_url),
+        (
+            "https://financialmodelingprep.com/stable/historical-price-full",
+            _stable_hist_url,
+        ),
+        (
+            "https://financialmodelingprep.com/api/v3/historical-price-full",
+            _v3_hist_url,
+        ),
     ],
 }
 
@@ -86,8 +95,8 @@ class FMPClient:
 
         self.session = requests.Session()
         self.session.headers.update({"apikey": self.api_key})
-        self.cache = {}  # Simple in-memory cache for session
-        self.last_call_time = 0
+        self.cache: dict[str, Any] = {}  # Simple in-memory cache for session
+        self.last_call_time = 0.0
         self.rate_limit_reached = False
         self.retry_count = 0
         self.max_retries = 1
@@ -98,7 +107,7 @@ class FMPClient:
 
     def _rate_limited_get(
         self, url: str, params: Optional[dict] = None, quiet: bool = False
-    ) -> Optional[dict]:
+    ) -> Any:
         """
         Make rate-limited GET request with retry logic
 
@@ -133,12 +142,16 @@ class FMPClient:
                 # Rate limit exceeded
                 self.retry_count += 1
                 if self.retry_count <= self.max_retries:
-                    print("WARNING: Rate limit exceeded. Waiting 60 seconds...", file=sys.stderr)
+                    print(
+                        "WARNING: Rate limit exceeded. Waiting 60 seconds...",
+                        file=sys.stderr,
+                    )
                     time.sleep(60)
                     return self._rate_limited_get(url, params, quiet=quiet)
                 else:
                     print(
-                        "ERROR: Daily API rate limit reached. Stopping analysis.", file=sys.stderr
+                        "ERROR: Daily API rate limit reached. Stopping analysis.",
+                        file=sys.stderr,
                     )
                     self.rate_limit_reached = True
                     return None
@@ -177,7 +190,8 @@ class FMPClient:
                 if not isinstance(data, list) or len(data) == 0:
                     valid = False
                 elif is_single and not any(
-                    q.get("symbol", "").replace("-", ".") == symbols_str.replace("-", ".")
+                    q.get("symbol", "").replace("-", ".")
+                    == symbols_str.replace("-", ".")
                     for q in data
                 ):
                     valid = False
@@ -202,7 +216,9 @@ class FMPClient:
                 elif "historical" not in data:
                     valid = False
                 elif is_single and data.get("symbol"):
-                    if data["symbol"].replace("-", ".") != symbols_str.replace("-", "."):
+                    if data["symbol"].replace("-", ".") != symbols_str.replace(
+                        "-", "."
+                    ):
                         valid = False
 
             if valid:
@@ -274,10 +290,10 @@ class FMPClient:
 
         data = self._request_with_fallback("quote", symbols)
 
-        if data:
+        if isinstance(data, list):
             self.cache[cache_key] = data
-
-        return data
+            return data
+        return None
 
     def get_historical_prices(self, symbol: str, days: int = 365) -> Optional[dict]:
         """

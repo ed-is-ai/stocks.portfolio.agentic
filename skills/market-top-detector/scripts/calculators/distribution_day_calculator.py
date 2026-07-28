@@ -19,7 +19,9 @@ Scoring:
 """
 
 
-def calculate_distribution_days(sp500_history: list[dict], nasdaq_history: list[dict]) -> dict:
+def calculate_distribution_days(
+    sp500_history: list[dict], nasdaq_history: list[dict]
+) -> dict:
     """
     Calculate distribution day count for S&P 500 and NASDAQ.
 
@@ -34,8 +36,12 @@ def calculate_distribution_days(sp500_history: list[dict], nasdaq_history: list[
     nasdaq_result = _count_distribution_days(nasdaq_history, "NASDAQ")
 
     # Use the higher (worse) effective count
-    sp500_effective = sp500_result["distribution_days"] + 0.5 * sp500_result["stalling_days"]
-    nasdaq_effective = nasdaq_result["distribution_days"] + 0.5 * nasdaq_result["stalling_days"]
+    sp500_effective = (
+        sp500_result["distribution_days"] + 0.5 * sp500_result["stalling_days"]
+    )
+    nasdaq_effective = (
+        nasdaq_result["distribution_days"] + 0.5 * nasdaq_result["stalling_days"]
+    )
 
     if sp500_effective >= nasdaq_effective:
         primary = sp500_result
@@ -108,10 +114,12 @@ def _count_distribution_days(history: list[dict], index_name: str) -> dict:
         today = history[i]
         yesterday = history[i + 1]
 
-        today_close = today.get("close", today.get("adjClose", 0))
-        yesterday_close = yesterday.get("close", yesterday.get("adjClose", 0))
-        today_volume = today.get("volume", 0)
-        yesterday_volume = yesterday.get("volume", 0)
+        today_close = float(today.get("close", today.get("adjClose", 0)) or 0)
+        yesterday_close = float(
+            yesterday.get("close", yesterday.get("adjClose", 0)) or 0
+        )
+        today_volume = int(today.get("volume", 0) or 0)
+        yesterday_volume = int(yesterday.get("volume", 0) or 0)
 
         if yesterday_close == 0 or yesterday_volume == 0:
             continue
@@ -129,7 +137,9 @@ def _count_distribution_days(history: list[dict], index_name: str) -> dict:
                     "date": date,
                     "type": "distribution",
                     "pct_change": round(pct_change, 2),
-                    "volume_change": round((today_volume / yesterday_volume - 1) * 100, 1),
+                    "volume_change": round(
+                        (today_volume / yesterday_volume - 1) * 100, 1
+                    ),
                     "window_index": i,
                 }
             )
@@ -142,7 +152,9 @@ def _count_distribution_days(history: list[dict], index_name: str) -> dict:
                     "date": date,
                     "type": "stalling",
                     "pct_change": round(pct_change, 2),
-                    "volume_change": round((today_volume / yesterday_volume - 1) * 100, 1),
+                    "volume_change": round(
+                        (today_volume / yesterday_volume - 1) * 100, 1
+                    ),
                     "window_index": i,
                 }
             )

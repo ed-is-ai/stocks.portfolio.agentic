@@ -522,7 +522,11 @@ class TestReportGenerator:
                 "risk_pct": 7.0,
                 "trade_status": "NEAR PIVOT",
             },
-            "relative_strength": {"score": 80, "rs_rank_estimate": 80, "weighted_rs": 15.0},
+            "relative_strength": {
+                "score": 80,
+                "rs_rank_estimate": 80,
+                "weighted_rs": 15.0,
+            },
         }
 
     def test_market_cap_none(self):
@@ -553,7 +557,9 @@ class TestReportGenerator:
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             json_file = os.path.join(tmpdir, "test.json")
-            generate_json_report(top_results, metadata, json_file, all_results=all_results)
+            generate_json_report(
+                top_results, metadata, json_file, all_results=all_results
+            )
             with open(json_file) as f:
                 data = json.load(f)
             assert data["summary"]["total"] == 10
@@ -809,7 +815,9 @@ class TestSMA50ExtendedPenalty:
 
     def test_score_is_adjusted(self):
         result = self._run_tt(15.0)
-        assert result["score"] == max(0, result["raw_score"] + result["extended_penalty"])
+        assert result["score"] == max(
+            0, result["raw_score"] + result["extended_penalty"]
+        )
 
     # --- Output fields ---
 
@@ -877,6 +885,7 @@ class TestExtThresholdE2E:
             "Tech",
             "Test Corp",
         )
+        assert result_default is not None
         tt_default = result_default["trend_template"]
         assert tt_default["extended_penalty"] == -10
 
@@ -890,6 +899,7 @@ class TestExtThresholdE2E:
             "Test Corp",
             ext_threshold=15.0,
         )
+        assert result_custom is not None
         tt_custom = result_custom["trend_template"]
         assert tt_custom["extended_penalty"] == 0
 
@@ -947,7 +957,11 @@ class TestSectorDistribution:
                 "risk_pct": 7.0,
                 "trade_status": "NEAR PIVOT",
             },
-            "relative_strength": {"score": 80, "rs_rank_estimate": 80, "weighted_rs": 15.0},
+            "relative_strength": {
+                "score": 80,
+                "rs_rank_estimate": 80,
+                "weighted_rs": 15.0,
+            },
         }
 
     def test_sector_distribution_uses_all_results(self):
@@ -970,7 +984,9 @@ class TestSectorDistribution:
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             md_file = os.path.join(tmpdir, "test.md")
-            generate_markdown_report(top_results, metadata, md_file, all_results=all_results)
+            generate_markdown_report(
+                top_results, metadata, md_file, all_results=all_results
+            )
             with open(md_file) as f:
                 content = f.read()
             # Should contain Healthcare and Financials from all_results
@@ -989,7 +1005,9 @@ class TestSectorDistribution:
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             md_file = os.path.join(tmpdir, "test.md")
-            generate_markdown_report(top_results, metadata, md_file, all_results=all_results)
+            generate_markdown_report(
+                top_results, metadata, md_file, all_results=all_results
+            )
             with open(md_file) as f:
                 content = f.read()
             assert "Showing top 3 of 10 candidates" in content
@@ -1041,7 +1059,9 @@ class TestSectorDistribution:
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             json_file = os.path.join(tmpdir, "test.json")
-            generate_json_report(all_results[:1], metadata, json_file, all_results=all_results)
+            generate_json_report(
+                all_results[:1], metadata, json_file, all_results=all_results
+            )
             with open(json_file) as f:
                 data = json.load(f)
             assert "sector_distribution" in data
@@ -1080,7 +1100,9 @@ class TestRSPercentileRanking:
 
     def test_rank_ordering(self):
         """Higher weighted_rs gets higher percentile."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {
             "AAPL": {"score": 80, "weighted_rs": 30.0},
@@ -1094,7 +1116,9 @@ class TestRSPercentileRanking:
 
     def test_score_mapping(self):
         """Top percentile gets top score."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {f"S{i}": {"score": 50, "weighted_rs": float(i)} for i in range(100)}
         ranked = rank_relative_strength_universe(rs_map)
@@ -1105,7 +1129,9 @@ class TestRSPercentileRanking:
 
     def test_single_stock(self):
         """Single stock capped by small-population rule (n=1 -> max score 70)."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {"ONLY": {"score": 50, "weighted_rs": 10.0}}
         ranked = rank_relative_strength_universe(rs_map)
@@ -1115,7 +1141,9 @@ class TestRSPercentileRanking:
 
     def test_handles_none_weighted_rs(self):
         """Stocks with None weighted_rs get score=0 and percentile=0."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {
             "GOOD": {"score": 80, "weighted_rs": 20.0},
@@ -1128,14 +1156,18 @@ class TestRSPercentileRanking:
 
     def test_empty_dict(self):
         """Empty input returns empty dict."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         ranked = rank_relative_strength_universe({})
         assert ranked == {}
 
     def test_tied_values(self):
         """Tied weighted_rs values should get same percentile."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {
             "A": {"score": 50, "weighted_rs": 10.0},
@@ -1292,8 +1324,12 @@ class TestZigZagSwingDetection:
             lows.append(base - 1)
             closes.append(float(base))
             dates.append(f"day-{i}")
-        sh_low, sl_low = _zigzag_swing_points(highs, lows, closes, dates, atr_multiplier=0.5)
-        sh_high, sl_high = _zigzag_swing_points(highs, lows, closes, dates, atr_multiplier=3.0)
+        sh_low, sl_low = _zigzag_swing_points(
+            highs, lows, closes, dates, atr_multiplier=0.5
+        )
+        sh_high, sl_high = _zigzag_swing_points(
+            highs, lows, closes, dates, atr_multiplier=3.0
+        )
         # Lower multiplier should find at least as many swings
         assert len(sh_low) + len(sl_low) >= len(sh_high) + len(sl_high)
 
@@ -1318,7 +1354,8 @@ class TestZigZagSwingDetection:
 class TestVCPPatternEnhanced:
     """Test ZigZag integration, multi-start, and min contraction duration."""
 
-    def _make_vcp_prices(self, n=120):
+    @staticmethod
+    def _make_vcp_prices(n=120):
         """Build synthetic VCP price data (most-recent-first) with clear contractions.
 
         Creates: ramp up -> T1 drop -> recovery -> T2 smaller drop -> recovery
@@ -1388,7 +1425,9 @@ class TestVCPPatternEnhanced:
     def test_contraction_duration_in_result(self):
         """Contractions should have duration_days field when available."""
         prices = self._make_vcp_prices()
-        result = calculate_vcp_pattern(prices, atr_multiplier=1.5, min_contraction_days=3)
+        result = calculate_vcp_pattern(
+            prices, atr_multiplier=1.5, min_contraction_days=3
+        )
         for c in result.get("contractions", []):
             assert "duration_days" in c
 
@@ -1450,7 +1489,9 @@ class TestVolumeZoneAnalysis:
             {"high_idx": 30, "low_idx": 40, "label": "T1"},
             {"high_idx": 20, "low_idx": 25, "label": "T2"},
         ]
-        result = calculate_volume_pattern(prices, pivot_price=101.0, contractions=contractions)
+        result = calculate_volume_pattern(
+            prices, pivot_price=101.0, contractions=contractions
+        )
         assert "zone_analysis" in result
 
     def test_zone_b_dry_up(self):
@@ -1475,7 +1516,9 @@ class TestVolumeZoneAnalysis:
             {"high_idx": 30, "low_idx": 40, "label": "T1"},
             {"high_idx": 15, "low_idx": 20, "label": "T2"},
         ]
-        result = calculate_volume_pattern(prices, pivot_price=101.0, contractions=contractions)
+        result = calculate_volume_pattern(
+            prices, pivot_price=101.0, contractions=contractions
+        )
         assert result["dry_up_ratio"] < 0.5
 
     def test_contraction_volume_declining_bonus(self):
@@ -1505,7 +1548,9 @@ class TestVolumeZoneAnalysis:
             {"high_idx": 10, "low_idx": 20, "label": "T1"},
             {"high_idx": 35, "low_idx": 45, "label": "T2"},
         ]
-        result = calculate_volume_pattern(prices, pivot_price=101.0, contractions=contractions)
+        result = calculate_volume_pattern(
+            prices, pivot_price=101.0, contractions=contractions
+        )
         assert "contraction_volume_trend" in result
         assert result["contraction_volume_trend"]["declining"] is True
 
@@ -1541,7 +1586,9 @@ class TestVolumeZoneAnalysis:
             {"high_idx": 30, "low_idx": 40, "label": "T1"},
             {"high_idx": 15, "low_idx": 20, "label": "T2"},
         ]
-        result = calculate_volume_pattern(prices, pivot_price=101.0, contractions=contractions)
+        result = calculate_volume_pattern(
+            prices, pivot_price=101.0, contractions=contractions
+        )
         assert result["breakout_volume_detected"] is True
 
 
@@ -1556,7 +1603,9 @@ class TestRSNoneHandling:
 
     def test_all_none_get_score_zero(self):
         """All-None universe: every stock should get score=0, not score=100."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {
             "A": {"score": 0, "weighted_rs": None, "error": "No SPY data"},
@@ -1570,7 +1619,9 @@ class TestRSNoneHandling:
 
     def test_mixed_none_excludes_none_from_percentile(self):
         """None stocks excluded from percentile; valid stocks ranked among themselves."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {
             "GOOD1": {"score": 80, "weighted_rs": 30.0},
@@ -1587,7 +1638,9 @@ class TestRSNoneHandling:
 
     def test_none_stock_preserves_error(self):
         """None-weighted_rs stock should preserve its original error field."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {
             "OK": {"score": 50, "weighted_rs": 10.0},
@@ -1602,7 +1655,9 @@ class TestRSSmallPopulation:
 
     def test_small_population_caps_score(self):
         """With fewer than 10 valid stocks, scores should be capped."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         # 3 stocks: highest should NOT get score=100
         rs_map = {
@@ -1636,7 +1691,9 @@ class TestRSSmallPopulation:
 
     def test_large_population_no_cap(self):
         """With 20+ valid stocks, no cap is applied."""
-        from calculators.relative_strength_calculator import rank_relative_strength_universe
+        from calculators.relative_strength_calculator import (
+            rank_relative_strength_universe,
+        )
 
         rs_map = {f"S{i}": {"score": 50, "weighted_rs": float(i)} for i in range(20)}
         ranked = rank_relative_strength_universe(rs_map)
@@ -1671,7 +1728,7 @@ class TestFixedTautologicalTests:
 
     def test_new_params_no_crash(self):
         """calculate_vcp_pattern with new params should not raise an exception."""
-        prices = TestVCPPatternEnhanced._make_vcp_prices(None)
+        prices = TestVCPPatternEnhanced._make_vcp_prices()
         result = calculate_vcp_pattern(
             prices, atr_multiplier=2.0, atr_period=10, min_contraction_days=3
         )
@@ -1737,7 +1794,10 @@ class TestFixedTautologicalTests:
         )
 
         # Declining should have the bonus
-        assert result_declining.get("contraction_volume_trend", {}).get("declining") is True
+        assert (
+            result_declining.get("contraction_volume_trend", {}).get("declining")
+            is True
+        )
         assert result_flat.get("contraction_volume_trend", {}).get("declining") is False
         # Score difference should be exactly 10 (strengthened bonus in Phase 4)
         assert result_declining["score"] - result_flat["score"] == 10
@@ -1781,10 +1841,14 @@ class TestParameterPassthrough:
         """contraction_ratio=0.9 accepts T1=20%, T2=17% (ratio=0.85)."""
         contractions = _make_vcp_contractions([20, 17])
         # Default 0.75 rejects
-        result_strict = _validate_vcp(contractions, total_days=120, contraction_ratio=0.75)
+        result_strict = _validate_vcp(
+            contractions, total_days=120, contraction_ratio=0.75
+        )
         assert result_strict["valid"] is False
         # Relaxed 0.9 accepts
-        result_relaxed = _validate_vcp(contractions, total_days=120, contraction_ratio=0.9)
+        result_relaxed = _validate_vcp(
+            contractions, total_days=120, contraction_ratio=0.9
+        )
         assert result_relaxed["valid"] is True
 
     def test_breakout_volume_ratio_2_rejects_16x(self):
@@ -1793,7 +1857,9 @@ class TestParameterPassthrough:
         # Most recent bar: 1.6x volume, price above pivot
         prices[0]["volume"] = 1600000
         prices[0]["close"] = 102.0
-        result = calculate_volume_pattern(prices, pivot_price=100.0, breakout_volume_ratio=2.0)
+        result = calculate_volume_pattern(
+            prices, pivot_price=100.0, breakout_volume_ratio=2.0
+        )
         assert result["breakout_volume_detected"] is False
 
     def test_breakout_volume_ratio_default_detects_16x(self):
@@ -1808,7 +1874,7 @@ class TestParameterPassthrough:
         """calculate_vcp_pattern with min_contractions=3 finds fewer patterns."""
         from calculators.vcp_pattern_calculator import calculate_vcp_pattern
 
-        prices = TestVCPPatternEnhanced._make_vcp_prices(None)
+        prices = TestVCPPatternEnhanced._make_vcp_prices()
         result_2 = calculate_vcp_pattern(prices, min_contractions=2)
         result_3 = calculate_vcp_pattern(prices, min_contractions=3)
         # With stricter min_contractions, either fewer contractions or not valid
@@ -1981,7 +2047,11 @@ class TestTuningParamsMetadata:
                 "risk_pct": 7.0,
                 "trade_status": "NEAR PIVOT",
             },
-            "relative_strength": {"score": 80, "rs_rank_estimate": 80, "weighted_rs": 15.0},
+            "relative_strength": {
+                "score": 80,
+                "rs_rank_estimate": 80,
+                "weighted_rs": 15.0,
+            },
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             json_file = os.path.join(tmpdir, "test.json")
@@ -2499,27 +2569,37 @@ class TestScorerStateCaps:
         assert result["state_cap_applied"] is False
 
     def test_invalid_state_caps_to_no_vcp(self):
-        result = calculate_composite_score(**self._base_scores(), execution_state="Invalid")
+        result = calculate_composite_score(
+            **self._base_scores(), execution_state="Invalid"
+        )
         assert result["rating"] == "No VCP"
         assert result["state_cap_applied"] is True
 
     def test_damaged_state_caps_to_no_vcp(self):
-        result = calculate_composite_score(**self._base_scores(), execution_state="Damaged")
+        result = calculate_composite_score(
+            **self._base_scores(), execution_state="Damaged"
+        )
         assert result["rating"] == "No VCP"
         assert result["state_cap_applied"] is True
 
     def test_overextended_caps_textbook_to_weak(self):
-        result = calculate_composite_score(**self._base_scores(), execution_state="Overextended")
+        result = calculate_composite_score(
+            **self._base_scores(), execution_state="Overextended"
+        )
         assert result["rating"] == "Weak VCP"
         assert result["state_cap_applied"] is True
 
     def test_extended_caps_strong_to_developing(self):
-        result = calculate_composite_score(**self._base_scores(), execution_state="Extended")
+        result = calculate_composite_score(
+            **self._base_scores(), execution_state="Extended"
+        )
         assert result["rating"] == "Developing VCP"
         assert result["state_cap_applied"] is True
 
     def test_pre_breakout_no_cap(self):
-        result = calculate_composite_score(**self._base_scores(), execution_state="Pre-breakout")
+        result = calculate_composite_score(
+            **self._base_scores(), execution_state="Pre-breakout"
+        )
         assert result["rating"] == "Textbook VCP"
         assert result["state_cap_applied"] is False
 
@@ -2545,7 +2625,9 @@ class TestScorerStateCaps:
             execution_state="Extended",
         )
         assert result["rating"] == "Weak VCP"
-        assert result["state_cap_applied"] is False  # Weak VCP == cap, no downgrade needed
+        assert (
+            result["state_cap_applied"] is False
+        )  # Weak VCP == cap, no downgrade needed
 
     def test_execution_state_stored_in_result(self):
         result = calculate_composite_score(
@@ -2619,29 +2701,39 @@ class TestSMA200Penalty:
     """Tests for _calculate_sma200_penalty() and its integration."""
 
     def test_no_penalty_below_threshold(self):
-        penalty, dist = _calculate_sma200_penalty(price=140.0, sma200=100.0, max_extension=50.0)
+        penalty, dist = _calculate_sma200_penalty(
+            price=140.0, sma200=100.0, max_extension=50.0
+        )
         assert penalty == 0
         assert dist == pytest.approx(40.0)
 
     def test_no_penalty_at_exact_threshold(self):
-        penalty, dist = _calculate_sma200_penalty(price=150.0, sma200=100.0, max_extension=50.0)
+        penalty, dist = _calculate_sma200_penalty(
+            price=150.0, sma200=100.0, max_extension=50.0
+        )
         assert penalty == 0
         assert dist == pytest.approx(50.0)
 
     def test_first_tier_penalty_just_above_threshold(self):
         # 51% above SMA200, threshold=50 → excess=1 → tier −10
-        penalty, dist = _calculate_sma200_penalty(price=151.0, sma200=100.0, max_extension=50.0)
+        penalty, dist = _calculate_sma200_penalty(
+            price=151.0, sma200=100.0, max_extension=50.0
+        )
         assert penalty == -10
         assert dist == pytest.approx(51.0)
 
     def test_second_tier_penalty_10pct_excess(self):
         # 60% above SMA200, threshold=50 → excess=10 → tier −15
-        penalty, dist = _calculate_sma200_penalty(price=160.0, sma200=100.0, max_extension=50.0)
+        penalty, dist = _calculate_sma200_penalty(
+            price=160.0, sma200=100.0, max_extension=50.0
+        )
         assert penalty == -15
 
     def test_third_tier_penalty_20pct_excess(self):
         # 70% above SMA200, threshold=50 → excess=20 → tier −20
-        penalty, dist = _calculate_sma200_penalty(price=170.0, sma200=100.0, max_extension=50.0)
+        penalty, dist = _calculate_sma200_penalty(
+            price=170.0, sma200=100.0, max_extension=50.0
+        )
         assert penalty == -20
 
     def test_no_penalty_when_sma200_none(self):
@@ -2656,7 +2748,9 @@ class TestSMA200Penalty:
 
     def test_custom_max_extension(self):
         # max_extension=30 → excess=5 at 35% above → tier −10
-        penalty, dist = _calculate_sma200_penalty(price=135.0, sma200=100.0, max_extension=30.0)
+        penalty, dist = _calculate_sma200_penalty(
+            price=135.0, sma200=100.0, max_extension=30.0
+        )
         assert penalty == -10
 
     def test_trend_template_returns_sma200_penalty_field(self):
@@ -2767,7 +2861,10 @@ class TestWideAndLoose:
 
         final = {"depth_pct": 17.6, "duration_days": 7}
         assert (
-            _compute_wide_and_loose([{"depth_pct": 20.0, "duration_days": 25}, final], 15.0) is True
+            _compute_wide_and_loose(
+                [{"depth_pct": 20.0, "duration_days": 25}, final], 15.0
+            )
+            is True
         )
 
     def test_compute_wide_and_loose_false_deep_but_long(self):
@@ -2775,7 +2872,9 @@ class TestWideAndLoose:
 
         final = {"depth_pct": 17.6, "duration_days": 15}  # duration >= 10
         assert (
-            _compute_wide_and_loose([{"depth_pct": 20.0, "duration_days": 25}, final], 15.0)
+            _compute_wide_and_loose(
+                [{"depth_pct": 20.0, "duration_days": 25}, final], 15.0
+            )
             is False
         )
 
@@ -2784,7 +2883,9 @@ class TestWideAndLoose:
 
         final = {"depth_pct": 5.6, "duration_days": 6}  # depth <= threshold
         assert (
-            _compute_wide_and_loose([{"depth_pct": 20.0, "duration_days": 25}, final], 15.0)
+            _compute_wide_and_loose(
+                [{"depth_pct": 20.0, "duration_days": 25}, final], 15.0
+            )
             is False
         )
 
@@ -2847,7 +2948,10 @@ class TestRightSideTightness:
             result_tight.get("right_side_range_ratio") is not None
             and result_loose.get("right_side_range_ratio") is not None
         ):
-            assert result_tight["right_side_range_ratio"] < result_loose["right_side_range_ratio"]
+            assert (
+                result_tight["right_side_range_ratio"]
+                < result_loose["right_side_range_ratio"]
+            )
 
     def test_right_side_range_ratio_none_for_short_data(self):
         prices = _make_prices(35, start=100.0, daily_change=0.0)
@@ -2955,7 +3059,9 @@ class TestBreakoutVolumeScore:
         prices[0]["volume"] = int(avg * 1.6)
         prices[0]["close"] = 105.0  # above pivot 100
         pivot = 100.0
-        result = calculate_volume_pattern(prices, pivot_price=pivot, breakout_volume_ratio=1.5)
+        result = calculate_volume_pattern(
+            prices, pivot_price=pivot, breakout_volume_ratio=1.5
+        )
         assert result["breakout_volume_score"] == 60
 
     def test_breakout_volume_score_100_at_3x(self):
@@ -3009,7 +3115,9 @@ class TestDecliningContractionBonus:
         r_dec = calculate_volume_pattern(
             prices_declining, pivot_price=101.0, contractions=contractions
         )
-        r_flat = calculate_volume_pattern(prices_flat, pivot_price=101.0, contractions=contractions)
+        r_flat = calculate_volume_pattern(
+            prices_flat, pivot_price=101.0, contractions=contractions
+        )
 
         assert r_dec.get("contraction_volume_trend", {}).get("declining") is True
         assert r_flat.get("contraction_volume_trend", {}).get("declining") is False
@@ -3095,7 +3203,9 @@ class TestPhase5ReportFormat:
 
     def test_quick_scan_lists_symbol_and_state(self):
         """Quick Scan table should include symbol, execution state, and pattern type."""
-        stock = _make_stock(symbol="NVDA", execution_state="Breakout", pattern_type="VCP-adjacent")
+        stock = _make_stock(
+            symbol="NVDA", execution_state="Breakout", pattern_type="VCP-adjacent"
+        )
         metadata = {"generated_at": "2025-01-01", "funnel": {}}
         with tempfile.TemporaryDirectory() as tmpdir:
             md_file = os.path.join(tmpdir, "test.md")
@@ -3216,9 +3326,17 @@ class TestPhase5StrictMode:
 
     def test_strict_requires_pre_breakout_or_breakout(self):
         """Strict mode: Extended/Overextended states should be excluded."""
-        for state in ("Extended", "Overextended", "Early-post-breakout", "Damaged", "Invalid"):
+        for state in (
+            "Extended",
+            "Overextended",
+            "Early-post-breakout",
+            "Damaged",
+            "Invalid",
+        ):
             stock = _make_stock(valid_vcp=True, execution_state=state)
-            strict_ok = stock.get("valid_vcp", False) and stock.get("execution_state") in (
+            strict_ok = stock.get("valid_vcp", False) and stock.get(
+                "execution_state"
+            ) in (
                 "Pre-breakout",
                 "Breakout",
             )

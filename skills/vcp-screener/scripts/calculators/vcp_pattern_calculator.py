@@ -16,7 +16,7 @@ VCP Characteristics:
 - Pattern duration: 15-325 trading days
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 
 def calculate_vcp_pattern(
@@ -49,7 +49,7 @@ def calculate_vcp_pattern(
         Dict with score (0-100), contractions list, pattern validity, pivot point,
         atr_compression_ratio, wide_and_loose, right_side_range_ratio
     """
-    empty_result = {
+    empty_result: dict[str, Any] = {
         "score": 0,
         "valid_vcp": False,
         "contractions": [],
@@ -74,16 +74,18 @@ def calculate_vcp_pattern(
         return empty_result
 
     # Extract price arrays
-    highs = [d.get("high", d.get("close", 0)) for d in prices]
-    lows = [d.get("low", d.get("close", 0)) for d in prices]
-    closes = [d.get("close", 0) for d in prices]
+    highs = [float(d.get("high", d.get("close", 0)) or 0) for d in prices]
+    lows = [float(d.get("low", d.get("close", 0)) or 0) for d in prices]
+    closes = [float(d.get("close", 0) or 0) for d in prices]
     dates = [d.get("date", f"day-{i}") for i, d in enumerate(prices)]
 
     # Step A: Find swing points using ZigZag (primary) with fixed-window fallback
     atr_val = _calculate_atr(highs, lows, closes, atr_period)
     atr_10 = _calculate_atr(highs, lows, closes, 10)
     atr_50 = _calculate_atr(highs, lows, closes, 50)
-    zz_highs, zz_lows = _zigzag_swing_points(highs, lows, closes, dates, atr_multiplier, atr_period)
+    zz_highs, zz_lows = _zigzag_swing_points(
+        highs, lows, closes, dates, atr_multiplier, atr_period
+    )
 
     # Use ZigZag results if they have enough points, otherwise fallback
     if len(zz_highs) >= 1 and len(zz_lows) >= 1:
@@ -115,7 +117,9 @@ def calculate_vcp_pattern(
             min_contraction_days=min_contraction_days,
         )
         if len(candidate) >= min_contractions:
-            v = _validate_vcp(candidate, n, min_contractions, t1_depth_min, contraction_ratio)
+            v = _validate_vcp(
+                candidate, n, min_contractions, t1_depth_min, contraction_ratio
+            )
             s = _score_vcp(candidate, v)
         else:
             v = {"valid": False}
@@ -131,7 +135,9 @@ def calculate_vcp_pattern(
     contractions = best_contractions
 
     if len(contractions) < min_contractions:
-        atr_compression_ratio = (atr_10 / atr_50) if (atr_50 > 0 and atr_10 > 0) else None
+        atr_compression_ratio = (
+            (atr_10 / atr_50) if (atr_50 > 0 and atr_10 > 0) else None
+        )
         return {
             "score": 0,
             "valid_vcp": False,
@@ -148,7 +154,9 @@ def calculate_vcp_pattern(
         }
 
     # Step C: Validate VCP
-    validation = _validate_vcp(contractions, n, min_contractions, t1_depth_min, contraction_ratio)
+    validation = _validate_vcp(
+        contractions, n, min_contractions, t1_depth_min, contraction_ratio
+    )
 
     # Pivot price = high of the last contraction
     pivot_price = _get_pivot_price(contractions, highs, swing_highs)
@@ -374,7 +382,9 @@ def _identify_contractions(
 
         low_idx, low_val = next_low
         depth_pct = (
-            (current_high_val - low_val) / current_high_val * 100 if current_high_val > 0 else 0
+            (current_high_val - low_val) / current_high_val * 100
+            if current_high_val > 0
+            else 0
         )
 
         contractions.append(
@@ -382,7 +392,9 @@ def _identify_contractions(
                 "label": f"T{len(contractions) + 1}",
                 "high_idx": current_high_idx,
                 "high_price": round(current_high_val, 2),
-                "high_date": dates[current_high_idx] if current_high_idx < len(dates) else "N/A",
+                "high_date": dates[current_high_idx]
+                if current_high_idx < len(dates)
+                else "N/A",
                 "low_idx": low_idx,
                 "low_price": round(low_val, 2),
                 "low_date": dates[low_idx] if low_idx < len(dates) else "N/A",
@@ -456,7 +468,10 @@ def _build_contractions_from(
             # Try to find a later swing low, but only before the next swing high
             found_valid = False
             for idx, val in swing_lows:
-                if idx > current_high_idx and (idx - current_high_idx) >= min_contraction_days:
+                if (
+                    idx > current_high_idx
+                    and (idx - current_high_idx) >= min_contraction_days
+                ):
                     if next_high_boundary is not None and idx > next_high_boundary:
                         break  # Don't jump past an intermediate swing high
                     next_low = (idx, val)
@@ -468,7 +483,9 @@ def _build_contractions_from(
                 break
 
         depth_pct = (
-            (current_high_val - low_val) / current_high_val * 100 if current_high_val > 0 else 0
+            (current_high_val - low_val) / current_high_val * 100
+            if current_high_val > 0
+            else 0
         )
 
         # Right-shoulder validation: subsequent highs within 5% of H1
@@ -482,7 +499,9 @@ def _build_contractions_from(
                 "label": f"T{len(contractions) + 1}",
                 "high_idx": current_high_idx,
                 "high_price": round(current_high_val, 2),
-                "high_date": dates[current_high_idx] if current_high_idx < len(dates) else "N/A",
+                "high_date": dates[current_high_idx]
+                if current_high_idx < len(dates)
+                else "N/A",
                 "low_idx": low_idx,
                 "low_price": round(low_val, 2),
                 "low_date": dates[low_idx] if low_idx < len(dates) else "N/A",
@@ -518,12 +537,17 @@ def _validate_vcp(
     valid = True
 
     if len(contractions) < min_contractions:
-        return {"valid": False, "issues": [f"Need at least {min_contractions} contractions"]}
+        return {
+            "valid": False,
+            "issues": [f"Need at least {min_contractions} contractions"],
+        }
 
     # Check T1 depth (8-35% for large-caps)
     t1_depth = contractions[0]["depth_pct"]
     if t1_depth < t1_depth_min:
-        issues.append(f"T1 depth too shallow ({t1_depth:.1f}%, need >= {t1_depth_min}%)")
+        issues.append(
+            f"T1 depth too shallow ({t1_depth:.1f}%, need >= {t1_depth_min}%)"
+        )
         valid = False
     elif t1_depth > 35:
         issues.append(f"T1 depth too deep ({t1_depth:.1f}%, prefer <= 35%)")
@@ -556,7 +580,9 @@ def _validate_vcp(
         # The high of subsequent contraction should be near the first
         if prev_high > 0:
             pct_diff = (
-                abs(curr_high - contractions[0]["high_price"]) / contractions[0]["high_price"] * 100
+                abs(curr_high - contractions[0]["high_price"])
+                / contractions[0]["high_price"]
+                * 100
             )
             if pct_diff > 5:
                 issues.append(

@@ -39,6 +39,7 @@ class TestFetchBreadth200dma:
         """Breadth_Index_Raw=0.6481 should become value=64.81."""
         mock_get.return_value = _mock_response(SAMPLE_CSV)
         result = fetch_breadth_200dma()
+        assert result is not None
         assert result["value"] == 64.81
 
     @patch("breadth_csv_client.requests.get")
@@ -46,6 +47,7 @@ class TestFetchBreadth200dma:
         """Should return the date of the latest (last) row."""
         mock_get.return_value = _mock_response(SAMPLE_CSV)
         result = fetch_breadth_200dma()
+        assert result is not None
         assert result["date"] == "2026-02-18"
 
     @patch("breadth_csv_client.requests.get")
@@ -56,6 +58,7 @@ class TestFetchBreadth200dma:
         mock_dt.strptime = datetime.strptime
         mock_dt.now.return_value = datetime(2026, 2, 18, 12, 0, 0)
         result = fetch_breadth_200dma()
+        assert result is not None
         assert result["is_fresh"] is True
         assert result["days_old"] == 0
 

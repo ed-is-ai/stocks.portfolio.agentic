@@ -27,6 +27,7 @@ import openpyxl
 from openpyxl.cell.cell import Cell
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.hyperlink import Hyperlink
+from openpyxl.worksheet.worksheet import Worksheet
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -452,7 +453,9 @@ def _record_to_row(
 ) -> list[object]:
     a = r.analysis
     if not a:
-        return [r.ticker] + [""] * (len(_HEADERS) - 1)
+        row: list[object] = [r.ticker]
+        row.extend([""] * (len(_HEADERS) - 1))
+        return row
     risk = (
         f"{(a.entry_price - a.stop_loss) / a.entry_price * 100:.1f}%"
         if a.entry_price and a.stop_loss
@@ -694,6 +697,8 @@ def write_excel(
 
     # --- Sheet 1: All results ---
     ws_all = wb.active
+    if not isinstance(ws_all, Worksheet):
+        raise TypeError("Expected a worksheet as the active workbook sheet")
     ws_all.title = "All Results"
     _write_sheet(ws_all, records, held)
 

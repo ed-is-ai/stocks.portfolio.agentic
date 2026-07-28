@@ -723,7 +723,8 @@ class AnalystAgent(Agent):
             temperature=0.1,
             max_tokens=600,
         )
-        raw = self._strip_think(response.choices[0].message.content.strip())
+        content = response.choices[0].message.content
+        raw = self._strip_think(content or "")
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):

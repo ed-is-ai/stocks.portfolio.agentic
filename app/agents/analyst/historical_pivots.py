@@ -79,8 +79,8 @@ def _find_peak_candidates(
     weekly: pd.DataFrame, half_window: int = _HALF_WINDOW
 ) -> list[int]:
     """Return row indices where the weekly high is a local maximum with sufficient prominence."""
-    highs = weekly["high"].values
-    lows = weekly["low"].values
+    highs = weekly["high"].to_numpy(dtype=float)
+    lows = weekly["low"].to_numpy(dtype=float)
     n = len(highs)
     peaks: list[int] = []
 
@@ -118,7 +118,7 @@ def _build_base(
     or None if the base is too short.
     """
     pivot_price = float(weekly["high"].iloc[peak_idx])
-    lows = weekly["low"].values
+    lows = weekly["low"].to_numpy(dtype=float)
     floor = pivot_price * (1.0 - max_depth_pct / 100.0)
 
     base_start_idx = peak_idx
@@ -162,7 +162,7 @@ def _find_breakout(
     Always returns a dict. advance_pct < min_advance_pct → status "failed".
     breakout_date/close are None when price never cleared the pivot.
     """
-    closes = weekly["close"].values
+    closes = weekly["close"].to_numpy(dtype=float)
     n = len(closes)
     threshold = pivot_price * _BREAKOUT_THRESHOLD
 
@@ -202,7 +202,7 @@ def _is_stage2_at_pivot(weekly: pd.DataFrame, peak_idx: int) -> bool:
     """Return True if price was above its 40-week SMA at the pivot week."""
     if peak_idx < 39:
         return False  # insufficient history for SMA40
-    closes = weekly["close"].values
+    closes = weekly["close"].to_numpy(dtype=float)
     sma40 = float(closes[peak_idx - 39 : peak_idx + 1].mean())
     return float(closes[peak_idx]) > sma40
 
@@ -252,8 +252,8 @@ def _detect_open_base(
     min_base_weeks: int = _MIN_BASE_WEEKS,
 ) -> dict[str, Any] | None:
     """Check whether the trailing price action forms an open (unbroken) base."""
-    closes = weekly["close"].values
-    highs = weekly["high"].values
+    closes = weekly["close"].to_numpy(dtype=float)
+    highs = weekly["high"].to_numpy(dtype=float)
     n = len(weekly)
     # Look back up to 52 weeks from the end
     lookback = min(n, 52)
@@ -273,7 +273,7 @@ def _detect_open_base(
         return None  # already broken out — will be caught by confirmed pivots
 
     # Walk back to find base start
-    lows = weekly["low"].values
+    lows = weekly["low"].to_numpy(dtype=float)
     base_start_idx = recent_high_pos
     for i in range(recent_high_pos - 1, max(0, recent_high_pos - 104), -1):
         if lows[i] < floor:

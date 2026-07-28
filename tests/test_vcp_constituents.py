@@ -44,6 +44,7 @@ def test_fetch_datahub_constituents_maps_to_fmp_shape(monkeypatch, tmp_path) -> 
 
     constituents = client.get_sp500_constituents()
 
+    assert constituents is not None
     assert [c["symbol"] for c in constituents] == ["MMM", "AAPL", "BRK.B"]
     assert constituents[1] == {
         "symbol": "AAPL",
@@ -76,6 +77,8 @@ def test_get_constituents_falls_back_to_cache_on_network_failure(
 
     constituents = client.get_sp500_constituents()
 
+    assert constituents is not None
+    assert client.last_error is not None
     assert [c["symbol"] for c in constituents] == ["MMM", "AAPL", "BRK.B"]
     assert "network down" in client.last_error
 

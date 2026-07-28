@@ -1,6 +1,10 @@
+from typing import cast
+
+from app.agents.analyst.exit_evaluator import ExitEvaluator
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.portfolio_service import PortfolioService
+from app.services.trader_service import TraderService
 
 
 def test_to_gbp_converts_usd_and_passes_through_gbp() -> None:
@@ -55,7 +59,10 @@ def test_load_analysis_skips_invalid_records_without_dropping_valid(
     import app.services.portfolio_service as module
 
     monkeypatch.setattr(module, "read_analysis_records", lambda _path: [invalid, valid])
-    records = PortfolioService(_StubTrader(), _StubEvaluator()).load_analysis()
+    records = PortfolioService(
+        cast(TraderService, _StubTrader()),
+        cast(ExitEvaluator, _StubEvaluator()),
+    ).load_analysis()
     assert [record.ticker for record in records] == ["AAA"]
 
 
@@ -70,7 +77,10 @@ class _StubEvaluator:
 
 
 def _make_service(monkeypatch) -> PortfolioService:
-    svc = PortfolioService(_StubTrader(), _StubEvaluator())
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()),
+        cast(ExitEvaluator, _StubEvaluator()),
+    )
     monkeypatch.setattr(svc, "load_analysis", lambda: [])
     monkeypatch.setattr(
         svc,
@@ -137,7 +147,10 @@ def test_position_without_current_value_excluded_from_value_totals(
 
 
 def test_fetch_all_prices_assembles_results(monkeypatch) -> None:
-    svc = PortfolioService(_StubTrader(), _StubEvaluator())
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()),
+        cast(ExitEvaluator, _StubEvaluator()),
+    )
 
     def fake_fetch(yf_sym, gbpusd):
         table = {"AAA": (10.0, 10.0, "GBP"), "BBB": (20.0, 20.0, "GBP")}
@@ -150,7 +163,10 @@ def test_fetch_all_prices_assembles_results(monkeypatch) -> None:
 
 
 def test_fetch_all_prices_retries_with_london_suffix(monkeypatch) -> None:
-    svc = PortfolioService(_StubTrader(), _StubEvaluator())
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()),
+        cast(ExitEvaluator, _StubEvaluator()),
+    )
     calls: list[str] = []
 
     def fake_fetch(yf_sym, gbpusd):
@@ -168,7 +184,10 @@ def test_fetch_all_prices_retries_with_london_suffix(monkeypatch) -> None:
 
 
 def test_fetch_all_prices_drops_below_threshold(monkeypatch) -> None:
-    svc = PortfolioService(_StubTrader(), _StubEvaluator())
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()),
+        cast(ExitEvaluator, _StubEvaluator()),
+    )
 
     def fake_fetch(yf_sym, gbpusd):
         return (0.0, 0.0, "GBP")

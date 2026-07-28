@@ -208,7 +208,11 @@ class TestSingleStockReport:
                     "total_shares": 5_000_000,
                     "num_holders": 100,
                     "top_holders": [
-                        {"holder": f"Fund{i}", "shares": 100_000 - i * 1000, "change": 5_000}
+                        {
+                            "holder": f"Fund{i}",
+                            "shares": 100_000 - i * 1000,
+                            "change": 5_000,
+                        }
                         for i in range(20)
                     ],
                 },
@@ -223,10 +227,20 @@ class TestSingleStockReport:
             "holders_trend": 5,
             "new_positions": [{"name": "NewFund1", "shares": 10_000}],
             "increased_positions": [
-                {"name": "Fund0", "current_shares": 100_000, "change": 5_000, "pct_change": 5.26}
+                {
+                    "name": "Fund0",
+                    "current_shares": 100_000,
+                    "change": 5_000,
+                    "pct_change": 5.26,
+                }
             ],
             "decreased_positions": [
-                {"name": "Fund50", "current_shares": 50_000, "change": -2_000, "pct_change": -3.85}
+                {
+                    "name": "Fund50",
+                    "current_shares": 50_000,
+                    "change": -2_000,
+                    "pct_change": -3.85,
+                }
             ],
             "data_quality": {
                 "grade": grade,
@@ -243,6 +257,7 @@ class TestSingleStockReport:
         analysis = self._make_mock_analysis(grade="A")
         report = analyzer.generate_report(analysis, output_dir=str(tmp_path))
 
+        assert report is not None
         assert "change != shares" in report
 
     def test_grade_b_report_contains_caution(self, tmp_path):
@@ -250,4 +265,5 @@ class TestSingleStockReport:
         analysis = self._make_mock_analysis(grade="B")
         report = analyzer.generate_report(analysis, output_dir=str(tmp_path))
 
+        assert report is not None
         assert "CAUTION: Reference Only" in report

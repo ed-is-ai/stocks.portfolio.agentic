@@ -609,14 +609,15 @@ def main():
     print("-" * 70)
 
     # Determine universe
+    constituents: list[dict] = []
     if args.universe:
         symbols = args.universe
         universe_desc = f"Custom ({len(symbols)} stocks)"
         print(f"  Using custom universe: {len(symbols)} stocks")
     else:
         print("  Fetching S&P 500 constituents...", end=" ", flush=True)
-        constituents = client.get_sp500_constituents()
-        if not constituents:
+        fetched_constituents = client.get_sp500_constituents()
+        if not fetched_constituents:
             print("FAILED")
             reason = client.last_error or "no data returned from any endpoint"
             print(
@@ -624,6 +625,7 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
+        constituents = fetched_constituents
         symbols = [c["symbol"] for c in constituents]
         universe_desc = f"S&P 500 ({len(symbols)} stocks)"
         print(f"OK ({len(symbols)} stocks)")

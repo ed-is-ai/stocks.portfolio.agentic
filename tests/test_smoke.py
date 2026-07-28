@@ -7,11 +7,13 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch, MagicMock
 
 from app.orchestration.orchestrator import pipeline
 from app.workflows.momentum import build_momentum_pipeline
 from app.integrations.tv_screener import ScreenerResult
+from app.schemas.record import StockRecord
 from app.schemas.source_health import SourceName, SourceResult, SourceState
 
 
@@ -360,8 +362,8 @@ class TestSmokeTests:
 
         # Verify the trace exposes every stage's output
         assert [name for name, _ in trace] == ["scan", "analyse", "alert"]
-        scan_results = trace[0][1]
-        analysis_results = trace[1][1]
+        scan_results = cast(list[StockRecord], trace[0][1])
+        analysis_results = cast(list[StockRecord], trace[1][1])
 
         assert len(scan_results) == 1
         assert len(analysis_results) == 1

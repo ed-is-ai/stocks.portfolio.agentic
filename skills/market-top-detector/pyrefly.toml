@@ -1,0 +1,3 @@
+project-includes = ["scripts/**/*.py"]
+search-path = ["scripts", "scripts/tests"]
+infer-with-first-use = false

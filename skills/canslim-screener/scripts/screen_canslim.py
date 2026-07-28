@@ -122,7 +122,10 @@ def parse_arguments():
 
 
 def analyze_stock(
-    symbol: str, client: FMPClient, market_data: dict, sp500_historical: list[dict] = None
+    symbol: str,
+    client: FMPClient,
+    market_data: dict,
+    sp500_historical: dict | None = None,
 ) -> Optional[dict]:
     """
     Analyze a single stock using CANSLIM Phase 3 components (7 components: C, A, N, S, L, I, M)
@@ -158,7 +161,9 @@ def analyze_stock(
         price = quote[0].get("price", 0)
 
         # C Component: Current Quarterly Earnings
-        quarterly_income = client.get_income_statement(symbol, period="quarter", limit=8)
+        quarterly_income = client.get_income_statement(
+            symbol, period="quarter", limit=8
+        )
         c_result = (
             calculate_quarterly_growth(quarterly_income)
             if quarterly_income
@@ -189,12 +194,18 @@ def analyze_stock(
         historical_prices_52w_data = client.get_historical_prices(symbol, days=365)
         # Extract 'historical' list from FMP response format
         historical_prices_52w = (
-            historical_prices_52w_data.get("historical", []) if historical_prices_52w_data else []
+            historical_prices_52w_data.get("historical", [])
+            if historical_prices_52w_data
+            else []
         )
         # Prepare S&P 500 historical list (extract from FMP response format)
-        sp500_historical_list = sp500_historical.get("historical", []) if sp500_historical else None
+        sp500_historical_list = (
+            sp500_historical.get("historical", []) if sp500_historical else None
+        )
         l_result = (
-            calculate_leadership(historical_prices_52w, sp500_historical=sp500_historical_list)
+            calculate_leadership(
+                historical_prices_52w, sp500_historical=sp500_historical_list
+            )
             if historical_prices_52w
             else {"score": 0, "error": "No 52-week price history"}
         )
@@ -203,7 +214,10 @@ def analyze_stock(
         institutional_holders = client.get_institutional_holders(symbol)
         i_result = (
             calculate_institutional_sponsorship(
-                institutional_holders, profile[0], symbol=symbol, use_finviz_fallback=True
+                institutional_holders,
+                profile[0],
+                symbol=symbol,
+                use_finviz_fallback=True,
             )
             if institutional_holders
             else {"score": 0, "error": "No institutional holder data"}
@@ -214,24 +228,24 @@ def analyze_stock(
 
         # Calculate composite score (Phase 3: 7 components - FULL CANSLIM)
         composite = calculate_composite_score_phase3(
-            c_score=c_result.get("score", 0),
-            a_score=a_result.get("score", 50),
-            n_score=n_result.get("score", 0),
-            s_score=s_result.get("score", 0),
-            l_score=l_result.get("score", 0),
-            i_score=i_result.get("score", 0),
-            m_score=m_result.get("score", 50),
+            c_score=float(c_result.get("score", 0) or 0),
+            a_score=float(a_result.get("score", 50) or 50),
+            n_score=float(n_result.get("score", 0) or 0),
+            s_score=float(s_result.get("score", 0) or 0),
+            l_score=float(l_result.get("score", 0) or 0),
+            i_score=float(i_result.get("score", 0) or 0),
+            m_score=float(m_result.get("score", 50) or 50),
         )
 
         # Check minimum thresholds (Phase 3)
         threshold_check = check_minimum_thresholds_phase3(
-            c_score=c_result.get("score", 0),
-            a_score=a_result.get("score", 50),
-            n_score=n_result.get("score", 0),
-            s_score=s_result.get("score", 0),
-            l_score=l_result.get("score", 0),
-            i_score=i_result.get("score", 0),
-            m_score=m_result.get("score", 50),
+            c_score=float(c_result.get("score", 0) or 0),
+            a_score=float(a_result.get("score", 50) or 50),
+            n_score=float(n_result.get("score", 0) or 0),
+            s_score=float(s_result.get("score", 0) or 0),
+            l_score=float(l_result.get("score", 0) or 0),
+            i_score=float(i_result.get("score", 0) or 0),
+            m_score=float(m_result.get("score", 50) or 50),
         )
 
         print(f"✓ Score: {composite['composite_score']:.1f} ({composite['rating']})")
@@ -289,7 +303,9 @@ def main():
         print(f"✓ Custom universe: {len(universe)} stocks")
     else:
         universe = DEFAULT_UNIVERSE[: args.max_candidates]
-        print(f"✓ Default universe (S&P 500 top {len(universe)}): {len(universe)} stocks")
+        print(
+            f"✓ Default universe (S&P 500 top {len(universe)}): {len(universe)} stocks"
+        )
 
     print()
 
@@ -305,7 +321,9 @@ def main():
         sys.exit(1)
 
     # Fetch S&P 500 historical prices (used by both M and L components)
-    print("Fetching S&P 500 52-week data for M (EMA) and L (Relative Strength) components...")
+    print(
+        "Fetching S&P 500 52-week data for M (EMA) and L (Relative Strength) components..."
+    )
     sp500_historical = client.get_historical_prices(
         "^GSPC", days=365
     )  # Must match ^GSPC quote for M component EMA
@@ -318,7 +336,9 @@ def main():
         )
 
     # Calculate M component using real historical prices for accurate EMA
-    sp500_historical_list = sp500_historical.get("historical", []) if sp500_historical else []
+    sp500_historical_list = (
+        sp500_historical.get("historical", []) if sp500_historical else []
+    )
     market_data = calculate_market_direction(
         sp500_quote=sp500_quote[0],
         sp500_prices=sp500_historical_list if sp500_historical_list else None,
@@ -334,7 +354,9 @@ def main():
     if market_data.get("warning"):
         print()
         print(f"⚠️  WARNING: {market_data['warning']}")
-        print("    Consider raising cash allocation. CANSLIM doesn't work in bear markets.")
+        print(
+            "    Consider raising cash allocation. CANSLIM doesn't work in bear markets."
+        )
 
     print()
 
@@ -361,7 +383,9 @@ def main():
     # Display top 5
     print("Top 5 Stocks:")
     for i, stock in enumerate(results[:5], 1):
-        print(f"  {i}. {stock['symbol']:6} - {stock['composite_score']:5.1f} ({stock['rating']})")
+        print(
+            f"  {i}. {stock['symbol']:6} - {stock['composite_score']:5.1f} ({stock['rating']})"
+        )
 
     print()
 

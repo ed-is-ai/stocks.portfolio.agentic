@@ -9,6 +9,7 @@ must go through this repository.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
@@ -197,7 +198,7 @@ class PipelineStatusRepository:
 
     def update_source_health(
         self,
-        source_health: dict[SourceName | str, SourceHealth],
+        source_health: Mapping[SourceName, SourceHealth],
         *,
         expected_run_id: str,
     ) -> PipelineStatus:

@@ -17,6 +17,7 @@ Scoring: Weighted average of ETF deterioration signals.
 If 60%+ ETFs are deteriorating, apply 1.3x amplification.
 """
 
+from collections.abc import Mapping
 from typing import Optional
 
 # Default Leading/Growth ETF basket
@@ -81,7 +82,9 @@ def select_dynamic_basket(quotes: dict[str, dict], top_n: int = 10) -> list[str]
 
 
 def calculate_leading_stock_health(
-    quotes: dict[str, dict], historical: dict[str, list[dict]], etf_list: Optional[list[str]] = None
+    quotes: Mapping[str, dict | None],
+    historical: dict[str, list[dict]],
+    etf_list: Optional[list[str]] = None,
 ) -> dict:
     """
     Calculate leading stock health score.
@@ -130,7 +133,9 @@ def calculate_leading_stock_health(
         etf_scores.append(detail["deterioration_score"])
         etf_details[symbol] = detail
 
-    fetch_success_rate = fetch_successes / total_attempted if total_attempted > 0 else 0.0
+    fetch_success_rate = (
+        fetch_successes / total_attempted if total_attempted > 0 else 0.0
+    )
 
     if not etf_scores:
         return {
@@ -219,7 +224,7 @@ def _evaluate_etf(symbol: str, quote: dict, history: list[dict]) -> dict:
 
     # 2. Position vs moving averages (0-40 points)
     if history and len(history) >= 50:
-        closes = [d.get("close", d.get("adjClose", 0)) for d in history]
+        closes = [float(d.get("close", d.get("adjClose", 0)) or 0) for d in history]
 
         # 50DMA
         sma50 = sum(closes[:50]) / 50
@@ -240,7 +245,7 @@ def _evaluate_etf(symbol: str, quote: dict, history: list[dict]) -> dict:
                 flags.append("Likely below 200DMA (estimated)")
 
     elif history and len(history) >= 20:
-        closes = [d.get("close", d.get("adjClose", 0)) for d in history]
+        closes = [float(d.get("close", d.get("adjClose", 0)) or 0) for d in history]
         sma20 = sum(closes[:20]) / 20
         if price < sma20:
             score += 15
@@ -273,7 +278,7 @@ def _detect_lower_highs(history: list[dict], lookback: int = 20) -> bool:
     if len(history) < lookback:
         return False
 
-    highs = [d.get("high", d.get("close", 0)) for d in history[:lookback]]
+    highs = [float(d.get("high", d.get("close", 0)) or 0) for d in history[:lookback]]
 
     # Find local maxima (swing highs)
     swing_highs = []

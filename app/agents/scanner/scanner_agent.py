@@ -11,7 +11,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol, cast
 
 import pandas as pd
 import yfinance as yf
@@ -256,7 +256,7 @@ def _fetch_spy_context() -> tuple[bool, float]:
     stop=stop_after_attempt(_YF_INFO_RETRIES),
     retry_error_callback=lambda _state: {},
 )
-def _fetch_ticker_info(t: yf.Ticker) -> dict[str, Any]:
+def _fetch_ticker_info(t: "_TickerInfoSource") -> dict[str, Any]:
     """Read ``t.info``, retrying with exponential backoff on an empty payload.
 
     An empty payload (or a raised exception) is yfinance's throttling
@@ -265,6 +265,13 @@ def _fetch_ticker_info(t: yf.Ticker) -> dict[str, Any]:
     returns an empty dict rather than raising.
     """
     return t.info or {}
+
+
+class _TickerInfoSource(Protocol):
+    """Structural type for the small part of ``yf.Ticker`` used by retries."""
+
+    @property
+    def info(self) -> dict[str, Any]: ...
 
 
 def _fetch_fundamentals_yf(ticker: str) -> dict[str, Any]:
@@ -468,7 +475,7 @@ def _inst_count(ticker_obj: yf.Ticker) -> int | None:
         row = mh[mh.index == "institutionsCount"]
         if row.empty:
             return None
-        return int(float(row.iloc[0, 0]))
+        return int(float(cast(Any, row.iloc[0, 0])))
     except Exception:
         return None
 
@@ -634,9 +641,10 @@ class ScannerAgent(Agent):
         # Daily OHLCV in FMP-compatible format (most recent first) for VCP calculators
         ohlcv_history: list[dict[str, float | int | str]] = []
         for date, row in df.iloc[::-1].iterrows():
+            date_value = cast(Any, date)
             ohlcv_history.append(
                 {
-                    "date": date.strftime("%Y-%m-%d"),
+                    "date": date_value.strftime("%Y-%m-%d"),
                     "open": round(float(row["open"]), 4),
                     "high": round(float(row["high"]), 4),
                     "low": round(float(row["low"]), 4),

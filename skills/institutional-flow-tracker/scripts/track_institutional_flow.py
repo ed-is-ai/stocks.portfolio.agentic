@@ -51,7 +51,9 @@ class InstitutionalFlowTracker:
         self.api_key = api_key
         self.base_url = "https://financialmodelingprep.com/api/v3"
 
-    def get_stock_screener(self, market_cap_min: int = 1000000000, limit: int = 100) -> list[dict]:
+    def get_stock_screener(
+        self, market_cap_min: int = 1000000000, limit: int = 100
+    ) -> list[dict]:
         """Get list of stocks meeting market cap criteria"""
         url = f"{self.base_url}/stock-screener"
         params = {"marketCapMoreThan": market_cap_min, "limit": limit}
@@ -116,7 +118,9 @@ class InstitutionalFlowTracker:
         # Data quality assessment
         filtered = calculate_filtered_metrics(current_holders)
         total_count = len(current_holders)
-        genuine_ratio = filtered["genuine_count"] / total_count if total_count > 0 else 0
+        genuine_ratio = (
+            filtered["genuine_count"] / total_count if total_count > 0 else 0
+        )
         coverage = calculate_coverage_ratio(current_holders, previous_holders)
         match = calculate_match_ratio(current_holders, previous_holders)
         grade = reliability_grade(coverage, match, genuine_ratio)
@@ -144,7 +148,9 @@ class InstitutionalFlowTracker:
         institution_change = current_count - previous_count if previous_q else 0
 
         # Get top holders sorted by shares held
-        top_holders = sorted(current_holders, key=lambda x: x.get("shares", 0), reverse=True)[:10]
+        top_holders = sorted(
+            current_holders, key=lambda x: x.get("shares", 0), reverse=True
+        )[:10]
 
         top_holder_names = [
             {
@@ -197,7 +203,9 @@ class InstitutionalFlowTracker:
 
         # Filter by sector if specified
         if sector:
-            stocks = [s for s in stocks if s.get("sector", "").lower() == sector.lower()]
+            stocks = [
+                s for s in stocks if s.get("sector", "").lower() == sector.lower()
+            ]
             print(f"Filtered to {len(stocks)} stocks in {sector} sector")
 
         # Filter out ETFs and non-tradable stocks early (saves API calls)
@@ -254,7 +262,12 @@ class InstitutionalFlowTracker:
 
         return results[:top]
 
-    def generate_report(self, results: list[dict], output_file: str = None, output_dir: str = None):
+    def generate_report(
+        self,
+        results: list[dict],
+        output_file: str | None = None,
+        output_dir: str | None = None,
+    ) -> str | None:
         """Generate markdown report from screening results"""
 
         if not results:
@@ -281,9 +294,7 @@ Only stocks with **Grade A or B** data reliability are included. Grade C (unreli
         accumulators = [r for r in results if r["percent_change"] > 0][:10]
         if accumulators:
             report += "\n| Symbol | Company | Ownership Change | Grade | Institution Change | Top Holder |\n"
-            report += (
-                "|--------|---------|-----------------|-------|-------------------|------------|\n"
-            )
+            report += "|--------|---------|-----------------|-------|-------------------|------------|\n"
             for r in accumulators:
                 top_holder = r["top_holders"][0]["name"] if r["top_holders"] else "N/A"
                 report += (
@@ -388,9 +399,13 @@ For detailed interpretation framework, see:
 
         # Determine output path
         if output_file:
-            output_path = output_file if output_file.endswith(".md") else f"{output_file}.md"
+            output_path = (
+                output_file if output_file.endswith(".md") else f"{output_file}.md"
+            )
         else:
-            filename = f"institutional_flow_screening_{datetime.now().strftime('%Y%m%d')}.md"
+            filename = (
+                f"institutional_flow_screening_{datetime.now().strftime('%Y%m%d')}.md"
+            )
             if output_dir:
                 os.makedirs(output_dir, exist_ok=True)
                 output_path = os.path.join(output_dir, filename)
@@ -431,7 +446,10 @@ Examples:
         help="FMP API key (or set FMP_API_KEY environment variable)",
     )
     parser.add_argument(
-        "--top", type=int, default=50, help="Number of top stocks to return (default: 50)"
+        "--top",
+        type=int,
+        default=50,
+        help="Number of top stocks to return (default: 50)",
     )
     parser.add_argument(
         "--min-change-percent",
@@ -446,7 +464,9 @@ Examples:
         help="Minimum market cap in dollars (default: 1B)",
     )
     parser.add_argument(
-        "--sector", type=str, help="Filter by specific sector (e.g., Technology, Healthcare)"
+        "--sector",
+        type=str,
+        help="Filter by specific sector (e.g., Technology, Healthcare)",
     )
     parser.add_argument(
         "--min-institutions",
@@ -501,7 +521,9 @@ Examples:
 
     # Save JSON results if requested
     if args.output:
-        json_output = args.output if args.output.endswith(".json") else f"{args.output}.json"
+        json_output = (
+            args.output if args.output.endswith(".json") else f"{args.output}.json"
+        )
         if args.output_dir:
             os.makedirs(args.output_dir, exist_ok=True)
             json_output = os.path.join(args.output_dir, os.path.basename(json_output))
@@ -517,7 +539,9 @@ Examples:
         print("\n" + "=" * 80)
         print("TOP 10 INSTITUTIONAL FLOW CHANGES (Grade A/B only)")
         print("=" * 80)
-        print(f"{'Symbol':<8} {'Company':<25} {'Change':>10} {'Grade':>6} {'Institutions':>12}")
+        print(
+            f"{'Symbol':<8} {'Company':<25} {'Change':>10} {'Grade':>6} {'Institutions':>12}"
+        )
         print("-" * 80)
         for r in results[:10]:
             print(
