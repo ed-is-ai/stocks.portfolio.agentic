@@ -725,3 +725,35 @@ class TestCurrencyNormalization:
         assert results[0].currency == "GBP"
         # Latest close ~4599p → ~£45.99, i.e. converted out of pence.
         assert 40 < results[0].price < 60
+
+
+class TestSelectValidVcpSymbols:
+    """VCP intake narrows scored output to genuine valid_vcp setups (#132)."""
+
+    _RESULTS = [
+        {"symbol": "AAA", "valid_vcp": True, "entry_ready": True},
+        {"symbol": "BBB", "valid_vcp": True, "entry_ready": False},
+        {"symbol": "CCC", "valid_vcp": False, "entry_ready": False},
+        {"symbol": "", "valid_vcp": True, "entry_ready": True},
+        {"valid_vcp": True, "entry_ready": True},  # missing symbol
+    ]
+
+    def test_returns_only_valid_vcp_symbols(self):
+        from app.agents.scanner.scanner_agent import select_valid_vcp_symbols
+
+        assert select_valid_vcp_symbols(self._RESULTS) == ["AAA", "BBB"]
+
+    def test_empty_results_returns_empty(self):
+        from app.agents.scanner.scanner_agent import select_valid_vcp_symbols
+
+        assert select_valid_vcp_symbols([]) == []
+
+    def test_logs_three_tier_breakdown(self, capsys):
+        from app.agents.scanner.scanner_agent import select_valid_vcp_symbols
+
+        select_valid_vcp_symbols(self._RESULTS)
+        out = capsys.readouterr().out
+        # 3 screened (symbol present), 2 valid VCP, 1 entry-ready.
+        assert "3 screened" in out
+        assert "2 valid VCP" in out
+        assert "1 entry-ready" in out

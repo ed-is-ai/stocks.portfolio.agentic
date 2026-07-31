@@ -140,6 +140,29 @@ def _vcp_unavailable_reason() -> tuple[str, str] | None:
     return None
 
 
+def select_valid_vcp_symbols(results: list[dict[str, Any]]) -> list[str]:
+    """Return symbols with a genuine VCP setup, logging the tier breakdown.
+
+    The screener scores every trend-template passer, so its raw ``results``
+    conflate three distinct populations. Feeding all of them into analysis
+    inflated the reported VCP count far beyond genuine setups (#132). We now
+    admit only ``valid_vcp`` rows to analysis and log the three tiers so the
+    breadth visibility added in #101 survives without the conflation:
+
+      - screened   — every scored candidate (trend-template passers)
+      - valid VCP  — a genuine VCP pattern (``valid_vcp``)
+      - entry-ready — valid *and* positioned to enter now (``entry_ready``)
+    """
+    screened = [r for r in results if r.get("symbol")]
+    valid = [r for r in screened if r.get("valid_vcp")]
+    entry_ready = [r for r in valid if r.get("entry_ready")]
+    print(
+        f"  vcp_screener tiers: {len(screened)} screened, "
+        f"{len(valid)} valid VCP, {len(entry_ready)} entry-ready"
+    )
+    return [r["symbol"] for r in valid]
+
+
 def fetch_vcp_screener_tickers() -> list[str]:
     """Run the vcp-screener over the S&P 500 and return candidate symbols.
 
@@ -168,9 +191,9 @@ def fetch_vcp_screener_tickers() -> list[str]:
                     "--output-dir",
                     tmpdir,
                     # Screen the entire pre-filtered universe (no candidate cap)
-                    # and report every scored candidate, so the source count
-                    # reflects the true number that passed VCP detection rather
-                    # than an arbitrary top-N (was pinned at 100). #101
+                    # rather than an arbitrary top-N (was pinned at 100, #101).
+                    # select_valid_vcp_symbols then narrows the scored output to
+                    # genuine valid_vcp setups for analysis (#132).
                     "--full-sp500",
                     "--top",
                     _VCP_RESULT_LIMIT,
@@ -196,7 +219,7 @@ def fetch_vcp_screener_tickers() -> list[str]:
             message = "vcp_screener output was not valid JSON"
             print(f"  [warn] {message}")
             raise VcpScreenerError("invalid_output", message) from exc
-        return [r["symbol"] for r in data.get("results", []) if r.get("symbol")]
+        return select_valid_vcp_symbols(data.get("results", []))
 
 
 def fetch_vcp_screener_result() -> SourceResult:
