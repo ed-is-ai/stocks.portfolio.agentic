@@ -7,6 +7,7 @@ import json
 
 import app.agents.scanner.scan_history as sh
 from app.schemas import StockAnalysis, StockRecord, StockScan
+from app.schemas.analysis_artifact import build_analysis_payload
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,45 @@ class TestGetFreshBreakouts:
         records = [_record("A", "broken_out")]
         result = sh.get_fresh_breakouts(records, history)
         assert result == set()
+
+
+# ---------------------------------------------------------------------------
+# apply_fresh_breakout_flags
+# ---------------------------------------------------------------------------
+
+
+class TestApplyFreshBreakoutFlags:
+    def test_flags_only_breakout_tickers(self) -> None:
+        a, b = _record("A", "broken_out"), _record("B", "approaching")
+        sh.apply_fresh_breakout_flags([a, b], {"A"})
+        assert a.analysis is not None and a.analysis.fresh_breakout is True
+        assert b.analysis is not None and b.analysis.fresh_breakout is False
+
+    def test_record_without_analysis_is_skipped(self) -> None:
+        rec = _record("C", None)
+        sh.apply_fresh_breakout_flags([rec], {"C"})
+        assert rec.analysis is None
+
+    def test_flag_survives_into_serialised_payload(self) -> None:
+        """Regression (#131): the published JSON must carry fresh_breakout.
+
+        The bug serialised the analysis payload *before* the flags were
+        assigned, so the web dashboard always read fresh_breakout=false even
+        when a breakout was detected. Assert the flag reaches the payload that
+        os.replace promotes.
+        """
+        records = [_record("A", "broken_out"), _record("B", "approaching")]
+        breakouts = sh.get_fresh_breakouts(records, {})
+        sh.apply_fresh_breakout_flags(records, breakouts)
+
+        payload = build_analysis_payload(
+            [r.model_dump(mode="json") for r in records],
+            run_id="run-1",
+            generated_at=datetime.datetime(2024, 1, 1, tzinfo=datetime.timezone.utc),
+        )
+        by_ticker = {r["ticker"]: r for r in payload["records"]}
+        assert by_ticker["A"]["analysis"]["fresh_breakout"] is True
+        assert by_ticker["B"]["analysis"]["fresh_breakout"] is False
 
 
 # ---------------------------------------------------------------------------

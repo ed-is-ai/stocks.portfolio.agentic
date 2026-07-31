@@ -73,6 +73,20 @@ def get_fresh_breakouts(
     return {t for t in broken_out_now if prev.get(t) != "broken_out"}
 
 
+def apply_fresh_breakout_flags(records: list[StockRecord], breakouts: set[str]) -> None:
+    """Mark records whose ticker just broke out so serialised artifacts carry it.
+
+    Mutates ``records`` in place. MUST run before the analysis payload is
+    serialised (and before the Excel export) — otherwise the published JSON
+    reports ``fresh_breakout=false`` for a breakout that was detected this run,
+    silently disagreeing with the Excel export. See the export ordering in
+    app.orchestration.orchestrator.
+    """
+    for record in records:
+        if record.analysis and record.ticker in breakouts:
+            record.analysis.fresh_breakout = True
+
+
 def save_history(
     current_records: list[StockRecord],
     history: dict[str, Snapshot],
@@ -80,8 +94,7 @@ def save_history(
     """Append today's {ticker: zone} snapshot and write to disk (max 30 entries)."""
     today = date.today().isoformat()
     history[today] = {
-        r.ticker: (r.analysis.entry_zone if r.analysis else "")
-        for r in current_records
+        r.ticker: (r.analysis.entry_zone if r.analysis else "") for r in current_records
     }
     if len(history) > _MAX_SNAPSHOTS:
         for k in sorted(history.keys())[:-_MAX_SNAPSHOTS]:

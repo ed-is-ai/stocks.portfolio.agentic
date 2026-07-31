@@ -45,6 +45,7 @@ from app.agents.scanner.scanner_agent import (
 )
 from app.agents.scanner.scanner_agent import _av_client as _shared_av_client
 from app.agents.scanner.scan_history import (
+    apply_fresh_breakout_flags,
     get_fresh_breakouts,
     get_new_tickers,
     load_history,
@@ -1085,6 +1086,18 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         with open(scan_temporary, "w", encoding="utf-8") as stream:
             json.dump(scan_payload, stream, indent=2)
 
+        current_tickers = [r.ticker for r in analysis_results]
+        history = load_history()
+        new = get_new_tickers(current_tickers, history)
+        breakouts = get_fresh_breakouts(analysis_results, history)
+        save_history(analysis_results, history)
+        save_sector_snapshot(sector_snapshot, sector_history)
+
+        # Assign fresh-breakout flags *before* serialising the analysis payload
+        # so the published artifact (read by the web dashboard) carries them.
+        # Excel is written afterwards too, so both consumers stay consistent.
+        apply_fresh_breakout_flags(analysis_results, breakouts)
+
         # Embed run ownership + generation time *inside* the artifact payload
         # so the single os.replace below atomically publishes both the data
         # and the fact that this run produced it. A separate follow-up write
@@ -1098,17 +1111,6 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         )
         with open(analysis_temporary, "w", encoding="utf-8") as stream:
             json.dump(analysis_payload, stream, indent=2)
-
-        current_tickers = [r.ticker for r in analysis_results]
-        history = load_history()
-        new = get_new_tickers(current_tickers, history)
-        breakouts = get_fresh_breakouts(analysis_results, history)
-        save_history(analysis_results, history)
-        save_sector_snapshot(sector_snapshot, sector_history)
-
-        for r in analysis_results:
-            if r.analysis and r.ticker in breakouts:
-                r.analysis.fresh_breakout = True
 
         if new:
             print(f"      New tickers this run:     {len(new)}")
