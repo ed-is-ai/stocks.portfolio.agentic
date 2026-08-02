@@ -30,6 +30,11 @@ EXTRACTION_RESULTS_JSON = (
     ROOT_DIR / "app" / "agents" / "extraction" / "extraction_results.json"
 )
 WW_CONTEXT_JSON = ROOT_DIR / "app" / "agents" / "extraction" / "ww_context.json"
+# Watermark of the last StockTwits weekly email processed (#137), so the vision
+# extraction only re-runs when a strictly newer email has arrived.
+STOCKTWITS_EMAIL_WATERMARK_JSON = (
+    ROOT_DIR / "app" / "agents" / "extraction" / "stocktwits_email_watermark.json"
+)
 SCAN_HISTORY_JSON = ROOT_DIR / "app" / "agents" / "scanner" / "scan_history.json"
 # Sector-prevalence-per-run snapshots, kept separate from scan_history's
 # ticker/zone snapshots so run-over-run sector deltas (#109) don't entangle

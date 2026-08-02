@@ -277,6 +277,11 @@ def test_extraction_reports_provider_failure_and_missing_local_source(
 ) -> None:
     import app.agents.extraction.extraction_agent as extraction_module
 
+    # Disable the weekly-email StockTwits source so this test exercises the
+    # config fallback (and never touches IMAP if .env leaked into the process).
+    monkeypatch.delenv("EMAIL_USER", raising=False)
+    monkeypatch.delenv("EMAIL_PASSWORD", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setattr(extraction_module, "_ST_WATCHLIST", tmp_path / "missing.json")
     monkeypatch.setattr(
         ExtractionAgent,

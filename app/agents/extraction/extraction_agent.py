@@ -18,6 +18,7 @@ from app.core.config import (
     STOCKTWITS_WATCHLIST_JSON,
     WW_CONTEXT_JSON,
 )
+from app.integrations.stocktwits_email import StockTwitsEmailSource
 from app.schemas.source_health import SourceHealth, SourceName, SourceState
 
 
@@ -45,13 +46,15 @@ _ST_WATCHLIST = STOCKTWITS_WATCHLIST_JSON
 
 class ExtractionAgent(Agent):
     """Aggregate watchlist from multiple sources: WhaleWisdom institutional data
-    and quarterly-curated StockTwits momentum lists. Deduplicates and outputs
+    and the StockTwits Top 25 momentum lists (from the weekly newsletter email,
+    falling back to a quarterly-curated config). Deduplicates and outputs
     source-tagged results for Scanner integration."""
 
     name: str = "ExtractionAgent"
     last_quarter: str = ""
     source_health: dict[SourceName, SourceHealth] = {}
     stocktwits_error: bool = False
+    stocktwits_source: str = "config"
 
     def run(self, payload: Any = None) -> list[str]:  # noqa: ARG002
         """Fetch WhaleWisdom and StockTwits tickers, merge, and update results.
@@ -103,33 +106,15 @@ class ExtractionAgent(Agent):
             )
         }
 
-        # Load StockTwits
-        print("  StockTwits: Loading quarterly watchlist...")
+        # Load StockTwits (weekly email first, falling back to the config)
+        print("  StockTwits: Loading Top 25 momentum lists...")
         st_by_index = self._load_stocktwits_config()
         st_total = sum(len(t) for t in st_by_index.values())
         if st_by_index:
-            print(f"    [ok] {st_total} tickers from config")
+            print(f"    [ok] {st_total} tickers from {self.stocktwits_source}")
         else:
             print("    [warn] No StockTwits data loaded")
-        if not _ST_WATCHLIST.exists():
-            st_state = SourceState.SKIPPED
-            st_code = "missing_configuration"
-            st_message = "StockTwits watchlist configuration is missing."
-        elif self.stocktwits_error:
-            st_state = SourceState.FAILED
-            st_code = "invalid_configuration"
-            st_message = "StockTwits watchlist configuration could not be read."
-        else:
-            st_state = SourceState.OK if st_total else SourceState.EMPTY
-            st_code = ""
-            st_message = "StockTwits watchlist loaded successfully."
-        self.source_health[SourceName.STOCKTWITS] = SourceHealth(
-            source=SourceName.STOCKTWITS,
-            state=st_state,
-            count=st_total,
-            detail_code=st_code,
-            display_message=st_message,
-        )
+        self.source_health[SourceName.STOCKTWITS] = self._stocktwits_health(st_total)
 
         # Update results with both sources
         self._update_results_with_sources(ww_result, st_by_index)
@@ -145,10 +130,37 @@ class ExtractionAgent(Agent):
         return result
 
     def _load_stocktwits_config(self) -> dict[str, list[str]]:
-        """Load StockTwits watchlist config and return tickers by index.
+        """Return StockTwits Top 25 tickers by index, email first then config.
+
+        Tries the weekly newsletter email (fresh, #137); on any failure falls
+        back to the quarterly-curated ``stocktwits_watchlist.json``. Records
+        which source won in ``self.stocktwits_source``.
 
         Returns dict: {"sp500": [...], "nasdaq100": [...], "russell2000": [...]}
         """
+        email_lists = self._load_stocktwits_from_email()
+        if email_lists:
+            self.stocktwits_source = "email"
+            return email_lists
+        self.stocktwits_source = "config"
+        return self._load_stocktwits_from_config()
+
+    def _load_stocktwits_from_email(self) -> dict[str, list[str]]:
+        """Load the Top 25 lists from the weekly email, or {} if unavailable."""
+        try:
+            source = StockTwitsEmailSource()
+            if not source.enabled:
+                print("  StockTwits: email source not configured, using config")
+                return {}
+            print("  StockTwits: fetching weekly email...")
+            lists = source.load()
+            return lists or {}
+        except Exception as exc:  # never let the email path break extraction
+            print(f"  [warn] StockTwits email source failed: {exc}")
+            return {}
+
+    def _load_stocktwits_from_config(self) -> dict[str, list[str]]:
+        """Load the quarterly-curated StockTwits watchlist config by index."""
         if not _ST_WATCHLIST.exists():
             print(f"  [warn] StockTwits config not found at {_ST_WATCHLIST}")
             return {}
@@ -168,6 +180,39 @@ class ExtractionAgent(Agent):
             self.stocktwits_error = True
             print(f"  [err] Failed to load StockTwits config: {exc}")
             return {}
+
+    def _stocktwits_health(self, count: int) -> SourceHealth:
+        """Build the StockTwits SourceHealth for the source actually used."""
+        if self.stocktwits_source == "email":
+            return SourceHealth(
+                source=SourceName.STOCKTWITS,
+                state=SourceState.OK if count else SourceState.EMPTY,
+                count=count,
+                detail_code="",
+                display_message="StockTwits Top 25 loaded from the weekly email.",
+            )
+        if not _ST_WATCHLIST.exists():
+            st_state = SourceState.SKIPPED
+            st_code = "missing_configuration"
+            st_message = "StockTwits watchlist configuration is missing."
+        elif self.stocktwits_error:
+            st_state = SourceState.FAILED
+            st_code = "invalid_configuration"
+            st_message = "StockTwits watchlist configuration could not be read."
+        else:
+            st_state = SourceState.OK if count else SourceState.EMPTY
+            st_code = ""
+            st_message = (
+                "StockTwits watchlist loaded from the quarterly config "
+                "(weekly email unavailable)."
+            )
+        return SourceHealth(
+            source=SourceName.STOCKTWITS,
+            state=st_state,
+            count=count,
+            detail_code=st_code,
+            display_message=st_message,
+        )
 
     def _fetch_heat_map(self) -> list[HeatMapStock]:
         """Call the heat map JSON endpoint and return the children list."""
