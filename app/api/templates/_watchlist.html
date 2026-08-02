@@ -6,23 +6,32 @@
 </div>
 {% else %}
 {% if market_narrative %}
-<div class="alert border-0 mt-1" style="background:#eef2ff;border:1px solid #c7d2fe" role="note" aria-label="Market narrative">
-  <div class="fw-bold small text-uppercase mb-1" style="letter-spacing:.06em;color:#4338ca">Market Narrative</div>
-  <div class="fw-bold mb-1">{{ market_narrative.headline }}</div>
-  <ul class="mb-1 small">
-    {% for bullet in market_narrative.bullets %}
-    <li>{{ bullet }}</li>
-    {% endfor %}
-  </ul>
-  <div class="small fst-italic text-muted">{{ market_narrative.not_advice }}</div>
-  {% if market_narrative.sources %}
-  <div class="small mt-1" style="color:#94a3b8">
-    Sources:
-    {% for source in market_narrative.sources %}
-    {% if source.url %}<a href="{{ source.url }}" style="color:#4338ca">{{ source.label }}</a>{% else %}{{ source.label }}{% endif %}{% if not loop.last %}, {% endif %}
-    {% endfor %}
+<div id="market-narrative" class="alert border-0 mt-1" style="background:#eef2ff;border:1px solid #c7d2fe" role="note" aria-label="Market narrative">
+  <div class="d-flex align-items-center justify-content-between gap-2 mb-1">
+    <div class="fw-bold small text-uppercase" style="letter-spacing:.06em;color:#4338ca">Market Narrative</div>
+    <button id="market-narrative-toggle" class="btn btn-sm p-1 lh-1" type="button"
+            aria-expanded="true" aria-controls="market-narrative-details"
+            aria-label="Collapse market narrative" title="Collapse market narrative">
+      <i class="bi bi-chevron-up" aria-hidden="true"></i>
+    </button>
   </div>
-  {% endif %}
+  <div class="fw-bold mb-1">{{ market_narrative.headline }}</div>
+  <div id="market-narrative-details">
+    <ul class="mb-1 small">
+      {% for bullet in market_narrative.bullets %}
+      <li>{{ bullet }}</li>
+      {% endfor %}
+    </ul>
+    <div class="small fst-italic text-muted">{{ market_narrative.not_advice }}</div>
+    {% if market_narrative.sources %}
+    <div class="small mt-1" style="color:#94a3b8">
+      Sources:
+      {% for source in market_narrative.sources %}
+      {% if source.url %}<a href="{{ source.url }}" style="color:#4338ca">{{ source.label }}</a>{% else %}{{ source.label }}{% endif %}{% if not loop.last %}, {% endif %}
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
 </div>
 {% endif %}
 <div class="tbl-toolbar wl-toolbar" id="wl-toolbar">

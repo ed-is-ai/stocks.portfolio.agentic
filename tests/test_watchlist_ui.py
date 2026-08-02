@@ -96,7 +96,7 @@ def _sample_records() -> list[StockRecord]:
     return [with_analysis, without_analysis]
 
 
-def _render_watchlist() -> str:
+def _render_watchlist(*, market_narrative=None) -> str:
     from app.core.alerting import build_alert_ui_state
     from app.core.recommendation import classify_recommendation
     from app.services.freshness_service import calculate_freshness
@@ -123,6 +123,7 @@ def _render_watchlist() -> str:
         freshness=calculate_freshness(None),
         source_health=[],
         latest_attempt_error=None,
+        market_narrative=market_narrative,
     )
 
 
@@ -297,8 +298,46 @@ def test_watchlist_js_persists_state_and_seeds_presets() -> None:
     )
     assert "wl-state-v1" in js
     assert "wl-presets-v1" in js
+    assert "marketNarrativeCollapsed: false" in js
+    assert "state.marketNarrativeCollapsed = !state.marketNarrativeCollapsed" in js
+    assert "applyMarketNarrative();" in js
+    assert "htmx:afterSettle" in js
     for preset in ("Buy-ready", "UK breakouts", "Low-risk Stage 2"):
         assert preset in js, f"missing built-in preset {preset}"
+
+
+def test_market_narrative_renders_accessible_collapsible_details() -> None:
+    from app.schemas.market_narrative import MarketNarrative, MarketNarrativeSource
+
+    html = _render_watchlist(
+        market_narrative=MarketNarrative(
+            headline="Breadth is improving",
+            bullets=["Technology leads the current scan."],
+            sources=[
+                MarketNarrativeSource(
+                    label="Market breadth",
+                    url="https://example.com/breadth",
+                )
+            ],
+        ),
+    )
+
+    assert 'id="market-narrative"' in html
+    assert 'id="market-narrative-toggle"' in html
+    assert 'aria-expanded="true"' in html
+    assert 'aria-controls="market-narrative-details"' in html
+    assert 'aria-label="Collapse market narrative"' in html
+    assert 'id="market-narrative-details"' in html
+    assert "Breadth is improving" in html
+    assert "Technology leads the current scan." in html
+
+
+def test_market_narrative_toggle_is_absent_without_narrative() -> None:
+    html = _render_watchlist(market_narrative=None)
+
+    assert 'id="market-narrative"' not in html
+    assert 'id="market-narrative-toggle"' not in html
+    assert 'id="market-narrative-details"' not in html
 
 
 def _request(path: str, method: str = "GET") -> Request:

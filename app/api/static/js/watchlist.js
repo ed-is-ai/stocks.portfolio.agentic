@@ -92,6 +92,7 @@
     sortKeys: [],
     hidden: DEFAULT_HIDDEN.slice(),
     presetId: null,
+    marketNarrativeCollapsed: false,
   });
 
   let state = loadState();
@@ -127,6 +128,23 @@
   // ── DOM helpers ────────────────────────────────────────────────
   const table = () => document.getElementById('watchlist-table');
   const tbody = () => { const t = table(); return t ? t.querySelector('tbody') : null; };
+
+  function applyMarketNarrative() {
+    const toggle = document.getElementById('market-narrative-toggle');
+    const details = document.getElementById('market-narrative-details');
+    if (!toggle || !details) return;
+    const collapsed = state.marketNarrativeCollapsed === true;
+    details.hidden = collapsed;
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    const label = collapsed ? 'Expand market narrative' : 'Collapse market narrative';
+    toggle.setAttribute('aria-label', label);
+    toggle.title = label;
+    const icon = toggle.querySelector('i');
+    if (icon) {
+      icon.classList.toggle('bi-chevron-down', collapsed);
+      icon.classList.toggle('bi-chevron-up', !collapsed);
+    }
+  }
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -461,6 +479,7 @@
   }
 
   function init() {
+    applyMarketNarrative();
     const body = tbody();
     if (!body) return; // not the watchlist partial
     originalRows = Array.prototype.slice.call(body.rows);
@@ -469,6 +488,13 @@
 
   // ── Global event wiring (bound once) ───────────────────────────
   document.body.addEventListener('click', (event) => {
+    const narrativeToggle = event.target.closest('#market-narrative-toggle');
+    if (narrativeToggle) {
+      state.marketNarrativeCollapsed = !state.marketNarrativeCollapsed;
+      applyMarketNarrative();
+      saveState();
+      return;
+    }
     const toggle = event.target.closest('#wl-toolbar [data-filter]');
     if (toggle) {
       const filter = toggle.dataset.filter;
