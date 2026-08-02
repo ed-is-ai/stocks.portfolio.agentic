@@ -1,0 +1,6 @@
+#!/bin/sh
+echo "Running test suite before push..."
+uv run pytest -q || {
+  echo "❌ Tests failed — push aborted. Use 'git push --no-verify' to override."
+  exit 1
+}
