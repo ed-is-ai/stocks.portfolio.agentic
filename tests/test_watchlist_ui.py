@@ -536,6 +536,13 @@ def test_watchlist_frontend_assets_are_served() -> None:
         assert response.text.strip(), path
 
 
+def test_dashboard_cache_busts_watchlist_controller() -> None:
+    markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+
+    assert 'src="/static/js/watchlist.js?v=20260802-1"' in markup
+    assert 'src="/static/js/watchlist.js"' not in markup
+
+
 def test_watchlist_and_refresh_http_paths_render_canonical_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
