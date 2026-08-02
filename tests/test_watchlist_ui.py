@@ -334,6 +334,25 @@ def test_dashboard_has_one_refresh_data_control() -> None:
     assert markup.count('id="refresh-data-button"') == 1
 
 
+def test_refresh_controls_explain_cached_and_fresh_institutional_data() -> None:
+    markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+    cached_button = markup.split('id="refresh-data-button"', 1)[1].split(
+        "</button>", 1
+    )[0]
+    fresh_button = markup.split('id="refresh-institutional-button"', 1)[1].split(
+        "</button>", 1
+    )[0]
+
+    assert 'title="Run the full scan and analysis' in cached_button
+    assert "cached WhaleWisdom / StockTwits data" in cached_button
+    assert 'title="Run the full scan and analysis' in fresh_button
+    assert "refreshing WhaleWisdom / StockTwits from source" in fresh_button
+    assert 'hx-post="/refresh-data"' in cached_button
+    assert 'hx-post="/refresh-data"' in fresh_button
+    assert "hx-vals" not in cached_button
+    assert "hx-vals" in fresh_button and '"extract": true' in fresh_button
+
+
 def test_removed_scanner_partial_returns_not_found() -> None:
     response = TestClient(app).get("/partials/scanner")
     assert response.status_code == 404
