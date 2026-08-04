@@ -54,6 +54,8 @@ ANALYSIS_PROGRESS_TXT = (
     ROOT_DIR / "app" / "agents" / "analyst" / "analysis_progress.txt"
 )
 PORTFOLIO_VALUE_CSV = ROOT_DIR / "data" / "portfolio_value.csv"
+# Where uploaded SIPP portfolio CSVs are saved for import (#145).
+SIPP_IMPORT_DIR = ROOT_DIR / "data" / "processed" / "SIPP"
 PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
 PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"
 PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "3600"))

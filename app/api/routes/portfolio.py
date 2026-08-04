@@ -1,13 +1,14 @@
-"""Portfolio routes — live price refresh."""
+"""Portfolio routes — live price refresh and SIPP CSV import."""
 
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import get_portfolio_service, get_trader_service
 from app.api.templating import templates
+from app.core.config import SIPP_IMPORT_DIR
 from app.core.security import require_local_or_token
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
@@ -74,3 +75,50 @@ async def refresh_portfolio_prices(
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=500
         )
+
+
+@router.post(
+    "/import-sipp",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def import_sipp(
+    request: Request,
+    trader: TraderDep,
+    portfolio: PortfolioDep,
+    file: Annotated[UploadFile, File()],
+) -> HTMLResponse:
+    """Import an uploaded SIPP portfolio CSV and return the portfolio partial.
+
+    Saves the upload under ``data/processed/SIPP/`` then replays it through
+    ``TraderService.import_sipp``. A non-CSV upload or a failing import returns
+    the portfolio partial with an error message rather than raising.
+    """
+    filename = file.filename or ""
+    if not filename.lower().endswith(".csv"):
+        context = portfolio.default_portfolio_context()
+        context["error_message"] = "Please upload a .csv file."
+        return templates.TemplateResponse(
+            request, "_portfolio.html", context=context, status_code=400
+        )
+
+    SIPP_IMPORT_DIR.mkdir(parents=True, exist_ok=True)
+    destination = SIPP_IMPORT_DIR / "merged.csv"
+    try:
+        destination.write_bytes(await file.read())
+        cash_balance = trader.import_sipp(destination)
+    except Exception as e:
+        logger.exception("SIPP import failed: %s", e)
+        context = portfolio.default_portfolio_context()
+        context["error_message"] = f"Import failed: {e}"
+        return templates.TemplateResponse(
+            request, "_portfolio.html", context=context, status_code=400
+        )
+
+    positions = trader.get_portfolio()
+    context = portfolio.portfolio_partial_context(positions, cash_balance=cash_balance)
+    context["import_message"] = (
+        f"Imported {len(positions)} position(s); cash balance £{cash_balance:,.2f}."
+    )
+    logger.info("SIPP import: %d positions, cash £%.2f", len(positions), cash_balance)
+    return templates.TemplateResponse(request, "_portfolio.html", context=context)
