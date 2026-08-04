@@ -4,6 +4,7 @@
       class="d-flex align-items-center gap-2 flex-wrap">
   <input type="file" name="file" accept=".csv" required
          aria-label="SIPP portfolio CSV file"
+         title="SIPP CSV with header row: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance (dates DD/MM/YYYY; final Running Balance = cash)"
          class="form-control form-control-sm" style="max-width:16rem">
   <button type="submit" class="btn btn-sm btn-outline-primary d-flex align-items-center gap-2">
     <i class="bi bi-upload"></i> Import CSV
@@ -45,7 +46,7 @@
 {% if not positions %}
 <div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-info-circle-fill fs-5"></i>
-  <span>No open positions. Go to <strong>Watchlist</strong> and click <strong>Buy</strong> to record a purchase.</span>
+  <span>No open positions yet. Add one below — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Watchlist</strong> and click <strong>Buy</strong>.</span>
 </div>
 <div class="mt-3">
   <div style="font-size:0.74rem; color:var(--muted); margin-bottom:0.4rem">
@@ -58,6 +59,12 @@
     <i class="bi bi-upload me-1"></i>Or import a SIPP portfolio CSV:
   </div>
   {{ import_form() }}
+  <div style="font-size:0.68rem; color:var(--muted); margin-top:0.4rem; line-height:1.5">
+    Expected columns (header row required):
+    <code>Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance</code>.
+    Dates as <code>DD/MM/YYYY</code>; the final <code>Running Balance</code> sets your cash.
+    Export this from your SIPP provider (interactive investor, AJ Bell, etc.).
+  </div>
 </div>
 {% else %}
 
