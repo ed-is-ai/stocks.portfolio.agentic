@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.api.app import app
 from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.schemas.trade import SippImportResult
 
 client = TestClient(app)
 
@@ -26,7 +27,9 @@ def mocked_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr("app.api.routes.portfolio.SIPP_IMPORT_DIR", tmp_path / "SIPP")
     mock_trader = MagicMock()
-    mock_trader.import_sipp.return_value = 5000.0
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=5000.0, buy_count=2, sell_count=0, cash_flow_count=1
+    )
     mock_trader.get_portfolio.return_value = [object(), object()]
     mock_portfolio = MagicMock()
     mock_portfolio.default_portfolio_context.return_value = {}
@@ -74,6 +77,19 @@ def test_non_csv_is_rejected_without_import(mocked_import):
 def test_import_failure_returns_400(mocked_import):
     mock_trader, _, _ = mocked_import
     mock_trader.import_sipp.side_effect = ValueError("bad row")
+    resp = _upload()
+
+    assert resp.status_code == 400
+    mock_trader.import_sipp.assert_called_once()
+
+
+def test_missing_columns_returns_400(mocked_import):
+    from app.agents.trader.trader_agent import SippImportError
+
+    mock_trader, _, _ = mocked_import
+    mock_trader.import_sipp.side_effect = SippImportError(
+        "CSV is missing required columns: Quantity"
+    )
     resp = _upload()
 
     assert resp.status_code == 400

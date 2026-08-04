@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from app.agents.trader.trader_agent import TraderAgent, _to_iso_date
+import pytest
+
+from app.agents.trader.trader_agent import (
+    SippImportError,
+    TraderAgent,
+    _to_iso_date,
+)
 
 
 def test_record_multiple_buys(tmp_path: Path) -> None:
@@ -210,8 +216,8 @@ def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    cash = agent.import_sipp(csv_path)
-    assert cash == 500.0
+    result = agent.import_sipp(csv_path)
+    assert result.cash_balance == 500.0
 
 
 def test_record_buy_normalizes_ddmmyyyy_to_iso(tmp_path: Path) -> None:
@@ -256,9 +262,73 @@ def test_sipp_logs_and_skips_malformed_quantity(tmp_path: Path, caplog) -> None:
     agent._init_db()
 
     with caplog.at_level(logging.WARNING):
-        agent.import_sipp(csv_path)
+        result = agent.import_sipp(csv_path)
 
     # The malformed AAPL row was skipped (and logged); the valid MSFT row imported.
     portfolio = agent.get_portfolio()
     assert {p.ticker for p in portfolio} == {"MSFT"}
     assert any("unparseable quantity" in r.message for r in caplog.records)
+    # The skip is now surfaced in the result, not just logged (#152).
+    assert len(result.skipped_rows) == 1
+    assert "REF-BAD" in result.skipped_rows[0]
+
+
+def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:
+    # No Quantity / Running Balance columns -> reject before any DB write (#152).
+    csv_text = "Date,Symbol,Price,Description\n01/02/2024,AAPL,100,Buy AAPL\n"
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    with pytest.raises(SippImportError) as exc:
+        agent.import_sipp(csv_path)
+    assert "Quantity" in str(exc.value)
+    assert "Running Balance" in str(exc.value)
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_reports_parse_errors(tmp_path: Path) -> None:
+    # An unparseable Price is surfaced (not silently zeroed) and the row is
+    # skipped because the resulting price is non-positive (#152).
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B1,5,notaprice,Buy AAPL,REF-P,1000.00,,5000.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+    assert agent.get_portfolio() == []
+    assert any("Price" in e for e in result.parse_errors)
+    assert result.buy_count == 0
+    # Running Balance still parsed as the closing cash.
+    assert result.cash_balance == 5000.0
+
+
+def test_sipp_clean_import_reports_counts(tmp_path: Path) -> None:
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
+        "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+        "03/01/2024,AAPL,B1,2,110.00,Sell AAPL,REF-S,,220.00,720.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+    assert result.buy_count == 1
+    assert result.sell_count == 1
+    assert result.cash_flow_count == 1
+    assert result.skipped_rows == []
+    assert result.parse_errors == []
+    assert result.cash_balance == 720.0

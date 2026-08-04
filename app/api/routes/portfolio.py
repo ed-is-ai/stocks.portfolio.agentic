@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse
 
+from app.agents.trader.trader_agent import SippImportError
 from app.api.dependencies import get_portfolio_service, get_trader_service
 from app.api.templating import templates
 from app.core.config import SIPP_IMPORT_DIR
@@ -106,7 +107,14 @@ async def import_sipp(
     destination = SIPP_IMPORT_DIR / "merged.csv"
     try:
         destination.write_bytes(await file.read())
-        cash_balance = trader.import_sipp(destination)
+        result = trader.import_sipp(destination)
+    except SippImportError as e:
+        # Validation failure (e.g. missing columns) — show the reason verbatim.
+        context = portfolio.default_portfolio_context()
+        context["error_message"] = str(e)
+        return templates.TemplateResponse(
+            request, "_portfolio.html", context=context, status_code=400
+        )
     except Exception as e:
         logger.exception("SIPP import failed: %s", e)
         context = portfolio.default_portfolio_context()
@@ -116,11 +124,30 @@ async def import_sipp(
         )
 
     positions = trader.get_portfolio()
-    context = portfolio.portfolio_partial_context(positions, cash_balance=cash_balance)
-    context["import_message"] = (
-        f"Imported {len(positions)} position(s); cash balance £{cash_balance:,.2f}."
+    context = portfolio.portfolio_partial_context(
+        positions, cash_balance=result.cash_balance
     )
-    logger.info("SIPP import: %d positions, cash £%.2f", len(positions), cash_balance)
+    message = (
+        f"Imported {result.buy_count} buy(s) and {result.sell_count} sell(s); "
+        f"{len(positions)} open position(s); cash balance "
+        f"£{result.cash_balance:,.2f}."
+    )
+    warnings = []
+    if result.skipped_rows:
+        warnings.append(f"{len(result.skipped_rows)} row(s) skipped")
+    if result.parse_errors:
+        warnings.append(f"{len(result.parse_errors)} value(s) unparseable")
+    if warnings:
+        message += " Note: " + "; ".join(warnings) + "."
+    context["import_message"] = message
+    logger.info(
+        "SIPP import: %d buys, %d sells, %d skipped, %d parse errors, cash £%.2f",
+        result.buy_count,
+        result.sell_count,
+        len(result.skipped_rows),
+        len(result.parse_errors),
+        result.cash_balance,
+    )
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 

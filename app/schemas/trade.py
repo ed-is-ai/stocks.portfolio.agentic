@@ -5,6 +5,22 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 
+class SippImportResult(BaseModel):
+    """Outcome of a SIPP CSV import, including anything skipped or unparseable.
+
+    ``cash_balance`` is the authoritative closing balance (final Running
+    Balance). The count/list fields make otherwise-silent problems visible to
+    the caller (#152) so the UI can report them instead of a false success.
+    """
+
+    cash_balance: float
+    buy_count: int = 0
+    sell_count: int = 0
+    cash_flow_count: int = 0
+    skipped_rows: list[str] = []
+    parse_errors: list[str] = []
+
+
 class ExitSignal(BaseModel):
     """Exit or add signal for a held position."""
 

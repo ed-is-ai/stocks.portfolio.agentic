@@ -15,7 +15,7 @@ from pydantic import PrivateAttr
 
 from app.agents.base import Agent
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
-from app.schemas import Position, Trade
+from app.schemas import Position, SippImportResult, Trade
 from app.repositories import db
 from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
@@ -27,6 +27,23 @@ from app.repositories.trades_repo import TradesRepository
 logger = logging.getLogger(__name__)
 
 _DB_PATH = TRADES_DB
+
+# Columns a SIPP CSV must carry for the import to make sense (Sedol optional).
+REQUIRED_SIPP_COLUMNS = (
+    "Date",
+    "Symbol",
+    "Quantity",
+    "Price",
+    "Description",
+    "Reference",
+    "Debit",
+    "Credit",
+    "Running Balance",
+)
+
+
+class SippImportError(ValueError):
+    """Raised when a SIPP CSV cannot be imported (e.g. missing columns)."""
 
 
 def _to_iso_date(value: str) -> str:
@@ -377,14 +394,22 @@ class TraderAgent(Agent):
             },
         )
 
-    def import_sipp(self, csv_path: str | Path) -> float:
-        """Import SIPP CSV, extract trades and cash flows. Return cash balance."""
-        csv_path = Path(csv_path)
+    def import_sipp(self, csv_path: str | Path) -> SippImportResult:
+        """Import a SIPP CSV; return a result with counts and any problems.
 
-        def clean_amount(s: str | None) -> float:
+        Validates the header row first (missing required columns abort the
+        import with ``SippImportError`` before any DB write). Unparseable
+        numeric values and skipped trade rows are collected and reported rather
+        than silently swallowed (#152).
+        """
+        csv_path = Path(csv_path)
+        parse_errors: list[str] = []
+        skipped_rows: list[str] = []
+
+        def clean_amount(s: str | None, field: str = "", ref: str = "") -> float:
             if not s or s.strip() in ("", "n/a"):
                 return 0.0
-            s = (
+            cleaned = (
                 s.replace("﻿", "")
                 .replace("£", "")
                 .replace(",", "")
@@ -392,8 +417,11 @@ class TraderAgent(Agent):
                 .strip()
             )
             try:
-                return float(s)
+                return float(cleaned)
             except ValueError:
+                parse_errors.append(
+                    f"row {ref or '?'}: unparseable {field or 'amount'} {s.strip()!r}"
+                )
                 return 0.0
 
         def classify_flow_type(description: str) -> str:
@@ -412,9 +440,17 @@ class TraderAgent(Agent):
                 return "WITHDRAWAL"
             return "OTHER"
 
-        with open(csv_path, encoding="utf-8") as f:
+        with open(csv_path, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
             rows = list(reader)
+
+        present = {(h or "").replace("﻿", "").strip() for h in fieldnames}
+        missing = [c for c in REQUIRED_SIPP_COLUMNS if c not in present]
+        if missing:
+            raise SippImportError(
+                "CSV is missing required columns: " + ", ".join(missing)
+            )
 
         conn = self._conn()
         buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
@@ -423,12 +459,12 @@ class TraderAgent(Agent):
             for row in rows:
                 qty = row.get("Quantity", "").strip()
                 symbol = row.get("Symbol", "").strip()
-                debit = clean_amount(row.get("Debit", ""))
-                credit = clean_amount(row.get("Credit", ""))
-                price = clean_amount(row.get("Price", ""))
+                reference = row.get("Reference", "").strip()
+                debit = clean_amount(row.get("Debit", ""), "Debit", reference)
+                credit = clean_amount(row.get("Credit", ""), "Credit", reference)
+                price = clean_amount(row.get("Price", ""), "Price", reference)
                 date = _to_iso_date(row.get("Date", "").strip())
                 description = row.get("Description", "").strip()
-                reference = row.get("Reference", "").strip()
 
                 if qty and qty != "n/a":
                     # Trade if Symbol is valid or if HSBC GLOB
@@ -438,7 +474,24 @@ class TraderAgent(Agent):
                     if is_trade or is_hsbc_glob:
                         try:
                             shares = float(qty.replace("£", "").replace(",", ""))
-                            if shares > 0 and price > 0:
+                        except ValueError:
+                            skipped_rows.append(
+                                f"row {reference or '?'}: unparseable quantity {qty!r}"
+                            )
+                            logger.warning(
+                                "skipping trade row with unparseable quantity %r (ref %s)",
+                                qty,
+                                reference or "",
+                            )
+                            shares = None
+
+                        if shares is not None:
+                            if shares <= 0 or price <= 0:
+                                skipped_rows.append(
+                                    f"row {reference or '?'}: non-positive "
+                                    f"shares/price ({shares}, {price})"
+                                )
+                            else:
                                 action = (
                                     "BUY"
                                     if debit > 0
@@ -462,12 +515,11 @@ class TraderAgent(Agent):
                                         buy_count += 1
                                     else:
                                         sell_count += 1
-                        except ValueError:
-                            logger.warning(
-                                "skipping trade row with unparseable quantity %r (ref %s)",
-                                qty,
-                                reference or "",
-                            )
+                                else:
+                                    skipped_rows.append(
+                                        f"row {reference or '?'}: trade with no "
+                                        "debit/credit amount"
+                                    )
                     else:
                         amount = credit if credit > 0 else debit
                         if amount > 0:
@@ -501,7 +553,7 @@ class TraderAgent(Agent):
 
                 running_balance = row.get("Running Balance", "").strip()
                 if running_balance and running_balance != "n/a":
-                    rb = clean_amount(running_balance)
+                    rb = clean_amount(running_balance, "Running Balance", reference)
                     if rb > 0:
                         cash_balance = rb
 
@@ -518,9 +570,18 @@ class TraderAgent(Agent):
 
         print(
             f"SIPP import complete: {buy_count} BUY, {sell_count} SELL, "
-            f"{cash_count} cash flows. Cash balance: GBP {cash_balance:,.2f}"
+            f"{cash_count} cash flows, {len(skipped_rows)} skipped, "
+            f"{len(parse_errors)} parse errors. "
+            f"Cash balance: GBP {cash_balance:,.2f}"
         )
-        return cash_balance
+        return SippImportResult(
+            cash_balance=cash_balance,
+            buy_count=buy_count,
+            sell_count=sell_count,
+            cash_flow_count=cash_count,
+            skipped_rows=skipped_rows,
+            parse_errors=parse_errors,
+        )
 
     def save_price_cache(
         self,

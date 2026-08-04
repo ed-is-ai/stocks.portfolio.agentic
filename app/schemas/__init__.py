@@ -20,7 +20,13 @@ from app.schemas.sector_allocation import (
     SectorDelta,
     SectorShare,
 )
-from app.schemas.trade import EmailConfig, ExitSignal, Position, Trade
+from app.schemas.trade import (
+    EmailConfig,
+    ExitSignal,
+    Position,
+    SippImportResult,
+    Trade,
+)
 from app.schemas.pipeline_status import (
     PipelineStage,
     PipelineState,
@@ -60,6 +66,7 @@ __all__ = [
     "SourceName",
     "SourceResult",
     "SourceState",
+    "SippImportResult",
     "StageState",
     "StageStatus",
     "Trade",

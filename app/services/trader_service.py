@@ -9,7 +9,7 @@ but the rest of the app talks to persistence only through here.
 from pathlib import Path
 
 from app.agents.trader.trader_agent import TraderAgent
-from app.schemas.trade import Position, Trade
+from app.schemas.trade import Position, SippImportResult, Trade
 
 
 class TraderService:
@@ -109,6 +109,6 @@ class TraderService:
         """Delete a trade by ID. Returns True if a row was deleted."""
         return self._agent.delete_trade(trade_id)
 
-    def import_sipp(self, csv_path: str | Path) -> float:
-        """Import a SIPP CSV; return the resulting cash balance."""
+    def import_sipp(self, csv_path: str | Path) -> SippImportResult:
+        """Import a SIPP CSV; return the outcome (cash balance + counts)."""
         return self._agent.import_sipp(csv_path)
