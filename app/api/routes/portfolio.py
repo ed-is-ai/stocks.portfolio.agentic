@@ -3,7 +3,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import get_portfolio_service, get_trader_service
@@ -121,4 +121,80 @@ async def import_sipp(
         f"Imported {len(positions)} position(s); cash balance £{cash_balance:,.2f}."
     )
     logger.info("SIPP import: %d positions, cash £%.2f", len(positions), cash_balance)
+    return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+def _quick_add_error(
+    request: Request, portfolio: PortfolioService, message: str
+) -> HTMLResponse:
+    """Render the portfolio partial with a quick-add error banner."""
+    context = portfolio.default_portfolio_context()
+    context["error_message"] = message
+    return templates.TemplateResponse(
+        request, "_portfolio.html", context=context, status_code=400
+    )
+
+
+@router.post(
+    "/portfolio/quick-add",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def quick_add_holding(
+    request: Request,
+    trader: TraderDep,
+    portfolio: PortfolioDep,
+    ticker: Annotated[str, Form()],
+    value: Annotated[float, Form()],
+    date: Annotated[str | None, Form()] = None,
+) -> HTMLResponse:
+    """Add a holding from a ticker + GBP value, computing shares from live price.
+
+    Fetches the current price, derives ``shares = value / gbp_price``, and
+    records a BUY at the native price so cost/currency stay consistent with the
+    rest of the portfolio. A missing ticker, non-positive value, or price
+    lookup failure returns the partial with an error and records nothing.
+    """
+    ticker = ticker.strip().upper()
+    if not ticker or value <= 0:
+        return _quick_add_error(
+            request, portfolio, "Enter a ticker and a positive value."
+        )
+
+    gbpusd = portfolio.gbpusd_rate()
+    gbp_prices, display_info = portfolio.fetch_all_prices(
+        [ticker], portfolio.load_ticker_aliases(), gbpusd
+    )
+    gbp_price = gbp_prices.get(ticker)
+    if not gbp_price:
+        return _quick_add_error(
+            request, portfolio, f"Couldn't fetch a current price for {ticker}."
+        )
+
+    original_price, _currency = display_info[ticker]
+    shares = round(value / gbp_price, 4)
+    if shares <= 0:
+        return _quick_add_error(
+            request, portfolio, f"Value is too small to buy any shares of {ticker}."
+        )
+
+    try:
+        trader.record_buy(
+            ticker,
+            shares,
+            original_price,
+            date or None,
+            notes=f"Quick-add: £{value:,.2f} @ £{gbp_price:g}/share",
+        )
+    except Exception as e:
+        logger.exception("Quick-add failed for %s: %s", ticker, e)
+        return _quick_add_error(request, portfolio, f"Could not add {ticker}: {e}")
+
+    # Persist the fetched price so the new holding renders with live P&L.
+    trader.save_price_cache(gbp_prices, display_info)
+    context = portfolio.default_portfolio_context()
+    context["import_message"] = (
+        f"Added {shares:g} share(s) of {ticker} (~£{value:,.2f})."
+    )
+    logger.info("Quick-add: %s x%.4f (~£%.2f)", ticker, shares, value)
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
