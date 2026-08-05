@@ -21,8 +21,11 @@ from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
 from app.repositories.cash_flows_repo import CashFlowsRepository
 from app.repositories.db import Connect
+from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
+from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
 from app.repositories.trades_repo import TradesRepository
+from app.schemas.trade import Portfolio
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +82,8 @@ class TraderAgent(Agent):
     _price_cache: PriceCacheRepository = PrivateAttr()
     _account: AccountStateRepository = PrivateAttr()
     _artifacts: ArtifactsRepository = PrivateAttr()
+    _portfolios: PortfoliosRepository = PrivateAttr()
+    _snapshots: PortfolioSnapshotsRepository = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
@@ -87,7 +92,88 @@ class TraderAgent(Agent):
         self._price_cache = PriceCacheRepository(connect)
         self._account = AccountStateRepository(connect)
         self._artifacts = ArtifactsRepository()
+        self._portfolios = PortfoliosRepository(connect)
+        self._snapshots = PortfolioSnapshotsRepository(connect)
         self._init_db()
+
+    # --- portfolio CRUD (#147) -------------------------------------------
+
+    @staticmethod
+    def _cash_key(portfolio_id: int | None) -> str:
+        """Return the account-state key holding a portfolio's cash balance.
+
+        ``None`` maps to the legacy single-portfolio ``cash_balance`` key so
+        pre-multi-portfolio code paths and tests keep working unchanged.
+        """
+        return (
+            f"cash_balance:{portfolio_id}"
+            if portfolio_id is not None
+            else ("cash_balance")
+        )
+
+    def list_portfolios(self) -> list[Portfolio]:
+        """Return every portfolio with its trade/cash-flow counts."""
+        result: list[Portfolio] = []
+        for pf in self._portfolios.list_all():
+            trades, flows = self._portfolios.counts(pf.id)
+            result.append(
+                pf.model_copy(
+                    update={
+                        "trade_count": trades,
+                        "cash_flow_count": flows,
+                    }
+                )
+            )
+        return result
+
+    def get_portfolio_meta(self, portfolio_id: int) -> Portfolio | None:
+        """Return one portfolio's metadata (with counts), or None."""
+        pf = self._portfolios.get(portfolio_id)
+        if pf is None:
+            return None
+        trades, flows = self._portfolios.counts(pf.id)
+        return pf.model_copy(
+            update={
+                "trade_count": trades,
+                "cash_flow_count": flows,
+            }
+        )
+
+    def portfolio_exists(self, portfolio_id: int) -> bool:
+        """Return True if a portfolio with ``portfolio_id`` exists."""
+        return self._portfolios.exists(portfolio_id)
+
+    def create_portfolio(self, name: str, opening_cash: float = 0.0) -> Portfolio:
+        """Create a portfolio, optionally seeding an opening cash balance.
+
+        Opening cash is stored as the portfolio's balance and recorded as an
+        auditable ``OPENING`` cash-flow row so it shows in trade history.
+        """
+        pf = self._portfolios.create(name.strip() or "Untitled")
+        if opening_cash and opening_cash > 0:
+            with self._conn() as conn:
+                self._cash_flows.insert_ignore(
+                    conn,
+                    datetime.today().strftime("%Y-%m-%d"),
+                    "OPENING",
+                    None,
+                    opening_cash,
+                    "Opening balance",
+                    f"opening:{pf.id}",
+                    pf.id,
+                )
+                conn.commit()
+            self.set_cash_balance(opening_cash, pf.id)
+        return self.get_portfolio_meta(pf.id) or pf
+
+    def rename_portfolio(self, portfolio_id: int, name: str) -> bool:
+        """Rename a portfolio. Returns True if it existed."""
+        return self._portfolios.rename(portfolio_id, name.strip() or "Untitled")
+
+    def delete_portfolio(self, portfolio_id: int) -> bool:
+        """Hard-delete a portfolio and all its data. Returns True if it
+        existed."""
+        return self._portfolios.delete(portfolio_id)
 
     def _conn(self):
         """Open a connection to the configured database (for batch imports)."""
@@ -120,6 +206,7 @@ class TraderAgent(Agent):
         notes: str = "",
         stop_loss: float | None = None,
         entry_price: float | None = None,
+        portfolio_id: int | None = None,
     ) -> Trade:
         """Record a buy transaction and return the saved Trade."""
         trade_date = (
@@ -134,6 +221,7 @@ class TraderAgent(Agent):
             notes,
             stop_loss,
             entry_price,
+            portfolio_id,
         )
         return Trade(
             id=trade_id,
@@ -145,6 +233,7 @@ class TraderAgent(Agent):
             notes=notes,
             stop_loss=stop_loss,
             entry_price=entry_price,
+            portfolio_id=portfolio_id,
         )
 
     def record_sell(
@@ -154,6 +243,7 @@ class TraderAgent(Agent):
         price: float,
         date: str | None = None,
         notes: str = "",
+        portfolio_id: int | None = None,
     ) -> Trade:
         """Record a sell transaction and return the saved Trade."""
         trade_date = (
@@ -166,6 +256,7 @@ class TraderAgent(Agent):
             price,
             trade_date,
             notes,
+            portfolio_id=portfolio_id,
         )
         return Trade(
             id=trade_id,
@@ -175,6 +266,7 @@ class TraderAgent(Agent):
             price=price,
             date=trade_date,
             notes=notes,
+            portfolio_id=portfolio_id,
         )
 
     def correct_trade(
@@ -186,12 +278,17 @@ class TraderAgent(Agent):
         notes: str = "",
         stop_loss: float | None = None,
         entry_price: float | None = None,
+        portfolio_id: int | None = None,
     ) -> Trade:
-        """Overwrite the position for a ticker: delete all trades and insert one BUY."""
+        """Overwrite the position for a ticker: delete all trades and insert one BUY.
+
+        Scoped to ``portfolio_id`` so correcting a ticker in one account never
+        touches the same ticker held in another.
+        """
         trade_date = (
             _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
         )
-        self._trades.delete_by_ticker(ticker.upper())
+        self._trades.delete_by_ticker(ticker.upper(), portfolio_id)
         trade_id = self._trades.insert(
             ticker.upper(),
             "BUY",
@@ -201,6 +298,7 @@ class TraderAgent(Agent):
             notes,
             stop_loss,
             entry_price,
+            portfolio_id,
         )
         return Trade(
             id=trade_id,
@@ -212,15 +310,22 @@ class TraderAgent(Agent):
             notes=notes,
             stop_loss=stop_loss,
             entry_price=entry_price,
+            portfolio_id=portfolio_id,
         )
 
     def delete_trade(self, trade_id: int) -> bool:
         """Delete a trade by ID. Returns True if a row was deleted."""
         return self._trades.delete_by_id(trade_id)
 
-    def get_trade_history(self, ticker: str | None = None) -> list[Trade]:
-        """Return all trades, newest first. Optionally filter by ticker."""
-        return self._trades.history(ticker.upper() if ticker else None)
+    def get_trade_history(
+        self, ticker: str | None = None, portfolio_id: int | None = None
+    ) -> list[Trade]:
+        """Return trades newest first. Optionally filter by ticker/portfolio."""
+        return self._trades.history(ticker.upper() if ticker else None, portfolio_id)
+
+    def held_tickers(self) -> set[str]:
+        """Return tickers held (net-positive) in any portfolio (#147)."""
+        return self._trades.held_tickers()
 
     def get_latest_trade(self, ticker: str) -> Trade | None:
         """Return the most recent trade for a ticker, or None if none exist."""
@@ -231,15 +336,17 @@ class TraderAgent(Agent):
         self,
         current_prices: dict[str, float] | None = None,
         display_info: dict[str, tuple[float, str]] | None = None,
+        portfolio_id: int | None = None,
     ) -> list[Position]:
         """Compute open positions using average cost basis.
 
-        Replays all trades chronologically to derive shares and avg cost per ticker.
+        Replays trades chronologically to derive shares and avg cost per ticker.
         Unrealised P&L requires current_prices dict; omit for cost-only view.
-        Only includes valid-ticker trades (excludes Symbol='n/a').
+        Only includes valid-ticker trades (excludes Symbol='n/a'). Scoped to
+        ``portfolio_id`` when given (``None`` aggregates every portfolio).
         display_info: optional {ticker: (original_price, currency)} for template display.
         """
-        rows = self._trades.open_rows()
+        rows = self._trades.open_rows(portfolio_id)
         state = self._replay_trades(rows)
         return [
             self._build_position(ticker, s, current_prices, display_info)
@@ -342,8 +449,16 @@ class TraderAgent(Agent):
             price_currency=currency,
         )
 
-    def update_portfolio_snapshot(self, cash_balance: float | None = None) -> None:
-        """Update portfolio_value.csv with total_value, total_cost, cash_balance, investments_value."""
+    def update_portfolio_snapshot(
+        self, cash_balance: float | None = None, portfolio_id: int | None = None
+    ) -> None:
+        """Append a value snapshot for the given portfolio (or the legacy CSV).
+
+        When ``portfolio_id`` is given the snapshot is written to the
+        per-portfolio ``portfolio_snapshots`` table (#147). With no id the
+        legacy single-portfolio ``portfolio_value.csv`` is appended, preserving
+        pre-multi-portfolio behaviour.
+        """
         from datetime import datetime, timezone
 
         # Load current prices from analysis results
@@ -355,13 +470,28 @@ class TraderAgent(Agent):
             except (TypeError, KeyError) as exc:
                 logger.warning("price/value computation failed: %s", exc)
 
-        positions = self.get_portfolio(prices if prices else None)
+        positions = self.get_portfolio(
+            prices if prices else None, portfolio_id=portfolio_id
+        )
         total_cost = sum(p.total_cost for p in positions if p.total_cost is not None)
         total_value = sum(
             p.current_value for p in positions if p.current_value is not None
         )
         if total_value is None:
             total_value = total_cost
+
+        if portfolio_id is not None:
+            if cash_balance is None:
+                cash_balance = self.get_cash_balance(portfolio_id)
+            timestamp = datetime.now(timezone.utc).isoformat()
+            self._snapshots.append(
+                portfolio_id,
+                timestamp,
+                round(total_value, 2),
+                round(total_cost, 2),
+                round(cash_balance, 2) if cash_balance is not None else None,
+            )
+            return
 
         if cash_balance is None:
             rows = self._artifacts.read_csv_dicts(PORTFOLIO_VALUE_CSV)
@@ -394,13 +524,16 @@ class TraderAgent(Agent):
             },
         )
 
-    def import_sipp(self, csv_path: str | Path) -> SippImportResult:
-        """Import a SIPP CSV; return a result with counts and any problems.
+    def import_sipp(
+        self, csv_path: str | Path, portfolio_id: int | None = None
+    ) -> SippImportResult:
+        """Import a SIPP CSV into ``portfolio_id``; return counts and problems.
 
         Validates the header row first (missing required columns abort the
         import with ``SippImportError`` before any DB write). Unparseable
         numeric values and skipped trade rows are collected and reported rather
-        than silently swallowed (#152).
+        than silently swallowed (#152). Idempotency is keyed per-portfolio, so
+        the same CSV imported into two portfolios does not collide (#147).
         """
         csv_path = Path(csv_path)
         parse_errors: list[str] = []
@@ -510,6 +643,7 @@ class TraderAgent(Agent):
                                         date,
                                         "",
                                         reference or None,
+                                        portfolio_id,
                                     )
                                     if action == "BUY":
                                         buy_count += 1
@@ -532,6 +666,7 @@ class TraderAgent(Agent):
                                 amount,
                                 description,
                                 reference,
+                                portfolio_id,
                             )
                             cash_count += 1
                 else:
@@ -548,6 +683,7 @@ class TraderAgent(Agent):
                             amount,
                             description,
                             reference,
+                            portfolio_id,
                         )
                         cash_count += 1
 
@@ -565,8 +701,8 @@ class TraderAgent(Agent):
             conn.close()
 
         if cash_balance > 0:
-            self.set_cash_balance(cash_balance)
-        self.update_portfolio_snapshot(cash_balance)
+            self.set_cash_balance(cash_balance, portfolio_id)
+        self.update_portfolio_snapshot(cash_balance, portfolio_id)
 
         print(
             f"SIPP import complete: {buy_count} BUY, {sell_count} SELL, "
@@ -611,25 +747,33 @@ class TraderAgent(Agent):
         }
         return prices, fetched_at, display_info
 
-    def set_cash_balance(self, amount: float) -> None:
-        """Persist the SIPP cash balance (Running Balance) to account_state."""
-        self._account.set("cash_balance", str(amount))
+    def set_cash_balance(self, amount: float, portfolio_id: int | None = None) -> None:
+        """Persist a portfolio's cash balance (Running Balance) to account_state."""
+        self._account.set(self._cash_key(portfolio_id), str(amount))
 
-    def get_cash_balance(self) -> float | None:
-        """Return the stored SIPP cash balance, or None if not yet imported."""
-        value = self._account.get("cash_balance")
+    def get_cash_balance(self, portfolio_id: int | None = None) -> float | None:
+        """Return a portfolio's stored cash balance, or None if not yet set."""
+        value = self._account.get(self._cash_key(portfolio_id))
         return float(value) if value is not None else None
+
+    def snapshot_history(
+        self, portfolio_id: int, limit: int = 180
+    ) -> list[tuple[Any, ...]]:
+        """Return a portfolio's value-history snapshots, oldest-first."""
+        return self._snapshots.history(portfolio_id, limit)
 
     def refresh_portfolio_prices(
         self,
         current_prices: dict[str, float],
         display_info: dict[str, tuple[float, str]] | None = None,
+        portfolio_id: int | None = None,
     ) -> list[Position]:
         """Fetch live prices and recalculate portfolio metrics.
 
         Takes a dict of current prices {ticker: gbp_price} and returns updated
         Position objects with recalculated market value, unrealised P&L,
-        and profit targets. Handles missing prices gracefully.
+        and profit targets. Handles missing prices gracefully. Scoped to
+        ``portfolio_id`` when given.
         display_info: optional {ticker: (original_price, currency)} for template display.
         """
         import logging
@@ -637,7 +781,7 @@ class TraderAgent(Agent):
         logger = logging.getLogger(__name__)
         logger.info("Starting portfolio price refresh")
 
-        rows = self._trades.open_rows()
+        rows = self._trades.open_rows(portfolio_id)
         state = self._replay_trades(rows)
         positions = []
 

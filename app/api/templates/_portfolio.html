@@ -1,7 +1,8 @@
-{% macro import_form() %}
+{% macro import_form(portfolio_id) %}
 <form hx-post="/import-sipp" hx-encoding="multipart/form-data"
       hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
       class="d-flex align-items-center gap-2 flex-wrap">
+  <input type="hidden" name="portfolio_id" value="{{ portfolio_id }}">
   <input type="file" name="file" accept=".csv" required
          aria-label="SIPP portfolio CSV file"
          title="SIPP CSV with header row: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance (dates DD/MM/YYYY; final Running Balance = cash)"
@@ -12,10 +13,11 @@
 </form>
 {% endmacro %}
 
-{% macro quick_add_form() %}
+{% macro quick_add_form(portfolio_id) %}
 <form hx-post="/portfolio/quick-add"
       hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
       class="d-flex align-items-center gap-2 flex-wrap">
+  <input type="hidden" name="portfolio_id" value="{{ portfolio_id }}">
   <input type="text" name="ticker" required placeholder="Ticker"
          aria-label="Ticker symbol"
          class="form-control form-control-sm text-uppercase" style="max-width:7rem">
@@ -29,6 +31,100 @@
   </button>
 </form>
 {% endmacro %}
+
+{% if no_portfolios %}
+<div data-active-portfolio="">
+  <div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
+    <i class="bi bi-info-circle-fill fs-5"></i>
+    <span>You don't have any portfolios yet. Create your first one to start
+      recording holdings, cash, and trades.</span>
+  </div>
+  <form hx-post="/portfolios" hx-target="#tab-content" hx-swap="innerHTML"
+        hx-indicator="#spinner"
+        class="d-flex align-items-end gap-2 flex-wrap mt-3" style="max-width:34rem">
+    <div>
+      <label class="form-label">Portfolio name</label>
+      <input type="text" name="name" required placeholder="e.g. SIPP, ISA"
+             class="form-control form-control-sm" style="max-width:12rem">
+    </div>
+    <div>
+      <label class="form-label">Opening cash (optional)</label>
+      <div class="input-group input-group-sm" style="max-width:9rem">
+        <span class="input-group-text">£</span>
+        <input type="number" name="opening_cash" min="0" step="any" value="0"
+               class="form-control">
+      </div>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary d-flex align-items-center gap-2">
+      <i class="bi bi-plus-lg"></i> Create portfolio
+    </button>
+  </form>
+</div>
+<script>
+  if (window.setActivePortfolio) { setActivePortfolio(""); }
+</script>
+{% else %}
+
+<!-- Portfolio selector / management (#147) -->
+<div class="d-flex align-items-center gap-2 mb-3 flex-wrap"
+     data-active-portfolio="{{ active_portfolio.id if active_portfolio else '' }}">
+  <span class="form-label mb-0"><i class="bi bi-briefcase me-1"></i>Account</span>
+  <select class="form-select form-select-sm" style="max-width:14rem" id="portfolioSelect"
+          name="portfolio_id"
+          hx-get="/partials/portfolio" hx-target="#tab-content" hx-swap="innerHTML"
+          hx-trigger="change" hx-indicator="#spinner"
+          onchange="if (window.setActivePortfolio) setActivePortfolio(this.value)">
+    {% for pf in portfolios %}
+    <option value="{{ pf.id }}" {% if active_portfolio and pf.id == active_portfolio.id %}selected{% endif %}>{{ pf.name }}</option>
+    {% endfor %}
+  </select>
+
+  <details class="d-inline-block">
+    <summary class="btn btn-sm btn-outline-secondary">New</summary>
+    <form hx-post="/portfolios" hx-target="#tab-content" hx-swap="innerHTML"
+          hx-indicator="#spinner"
+          class="d-flex align-items-end gap-2 flex-wrap mt-2 p-2 border rounded">
+      <div>
+        <label class="form-label">Name</label>
+        <input type="text" name="name" required placeholder="e.g. ISA"
+               class="form-control form-control-sm" style="max-width:10rem">
+      </div>
+      <div>
+        <label class="form-label">Opening cash</label>
+        <div class="input-group input-group-sm" style="max-width:8rem">
+          <span class="input-group-text">£</span>
+          <input type="number" name="opening_cash" min="0" step="any" value="0"
+                 class="form-control">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-sm btn-primary">Create</button>
+    </form>
+  </details>
+
+  {% if active_portfolio %}
+  <details class="d-inline-block">
+    <summary class="btn btn-sm btn-outline-secondary">Rename</summary>
+    <form hx-post="/portfolios/{{ active_portfolio.id }}/rename"
+          hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+          class="d-flex align-items-end gap-2 mt-2 p-2 border rounded">
+      <div>
+        <label class="form-label">New name</label>
+        <input type="text" name="name" required value="{{ active_portfolio.name }}"
+               class="form-control form-control-sm" style="max-width:10rem">
+      </div>
+      <button type="submit" class="btn btn-sm btn-primary">Save</button>
+    </form>
+  </details>
+
+  <button class="btn btn-sm btn-outline-danger"
+          hx-post="/portfolios/{{ active_portfolio.id }}/delete"
+          hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+          hx-confirm="Delete &quot;{{ active_portfolio.name }}&quot;? This removes {{ active_portfolio.trade_count or 0 }} trade(s) and {{ active_portfolio.cash_flow_count or 0 }} cash flow(s). This cannot be undone."
+          onclick="if (window.setActivePortfolio) setActivePortfolio('')">
+    Delete
+  </button>
+  {% endif %}
+</div>
 
 {% if import_message %}
 <div class="alert alert-success border-0 d-flex align-items-center gap-2 mt-1 mb-3">
@@ -52,13 +148,13 @@
   <div style="font-size:0.74rem; color:var(--muted); margin-bottom:0.4rem">
     <i class="bi bi-plus-circle me-1"></i>Quick-add a holding by value:
   </div>
-  {{ quick_add_form() }}
+  {{ quick_add_form(portfolio_id) }}
 </div>
 <div class="mt-3">
   <div style="font-size:0.74rem; color:var(--muted); margin-bottom:0.4rem">
     <i class="bi bi-upload me-1"></i>Or import a SIPP portfolio CSV:
   </div>
-  {{ import_form() }}
+  {{ import_form(portfolio_id) }}
   <div style="font-size:0.68rem; color:var(--muted); margin-top:0.4rem; line-height:1.5">
     Expected columns (header row required):
     <code>Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance</code>.
@@ -79,8 +175,8 @@
     {% endif %}
   </div>
   <div class="d-flex align-items-center gap-2 flex-wrap">
-    {{ quick_add_form() }}
-    {{ import_form() }}
+    {{ quick_add_form(portfolio_id) }}
+    {{ import_form(portfolio_id) }}
     <button id="refreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-2" onclick="refreshPortfolioPrices()">
       <i class="bi bi-arrow-clockwise" id="refreshIcon"></i>
       <span id="refreshText">Refresh Prices</span>
@@ -366,4 +462,16 @@
 <small class="text-muted mt-2 d-block" style="font-size:0.74rem">
   {{ positions|length }} position(s) &middot; prices from last pipeline run &middot; hover signal badge for reason
 </small>
+{% endif %}
+
+<!-- Persist the server-confirmed active portfolio so the browser reselects it
+     on the next tab load / mutation (#147). -->
+<script>
+  (function () {
+    var host = document.querySelector('[data-active-portfolio]');
+    if (host && window.setActivePortfolio) {
+      setActivePortfolio(host.getAttribute('data-active-portfolio') || '');
+    }
+  })();
+</script>
 {% endif %}

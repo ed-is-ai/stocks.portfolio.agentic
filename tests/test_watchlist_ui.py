@@ -402,6 +402,7 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
     records = []
     trader = MagicMock()
     trader.get_portfolio.return_value = [SimpleNamespace(ticker="AAPL")]
+    trader.held_tickers.return_value = {"AAPL"}
     portfolio = MagicMock()
     portfolio.load_analysis.return_value = records
     pipeline = MagicMock()

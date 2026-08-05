@@ -955,11 +955,19 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         # cache-first, sharing the same price cache the web UI reads/writes,
         # so the email snapshot and the /portfolio route always agree.
         portfolio_service = PortfolioService(TraderService(_trader))
-        held_tickers = [p.ticker for p in _trader.get_portfolio()]
+        held_tickers = list(_trader.held_tickers())
         prices, display_info, gbpusd = portfolio_service.get_prices_for_holdings(
             held_tickers
         )
-        positions = _trader.get_portfolio(prices, display_info)
+        # Multi-portfolio (#147): evaluate holdings per-portfolio so each
+        # position keeps its own cost basis / stop, then combine for alerts and
+        # the aggregate value log. Each portfolio also gets its own snapshot.
+        portfolios = _trader.list_portfolios()
+        positions = []
+        for pf in portfolios:
+            pf_positions = _trader.get_portfolio(prices, display_info, pf.id)
+            positions.extend(pf_positions)
+            _trader.update_portfolio_snapshot(_trader.get_cash_balance(pf.id), pf.id)
         held = {p.ticker for p in positions}
         gbp_totals = PortfolioService.gbp_totals(positions, gbpusd)
         pf_value, pf_cost, _pf_pnl = gbp_totals

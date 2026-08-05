@@ -12,6 +12,7 @@
     <thead>
       <tr>
         <th>Date</th>
+        <th>Portfolio</th>
         <th>Ticker</th>
         <th>Action</th>
         <th>Shares</th>
@@ -25,6 +26,9 @@
       {% for t in trades %}
       <tr>
         <td class="text-muted" style="font-size:0.76rem">{{ t.date }}</td>
+        <td class="text-muted" style="font-size:0.76rem">
+          {{ portfolio_names.get(t.portfolio_id, "—") if portfolio_names else "—" }}
+        </td>
         <td><strong>{{ t.ticker }}</strong></td>
         <td>
           <span class="rec {% if t.action == 'BUY' %}rec-buy{% else %}rec-sell{% endif %}">{{ t.action }}</span>

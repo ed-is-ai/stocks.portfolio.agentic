@@ -80,7 +80,8 @@ def build_watchlist_context(
     records = sorted(
         portfolio.load_analysis(), key=actionability_sort_key, reverse=True
     )
-    portfolio_tickers = {position.ticker for position in trader.get_portfolio()}
+    # "Held" spans every portfolio: a ticker owned in any account counts (#147).
+    portfolio_tickers = trader.held_tickers()
 
     recommendations: dict[str, Recommendation] = {}
     alert_states: dict[str, AlertUiState] = {}

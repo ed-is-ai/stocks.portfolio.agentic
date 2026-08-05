@@ -14,6 +14,7 @@ from app.api.routes import (
     notifications,
     pipeline,
     portfolio,
+    portfolios,
     settings,
     trades,
     views,
@@ -25,6 +26,7 @@ def create_app() -> FastAPI:
     """Build and return the FastAPI application."""
     app = FastAPI(title="Stock Trader")
     app.include_router(views.router)
+    app.include_router(portfolios.router)
     app.include_router(portfolio.router)
     app.include_router(trades.router)
     app.include_router(pipeline.router)

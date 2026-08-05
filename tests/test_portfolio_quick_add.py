@@ -26,6 +26,7 @@ def mocked(monkeypatch: pytest.MonkeyPatch):
         lambda *a, **k: HTMLResponse("ok", status_code=k.get("status_code", 200)),
     )
     mock_trader = MagicMock()
+    mock_trader.portfolio_exists.return_value = True
     mock_portfolio = MagicMock()
     mock_portfolio.gbpusd_rate.return_value = 1.25
     mock_portfolio.load_ticker_aliases.return_value = {}
@@ -47,7 +48,7 @@ def _post(ticker: str = "aapl", value: str = "100", token: str = "s3cret"):
     headers = {"X-Auth-Token": token} if token else {}
     return client.post(
         "/portfolio/quick-add",
-        data={"ticker": ticker, "value": value},
+        data={"ticker": ticker, "value": value, "portfolio_id": "1"},
         headers=headers,
     )
 

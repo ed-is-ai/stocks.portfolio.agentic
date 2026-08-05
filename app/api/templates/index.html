@@ -364,7 +364,8 @@
       </li>
       <li class="nav-item">
         <a class="nav-link" id="tab-portfolio"
-           hx-get="/partials/portfolio" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+           hx-get="/partials/portfolio" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
+           hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'>
           <i class="bi bi-briefcase"></i>Portfolio
         </a>
       </li>
@@ -414,6 +415,7 @@
       <form hx-post="/trades" hx-target="#tab-content" hx-swap="innerHTML"
             hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('buyModal')).hide()">
         <input type="hidden" name="action" value="BUY">
+        <input type="hidden" name="portfolio_id" id="buy-portfolio-id">
         <input type="hidden" name="entry_price" id="buy-entry-price">
         <input type="hidden" name="stop_loss" id="buy-stop-loss">
         <div class="modal-body">
@@ -460,6 +462,7 @@
       <form hx-post="/trades" hx-target="#tab-content" hx-swap="innerHTML"
             hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('sellModal')).hide()">
         <input type="hidden" name="action" value="SELL">
+        <input type="hidden" name="portfolio_id" id="sell-portfolio-id">
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label">Ticker</label>
@@ -504,6 +507,7 @@
       <form hx-post="/trades" hx-target="#tab-content" hx-swap="innerHTML"
             hx-on::after-request="bootstrap.Modal.getInstance(document.getElementById('adjustModal')).hide()">
         <input type="hidden" name="action" value="CORRECT">
+        <input type="hidden" name="portfolio_id" id="adjust-portfolio-id">
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label">Ticker</label>
@@ -549,7 +553,21 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+  // Active-portfolio selection is per-browser (localStorage), like the
+  // watchlist controls (#147). "" means "no selection / use the default".
+  function activePortfolio() {
+    return localStorage.getItem('activePortfolioId') || '';
+  }
+  function setActivePortfolio(id) {
+    if (id === null || id === undefined || id === '') {
+      localStorage.removeItem('activePortfolioId');
+    } else {
+      localStorage.setItem('activePortfolioId', String(id));
+    }
+  }
+
   function openBuy(ticker, price, entry, stop) {
+    document.getElementById('buy-portfolio-id').value = activePortfolio();
     const buyPrice = parseFloat(price) || 0;
     const analystStop = (stop && stop !== 'null') ? parseFloat(stop) : null;
     const floorStop = buyPrice > 0 ? parseFloat((buyPrice * 0.90).toFixed(2)) : null;
@@ -563,6 +581,7 @@
   }
 
   function openAdjust(ticker, shares, price, entryDate, stop, entryPrice) {
+    document.getElementById('adjust-portfolio-id').value = activePortfolio();
     document.getElementById('adjust-ticker').value = ticker;
     document.getElementById('adjust-shares').value = shares || '';
     document.getElementById('adjust-price').value = price || '';
@@ -574,6 +593,7 @@
   }
 
   function openSell(ticker, shares, price) {
+    document.getElementById('sell-portfolio-id').value = activePortfolio();
     document.getElementById('sell-ticker').value = ticker;
     document.getElementById('sell-shares').value = shares || '';
     document.getElementById('sell-price').value  = price || '';
@@ -620,7 +640,10 @@
     text.textContent = 'Fetching...';
 
     try {
-      const response = await fetch('/api/portfolio/refresh', {
+      const pid = activePortfolio();
+      const url = pid ? '/api/portfolio/refresh?portfolio_id=' + encodeURIComponent(pid)
+                      : '/api/portfolio/refresh';
+      const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });

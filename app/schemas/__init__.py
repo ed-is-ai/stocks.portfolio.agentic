@@ -23,6 +23,7 @@ from app.schemas.sector_allocation import (
 from app.schemas.trade import (
     EmailConfig,
     ExitSignal,
+    Portfolio,
     Position,
     SippImportResult,
     Trade,
@@ -51,6 +52,7 @@ __all__ = [
     "MarketNarrative",
     "MarketNarrativeSource",
     "MomentumScore",
+    "Portfolio",
     "Position",
     "PortfolioSectorWeight",
     "PipelineStage",

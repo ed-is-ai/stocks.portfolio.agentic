@@ -240,8 +240,23 @@ class PortfolioService:
 
     # --- chart data -------------------------------------------------------
 
-    def _load_portfolio_history(self) -> dict:
-        """Return chart-ready dicts with labels, values, costs, and cash."""
+    def _load_portfolio_history(self, portfolio_id: int | None = None) -> dict:
+        """Return chart-ready dicts with labels, values, costs, and cash.
+
+        With a ``portfolio_id`` the series comes from that portfolio's
+        ``portfolio_snapshots`` (#147); without one it falls back to the legacy
+        single-portfolio ``portfolio_value.csv``.
+        """
+        if portfolio_id is not None:
+            rows = self._trader.snapshot_history(portfolio_id)
+            return {
+                "labels": [str(r[0])[:16].replace("T", " ") for r in rows],
+                "values": [float(r[1]) for r in rows],
+                "costs": [float(r[2]) for r in rows],
+                "cash_values": [
+                    float(r[3]) if r[3] is not None else None for r in rows
+                ],
+            }
         if not PORTFOLIO_VALUE_CSV.exists():
             return {"labels": [], "values": [], "costs": [], "cash_values": []}
         with open(PORTFOLIO_VALUE_CSV, newline="", encoding="utf-8") as fh:
@@ -259,7 +274,9 @@ class PortfolioService:
             "cash_values": [_cash(r) for r in rows],
         }
 
-    def _trade_markers(self, chart_data: dict) -> tuple[list, list, list, list]:
+    def _trade_markers(
+        self, chart_data: dict, portfolio_id: int | None = None
+    ) -> tuple[list, list, list, list]:
         """Return (buy_values, sell_values, buy_labels, sell_labels) aligned to labels.
 
         Each array is len(labels) long with None at positions that have no trade.
@@ -268,6 +285,10 @@ class PortfolioService:
         labels = chart_data["labels"]
         values = chart_data["values"]
         n = len(labels)
+        if n == 0:
+            # No value-history snapshots yet (e.g. a freshly created portfolio
+            # with trades but no chart points) — nothing to anchor markers to.
+            return [], [], [], []
 
         label_dates = []
         for lbl in labels:
@@ -281,7 +302,7 @@ class PortfolioService:
         buy_tips: list = [None] * n
         sell_tips: list = [None] * n
 
-        trades = self._trader.get_trade_history()
+        trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
         trades.sort(key=lambda t: t.date)
 
         for trade in trades:
@@ -319,6 +340,7 @@ class PortfolioService:
         gbpusd_rate: float | None = None,
         cash_balance: float | None = None,
         error_message: str | None = None,
+        portfolio_id: int | None = None,
     ) -> dict:
         """Build the template context for the portfolio partial.
 
@@ -353,10 +375,19 @@ class PortfolioService:
         )
         total_pnl_gbp = total_value_gbp - total_cost_gbp_valued - (cash_balance or 0)
 
-        chart_data = self._load_portfolio_history()
-        buy_vals, sell_vals, buy_tips, sell_tips = self._trade_markers(chart_data)
+        chart_data = self._load_portfolio_history(portfolio_id)
+        buy_vals, sell_vals, buy_tips, sell_tips = self._trade_markers(
+            chart_data, portfolio_id
+        )
+        # Always attach the account switcher metadata so any render of the
+        # partial (trade, import, refresh, quick-add) keeps the selector (#147).
+        portfolios = self._trader.list_portfolios()
+        active_portfolio = next((p for p in portfolios if p.id == portfolio_id), None)
         return {
             "positions": positions,
+            "portfolio_id": portfolio_id,
+            "portfolios": portfolios,
+            "active_portfolio": active_portfolio,
             "positions_with_value": positions_with_value,
             "total_cost_gbp": total_cost_gbp,
             "total_value_gbp": total_value_gbp,
@@ -377,20 +408,41 @@ class PortfolioService:
             "chart_sell_tips": json.dumps(sell_tips),
         }
 
-    def default_portfolio_context(self) -> dict:
+    def default_portfolio_context(self, portfolio_id: int | None = None) -> dict:
         """Build the portfolio partial context from cached prices + analysis.
 
         Used by ``GET /partials/portfolio`` and after a trade is recorded.
+        Scoped to ``portfolio_id`` when given (holdings, cash, and value chart);
+        the portfolio selector metadata is always attached so the header can
+        render the account switcher (#147).
         """
+        portfolios = self._trader.list_portfolios()
+        if not portfolios:
+            # Empty state: no accounts exist yet.
+            return {
+                "positions": [],
+                "portfolios": [],
+                "portfolio_id": None,
+                "no_portfolios": True,
+            }
+        # Resolve the active portfolio: an unknown/None id falls back to the
+        # first (migrated SIPP) portfolio.
+        active_id = portfolio_id
+        if active_id is None or not any(p.id == active_id for p in portfolios):
+            active_id = portfolios[0].id
+
         cached_prices, prices_as_of, display_info = self._trader.load_price_cache()
         analysis_prices = self.current_prices(self.load_analysis())
         prices = {**cached_prices, **analysis_prices}
-        positions = self._trader.get_portfolio(prices or None, display_info or None)
+        positions = self._trader.get_portfolio(
+            prices or None, display_info or None, active_id
+        )
         gbpusd = cached_prices.get("__GBPUSD__")
-        cash_balance = self._trader.get_cash_balance()
+        cash_balance = self._trader.get_cash_balance(active_id)
         return self.portfolio_partial_context(
             positions,
             prices_as_of=prices_as_of,
             gbpusd_rate=gbpusd,
             cash_balance=cash_balance,
+            portfolio_id=active_id,
         )

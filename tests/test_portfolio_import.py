@@ -27,6 +27,7 @@ def mocked_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr("app.api.routes.portfolio.SIPP_IMPORT_DIR", tmp_path / "SIPP")
     mock_trader = MagicMock()
+    mock_trader.portfolio_exists.return_value = True
     mock_trader.import_sipp.return_value = SippImportResult(
         cash_balance=5000.0, buy_count=2, sell_count=0, cash_flow_count=1
     )
@@ -47,6 +48,7 @@ def _upload(filename: str = "merged.csv", content: bytes = _CSV, token: str = "s
     return client.post(
         "/import-sipp",
         files={"file": (filename, content, "text/csv")},
+        data={"portfolio_id": "1"},
         headers=headers,
     )
 

@@ -67,7 +67,10 @@ def test_load_analysis_skips_invalid_records_without_dropping_valid(
 
 
 class _StubTrader:
-    def get_trade_history(self, ticker=None):
+    def get_trade_history(self, ticker=None, portfolio_id=None):
+        return []
+
+    def list_portfolios(self):
         return []
 
 
@@ -85,7 +88,12 @@ def _make_service(monkeypatch) -> PortfolioService:
     monkeypatch.setattr(
         svc,
         "_load_portfolio_history",
-        lambda: {"labels": [], "values": [], "costs": [], "cash_values": []},
+        lambda portfolio_id=None: {
+            "labels": [],
+            "values": [],
+            "costs": [],
+            "cash_values": [],
+        },
     )
     return svc
 

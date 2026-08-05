@@ -44,16 +44,30 @@ async def partial_watchlist(
 
 
 @router.get("/partials/portfolio", response_class=HTMLResponse)
-async def partial_portfolio(request: Request, portfolio: PortfolioDep) -> HTMLResponse:
-    context = portfolio.default_portfolio_context()
+async def partial_portfolio(
+    request: Request, portfolio: PortfolioDep, portfolio_id: int | None = None
+) -> HTMLResponse:
+    context = portfolio.default_portfolio_context(portfolio_id)
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 
 @router.get("/partials/history", response_class=HTMLResponse)
 async def partial_history(request: Request, trader: TraderDep) -> HTMLResponse:
+    # Trade History spans every portfolio; a name map feeds the Portfolio
+    # column, disambiguating duplicate names with #id (#147).
     trades = trader.get_trade_history()
+    portfolios = trader.list_portfolios()
+    seen: dict[str, int] = {}
+    for pf in portfolios:
+        seen[pf.name] = seen.get(pf.name, 0) + 1
+    names = {
+        pf.id: (f"{pf.name} #{pf.id}" if seen[pf.name] > 1 else pf.name)
+        for pf in portfolios
+    }
     return templates.TemplateResponse(
-        request, "_history.html", context={"trades": trades}
+        request,
+        "_history.html",
+        context={"trades": trades, "portfolio_names": names},
     )
 
 

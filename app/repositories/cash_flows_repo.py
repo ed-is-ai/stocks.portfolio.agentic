@@ -20,15 +20,17 @@ class CashFlowsRepository:
         amount: float,
         description: str | None,
         reference: str | None,
+        portfolio_id: int | None = None,
     ) -> None:
         """Insert a cash flow with ``INSERT OR IGNORE`` on the given connection.
 
-        The unique ``reference`` makes the SIPP import idempotent. Inserts share
-        the import's connection so the whole import is one transaction.
+        The ``(portfolio_id, reference)`` pair makes the SIPP import idempotent
+        per-portfolio. Inserts share the import's connection so the whole import
+        is one transaction.
         """
         conn.execute(
             "INSERT OR IGNORE INTO cash_flows "
-            "(date, flow_type, ticker, amount, description, reference) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (date, flow_type, ticker, amount, description, reference),
+            "(date, flow_type, ticker, amount, description, reference, portfolio_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (date, flow_type, ticker, amount, description, reference, portfolio_id),
         )

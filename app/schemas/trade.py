@@ -21,6 +21,17 @@ class SippImportResult(BaseModel):
     parse_errors: list[str] = []
 
 
+class Portfolio(BaseModel):
+    """A named account (e.g. SIPP, ISA) that scopes its own holdings, cash,
+    and value history (#147). Names may duplicate; ``id`` is the identity."""
+
+    id: int
+    name: str
+    created_at: str
+    trade_count: int | None = None
+    cash_flow_count: int | None = None
+
+
 class ExitSignal(BaseModel):
     """Exit or add signal for a held position."""
 
@@ -48,6 +59,7 @@ class Trade(BaseModel):
     notes: str = ""
     stop_loss: float | None = None  # initial stop from analysis at time of entry
     entry_price: float | None = None  # analyst pivot entry price
+    portfolio_id: int | None = None  # owning account (#147)
 
 
 class Position(BaseModel):

@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,11 @@ def session(connect: "Connect") -> Iterator[sqlite3.Connection]:
 
 
 _SCHEMA = """
+CREATE TABLE IF NOT EXISTS portfolios (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS trades (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ticker      TEXT NOT NULL,
@@ -50,11 +56,19 @@ CREATE TABLE IF NOT EXISTS trades (
 CREATE TABLE IF NOT EXISTS cash_flows (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,
-    flow_type   TEXT NOT NULL CHECK(flow_type IN ('CONTRIBUTION', 'DIVIDEND', 'INTEREST', 'TAX_RELIEF', 'TRANSFER', 'WITHDRAWAL', 'OTHER')),
+    flow_type   TEXT NOT NULL CHECK(flow_type IN ('CONTRIBUTION', 'DIVIDEND', 'INTEREST', 'TAX_RELIEF', 'TRANSFER', 'WITHDRAWAL', 'OPENING', 'OTHER')),
     ticker      TEXT,
     amount      REAL NOT NULL CHECK(amount > 0),
     description TEXT,
-    reference   TEXT UNIQUE
+    reference   TEXT
+);
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id   INTEGER NOT NULL,
+    timestamp      TEXT NOT NULL,
+    total_value    REAL NOT NULL,
+    total_cost     REAL NOT NULL,
+    cash_balance   REAL
 );
 CREATE TABLE IF NOT EXISTS price_cache (
     ticker          TEXT PRIMARY KEY,
@@ -70,6 +84,9 @@ CREATE TABLE IF NOT EXISTS account_state (
 );
 """
 
+#: Name of the default portfolio existing single-portfolio data migrates into.
+DEFAULT_PORTFOLIO_NAME = "SIPP"
+
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open a SQLite connection to ``db_path``."""
@@ -81,6 +98,83 @@ def make_connect(db_path_getter: Callable[[], str | Path]) -> Connect:
     return lambda: connect(db_path_getter())
 
 
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Return True if ``table`` has a column named ``column``."""
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r[1] == column for r in rows)
+
+
+def _rebuild_cash_flows(conn: sqlite3.Connection) -> None:
+    """Rebuild ``cash_flows`` to add ``portfolio_id`` and drop the global
+    ``UNIQUE(reference)`` constraint.
+
+    Pre-multi-portfolio databases keyed idempotency on a globally unique
+    ``reference``, which would stop the same CSV importing into two
+    portfolios. The rebuild also widens the ``flow_type`` CHECK to allow the
+    ``OPENING`` balance rows recorded when a portfolio is created. New
+    databases already get the correct shape from ``_SCHEMA`` and skip this.
+    """
+    conn.execute(
+        """
+        CREATE TABLE cash_flows_new (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            date         TEXT NOT NULL,
+            flow_type    TEXT NOT NULL CHECK(flow_type IN ('CONTRIBUTION', 'DIVIDEND', 'INTEREST', 'TAX_RELIEF', 'TRANSFER', 'WITHDRAWAL', 'OPENING', 'OTHER')),
+            ticker       TEXT,
+            amount       REAL NOT NULL CHECK(amount > 0),
+            description  TEXT,
+            reference    TEXT,
+            portfolio_id INTEGER
+        )
+        """
+    )
+    conn.execute(
+        "INSERT INTO cash_flows_new "
+        "(id, date, flow_type, ticker, amount, description, reference) "
+        "SELECT id, date, flow_type, ticker, amount, description, reference "
+        "FROM cash_flows"
+    )
+    conn.execute("DROP TABLE cash_flows")
+    conn.execute("ALTER TABLE cash_flows_new RENAME TO cash_flows")
+
+
+def _migrate_default_portfolio(conn: sqlite3.Connection) -> None:
+    """Backfill pre-multi-portfolio data into a single default portfolio.
+
+    Existing trades, cash flows, and the stored ``cash_balance`` are adopted
+    by a portfolio named :data:`DEFAULT_PORTFOLIO_NAME` so the app keeps
+    working with zero user action. A brand-new empty database is left with no
+    portfolios (the UI shows a "create your first portfolio" prompt), so new
+    users are never handed a portfolio they didn't ask for.
+    """
+    if conn.execute("SELECT 1 FROM portfolios LIMIT 1").fetchone():
+        return  # already has at least one portfolio; nothing to backfill
+    has_trades = conn.execute("SELECT 1 FROM trades LIMIT 1").fetchone()
+    has_flows = conn.execute("SELECT 1 FROM cash_flows LIMIT 1").fetchone()
+    has_cash = conn.execute(
+        "SELECT 1 FROM account_state WHERE key = 'cash_balance'"
+    ).fetchone()
+    if not (has_trades or has_flows or has_cash):
+        return  # fresh install — start with the empty state
+
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    cur = conn.execute(
+        "INSERT INTO portfolios (name, created_at) VALUES (?, ?)",
+        (DEFAULT_PORTFOLIO_NAME, created_at),
+    )
+    pid = int(cur.lastrowid)  # type: ignore[arg-type]
+    conn.execute(
+        "UPDATE trades SET portfolio_id = ? WHERE portfolio_id IS NULL", (pid,)
+    )
+    conn.execute(
+        "UPDATE cash_flows SET portfolio_id = ? WHERE portfolio_id IS NULL", (pid,)
+    )
+    conn.execute(
+        "UPDATE account_state SET key = ? WHERE key = 'cash_balance'",
+        (f"cash_balance:{pid}",),
+    )
+
+
 def init_trades_db(conn: sqlite3.Connection) -> None:
     """Create the ``trades.db`` schema and apply additive migrations."""
     conn.executescript(_SCHEMA)
@@ -89,18 +183,39 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
         except sqlite3.OperationalError as exc:
             logger.debug("schema migration step skipped: %s", exc)
-    try:
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_reference "
-            "ON trades(reference) WHERE reference IS NOT NULL"
-        )
-    except sqlite3.OperationalError as exc:
-        logger.debug("index migration step skipped: %s", exc)
     for col_def in ("currency TEXT DEFAULT 'GBP'", "original_price REAL"):
         try:
             conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
         except sqlite3.OperationalError as exc:
             logger.debug("schema migration step skipped: %s", exc)
+
+    # Multi-portfolio migration (#147): add portfolio_id everywhere, rebuild
+    # cash_flows to drop the legacy global-unique reference, then backfill.
+    if not _has_column(conn, "trades", "portfolio_id"):
+        conn.execute("ALTER TABLE trades ADD COLUMN portfolio_id INTEGER")
+    if not _has_column(conn, "cash_flows", "portfolio_id"):
+        _rebuild_cash_flows(conn)
+
+    # Idempotency keys are per-portfolio: the same reference may recur across
+    # portfolios, so drop the old global-unique index in favour of composite.
+    # Idempotency is keyed on (portfolio_id, reference). ``ifnull`` collapses a
+    # NULL portfolio to a single bucket so legacy imports with no portfolio_id
+    # still dedupe (SQLite treats bare NULLs as distinct in a unique index).
+    conn.execute("DROP INDEX IF EXISTS idx_trades_reference")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_portfolio_reference "
+        "ON trades(ifnull(portfolio_id, -1), reference) WHERE reference IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_flows_portfolio_reference "
+        "ON cash_flows(ifnull(portfolio_id, -1), reference) "
+        "WHERE reference IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_snapshots_portfolio "
+        "ON portfolio_snapshots(portfolio_id)"
+    )
+
     for table in ("trades", "cash_flows"):
         try:
             conn.execute(
@@ -111,4 +226,6 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
             )
         except sqlite3.OperationalError as exc:
             logger.debug("date migration step skipped: %s", exc)
+
+    _migrate_default_portfolio(conn)
     conn.commit()

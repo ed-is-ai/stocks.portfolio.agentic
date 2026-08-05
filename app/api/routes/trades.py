@@ -19,6 +19,19 @@ TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
 
 
+def _reject_missing_portfolio(
+    request: Request, portfolio: PortfolioService, portfolio_id: int | None
+) -> HTMLResponse:
+    """Render the portfolio partial with a "select a portfolio" error banner."""
+    context = portfolio.default_portfolio_context(portfolio_id)
+    context["error_message"] = (
+        "Select a portfolio before recording trades. Create one if you have none."
+    )
+    return templates.TemplateResponse(
+        request, "_portfolio.html", context=context, status_code=400
+    )
+
+
 @router.post("/trades", dependencies=[Depends(require_local_or_token)])
 async def record_trade(
     request: Request,
@@ -32,17 +45,28 @@ async def record_trade(
     notes: Annotated[str, Form()] = "",
     stop_loss: Annotated[float | None, Form()] = None,
     entry_price: Annotated[float | None, Form()] = None,
+    portfolio_id: Annotated[int | None, Form()] = None,
 ) -> HTMLResponse:
-    """Record a BUY, SELL, or CORRECT action and return the updated portfolio."""
+    """Record a BUY, SELL, or CORRECT action and return the updated portfolio.
+
+    The trade targets the selected portfolio; a missing or unknown id is
+    rejected with an error banner and nothing is written (#147).
+    """
+    if portfolio_id is None or not trader.portfolio_exists(portfolio_id):
+        return _reject_missing_portfolio(request, portfolio, portfolio_id)
     if action == "BUY":
-        trader.record_buy(ticker, shares, price, date, notes, stop_loss, entry_price)
+        trader.record_buy(
+            ticker, shares, price, date, notes, stop_loss, entry_price, portfolio_id
+        )
     elif action == "SELL":
-        trader.record_sell(ticker, shares, price, date, notes)
+        trader.record_sell(ticker, shares, price, date, notes, portfolio_id)
     elif action == "CORRECT":
-        trader.correct_trade(ticker, shares, price, date, notes, stop_loss, entry_price)
+        trader.correct_trade(
+            ticker, shares, price, date, notes, stop_loss, entry_price, portfolio_id
+        )
     else:
         logger.warning("unsupported trade action: %s", action)
-    context = portfolio.default_portfolio_context()
+    context = portfolio.default_portfolio_context(portfolio_id)
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 
