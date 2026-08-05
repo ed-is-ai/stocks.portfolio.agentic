@@ -65,66 +65,105 @@
 </script>
 {% else %}
 
-<!-- Portfolio selector / management (#147) -->
-<div class="d-flex align-items-center gap-2 mb-3 flex-wrap"
+<!-- Account switcher + management (#147, tidied #156) -->
+<div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap"
      data-active-portfolio="{{ active_portfolio.id if active_portfolio else '' }}">
-  <span class="form-label mb-0"><i class="bi bi-briefcase me-1"></i>Account</span>
-  <select class="form-select form-select-sm" style="max-width:14rem" id="portfolioSelect"
-          name="portfolio_id"
-          hx-get="/partials/portfolio" hx-target="#tab-content" hx-swap="innerHTML"
-          hx-trigger="change" hx-indicator="#spinner"
-          onchange="if (window.setActivePortfolio) setActivePortfolio(this.value)">
-    {% for pf in portfolios %}
-    <option value="{{ pf.id }}" {% if active_portfolio and pf.id == active_portfolio.id %}selected{% endif %}>{{ pf.name }}</option>
-    {% endfor %}
-  </select>
+  <div class="d-flex align-items-center gap-2">
+    <span class="form-label mb-0"><i class="bi bi-briefcase me-1"></i>Account</span>
+    <select class="form-select form-select-sm" style="max-width:14rem" id="portfolioSelect"
+            name="portfolio_id"
+            hx-get="/partials/portfolio" hx-target="#tab-content" hx-swap="innerHTML"
+            hx-trigger="change" hx-indicator="#spinner"
+            onchange="if (window.setActivePortfolio) setActivePortfolio(this.value)">
+      {% for pf in portfolios %}
+      <option value="{{ pf.id }}" {% if active_portfolio and pf.id == active_portfolio.id %}selected{% endif %}>{{ pf.name }}</option>
+      {% endfor %}
+    </select>
 
-  <details class="d-inline-block">
-    <summary class="btn btn-sm btn-outline-secondary">New</summary>
-    <form hx-post="/portfolios" hx-target="#tab-content" hx-swap="innerHTML"
-          hx-indicator="#spinner"
-          class="d-flex align-items-end gap-2 flex-wrap mt-2 p-2 border rounded">
-      <div>
-        <label class="form-label">Name</label>
-        <input type="text" name="name" required placeholder="e.g. ISA"
-               class="form-control form-control-sm" style="max-width:10rem">
+    <div class="dropdown">
+      <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button"
+              data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+        <i class="bi bi-gear me-1"></i>Manage
+      </button>
+      <div class="dropdown-menu p-3" style="min-width:17rem">
+        <div class="fw-semibold mb-2" style="font-size:0.78rem">
+          <i class="bi bi-plus-lg me-1"></i>Create portfolio
+        </div>
+        <form hx-post="/portfolios" hx-target="#tab-content" hx-swap="innerHTML"
+              hx-indicator="#spinner">
+          <input type="text" name="name" required placeholder="Name (e.g. ISA)"
+                 class="form-control form-control-sm mb-2">
+          <div class="input-group input-group-sm mb-2">
+            <span class="input-group-text">£</span>
+            <input type="number" name="opening_cash" min="0" step="any" value="0"
+                   placeholder="Opening cash" class="form-control">
+          </div>
+          <button type="submit" class="btn btn-sm btn-primary w-100">Create</button>
+        </form>
+        {% if active_portfolio %}
+        <hr class="my-3">
+        <div class="fw-semibold mb-2" style="font-size:0.78rem">
+          <i class="bi bi-pencil me-1"></i>Rename &ldquo;{{ active_portfolio.name }}&rdquo;
+        </div>
+        <form hx-post="/portfolios/{{ active_portfolio.id }}/rename"
+              hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+              class="d-flex gap-2">
+          <input type="text" name="name" required value="{{ active_portfolio.name }}"
+                 class="form-control form-control-sm">
+          <button type="submit" class="btn btn-sm btn-outline-primary">Save</button>
+        </form>
+        <hr class="my-3">
+        <button class="btn btn-sm btn-outline-danger w-100"
+                hx-post="/portfolios/{{ active_portfolio.id }}/delete"
+                hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+                hx-confirm="Delete &quot;{{ active_portfolio.name }}&quot;? This removes {{ active_portfolio.trade_count or 0 }} trade(s) and {{ active_portfolio.cash_flow_count or 0 }} cash flow(s). This cannot be undone."
+                onclick="if (window.setActivePortfolio) setActivePortfolio('')">
+          <i class="bi bi-trash3 me-1"></i>Delete this portfolio
+        </button>
+        {% endif %}
       </div>
-      <div>
-        <label class="form-label">Opening cash</label>
-        <div class="input-group input-group-sm" style="max-width:8rem">
-          <span class="input-group-text">£</span>
-          <input type="number" name="opening_cash" min="0" step="any" value="0"
-                 class="form-control">
+    </div>
+  </div>
+
+  <!-- Holding actions -->
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <div class="dropdown">
+      <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button"
+              data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+        <i class="bi bi-plus-lg me-1"></i>Add holding
+      </button>
+      <div class="dropdown-menu dropdown-menu-end p-3" style="min-width:21rem">
+        <div class="fw-semibold mb-2" style="font-size:0.78rem">
+          <i class="bi bi-plus-circle me-1"></i>Quick-add by value
+        </div>
+        {{ quick_add_form(portfolio_id) }}
+        <hr class="my-3">
+        <div class="fw-semibold mb-2" style="font-size:0.78rem">
+          <i class="bi bi-upload me-1"></i>Import a SIPP CSV
+        </div>
+        {{ import_form(portfolio_id) }}
+        <div class="text-muted mt-2" style="font-size:0.68rem; line-height:1.5">
+          Expected columns (header row required):
+          <code>Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance</code>.
+          Dates as <code>DD/MM/YYYY</code>; the final <code>Running Balance</code> sets your cash.
         </div>
       </div>
-      <button type="submit" class="btn btn-sm btn-primary">Create</button>
-    </form>
-  </details>
-
-  {% if active_portfolio %}
-  <details class="d-inline-block">
-    <summary class="btn btn-sm btn-outline-secondary">Rename</summary>
-    <form hx-post="/portfolios/{{ active_portfolio.id }}/rename"
-          hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
-          class="d-flex align-items-end gap-2 mt-2 p-2 border rounded">
-      <div>
-        <label class="form-label">New name</label>
-        <input type="text" name="name" required value="{{ active_portfolio.name }}"
-               class="form-control form-control-sm" style="max-width:10rem">
-      </div>
-      <button type="submit" class="btn btn-sm btn-primary">Save</button>
-    </form>
-  </details>
-
-  <button class="btn btn-sm btn-outline-danger"
-          hx-post="/portfolios/{{ active_portfolio.id }}/delete"
-          hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
-          hx-confirm="Delete &quot;{{ active_portfolio.name }}&quot;? This removes {{ active_portfolio.trade_count or 0 }} trade(s) and {{ active_portfolio.cash_flow_count or 0 }} cash flow(s). This cannot be undone."
-          onclick="if (window.setActivePortfolio) setActivePortfolio('')">
-    Delete
-  </button>
-  {% endif %}
+    </div>
+    {% if positions %}
+    <button id="refreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-2" onclick="refreshPortfolioPrices()">
+      <i class="bi bi-arrow-clockwise" id="refreshIcon"></i>
+      <span id="refreshText">Refresh Prices</span>
+    </button>
+    {% endif %}
+  </div>
 </div>
+
+{% if prices_as_of and positions %}
+<div class="mb-3" style="font-size:0.74rem; color:var(--muted)">
+  <i class="bi bi-clock me-1"></i>Prices as of {{ prices_as_of }}
+  {% if gbpusd_rate %}&nbsp;&middot;&nbsp;Rate: £1&nbsp;=&nbsp;${{ "%.4f"|format(gbpusd_rate) }}{% endif %}
+</div>
+{% endif %}
 
 {% if import_message %}
 <div class="alert alert-success border-0 d-flex align-items-center gap-2 mt-1 mb-3">
@@ -142,48 +181,8 @@
 {% if not positions %}
 <div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-info-circle-fill fs-5"></i>
-  <span>No open positions yet. Add one below — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Watchlist</strong> and click <strong>Buy</strong>.</span>
+  <span>No open positions yet. Use <strong>Add holding</strong> above — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Watchlist</strong> and click <strong>Buy</strong>.</span>
 </div>
-<div class="mt-3">
-  <div style="font-size:0.74rem; color:var(--muted); margin-bottom:0.4rem">
-    <i class="bi bi-plus-circle me-1"></i>Quick-add a holding by value:
-  </div>
-  {{ quick_add_form(portfolio_id) }}
-</div>
-<div class="mt-3">
-  <div style="font-size:0.74rem; color:var(--muted); margin-bottom:0.4rem">
-    <i class="bi bi-upload me-1"></i>Or import a SIPP portfolio CSV:
-  </div>
-  {{ import_form(portfolio_id) }}
-  <div style="font-size:0.68rem; color:var(--muted); margin-top:0.4rem; line-height:1.5">
-    Expected columns (header row required):
-    <code>Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance</code>.
-    Dates as <code>DD/MM/YYYY</code>; the final <code>Running Balance</code> sets your cash.
-    Export this from your SIPP provider (interactive investor, AJ Bell, etc.).
-  </div>
-</div>
-{% else %}
-
-<!-- Toolbar -->
-<div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
-  <div style="font-size:0.74rem; color:var(--muted)">
-    {% if prices_as_of %}
-      <i class="bi bi-clock me-1"></i>Prices as of {{ prices_as_of }}
-      {% if gbpusd_rate %}&nbsp;&middot;&nbsp;Rate: £1&nbsp;=&nbsp;${{ "%.4f"|format(gbpusd_rate) }}{% endif %}
-    {% else %}
-      <i class="bi bi-clock me-1"></i>No cached prices — click Refresh
-    {% endif %}
-  </div>
-  <div class="d-flex align-items-center gap-2 flex-wrap">
-    {{ quick_add_form(portfolio_id) }}
-    {{ import_form(portfolio_id) }}
-    <button id="refreshBtn" class="btn btn-sm btn-outline-secondary d-flex align-items-center gap-2" onclick="refreshPortfolioPrices()">
-      <i class="bi bi-arrow-clockwise" id="refreshIcon"></i>
-      <span id="refreshText">Refresh Prices</span>
-    </button>
-  </div>
-</div>
-
 {% endif %}
 {% if positions %}
 
