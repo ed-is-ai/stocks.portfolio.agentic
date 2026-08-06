@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from app.agents.trader.trader_agent import TraderAgent
-from app.schemas.trade import Portfolio, Position, SippImportResult, Trade
+from app.schemas.trade import (
+    CashFlow,
+    Portfolio,
+    Position,
+    SippImportResult,
+    Trade,
+)
 
 
 class TraderService:
@@ -69,6 +75,12 @@ class TraderService:
     def held_tickers(self) -> set[str]:
         """Return tickers held (net-positive) in any portfolio."""
         return self._agent.held_tickers()
+
+    def get_cash_flows(
+        self, portfolio_id: int | None = None, limit: int = 200
+    ) -> list[CashFlow]:
+        """Return the cash-flow ledger newest-first, scoped to a portfolio."""
+        return self._agent.get_cash_flows(portfolio_id, limit)
 
     def get_cash_balance(self, portfolio_id: int | None = None) -> float | None:
         """Return a portfolio's stored cash balance, or None if unset."""

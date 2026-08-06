@@ -383,11 +383,19 @@ class PortfolioService:
         # partial (trade, import, refresh, quick-add) keeps the selector (#147).
         portfolios = self._trader.list_portfolios()
         active_portfolio = next((p for p in portfolios if p.id == portfolio_id), None)
+        # Cash-flow ledger for the selected account — read-only activity view
+        # (#161). The balance still comes from the provider Running Balance.
+        cash_flows = (
+            self._trader.get_cash_flows(portfolio_id)
+            if portfolio_id is not None
+            else []
+        )
         return {
             "positions": positions,
             "portfolio_id": portfolio_id,
             "portfolios": portfolios,
             "active_portfolio": active_portfolio,
+            "cash_flows": cash_flows,
             "positions_with_value": positions_with_value,
             "total_cost_gbp": total_cost_gbp,
             "total_value_gbp": total_value_gbp,

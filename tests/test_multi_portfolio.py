@@ -89,6 +89,17 @@ def test_create_portfolio_with_opening_cash_records_cashflow(tmp_path: Path) -> 
     assert pf.cash_flow_count == 1
 
 
+def test_get_cash_flows_surfaces_ledger_scoped_to_portfolio(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    a = agent.create_portfolio("SIPP", opening_cash=1000.0)
+    b = agent.create_portfolio("ISA")
+    a_flows = agent.get_cash_flows(a.id)
+    assert [f.flow_type for f in a_flows] == ["OPENING"]
+    assert a_flows[0].amount == 1000.0
+    # The ISA has no opening cash, so its ledger is empty (isolation).
+    assert agent.get_cash_flows(b.id) == []
+
+
 def test_rename_and_delete_portfolio(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("ISA")

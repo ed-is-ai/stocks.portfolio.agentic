@@ -21,6 +21,7 @@ from app.schemas.sector_allocation import (
     SectorShare,
 )
 from app.schemas.trade import (
+    CashFlow,
     EmailConfig,
     ExitSignal,
     Portfolio,
@@ -46,6 +47,7 @@ __all__ = [
     "AlertSummary",
     "CANSLIMScore",
     "EmailConfig",
+    "CashFlow",
     "ExitSignal",
     "FomcMeeting",
     "MarketCycleContext",

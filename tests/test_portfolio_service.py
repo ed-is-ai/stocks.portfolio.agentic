@@ -73,6 +73,9 @@ class _StubTrader:
     def list_portfolios(self):
         return []
 
+    def get_cash_flows(self, portfolio_id=None, limit=200):
+        return []
+
 
 class _StubEvaluator:
     def evaluate(self, position, stock):

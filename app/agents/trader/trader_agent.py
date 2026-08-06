@@ -16,7 +16,7 @@ from pydantic import PrivateAttr
 
 from app.agents.base import Agent
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
-from app.schemas import Position, SippImportResult, Trade
+from app.schemas import CashFlow, Position, SippImportResult, Trade
 from app.repositories import db
 from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
@@ -327,6 +327,12 @@ class TraderAgent(Agent):
     def held_tickers(self) -> set[str]:
         """Return tickers held (net-positive) in any portfolio (#147)."""
         return self._trades.held_tickers()
+
+    def get_cash_flows(
+        self, portfolio_id: int | None = None, limit: int = 200
+    ) -> list[CashFlow]:
+        """Return the cash-flow ledger newest-first, scoped to a portfolio."""
+        return self._cash_flows.history(portfolio_id, limit)
 
     def get_latest_trade(self, ticker: str) -> Trade | None:
         """Return the most recent trade for a ticker, or None if none exist."""

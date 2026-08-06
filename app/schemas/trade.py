@@ -32,6 +32,24 @@ class Portfolio(BaseModel):
     cash_flow_count: int | None = None
 
 
+class CashFlow(BaseModel):
+    """A non-trade cash movement recorded in the ledger (#161).
+
+    Dividends, contributions, interest, tax relief, transfers, withdrawals, and
+    the opening balance. Stored per-portfolio; surfaced as a read-only activity
+    view (the balance itself still comes from the provider Running Balance).
+    """
+
+    id: int | None = None
+    date: str
+    flow_type: str
+    ticker: str | None = None
+    amount: float
+    description: str | None = None
+    reference: str | None = None
+    portfolio_id: int | None = None
+
+
 class ExitSignal(BaseModel):
     """Exit or add signal for a held position."""
 

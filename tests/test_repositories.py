@@ -75,6 +75,22 @@ def test_cash_flows_insert_ignore_dedupes(trades_connect):
     assert count == 1
 
 
+def test_cash_flows_history_scopes_and_orders(trades_connect):
+    repo = CashFlowsRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(conn, "2024-01-01", "DIVIDEND", None, 12.5, "Div", "R1", 1)
+        repo.insert_ignore(
+            conn, "2024-03-01", "CONTRIBUTION", None, 500, "Top-up", "R2", 1
+        )
+        repo.insert_ignore(conn, "2024-02-01", "DIVIDEND", None, 8.0, "Div B", "R3", 2)
+    # Scoped to portfolio 1, newest date first.
+    flows = repo.history(portfolio_id=1)
+    assert [f.reference for f in flows] == ["R2", "R1"]
+    assert flows[0].flow_type == "CONTRIBUTION"
+    # Portfolio 2 sees only its own row.
+    assert [f.reference for f in repo.history(portfolio_id=2)] == ["R3"]
+
+
 # --- PriceCacheRepository --------------------------------------------------
 
 
