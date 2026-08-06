@@ -9,8 +9,51 @@ immediate individual email and are persisted regardless of send success.
 from unittest.mock import MagicMock, patch
 
 from app.agents.alert.alert_agent import AlertAgent
+from app.core.alerting import classify_alert
 from app.repositories.notifications_repo import build_notifications_repository
-from app.schemas import EmailConfig, Position, StockRecord, StockScan
+from app.schemas import EmailConfig, Position, StockAnalysis, StockRecord, StockScan
+
+# A SEPA template with 6/8 checks true — enough to clear the digest's
+# LOW-CONVICTION filter (needs sepa_count >= 5) so a setup actually renders.
+_STRONG_SEPA = {
+    "above_150_200": True,
+    "sma150_above_200": True,
+    "sma200_rising": True,
+    "sma50_above_150_200": True,
+    "above_25pct_of_low": True,
+    "within_25pct_of_high": True,
+    "rs_leader": False,
+    "above_sma50": False,
+}
+
+
+def _buy_record(ticker: str, *, breakout: bool) -> StockRecord:
+    """Build a conviction-passing setup: a fresh breakout or a Stay-Alert name."""
+    scan = StockScan(
+        ticker=ticker,
+        as_of="2024-01-01",
+        price=100.0,
+        volume=1_000_000,
+        rel_volume=2.0,
+        high_52w=110.0,
+        low_52w=50.0,
+        pct_from_52w_high=-5.0,
+        pct_change_week=4.0,
+    )
+    analysis = StockAnalysis(
+        score=9,
+        stage="Stage 2",
+        entry_zone="approaching",
+        fresh_breakout=breakout,
+        sepa_template=_STRONG_SEPA,
+        strengths=["Strong momentum"],
+        risks=[],
+        summary="setup",
+    )
+    return StockRecord.model_validate(
+        {**scan.model_dump(), "analysis": analysis.model_dump()}
+    )
+
 
 _EMAIL = EmailConfig(
     host="localhost",
@@ -112,13 +155,51 @@ def test_watched_signals_appear_in_digest(mock_smtp, tmp_path) -> None:
     with patch.object(AlertAgent, "send_email", side_effect=_capture):
         agent.send_summary_email(positions=[_position("AMD", 175.0)])
 
-    assert "WATCHLIST ENTRIES TRIGGERED" in captured["html"]
-    assert "WATCHLIST STOP LOSSES" in captured["html"]
+    assert "ENTRY REACHED" in captured["html"]
+    assert "STOPPED OUT" in captured["html"]
     assert "NVDA" in captured["text"]
     assert "AMD" in captured["text"]
 
     events = {i.event_type for i in build_notifications_repository().recent()}
     assert events == {"entry_triggered", "stop_loss_hit"}
+
+
+@patch("smtplib.SMTP")
+def test_buy_alerts_split_into_breaking_out_and_approaching(mock_smtp, tmp_path):
+    # A fresh breakout and a Stay-Alert (approaching) name must render under
+    # separate, correctly-labelled sections rather than one BUY/BREAKOUT
+    # bucket (#162).
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    breakout = _buy_record("BRKO", breakout=True)
+    approaching = _buy_record("WTCH", breakout=False)
+    # Sanity: the classifier agrees on which is which.
+    assert classify_alert(breakout).trigger is not None
+    assert classify_alert(approaching).trigger is None
+    agent._buy_alerts = [
+        (breakout, classify_alert(breakout).label or ""),
+        (approaching, classify_alert(approaching).label or ""),
+    ]
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email()
+
+    for body in (captured["html"], captured["text"]):
+        assert "BREAKING OUT NOW" in body
+        assert "APPROACHING ENTRY" in body
+        # Breakout section precedes the approaching one.
+        assert body.index("BREAKING OUT NOW") < body.index("APPROACHING ENTRY")
+    # Legend is present in both renderings.
+    assert "How to read" in captured["html"]
+    assert "HOW TO READ" in captured["text"]
+    assert "BRKO" in captured["text"] and "WTCH" in captured["text"]
 
 
 @patch("smtplib.SMTP")
@@ -147,8 +228,8 @@ def test_non_held_watched_stop_is_suppressed(mock_smtp, tmp_path) -> None:
     with patch.object(AlertAgent, "send_email", side_effect=_capture):
         agent.send_summary_email(positions=[])
 
-    assert "WATCHLIST ENTRIES TRIGGERED" in captured["html"]
-    assert "WATCHLIST STOP LOSSES" not in captured["html"]
+    assert "ENTRY REACHED" in captured["html"]
+    assert "STOPPED OUT" not in captured["html"]
 
     events = {i.event_type for i in build_notifications_repository().recent()}
     assert "entry_triggered" in events
@@ -254,7 +335,7 @@ def test_held_and_watched_same_ticker_dedups(mock_smtp, tmp_path) -> None:
     digest_html = sends[1]
     # Held SELL card present; watched stop for the same ticker suppressed.
     assert "SELL / STOP LOSS" in digest_html
-    assert "WATCHLIST STOP LOSSES" not in digest_html
+    assert "STOPPED OUT" not in digest_html
     # One immediate held notification; digest adds none for this ticker.
     items = [i for i in build_notifications_repository().recent() if i.ticker == "NVDA"]
     assert len(items) == 1

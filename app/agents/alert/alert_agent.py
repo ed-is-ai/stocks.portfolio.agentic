@@ -1150,25 +1150,6 @@ class AlertAgent(Agent):
                     f"  price {sym}{p.current_price or 0:.2f}  P&L {pnl_str}"
                 )
 
-        if self._sell_alerts:
-            text_parts.append("\n\n*** SELL / STOP LOSS ALERTS ***\n")
-            for pos, stock in self._sell_alerts:
-                n = self._stop_loss_narrative(pos, stock)
-                text_parts.append(self._format_stop_loss_text(pos, stock, n))
-                text_parts.append("\n" + "-" * 40)
-
-        if entry_triggered:
-            text_parts.append("\n\n*** WATCHLIST ENTRIES TRIGGERED ***\n")
-            for ticker, current, entry in entry_triggered:
-                text_parts.append(
-                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}"
-                )
-
-        if watched_stops:
-            text_parts.append("\n\n*** WATCHLIST STOP LOSSES ***\n")
-            for ticker, current, stop in watched_stops:
-                text_parts.append(f"  {ticker}: ${current:.2f} hit stop ${stop:.2f}")
-
         def _conviction_rank(item: tuple[StockRecord, str]) -> int:
             verdict = self._breakout_narrative(item[0])["verdict"]
             if "HIGH CONVICTION" in verdict:
@@ -1185,9 +1166,54 @@ class AlertAgent(Agent):
             ],
             key=_conviction_rank,
         )
-        if strong_buys:
-            text_parts.append("\n\n*** BUY / BREAKOUT ALERTS ***\n")
-            for stock, trigger in strong_buys:
+        # Split the surfaced setups by urgency: a genuine breakout (a
+        # ``classify_alert`` trigger) is happening now; a "Stay Alert" name is
+        # only approaching its pivot. They used to share one BUY/BREAKOUT
+        # section, which buried the act-now rows (#162).
+        breaking_out = [(s, t) for s, t in strong_buys if classify_alert(s).trigger]
+        approaching = [(s, t) for s, t in strong_buys if not classify_alert(s).trigger]
+
+        # A one-line legend explaining the surfaced -> tracked -> entry-reached
+        # pipeline, shown once when there is any alert content.
+        if self._sell_alerts or watched_count or strong_buys:
+            text_parts.append(
+                "\n\nHOW TO READ: setups are surfaced (Breaking Out now / "
+                "Approaching entry), tracked, then flagged 'Entry Reached' once "
+                "price crosses the pivot. Technical signals, not advice."
+            )
+
+        if self._sell_alerts:
+            text_parts.append("\n\n*** SELL / STOP LOSS (held) ***\n")
+            for pos, stock in self._sell_alerts:
+                n = self._stop_loss_narrative(pos, stock)
+                text_parts.append(self._format_stop_loss_text(pos, stock, n))
+                text_parts.append("\n" + "-" * 40)
+
+        if entry_triggered:
+            text_parts.append(
+                "\n\n*** ENTRY REACHED — tracked setup hit its pivot ***\n"
+            )
+            for ticker, current, entry in entry_triggered:
+                text_parts.append(
+                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}"
+                )
+
+        if watched_stops:
+            text_parts.append("\n\n*** TRACKED SETUP — STOPPED OUT ***\n")
+            for ticker, current, stop in watched_stops:
+                text_parts.append(f"  {ticker}: ${current:.2f} hit stop ${stop:.2f}")
+
+        if breaking_out:
+            text_parts.append("\n\n*** BREAKING OUT NOW ***\n")
+            for stock, trigger in breaking_out:
+                text_parts.append(self.format_alert_text(stock, trigger))
+                text_parts.append("\n" + "-" * 40)
+
+        if approaching:
+            text_parts.append(
+                "\n\n*** APPROACHING ENTRY (watch — not yet at pivot) ***\n"
+            )
+            for stock, trigger in approaching:
                 text_parts.append(self.format_alert_text(stock, trigger))
                 text_parts.append("\n" + "-" * 40)
 
@@ -1282,10 +1308,22 @@ class AlertAgent(Agent):
             + snapshot_html
         ]
 
+        if self._sell_alerts or watched_count or strong_buys:
+            html_parts.append(
+                '<div style="margin:12px 0;padding:8px 12px;background:#f8fafc;'
+                "border:1px solid #e2e8f0;border-radius:6px;font-size:0.78em;"
+                'color:#64748b">'
+                "<strong>How to read:</strong> setups are surfaced "
+                "(<em>Breaking out now</em> / <em>Approaching entry</em>), "
+                "tracked, then flagged <em>Entry reached</em> once price crosses "
+                "the pivot. Technical signals, not advice.</div>"
+            )
+
         if self._sell_alerts:
             html_parts.append(
                 '<div style="margin:20px 0">'
-                '<h3 style="color:#c0392b;margin-bottom:12px">&#9888; SELL / STOP LOSS</h3>'
+                '<h3 style="color:#c0392b;margin-bottom:12px">'
+                "&#9888; SELL / STOP LOSS (held)</h3>"
             )
             for pos, stock in self._sell_alerts:
                 n = self._stop_loss_narrative(pos, stock)
@@ -1296,7 +1334,7 @@ class AlertAgent(Agent):
             html_parts.append(
                 '<div style="margin:20px 0">'
                 '<h3 style="color:#27ae60;margin-bottom:12px">'
-                "&#9889; WATCHLIST ENTRIES TRIGGERED</h3>"
+                "&#9889; ENTRY REACHED &mdash; tracked setup hit its pivot</h3>"
             )
             for ticker, current, entry in entry_triggered:
                 html_parts.append(self._watched_row_html(ticker, current, entry))
@@ -1306,7 +1344,7 @@ class AlertAgent(Agent):
             html_parts.append(
                 '<div style="margin:20px 0">'
                 '<h3 style="color:#c0392b;margin-bottom:12px">'
-                "&#9888; WATCHLIST STOP LOSSES</h3>"
+                "&#9888; TRACKED SETUP &mdash; STOPPED OUT</h3>"
             )
             for ticker, current, stop in watched_stops:
                 html_parts.append(
@@ -1314,12 +1352,23 @@ class AlertAgent(Agent):
                 )
             html_parts.append("</div>")
 
-        if strong_buys:
+        if breaking_out:
             html_parts.append(
                 '<div style="margin:20px 0">'
-                '<h3 style="color:#27ae60;margin-bottom:12px">&#9889; BUY / BREAKOUT</h3>'
+                '<h3 style="color:#27ae60;margin-bottom:12px">'
+                "&#9889; BREAKING OUT NOW</h3>"
             )
-            for stock, trigger in strong_buys:
+            for stock, trigger in breaking_out:
+                html_parts.append(self._buy_card_html(stock, trigger))
+            html_parts.append("</div>")
+
+        if approaching:
+            html_parts.append(
+                '<div style="margin:20px 0">'
+                '<h3 style="color:#b45309;margin-bottom:12px">'
+                "&#128064; APPROACHING ENTRY (watch &mdash; not yet at pivot)</h3>"
+            )
+            for stock, trigger in approaching:
                 html_parts.append(self._buy_card_html(stock, trigger))
             html_parts.append("</div>")
 
