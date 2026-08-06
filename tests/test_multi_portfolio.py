@@ -218,6 +218,38 @@ def test_cash_balance_is_independent_of_row_order(tmp_path: Path) -> None:
     assert fwd_pos == rev_pos == {"AAPL": 15.0, "MSFT": 5.0}
 
 
+# Two separate files: an older quarter and a newer one, each a single row
+# with its own closing Running Balance.
+_OLD_FILE = ["01/01/2024,AAPL,B0,10,100,Buy AAPL,O1,1000,,4000"]
+_NEW_FILE = ["01/06/2024,MSFT,B1,5,200,Buy MSFT,N1,1000,,9000"]
+
+
+def test_cash_balance_does_not_regress_when_older_file_imported_after_newer(
+    tmp_path: Path,
+) -> None:
+    # #160: importing an older SIPP file after a newer one must not overwrite
+    # the balance with the older file's (stale) Running Balance.
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE), pf.id)
+    assert agent.get_cash_balance(pf.id) == 9000.0
+    # Now import the OLDER file — balance must stay on the newer date.
+    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE), pf.id)
+    assert agent.get_cash_balance(pf.id) == 9000.0
+
+
+def test_cash_balance_advances_when_newer_file_imported_after_older(
+    tmp_path: Path,
+) -> None:
+    # The normal order still advances the balance to the newer date.
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE), pf.id)
+    assert agent.get_cash_balance(pf.id) == 4000.0
+    agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE), pf.id)
+    assert agent.get_cash_balance(pf.id) == 9000.0
+
+
 # --- snapshots -------------------------------------------------------------
 
 

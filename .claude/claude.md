@@ -203,6 +203,6 @@ The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pensi
 - Add correcting transaction if confirmed closed
 
 **Cash balance mismatch?**
-- Verify the latest-dated Running Balance in the CSV matches your account statement (row order no longer matters — the balance is taken from the newest date, not the last file row, #158)
+- Verify the latest-dated Running Balance in the CSV matches your account statement (neither row order nor import order matters — the balance is taken from the newest date within a file, #158, and importing an older file after a newer one won't regress it, #160)
 - Check for duplicate entries in cash_flows table (reference must be unique)
 - Ensure no data corruption in CSV (look for hidden characters)

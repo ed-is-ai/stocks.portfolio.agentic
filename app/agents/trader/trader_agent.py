@@ -714,7 +714,13 @@ class TraderAgent(Agent):
             conn.close()
 
         if cash_balance > 0:
-            self.set_cash_balance(cash_balance, portfolio_id)
+            # The winning row's date (its ISO date, or None if unparseable).
+            cash_asof = (
+                cash_balance_rank[1]
+                if cash_balance_rank is not None and cash_balance_rank[0] == 1
+                else None
+            )
+            self._apply_import_cash_balance(portfolio_id, cash_balance, cash_asof)
         self.update_portfolio_snapshot(cash_balance, portfolio_id)
 
         print(
@@ -768,6 +774,34 @@ class TraderAgent(Agent):
         """Return a portfolio's stored cash balance, or None if not yet set."""
         value = self._account.get(self._cash_key(portfolio_id))
         return float(value) if value is not None else None
+
+    @staticmethod
+    def _cash_date_key(portfolio_id: int | None) -> str:
+        """account_state key holding the as-of date of the stored cash balance."""
+        return (
+            f"cash_balance_date:{portfolio_id}"
+            if portfolio_id is not None
+            else "cash_balance_date"
+        )
+
+    def _apply_import_cash_balance(
+        self, portfolio_id: int | None, amount: float, as_of: str | None
+    ) -> None:
+        """Store an imported cash balance only if it's not older than the one
+        already stored (#160).
+
+        The provider Running Balance is a snapshot, so importing an *older*
+        SIPP file after a newer one must not regress the balance to a stale
+        date. We persist the balance's as-of date alongside it and only replace
+        when the incoming date is newer-or-equal (ties → the newer import wins).
+        An incoming balance with no parseable date can't be compared, so it
+        overwrites — matching the pre-#160 behaviour for undated files.
+        """
+        stored_date = self._account.get(self._cash_date_key(portfolio_id))
+        if as_of is None or stored_date is None or as_of >= stored_date:
+            self.set_cash_balance(amount, portfolio_id)
+            if as_of is not None:
+                self._account.set(self._cash_date_key(portfolio_id), as_of)
 
     def snapshot_history(
         self, portfolio_id: int, limit: int = 180

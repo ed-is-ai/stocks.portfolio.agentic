@@ -93,8 +93,8 @@ class PortfoliosRepository:
                 (portfolio_id,),
             )
             conn.execute(
-                "DELETE FROM account_state WHERE key = ?",
-                (f"cash_balance:{portfolio_id}",),
+                "DELETE FROM account_state WHERE key IN (?, ?)",
+                (f"cash_balance:{portfolio_id}", f"cash_balance_date:{portfolio_id}"),
             )
             cur = conn.execute("DELETE FROM portfolios WHERE id = ?", (portfolio_id,))
             return cur.rowcount > 0
