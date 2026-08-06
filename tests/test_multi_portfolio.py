@@ -179,6 +179,45 @@ def test_same_csv_imports_into_two_portfolios_independently(tmp_path: Path) -> N
     assert agent.get_cash_balance(b.id) == 5000.0
 
 
+# --- import row order (#158) -----------------------------------------------
+
+_MULTI_HEADER = (
+    "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+    "Running Balance"
+)
+# Three dated trade rows, oldest-first; the latest-dated row (2024-03-10)
+# carries the authoritative closing balance of 2450.
+_MULTI_ROWS = [
+    "01/01/2024,AAPL,B0,10,100,Buy AAPL,R1,1000,,4000",
+    "15/02/2024,MSFT,B1,5,200,Buy MSFT,R2,1000,,3000",
+    "10/03/2024,AAPL,B0,5,110,Buy AAPL,R3,550,,2450",
+]
+
+
+def _write_rows(tmp_path: Path, name: str, rows: list[str]) -> Path:
+    path = tmp_path / name
+    path.write_text("\n".join([_MULTI_HEADER, *rows]) + "\n", encoding="utf-8")
+    return path
+
+
+def test_cash_balance_is_independent_of_row_order(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    fwd = agent.create_portfolio("Forward")
+    rev = agent.create_portfolio("Reversed")
+    agent.import_sipp(_write_rows(tmp_path, "fwd.csv", _MULTI_ROWS), fwd.id)
+    agent.import_sipp(
+        _write_rows(tmp_path, "rev.csv", list(reversed(_MULTI_ROWS))), rev.id
+    )
+    # Authoritative balance is the latest-dated row (2024-03-10 -> 2450),
+    # whether the file is oldest-first or fully reversed.
+    assert agent.get_cash_balance(fwd.id) == 2450.0
+    assert agent.get_cash_balance(rev.id) == 2450.0
+    # Positions are identical too (replay already sorts by date).
+    fwd_pos = {p.ticker: p.shares for p in agent.get_portfolio(portfolio_id=fwd.id)}
+    rev_pos = {p.ticker: p.shares for p in agent.get_portfolio(portfolio_id=rev.id)}
+    assert fwd_pos == rev_pos == {"AAPL": 15.0, "MSFT": 5.0}
+
+
 # --- snapshots -------------------------------------------------------------
 
 

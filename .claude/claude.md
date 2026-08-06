@@ -188,7 +188,7 @@ The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pensi
 - **Exception**: HSBC GLOB funds use description matching; ticker is 'HSFWA'
 - **Cash flows**: Non-trade entries (contributions, tax relief, interest, dividends) stored separately in cash_flows table
 - **Date sorting**: Trades replayed chronologically (DD/MM/YYYY converted to YYYY/MM/DD for sorting)
-- **Cash position**: Final Running Balance column used as authoritative cash balance
+- **Cash position**: Running Balance of the latest-dated row is the authoritative cash balance, chosen independently of CSV row order (a newest-first export yields the same balance as oldest-first) (#158)
 
 ### Common Issues
 
@@ -203,6 +203,6 @@ The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pensi
 - Add correcting transaction if confirmed closed
 
 **Cash balance mismatch?**
-- Verify final Running Balance in CSV matches account statement
+- Verify the latest-dated Running Balance in the CSV matches your account statement (row order no longer matters — the balance is taken from the newest date, not the last file row, #158)
 - Check for duplicate entries in cash_flows table (reference must be unique)
 - Ensure no data corruption in CSV (look for hidden characters)

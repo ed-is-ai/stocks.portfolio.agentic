@@ -7,6 +7,7 @@ Run as part of the web UI backend.
 
 import csv
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -587,9 +588,17 @@ class TraderAgent(Agent):
 
         conn = self._conn()
         buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
+        # The authoritative cash balance is the running balance of the
+        # latest-dated row, chosen independently of the CSV's row order so a
+        # newest-first export yields the same balance as an oldest-first one
+        # (#158). Rank = (has-ISO-date, iso-date, file-index): an ISO-dated row
+        # always beats an unparseable-date row, later dates win, and ties fall
+        # to the last such row in the file. With no parseable dates this
+        # degrades to the previous last-row-in-file behaviour.
+        cash_balance_rank: tuple[int, str, int] | None = None
 
         try:
-            for row in rows:
+            for idx, row in enumerate(rows):
                 qty = row.get("Quantity", "").strip()
                 symbol = row.get("Symbol", "").strip()
                 reference = row.get("Reference", "").strip()
@@ -691,7 +700,11 @@ class TraderAgent(Agent):
                 if running_balance and running_balance != "n/a":
                     rb = clean_amount(running_balance, "Running Balance", reference)
                     if rb > 0:
-                        cash_balance = rb
+                        is_iso = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date))
+                        rank = (1 if is_iso else 0, date if is_iso else "", idx)
+                        if cash_balance_rank is None or rank > cash_balance_rank:
+                            cash_balance_rank = rank
+                            cash_balance = rb
 
             conn.commit()
         except Exception:
