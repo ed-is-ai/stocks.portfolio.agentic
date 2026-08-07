@@ -68,6 +68,11 @@ DEFAULT_TRAILING_STOP_PCT = 0.15
 # --- Web / static assets ---------------------------------------------------
 TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
 STATIC_DIR = ROOT_DIR / "app" / "api" / "static"
+# Jinja2 templates for AlertAgent's outbound HTML emails, colocated with the
+# agent's code (see the DB/artifact paths above) rather than under app/api,
+# since these render standalone email bodies, not FastAPI request/response
+# pages.
+ALERT_TEMPLATES_DIR = ROOT_DIR / "app" / "agents" / "alert" / "templates"
 
 # --- Reference data --------------------------------------------------------
 TICKER_ALIASES_JSON = ROOT_DIR / "config" / "ticker_aliases.json"

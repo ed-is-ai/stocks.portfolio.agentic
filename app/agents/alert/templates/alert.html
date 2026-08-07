@@ -1,0 +1,75 @@
+{% import "_macros.html" as m %}
+{% import "_breakout_assessment.html" as ba %}
+<html><body style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px">
+  {% if trigger %}
+  <div style="background:#1e3a5f;color:white;padding:10px 16px;border-radius:4px;font-weight:bold;margin-bottom:16px;font-size:0.95em">
+    &#9889; {{ trigger }}</div>
+  {% endif %}
+  <h2 style="border-bottom:2px solid {{ score_color }};padding-bottom:8px">
+    {{ stock.ticker }}
+    <span style="color:{{ score_color }};font-size:0.9em">
+      &#9679; Score {{ analysis.score }}/10 &mdash; {{ analysis.stage }}
+    </span>
+  </h2>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+    <tr>
+      <td style="padding:6px;background:#f8f8f8"><b>Price</b></td>
+      <td style="padding:6px">${{ stock.price }}</td>
+      <td style="padding:6px;background:#f8f8f8"><b>RSI</b></td>
+      <td style="padding:6px">{{ stock.rsi14 }}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px;background:#f8f8f8"><b>Rel. Volume</b></td>
+      <td style="padding:6px">{{ stock.rel_volume }}x</td>
+      <td style="padding:6px;background:#f8f8f8"><b>From 52w High</b></td>
+      <td style="padding:6px">{{ stock.pct_from_52w_high }}%</td>
+    </tr>
+    <tr>
+      <td style="padding:6px;background:#dff0d8"><b>Entry</b></td>
+      <td style="padding:6px;color:#27ae60;font-weight:bold">{{ entry }}</td>
+      <td style="padding:6px;background:#f2dede"><b>Stop Loss</b></td>
+      <td style="padding:6px;color:#c0392b;font-weight:bold">{{ stop }}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px;background:#f8f8f8" colspan="2"><b>Risk to Stop</b></td>
+      <td style="padding:6px" colspan="2">{{ risk_str }} below entry</td>
+    </tr>
+    {% if congress %}
+    <tr><td style="padding:6px;background:#f8f8f8" colspan="2"><b>Congress</b></td>
+        <td style="padding:6px;color:{{ congress_net_color }}" colspan="2">{{ congress }}</td></tr>
+    {% endif %}
+  </table>
+  <p style="font-style:italic;color:#555">{{ analysis.summary }}</p>
+  {{ ba.breakout_assessment(narrative, vol_color, sepa_color, verdict_bg, verdict_border) }}
+  <ul style="padding-left:20px;color:#27ae60">
+    {% for item in strengths %}<li>&#10003; {{ item }}</li>{% endfor %}
+  </ul>
+  {% if risks %}
+  <ul style="padding-left:20px;color:#c0392b">
+    {% for item in risks %}<li>&#9888; {{ item }}</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% if analysis.canslim %}
+  <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:0.85em">
+    <tr><td colspan="3" style="padding:4px 6px;background:#eee;font-weight:bold">
+      CANSLIM Score: {{ analysis.canslim.total }}/14
+    </td></tr>
+    <tr><td style="padding:3px 6px;background:#f8f8f8;width:30%">C &mdash; Momentum</td>
+        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.C) }}</td><td style="padding:3px 6px">{{ analysis.canslim.C }}/2</td></tr>
+    <tr><td style="padding:3px 6px;background:#f8f8f8">A &mdash; Annual Strength</td>
+        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.A) }}</td><td style="padding:3px 6px">{{ analysis.canslim.A }}/2</td></tr>
+    <tr><td style="padding:3px 6px;background:#f8f8f8">N &mdash; Near New High</td>
+        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.N) }}</td><td style="padding:3px 6px">{{ analysis.canslim.N }}/2</td></tr>
+    <tr><td style="padding:3px 6px;background:#f8f8f8">S &mdash; Volume</td>
+        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.S) }}</td><td style="padding:3px 6px">{{ analysis.canslim.S }}/2</td></tr>
+    <tr><td style="padding:3px 6px;background:#f8f8f8">L &mdash; Leader (RSI)</td>
+        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.L) }}</td><td style="padding:3px 6px">{{ analysis.canslim.L }}/2</td></tr>
+    <tr><td style="padding:3px 6px;background:#f8f8f8">I &mdash; Stage Structure</td>
+        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.I) }}</td><td style="padding:3px 6px">{{ analysis.canslim.I }}/2</td></tr>
+    <tr><td style="padding:3px 6px;background:#f8f8f8">M &mdash; SMA Alignment</td>
+        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.M) }}</td><td style="padding:3px 6px">{{ analysis.canslim.M }}/2</td></tr>
+  </table>
+  {% endif %}
+  {{ svg_chart | safe }}
+  <p style="color:#aaa;font-size:0.8em;margin-top:24px">{{ today }} &mdash; Momentum Scanner</p>
+</body></html>

@@ -1,0 +1,33 @@
+{% macro snapshot_card(rows, total_value, total_cost, total_pnl, pnl_pct, pnl_color, margin="margin:16px 0;") %}
+<div style="{{ margin }}padding:14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px">
+  <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;margin-bottom:10px">
+    Portfolio Snapshot
+  </div>
+  <div style="display:flex;gap:24px;margin-bottom:10px;flex-wrap:wrap">
+    <div><div style="font-size:0.72em;color:#64748b">Market Value</div>
+         <div style="font-weight:700;font-size:1.1em">£{{ total_value }}</div></div>
+    <div><div style="font-size:0.72em;color:#64748b">Cost Basis</div>
+         <div style="font-weight:700;font-size:1.1em">£{{ total_cost }}</div></div>
+    <div><div style="font-size:0.72em;color:#64748b">Unrealised P&amp;L</div>
+         <div style="font-weight:700;font-size:1.1em;color:{{ pnl_color }}">£{{ total_pnl }} ({{ pnl_pct }})</div></div>
+  </div>
+  <table style="width:100%;border-collapse:collapse;font-size:0.82em">
+    <tr style="background:#e2e8f0">
+      <th style="padding:4px 8px;text-align:left">Ticker</th>
+      <th style="padding:4px 8px;text-align:right">Shares</th>
+      <th style="padding:4px 8px;text-align:right">Price</th>
+      <th style="padding:4px 8px;text-align:right">Value</th>
+      <th style="padding:4px 8px;text-align:right">P&amp;L %</th>
+    </tr>
+    {% for row in rows %}
+    <tr>
+      <td style="padding:5px 8px;font-weight:700">{{ row.ticker }}</td>
+      <td style="padding:5px 8px;text-align:right">{{ row.shares }}</td>
+      <td style="padding:5px 8px;text-align:right">{{ row.price }}</td>
+      <td style="padding:5px 8px;text-align:right">{{ row.value }}</td>
+      <td style="padding:5px 8px;text-align:right;color:{{ row.pnl_color }}">{{ row.pnl_pct }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endmacro %}

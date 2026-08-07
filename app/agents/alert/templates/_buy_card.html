@@ -1,0 +1,46 @@
+{% macro buy_card(stock, trigger, url, score_color, entry, stop, risk_str, n, verdict_bg, verdict_border, congress, congress_net_color, svg_chart) %}
+<div style="border:1px solid #c3e6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#f8fff9">
+  <div style="font-weight:700;font-size:1em;color:#1e3a5f;margin-bottom:4px">
+    &#9889; <a href="{{ url }}" style="color:#1e3a5f;text-decoration:none;font-weight:800" target="_blank">{{ stock.ticker }}</a>
+    <span style="color:{{ score_color }};font-size:0.88em;margin-left:6px">
+      Score {{ stock.analysis.score }}/10 &mdash; {{ stock.analysis.stage }}
+    </span>
+    <span style="background:#1e3a5f;color:white;padding:2px 8px;border-radius:3px;
+                 font-size:0.75em;margin-left:8px">{{ trigger }}</span>
+  </div>
+  <div style="font-size:0.82em;color:#555;margin-bottom:8px">
+    Price <b>${{ stock.price }}</b> &nbsp;|&nbsp;
+    Entry <b>{{ entry }}</b> &nbsp;|&nbsp;
+    Stop <b>{{ stop }}</b> &nbsp;|&nbsp;
+    Risk <b>{{ risk_str }}</b> &nbsp;|&nbsp;
+    RSI <b>{{ stock.rsi14 }}</b> &nbsp;|&nbsp;
+    RelVol <b>{{ stock.rel_volume }}x</b>
+  </div>
+  {% if congress %}
+  <div style="font-size:0.82em;color:{{ congress_net_color }};margin-bottom:8px">{{ congress }}</div>
+  {% endif %}
+  <table style="width:100%;border-collapse:collapse;font-size:0.82em">
+    <tr>
+      <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;width:80px;color:#555;vertical-align:top">Volume</td>
+      <td style="padding:4px 6px">{{ n.volume }}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">SEPA</td>
+      <td style="padding:4px 6px">{{ n.sepa }}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">CANSLIM</td>
+      <td style="padding:4px 6px">{{ n.canslim }}</td>
+    </tr>
+    <tr>
+      <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">Momentum</td>
+      <td style="padding:4px 6px">{{ n.momentum }}</td>
+    </tr>
+  </table>
+  <div style="margin-top:8px;padding:8px 12px;background:{{ verdict_bg }};
+              border-left:3px solid {{ verdict_border }};font-weight:700;font-size:0.85em">
+    {{ n.verdict }}
+  </div>
+  {{ svg_chart | safe }}
+</div>
+{% endmacro %}

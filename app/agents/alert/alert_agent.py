@@ -13,6 +13,7 @@ from typing import Any, Iterable
 
 from pydantic import PrivateAttr
 
+from app.agents.alert.templating import email_templates, get_macro
 from app.agents.base import Agent
 from app.core.alerting import classify_alert, is_on_cooldown
 from app.core.alerting import BREAKOUT_COOLDOWN_HOURS as ALERT_COOLDOWN_HOURS
@@ -59,6 +60,56 @@ EMAIL_CONFIG = EmailConfig(
     password=os.getenv("EMAIL_PASSWORD", ""),
     recipient=os.getenv("EMAIL_TO", ""),
 )
+
+# ── CTA copy (#168) ─────────────────────────────────────────────────────
+# Always shown, right where the old "How to read" legend (#163) sat —
+# after the narrative/snapshot, immediately before the alert sections —
+# never gated on content existing unlike the section bodies themselves.
+# Single source of truth for wording so text/HTML can't drift; each
+# renderer supplies its own markup only.
+#
+# One group per actual section, in the same order, using the same icons
+# and colours as the section <h3> headers below, so the CTA reads as a
+# table of contents for what follows. Colours are not new — they're the
+# exact hex values already used on the real section headers and
+# throughout the stop-loss/risk markup elsewhere in this file: #c0392b
+# (red) for sell/stopped-out, #27ae60 (green) for buy, #b45309 (amber)
+# for approaching/watch. "TRACKED SETUP — STOPPED OUT" is folded into
+# "Sell / stop loss (held)" rather than given its own line: both only
+# fire for held tickers (the #113 gating in send_summary_email), so both
+# mean "a held name's risk trigger fired — review for exit." "Entry
+# reached" and "Breaking out now" are folded into one "Buy" group and
+# the two sections themselves are merged (see send_summary_email) — the
+# specific reason for each ticker is on its own row/card, not restated
+# here.
+_CTA_GROUPS: list[tuple[str, str, str, str]] = [
+    # (icon, heading, colour, description)
+    (
+        "⚠",
+        "Sell / stop loss (held)",
+        "#c0392b",
+        "a position you own (or a tracked setup on a name you hold) hit "
+        "its stop or target — review for exit.",
+    ),
+    (
+        "⚡",
+        "Buy",
+        "#27ae60",
+        "a setup crossed its pivot, or a fresh breakout just fired — see "
+        "the reason on each row below.",
+    ),
+    (
+        "👀",
+        "Watch",
+        "#b45309",
+        "approaching entry — on the radar, not yet at its pivot — add to "
+        "your watchlist and wait for the trigger.",
+    ),
+]
+_CTA_NO_ALERTS = "No actionable tickers today — nothing below needs a decision."
+# Reuses the exact wording already used app-wide, see
+# app/schemas/market_narrative.py: MarketNarrative.not_advice default.
+_CTA_NOT_ADVICE = "Informational only — not financial advice."
 
 
 class AlertAgent(Agent):
@@ -408,22 +459,12 @@ class AlertAgent(Agent):
     def format_alert_html(self, stock: StockRecord, trigger: str | None = None) -> str:
         analysis = stock.analysis
         assert analysis is not None
-        strengths_html = "".join(
-            f"<li>&#10003; {item}</li>" for item in analysis.strengths
-        )
-        risks_html = "".join(f"<li>&#9888; {item}</li>" for item in analysis.risks)
-
         if analysis.score >= 8:
             score_color = "#27ae60"
         elif analysis.score >= 6:
             score_color = "#f39c12"
         else:
             score_color = "#e74c3c"
-        risks_section = (
-            f"<ul style='padding-left:20px;color:#c0392b'>{risks_html}</ul>"
-            if risks_html
-            else ""
-        )
 
         entry = f"${analysis.entry_price:.2f}" if analysis.entry_price else "—"
         stop = f"${analysis.stop_loss:.2f}" if analysis.stop_loss else "—"
@@ -435,96 +476,38 @@ class AlertAgent(Agent):
         else:
             risk_str = "—"
 
-        canslim_section = ""
-        if analysis.canslim:
-            cs = analysis.canslim
-
-            def _bar(val: int) -> str:
-                return "&#9632;" * val + "&#9633;" * (2 - val)
-
-            canslim_section = f"""
-          <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:0.85em">
-            <tr><td colspan="3" style="padding:4px 6px;background:#eee;font-weight:bold">
-              CANSLIM Score: {cs.total}/14
-            </td></tr>
-            <tr><td style="padding:3px 6px;background:#f8f8f8;width:30%">C &mdash; Momentum</td>
-                <td style="padding:3px 6px">{_bar(cs.C)}</td><td style="padding:3px 6px">{cs.C}/2</td></tr>
-            <tr><td style="padding:3px 6px;background:#f8f8f8">A &mdash; Annual Strength</td>
-                <td style="padding:3px 6px">{_bar(cs.A)}</td><td style="padding:3px 6px">{cs.A}/2</td></tr>
-            <tr><td style="padding:3px 6px;background:#f8f8f8">N &mdash; Near New High</td>
-                <td style="padding:3px 6px">{_bar(cs.N)}</td><td style="padding:3px 6px">{cs.N}/2</td></tr>
-            <tr><td style="padding:3px 6px;background:#f8f8f8">S &mdash; Volume</td>
-                <td style="padding:3px 6px">{_bar(cs.S)}</td><td style="padding:3px 6px">{cs.S}/2</td></tr>
-            <tr><td style="padding:3px 6px;background:#f8f8f8">L &mdash; Leader (RSI)</td>
-                <td style="padding:3px 6px">{_bar(cs.L)}</td><td style="padding:3px 6px">{cs.L}/2</td></tr>
-            <tr><td style="padding:3px 6px;background:#f8f8f8">I &mdash; Stage Structure</td>
-                <td style="padding:3px 6px">{_bar(cs.I)}</td><td style="padding:3px 6px">{cs.I}/2</td></tr>
-            <tr><td style="padding:3px 6px;background:#f8f8f8">M &mdash; SMA Alignment</td>
-                <td style="padding:3px 6px">{_bar(cs.M)}</td><td style="padding:3px 6px">{cs.M}/2</td></tr>
-          </table>"""
-
-        congress_row = ""
         congress = self._congress_summary(stock)
+        congress_net_color = "#555"
         if congress:
             net = (stock.congress_buys or 0) - (stock.congress_sells or 0)
-            net_color = "#27ae60" if net > 0 else "#c0392b" if net < 0 else "#555"
-            congress_row = (
-                f'<tr><td style="padding:6px;background:#f8f8f8" colspan="2">'
-                f"<b>Congress</b></td>"
-                f'<td style="padding:6px;color:{net_color}" colspan="2">'
-                f"{congress}</td></tr>"
+            congress_net_color = (
+                "#27ae60" if net > 0 else "#c0392b" if net < 0 else "#555"
             )
 
-        trigger_banner = ""
-        if trigger:
-            trigger_banner = (
-                f'<div style="background:#1e3a5f;color:white;padding:10px 16px;'
-                f'border-radius:4px;font-weight:bold;margin-bottom:16px;font-size:0.95em">'
-                f"&#9889; {trigger}</div>"
-            )
-        return f"""
-        <html><body style=\"font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px\">
-          {trigger_banner}
-          <h2 style=\"border-bottom:2px solid {score_color};padding-bottom:8px\">
-            {stock.ticker}
-            <span style=\"color:{score_color};font-size:0.9em\">
-              &#9679; Score {analysis.score}/10 &mdash; {analysis.stage}
-            </span>
-          </h2>
-          <table style=\"width:100%;border-collapse:collapse;margin-bottom:16px\">
-            <tr>
-              <td style=\"padding:6px;background:#f8f8f8\"><b>Price</b></td>
-              <td style=\"padding:6px\">${stock.price}</td>
-              <td style=\"padding:6px;background:#f8f8f8\"><b>RSI</b></td>
-              <td style=\"padding:6px\">{stock.rsi14}</td>
-            </tr>
-            <tr>
-              <td style=\"padding:6px;background:#f8f8f8\"><b>Rel. Volume</b></td>
-              <td style=\"padding:6px\">{stock.rel_volume}x</td>
-              <td style=\"padding:6px;background:#f8f8f8\"><b>From 52w High</b></td>
-              <td style=\"padding:6px\">{stock.pct_from_52w_high}%</td>
-            </tr>
-            <tr>
-              <td style=\"padding:6px;background:#dff0d8\"><b>Entry</b></td>
-              <td style=\"padding:6px;color:#27ae60;font-weight:bold\">{entry}</td>
-              <td style=\"padding:6px;background:#f2dede\"><b>Stop Loss</b></td>
-              <td style=\"padding:6px;color:#c0392b;font-weight:bold\">{stop}</td>
-            </tr>
-            <tr>
-              <td style=\"padding:6px;background:#f8f8f8\" colspan="2"><b>Risk to Stop</b></td>
-              <td style=\"padding:6px\" colspan="2">{risk_str} below entry</td>
-            </tr>
-            {congress_row}
-          </table>
-          <p style=\"font-style:italic;color:#555\">{analysis.summary}</p>
-          {self._narrative_html(stock)}
-          <ul style=\"padding-left:20px;color:#27ae60\">{strengths_html}</ul>
-          {risks_section}
-          {canslim_section}
-          {self._svg_chart(stock.price_history, score_color)}
-          <p style=\"color:#aaa;font-size:0.8em;margin-top:24px\">{date.today().isoformat()} &mdash; Momentum Scanner</p>
-        </body></html>
-        """
+        vol_color, sepa_color, verdict_bg, verdict_border = self._narrative_colors(
+            stock
+        )
+
+        return email_templates.get_template("alert.html").render(
+            stock=stock,
+            analysis=analysis,
+            trigger=trigger,
+            score_color=score_color,
+            strengths=analysis.strengths,
+            risks=analysis.risks,
+            entry=entry,
+            stop=stop,
+            risk_str=risk_str,
+            congress=congress,
+            congress_net_color=congress_net_color,
+            narrative=self._breakout_narrative(stock),
+            vol_color=vol_color,
+            sepa_color=sepa_color,
+            verdict_bg=verdict_bg,
+            verdict_border=verdict_border,
+            svg_chart=self._svg_chart(stock.price_history, score_color),
+            today=date.today().isoformat(),
+        )
 
     @staticmethod
     def _svg_chart(prices: list[float], line_color: str = "#2980b9") -> str:
@@ -563,9 +546,11 @@ class AlertAgent(Agent):
             f"</svg>"
         )
 
-    def _narrative_html(self, stock: StockRecord) -> str:
-        """Render breakout narrative as a styled HTML section."""
-        n = self._breakout_narrative(stock)
+    @staticmethod
+    def _narrative_colors(stock: StockRecord) -> tuple[str, str, str, str]:
+        """Return (vol_color, sepa_color, verdict_bg, verdict_border) for the
+        breakout-assessment box rendered in ``alert.html``.
+        """
         rv = stock.rel_volume
         vol_color = "#27ae60" if rv >= 1.5 else "#f39c12" if rv >= 1.0 else "#e74c3c"
 
@@ -596,30 +581,7 @@ class AlertAgent(Agent):
             if score >= 7
             else "#e74c3c"
         )
-
-        def _row(label: str, text: str, color: str = "#333") -> str:
-            return (
-                f"<tr><td style='padding:5px 8px;background:#f8f8f8;font-weight:600;"
-                f"width:90px;font-size:0.82em;color:#555;vertical-align:top'>{label}</td>"
-                f"<td style='padding:5px 8px;color:{color};font-size:0.84em'>{text}</td></tr>"
-            )
-
-        return f"""
-        <div style="margin:16px 0">
-          <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;
-                      letter-spacing:0.06em;color:#888;margin-bottom:6px">Breakout Assessment</div>
-          <table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-radius:4px">
-            {_row("Volume", n["volume"], vol_color)}
-            {_row("SEPA", n["sepa"], sepa_color)}
-            {_row("CANSLIM", n["canslim"])}
-            {_row("Momentum", n["momentum"])}
-          </table>
-          <div style="margin-top:8px;padding:10px 14px;background:{verdict_bg};
-                      border-left:4px solid {verdict_border};border-radius:0 4px 4px 0;
-                      font-weight:700;font-size:0.88em">
-            {n["verdict"]}
-          </div>
-        </div>"""
+        return vol_color, sepa_color, verdict_bg, verdict_border
 
     @staticmethod
     def _stop_loss_narrative(
@@ -803,13 +765,6 @@ class AlertAgent(Agent):
         verdict_bg = "#f8d7da" if "NOW" in n["verdict"] else "#fff3cd"
         verdict_border = "#e74c3c" if "NOW" in n["verdict"] else "#f39c12"
 
-        def _row(label: str, text: str, color: str = "#333") -> str:
-            return (
-                f"<tr><td style='padding:5px 8px;background:#f8f8f8;font-weight:600;"
-                f"width:90px;font-size:0.82em;color:#555;vertical-align:top'>{label}</td>"
-                f"<td style='padding:5px 8px;color:{color};font-size:0.84em'>{text}</td></tr>"
-            )
-
         rv = stock.rel_volume if stock else None
         vol_color = (
             "#e74c3c"
@@ -828,52 +783,21 @@ class AlertAgent(Agent):
             else "#27ae60"
         )
 
-        return f"""
-        <html><body style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px">
-          <div style="background:#c0392b;color:white;padding:10px 16px;border-radius:4px;
-                      font-weight:bold;margin-bottom:16px;font-size:0.95em">
-            &#9888; STOP LOSS HIT: {pos.ticker}
-          </div>
-          <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
-            <tr>
-              <td style="padding:6px;background:#f8f8f8"><b>Ticker</b></td>
-              <td style="padding:6px">{pos.ticker}</td>
-              <td style="padding:6px;background:#f8f8f8"><b>Shares</b></td>
-              <td style="padding:6px">{pos.shares}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px;background:#f8f8f8"><b>Current Price</b></td>
-              <td style="padding:6px;font-weight:bold">${price:.2f}</td>
-              <td style="padding:6px;background:#f8f8f8"><b>Stop Loss</b></td>
-              <td style="padding:6px;color:#c0392b;font-weight:bold">${stop:.2f}</td>
-            </tr>
-            <tr>
-              <td style="padding:6px;background:#f8f8f8"><b>Avg Cost</b></td>
-              <td style="padding:6px">${pos.avg_cost:.2f}</td>
-              <td style="padding:6px;background:#f8f8f8"><b>Unrealised P&amp;L</b></td>
-              <td style="padding:6px;color:{pnl_color};font-weight:bold">{pnl_str} ({pnl_pct_str})</td>
-            </tr>
-          </table>
-          <div style="margin:16px 0">
-            <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;
-                        letter-spacing:0.06em;color:#888;margin-bottom:6px">Situation Assessment</div>
-            <table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-radius:4px">
-              {_row("Stop", n["stop"], "#c0392b")}
-              {_row("P&amp;L", n["pnl"])}
-              {_row("Volume", n["volume"], vol_color)}
-              {_row("Trend", n["trend"], trend_color)}
-              {_row("CANSLIM", n["canslim"])}
-            </table>
-            <div style="margin-top:8px;padding:10px 14px;background:{verdict_bg};
-                        border-left:4px solid {verdict_border};border-radius:0 4px 4px 0;
-                        font-weight:700;font-size:0.88em">
-              {n["verdict"]}
-            </div>
-          </div>
-          <p style="color:#aaa;font-size:0.8em;margin-top:24px">
-            {date.today().isoformat()} &mdash; Momentum Scanner
-          </p>
-        </body></html>"""
+        return email_templates.get_template("stop_loss.html").render(
+            pos=pos,
+            price_str=f"{price:.2f}",
+            stop_str=f"{stop:.2f}",
+            avg_cost_str=f"{pos.avg_cost:.2f}",
+            pnl_str=pnl_str,
+            pnl_pct_str=pnl_pct_str,
+            pnl_color=pnl_color,
+            vol_color=vol_color,
+            trend_color=trend_color,
+            verdict_bg=verdict_bg,
+            verdict_border=verdict_border,
+            n=n,
+            today=date.today().isoformat(),
+        )
 
     def check_portfolio_stops(
         self,
@@ -1173,14 +1097,19 @@ class AlertAgent(Agent):
         breaking_out = [(s, t) for s, t in strong_buys if classify_alert(s).trigger]
         approaching = [(s, t) for s, t in strong_buys if not classify_alert(s).trigger]
 
-        # A one-line legend explaining the surfaced -> tracked -> entry-reached
-        # pipeline, shown once when there is any alert content.
-        if self._sell_alerts or watched_count or strong_buys:
-            text_parts.append(
-                "\n\nHOW TO READ: setups are surfaced (Breaking Out now / "
-                "Approaching entry), tracked, then flagged 'Entry Reached' once "
-                "price crosses the pivot. Technical signals, not advice."
-            )
+        # Whether there's any alert content this run — same condition that
+        # previously gated the "How to read" legend (#163); now decides
+        # whether the CTA lists section guidance or shows the neutral
+        # fallback.
+        cta_active = bool(self._sell_alerts or watched_count or strong_buys)
+        if cta_active:
+            cta_lines = ["\n\nHOW TO USE THIS EMAIL"]
+            for icon, heading, _color, desc in _CTA_GROUPS:
+                cta_lines.append(f"  {icon} {heading.upper()}: {desc}")
+            cta_lines.append(f"  {_CTA_NOT_ADVICE}")
+            text_parts.append("\n".join(cta_lines))
+        else:
+            text_parts.append(f"\n\n{_CTA_NO_ALERTS}\n{_CTA_NOT_ADVICE}")
 
         if self._sell_alerts:
             text_parts.append("\n\n*** SELL / STOP LOSS (held) ***\n")
@@ -1189,22 +1118,17 @@ class AlertAgent(Agent):
                 text_parts.append(self._format_stop_loss_text(pos, stock, n))
                 text_parts.append("\n" + "-" * 40)
 
-        if entry_triggered:
-            text_parts.append(
-                "\n\n*** ENTRY REACHED — tracked setup hit its pivot ***\n"
-            )
-            for ticker, current, entry in entry_triggered:
-                text_parts.append(
-                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}"
-                )
-
         if watched_stops:
             text_parts.append("\n\n*** TRACKED SETUP — STOPPED OUT ***\n")
             for ticker, current, stop in watched_stops:
                 text_parts.append(f"  {ticker}: ${current:.2f} hit stop ${stop:.2f}")
 
-        if breaking_out:
-            text_parts.append("\n\n*** BREAKING OUT NOW ***\n")
+        if entry_triggered or breaking_out:
+            text_parts.append("\n\n*** BUY ***\n")
+            for ticker, current, entry in entry_triggered:
+                text_parts.append(
+                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}"
+                )
             for stock, trigger in breaking_out:
                 text_parts.append(self.format_alert_text(stock, trigger))
                 text_parts.append("\n" + "-" * 40)
@@ -1222,8 +1146,8 @@ class AlertAgent(Agent):
 
         text_body = "\n".join(text_parts)
 
-        # ── Portfolio snapshot (HTML) ───────────────────────────────────────
-        snapshot_html = ""
+        # ── Portfolio snapshot (view model) ─────────────────────────────────
+        snapshot: dict[str, Any] | None = None
         if positions:
             if gbp_totals is not None:
                 total_value, total_cost, total_pnl = gbp_totals
@@ -1232,163 +1156,75 @@ class AlertAgent(Agent):
                 total_cost = sum(p.total_cost for p in positions)
                 total_pnl = total_value - total_cost
             pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
-            pnl_color = "#27ae60" if total_pnl >= 0 else "#c0392b"
-            rows_html = "".join(
-                f"<tr>"
-                f"<td style='padding:5px 8px;font-weight:700'>{p.ticker}</td>"
-                f"<td style='padding:5px 8px;text-align:right'>{p.shares:g}</td>"
-                f"<td style='padding:5px 8px;text-align:right'>"
-                f"{self._currency_symbol(p.price_currency)}{p.current_price or 0:.2f}</td>"
-                f"<td style='padding:5px 8px;text-align:right'>"
-                f"{self._currency_symbol(p.price_currency)}{p.current_value or 0:,.2f}</td>"
-                f"<td style='padding:5px 8px;text-align:right;color:{'#27ae60' if (p.unrealised_pnl or 0) >= 0 else '#c0392b'}'>"
-                f"{'%+.1f' % p.unrealised_pnl_pct}%</td>"
-                f"</tr>"
-                for p in positions
-                if p.current_value
-            )
-            snapshot_html = f"""
-            <div style="margin:16px 0;padding:14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px">
-              <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;margin-bottom:10px">
-                Portfolio Snapshot
-              </div>
-              <div style="display:flex;gap:24px;margin-bottom:10px;flex-wrap:wrap">
-                <div><div style="font-size:0.72em;color:#64748b">Market Value</div>
-                     <div style="font-weight:700;font-size:1.1em">£{total_value:,.2f}</div></div>
-                <div><div style="font-size:0.72em;color:#64748b">Cost Basis</div>
-                     <div style="font-weight:700;font-size:1.1em">£{total_cost:,.2f}</div></div>
-                <div><div style="font-size:0.72em;color:#64748b">Unrealised P&amp;L</div>
-                     <div style="font-weight:700;font-size:1.1em;color:{pnl_color}">£{total_pnl:+,.2f} ({pnl_pct:+.1f}%)</div></div>
-              </div>
-              <table style="width:100%;border-collapse:collapse;font-size:0.82em">
-                <tr style="background:#e2e8f0">
-                  <th style="padding:4px 8px;text-align:left">Ticker</th>
-                  <th style="padding:4px 8px;text-align:right">Shares</th>
-                  <th style="padding:4px 8px;text-align:right">Price</th>
-                  <th style="padding:4px 8px;text-align:right">Value</th>
-                  <th style="padding:4px 8px;text-align:right">P&amp;L %</th>
-                </tr>
-                {rows_html}
-              </table>
-            </div>"""
-
-        # ── Market narrative (HTML) ─────────────────────────────────────────
-        narrative_html = ""
-        if market_narrative:
-            bullets_html = "".join(f"<li>{b}</li>" for b in market_narrative.bullets)
-            sources_html = ""
-            if market_narrative.sources:
-                links_html = ", ".join(
-                    f'<a href="{s.url}" style="color:#4338ca">{s.label}</a>'
-                    if s.url
-                    else s.label
-                    for s in market_narrative.sources
-                )
-                sources_html = (
-                    '<div style="font-size:0.7em;color:#94a3b8;margin-top:4px">'
-                    f"Sources: {links_html}</div>"
-                )
-            narrative_html = f"""
-            <div style="margin:16px 0;padding:14px;background:#eef2ff;border:1px solid #c7d2fe;border-radius:6px">
-              <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;color:#4338ca;margin-bottom:6px">
-                Market Narrative
-              </div>
-              <div style="font-weight:700;margin-bottom:6px">{market_narrative.headline}</div>
-              <ul style="margin:0 0 6px 18px;padding:0;font-size:0.88em">{bullets_html}</ul>
-              <div style="font-size:0.72em;color:#64748b;font-style:italic">{market_narrative.not_advice}</div>
-              {sources_html}
-            </div>"""
+            # Blue for a portfolio gain, not the BUY-signal green (#168 review
+            # feedback) — "my portfolio is up" and "this is a buy signal"
+            # shouldn't share a colour.
+            pnl_color = "#2980b9" if total_pnl >= 0 else "#c0392b"
+            snapshot = {
+                "rows": [
+                    {
+                        "ticker": p.ticker,
+                        "shares": f"{p.shares:g}",
+                        "price": (
+                            f"{self._currency_symbol(p.price_currency)}"
+                            f"{p.current_price or 0:.2f}"
+                        ),
+                        "value": (
+                            f"{self._currency_symbol(p.price_currency)}"
+                            f"{p.current_value or 0:,.2f}"
+                        ),
+                        "pnl_pct": f"{p.unrealised_pnl_pct:+.1f}%",
+                        "pnl_color": (
+                            "#2980b9" if (p.unrealised_pnl or 0) >= 0 else "#c0392b"
+                        ),
+                    }
+                    for p in positions
+                    if p.current_value
+                ],
+                "total_value": f"{total_value:,.2f}",
+                "total_cost": f"{total_cost:,.2f}",
+                "total_pnl": f"{total_pnl:+,.2f}",
+                "pnl_pct": f"{pnl_pct:+.1f}%",
+                "pnl_color": pnl_color,
+            }
 
         # ── HTML body ──────────────────────────────────────────────────────
-        html_parts: list[str] = [
-            '<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">'
-            f'<h2 style="color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px">'
-            f"&#128200; Stock Scanner Summary &mdash; {today}</h2>"
-            + narrative_html
-            + snapshot_html
+        sell_cards = [
+            self._sell_card_context(pos, stock, self._stop_loss_narrative(pos, stock))
+            for pos, stock in self._sell_alerts
         ]
-
-        if self._sell_alerts or watched_count or strong_buys:
-            html_parts.append(
-                '<div style="margin:12px 0;padding:8px 12px;background:#f8fafc;'
-                "border:1px solid #e2e8f0;border-radius:6px;font-size:0.78em;"
-                'color:#64748b">'
-                "<strong>How to read:</strong> setups are surfaced "
-                "(<em>Breaking out now</em> / <em>Approaching entry</em>), "
-                "tracked, then flagged <em>Entry reached</em> once price crosses "
-                "the pivot. Technical signals, not advice.</div>"
-            )
-
-        if self._sell_alerts:
-            html_parts.append(
-                '<div style="margin:20px 0">'
-                '<h3 style="color:#c0392b;margin-bottom:12px">'
-                "&#9888; SELL / STOP LOSS (held)</h3>"
-            )
-            for pos, stock in self._sell_alerts:
-                n = self._stop_loss_narrative(pos, stock)
-                html_parts.append(self._sell_card_html(pos, stock, n))
-            html_parts.append("</div>")
-
-        if entry_triggered:
-            html_parts.append(
-                '<div style="margin:20px 0">'
-                '<h3 style="color:#27ae60;margin-bottom:12px">'
-                "&#9889; ENTRY REACHED &mdash; tracked setup hit its pivot</h3>"
-            )
-            for ticker, current, entry in entry_triggered:
-                html_parts.append(self._watched_row_html(ticker, current, entry))
-            html_parts.append("</div>")
-
-        if watched_stops:
-            html_parts.append(
-                '<div style="margin:20px 0">'
-                '<h3 style="color:#c0392b;margin-bottom:12px">'
-                "&#9888; TRACKED SETUP &mdash; STOPPED OUT</h3>"
-            )
-            for ticker, current, stop in watched_stops:
-                html_parts.append(
-                    self._watched_row_html(ticker, current, stop, stop=True)
-                )
-            html_parts.append("</div>")
-
-        if breaking_out:
-            html_parts.append(
-                '<div style="margin:20px 0">'
-                '<h3 style="color:#27ae60;margin-bottom:12px">'
-                "&#9889; BREAKING OUT NOW</h3>"
-            )
-            for stock, trigger in breaking_out:
-                html_parts.append(self._buy_card_html(stock, trigger))
-            html_parts.append("</div>")
-
-        if approaching:
-            html_parts.append(
-                '<div style="margin:20px 0">'
-                '<h3 style="color:#b45309;margin-bottom:12px">'
-                "&#128064; APPROACHING ENTRY (watch &mdash; not yet at pivot)</h3>"
-            )
-            for stock, trigger in approaching:
-                html_parts.append(self._buy_card_html(stock, trigger))
-            html_parts.append("</div>")
-
+        watched_stop_rows = [
+            self._watched_row_ctx(t, c, lvl, stop=True) for t, c, lvl in watched_stops
+        ]
+        entry_triggered_rows = [
+            self._watched_row_ctx(t, c, lvl, stop=False)
+            for t, c, lvl in entry_triggered
+        ]
+        breaking_out_cards = [
+            self._buy_card_context(stock, trigger) for stock, trigger in breaking_out
+        ]
+        approaching_cards = [
+            self._buy_card_context(stock, trigger) for stock, trigger in approaching
+        ]
         low_conviction_count = len(self._buy_alerts) - len(strong_buys)
-        if low_conviction_count:
-            html_parts.append(
-                f'<p style="color:#94a3b8;font-size:0.8em;font-style:italic">'
-                f"{low_conviction_count} low-conviction breakout(s) suppressed.</p>"
-            )
+        any_alerts = bool(self._sell_alerts or strong_buys or watched_count)
 
-        if not self._sell_alerts and not strong_buys and not watched_count:
-            html_parts.append(
-                '<p style="color:#64748b;font-style:italic">No actionable alerts this run.</p>'
-            )
-
-        html_parts.append(
-            f'<p style="color:#aaa;font-size:0.8em;margin-top:24px">'
-            f"{today} &mdash; Momentum Scanner</p></body></html>"
+        html_body = email_templates.get_template("summary.html").render(
+            today=today,
+            narrative=market_narrative,
+            snapshot=snapshot,
+            cta_active=cta_active,
+            cta_groups=_CTA_GROUPS,
+            cta_not_advice=_CTA_NOT_ADVICE,
+            cta_no_alerts=_CTA_NO_ALERTS,
+            sell_cards=sell_cards,
+            watched_stop_rows=watched_stop_rows,
+            entry_triggered_rows=entry_triggered_rows,
+            breaking_out_cards=breaking_out_cards,
+            approaching_cards=approaching_cards,
+            low_conviction_count=low_conviction_count,
+            any_alerts=any_alerts,
         )
-        html_body = "\n".join(html_parts)
 
         if not self.send_email(subject, html_body, text_body):
             return
@@ -1423,28 +1259,22 @@ class AlertAgent(Agent):
     def _yahoo_url(ticker: str) -> str:
         return f"https://finance.yahoo.com/quote/{ticker.replace('.', '-')}"
 
-    def _watched_row_html(
-        self, ticker: str, current: float, level: float, stop: bool = False
-    ) -> str:
-        """Compact HTML row for one watched-setup entry/stop signal (#81)."""
-        color = "#c0392b" if stop else "#27ae60"
-        label = "hit stop" if stop else "crossed entry"
-        bg = "#fff8f8" if stop else "#f8fff9"
-        border = "#f5c6cb" if stop else "#c3e6cb"
-        url = self._yahoo_url(ticker)
-        return (
-            f'<div style="border:1px solid {border};border-radius:6px;'
-            f'padding:10px 14px;margin-bottom:10px;background:{bg}">'
-            f'<a href="{url}" style="color:{color};text-decoration:none;'
-            f'font-weight:700" target="_blank">{ticker}</a>'
-            f'<span style="color:#555;font-size:0.88em;margin-left:8px">'
-            f"${current:.2f} {label} ${level:.2f}</span></div>"
-        )
+    def _watched_row_ctx(
+        self, ticker: str, current: float, level: float, stop: bool
+    ) -> dict[str, Any]:
+        """Render context for one watched-setup entry/stop signal row (#81)."""
+        return {
+            "ticker": ticker,
+            "current_str": f"{current:.2f}",
+            "level_str": f"{level:.2f}",
+            "url": self._yahoo_url(ticker),
+            "stop": stop,
+        }
 
-    def _sell_card_html(
+    def _sell_card_context(
         self, pos: Position, stock: StockRecord | None, n: dict[str, str]
-    ) -> str:
-        """Compact HTML card for one stop-loss hit."""
+    ) -> dict[str, Any]:
+        """Render context shared by the digest's sell cards."""
         price = pos.current_price or 0.0
         stop = pos.stop_loss or 0.0
         pnl = pos.unrealised_pnl
@@ -1454,42 +1284,21 @@ class AlertAgent(Agent):
         pnl_color = "#c0392b" if (pnl or 0) < 0 else "#27ae60"
         verdict_bg = "#f8d7da" if "NOW" in n["verdict"] else "#fff3cd"
         verdict_border = "#e74c3c" if "NOW" in n["verdict"] else "#f39c12"
+        return {
+            "pos": pos,
+            "url": self._yahoo_url(pos.ticker),
+            "stop_str": f"{stop:.2f}",
+            "price_str": f"{price:.2f}",
+            "pnl_str": pnl_str,
+            "pnl_pct_str": pnl_pct_str,
+            "pnl_color": pnl_color,
+            "verdict_bg": verdict_bg,
+            "verdict_border": verdict_border,
+            "n": n,
+        }
 
-        url = self._yahoo_url(pos.ticker)
-        return f"""
-        <div style="border:1px solid #f5c6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#fff8f8">
-          <div style="font-weight:700;font-size:1em;color:#c0392b;margin-bottom:8px">
-            &#9888; <a href="{url}" style="color:#c0392b;text-decoration:none" target="_blank">{pos.ticker}</a> &mdash; Stop ${stop:.2f} | Price ${price:.2f}
-            <span style="font-weight:400;font-size:0.85em;color:{pnl_color};margin-left:8px">
-              P&amp;L {pnl_str} ({pnl_pct_str})
-            </span>
-          </div>
-          <table style="width:100%;border-collapse:collapse;font-size:0.82em">
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;width:80px;color:#555;vertical-align:top">Stop</td>
-              <td style="padding:4px 6px;color:#c0392b">{n["stop"]}</td>
-            </tr>
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">P&amp;L</td>
-              <td style="padding:4px 6px">{n["pnl"]}</td>
-            </tr>
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">Volume</td>
-              <td style="padding:4px 6px">{n["volume"]}</td>
-            </tr>
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">Trend</td>
-              <td style="padding:4px 6px">{n["trend"]}</td>
-            </tr>
-          </table>
-          <div style="margin-top:8px;padding:8px 12px;background:{verdict_bg};
-                      border-left:3px solid {verdict_border};font-weight:700;font-size:0.85em">
-            {n["verdict"]}
-          </div>
-        </div>"""
-
-    def _buy_card_html(self, stock: StockRecord, trigger: str) -> str:
-        """Compact HTML card for one breakout alert."""
+    def _buy_card_context(self, stock: StockRecord, trigger: str) -> dict[str, Any]:
+        """Render context shared by ``_buy_card_html`` and the digest."""
         a = stock.analysis
         assert a is not None
         score_color = (
@@ -1502,7 +1311,6 @@ class AlertAgent(Agent):
             risk_str = f"{risk_pct:.1f}%"
         else:
             risk_str = "—"
-        n = self._breakout_narrative(stock)
         verdict_bg = (
             "#d4edda"
             if a.score >= 8 and stock.rel_volume >= 1.5
@@ -1517,61 +1325,33 @@ class AlertAgent(Agent):
             if a.score >= 7
             else "#e74c3c"
         )
-        url = self._yahoo_url(stock.ticker)
-
         congress = self._congress_summary(stock)
-        congress_line = ""
+        congress_net_color = "#555"
         if congress:
             net = (stock.congress_buys or 0) - (stock.congress_sells or 0)
-            net_color = "#27ae60" if net > 0 else "#c0392b" if net < 0 else "#555"
-            congress_line = (
-                f'<div style="font-size:0.82em;color:{net_color};margin-bottom:8px">'
-                f"{congress}</div>"
+            congress_net_color = (
+                "#27ae60" if net > 0 else "#c0392b" if net < 0 else "#555"
             )
+        return {
+            "stock": stock,
+            "trigger": trigger,
+            "url": self._yahoo_url(stock.ticker),
+            "score_color": score_color,
+            "entry": entry,
+            "stop": stop,
+            "risk_str": risk_str,
+            "n": self._breakout_narrative(stock),
+            "verdict_bg": verdict_bg,
+            "verdict_border": verdict_border,
+            "congress": congress,
+            "congress_net_color": congress_net_color,
+            "svg_chart": self._svg_chart(stock.price_history, score_color),
+        }
 
-        return f"""
-        <div style="border:1px solid #c3e6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#f8fff9">
-          <div style="font-weight:700;font-size:1em;color:#1e3a5f;margin-bottom:4px">
-            &#9889; <a href="{url}" style="color:#1e3a5f;text-decoration:none;font-weight:800" target="_blank">{stock.ticker}</a>
-            <span style="color:{score_color};font-size:0.88em;margin-left:6px">
-              Score {a.score}/10 &mdash; {a.stage}
-            </span>
-            <span style="background:#1e3a5f;color:white;padding:2px 8px;border-radius:3px;
-                         font-size:0.75em;margin-left:8px">{trigger}</span>
-          </div>
-          <div style="font-size:0.82em;color:#555;margin-bottom:8px">
-            Price <b>${stock.price}</b> &nbsp;|&nbsp;
-            Entry <b>{entry}</b> &nbsp;|&nbsp;
-            Stop <b>{stop}</b> &nbsp;|&nbsp;
-            Risk <b>{risk_str}</b> &nbsp;|&nbsp;
-            RSI <b>{stock.rsi14}</b> &nbsp;|&nbsp;
-            RelVol <b>{stock.rel_volume}x</b>
-          </div>
-          {congress_line}
-          <table style="width:100%;border-collapse:collapse;font-size:0.82em">
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;width:80px;color:#555;vertical-align:top">Volume</td>
-              <td style="padding:4px 6px">{n["volume"]}</td>
-            </tr>
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">SEPA</td>
-              <td style="padding:4px 6px">{n["sepa"]}</td>
-            </tr>
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">CANSLIM</td>
-              <td style="padding:4px 6px">{n["canslim"]}</td>
-            </tr>
-            <tr>
-              <td style="padding:4px 6px;background:#f8f8f8;font-weight:600;color:#555;vertical-align:top">Momentum</td>
-              <td style="padding:4px 6px">{n["momentum"]}</td>
-            </tr>
-          </table>
-          <div style="margin-top:8px;padding:8px 12px;background:{verdict_bg};
-                      border-left:3px solid {verdict_border};font-weight:700;font-size:0.85em">
-            {n["verdict"]}
-          </div>
-          {self._svg_chart(stock.price_history, score_color)}
-        </div>"""
+    def _buy_card_html(self, stock: StockRecord, trigger: str) -> str:
+        """Compact HTML card for one breakout alert."""
+        ctx = self._buy_card_context(stock, trigger)
+        return get_macro("_buy_card.html", "buy_card")(**ctx)
 
     def send_email(self, subject: str, html_body: str, text_body: str) -> bool:
         """Send one email; return True only if it was actually dispatched.

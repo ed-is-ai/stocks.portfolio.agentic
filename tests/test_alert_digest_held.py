@@ -11,7 +11,14 @@ from unittest.mock import MagicMock, patch
 from app.agents.alert.alert_agent import AlertAgent
 from app.core.alerting import classify_alert
 from app.repositories.notifications_repo import build_notifications_repository
-from app.schemas import EmailConfig, Position, StockAnalysis, StockRecord, StockScan
+from app.schemas import (
+    EmailConfig,
+    MarketNarrative,
+    Position,
+    StockAnalysis,
+    StockRecord,
+    StockScan,
+)
 
 # A SEPA template with 6/8 checks true — enough to clear the digest's
 # LOW-CONVICTION filter (needs sepa_count >= 5) so a setup actually renders.
@@ -155,7 +162,8 @@ def test_watched_signals_appear_in_digest(mock_smtp, tmp_path) -> None:
     with patch.object(AlertAgent, "send_email", side_effect=_capture):
         agent.send_summary_email(positions=[_position("AMD", 175.0)])
 
-    assert "ENTRY REACHED" in captured["html"]
+    assert "BUY" in captured["html"]
+    assert "crossed entry" in captured["html"]
     assert "STOPPED OUT" in captured["html"]
     assert "NVDA" in captured["text"]
     assert "AMD" in captured["text"]
@@ -192,13 +200,13 @@ def test_buy_alerts_split_into_breaking_out_and_approaching(mock_smtp, tmp_path)
         agent.send_summary_email()
 
     for body in (captured["html"], captured["text"]):
-        assert "BREAKING OUT NOW" in body
+        assert "BUY" in body
         assert "APPROACHING ENTRY" in body
-        # Breakout section precedes the approaching one.
-        assert body.index("BREAKING OUT NOW") < body.index("APPROACHING ENTRY")
-    # Legend is present in both renderings.
-    assert "How to read" in captured["html"]
-    assert "HOW TO READ" in captured["text"]
+        # Breaking-out/entry-reached (merged into BUY, #168) precedes approaching.
+        assert body.index("BUY") < body.index("APPROACHING ENTRY")
+    # CTA is present in both renderings.
+    assert "How To Use This Email" in captured["html"]
+    assert "HOW TO USE THIS EMAIL" in captured["text"]
     assert "BRKO" in captured["text"] and "WTCH" in captured["text"]
 
 
@@ -228,7 +236,7 @@ def test_non_held_watched_stop_is_suppressed(mock_smtp, tmp_path) -> None:
     with patch.object(AlertAgent, "send_email", side_effect=_capture):
         agent.send_summary_email(positions=[])
 
-    assert "ENTRY REACHED" in captured["html"]
+    assert "BUY" in captured["html"]
     assert "STOPPED OUT" not in captured["html"]
 
     events = {i.event_type for i in build_notifications_repository().recent()}
@@ -238,6 +246,323 @@ def test_non_held_watched_stop_is_suppressed(mock_smtp, tmp_path) -> None:
     # Bookkeeping retained: AMD left the watchlist (row marked "stopped").
     watching = {ticker for _rowid, ticker, _entry, _stop in agent._alerts.watching()}
     assert "AMD" not in watching
+
+
+# ── CTA + section layout (#168) ─────────────────────────────────────────────
+
+
+@patch("smtplib.SMTP")
+def test_cta_sits_between_narrative_snapshot_and_sell_section(
+    mock_smtp, tmp_path
+) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    pos = _position("TSLA", 89.0, stop_loss=90.0, entry_price=100.0)
+    agent.check_portfolio_stops([pos], {})
+    narrative = MarketNarrative(
+        headline="Breadth improving", bullets=["Small-caps leading"]
+    )
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[pos], market_narrative=narrative)
+
+    html = captured["html"]
+    assert (
+        html.index("Stock Scanner Summary")
+        < html.index("Market Narrative")
+        < html.index("How To Use This Email")
+        < html.index("SELL / STOP LOSS")
+    )
+
+    text = captured["text"]
+    assert (
+        text.index("Stock Scanner Summary")
+        < text.index("MARKET NARRATIVE")
+        < text.index("HOW TO USE THIS EMAIL")
+        < text.index("SELL / STOP LOSS")
+    )
+
+
+@patch("smtplib.SMTP")
+def test_cta_group_order_matches_sections(mock_smtp, tmp_path) -> None:
+    # SELL -> STOPPED OUT -> BUY -> WATCH, both in the CTA and in the actual
+    # sections it precedes (#168 review feedback).
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    pos = _position("TSLA", 89.0, stop_loss=90.0, entry_price=100.0)
+    agent.check_portfolio_stops([pos], {})
+    agent._alerts.record(
+        "NVDA", 8, "Stage 2", "setup", entry_price=100.0, stop_loss=90.0
+    )
+    agent.check_positions([_stock("NVDA", 105.0)])  # NVDA -> entry_triggered
+    approaching = _buy_record("WTCH", breakout=False)
+    agent._buy_alerts = [(approaching, classify_alert(approaching).label or "")]
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[pos])
+
+    # CTA's own group order, via description text unique to the CTA copy.
+    html = captured["html"]
+    assert (
+        html.index("review for exit")
+        < html.index("see the reason on each row below")
+        < html.index("wait for the trigger")
+    )
+    # The actual sections' order, via text unique to each real section.
+    assert (
+        html.index("(held)")
+        < html.index("crossed entry")
+        < html.index("APPROACHING ENTRY")
+    )
+
+    text = captured["text"]
+    assert (
+        text.index("review for exit")
+        < text.index("see the reason on each row below")
+        < text.index("wait for the trigger")
+    )
+    assert (
+        text.index("(held)")
+        < text.index("crossed entry")
+        < text.index("APPROACHING ENTRY")
+    )
+
+
+@patch("smtplib.SMTP")
+def test_entry_reached_and_breaking_out_merge_into_one_buy_section(
+    mock_smtp, tmp_path
+) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    agent._alerts.record(
+        "NVDA", 8, "Stage 2", "setup", entry_price=100.0, stop_loss=90.0
+    )
+    agent.check_positions([_stock("NVDA", 105.0)])  # -> entry_triggered
+    breakout = _buy_record("BRKO", breakout=True)
+    agent._buy_alerts = [(breakout, classify_alert(breakout).label or "")]
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email()
+
+    html = captured["html"]
+    text = captured["text"]
+    # CTA heading + the one merged section header, in each format.
+    assert html.count("BUY") == 2
+    assert text.count("BUY") == 2
+
+    for body in (html, text):
+        assert "ENTRY REACHED" not in body
+        assert "BREAKING OUT NOW" not in body
+        # Per-row detail survives the merge: the watched-row reason and the
+        # breakout's trigger label are both still present underneath.
+        assert "crossed entry" in body
+        assert "NVDA" in body
+        assert "BRKO" in body
+
+
+@patch("smtplib.SMTP")
+def test_stopped_out_moves_next_to_sell(mock_smtp, tmp_path) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    pos = _position("TSLA", 89.0, stop_loss=90.0, entry_price=100.0)
+    agent.check_portfolio_stops([pos], {})
+    agent._alerts.record(
+        "AMD", 8, "Stage 2", "setup", entry_price=200.0, stop_loss=180.0
+    )
+    agent.check_positions([_stock("AMD", 175.0)])  # AMD held & stopped out
+    breakout = _buy_record("BRKO", breakout=True)
+    agent._buy_alerts = [(breakout, classify_alert(breakout).label or "")]
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[pos, _position("AMD", 175.0)])
+
+    for body in (captured["html"], captured["text"]):
+        assert body.index("(held)") < body.index("STOPPED OUT") < body.index("BRKO")
+
+
+@patch("smtplib.SMTP")
+def test_cta_folds_stopped_out_into_sell_group_no_extra_group(
+    mock_smtp, tmp_path
+) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    agent._alerts.record(
+        "AMD", 8, "Stage 2", "setup", entry_price=200.0, stop_loss=180.0
+    )
+    agent.check_positions([_stock("AMD", 175.0)])
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[_position("AMD", 175.0)])
+
+    html = captured["html"]
+    assert "How to read" not in html
+    assert "How To Use This Email" in html
+    text = captured["text"]
+    assert "HOW TO READ" not in text
+    assert "HOW TO USE THIS EMAIL" in text
+
+    # Exactly one SELL/stop-loss CTA group — stopped-out isn't a 4th line.
+    assert html.count("review for exit") == 1
+    assert text.count("review for exit") == 1
+
+
+def test_cta_no_alerts_fallback(tmp_path) -> None:
+    agent = _agent(tmp_path)
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email()
+
+    for body in (captured["html"], captured["text"]):
+        assert "No actionable tickers today" in body
+        assert "Informational only" in body
+    assert "How To Use This Email" not in captured["html"]
+    assert "HOW TO USE THIS EMAIL" not in captured["text"]
+
+
+@patch("smtplib.SMTP")
+def test_narrative_and_snapshot_render_as_two_columns(mock_smtp, tmp_path) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    narrative = MarketNarrative(headline="Breadth improving", bullets=["Leaders up"])
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(
+            positions=[_position("NVDA", 110.0)], market_narrative=narrative
+        )
+
+    html = captured["html"]
+    assert "<table" in html
+    # The 2-column wrapper table opens before either card's content, since
+    # both cards are nested inside its <td> cells.
+    assert (
+        html.index("<table")
+        < html.index("Market Narrative")
+        < html.index("Portfolio Snapshot")
+    )
+    # Plain-text has no notion of columns — narrative still precedes snapshot
+    # sequentially, with no table markup.
+    text = captured["text"]
+    assert "<table" not in text
+    assert text.index("MARKET NARRATIVE") < text.index("PORTFOLIO SNAPSHOT")
+
+
+@patch("smtplib.SMTP")
+def test_snapshot_positive_pnl_is_blue_not_green(mock_smtp, tmp_path) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[_position("NVDA", 110.0)])
+
+    snapshot_start = captured["html"].index("Portfolio Snapshot")
+    snapshot_end = captured["html"].index("</table>", snapshot_start) + len("</table>")
+    snapshot_html = captured["html"][snapshot_start:snapshot_end]
+    assert "#2980b9" in snapshot_html
+    assert "#27ae60" not in snapshot_html
+
+
+@patch("smtplib.SMTP")
+def test_cta_html_collapsed_by_default_text_always_expanded(
+    mock_smtp, tmp_path
+) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    pos = _position("TSLA", 89.0, stop_loss=90.0, entry_price=100.0)
+    agent.check_portfolio_stops([pos], {})
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[pos])
+
+    html = captured["html"]
+    assert "<details" in html
+    # No `open` attribute -> collapsed by default.
+    details_tag = html[html.index("<details") : html.index(">", html.index("<details"))]
+    assert "open" not in details_tag
+    assert "<summary" in html
+    assert "How To Use This Email" in html
+
+    # Plain-text has no collapse concept; content is unconditionally present.
+    text = captured["text"]
+    assert "<details" not in text
+    assert "HOW TO USE THIS EMAIL" in text
+
+
+def test_cta_no_alerts_fallback_html_not_collapsible(tmp_path) -> None:
+    agent = _agent(tmp_path)
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email()
+
+    # Nothing to hide on a quiet day -> plain div, not a <details> disclosure.
+    assert "<details" not in captured["html"]
 
 
 # ── Held-position critical events → immediate individual email ─────────────

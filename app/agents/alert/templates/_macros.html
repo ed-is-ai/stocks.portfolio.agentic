@@ -1,0 +1,11 @@
+{# Shared macros for AlertAgent's email templates. #}
+
+{% macro canslim_bar(val) -%}
+{%- for _ in range(val) -%}&#9632;{%- endfor -%}
+{%- for _ in range(2 - val) -%}&#9633;{%- endfor -%}
+{%- endmacro %}
+
+{% macro assessment_row(label, text, color="#333") -%}
+<tr><td style="padding:5px 8px;background:#f8f8f8;font-weight:600;width:90px;font-size:0.82em;color:#555;vertical-align:top">{{ label }}</td>
+    <td style="padding:5px 8px;color:{{ color }};font-size:0.84em">{{ text }}</td></tr>
+{%- endmacro %}

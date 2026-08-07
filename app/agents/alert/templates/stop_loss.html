@@ -1,0 +1,46 @@
+{% import "_macros.html" as m %}
+<html><body style="font-family:Arial,sans-serif;max-width:560px;margin:auto;padding:20px">
+  <div style="background:#c0392b;color:white;padding:10px 16px;border-radius:4px;
+              font-weight:bold;margin-bottom:16px;font-size:0.95em">
+    &#9888; STOP LOSS HIT: {{ pos.ticker }}
+  </div>
+  <table style="width:100%;border-collapse:collapse;margin-bottom:16px">
+    <tr>
+      <td style="padding:6px;background:#f8f8f8"><b>Ticker</b></td>
+      <td style="padding:6px">{{ pos.ticker }}</td>
+      <td style="padding:6px;background:#f8f8f8"><b>Shares</b></td>
+      <td style="padding:6px">{{ pos.shares }}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px;background:#f8f8f8"><b>Current Price</b></td>
+      <td style="padding:6px;font-weight:bold">${{ price_str }}</td>
+      <td style="padding:6px;background:#f8f8f8"><b>Stop Loss</b></td>
+      <td style="padding:6px;color:#c0392b;font-weight:bold">${{ stop_str }}</td>
+    </tr>
+    <tr>
+      <td style="padding:6px;background:#f8f8f8"><b>Avg Cost</b></td>
+      <td style="padding:6px">${{ avg_cost_str }}</td>
+      <td style="padding:6px;background:#f8f8f8"><b>Unrealised P&amp;L</b></td>
+      <td style="padding:6px;color:{{ pnl_color }};font-weight:bold">{{ pnl_str }} ({{ pnl_pct_str }})</td>
+    </tr>
+  </table>
+  <div style="margin:16px 0">
+    <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;
+                letter-spacing:0.06em;color:#888;margin-bottom:6px">Situation Assessment</div>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #e0e0e0;border-radius:4px">
+      {{ m.assessment_row("Stop", n.stop, "#c0392b") }}
+      {{ m.assessment_row("P&L", n.pnl) }}
+      {{ m.assessment_row("Volume", n.volume, vol_color) }}
+      {{ m.assessment_row("Trend", n.trend, trend_color) }}
+      {{ m.assessment_row("CANSLIM", n.canslim) }}
+    </table>
+    <div style="margin-top:8px;padding:10px 14px;background:{{ verdict_bg }};
+                border-left:4px solid {{ verdict_border }};border-radius:0 4px 4px 0;
+                font-weight:700;font-size:0.88em">
+      {{ n.verdict }}
+    </div>
+  </div>
+  <p style="color:#aaa;font-size:0.8em;margin-top:24px">
+    {{ today }} &mdash; Momentum Scanner
+  </p>
+</body></html>

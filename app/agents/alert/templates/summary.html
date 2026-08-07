@@ -1,0 +1,67 @@
+{% import "_cta.html" as cta %}
+{% import "_snapshot.html" as snap %}
+{% import "_market_narrative.html" as mn %}
+{% import "_watched_row.html" as wr %}
+{% import "_sell_card.html" as sc %}
+{% import "_buy_card.html" as bc %}
+<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">
+<h2 style="color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px">
+  &#128200; Stock Scanner Summary &mdash; {{ today }}</h2>
+
+{% if narrative and snapshot %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border-collapse:collapse">
+  <tr>
+    <td valign="top" style="width:50%;padding-right:8px">{{ mn.market_narrative_card(narrative, margin="margin:0;") }}</td>
+    <td valign="top" style="width:50%;padding-left:8px">{{ snap.snapshot_card(snapshot.rows, snapshot.total_value, snapshot.total_cost, snapshot.total_pnl, snapshot.pnl_pct, snapshot.pnl_color, margin="margin:0;") }}</td>
+  </tr>
+</table>
+{% else %}
+{% if narrative %}{{ mn.market_narrative_card(narrative) }}{% endif %}
+{% if snapshot %}{{ snap.snapshot_card(snapshot.rows, snapshot.total_value, snapshot.total_cost, snapshot.total_pnl, snapshot.pnl_pct, snapshot.pnl_color) }}{% endif %}
+{% endif %}
+
+{% if cta_active %}
+{{ cta.cta_box(cta_groups, cta_not_advice) }}
+{% else %}
+{{ cta.no_alerts_box(cta_no_alerts, cta_not_advice) }}
+{% endif %}
+
+{% if sell_cards %}
+<div style="margin:20px 0">
+  <h3 style="color:#c0392b;margin-bottom:12px">&#9888; SELL / STOP LOSS (held)</h3>
+  {% for c in sell_cards %}{{ sc.sell_card(**c) }}{% endfor %}
+</div>
+{% endif %}
+
+{% if watched_stop_rows %}
+<div style="margin:20px 0">
+  <h3 style="color:#c0392b;margin-bottom:12px">&#9888; TRACKED SETUP &mdash; STOPPED OUT</h3>
+  {% for c in watched_stop_rows %}{{ wr.watched_row(**c) }}{% endfor %}
+</div>
+{% endif %}
+
+{% if entry_triggered_rows or breaking_out_cards %}
+<div style="margin:20px 0">
+  <h3 style="color:#27ae60;margin-bottom:12px">&#9889; BUY</h3>
+  {% for c in entry_triggered_rows %}{{ wr.watched_row(**c) }}{% endfor %}
+  {% for c in breaking_out_cards %}{{ bc.buy_card(**c) }}{% endfor %}
+</div>
+{% endif %}
+
+{% if approaching_cards %}
+<div style="margin:20px 0">
+  <h3 style="color:#b45309;margin-bottom:12px">&#128064; APPROACHING ENTRY (watch &mdash; not yet at pivot)</h3>
+  {% for c in approaching_cards %}{{ bc.buy_card(**c) }}{% endfor %}
+</div>
+{% endif %}
+
+{% if low_conviction_count %}
+<p style="color:#94a3b8;font-size:0.8em;font-style:italic">{{ low_conviction_count }} low-conviction breakout(s) suppressed.</p>
+{% endif %}
+
+{% if not any_alerts %}
+<p style="color:#64748b;font-style:italic">No actionable alerts this run.</p>
+{% endif %}
+
+<p style="color:#aaa;font-size:0.8em;margin-top:24px">{{ today }} &mdash; Momentum Scanner</p>
+</body></html>
