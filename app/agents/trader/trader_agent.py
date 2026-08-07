@@ -55,9 +55,11 @@ def _to_iso_date(value: str) -> str:
 
     Accepts the SIPP CSV's ``DD/MM/YYYY`` and already-ISO ``YYYY-MM-DD``.
     Unrecognized formats are logged and returned unchanged so a single odd
-    row never aborts an import.
+    row never aborts an import. BOM characters (which some provider exports
+    embed even mid-value, e.g. ``12/10/2﻿﻿020``) are stripped first
+    so a polluted date still parses (#166).
     """
-    value = value.strip()
+    value = value.replace("﻿", "").strip()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
         try:
             return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
@@ -582,10 +584,19 @@ class TraderAgent(Agent):
 
         with open(csv_path, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            fieldnames = reader.fieldnames or []
+            # Some provider exports prepend a run of BOM characters to the very
+            # first header cell (e.g. "﻿...﻿Date"). ``utf-8-sig``
+            # strips only one, so the first column key stays polluted and every
+            # ``row.get("Date")`` misses it — silently blanking the trade date
+            # (#166). Normalise the header names before reading rows so the
+            # value lookups use the clean column names.
+            reader.fieldnames = [
+                (h or "").replace("﻿", "").strip() for h in (reader.fieldnames or [])
+            ]
+            fieldnames = reader.fieldnames
             rows = list(reader)
 
-        present = {(h or "").replace("﻿", "").strip() for h in fieldnames}
+        present = set(fieldnames)
         missing = [c for c in REQUIRED_SIPP_COLUMNS if c not in present]
         if missing:
             raise SippImportError(

@@ -82,6 +82,38 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
     assert portfolio[0].shares == 10.0  # not 20.0
 
 
+def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None:
+    # Some provider exports prepend a run of BOM chars to the first header cell
+    # ("﻿...﻿Date"); utf-8-sig strips only one, so the Date column would
+    # be missed and every trade date stored blank (#166). The import must still
+    # read the date.
+    bom = "﻿" * 40
+    csv_text = (
+        f"{bom}Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,"
+        "Credit,Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp(csv_path)
+
+    trades = agent.get_trade_history()
+    assert len(trades) == 1
+    assert trades[0].ticker == "AAPL"
+    assert trades[0].date == "2024-02-01"  # not blank
+
+
+def test_to_iso_date_strips_embedded_bom() -> None:
+    # Some exports embed BOM chars mid-value (e.g. "12/10/2﻿﻿020"); the
+    # date must still parse rather than being stored as a polluted string (#166).
+    assert _to_iso_date("12/10/2﻿﻿﻿020") == "2020-10-12"
+    assert _to_iso_date("﻿2024-02-01") == "2024-02-01"
+
+
 def test_oversell_is_logged_and_clamped(tmp_path: Path, caplog) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
