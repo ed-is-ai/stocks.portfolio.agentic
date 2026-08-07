@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 _DB_PATH = TRADES_DB
 
+# Matches a leading run of BOM noise on a CSV header cell: either the real
+# BOM character (U+FEFF, left behind when a provider export stacks more than
+# one and ``utf-8-sig`` only strips the first) or the 3-character mojibake
+# "ï»¿" produced when a BOM gets decoded as Latin-1 and re-saved as UTF-8
+# (#171).
+_HEADER_BOM_NOISE_RE = re.compile(r"^(?:﻿|ï»¿)+")
+
 # Columns a SIPP CSV must carry for the import to make sense (Sedol optional).
 REQUIRED_SIPP_COLUMNS = (
     "Date",
@@ -584,14 +591,16 @@ class TraderAgent(Agent):
 
         with open(csv_path, encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            # Some provider exports prepend a run of BOM characters to the very
-            # first header cell (e.g. "﻿...﻿Date"). ``utf-8-sig``
-            # strips only one, so the first column key stays polluted and every
-            # ``row.get("Date")`` misses it — silently blanking the trade date
-            # (#166). Normalise the header names before reading rows so the
-            # value lookups use the clean column names.
+            # Some provider exports prepend a run of BOM noise to the very
+            # first header cell (e.g. "﻿...﻿Date" or "ï»¿...ï»¿Date").
+            # ``utf-8-sig`` strips only one real BOM, so the first column key
+            # stays polluted and every ``row.get("Date")`` misses it —
+            # silently blanking the trade date (#166, #171). Normalise the
+            # header names before reading rows so the value lookups use the
+            # clean column names.
             reader.fieldnames = [
-                (h or "").replace("﻿", "").strip() for h in (reader.fieldnames or [])
+                _HEADER_BOM_NOISE_RE.sub("", h or "").strip()
+                for h in (reader.fieldnames or [])
             ]
             fieldnames = reader.fieldnames
             rows = list(reader)

@@ -107,6 +107,33 @@ def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None
     assert trades[0].date == "2024-02-01"  # not blank
 
 
+def test_import_sipp_handles_mojibake_bom_in_first_header(tmp_path: Path) -> None:
+    # Some export pipelines decode a BOM as Latin-1 and re-save as UTF-8,
+    # turning it into the 3-character mojibake "ï»¿" stacked ahead of the
+    # first header cell ("ï»¿...ï»¿Date"). This is a different byte pattern
+    # from the real BOM character (U+FEFF) handled above and previously
+    # slipped past the header cleanup, causing the Date column to be
+    # reported as missing and the import rejected outright (#171).
+    bom = "ï»¿" * 25
+    csv_text = (
+        f"{bom}Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,"
+        "Credit,Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-AAPL-1,1000.00,,5000.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp(csv_path)
+
+    trades = agent.get_trade_history()
+    assert len(trades) == 1
+    assert trades[0].ticker == "AAPL"
+    assert trades[0].date == "2024-02-01"  # not blank, import not rejected
+
+
 def test_to_iso_date_strips_embedded_bom() -> None:
     # Some exports embed BOM chars mid-value (e.g. "12/10/2﻿﻿020"); the
     # date must still parse rather than being stored as a polluted string (#166).
