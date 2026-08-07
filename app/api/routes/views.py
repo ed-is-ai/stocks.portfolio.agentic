@@ -12,6 +12,7 @@ from app.api.dependencies import (
     get_portfolio_service,
     get_trader_service,
 )
+from app.api.params import optional_int
 from app.api.templating import templates
 from app.api.watchlist_context import build_watchlist_context
 from app.core.config import PIPELINE_RUNS_CSV
@@ -45,9 +46,12 @@ async def partial_watchlist(
 
 @router.get("/partials/portfolio", response_class=HTMLResponse)
 async def partial_portfolio(
-    request: Request, portfolio: PortfolioDep, portfolio_id: int | None = None
+    request: Request, portfolio: PortfolioDep, portfolio_id: str | None = None
 ) -> HTMLResponse:
-    context = portfolio.default_portfolio_context(portfolio_id)
+    # Accept a raw string: the client sends an empty ``portfolio_id=`` when no
+    # account is selected, which an ``int | None`` param rejects with 422 and
+    # breaks the tab (#147 regression).
+    context = portfolio.default_portfolio_context(optional_int(portfolio_id))
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 

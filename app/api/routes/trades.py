@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.api.params import optional_int
 from app.api.templating import templates
 from app.core.security import require_local_or_token
 from app.services.portfolio_service import PortfolioService
@@ -45,28 +46,29 @@ async def record_trade(
     notes: Annotated[str, Form()] = "",
     stop_loss: Annotated[float | None, Form()] = None,
     entry_price: Annotated[float | None, Form()] = None,
-    portfolio_id: Annotated[int | None, Form()] = None,
+    portfolio_id: Annotated[str | None, Form()] = None,
 ) -> HTMLResponse:
     """Record a BUY, SELL, or CORRECT action and return the updated portfolio.
 
     The trade targets the selected portfolio; a missing or unknown id is
     rejected with an error banner and nothing is written (#147).
     """
-    if portfolio_id is None or not trader.portfolio_exists(portfolio_id):
-        return _reject_missing_portfolio(request, portfolio, portfolio_id)
+    pid = optional_int(portfolio_id)
+    if pid is None or not trader.portfolio_exists(pid):
+        return _reject_missing_portfolio(request, portfolio, pid)
     if action == "BUY":
         trader.record_buy(
-            ticker, shares, price, date, notes, stop_loss, entry_price, portfolio_id
+            ticker, shares, price, date, notes, stop_loss, entry_price, pid
         )
     elif action == "SELL":
-        trader.record_sell(ticker, shares, price, date, notes, portfolio_id)
+        trader.record_sell(ticker, shares, price, date, notes, pid)
     elif action == "CORRECT":
         trader.correct_trade(
-            ticker, shares, price, date, notes, stop_loss, entry_price, portfolio_id
+            ticker, shares, price, date, notes, stop_loss, entry_price, pid
         )
     else:
         logger.warning("unsupported trade action: %s", action)
-    context = portfolio.default_portfolio_context(portfolio_id)
+    context = portfolio.default_portfolio_context(pid)
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 

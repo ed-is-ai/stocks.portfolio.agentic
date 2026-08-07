@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 
 from app.agents.trader.trader_agent import SippImportError
 from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.api.params import optional_int
 from app.api.templating import templates
 from app.core.config import SIPP_IMPORT_DIR
 from app.core.security import require_local_or_token
@@ -30,15 +31,16 @@ async def refresh_portfolio_prices(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
-    portfolio_id: int | None = None,
+    portfolio_id: str | None = None,
 ) -> HTMLResponse:
     """Fetch live prices from yfinance and return the updated portfolio partial."""
+    pid = optional_int(portfolio_id)
     try:
-        positions = trader.get_portfolio(portfolio_id=portfolio_id)
+        positions = trader.get_portfolio(portfolio_id=pid)
         logger.info("Refreshing %d positions", len(positions))
         if not positions:
             context = portfolio.portfolio_partial_context(
-                [], error_message="No positions to refresh", portfolio_id=portfolio_id
+                [], error_message="No positions to refresh", portfolio_id=pid
             )
             return templates.TemplateResponse(
                 request, "_portfolio.html", context=context, status_code=400
@@ -53,24 +55,24 @@ async def refresh_portfolio_prices(
         trader.save_price_cache(gbp_prices, display_info)
         _, prices_as_of, _ = trader.load_price_cache()
         updated_positions = trader.refresh_portfolio_prices(
-            gbp_prices, display_info, portfolio_id
+            gbp_prices, display_info, pid
         )
         logger.info("Refreshed %d positions successfully", len(updated_positions))
-        cash_balance = trader.get_cash_balance(portfolio_id)
-        trader.update_portfolio_snapshot(cash_balance, portfolio_id)
+        cash_balance = trader.get_cash_balance(pid)
+        trader.update_portfolio_snapshot(cash_balance, pid)
         context = portfolio.portfolio_partial_context(
             updated_positions,
             prices_as_of=prices_as_of,
             gbpusd_rate=gbpusd,
             cash_balance=cash_balance,
-            portfolio_id=portfolio_id,
+            portfolio_id=pid,
         )
         return templates.TemplateResponse(request, "_portfolio.html", context=context)
     except Exception as e:
         logger.exception("Failed to refresh portfolio prices: %s", e)
         cached_prices, prices_as_of, display_info = trader.load_price_cache()
         cached_positions = trader.get_portfolio(
-            cached_prices or None, display_info or None, portfolio_id
+            cached_prices or None, display_info or None, pid
         )
         gbpusd = cached_prices.get("__GBPUSD__")
         context = portfolio.portfolio_partial_context(
@@ -78,7 +80,7 @@ async def refresh_portfolio_prices(
             prices_as_of=prices_as_of,
             gbpusd_rate=gbpusd,
             error_message=f"Failed to fetch prices: {e}",
-            portfolio_id=portfolio_id,
+            portfolio_id=pid,
         )
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=500
@@ -95,7 +97,7 @@ async def import_sipp(
     trader: TraderDep,
     portfolio: PortfolioDep,
     file: Annotated[UploadFile, File()],
-    portfolio_id: Annotated[int | None, Form()] = None,
+    portfolio_id: Annotated[str | None, Form()] = None,
 ) -> HTMLResponse:
     """Import an uploaded SIPP portfolio CSV into the selected portfolio.
 
@@ -104,8 +106,9 @@ async def import_sipp(
     upload, or a failing import returns the portfolio partial with an error
     message rather than raising (#147).
     """
-    if portfolio_id is None or not trader.portfolio_exists(portfolio_id):
-        context = portfolio.default_portfolio_context(portfolio_id)
+    pid = optional_int(portfolio_id)
+    if pid is None or not trader.portfolio_exists(pid):
+        context = portfolio.default_portfolio_context(pid)
         context["error_message"] = (
             "Select a portfolio to import into (create one if you have none)."
         )
@@ -115,7 +118,7 @@ async def import_sipp(
 
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
-        context = portfolio.default_portfolio_context(portfolio_id)
+        context = portfolio.default_portfolio_context(pid)
         context["error_message"] = "Please upload a .csv file."
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=400
@@ -125,25 +128,25 @@ async def import_sipp(
     destination = SIPP_IMPORT_DIR / "merged.csv"
     try:
         destination.write_bytes(await file.read())
-        result = trader.import_sipp(destination, portfolio_id)
+        result = trader.import_sipp(destination, pid)
     except SippImportError as e:
         # Validation failure (e.g. missing columns) — show the reason verbatim.
-        context = portfolio.default_portfolio_context(portfolio_id)
+        context = portfolio.default_portfolio_context(pid)
         context["error_message"] = str(e)
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=400
         )
     except Exception as e:
         logger.exception("SIPP import failed: %s", e)
-        context = portfolio.default_portfolio_context(portfolio_id)
+        context = portfolio.default_portfolio_context(pid)
         context["error_message"] = f"Import failed: {e}"
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=400
         )
 
-    positions = trader.get_portfolio(portfolio_id=portfolio_id)
+    positions = trader.get_portfolio(portfolio_id=pid)
     context = portfolio.portfolio_partial_context(
-        positions, cash_balance=result.cash_balance, portfolio_id=portfolio_id
+        positions, cash_balance=result.cash_balance, portfolio_id=pid
     )
     message = (
         f"Imported {result.buy_count} buy(s) and {result.sell_count} sell(s); "
@@ -195,7 +198,7 @@ async def quick_add_holding(
     ticker: Annotated[str, Form()],
     value: Annotated[float, Form()],
     date: Annotated[str | None, Form()] = None,
-    portfolio_id: Annotated[int | None, Form()] = None,
+    portfolio_id: Annotated[str | None, Form()] = None,
 ) -> HTMLResponse:
     """Add a holding from a ticker + GBP value, computing shares from live price.
 
@@ -205,18 +208,19 @@ async def quick_add_holding(
     non-positive value, or price lookup failure returns the partial with an
     error and records nothing (#147).
     """
-    if portfolio_id is None or not trader.portfolio_exists(portfolio_id):
+    pid = optional_int(portfolio_id)
+    if pid is None or not trader.portfolio_exists(pid):
         return _quick_add_error(
             request,
             portfolio,
             "Select a portfolio first (create one if you have none).",
-            portfolio_id,
+            pid,
         )
 
     ticker = ticker.strip().upper()
     if not ticker or value <= 0:
         return _quick_add_error(
-            request, portfolio, "Enter a ticker and a positive value.", portfolio_id
+            request, portfolio, "Enter a ticker and a positive value.", pid
         )
 
     gbpusd = portfolio.gbpusd_rate()
@@ -229,7 +233,7 @@ async def quick_add_holding(
             request,
             portfolio,
             f"Couldn't fetch a current price for {ticker}.",
-            portfolio_id,
+            pid,
         )
 
     original_price, _currency = display_info[ticker]
@@ -239,7 +243,7 @@ async def quick_add_holding(
             request,
             portfolio,
             f"Value is too small to buy any shares of {ticker}.",
-            portfolio_id,
+            pid,
         )
 
     try:
@@ -249,17 +253,15 @@ async def quick_add_holding(
             original_price,
             date or None,
             notes=f"Quick-add: £{value:,.2f} @ £{gbp_price:g}/share",
-            portfolio_id=portfolio_id,
+            portfolio_id=pid,
         )
     except Exception as e:
         logger.exception("Quick-add failed for %s: %s", ticker, e)
-        return _quick_add_error(
-            request, portfolio, f"Could not add {ticker}: {e}", portfolio_id
-        )
+        return _quick_add_error(request, portfolio, f"Could not add {ticker}: {e}", pid)
 
     # Persist the fetched price so the new holding renders with live P&L.
     trader.save_price_cache(gbp_prices, display_info)
-    context = portfolio.default_portfolio_context(portfolio_id)
+    context = portfolio.default_portfolio_context(pid)
     context["import_message"] = (
         f"Added {shares:g} share(s) of {ticker} (~£{value:,.2f})."
     )
