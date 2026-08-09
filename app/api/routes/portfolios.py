@@ -12,9 +12,15 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 
-from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.api.dependencies import (
+    get_notifications_repository,
+    get_portfolio_service,
+    get_trader_service,
+)
 from app.api.templating import templates
 from app.core.security import require_local_or_token
+from app.repositories.notifications_repo import NotificationsRepository
+from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -23,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
+NotificationsDep = Annotated[
+    NotificationsRepository, Depends(get_notifications_repository)
+]
 
 
 def _render(
@@ -89,13 +98,38 @@ async def delete_portfolio(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
+    notifications: NotificationsDep,
     portfolio_id: int,
 ) -> HTMLResponse:
-    """Hard-delete a portfolio and all its data, then show what remains.
+    """Hard-delete a portfolio's trades/cash flows/balance, then show what
+    remains.
 
     Deleting the last portfolio is allowed and lands on the empty state.
+    Prior notification-centre events for this account (e.g. SIPP import
+    events) are kept, not deleted — they're history, not live account
+    data — and a new event records the deletion itself for an audit trail
+    (#186).
     """
+    meta = trader.get_portfolio_meta(portfolio_id)
+    cash_balance = trader.get_cash_balance(portfolio_id)
     trader.delete_portfolio(portfolio_id)
+    try:
+        name = meta.name if meta else f"portfolio {portfolio_id}"
+        trade_count = meta.trade_count if meta else 0
+        cash_flow_count = meta.cash_flow_count if meta else 0
+        notifications.record(
+            NotificationCategory.PORTFOLIO,
+            "portfolio_deleted",
+            f"Portfolio deleted — {name}",
+            severity=NotificationSeverity.WARNING,
+            body=(
+                f"Removed {trade_count} trade(s), {cash_flow_count} cash "
+                f"flow(s); cash balance was £{cash_balance or 0:,.2f}."
+            ),
+            portfolio_id=portfolio_id,
+        )
+    except Exception:
+        logger.exception("Failed to record portfolio-deletion notification")
     logger.info("Deleted portfolio id=%s", portfolio_id)
     # Fall back to the first remaining portfolio (or the empty state).
     return _render(request, portfolio, None)

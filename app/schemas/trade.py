@@ -11,6 +11,12 @@ class SippImportResult(BaseModel):
     ``cash_balance`` is the authoritative closing balance (final Running
     Balance). The count/list fields make otherwise-silent problems visible to
     the caller (#152) so the UI can report them instead of a false success.
+
+    ``status`` is ``"error"`` when ``buy_count + sell_count + cash_flow_count
+    + len(skipped_rows) != total_rows`` — every data row must land in exactly
+    one bucket, so a mismatch means some row was silently unaccounted for
+    (a bug, not a data-quality issue) rather than trusting a result that
+    might be quietly incomplete (#187).
     """
 
     cash_balance: float
@@ -19,6 +25,8 @@ class SippImportResult(BaseModel):
     cash_flow_count: int = 0
     skipped_rows: list[str] = []
     parse_errors: list[str] = []
+    total_rows: int = 0
+    status: str = "ok"
 
 
 class Portfolio(BaseModel):

@@ -573,6 +573,12 @@ class TraderAgent(Agent):
         csv_path = Path(csv_path)
         parse_errors: list[str] = []
         skipped_rows: list[str] = []
+        # Rows with genuinely no signal (no quantity, no debit/credit, no
+        # parse error) -- counted toward the row-count reconciliation below
+        # so a benign informational row never falsely flags status="error",
+        # but not surfaced to the user as a "skipped due to issues" row
+        # since nothing actually went wrong (#187).
+        benign_empty_count = 0
 
         def clean_amount(s: str | None, field: str = "", ref: str = "") -> float:
             if not s or s.strip() in ("", "n/a"):
@@ -580,6 +586,8 @@ class TraderAgent(Agent):
             cleaned = (
                 s.replace("﻿", "")
                 .replace("£", "")
+                .replace("€", "")
+                .replace("$", "")
                 .replace(",", "")
                 .replace('"', "")
                 .strip()
@@ -646,10 +654,35 @@ class TraderAgent(Agent):
             for idx, row in enumerate(rows):
                 qty = row.get("Quantity", "").strip()
                 symbol = row.get("Symbol", "").strip()
-                reference = row.get("Reference", "").strip()
-                debit = clean_amount(row.get("Debit", ""), "Debit", reference)
-                credit = clean_amount(row.get("Credit", ""), "Credit", reference)
-                price = clean_amount(row.get("Price", ""), "Price", reference)
+                reference_raw = row.get("Reference", "").strip()
+                # Blank/"n/a" means "this provider didn't give one" — treat it
+                # as no reference (None), not a literal value. Every insert is
+                # deduped per-portfolio on (portfolio_id, reference) via a
+                # partial unique index that exempts NULL references (#147);
+                # passing the literal string "n/a" through would make every
+                # such row collide with the first one and get silently
+                # dropped by INSERT OR IGNORE (#186) — real SIPP exports
+                # commonly leave Reference "n/a" on every interest/dividend
+                # row, so this wasn't a hypothetical edge case.
+                reference = (
+                    reference_raw if reference_raw and reference_raw != "n/a" else None
+                )
+                # Many providers leave Reference blank/"n/a" on non-trade rows
+                # (interest, dividends) — fall back to a 1-based CSV row number
+                # (accounting for the header row) so issue detail can still
+                # point at a specific row instead of a useless "row n/a" for
+                # every such row (#185).
+                row_label = reference if reference else f"CSV row {idx + 2}"
+                _parse_errors_before = len(parse_errors)
+                debit = clean_amount(row.get("Debit", ""), "Debit", row_label)
+                credit = clean_amount(row.get("Credit", ""), "Credit", row_label)
+                # Scoped to just Debit/Credit (not Price, which is irrelevant
+                # to a non-trade row) so a cash-flow-shaped row whose amount
+                # failed to parse -- and therefore defaulted to 0.0 and would
+                # otherwise vanish with no action taken and no skip entry --
+                # gets flagged below instead of silently dropped (#187).
+                amount_had_parse_error = len(parse_errors) > _parse_errors_before
+                price = clean_amount(row.get("Price", ""), "Price", row_label)
                 date = _to_iso_date(row.get("Date", "").strip())
                 description = row.get("Description", "").strip()
 
@@ -663,19 +696,19 @@ class TraderAgent(Agent):
                             shares = float(qty.replace("£", "").replace(",", ""))
                         except ValueError:
                             skipped_rows.append(
-                                f"row {reference or '?'}: unparseable quantity {qty!r}"
+                                f"row {row_label}: unparseable quantity {qty!r}"
                             )
                             logger.warning(
                                 "skipping trade row with unparseable quantity %r (ref %s)",
                                 qty,
-                                reference or "",
+                                row_label,
                             )
                             shares = None
 
                         if shares is not None:
                             if shares <= 0 or price <= 0:
                                 skipped_rows.append(
-                                    f"row {reference or '?'}: non-positive "
+                                    f"row {row_label}: non-positive "
                                     f"shares/price ({shares}, {price})"
                                 )
                             else:
@@ -705,7 +738,7 @@ class TraderAgent(Agent):
                                         sell_count += 1
                                 else:
                                     skipped_rows.append(
-                                        f"row {reference or '?'}: trade with no "
+                                        f"row {row_label}: trade with no "
                                         "debit/credit amount"
                                     )
                     else:
@@ -723,9 +756,23 @@ class TraderAgent(Agent):
                                 portfolio_id,
                             )
                             cash_count += 1
+                        elif amount_had_parse_error:
+                            skipped_rows.append(
+                                f"row {row_label}: unparseable cash amount, row skipped"
+                            )
+                        else:
+                            benign_empty_count += 1
                 else:
-                    if symbol and symbol != "n/a":
-                        continue
+                    # No Quantity means this can't be a share trade regardless
+                    # of whether Symbol/Sedol is populated — some providers
+                    # tag a cash dividend with the paying company's symbol for
+                    # reference (e.g. "Div 60 SIGNIFY NV") even though no
+                    # shares changed hands. Previously any populated Symbol
+                    # here caused a silent `continue` that dropped the row
+                    # with zero visibility — not even counted as skipped
+                    # (#186). Fall through to the same cash-flow handling as
+                    # a blank-Symbol row; a genuine no-amount/no-signal row
+                    # still does nothing below.
                     amount = credit if credit > 0 else debit
                     if amount > 0:
                         flow_type = classify_flow_type(description)
@@ -740,10 +787,16 @@ class TraderAgent(Agent):
                             portfolio_id,
                         )
                         cash_count += 1
+                    elif amount_had_parse_error:
+                        skipped_rows.append(
+                            f"row {row_label}: unparseable cash amount, row skipped"
+                        )
+                    else:
+                        benign_empty_count += 1
 
                 running_balance = row.get("Running Balance", "").strip()
                 if running_balance and running_balance != "n/a":
-                    rb = clean_amount(running_balance, "Running Balance", reference)
+                    rb = clean_amount(running_balance, "Running Balance", row_label)
                     if rb > 0:
                         is_iso = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date))
                         rank = (1 if is_iso else 0, date if is_iso else "", idx)
@@ -768,10 +821,20 @@ class TraderAgent(Agent):
             self._apply_import_cash_balance(portfolio_id, cash_balance, cash_asof)
         self.update_portfolio_snapshot(cash_balance, portfolio_id)
 
+        # Every data row must land in exactly one bucket -- a mismatch means
+        # some row was silently unaccounted for (a bug), not just a
+        # data-quality issue, so it's flagged distinctly from an ordinary
+        # skipped-row warning (#187).
+        total_rows = len(rows)
+        total_actions = (
+            buy_count + sell_count + cash_count + len(skipped_rows) + benign_empty_count
+        )
+        status = "ok" if total_actions == total_rows else "error"
+
         print(
             f"SIPP import complete: {buy_count} BUY, {sell_count} SELL, "
             f"{cash_count} cash flows, {len(skipped_rows)} skipped, "
-            f"{len(parse_errors)} parse errors. "
+            f"{len(parse_errors)} parse errors, status={status}. "
             f"Cash balance: GBP {cash_balance:,.2f}"
         )
         return SippImportResult(
@@ -781,6 +844,8 @@ class TraderAgent(Agent):
             cash_flow_count=cash_count,
             skipped_rows=skipped_rows,
             parse_errors=parse_errors,
+            total_rows=total_rows,
+            status=status,
         )
 
     def save_price_cache(

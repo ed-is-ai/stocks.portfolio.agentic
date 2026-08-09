@@ -1,14 +1,13 @@
 {% macro import_form(portfolio_id) %}
-<form hx-post="/import-sipp" hx-encoding="multipart/form-data"
-      hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+<form onsubmit="return handleSippImportSubmit(event, this)"
       class="d-flex align-items-center gap-2 flex-wrap">
   <input type="hidden" name="portfolio_id" value="{{ portfolio_id }}">
-  <input type="file" name="file" accept=".csv" required
-         aria-label="SIPP portfolio CSV file"
-         title="SIPP CSV with header row: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance (dates DD/MM/YYYY; final Running Balance = cash)"
+  <input type="file" name="file" accept=".csv" multiple required
+         aria-label="SIPP portfolio CSV file(s)"
+         title="SIPP CSV with header row: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance (dates DD/MM/YYYY; final Running Balance = cash). Select multiple files to queue them — import oldest first so the most recent file's balance wins."
          class="form-control form-control-sm" style="max-width:16rem">
   <button type="submit" class="btn btn-sm btn-outline-primary d-flex align-items-center gap-2">
-    <i class="bi bi-upload"></i> Import CSV
+    <i class="bi bi-upload"></i> Import CSV(s)
   </button>
 </form>
 {% endmacro %}
@@ -139,13 +138,16 @@
         {{ quick_add_form(portfolio_id) }}
         <hr class="my-3">
         <div class="fw-semibold mb-2" style="font-size:0.78rem">
-          <i class="bi bi-upload me-1"></i>Import a SIPP CSV
+          <i class="bi bi-upload me-1"></i>Import SIPP CSV(s)
         </div>
         {{ import_form(portfolio_id) }}
         <div class="text-muted mt-2" style="font-size:0.68rem; line-height:1.5">
           Expected columns (header row required):
           <code>Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance</code>.
           Dates as <code>DD/MM/YYYY</code>; the final <code>Running Balance</code> sets your cash.
+          Select multiple files to import them in a queue, oldest first — each
+          file's own most recent row sets the cash balance, so importing out
+          of order can make it regress.
         </div>
       </div>
     </div>
@@ -166,8 +168,13 @@
 {% endif %}
 
 {% if import_message %}
-<div class="alert alert-success border-0 d-flex align-items-center gap-2 mt-1 mb-3">
-  <i class="bi bi-check-circle-fill fs-5"></i>
+<div class="alert {{ 'alert-danger' if import_status == 'error' else 'alert-success' }} border-0 d-flex align-items-center gap-2 mt-1 mb-3"
+     data-import-buy-count="{{ import_buy_count|default(0) }}"
+     data-import-sell-count="{{ import_sell_count|default(0) }}"
+     data-import-cash-count="{{ import_cash_count|default(0) }}"
+     data-import-skipped-count="{{ import_skipped_count|default(0) }}"
+     data-import-status="{{ import_status|default('ok') }}">
+  <i class="bi {{ 'bi-exclamation-octagon-fill' if import_status == 'error' else 'bi-check-circle-fill' }} fs-5"></i>
   <span>{{ import_message }}</span>
 </div>
 {% endif %}

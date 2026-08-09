@@ -1,17 +1,26 @@
 """Portfolio routes — live price refresh and SIPP CSV import."""
 
 import logging
+import re
+import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse
 
 from app.agents.trader.trader_agent import SippImportError
-from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.api.dependencies import (
+    get_notifications_repository,
+    get_portfolio_service,
+    get_trader_service,
+)
 from app.api.params import optional_int
 from app.api.templating import templates
-from app.core.config import SIPP_IMPORT_DIR
+from app.core.config import IMPORTED_FILES_DIR, SIPP_IMPORT_DIR
 from app.core.security import require_local_or_token
+from app.repositories.notifications_repo import NotificationsRepository
+from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -20,6 +29,58 @@ logger = logging.getLogger(__name__)
 
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
+NotificationsDep = Annotated[
+    NotificationsRepository, Depends(get_notifications_repository)
+]
+
+#: Cap on how many individual row/value issues to spell out in the import
+#: message and notification body before falling back to "(+N more)".
+_MAX_ISSUE_DETAILS = 5
+
+
+#: Anything other than alphanumerics/dot/dash/underscore in an uploaded
+#: filename is collapsed to "_" before it's used as part of an archive path,
+#: so a crafted filename (e.g. containing "../") can't escape
+#: IMPORTED_FILES_DIR or clash with shell/filesystem-special characters.
+_UNSAFE_FILENAME_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def _archive_upload(filename: str, content: bytes) -> None:
+    """Save a timestamped copy of an uploaded import file for later reference.
+
+    Called for every upload attempt, not just successful imports — a file
+    rejected for a bad portfolio, wrong extension, or a failed parse still
+    needs to be inspectable to diagnose why. Kept separate from
+    ``SIPP_IMPORT_DIR``'s single working copy (which the next upload
+    overwrites) so every past attempt stays around. Best effort — a failure
+    here must not fail an otherwise-successful import.
+    """
+    try:
+        IMPORTED_FILES_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = _UNSAFE_FILENAME_CHARS_RE.sub("_", filename) or "upload.csv"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        # A random suffix, not just the microsecond timestamp, guards against
+        # two same-named files in one multi-file queue import landing in the
+        # same microsecond and clobbering each other's archive copy.
+        unique = uuid.uuid4().hex[:8]
+        (IMPORTED_FILES_DIR / f"{stamp}_{unique}_{safe_name}").write_bytes(content)
+    except Exception:
+        logger.exception("Failed to archive imported file %s", filename)
+
+
+def _describe_issues(label: str, issues: list[str]) -> str:
+    """Format a skipped-rows/parse-errors list with per-row detail.
+
+    Each entry already reads like ``"row REF: unparseable quantity 'abc'"``
+    (see ``TraderAgent.import_sipp``) — this just joins a bounded number of
+    them under a count-labelled prefix so the reason (which row, which
+    column, what value) is visible rather than only a bare count (#185).
+    """
+    shown = issues[:_MAX_ISSUE_DETAILS]
+    detail = "; ".join(shown)
+    if len(issues) > _MAX_ISSUE_DETAILS:
+        detail += f"; (+{len(issues) - _MAX_ISSUE_DETAILS} more)"
+    return f"{len(issues)} {label} — {detail}"
 
 
 @router.post(
@@ -96,6 +157,7 @@ async def import_sipp(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
+    notifications: NotificationsDep,
     file: Annotated[UploadFile, File()],
     portfolio_id: Annotated[str | None, Form()] = None,
 ) -> HTMLResponse:
@@ -104,8 +166,20 @@ async def import_sipp(
     Saves the upload under ``data/processed/SIPP/`` then replays it through
     ``TraderService.import_sipp``. A missing/unknown portfolio, a non-CSV
     upload, or a failing import returns the portfolio partial with an error
-    message rather than raising (#147).
+    message rather than raising (#147). Every upload — success or failure —
+    is archived as a timestamped copy under ``data/imported/`` (a permanent
+    per-attempt record, since ``data/processed/SIPP/merged.csv`` is
+    overwritten by the next upload, and a failed file still needs to be
+    inspectable to diagnose why). On success, also records one Event per
+    file in the notification centre (#184) — the multi-file import queue
+    (index.html's ``handleSippImportSubmit``) calls this endpoint once per
+    queued file, so this naturally yields one archived file and one event
+    per file.
     """
+    filename = file.filename or ""
+    content = await file.read()
+    _archive_upload(filename, content)
+
     pid = optional_int(portfolio_id)
     if pid is None or not trader.portfolio_exists(pid):
         context = portfolio.default_portfolio_context(pid)
@@ -116,7 +190,6 @@ async def import_sipp(
             request, "_portfolio.html", context=context, status_code=400
         )
 
-    filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
         context = portfolio.default_portfolio_context(pid)
         context["error_message"] = "Please upload a .csv file."
@@ -127,7 +200,7 @@ async def import_sipp(
     SIPP_IMPORT_DIR.mkdir(parents=True, exist_ok=True)
     destination = SIPP_IMPORT_DIR / "merged.csv"
     try:
-        destination.write_bytes(await file.read())
+        destination.write_bytes(content)
         result = trader.import_sipp(destination, pid)
     except SippImportError as e:
         # Validation failure (e.g. missing columns) — show the reason verbatim.
@@ -149,26 +222,73 @@ async def import_sipp(
         positions, cash_balance=result.cash_balance, portfolio_id=pid
     )
     message = (
-        f"Imported {result.buy_count} buy(s) and {result.sell_count} sell(s); "
-        f"{len(positions)} open position(s); cash balance "
-        f"£{result.cash_balance:,.2f}."
+        f"Imported {result.buy_count} buy(s), {result.sell_count} sell(s), "
+        f"{result.cash_flow_count} cash transaction(s); {len(positions)} open "
+        f"position(s); cash balance £{result.cash_balance:,.2f}."
     )
     warnings = []
     if result.skipped_rows:
-        warnings.append(f"{len(result.skipped_rows)} row(s) skipped")
+        warnings.append(_describe_issues("row(s) skipped", result.skipped_rows))
     if result.parse_errors:
-        warnings.append(f"{len(result.parse_errors)} value(s) unparseable")
+        warnings.append(_describe_issues("value(s) unparseable", result.parse_errors))
     if warnings:
-        message += " Note: " + "; ".join(warnings) + "."
+        message += " Note: " + " | ".join(warnings) + "."
+    if result.status == "error":
+        # buy/sell/cash/skipped counts didn't add up to total_rows — some
+        # row was silently unaccounted for (#187). Distinct from an ordinary
+        # data-quality warning: this points at a bug in the import, so it's
+        # called out on its own rather than folded into `warnings` above.
+        accounted_rows = (
+            result.buy_count
+            + result.sell_count
+            + result.cash_flow_count
+            + len(result.skipped_rows)
+        )
+        message += (
+            f" ERROR: only {accounted_rows} of {result.total_rows} row(s) were "
+            "accounted for — some rows may be missing from this import."
+        )
     context["import_message"] = message
+    # Machine-readable counts for the multi-file import queue (index.html's
+    # handleSippImportSubmit), which aggregates these across sequential
+    # single-file POSTs rather than parsing the prose message above.
+    context["import_buy_count"] = result.buy_count
+    context["import_sell_count"] = result.sell_count
+    context["import_cash_count"] = result.cash_flow_count
+    context["import_skipped_count"] = len(result.skipped_rows)
+    context["import_status"] = result.status
     logger.info(
-        "SIPP import: %d buys, %d sells, %d skipped, %d parse errors, cash £%.2f",
+        "SIPP import: %d buys, %d sells, %d cash flows, %d skipped, "
+        "%d parse errors, cash £%.2f, status=%s",
         result.buy_count,
         result.sell_count,
+        result.cash_flow_count,
         len(result.skipped_rows),
         len(result.parse_errors),
         result.cash_balance,
+        result.status,
     )
+    try:
+        account = trader.get_portfolio_meta(pid)
+        severity = (
+            NotificationSeverity.ERROR
+            if result.status == "error"
+            else NotificationSeverity.WARNING
+            if warnings
+            else NotificationSeverity.INFO
+        )
+        notifications.record(
+            NotificationCategory.PORTFOLIO,
+            "sipp_import",
+            f"SIPP CSV imported — {filename}",
+            severity=severity,
+            body=f"{account.name if account else 'account'}: {message}",
+            portfolio_id=pid,
+        )
+    except Exception:
+        # Never let notification bookkeeping fail an otherwise-successful
+        # import (matches AlertAgent's/orchestrator's best-effort pattern).
+        logger.exception("Failed to record SIPP import notification")
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 

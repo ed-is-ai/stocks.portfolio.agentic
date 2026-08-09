@@ -1,7 +1,8 @@
 """Schema for in-app notifications surfaced by the notification centre (#80).
 
 One row per user-facing event: an alert email that was actually sent, a
-completed data-refresh run, or a source-health failure during a run. The
+completed data-refresh run, a source-health failure during a run, or a
+SIPP CSV import. The
 repository (``app.repositories.notifications_repo``) owns the table; this
 module owns the shape and the small amount of derived presentation logic
 (icon, deep-link target) the dropdown template needs.
@@ -26,6 +27,7 @@ class NotificationCategory(StrEnum):
     ALERT = "alert"
     REFRESH = "refresh"
     SOURCE = "source"
+    PORTFOLIO = "portfolio"
 
 
 class NotificationSeverity(StrEnum):
@@ -41,6 +43,7 @@ _DEEP_LINK_TABS: dict[NotificationCategory, str] = {
     NotificationCategory.ALERT: "tab-watchlist",
     NotificationCategory.REFRESH: "tab-runlog",
     NotificationCategory.SOURCE: "tab-runlog",
+    NotificationCategory.PORTFOLIO: "tab-portfolio",
 }
 
 #: bootstrap-icons glyph per severity.
@@ -62,6 +65,7 @@ class Notification(BaseModel):
     body: str = ""
     ticker: str | None = None
     run_id: str | None = None
+    portfolio_id: int | None = None
     created_at: datetime = Field(default_factory=utc_now)
     read_at: datetime | None = None
     dismissed_at: datetime | None = None

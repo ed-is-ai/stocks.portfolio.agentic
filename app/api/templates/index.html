@@ -732,6 +732,110 @@
       alert('Failed to fetch prices: ' + error.message);
     }
   }
+
+  function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  // Queues multiple SIPP CSVs through the single-file /import-sipp endpoint,
+  // one request at a time (its destination path and cash-balance detection
+  // are per-file, so concurrent uploads would race). Each response is a
+  // full _portfolio.html partial; only the final displayed one is used for
+  // positions/cash (always recomputed fresh from the DB), while per-file
+  // buy/sell/cash/skipped counts and row-count status are read off
+  // `data-import-*` attributes on its success banner, kept per file so the
+  // combined message can show a breakdown per import rather than only a
+  // grand total (#183, #187).
+  async function handleSippImportSubmit(event, form) {
+    event.preventDefault();
+    const fileInput = form.querySelector('input[type=file]');
+    const files = Array.from(fileInput.files || []);
+    if (!files.length) return false;
+
+    const portfolioId = form.querySelector('input[name=portfolio_id]').value;
+    const btn = form.querySelector('button[type=submit]');
+    const originalBtnHtml = btn.innerHTML;
+    btn.disabled = true;
+    fileInput.disabled = true;
+
+    let lastHtml = null;
+    let lastSuccessHtml = null;
+    const fileSummaries = [];
+    const failures = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      btn.textContent = files.length > 1
+        ? `Importing ${i + 1} of ${files.length}...`
+        : 'Importing...';
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('portfolio_id', portfolioId);
+        const response = await fetch('/import-sipp', { method: 'POST', body: formData });
+        const html = await response.text();
+        lastHtml = html;
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        if (response.ok) {
+          lastSuccessHtml = html;
+          const banner = doc.querySelector('[data-import-buy-count]');
+          fileSummaries.push({
+            name: file.name,
+            buys: banner ? parseInt(banner.getAttribute('data-import-buy-count'), 10) || 0 : 0,
+            sells: banner ? parseInt(banner.getAttribute('data-import-sell-count'), 10) || 0 : 0,
+            cash: banner ? parseInt(banner.getAttribute('data-import-cash-count'), 10) || 0 : 0,
+            skipped: banner ? parseInt(banner.getAttribute('data-import-skipped-count'), 10) || 0 : 0,
+            status: banner ? (banner.getAttribute('data-import-status') || 'ok') : 'ok',
+          });
+        } else {
+          const errEl = doc.querySelector('.alert-danger span');
+          failures.push(file.name + ': ' + (errEl ? errEl.textContent.trim() : 'import failed'));
+        }
+      } catch (error) {
+        failures.push(file.name + ': ' + error.message);
+      }
+    }
+
+    const displayHtml = lastSuccessHtml || lastHtml;
+    if (!displayHtml) {
+      // Every file failed before a response came back (e.g. offline) —
+      // leave the current view intact rather than blanking it.
+      btn.disabled = false;
+      fileInput.disabled = false;
+      btn.innerHTML = originalBtnHtml;
+      alert('Import failed: ' + failures.join('; '));
+      return false;
+    }
+    document.getElementById('tab-content').innerHTML = displayHtml;
+
+    if (files.length > 1) {
+      const successCount = files.length - failures.length;
+      const hasErrorStatus = fileSummaries.some((f) => f.status === 'error');
+      const lines = fileSummaries.map((f) => {
+        const flag = f.status === 'error' ? ' — ROW COUNT MISMATCH, check details' : '';
+        return `${escapeHtml(f.name)}: ${f.buys} buy(s), ${f.sells} sell(s), `
+          + `${f.cash} cash txn(s), ${f.skipped} skipped${flag}`;
+      });
+      if (failures.length) {
+        lines.push(...failures.map((f) => `${escapeHtml(f)} — failed`));
+      }
+      const summaryHtml = `Imported ${successCount} of ${files.length} file(s):`
+        + `<ul class="mb-0 ps-3">${lines.map((l) => `<li>${l}</li>`).join('')}</ul>`;
+      const banner = document.querySelector('#tab-content [data-import-buy-count]');
+      if (banner) {
+        banner.querySelector('span').innerHTML = summaryHtml;
+        if ((hasErrorStatus || failures.length) && !banner.classList.contains('alert-danger')) {
+          banner.classList.remove('alert-success');
+          banner.classList.add('alert-danger');
+        }
+      } else {
+        alert(`Imported ${successCount} of ${files.length} file(s) — see log for details.`);
+      }
+    }
+    return false;
+  }
 </script>
 <script src="/static/js/watchlist.js?v=20260802-1"></script>
 <script src="/static/js/pipeline-refresh.js"></script>

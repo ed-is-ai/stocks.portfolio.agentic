@@ -9,6 +9,7 @@ days) lives here.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from app.core import config
@@ -51,6 +52,7 @@ _COLUMNS = (
     "created_at",
     "read_at",
     "dismissed_at",
+    "portfolio_id",
 )
 
 
@@ -73,6 +75,12 @@ class NotificationsRepository:
         """Create the notifications table if it does not yet exist."""
         with session(self._connect) as conn:
             conn.execute(_SCHEMA)
+            try:
+                conn.execute(
+                    "ALTER TABLE notifications ADD COLUMN portfolio_id INTEGER"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists (idempotent, matches trades.db)
             conn.commit()
 
     def record(
@@ -85,15 +93,23 @@ class NotificationsRepository:
         body: str = "",
         ticker: str | None = None,
         run_id: str | None = None,
+        portfolio_id: int | None = None,
     ) -> int:
-        """Insert a notification and prune expired rows; return the new id."""
+        """Insert a notification and prune expired rows; return the new id.
+
+        ``portfolio_id`` ties an event to the account it's about (e.g. a
+        SIPP import or the account's own deletion, #186) for reference —
+        events are kept as history even after that account is gone, so
+        leave unset for events that aren't account-scoped (alerts,
+        pipeline runs).
+        """
         created_at = datetime.now(timezone.utc).isoformat()
         with session(self._connect) as conn:
             cursor = conn.execute(
                 "INSERT INTO notifications"
                 " (category, event_type, severity, title, body, ticker,"
-                "  run_id, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "  run_id, created_at, portfolio_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     str(category),
                     event_type,
@@ -103,6 +119,7 @@ class NotificationsRepository:
                     ticker,
                     run_id,
                     created_at,
+                    portfolio_id,
                 ),
             )
             new_id = int(cursor.lastrowid or 0)

@@ -294,6 +294,96 @@ def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
     assert agent.get_portfolio() == []
 
 
+def test_sipp_parses_eur_and_usd_amounts(tmp_path: Path) -> None:
+    """EUR/USD-denominated cash-flow rows must parse, not just GBP (#186) —
+    a real SIPP export can carry a EUR interest sub-account, and the
+    currency symbol was previously only stripped for £."""
+    import sqlite3
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "28/05/2024,n/a,n/a,n/a,n/a,Gross interest to 24/05/24,n/a,n/a,"
+        "€0.38,€153.61\n"
+        "29/05/2024,n/a,n/a,n/a,n/a,US dividend,n/a,n/a,$1.25,$154.86\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+
+    assert result.parse_errors == []
+    assert result.skipped_rows == []
+    conn = sqlite3.connect(agent.db_path)
+    rows = conn.execute(
+        "SELECT flow_type, amount FROM cash_flows ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert rows == [("INTEREST", 0.38), ("DIVIDEND", 1.25)]
+    assert result.cash_balance == 154.86
+
+
+def test_sipp_imports_dividend_row_that_has_symbol_but_no_quantity(
+    tmp_path: Path,
+) -> None:
+    """A cash dividend tagged with the paying company's Symbol/Sedol but no
+    Quantity (no shares changed hands) must still be imported as a cash
+    flow, not silently dropped — this shape is real provider output (#186)."""
+    import sqlite3
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "06/06/2023,LIGHT,BYY7VY5,n/a,n/a,"
+        "Div 60   SIGNIFY NV   EUR0.01,n/a,n/a,76.50,150.45\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+
+    assert result.buy_count == 0 and result.sell_count == 0
+    conn = sqlite3.connect(agent.db_path)
+    rows = conn.execute(
+        "SELECT flow_type, amount FROM cash_flows ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert rows == [("DIVIDEND", 76.50)]
+    # No phantom LIGHT position was created from the Symbol column.
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_issue_detail_falls_back_to_csv_row_when_reference_is_na(
+    tmp_path: Path,
+) -> None:
+    """When Reference is blank/"n/a" (common for interest/dividend rows),
+    issue detail must still point at a specific row instead of a useless
+    "row n/a" repeated for every failure (#186)."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Gross interest,n/a,n/a,not-a-number,100.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+
+    assert len(result.parse_errors) == 1
+    # Row 1 is the header, so the first data row is CSV row 2.
+    assert "CSV row 2" in result.parse_errors[0]
+    assert "n/a" not in result.parse_errors[0].split(":")[0]
+
+
 def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
     # Rows in chronological (oldest-first) order, as the documented import
     # expects. The returned cash balance is the last running balance.
@@ -311,6 +401,82 @@ def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
 
     result = agent.import_sipp(csv_path)
     assert result.cash_balance == 500.0
+
+
+def test_sipp_total_rows_and_status_ok_when_every_row_is_accounted_for(
+    tmp_path: Path,
+) -> None:
+    """``total_rows`` tracks the data-row count and ``status`` stays "ok"
+    when buy/sell/cash/skipped counts add up to it (#187)."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,,,,Contribution,REF-C1,,1000.00,1000.00\n"
+        "01/02/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B1,500.00,,500.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+
+    assert result.total_rows == 2
+    assert result.buy_count + result.cash_flow_count == result.total_rows
+    assert result.status == "ok"
+
+
+def test_sipp_unparseable_cash_amount_is_skipped_not_silently_dropped(
+    tmp_path: Path,
+) -> None:
+    """A non-trade row whose Debit/Credit is unparseable lands at amount=0
+    with no Quantity/Symbol to make it a trade. It must be recorded in
+    ``skipped_rows`` (not silently dropped) so the row-count reconciliation
+    stays "ok" while still surfacing the bad value to the user (#187)."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Gross interest,n/a,not-a-number,,100.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+
+    assert result.total_rows == 1
+    assert result.buy_count == 0
+    assert result.sell_count == 0
+    assert result.cash_flow_count == 0
+    assert len(result.skipped_rows) == 1
+    assert "unparseable cash amount" in result.skipped_rows[0]
+    assert result.status == "ok"
+
+
+def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> None:
+    """A row with no quantity and no debit/credit (e.g. a pure informational
+    line) is genuinely a no-op, not a problem — it must still count toward
+    the row-count reconciliation so ``status`` stays "ok", but must not be
+    reported to the user as a skipped/problem row (#187)."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Statement note,n/a,,,100.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path)
+
+    assert result.total_rows == 1
+    assert result.skipped_rows == []
+    assert result.status == "ok"
 
 
 def test_record_buy_normalizes_ddmmyyyy_to_iso(tmp_path: Path) -> None:

@@ -56,6 +56,11 @@ ANALYSIS_PROGRESS_TXT = (
 PORTFOLIO_VALUE_CSV = ROOT_DIR / "data" / "portfolio_value.csv"
 # Where uploaded SIPP portfolio CSVs are saved for import (#145).
 SIPP_IMPORT_DIR = ROOT_DIR / "data" / "processed" / "SIPP"
+# Archive of every uploaded file, one copy per import, kept alongside (not
+# instead of) SIPP_IMPORT_DIR's single working copy so past imports can be
+# re-inspected or replayed after SIPP_IMPORT_DIR's "merged.csv" is
+# overwritten by the next upload.
+IMPORTED_FILES_DIR = ROOT_DIR / "data" / "imported"
 PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
 PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"
 PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "3600"))
