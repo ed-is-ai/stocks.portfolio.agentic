@@ -36,6 +36,7 @@ from app.schemas.pipeline_status import (
     StageState,
     StageStatus,
 )
+from app.schemas.realised_pnl import RealisedPnlSummary, RoundTrip
 from app.schemas.source_health import (
     SourceHealth,
     SourceName,
@@ -60,6 +61,8 @@ __all__ = [
     "PipelineStage",
     "PipelineState",
     "PipelineStatus",
+    "RealisedPnlSummary",
+    "RoundTrip",
     "SectorAllocationSnapshot",
     "SectorDelta",
     "SectorShare",
