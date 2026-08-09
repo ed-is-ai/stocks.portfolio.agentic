@@ -16,6 +16,7 @@ from app.repositories.notifications_repo import NotificationsRepository
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
+from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
 
 
@@ -57,6 +58,12 @@ def get_notifications_repository() -> NotificationsRepository:
 def get_portfolio_service() -> PortfolioService:
     """Return the shared ``PortfolioService`` instance."""
     return PortfolioService(get_trader_service())
+
+
+@lru_cache
+def get_realised_pnl_service() -> RealisedPnlService:
+    """Return the shared ``RealisedPnlService`` instance."""
+    return RealisedPnlService(get_trader_service(), get_portfolio_service())
 
 
 @lru_cache

@@ -22,6 +22,7 @@ def _row_to_trade(row: tuple[Any, ...]) -> Trade:
         stop_loss=row[7] if len(row) > 7 else None,
         entry_price=row[8] if len(row) > 8 else None,
         portfolio_id=row[9] if len(row) > 9 else None,
+        realised_pnl_ack_at=row[10] if len(row) > 10 else None,
     )
 
 
@@ -88,6 +89,19 @@ class TradesRepository:
             (ticker, action, shares, price, date, notes, reference, portfolio_id),
         )
 
+    def set_ack(self, conn: Any, trade_id: int, acknowledged_at: str | None) -> None:
+        """Set or clear a trade's realised-P&L acknowledgment timestamp.
+
+        ``acknowledged_at`` is an ISO 8601 timestamp string (acknowledged) or
+        ``None`` (unacknowledged). Takes the caller's open connection and does
+        not commit — mirrors ``insert_ignore``'s batch-friendly shape so the
+        caller (``TraderAgent``) controls the transaction boundary.
+        """
+        conn.execute(
+            "UPDATE trades SET realised_pnl_ack_at = ? WHERE id = ?",
+            (acknowledged_at, trade_id),
+        )
+
     def delete_by_id(self, trade_id: int) -> bool:
         """Delete a trade by id. Returns True if a row was deleted."""
         with session(self._connect) as conn:
@@ -111,7 +125,7 @@ class TradesRepository:
         """Return trades newest-first, optionally filtered by ticker/portfolio."""
         base = (
             "SELECT id, ticker, action, shares, price, date, notes, stop_loss,"
-            " entry_price, portfolio_id FROM trades"
+            " entry_price, portfolio_id, realised_pnl_ack_at FROM trades"
         )
         order = f"{_DATE_SORT} DESC, id DESC"
         clauses: list[str] = []

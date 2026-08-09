@@ -1,8 +1,10 @@
-"""Realised P&L service — FIFO lot matching and round-trip shaping.
+"""Realised P&L service — FIFO lot matching, round-trip shaping, trade-date
+GBP conversion, and unmatched-sell detection.
 
-Epic 1, Story 1.1. Owns FIFO matching only: currency conversion (Story 1.2),
-unmatched-sell shaping (Story 1.3), and acknowledgment (Story 1.5) are later
-stories layered on top without changing this story's schema fields.
+Epic 1, Story 1.1 (FIFO matching) + Story 1.2 (trade-date FX conversion with
+historical rate caching) + Story 1.3 (unmatched-sell detection).
+Acknowledgment (Story 1.5) is a later story layered on top without changing
+this story's schema fields.
 """
 
 from __future__ import annotations
@@ -12,7 +14,8 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date
 
-from app.schemas import RealisedPnlSummary, RoundTrip, Trade
+from app.schemas import RealisedPnlSummary, RoundTrip, Trade, UnmatchedSell
+from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,25 @@ logger = logging.getLogger(__name__)
 # compare floats with a bare `==`.
 _EPSILON = 1e-6
 _INVALID_TICKERS = {"", "n/a", "N/A"}
+
+# Story 1.3: two reason strings depending on whether any prior lot existed
+# at all for this SELL, vs. whether one or more lots existed and were
+# partially consumed before running out -- "no prior BUY found" is
+# factually wrong for the second case (a BUY plainly *was* found).
+_NO_PRIOR_BUY_REASON = "No prior BUY found to match this sell"
+_PARTIAL_SHORTFALL_REASON = "Sell exceeds available BUY lots by {shares:g} shares"
+
+# Share-quantity precision for an UnmatchedSell's `shares` -- matches the
+# `_EPSILON` tolerance used for lot-consumption comparisons, so a SELL that
+# is (within tolerance) fully matched never surfaces as a spurious
+# near-zero UnmatchedSell, and a genuine shortfall never displays
+# float-subtraction residue like `2.9999999997` in the UI.
+_SHARES_PRECISION = 6
+
+
+def _round2(x: float) -> float:
+    """Round a GBP money amount to 2dp — the single money-rounding rule."""
+    return round(x, 2)
 
 
 @dataclass
@@ -32,8 +54,28 @@ class _Lot:
     buy_date: str
 
 
+@dataclass
+class _RawRoundTrip:
+    """One matched (SELL, lot) pair before GBP conversion.
+
+    Entry/exit price are still in the ticker's native currency; GBP
+    conversion happens afterward in ``_convert_to_gbp`` (Story 1.2), once
+    per distinct trade date across the whole batch rather than per leg.
+    """
+
+    ticker: str
+    portfolio_id: int
+    entry_date: str
+    entry_price: float
+    exit_date: str
+    exit_price: float
+    shares: float
+    holding_period_days: int
+
+
 class RealisedPnlService:
-    """FIFO-matches SELLs against the oldest open BUY lots per ticker.
+    """FIFO-matches SELLs against the oldest open BUY lots per ticker, then
+    converts each Round-trip's legs to GBP at their own trade-date rate.
 
     Reads trade rows via ``TraderService.get_trade_history()``, which
     returns newest-first, then sorts them ascending by ``(date, id)`` and
@@ -43,12 +85,19 @@ class RealisedPnlService:
     must never call or import the Portfolio tab's average-cost matching
     method on ``TraderAgent`` (it stays untouched).
 
+    Currency and FX resolution go exclusively through ``PortfolioService``
+    (``ticker_currency``/``historical_gbpusd_rates``, AD-5) — this service
+    never fetches market data or the live rate itself.
+
     No persistence or caching of any kind: every ``compute_summary`` call
     recomputes fresh from live trade data.
     """
 
-    def __init__(self, trader_service: TraderService) -> None:
+    def __init__(
+        self, trader_service: TraderService, portfolio_service: PortfolioService
+    ) -> None:
         self._trader = trader_service
+        self._portfolio = portfolio_service
 
     def compute_summary(self, portfolio_id: int) -> RealisedPnlSummary:
         """Return a fully-populated Realised P&L summary for one Account.
@@ -57,20 +106,50 @@ class RealisedPnlService:
         persisted (AC 6).
         """
         trades = self._sorted_valid_trades(portfolio_id)
-        round_trips, open_lots, unmatched_count = self._replay_fifo(
+        raw_round_trips, open_lots, unmatched_sells = self._replay_fifo(
             trades, portfolio_id
         )
+        round_trips = self._convert_to_gbp(raw_round_trips)
         grouped = self._group_and_order(round_trips)
         mismatched = self._mismatched_tickers(open_lots, portfolio_id)
-        total_pnl = round(sum(rt.realised_pnl_gbp for rt in round_trips), 2)
+        # FX-unavailable Round-trips carry a 0.0 placeholder, not a real
+        # figure, and must never enter the Account total (Story 1.2 AC7).
+        total_pnl = _round2(
+            sum(rt.realised_pnl_gbp for rt in round_trips if not rt.fx_unavailable)
+        )
         return RealisedPnlSummary(
             portfolio_id=portfolio_id,
             round_trips=grouped,
             total_realised_pnl_gbp=total_pnl,
             round_trip_count=len(round_trips),
-            unmatched_count=unmatched_count,
+            unmatched_count=len(unmatched_sells),
+            unmatched_sells=unmatched_sells,
             mismatched_tickers=mismatched,
         )
+
+    def toggle_unmatched_sell_ack(
+        self, trade_id: int, portfolio_id: int
+    ) -> RealisedPnlSummary:
+        """Flip one unmatched sell's acknowledgment and return the fresh summary.
+
+        Looks up the sell's current ``acknowledged_at`` in a freshly
+        computed summary and writes the opposite (AD-8: pure toggle of
+        current state, no acknowledged value accepted from the caller). If
+        ``trade_id`` isn't among the current unmatched sells (e.g. a stale
+        click), this is a no-op — no exception, no write. Recomputes after
+        writing, since Round-trip/unmatched-sell results are never cached
+        (AD-7).
+        """
+        summary = self.compute_summary(portfolio_id)
+        target = next(
+            (u for u in summary.unmatched_sells if u.trade_id == trade_id), None
+        )
+        if target is not None:
+            self._trader.set_unmatched_sell_ack(
+                trade_id, target.acknowledged_at is None
+            )
+            summary = self.compute_summary(portfolio_id)
+        return summary
 
     def _sorted_valid_trades(self, portfolio_id: int) -> list[Trade]:
         """Fetch, filter, and sort trades for FIFO replay.
@@ -104,69 +183,187 @@ class RealisedPnlService:
 
     def _replay_fifo(
         self, trades: list[Trade], portfolio_id: int
-    ) -> tuple[list[RoundTrip], dict[str, deque[_Lot]], int]:
+    ) -> tuple[list[_RawRoundTrip], dict[str, deque[_Lot]], list[UnmatchedSell]]:
         """Replay trades in order, FIFO-matching SELLs against open lots.
 
         On BUY, push a new lot onto that ticker's queue. On SELL, pop from
         the front, consuming up to ``shares_remaining`` per lot until the
         sold quantity is satisfied or the queue empties; a fully-consumed
         lot is dequeued immediately so it can never be re-matched. If the
-        queue empties before a SELL is fully satisfied, matching for that
-        SELL simply stops — no exception, no fabricated lot, and the
-        shortfall is only counted (``unmatched_count``), never shaped into
-        a return value (Story 1.3's job).
+        queue empties before a SELL is fully satisfied (including the
+        fully-empty-queue case), the unconsumed remainder is emitted as an
+        ``UnmatchedSell`` (Story 1.3) and matching for that SELL stops — no
+        exception, no fabricated lot. This is a single forward pass over
+        chronologically-sorted trades: an ``UnmatchedSell`` is never
+        revisited or retroactively filled by a later BUY for the same
+        ticker, because the SELL that produced it is never re-examined once
+        the loop has moved past it.
         """
         queues: dict[str, deque[_Lot]] = {}
-        round_trips: list[RoundTrip] = []
-        unmatched_count = 0
+        round_trips: list[_RawRoundTrip] = []
+        unmatched_sells: list[UnmatchedSell] = []
         for t in trades:
             queue = queues.setdefault(t.ticker, deque())
             if t.action == "BUY":
                 queue.append(_Lot(t.shares, t.price, t.date))
                 continue
             remaining_to_sell = t.shares
+            any_lot_matched = False
             while remaining_to_sell > _EPSILON and queue:
                 lot = queue[0]
                 matched = min(lot.shares_remaining, remaining_to_sell)
                 round_trips.append(
-                    self._build_round_trip(t, lot, matched, portfolio_id)
+                    self._build_raw_round_trip(t, lot, matched, portfolio_id)
                 )
                 lot.shares_remaining -= matched
                 remaining_to_sell -= matched
+                any_lot_matched = True
                 if lot.shares_remaining <= _EPSILON:
                     queue.popleft()
+            remaining_to_sell = round(remaining_to_sell, _SHARES_PRECISION)
             if remaining_to_sell > _EPSILON:
-                unmatched_count += 1
-        return round_trips, queues, unmatched_count
+                if t.id is None:
+                    logger.warning(
+                        "Realised P&L: unmatched SELL for %s has no trade id "
+                        "-- this should be unreachable for a persisted row; "
+                        "falling back to trade_id=0",
+                        t.ticker,
+                    )
+                reason = (
+                    _PARTIAL_SHORTFALL_REASON.format(shares=remaining_to_sell)
+                    if any_lot_matched
+                    else _NO_PRIOR_BUY_REASON
+                )
+                unmatched_sells.append(
+                    UnmatchedSell(
+                        trade_id=t.id or 0,
+                        ticker=t.ticker,
+                        portfolio_id=portfolio_id,
+                        date=t.date,
+                        shares=remaining_to_sell,
+                        price=t.price,
+                        reason=reason,
+                        acknowledged_at=t.realised_pnl_ack_at,
+                    )
+                )
+        return round_trips, queues, unmatched_sells
 
     @staticmethod
-    def _build_round_trip(
+    def _build_raw_round_trip(
         sell: Trade, lot: _Lot, matched_shares: float, portfolio_id: int
-    ) -> RoundTrip:
-        """Build one RoundTrip for a lot (or partial lot) consumed by a SELL.
-
-        ``realised_pnl_gbp``/``realised_pnl_pct`` are native-currency
-        placeholders in this story (the trade's raw price is treated as if
-        already GBP); Story 1.2 replaces the calculation with true
-        trade-date FX conversion without changing these field names.
+    ) -> _RawRoundTrip:
+        """Build one raw (pre-GBP-conversion) Round-trip for a lot (or
+        partial lot) consumed by a SELL. Entry/exit price stay in the
+        ticker's native currency here; GBP conversion is a separate pass
+        (``_convert_to_gbp``) so trade dates can be batch-resolved once
+        across every Round-trip instead of per leg (Story 1.2 AC1/AC2).
         """
-        entry_price = lot.buy_price
-        exit_price = sell.price
-        pnl_gbp = round((exit_price - entry_price) * matched_shares, 2)
-        cost_basis = entry_price * matched_shares
-        pnl_pct = round(pnl_gbp / cost_basis * 100, 2) if cost_basis > 0 else 0.0
         holding_days = (
             date.fromisoformat(sell.date) - date.fromisoformat(lot.buy_date)
         ).days
-        return RoundTrip(
+        return _RawRoundTrip(
             ticker=sell.ticker,
             portfolio_id=portfolio_id,
             entry_date=lot.buy_date,
-            entry_price=entry_price,
+            entry_price=lot.buy_price,
             exit_date=sell.date,
-            exit_price=exit_price,
+            exit_price=sell.price,
             shares=matched_shares,
             holding_period_days=holding_days,
+        )
+
+    def _convert_to_gbp(self, raw_round_trips: list[_RawRoundTrip]) -> list[RoundTrip]:
+        """Convert every raw Round-trip's legs to GBP at their own
+        trade-date FX rate (Story 1.2, AC1/AC5/AC6).
+
+        Resolves each distinct ticker's currency exactly once via
+        ``PortfolioService.ticker_currency`` (the sole currency seam,
+        AD-5), then batch-fetches every distinct trade date belonging to a
+        USD-currency leg in a single ``PortfolioService.
+        historical_gbpusd_rates`` call — never once per leg or per
+        Round-trip. A GBP-currency ticker never needs a rate lookup at all.
+        """
+        currencies: dict[str, str] = {}
+        for raw in raw_round_trips:
+            if raw.ticker not in currencies:
+                currencies[raw.ticker] = self._portfolio.ticker_currency(raw.ticker)
+
+        usd_dates: set[str] = set()
+        for raw in raw_round_trips:
+            if currencies[raw.ticker] == "USD":
+                usd_dates.add(raw.entry_date)
+                usd_dates.add(raw.exit_date)
+        rates = self._portfolio.historical_gbpusd_rates(sorted(usd_dates))
+
+        return [
+            self._convert_round_trip(raw, currencies[raw.ticker], rates)
+            for raw in raw_round_trips
+        ]
+
+    @staticmethod
+    def _convert_round_trip(
+        raw: _RawRoundTrip, currency: str, rates: dict[str, float]
+    ) -> RoundTrip:
+        """Convert one raw Round-trip's legs to GBP and compute P&L/% on
+        the GBP amounts (Story 1.2 AC1/AC5/AC7/AC8).
+
+        A GBP-currency ticker's legs use rate = 1 (no lookup, no
+        conversion — used as-is). A USD-currency ticker's BUY/SELL legs
+        each convert independently at their own trade date's rate. Any
+        other currency (this feature only resolves the GBP/USD pair, per
+        PRD FR-3/Glossary) is immediately ``fx_unavailable`` -- it must
+        never fall through to a ``rates.get(...)`` lookup, which would
+        silently apply an unrelated USD-leg's rate to a same-date
+        third-currency trade. If either leg's rate is missing or fails the
+        ``>0``/not-``None`` check, the whole Round-trip is flagged
+        ``fx_unavailable`` with a documented ``0.0`` placeholder for the
+        P&L fields (never a real figure — every caller must check
+        ``fx_unavailable`` first and skip the row, e.g. ``compute_summary``'s
+        own total).
+        """
+        if currency == "GBP":
+            entry_rate: float | None = 1.0
+            exit_rate: float | None = 1.0
+        elif currency == "USD":
+            entry_rate = rates.get(raw.entry_date)
+            exit_rate = rates.get(raw.exit_date)
+        else:
+            logger.warning(
+                "Realised P&L: unsupported currency %r for %s (only GBP/USD "
+                "resolved) -- flagging fx_unavailable",
+                currency,
+                raw.ticker,
+            )
+            entry_rate = exit_rate = None
+
+        if entry_rate is None or entry_rate <= 0 or exit_rate is None or exit_rate <= 0:
+            return RoundTrip(
+                ticker=raw.ticker,
+                portfolio_id=raw.portfolio_id,
+                entry_date=raw.entry_date,
+                entry_price=raw.entry_price,
+                exit_date=raw.exit_date,
+                exit_price=raw.exit_price,
+                shares=raw.shares,
+                holding_period_days=raw.holding_period_days,
+                realised_pnl_gbp=0.0,
+                realised_pnl_pct=0.0,
+                fx_unavailable=True,
+            )
+
+        gbp_cost = _round2(raw.entry_price * raw.shares / entry_rate)
+        gbp_proceeds = _round2(raw.exit_price * raw.shares / exit_rate)
+        pnl_gbp = _round2(gbp_proceeds - gbp_cost)
+        pnl_pct = round(pnl_gbp / gbp_cost * 100, 2) if gbp_cost > 0 else 0.0
+        return RoundTrip(
+            ticker=raw.ticker,
+            portfolio_id=raw.portfolio_id,
+            entry_date=raw.entry_date,
+            entry_price=raw.entry_price,
+            exit_date=raw.exit_date,
+            exit_price=raw.exit_price,
+            shares=raw.shares,
+            holding_period_days=raw.holding_period_days,
             realised_pnl_gbp=pnl_gbp,
             realised_pnl_pct=pnl_pct,
             fx_unavailable=False,

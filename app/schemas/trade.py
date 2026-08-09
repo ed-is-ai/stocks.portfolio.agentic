@@ -78,6 +78,7 @@ class Trade(BaseModel):
     stop_loss: float | None = None  # initial stop from analysis at time of entry
     entry_price: float | None = None  # analyst pivot entry price
     portfolio_id: int | None = None  # owning account (#147)
+    realised_pnl_ack_at: str | None = None  # unmatched-sell ack timestamp (#170)
 
 
 class Position(BaseModel):

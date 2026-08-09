@@ -11,7 +11,7 @@ import json
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
@@ -110,6 +110,149 @@ class PortfolioService:
     def _to_gbp(amount: float, currency: str, gbpusd: float) -> float:
         """Convert amount to GBP using current rate if currency is USD."""
         return amount / gbpusd if currency == "USD" else amount
+
+    @staticmethod
+    def _is_valid_rate(rate: float | None) -> bool:
+        """Return True for a usable rate: not None and strictly positive.
+
+        A cached or freshly-fetched rate of ``0``, negative, or ``None`` is
+        always treated as unavailable, never fed into a conversion (AC7).
+        """
+        return rate is not None and rate > 0
+
+    def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
+        """Return ``{date: gbpusd_rate}`` for the requested trade dates.
+
+        The sole seam (AD-5) for resolving trade-date GBP/USD rates — a
+        sibling to the live-rate ``gbpusd_rate()``, never a replacement for
+        it. Checks ``FxRateCacheRepository`` (via ``TraderService``) for
+        every date first; any cache miss is batch-fetched from ``yfinance``
+        in a single call (never once per date) with a 7-calendar-day
+        nearest-prior-day fallback. Newly-resolved valid rates are persisted
+        back to the cache so a later call never re-fetches the same date.
+
+        A date absent from the returned dict means the rate could not be
+        resolved — never a ``0.0``/negative sentinel. A cached row holding
+        an already-invalid value (``0``/negative/``NULL``) is treated as
+        unavailable and excluded, but is *not* retried against ``yfinance``
+        (the cache is authoritative for a date already attempted).
+        """
+        unique_dates = sorted(set(dates))
+        if not unique_dates:
+            return {}
+        cached = self._trader.get_cached_fx_rates(unique_dates)
+        result: dict[str, float] = {}
+        missing: list[str] = []
+        for d in unique_dates:
+            if d not in cached:
+                missing.append(d)
+                continue
+            rate = cached[d]
+            if self._is_valid_rate(rate):
+                result[d] = round(rate, 4)
+        if missing:
+            fetched = self._fetch_historical_gbpusd(missing)
+            valid_fetched = {
+                d: round(rate, 4)
+                for d, rate in fetched.items()
+                if self._is_valid_rate(rate)
+            }
+            # A date still unresolved after the full 7-day search (e.g. a
+            # trade older than the whole available FX series) is cached as
+            # a known-invalid sentinel too, not left un-cached -- otherwise
+            # it would trigger a fresh `yfinance` download on every single
+            # future call forever, defeating NFR1's per-calendar-date
+            # caching intent. Reuses the same "cached invalid = never
+            # refetched" mechanism already used for a bad stored value.
+            unresolved = {d: -1.0 for d in missing if d not in valid_fetched}
+            to_persist = {**valid_fetched, **unresolved}
+            if to_persist:
+                self._trader.save_fx_rates(to_persist)
+            result.update(valid_fetched)
+        return result
+
+    @staticmethod
+    def _fetch_historical_gbpusd(dates: list[str]) -> dict[str, float]:
+        """Batch-fetch GBP/USD rates for ``dates`` via one ranged download.
+
+        One ``yfinance`` call covers the full date range (plus a 7-day
+        lookback margin), reusing ``_fetch_price_gbp``'s MultiIndex-safe
+        column-access idiom. For each requested date, an exact match in the
+        downloaded series is used first; otherwise the nearest earlier date
+        present in the series is used, searching back up to 7 calendar days.
+        A date with no rate anywhere in that window (including one older
+        than the whole series) is simply omitted — no exception, no
+        sentinel.
+        """
+        import yfinance as yf
+
+        if not dates:
+            return {}
+        parsed = sorted(date.fromisoformat(d) for d in dates)
+        start = parsed[0] - timedelta(days=7)
+        end = parsed[-1] + timedelta(days=1)
+        try:
+            data = yf.download(
+                "GBPUSD=X", start=start, end=end, progress=False, auto_adjust=True
+            )
+        except Exception:
+            # yfinance is an unofficial, unsupported scraping library --
+            # a network/rate-limit failure here must degrade every
+            # requested date to unresolved (fx_unavailable downstream),
+            # matching `_fetch_gbpusd_rate()`'s existing same-style
+            # try/except, never crash the whole Account's computation.
+            logger.warning(
+                "historical GBP/USD fetch failed for %s", dates, exc_info=True
+            )
+            return {}
+        if data.empty:
+            return {}
+        close = data["Close"] if "Close" in data.columns else data.iloc[:, 0]
+        series = close.iloc[:, 0] if hasattr(close, "columns") else close
+        series = series.dropna()
+        if series.empty:
+            return {}
+        by_date: dict[str, float] = {}
+        for idx, val in series.items():
+            key = (
+                idx.strftime("%Y-%m-%d") if hasattr(idx, "strftime") else str(idx)[:10]
+            )
+            by_date[key] = float(val)
+
+        result: dict[str, float] = {}
+        for d in dates:
+            target = date.fromisoformat(d)
+            for offset in range(8):  # exact match (0) plus up to 7 days prior
+                candidate = (target - timedelta(days=offset)).isoformat()
+                if candidate in by_date:
+                    result[d] = by_date[candidate]
+                    break
+        return result
+
+    def ticker_currency(self, ticker: str) -> str:
+        """Return a ticker's trading currency (e.g. ``"GBP"``, ``"USD"``).
+
+        The sole seam (AD-5) for resolving a ticker's currency, reusing the
+        same ``yf.Ticker(...).fast_info.currency`` classification
+        ``_fetch_price_gbp`` already applies to current positions
+        (``GBp`` normalised to ``GBP``, defaulting to ``GBP`` on any
+        failure). Resolved through ``load_ticker_aliases()`` first, matching
+        ``fetch_all_prices``'s ``_resolve`` pattern.
+        """
+        import yfinance as yf
+
+        aliases = self.load_ticker_aliases()
+        yf_sym = aliases.get(ticker, ticker)
+        try:
+            currency = yf.Ticker(yf_sym).fast_info.currency or "GBP"
+            if currency == "GBp":
+                currency = "GBP"
+            return cast(str, currency)
+        except Exception:
+            logger.warning(
+                "Could not determine currency for %s; defaulting to GBP", ticker
+            )
+            return "GBP"
 
     # --- live price fetching ---------------------------------------------
 

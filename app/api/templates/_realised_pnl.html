@@ -1,0 +1,135 @@
+{% if no_portfolios %}
+<div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
+  <i class="bi bi-info-circle-fill fs-5"></i>
+  <span>You don't have any portfolios yet. Create your first one on the
+    <strong>Portfolio</strong> tab to start recording holdings, cash, and trades.</span>
+</div>
+{% else %}
+
+{% if summary.mismatched_tickers %}
+<div class="mismatch-banner-row mb-3">
+  <div class="alert alert-warning border-0 d-flex align-items-start gap-2 mt-1 mb-0">
+    <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+    <div class="flex-grow-1">
+      {% for ticker in summary.mismatched_tickers %}
+      <div>FIFO and average-cost totals disagree for {{ ticker }}.</div>
+      {% endfor %}
+    </div>
+    <button type="button" class="btn-close" aria-label="Dismiss"
+            onclick="this.closest('.mismatch-banner-row').remove()"></button>
+  </div>
+</div>
+{% endif %}
+
+<!-- Summary strip (all values in GBP) -->
+<div class="d-flex flex-wrap gap-3 mb-4">
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Realised P&amp;L</div>
+    <div class="sval {% if summary.total_realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+      {{ "+" if summary.total_realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(summary.total_realised_pnl_gbp) }}
+    </div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-arrow-repeat me-1"></i>Round-trips</div>
+    <div class="sval">{{ summary.round_trip_count }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-exclamation-triangle me-1"></i>Unmatched Sells</div>
+    <div class="sval">{{ summary.unmatched_count }}</div>
+  </div>
+</div>
+
+<div class="tbl-wrap">
+  <table class="table table-hover align-middle">
+    <thead>
+      <tr>
+        <th>Ticker</th>
+        <th>Entry Date</th>
+        <th>Entry Price</th>
+        <th>Exit Date</th>
+        <th>Exit Price</th>
+        <th>Shares</th>
+        <th>Holding (days)</th>
+        <th>Realised P&amp;L</th>
+        <th>P&amp;L %</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if not summary.round_trips %}
+      <tr>
+        <td colspan="9">
+          <div class="alert alert-info border-0 d-flex align-items-center gap-2 my-2">
+            <i class="bi bi-info-circle-fill fs-5"></i>
+            No Round-trips yet for this account.
+          </div>
+        </td>
+      </tr>
+      {% else %}
+      {% for ticker, round_trips in summary.round_trips.items() %}
+      {% for rt in round_trips %}
+      <tr>
+        <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ rt.ticker }}</span></td>
+        <td>{{ rt.entry_date }}</td>
+        <td>{{ "%.2f"|format(rt.entry_price) }}</td>
+        <td>{{ rt.exit_date }}</td>
+        <td>{{ "%.2f"|format(rt.exit_price) }}</td>
+        <td>{{ rt.shares }}</td>
+        <td>{{ rt.holding_period_days }}</td>
+        {% if rt.fx_unavailable %}
+        <td colspan="2">
+          <span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span>
+        </td>
+        {% else %}
+        <td>
+          <span class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+            {{ "+" if rt.realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(rt.realised_pnl_gbp) }}
+          </span>
+        </td>
+        <td>
+          <span class="{% if rt.realised_pnl_pct >= 0 %}pos{% else %}neg{% endif %}">
+            {{ "+" if rt.realised_pnl_pct >= 0 }}{{ "%.1f"|format(rt.realised_pnl_pct) }}%
+          </span>
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+      {% set ticker_subtotal = round_trips | selectattr("fx_unavailable", "equalto", false) | sum(attribute="realised_pnl_gbp") %}
+      <tr class="table-subtotal-row">
+        <td>{{ ticker }} subtotal</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>
+          <span class="{% if ticker_subtotal >= 0 %}pos{% else %}neg{% endif %}">
+            {{ "+" if ticker_subtotal >= 0 }}£{{ "%.2f"|format(ticker_subtotal) }}
+          </span>
+        </td>
+        <td>&mdash;</td>
+      </tr>
+      {% endfor %}
+      {% endif %}
+    </tbody>
+    <tfoot>
+      <tr class="table-total-row">
+        <td>Account Total</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>&mdash;</td>
+        <td>
+          {{ "+" if summary.total_realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(summary.total_realised_pnl_gbp) }}
+        </td>
+        <td>&mdash;</td>
+      </tr>
+    </tfoot>
+  </table>
+</div>
+
+{% include "_unmatched_sells.html" ignore missing %}
+
+{% endif %}

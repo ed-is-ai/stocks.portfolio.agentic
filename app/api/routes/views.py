@@ -10,15 +10,18 @@ from fastapi.responses import HTMLResponse
 from app.api.dependencies import (
     get_alerts_repository,
     get_portfolio_service,
+    get_realised_pnl_service,
     get_trader_service,
 )
 from app.api.params import optional_int
 from app.api.templating import templates
 from app.api.watchlist_context import build_watchlist_context
 from app.core.config import PIPELINE_RUNS_CSV
+from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
 from app.schemas.source_health import SourceHealth
 from app.services.portfolio_service import PortfolioService
+from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
 
 router = APIRouter()
@@ -26,6 +29,7 @@ router = APIRouter()
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
 AlertsDep = Annotated[AlertsRepository, Depends(get_alerts_repository)]
+RealisedPnlDep = Annotated[RealisedPnlService, Depends(get_realised_pnl_service)]
 
 
 @router.get("/", response_class=HTMLResponse)
@@ -53,6 +57,81 @@ async def partial_portfolio(
     # breaks the tab (#147 regression).
     context = portfolio.default_portfolio_context(optional_int(portfolio_id))
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+@router.get("/partials/realised-pnl", response_class=HTMLResponse)
+async def partial_realised_pnl(
+    request: Request,
+    trader: TraderDep,
+    realised_pnl: RealisedPnlDep,
+    portfolio_id: str | None = None,
+) -> HTMLResponse:
+    # Accept a raw string: the client sends an empty ``portfolio_id=`` when no
+    # account is selected, which an ``int | None`` param rejects with 422 and
+    # breaks the tab (#147 regression).
+    pid = optional_int(portfolio_id)
+    portfolios = trader.list_portfolios()
+    if not portfolios:
+        return templates.TemplateResponse(
+            request, "_realised_pnl.html", context={"no_portfolios": True}
+        )
+    # Resolve the active portfolio: an unknown/None id falls back to the
+    # first portfolio, matching PortfolioService.default_portfolio_context.
+    active_id = pid
+    if active_id is None or not any(p.id == active_id for p in portfolios):
+        active_id = portfolios[0].id
+    active_portfolio = next(p for p in portfolios if p.id == active_id)
+    summary = realised_pnl.compute_summary(active_id)
+    return templates.TemplateResponse(
+        request,
+        "_realised_pnl.html",
+        context={
+            "portfolios": portfolios,
+            "active_portfolio": active_portfolio,
+            "summary": summary,
+            "unmatched_sells": summary.unmatched_sells,
+        },
+    )
+
+
+@router.post(
+    "/trades/{trade_id}/ack",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def ack_unmatched_sell(
+    request: Request,
+    trade_id: int,
+    trader: TraderDep,
+    realised_pnl: RealisedPnlDep,
+    portfolio_id: str | None = None,
+) -> HTMLResponse:
+    """Toggle one unmatched sell's acknowledgment; re-render its fragment only.
+
+    Bodyless per AD-8 -- ``portfolio_id`` travels as a query-string param on
+    the ``hx-post`` URL (not a form field/body), only so the response can be
+    re-scoped to the same Account; the ack value itself is never supplied by
+    the client, only toggled server-side.
+    """
+    pid = optional_int(portfolio_id)
+    portfolios = trader.list_portfolios()
+    if not portfolios:
+        return templates.TemplateResponse(
+            request, "_unmatched_sells.html", context={"unmatched_sells": []}
+        )
+    active_id = pid
+    if active_id is None or not any(p.id == active_id for p in portfolios):
+        active_id = portfolios[0].id
+    active_portfolio = next(p for p in portfolios if p.id == active_id)
+    summary = realised_pnl.toggle_unmatched_sell_ack(trade_id, active_id)
+    return templates.TemplateResponse(
+        request,
+        "_unmatched_sells.html",
+        context={
+            "unmatched_sells": summary.unmatched_sells,
+            "active_portfolio": active_portfolio,
+        },
+    )
 
 
 @router.get("/partials/history", response_class=HTMLResponse)

@@ -7,6 +7,7 @@ from app.repositories.account_repo import AccountStateRepository
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
 from app.repositories.cash_flows_repo import CashFlowsRepository
+from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
 from app.repositories.results_repo import ResultsRepository
 from app.repositories.trades_repo import TradesRepository
@@ -62,6 +63,28 @@ def test_trades_insert_ignore_dedupes_reference(trades_connect):
     assert len(repo.history("AAPL")) == 1
 
 
+def test_trades_set_ack_writes_and_clears(trades_connect):
+    """Story 1.5, AC #7: ``set_ack`` writes/clears ``realised_pnl_ack_at``,
+    and only the targeted row is affected (an untouched trade stays
+    ``None``)."""
+    repo = TradesRepository(trades_connect)
+    target_id = repo.insert("AAPL", "SELL", 5, 100.0, "01/02/2024")
+    other_id = repo.insert("MSFT", "BUY", 5, 200.0, "02/02/2024")
+
+    with db.session(trades_connect) as conn:
+        repo.set_ack(conn, target_id, "2026-08-09T12:00:00+00:00")
+
+    history = {t.id: t for t in repo.history()}
+    assert history[target_id].realised_pnl_ack_at == "2026-08-09T12:00:00+00:00"
+    assert history[other_id].realised_pnl_ack_at is None
+
+    with db.session(trades_connect) as conn:
+        repo.set_ack(conn, target_id, None)
+
+    history = {t.id: t for t in repo.history()}
+    assert history[target_id].realised_pnl_ack_at is None
+
+
 # --- CashFlowsRepository ---------------------------------------------------
 
 
@@ -102,6 +125,33 @@ def test_price_cache_upsert_and_load(trades_connect):
     assert len(rows) == 1
     assert rows[0][0] == "AAPL"
     assert rows[0][1] == 110.0
+
+
+# --- FxRateCacheRepository (Story 1.2) --------------------------------------
+
+
+def test_fx_rate_cache_upsert_and_get_many_round_trip(trades_connect):
+    """The real SQL (``IN (...)`` placeholder construction, ``ON CONFLICT``
+    upsert) round-trips correctly against a real SQLite DB -- Story 1.2's
+    service-layer tests only exercise this repository via an in-memory
+    fake, so this is the one test that runs the actual SQL."""
+    repo = FxRateCacheRepository(trades_connect)
+
+    repo.upsert_many({"2026-01-01": 1.3456, "2026-01-02": 1.36})
+    result = repo.get_many(["2026-01-01", "2026-01-02", "2026-01-03"])
+    assert result == {"2026-01-01": 1.3456, "2026-01-02": 1.36}
+    assert "2026-01-03" not in result
+
+    # Upsert overwrites an existing row rather than erroring/duplicating.
+    repo.upsert_many({"2026-01-01": 1.40})
+    assert repo.get_many(["2026-01-01"]) == {"2026-01-01": 1.40}
+
+    # A dumb store: an invalid stored value round-trips unfiltered --
+    # PortfolioService, not this repository, is responsible for filtering.
+    repo.upsert_many({"2026-01-04": -1.0})
+    assert repo.get_many(["2026-01-04"]) == {"2026-01-04": -1.0}
+
+    assert repo.get_many([]) == {}
 
 
 # --- AccountStateRepository ------------------------------------------------

@@ -1,0 +1,62 @@
+<!-- Unmatched-sell panel (Story 1.5) -- collapsible <details>, modeled on the
+     Cash Activity ledger (_portfolio.html:466-501). Hidden entirely when
+     there are no unmatched sells (AC #3); open by default while any entry
+     is unacknowledged, collapsed once every entry is acknowledged (AC #2),
+     recomputed fresh on every render including this fragment's own
+     ack-toggle response. -->
+<div id="unmatched-sells-panel">
+{% if unmatched_sells %}
+{% set unacked_count = unmatched_sells | selectattr('acknowledged_at', 'none') | list | length %}
+<details class="unmatched-panel mt-3" {% if unacked_count > 0 %}open{% endif %}>
+  <summary>
+    <i class="bi bi-exclamation-triangle me-1"></i>Unmatched sells
+    ({{ unmatched_sells | length }}{% if unacked_count > 0 %}, {{ unacked_count }} needs review{% endif %})
+  </summary>
+  <div class="tbl-wrap mt-2">
+    <table class="table table-hover align-middle">
+      <thead>
+        <tr>
+          <th>Ticker</th>
+          <th>Sell date</th>
+          <th>Shares</th>
+          <th>Price</th>
+          <th>Reason</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for us in unmatched_sells %}
+        <tr class="{% if us.acknowledged_at %}acked-row{% endif %}">
+          <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ us.ticker }}</span></td>
+          <td class="text-muted" style="font-size:0.76rem">{{ us.date }}</td>
+          <td>{{ us.shares }}</td>
+          <td>£{{ "%.2f"|format(us.price) }}</td>
+          <td class="text-muted" style="font-size:0.78rem">{{ us.reason }}</td>
+          <td>
+            {% if us.acknowledged_at %}
+              <span class="ack-badge">KNOWN TRANSFER</span>
+              <span class="text-muted" style="font-size:0.7rem">Acknowledged {{ us.acknowledged_at[:10] }}</span>
+              <button type="button" class="ack-toggle acked"
+                      hx-post="/trades/{{ us.trade_id }}/ack?portfolio_id={{ active_portfolio.id }}"
+                      hx-target="#unmatched-sells-panel" hx-swap="outerHTML"
+                      hx-disabled-elt="this">
+                Undo
+              </button>
+            {% else %}
+              <span class="flag-badge">NEEDS REVIEW</span>
+              <button type="button" class="ack-toggle"
+                      hx-post="/trades/{{ us.trade_id }}/ack?portfolio_id={{ active_portfolio.id }}"
+                      hx-target="#unmatched-sells-panel" hx-swap="outerHTML"
+                      hx-disabled-elt="this">
+                Mark as known transfer
+              </button>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</details>
+{% endif %}
+</div>
