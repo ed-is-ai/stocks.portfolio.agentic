@@ -21,7 +21,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 try:
     import requests
@@ -105,6 +105,7 @@ class FMPClient:
         # is retained only as the constituents + cache source.
         self.api_key = api_key or os.getenv("FMP_API_KEY")
         self.session = requests.Session()
+        self._constituents_get: Callable[..., Any] = requests.get
         if self.api_key:
             self.session.headers.update({"apikey": self.api_key})
         self.cache = {}
@@ -269,8 +270,7 @@ class FMPClient:
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        self.last_error = None
-        constituents = self._fetch_datahub_constituents()
+        constituents = self.get_sp500_constituents_live()
         if constituents:
             self.cache[cache_key] = constituents
             self._save_constituents_cache(constituents)
@@ -293,7 +293,18 @@ class FMPClient:
             return constituents
         return None
 
-    def _fetch_datahub_constituents(self) -> Optional[list[dict]]:
+    def get_sp500_constituents_live(self) -> Optional[list[dict]]:
+        """Return only a freshly retrieved DataHub roster, never disk fallback.
+
+        Historical reconstruction uses this strict seam because a cached BAU
+        fallback cannot prove which current roster was captured.
+        """
+        self.last_error = None
+        return self._fetch_datahub_constituents(strict=True)
+
+    def _fetch_datahub_constituents(
+        self, *, strict: bool = False
+    ) -> Optional[list[dict]]:
         """Download and parse the DataHub S&P 500 constituents CSV.
 
         Maps the CSV columns to FMP's constituent shape so downstream callers
@@ -301,24 +312,70 @@ class FMPClient:
         network or parse failure, recording the cause in ``last_error``.
         """
         try:
-            response = requests.get(self._CONSTITUENTS_URL, timeout=30)
-            response.raise_for_status()
+            response = self._constituents_get(self._CONSTITUENTS_URL, timeout=30)
+            status_code = getattr(response, "status_code", None)
+            if status_code is not None and status_code != 200:
+                self.last_error = f"HTTP {status_code} - {str(response.text)[:200]}"
+                return None
+            if status_code is None:
+                response.raise_for_status()
         except requests.RequestException as exc:
             self.last_error = f"DataHub request failed: {exc}"
             return None
         try:
-            reader = csv.DictReader(io.StringIO(response.text))
-            constituents = [
-                {
-                    "symbol": row["Symbol"].strip(),
-                    "name": (row.get("Name") or row["Symbol"]).strip(),
-                    "sector": (row.get("Sector") or "Unknown").strip(),
-                    "subSector": (row.get("Sub-Industry") or "").strip(),
-                }
-                for row in reader
-                if (row.get("Symbol") or "").strip()
-            ]
-        except (csv.Error, KeyError) as exc:
+            if str(response.text).strip():
+                rows = list(csv.DictReader(io.StringIO(response.text)))
+                parsed_json_rows = False
+            else:
+                payload = response.json()
+                if not isinstance(payload, list):
+                    raise TypeError("DataHub payload is not a row list")
+                rows = payload
+                parsed_json_rows = True
+            constituents = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise TypeError("DataHub constituent row is not an object")
+                raw_symbol = row.get("Symbol", row.get("symbol", ""))
+                symbol = str(raw_symbol).strip()
+                if not symbol:
+                    if strict:
+                        raise ValueError("DataHub constituent row has no symbol")
+                    continue
+                if parsed_json_rows and "symbol" in row:
+                    if strict and not all(
+                        isinstance(row.get(field), str) and row[field].strip()
+                        for field in ("name", "sector")
+                    ):
+                        raise ValueError(
+                            "DataHub constituent row lacks required name or sector"
+                        )
+                    constituents.append(dict(row))
+                    continue
+                raw_name = row.get("Name", row.get("name"))
+                raw_sector = row.get("Sector", row.get("sector"))
+                if strict and not all(
+                    isinstance(value, str) and value.strip()
+                    for value in (raw_name, raw_sector)
+                ):
+                    raise ValueError(
+                        "DataHub constituent row lacks required name or sector"
+                    )
+                constituents.append(
+                    {
+                        "symbol": symbol,
+                        "name": str(
+                            raw_name if raw_name is not None else symbol
+                        ).strip(),
+                        "sector": str(
+                            raw_sector if raw_sector is not None else "Unknown"
+                        ).strip(),
+                        "subSector": str(
+                            row.get("Sub-Industry", row.get("subSector", ""))
+                        ).strip(),
+                    }
+                )
+        except (csv.Error, KeyError, TypeError, ValueError) as exc:
             self.last_error = f"DataHub CSV parse failed: {exc}"
             return None
         if not constituents:

@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+import re
+
+import pytest
+
+from app.services.backtest.trading_calendar import TradingCalendar
+
+
+@pytest.fixture(scope="module")
+def calendars() -> TradingCalendar:
+    return TradingCalendar()
+
+
+@pytest.mark.parametrize(
+    ("mic", "month", "expected"),
+    [
+        ("XNYS", "2024-04", "2024-04-30"),
+        ("XNYS", "2021-05", "2021-05-28"),
+        ("XLON", "2024-04", "2024-04-30"),
+        ("XLON", "2021-05", "2021-05-28"),
+    ],
+)
+def test_last_completed_session_uses_exchange_month_end(
+    calendars: TradingCalendar, mic: str, month: str, expected: str
+) -> None:
+    assert calendars.last_session_of_month(mic, month).isoformat() == expected
+
+
+def test_closed_mic_mapping(calendars: TradingCalendar) -> None:
+    assert calendars.calendar_name("XNAS") == "XNYS"
+    assert calendars.calendar_name("XNYS") == "XNYS"
+    assert calendars.calendar_name("XLON") == "XLON"
+    with pytest.raises(ValueError, match="Unsupported MIC"):
+        calendars.calendar_name("XPAR")
+
+
+@pytest.mark.parametrize(
+    ("mic", "session", "expected_close"),
+    [
+        ("XNYS", "2024-11-29", "18:00:00+00:00"),
+        ("XLON", "2024-12-24", "12:30:00+00:00"),
+    ],
+)
+def test_early_close_fixtures(
+    calendars: TradingCalendar, mic: str, session: str, expected_close: str
+) -> None:
+    assert str(calendars.session_close(mic, session).timetz()) == expected_close
+
+
+@pytest.mark.parametrize(
+    ("mic", "closed_date"),
+    [("XNYS", "2018-12-05"), ("XLON", "2022-09-19")],
+)
+def test_unscheduled_closure_fixtures(
+    calendars: TradingCalendar, mic: str, closed_date: str
+) -> None:
+    assert not calendars.is_session(mic, closed_date)
+
+
+def test_dst_changes_utc_open_without_changing_local_session(
+    calendars: TradingCalendar,
+) -> None:
+    assert (
+        str(calendars.session_open("XNYS", "2024-03-08").timetz()) == "14:30:00+00:00"
+    )
+    assert (
+        str(calendars.session_open("XNYS", "2024-03-11").timetz()) == "13:30:00+00:00"
+    )
+    assert (
+        str(calendars.session_open("XLON", "2024-03-28").timetz()) == "08:00:00+00:00"
+    )
+    assert (
+        str(calendars.session_open("XLON", "2024-04-02").timetz()) == "07:00:00+00:00"
+    )
+
+
+def test_session_table_digest_is_stable(calendars: TradingCalendar) -> None:
+    first = calendars.session_table_digest()
+    second = TradingCalendar().session_table_digest()
+    assert first == second
+    assert re.fullmatch(r"[0-9a-f]{64}", first)
+    assert first == "c18b0ba3277b7c4efa736dd1939ee5cfe7a64f4f5bd887cf78dec7bbd7c20b0e"

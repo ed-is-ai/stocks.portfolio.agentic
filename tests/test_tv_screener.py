@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 
-from app.integrations.tv_screener import map_sector
+import pandas as pd
+
+from app.integrations.tv_screener import _extract_roster_rows, map_sector
 
 
 class TestMapSector:
@@ -28,3 +30,45 @@ class TestMapSector:
         assert map_sector("") is None
         assert map_sector(None) is None
         assert map_sector(math.nan) is None
+
+
+def test_roster_rows_retain_exchange_qualified_symbol_and_currency() -> None:
+    frame = pd.DataFrame(
+        {
+            "name": ["NASDAQ:AAPL", "NYSE:IBM"],
+            "exchange": ["NASDAQ", "NYSE"],
+            "currency": ["USD", "USD"],
+            "sector": ["Technology Services", "Technology Services"],
+        }
+    )
+    assert _extract_roster_rows(frame, is_uk=False) == (
+        {
+            "symbol": "NASDAQ:AAPL",
+            "exchange": "NASDAQ",
+            "currency": "USD",
+            "quote_unit": "USD",
+        },
+        {
+            "symbol": "NYSE:IBM",
+            "exchange": "NYSE",
+            "currency": "USD",
+            "quote_unit": "USD",
+        },
+    )
+
+    uk = pd.DataFrame(
+        {
+            "name": ["LSE:ULVR"],
+            "exchange": ["LSE"],
+            "currency": ["GBp"],
+            "sector": ["Consumer Non-Durables"],
+        }
+    )
+    assert _extract_roster_rows(uk, is_uk=True) == (
+        {
+            "symbol": "LSE:ULVR",
+            "exchange": "LSE",
+            "currency": "GBP",
+            "quote_unit": "GBp",
+        },
+    )

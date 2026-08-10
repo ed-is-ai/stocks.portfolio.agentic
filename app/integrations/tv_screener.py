@@ -28,6 +28,7 @@ Soft filter (both markets):
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.schemas.source_health import SourceName, SourceResult, SourceState
@@ -89,6 +90,46 @@ def map_sector(raw_sector: object) -> str | None:
     return _TRBC_TO_GICS.get(raw_sector.strip())
 
 
+def _extract_roster_rows(df, *, is_uk: bool) -> tuple[dict[str, str], ...]:
+    """Retain source exchange/currency evidence before compatibility stripping."""
+    required = {"name", "exchange", "currency"}
+    if not required.issubset(df.columns):
+        return ()
+    rows: list[dict[str, str]] = []
+    for name, exchange, currency in zip(
+        df["name"], df["exchange"], df["currency"], strict=True
+    ):
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (name, exchange, currency)
+        ):
+            return ()
+        expected = "LSE" if is_uk else exchange.strip().upper()
+        if (is_uk and exchange.strip().upper() != expected) or (
+            not is_uk and expected not in _US_EXCHANGES
+        ):
+            return ()
+        rows.append(
+            {
+                "symbol": name.strip(),
+                "exchange": exchange.strip().upper(),
+                "currency": (
+                    "GBP"
+                    if is_uk and currency.strip() in {"GBP", "GBp"}
+                    else currency.strip()
+                ),
+                "quote_unit": "GBp" if is_uk else currency.strip(),
+            }
+        )
+    return tuple(rows)
+
+
+@dataclass(frozen=True)
+class TradingViewRosterEvidence:
+    result: SourceResult
+    rows: tuple[dict[str, str], ...]
+
+
 def ScreenerResult(  # noqa: N802
     tickers: list[str], status: str, detail: str = ""
 ) -> SourceResult:
@@ -105,14 +146,14 @@ def ScreenerResult(  # noqa: N802
     )
 
 
-def _fetch(
+def _fetch_evidence(
     exchanges: list[str],
     min_market_cap: int,
     min_avg_vol: int,
     min_price: float,
     max_rows: int,
     label: str,
-) -> SourceResult:
+) -> TradingViewRosterEvidence:
     """Core screener fetch — shared by US and UK callers."""
     started_at = datetime.now(timezone.utc)
     source = (
@@ -124,12 +165,15 @@ def _fetch(
         from tradingview_screener import Query, col  # type: ignore[import]
     except ImportError:
         print(f"  [skip] {label}: tradingview-screener not installed")
-        return SourceResult.unavailable(
-            source,
-            SourceState.SKIPPED,
-            "dependency_missing",
-            "TradingView screener dependency is not installed.",
-            started_at=started_at,
+        return TradingViewRosterEvidence(
+            SourceResult.unavailable(
+                source,
+                SourceState.SKIPPED,
+                "dependency_missing",
+                "TradingView screener dependency is not installed.",
+                started_at=started_at,
+            ),
+            (),
         )
 
     is_uk = exchanges == _UK_EXCHANGES
@@ -143,6 +187,8 @@ def _fetch(
         count, df = (
             query.select(
                 "name",
+                "exchange",
+                "currency",
                 "close",
                 "SMA50",
                 "SMA150",
@@ -167,12 +213,15 @@ def _fetch(
         )
     except Exception as exc:
         print(f"  [warn] {label}: screener call failed -- {exc}")
-        return SourceResult.unavailable(
-            source,
-            SourceState.FAILED,
-            "provider_failure",
-            f"{label} request failed.",
-            started_at=started_at,
+        return TradingViewRosterEvidence(
+            SourceResult.unavailable(
+                source,
+                SourceState.FAILED,
+                "provider_failure",
+                f"{label} request failed.",
+                started_at=started_at,
+            ),
+            (),
         )
 
     mask = df["close"] >= df["price_52_week_high"] * _PCT_FROM_HIGH_THRESHOLD
@@ -197,9 +246,25 @@ def _fetch(
         f"(from {count} server-side, {len(df)} fetched, "
         f"{len(filtered)} after 52w-high filter)"
     )
-    return SourceResult.from_items(
+    result = SourceResult.from_items(
         source, tickers, started_at=started_at, sectors=sectors
     )
+    return TradingViewRosterEvidence(
+        result, _extract_roster_rows(filtered, is_uk=is_uk)
+    )
+
+
+def _fetch(
+    exchanges: list[str],
+    min_market_cap: int,
+    min_avg_vol: int,
+    min_price: float,
+    max_rows: int,
+    label: str,
+) -> SourceResult:
+    return _fetch_evidence(
+        exchanges, min_market_cap, min_avg_vol, min_price, max_rows, label
+    ).result
 
 
 def fetch_tv_screener_tickers(max_rows: int = _US_MAX_ROWS) -> list[str]:
@@ -241,6 +306,31 @@ def fetch_tv_screener_result_uk(max_rows: int = _UK_MAX_ROWS) -> SourceResult:
         max_rows=max_rows,
         label="tv_screener_uk",
     )
+
+
+def fetch_tv_screener_roster_evidence(
+    *, market: str, max_rows: int | None = None
+) -> TradingViewRosterEvidence:
+    """Return current screener output with source exchange/currency evidence."""
+    if market.upper() == "UK":
+        return _fetch_evidence(
+            _UK_EXCHANGES,
+            _UK_MIN_MARKET_CAP,
+            _UK_MIN_AVG_VOL,
+            _UK_MIN_PRICE,
+            max_rows or _UK_MAX_ROWS,
+            "tv_screener_uk",
+        )
+    if market.upper() == "US":
+        return _fetch_evidence(
+            _US_EXCHANGES,
+            _US_MIN_MARKET_CAP,
+            _US_MIN_AVG_VOL,
+            _US_MIN_PRICE,
+            max_rows or _US_MAX_ROWS,
+            "tv_screener_us",
+        )
+    raise ValueError("market must be US or UK")
 
 
 if __name__ == "__main__":

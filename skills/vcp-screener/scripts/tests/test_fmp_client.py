@@ -32,7 +32,7 @@ def _install_session(client: FMPClient, responses: list[_FakeResponse]) -> None:
         calls["n"] += 1
         return responses[idx]
 
-    client.session.get = _get  # type: ignore[assignment]
+    client._constituents_get = _get
 
 
 def test_records_last_error_on_http_failure(tmp_path):
@@ -112,3 +112,25 @@ def test_ignores_corrupt_cache(tmp_path):
     _install_session(client, [_FakeResponse(500, payload=None, text="down")])
 
     assert client.get_sp500_constituents() is None
+
+
+def test_strict_live_constituents_never_uses_disk_fallback(tmp_path, capsys):
+    client = _make_client(tmp_path)
+    cached = [{"symbol": "MSFT", "name": "Microsoft", "sector": "Tech"}]
+    client._CONSTITUENTS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+    client._CONSTITUENTS_CACHE.write_text(
+        json.dumps({"cached_at": "2026-07-01T00:00:00+00:00", "constituents": cached})
+    )
+    _install_session(client, [_FakeResponse(503, payload=None, text="upstream down")])
+
+    assert client.get_sp500_constituents_live() is None
+    assert "falling back to cached" not in capsys.readouterr().err
+
+
+def test_strict_live_constituents_rejects_rows_missing_required_fields(tmp_path):
+    client = _make_client(tmp_path)
+    _install_session(client, [_FakeResponse(200, payload=[{"symbol": "AAPL"}])])
+
+    assert client.get_sp500_constituents_live() is None
+    assert client.last_error is not None
+    assert "required name or sector" in client.last_error

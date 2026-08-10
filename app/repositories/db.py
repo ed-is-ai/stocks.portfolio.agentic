@@ -94,7 +94,13 @@ DEFAULT_PORTFOLIO_NAME = "SIPP"
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
     """Open a SQLite connection to ``db_path``."""
-    return sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path)
+    # SQLite foreign-key checks are disabled by default and scoped to each
+    # connection. Backtest evidence uses fresh connections per repository
+    # operation, so schema-time PRAGMA statements alone cannot enforce its
+    # immutable-reference contract.
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 
 def make_connect(db_path_getter: Callable[[], str | Path]) -> Connect:
