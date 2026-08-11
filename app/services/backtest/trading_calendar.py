@@ -26,7 +26,12 @@ class TradingCalendar:
             raise ValueError(f"Unsupported MIC: {mic}") from exc
 
     def _calendar(self, mic: str):
-        return xcals.get_calendar(self.calendar_name(mic))
+        # exchange_calendars otherwise builds a rolling default window around
+        # today, making the supposedly canonical digest change at midnight and
+        # excluding older/future backtest sessions from the authority table.
+        return xcals.get_calendar(
+            self.calendar_name(mic), start=_DIGEST_START, end=_DIGEST_END
+        )
 
     def is_session(self, mic: str, session: str | date) -> bool:
         return bool(self._calendar(mic).is_session(pd.Timestamp(session)))
@@ -50,7 +55,9 @@ class TradingCalendar:
     def _session_table_bytes(self) -> bytes:
         records: list[dict[str, str]] = []
         for name in ("XNYS", "XLON"):
-            schedule = xcals.get_calendar(name).schedule.loc[_DIGEST_START:_DIGEST_END]
+            schedule = xcals.get_calendar(
+                name, start=_DIGEST_START, end=_DIGEST_END
+            ).schedule
             for session, row in schedule.iterrows():
                 records.append(
                     {

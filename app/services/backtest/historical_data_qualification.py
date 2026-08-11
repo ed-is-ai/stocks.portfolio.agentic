@@ -361,7 +361,7 @@ def normalize_provider_response(
 
 
 class YFinanceQualificationAdapter:
-    """Fetch one provider-native daily interval under the closed AD-6 contract."""
+    """Qualification facade over the reusable provider-native AD-6 adapter."""
 
     def __init__(
         self,
@@ -377,50 +377,45 @@ class YFinanceQualificationAdapter:
         self._clock = clock
 
     def fetch(self, definition: ProbeDefinition) -> HistoricalQualificationPayload:
-        request: dict[str, object] = {
-            "start": definition.start.isoformat(),
-            "end": definition.end.isoformat(),
-            "interval": "1d",
-            "prepost": False,
-            "auto_adjust": False,
-            "back_adjust": False,
-            "actions": True,
-            "repair": False,
-            "keepna": True,
-            "rounding": False,
-            "timeout": 15,
-            "raise_errors": True,
-        }
-        request_key = (
-            f"{definition.symbol}:{definition.start}:{definition.end}:"
-            f"{REQUEST_CONTRACT_VERSION}"
+        # Lazy import avoids a module cycle: the shared adapter deliberately
+        # reuses this module's established failure taxonomy.
+        from app.services.backtest.historical_price_evidence import (
+            HistoricalEvidenceRequest,
+            YFinanceHistoricalEvidenceAdapter,
         )
-        for attempt in range(3):
-            try:
-                ticker = self._ticker_factory(definition.symbol)
-                frame = ticker.history(**request)
-                metadata = dict(ticker.get_history_metadata(repair=False))
-                return normalize_provider_response(
-                    requested_symbol=definition.symbol,
-                    start=definition.start,
-                    end=definition.end,
-                    frame=frame,
-                    metadata=metadata,
-                    request=request,
-                    expected_currency=definition.expected_currency,
-                    expected_quote_unit=definition.expected_quote_unit,
-                    expected_timezone=definition.expected_timezone,
-                    expected_sessions=definition.expected_sessions,
-                    allowed_observed_symbols=definition.allowed_observed_symbols,
-                    acquired_at=self._clock(),
-                )
-            except Exception as exc:
-                failure = _classify_exception(exc)
-                if not failure.retryable or attempt == 2:
-                    raise failure from exc
-                base = 1.0 if attempt == 0 else 2.0
-                self._sleeper(min(2.25, base + self._jitter(request_key, attempt)))
-        raise AssertionError("unreachable")
+
+        payload = YFinanceHistoricalEvidenceAdapter(
+            self._ticker_factory,
+            sleeper=self._sleeper,
+            jitter=self._jitter,
+            clock=self._clock,
+        ).fetch(
+            HistoricalEvidenceRequest(
+                security_id=None,
+                alias_revision=None,
+                symbol=definition.symbol,
+                start=definition.start,
+                end=definition.end,
+                expected_currency=definition.expected_currency,
+                expected_quote_unit=definition.expected_quote_unit,
+                expected_timezone=definition.expected_timezone,
+                expected_sessions=definition.expected_sessions,
+                allowed_observed_symbols=definition.allowed_observed_symbols,
+            )
+        )
+        return HistoricalQualificationPayload(
+            requested_symbol=payload.requested_symbol,
+            observed_symbol=payload.observed_symbol,
+            currency=payload.currency,
+            quote_unit=payload.quote_unit,
+            quote_unit_scale=payload.quote_unit_scale,
+            exchange_timezone=payload.exchange_timezone,
+            request_contract=payload.request_contract,
+            rows=payload.rows,
+            response_metadata_digest=payload.response_metadata_digest,
+            content_digest=payload.data_revision,
+            acquired_at=payload.acquired_at,
+        )
 
 
 def classify_missing_observation(requested: date, first_observation: date) -> str:

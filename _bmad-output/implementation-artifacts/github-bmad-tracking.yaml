@@ -1,0 +1,67 @@
+generated: 2026-08-10
+repository: ed-is-ai/Agents.stocks
+contract_traceability:
+  architecture_spine: embedded-relevant-text
+  ux_design: embedded-relevant-text
+  github_issues_verified: 25
+correct_course:
+  proposal: sprint-change-proposal-2026-08-10.md
+  status: synchronized
+  synchronized_at: 2026-08-10
+  verified_issues: [184, 185, 187, 189, 195, 196, 199, 207, 208]
+implementation_readiness:
+  report: implementation-readiness-report-2026-08-10-rerun.md
+  status: ready
+  assessed_at: 2026-08-10
+  critical_issues: 0
+  major_issues: 0
+  non_blocking_observations: 9
+sprint_planning:
+  status: refreshed
+  refreshed_at: 2026-08-10
+  source: epics.md
+  readiness: ready
+  epics: 3
+  stories: 22
+  status_changes: 2
+create_story:
+  latest_story: 1-3-store-immutable-provider-native-historical-evidence
+  issue: 186
+  status: review
+  created_at: 2026-08-11
+epics:
+  epic-1:
+    issue: 207
+    status: open
+    sub_issues: [184, 185, 186, 187, 188, 189, 190, 191, 192, 193]
+  epic-2:
+    issue: 208
+    status: open
+    sub_issues: [194, 195, 196, 197, 198, 199, 200, 201, 202]
+  epic-3:
+    issue: 206
+    status: open
+    sub_issues: [203, 204, 205]
+stories:
+  1-1-qualify-the-free-historical-data-contract: { issue: 184, status: done }
+  1-2-capture-stable-security-identities-and-the-reconstruction-roster: { issue: 185, status: open }
+  1-3-store-immutable-provider-native-historical-evidence: { issue: 186, status: review }
+  1-4-produce-deterministic-price-volume-corporate-action-and-fx-planes: { issue: 187, status: open }
+  1-5-reconstruct-and-cache-canonical-historical-scan-records: { issue: 188, status: open }
+  1-6-commit-versioned-monthly-snapshot-coverage: { issue: 189, status: open }
+  1-7-run-initialization-through-the-durable-job-lifecycle: { issue: 190, status: open }
+  1-8-recover-and-notify-initialization-activity: { issue: 191, status: open }
+  1-9-use-historical-initialization-and-coverage-in-the-web-ui: { issue: 192, status: open }
+  1-10-extend-coverage-with-eligible-bau-scanner-snapshots: { issue: 193, status: open }
+  2-1-author-a-strategy-against-the-versioned-protocol: { issue: 194, status: open }
+  2-2-discover-strategies-and-validate-their-parameters: { issue: 195, status: open }
+  2-3-bind-backtests-to-bounded-views-and-a-replay-manifest: { issue: 196, status: open }
+  2-4-execute-the-deterministic-portfolio-simulation: { issue: 197, status: open }
+  2-5-calculate-and-atomically-persist-backtest-results: { issue: 198, status: open }
+  2-6-run-backtests-through-the-durable-activity-lifecycle: { issue: 199, status: open }
+  2-7-configure-and-launch-a-strategy-in-the-web-ui: { issue: 200, status: open }
+  2-8-monitor-backtest-activity-and-browse-the-results-list: { issue: 201, status: open }
+  2-9-review-a-completed-backtest-result: { issue: 202, status: open }
+  3-1-enforce-one-canonical-comparison-eligibility-predicate: { issue: 203, status: open }
+  3-2-choose-an-eligible-result-through-the-compare-picker: { issue: 204, status: open }
+  3-3-review-two-results-side-by-side: { issue: 205, status: open }

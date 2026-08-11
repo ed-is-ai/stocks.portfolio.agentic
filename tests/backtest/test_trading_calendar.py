@@ -80,4 +80,12 @@ def test_session_table_digest_is_stable(calendars: TradingCalendar) -> None:
     second = TradingCalendar().session_table_digest()
     assert first == second
     assert re.fullmatch(r"[0-9a-f]{64}", first)
-    assert first == "c18b0ba3277b7c4efa736dd1939ee5cfe7a64f4f5bd887cf78dec7bbd7c20b0e"
+    assert first == "f9ea088dec004ee6ee86542c68a2afc686cb9f60076e19c925eea26757c2d737"
+
+
+def test_calendar_authority_uses_fixed_bounds_not_rolling_today_window(
+    calendars: TradingCalendar,
+) -> None:
+    schedule = calendars._calendar("XNYS").schedule
+    assert schedule.index.min().year == 1970
+    assert schedule.index.max().year == 2100
