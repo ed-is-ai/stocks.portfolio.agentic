@@ -44,10 +44,10 @@
       "metadata": {"symbol": "SPLT", "currency": "USD", "exchangeTimezoneName": "America/New_York", "instrumentType": "EQUITY"},
       "index": ["2024-01-02T00:00:00-05:00", "2024-01-03T00:00:00-05:00"],
       "rows": [
-        {"Open": 100, "High": 104, "Low": 99, "Close": 100, "Adj Close": 25, "Volume": 1000, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 25, "High": 26, "Low": 24.75, "Close": 25, "Adj Close": 25, "Volume": 1000, "Dividends": 0, "Stock Splits": 0},
         {"Open": 25, "High": 27, "Low": 24, "Close": 25, "Adj Close": 25, "Volume": 4000, "Dividends": 0, "Stock Splits": 4}
       ],
-      "expected_content_digest": "69fd33d27c482f16b5632984ca544a67653f1f821246bc1d4a16f870b9c6cd52"
+      "expected_content_digest": "f471a2d252969bf567e4396710692b52dc1b28dd971ba563a5cafdab02e4fb2d"
     },
     {
       "id": "reverse_split", "requested_symbol": "RSPLT", "start": "2024-01-01", "end": "2024-01-04",
@@ -56,10 +56,10 @@
       "metadata": {"symbol": "RSPLT", "currency": "USD", "exchangeTimezoneName": "America/New_York", "instrumentType": "EQUITY"},
       "index": ["2024-01-02T00:00:00-05:00", "2024-01-03T00:00:00-05:00"],
       "rows": [
-        {"Open": 10, "High": 11, "Low": 9, "Close": 10, "Adj Close": 100, "Volume": 1000, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 100, "High": 110, "Low": 90, "Close": 100, "Adj Close": 100, "Volume": 1000, "Dividends": 0, "Stock Splits": 0},
         {"Open": 100, "High": 105, "Low": 98, "Close": 100, "Adj Close": 100, "Volume": 100, "Dividends": 0, "Stock Splits": 0.1}
       ],
-      "expected_content_digest": "26b0483412c8806168ec9e6bcf12a04e2721389913b61107c80683b3b2fad376"
+      "expected_content_digest": "5cbd977710dcbceb60d409b71a9a894df72e80fc973521861d87ed2b7a9f0445"
     },
     {
       "id": "dividend", "requested_symbol": "DIV", "start": "2024-01-01", "end": "2024-01-04",

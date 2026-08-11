@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
+from hashlib import sha256
 import sqlite3
 
 from app.repositories.db import Connect, session
+from app.services.backtest.historical_scan_record import (
+    DetectorFragmentEnvelopeV1,
+    HistoricalScanContractError,
+)
 
 _QUALIFICATION_SCHEMA = """
 CREATE TABLE IF NOT EXISTS historical_source_qualifications (
@@ -139,6 +145,27 @@ CREATE TRIGGER IF NOT EXISTS roster_lineage_immutable_update BEFORE UPDATE ON re
 CREATE TRIGGER IF NOT EXISTS roster_lineage_immutable_delete BEFORE DELETE ON reconstruction_roster_lineages BEGIN SELECT RAISE(ABORT, 'roster lineage is immutable'); END;
 """
 
+_SCAN_RECONSTRUCTION_CACHE_SCHEMA = """
+CREATE TABLE IF NOT EXISTS scan_reconstruction_cache (
+    security_id       TEXT NOT NULL,
+    date              TEXT NOT NULL,
+    detector          TEXT NOT NULL CHECK(detector IN (
+        'technical_indicators_v1', 'weinstein_stage_v1', 'vcp_v1'
+    )),
+    detector_version  TEXT NOT NULL CHECK(length(detector_version) = 64),
+    input_revision    TEXT NOT NULL CHECK(length(input_revision) = 64),
+    scan_result_json  TEXT NOT NULL,
+    scan_result_digest TEXT NOT NULL CHECK(length(scan_result_digest) = 64),
+    PRIMARY KEY (security_id, date, detector, detector_version, input_revision)
+);
+CREATE TRIGGER IF NOT EXISTS scan_reconstruction_cache_immutable_update
+BEFORE UPDATE ON scan_reconstruction_cache
+BEGIN SELECT RAISE(ABORT, 'scan reconstruction cache is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS scan_reconstruction_cache_immutable_delete
+BEFORE DELETE ON scan_reconstruction_cache
+BEGIN SELECT RAISE(ABORT, 'scan reconstruction cache is immutable'); END;
+"""
+
 
 @dataclass(frozen=True)
 class QualificationResult:
@@ -187,6 +214,28 @@ class RosterCaptureCommit:
     members: tuple[tuple[str, str, str, str, str, str, str], ...]
 
 
+class BacktestIntegrityError(RuntimeError):
+    code = "integrity_error"
+
+
+@dataclass(frozen=True)
+class DetectorCacheKey:
+    security_id: str
+    date: date
+    detector: str
+    detector_version: str
+    input_revision: str
+
+    def sql_values(self) -> tuple[str, str, str, str, str]:
+        return (
+            self.security_id,
+            self.date.isoformat(),
+            self.detector,
+            self.detector_version,
+            self.input_revision,
+        )
+
+
 def _row_to_result(row: tuple[object, ...]) -> QualificationResult:
     return QualificationResult(
         contract_digest=str(row[0]),
@@ -209,7 +258,11 @@ class BacktestRepository:
 
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
-            conn.executescript(_QUALIFICATION_SCHEMA + _ROSTER_SCHEMA)
+            conn.executescript(
+                _QUALIFICATION_SCHEMA
+                + _ROSTER_SCHEMA
+                + _SCAN_RECONSTRUCTION_CACHE_SCHEMA
+            )
             columns = {
                 str(row[1])
                 for row in conn.execute(
@@ -295,6 +348,103 @@ class BacktestRepository:
                    FROM security_identities ORDER BY security_id"""
             ).fetchall()
         return [tuple(str(value) for value in row) for row in rows]  # type: ignore[return-value]
+
+    def compare_and_insert_detector_fragment(
+        self, key: DetectorCacheKey, canonical_json: str | bytes
+    ) -> DetectorFragmentEnvelopeV1:
+        raw = (
+            canonical_json.encode("utf-8")
+            if isinstance(canonical_json, str)
+            else bytes(canonical_json)
+        )
+        try:
+            envelope = DetectorFragmentEnvelopeV1.from_canonical_json(raw)
+        except HistoricalScanContractError as exc:
+            raise BacktestIntegrityError("detector fragment is not canonical") from exc
+        self._verify_fragment_key(key, envelope)
+        rendered = raw.decode("utf-8")
+        digest = sha256(raw).hexdigest()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """INSERT OR IGNORE INTO scan_reconstruction_cache (
+                       security_id, date, detector, detector_version, input_revision,
+                       scan_result_json, scan_result_digest
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (*key.sql_values(), rendered, digest),
+            )
+            row = conn.execute(
+                """SELECT scan_result_json, scan_result_digest
+                   FROM scan_reconstruction_cache
+                   WHERE security_id=? AND date=? AND detector=?
+                     AND detector_version=? AND input_revision=?""",
+                key.sql_values(),
+            ).fetchone()
+            if row is None:
+                raise BacktestIntegrityError("detector cache write was not visible")
+            stored = self._validated_stored_fragment(key, str(row[0]), str(row[1]))
+            if str(row[0]) != rendered or str(row[1]) != digest:
+                raise BacktestIntegrityError(
+                    "immutable detector cache key has conflicting content"
+                )
+            return stored
+
+    def detector_fragment(
+        self, key: DetectorCacheKey
+    ) -> DetectorFragmentEnvelopeV1 | None:
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT scan_result_json, scan_result_digest
+                   FROM scan_reconstruction_cache
+                   WHERE security_id=? AND date=? AND detector=?
+                     AND detector_version=? AND input_revision=?""",
+                key.sql_values(),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._validated_stored_fragment(key, str(row[0]), str(row[1]))
+
+    def detector_cache_count(self) -> int:
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM scan_reconstruction_cache"
+            ).fetchone()
+        return 0 if row is None else int(row[0])
+
+    @staticmethod
+    def _verify_fragment_key(
+        key: DetectorCacheKey, envelope: DetectorFragmentEnvelopeV1
+    ) -> None:
+        if (
+            envelope.security_id,
+            envelope.date,
+            envelope.detector,
+            envelope.detector_version,
+            envelope.input_revision,
+        ) != (
+            key.security_id,
+            key.date,
+            key.detector,
+            key.detector_version,
+            key.input_revision,
+        ):
+            raise BacktestIntegrityError(
+                "detector fragment envelope does not match cache key"
+            )
+
+    @classmethod
+    def _validated_stored_fragment(
+        cls, key: DetectorCacheKey, rendered: str, digest: str
+    ) -> DetectorFragmentEnvelopeV1:
+        raw = rendered.encode("utf-8")
+        if sha256(raw).hexdigest() != digest:
+            raise BacktestIntegrityError("detector cache digest is invalid")
+        try:
+            envelope = DetectorFragmentEnvelopeV1.from_canonical_json(raw)
+        except HistoricalScanContractError as exc:
+            raise BacktestIntegrityError("stored detector fragment is invalid") from exc
+        cls._verify_fragment_key(key, envelope)
+        return envelope
 
     def commit_roster_capture(self, commit: RosterCaptureCommit) -> str:
         """Atomically compare-and-insert a complete roster capture."""

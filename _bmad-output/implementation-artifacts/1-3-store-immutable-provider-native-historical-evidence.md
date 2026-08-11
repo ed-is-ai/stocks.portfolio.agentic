@@ -5,7 +5,7 @@ github_issue: 186
 
 # Story 1.3: Store Immutable Provider-Native Historical Evidence
 
-Status: review
+Status: done
 
 ## Story
 
@@ -187,3 +187,4 @@ OpenAI Codex (GPT-5)
 
 - 2026-08-11: Created comprehensive Story 1.3 implementation context; marked ready-for-dev.
 - 2026-08-11: Fixed the rolling calendar authority prerequisite, passed 771 tests and all touched-scope quality checks, and moved Story 1.3 to review.
+- 2026-08-11: PR #211 merged to `main`; moved Story 1.3 to done.

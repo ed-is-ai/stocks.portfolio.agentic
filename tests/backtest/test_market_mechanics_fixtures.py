@@ -65,7 +65,9 @@ def test_provider_fixture_catalog_is_complete_and_has_pinned_digests() -> None:
     assert cases["renamed_alias"]["metadata"]["symbol"] == "META"
     assert cases["lse_gbpence"]["metadata"]["currency"] == "GBp"
     assert cases["ordinary_split"]["rows"][1]["Stock Splits"] == 4
+    assert cases["ordinary_split"]["rows"][0]["Close"] == 25
     assert cases["reverse_split"]["rows"][1]["Stock Splits"] == 0.1
+    assert cases["reverse_split"]["rows"][0]["Close"] == 100
     assert cases["dividend"]["rows"][0]["Dividends"] == 0.25
     assert cases["gbpusd_orientation"]["requested_symbol"] == "GBPUSD=X"
 

@@ -31,6 +31,10 @@ from app.core.config import (
 from app.core.config import RESULTS_DB as _RESULTS_DB_PATH
 from app.core.config import SKILLS_DIR
 from app.core.recommendation import actionability_sort_key
+from app.core.stage_classification import (
+    classify_weinstein_stage,
+    sma_slope as _sma_slope,
+)
 from app.repositories import db
 from app.repositories.results_repo import ResultRow, ResultsRepository
 from app.schemas import CANSLIMScore, MomentumScore, StockAnalysis, StockRecord
@@ -169,15 +173,6 @@ def _run_btp_pricing(pivot: float, last_contraction_low: float) -> dict | None:
         return None
 
 
-def _sma_slope(prices: list[float], window: int, lookback: int = 4) -> float | None:
-    """Approximate SMA slope from weekly price history. Positive = rising."""
-    if len(prices) < window + lookback:
-        return None
-    current_sma = sum(prices[-window:]) / window
-    past_sma = sum(prices[-(window + lookback) : -lookback]) / window
-    return current_sma - past_sma
-
-
 def _hh_hl_structure(prices: list[float], window: int = 4, periods: int = 3) -> bool:
     """Return True when weekly closes show consecutive higher highs + higher lows.
 
@@ -225,34 +220,13 @@ def _ma_compressed(sma50: float, sma150: float, threshold: float = 0.02) -> bool
 
 
 def _stage_classify(stock: StockRecord) -> str:
-    """Classify Weinstein stage using SMA levels and slope direction."""
-    price = stock.price
-    sma150 = stock.sma150 or price
-    sma200 = stock.sma200 or price
-
-    above_150 = price > sma150
-    above_200 = price > sma200
-    ma_bullish = sma150 > sma200
-
-    s150 = _sma_slope(stock.price_history, window=30, lookback=4)
-    s200 = _sma_slope(stock.price_history, window=40, lookback=4)
-
-    if s150 is None or s200 is None:
-        if above_150 and ma_bullish:
-            return "Stage 2"
-        if not above_150 and not above_200:
-            return "Stage 4"
-        if above_200 and not above_150:
-            return "Stage 3"
-        return "Stage 1"
-
-    if above_150 and ma_bullish and s200 > 0:
-        return "Stage 2"
-    if not above_150 and not above_200 and s150 < 0:
-        return "Stage 4"
-    if (not above_150 and above_200) or (above_150 and ma_bullish and s200 <= 0):
-        return "Stage 3"
-    return "Stage 1"
+    """Delegate Weinstein classification to the dependency-neutral core."""
+    return classify_weinstein_stage(
+        price=stock.price,
+        sma150=stock.sma150,
+        sma200=stock.sma200,
+        price_history=stock.price_history,
+    )
 
 
 def _sepa_assessment(stock: StockRecord, vcp: dict | None) -> dict[str, bool]:

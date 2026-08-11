@@ -27,10 +27,51 @@ to avoid contaminating the dry-up ratio with high breakout volume.
 The breakout quality is tracked separately via breakout_volume_score.
 """
 
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from typing import Optional
 
 
+def _volume_decimal(value: object) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError("volume must be numeric")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("volume must be numeric") from exc
+    if not result.is_finite() or result < 0:
+        raise ValueError("volume must be finite and non-negative")
+    return result
+
+
+_VOLUME_DECIMAL_CONTEXT = Context(prec=34, rounding=ROUND_HALF_EVEN)
+
+
+def _volume_output(
+    value: Decimal, *, legacy_integral_inputs: bool = False
+) -> int | Decimal:
+    """Keep legacy integral outputs while retaining reconstructed fractions."""
+    if legacy_integral_inputs or value == value.to_integral_value():
+        return int(value)
+    return value.normalize()
+
+
 def calculate_volume_pattern(
+    historical_prices: list[dict],
+    pivot_price: Optional[float] = None,
+    contractions: Optional[list[dict]] = None,
+    breakout_volume_ratio: float = 1.5,
+) -> dict:
+    """Run volume analysis under a fixed local Decimal context."""
+    with localcontext(_VOLUME_DECIMAL_CONTEXT):
+        return _calculate_volume_pattern(
+            historical_prices,
+            pivot_price=pivot_price,
+            contractions=contractions,
+            breakout_volume_ratio=breakout_volume_ratio,
+        )
+
+
+def _calculate_volume_pattern(
     historical_prices: list[dict],
     pivot_price: Optional[float] = None,
     contractions: Optional[list[dict]] = None,
@@ -61,14 +102,21 @@ def calculate_volume_pattern(
             "error": "Insufficient data (need 20+ days)",
         }
 
-    volumes = [int(d.get("volume", 0) or 0) for d in historical_prices]
+    volumes = [_volume_decimal(d.get("volume", 0) or 0) for d in historical_prices]
+    legacy_integral_inputs = all(
+        value == value.to_integral_value() for value in volumes
+    )
     closes = [
         float(d.get("close", d.get("adjClose", 0)) or 0) for d in historical_prices
     ]
 
     # 50-day average volume (or available)
     vol_period = min(50, len(volumes))
-    avg_volume_50d = sum(volumes[:vol_period]) / vol_period if vol_period > 0 else 0
+    avg_volume_50d = (
+        sum(volumes[:vol_period], Decimal(0)) / Decimal(vol_period)
+        if vol_period > 0
+        else Decimal(0)
+    )
 
     if avg_volume_50d <= 0:
         return {
@@ -84,29 +132,40 @@ def calculate_volume_pattern(
 
     if use_zone:
         zone_analysis, contraction_volume_trend = _zone_volume_analysis(
-            volumes, closes, contractions, pivot_price, avg_volume_50d
+            volumes,
+            closes,
+            contractions,
+            pivot_price,
+            avg_volume_50d,
+            legacy_integral_inputs=legacy_integral_inputs,
         )
 
     # Dry-up ratio: use Zone B if available, otherwise legacy window.
     # Bar[0] (potential breakout bar) is excluded from both paths to avoid
     # contaminating dry-up with high breakout volume.
     if use_zone and zone_analysis and zone_analysis.get("zone_b_avg_volume"):
-        avg_volume_recent = zone_analysis["zone_b_avg_volume"]
+        avg_volume_recent = _volume_decimal(zone_analysis["zone_b_avg_volume"])
     else:
         # volumes[1:11] — 10 bars, skip bar[0]
         legacy_vols = volumes[1:11] if len(volumes) > 1 else []
-        avg_volume_recent = sum(legacy_vols) / len(legacy_vols) if legacy_vols else 0
+        avg_volume_recent = (
+            sum(legacy_vols, Decimal(0)) / Decimal(len(legacy_vols))
+            if legacy_vols
+            else Decimal(0)
+        )
 
-    dry_up_ratio = avg_volume_recent / avg_volume_50d if avg_volume_50d > 0 else 1.0
+    dry_up_ratio = (
+        avg_volume_recent / avg_volume_50d if avg_volume_50d > 0 else Decimal(1)
+    )
 
     # Base score from dry-up ratio
-    if dry_up_ratio < 0.30:
+    if dry_up_ratio < Decimal("0.30"):
         base_score = 90
-    elif dry_up_ratio < 0.50:
+    elif dry_up_ratio < Decimal("0.50"):
         base_score = 75
-    elif dry_up_ratio < 0.70:
+    elif dry_up_ratio < Decimal("0.70"):
         base_score = 60
-    elif dry_up_ratio <= 1.00:
+    elif dry_up_ratio <= Decimal("1.00"):
         base_score = 40
     else:
         base_score = 20
@@ -122,17 +181,17 @@ def calculate_volume_pattern(
     if len(volumes) >= 1 and avg_volume_50d > 0:
         bar0_ratio = volumes[0] / avg_volume_50d
         if pivot_price and current_price > pivot_price:
-            if bar0_ratio >= breakout_volume_ratio:
+            if bar0_ratio >= Decimal(str(breakout_volume_ratio)):
                 breakout_volume = True
                 score += 10
             # Independent breakout volume score regardless of pivot position
-            if bar0_ratio >= 3.0:
+            if bar0_ratio >= Decimal("3.0"):
                 breakout_volume_score = 100
-            elif bar0_ratio >= 2.0:
+            elif bar0_ratio >= Decimal("2.0"):
                 breakout_volume_score = 80
-            elif bar0_ratio >= breakout_volume_ratio:
+            elif bar0_ratio >= Decimal(str(breakout_volume_ratio)):
                 breakout_volume_score = 60
-            elif bar0_ratio >= 1.0:
+            elif bar0_ratio >= Decimal("1.0"):
                 breakout_volume_score = 30
 
     # Modifier: Net accumulation/distribution in last 20 days
@@ -162,9 +221,13 @@ def calculate_volume_pattern(
 
     result = {
         "score": score,
-        "dry_up_ratio": round(dry_up_ratio, 3),
-        "avg_volume_50d": int(avg_volume_50d),
-        "avg_volume_recent_10d": int(avg_volume_recent),
+        "dry_up_ratio": round(float(dry_up_ratio), 3),
+        "avg_volume_50d": _volume_output(
+            avg_volume_50d, legacy_integral_inputs=legacy_integral_inputs
+        ),
+        "avg_volume_recent_10d": _volume_output(
+            avg_volume_recent, legacy_integral_inputs=legacy_integral_inputs
+        ),
         "breakout_volume_detected": breakout_volume,
         "breakout_volume_score": breakout_volume_score,
         "up_volume_days_20d": up_vol_days,
@@ -182,11 +245,13 @@ def calculate_volume_pattern(
 
 
 def _zone_volume_analysis(
-    volumes: list[int],
+    volumes: list[Decimal],
     closes: list[float],
     contractions: list[dict],
     pivot_price: Optional[float],
-    avg_volume_50d: float,
+    avg_volume_50d: Decimal,
+    *,
+    legacy_integral_inputs: bool = False,
 ) -> tuple:
     """Perform zone-based volume analysis using contraction boundaries.
 
@@ -206,14 +271,26 @@ def _zone_volume_analysis(
     zone_a_start = min(zone_a_start_rev, zone_a_end_rev)
     zone_a_end = max(zone_a_start_rev, zone_a_end_rev)
     zone_a_vols = volumes[max(0, zone_a_start) : min(n, zone_a_end + 1)]
-    zone_a_avg = int(sum(zone_a_vols) / len(zone_a_vols)) if zone_a_vols else 0
+    zone_a_avg = (
+        sum(zone_a_vols, Decimal(0)) / Decimal(len(zone_a_vols))
+        if zone_a_vols
+        else Decimal(0)
+    )
+    if legacy_integral_inputs:
+        zone_a_avg = Decimal(int(zone_a_avg))
 
     # Zone B: Pivot approach (10 bars before current, bar[0] excluded)
     # volumes[1:11] = bars 1..10 (10 bars) — breakout bar excluded
     zone_b_start = 1  # skip bar 0 (potential breakout)
     zone_b_end = min(11, n)
     zone_b_vols = volumes[zone_b_start:zone_b_end]
-    zone_b_avg = int(sum(zone_b_vols) / len(zone_b_vols)) if zone_b_vols else 0
+    zone_b_avg = (
+        sum(zone_b_vols, Decimal(0)) / Decimal(len(zone_b_vols))
+        if zone_b_vols
+        else Decimal(0)
+    )
+    if legacy_integral_inputs:
+        zone_b_avg = Decimal(int(zone_b_avg))
 
     # Zone C: Breakout bar (bar 0 if price > pivot)
     zone_c_vol = None
@@ -221,19 +298,25 @@ def _zone_volume_analysis(
     if pivot_price and n > 0 and closes[0] > pivot_price:
         zone_c_vol = volumes[0]
         zone_c_ratio = (
-            round(zone_c_vol / avg_volume_50d, 3) if avg_volume_50d > 0 else None
+            round(float(zone_c_vol / avg_volume_50d), 3) if avg_volume_50d > 0 else None
         )
 
     zone_analysis = {
-        "zone_a_avg_volume": zone_a_avg,
-        "zone_a_ratio": round(zone_a_avg / avg_volume_50d, 3)
+        "zone_a_avg_volume": _volume_output(
+            zone_a_avg, legacy_integral_inputs=legacy_integral_inputs
+        ),
+        "zone_a_ratio": round(float(zone_a_avg / avg_volume_50d), 3)
         if avg_volume_50d > 0
         else None,
-        "zone_b_avg_volume": zone_b_avg,
-        "zone_b_ratio": round(zone_b_avg / avg_volume_50d, 3)
+        "zone_b_avg_volume": _volume_output(
+            zone_b_avg, legacy_integral_inputs=legacy_integral_inputs
+        ),
+        "zone_b_ratio": round(float(zone_b_avg / avg_volume_50d), 3)
         if avg_volume_50d > 0
         else None,
-        "zone_c_volume": zone_c_vol,
+        "zone_c_volume": None
+        if zone_c_vol is None
+        else _volume_output(zone_c_vol, legacy_integral_inputs=legacy_integral_inputs),
         "zone_c_ratio": zone_c_ratio,
     }
 
@@ -246,7 +329,10 @@ def _zone_volume_analysis(
         c_end = max(c_start_rev, c_end_rev)
         c_vols = volumes[max(0, c_start) : min(n, c_end + 1)]
         if c_vols:
-            contraction_avgs.append(int(sum(c_vols) / len(c_vols)))
+            average = sum(c_vols, Decimal(0)) / Decimal(len(c_vols))
+            contraction_avgs.append(
+                Decimal(int(average)) if legacy_integral_inputs else average
+            )
 
     declining = False
     if len(contraction_avgs) >= 2:
@@ -257,7 +343,10 @@ def _zone_volume_analysis(
 
     contraction_volume_trend = {
         "declining": declining,
-        "contraction_volumes": contraction_avgs,
+        "contraction_volumes": [
+            _volume_output(value, legacy_integral_inputs=legacy_integral_inputs)
+            for value in contraction_avgs
+        ],
     }
 
     return zone_analysis, contraction_volume_trend
