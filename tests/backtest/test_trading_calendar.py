@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from datetime import date
+
 import re
 
 import pytest
 
-from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.trading_calendar import (
+    CalendarContractError,
+    TradingCalendar,
+)
 
 
 @pytest.fixture(scope="module")
@@ -89,3 +94,42 @@ def test_calendar_authority_uses_fixed_bounds_not_rolling_today_window(
     schedule = calendars._calendar("XNYS").schedule
     assert schedule.index.min().year == 1970
     assert schedule.index.max().year == 2100
+
+
+@pytest.mark.parametrize(
+    "month", ["2024-1", "24-01", "2024-00", "2024-13", "٢٠٢٤-01", "x"]
+)
+def test_strict_closed_month_parser_rejects_malformed_values(
+    calendars: TradingCalendar, month: str
+) -> None:
+    with pytest.raises(CalendarContractError, match="Malformed"):
+        calendars.closed_month(month, as_of=date(2026, 8, 11))
+
+
+def test_current_and_future_months_are_rejected_with_injected_date(
+    calendars: TradingCalendar,
+) -> None:
+    assert calendars.closed_month("2026-07", as_of=date(2026, 8, 11)) == "2026-07"
+    with pytest.raises(CalendarContractError, match="fully closed"):
+        calendars.closed_month("2026-08", as_of=date(2026, 8, 11))
+    with pytest.raises(CalendarContractError, match="fully closed"):
+        calendars.closed_month("2026-09", as_of=date(2026, 8, 11))
+
+
+def test_canonical_sessions_and_inclusive_calendar_month_ranges(
+    calendars: TradingCalendar,
+) -> None:
+    sessions = calendars.month_sessions(
+        ("XLON", "XNAS", "XNYS"), "2024-11", as_of=date(2024, 12, 1)
+    )
+    assert tuple(sessions) == ("XLON", "XNAS", "XNYS")
+    assert sessions["XNAS"] == sessions["XNYS"] == date(2024, 11, 29)
+    assert sessions["XLON"] == date(2024, 11, 29)
+    assert calendars.months_inclusive("2023-12", "2024-02") == (
+        "2023-12",
+        "2024-01",
+        "2024-02",
+    )
+    assert calendars.contiguous_month_intervals(
+        ("2024-04", "2023-12", "2024-02", "2024-01")
+    ) == (("2023-12", "2024-02"), ("2024-04", "2024-04"))
