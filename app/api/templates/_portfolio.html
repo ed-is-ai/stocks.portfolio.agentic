@@ -185,13 +185,13 @@
 </div>
 {% endif %}
 
-{% if not positions %}
+{% if not positions and cash_balance is none %}
 <div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-info-circle-fill fs-5"></i>
   <span>No open positions yet. Use <strong>Add holding</strong> above — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Watchlist</strong> and click <strong>Buy</strong>.</span>
 </div>
 {% endif %}
-{% if positions %}
+{% if positions or cash_balance is not none %}
 
 <!-- Portfolio value chart -->
 {% if chart_points >= 2 %}
@@ -445,7 +445,7 @@
         </td>
       </tr>
       {% endfor %}
-      {% if cash_balance %}
+      {% if cash_balance is not none %}
       <tr>
         <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">CASH</span></td>
         <td>—</td>

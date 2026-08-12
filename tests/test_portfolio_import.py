@@ -53,12 +53,17 @@ def mocked_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         app.dependency_overrides.clear()
 
 
-def _upload(filename: str = "merged.csv", content: bytes = _CSV, token: str = "s3cret"):
+def _upload(
+    filename: str = "merged.csv",
+    content: bytes = _CSV,
+    token: str = "s3cret",
+    portfolio_id: int = 1,
+):
     headers = {"X-Auth-Token": token} if token else {}
     return client.post(
         "/import-sipp",
         files={"file": (filename, content, "text/csv")},
-        data={"portfolio_id": "1"},
+        data={"portfolio_id": str(portfolio_id)},
         headers=headers,
     )
 
@@ -422,6 +427,65 @@ def test_row_count_mismatch_flags_error_status_and_severity(
     assert mock_notifications.record.call_args.kwargs["severity"] == (
         NotificationSeverity.ERROR
     )
+
+
+_STALE_HEADER = (
+    "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+    "Running Balance\n"
+)
+_NEWER_CSV = (
+    _STALE_HEADER + "01/06/2024,MSFT,B1,5,200,Buy MSFT,N1,1000,,9000\n"
+).encode()
+_OLDER_CSV = (
+    _STALE_HEADER + "01/01/2024,AAPL,B0,10,100,Buy AAPL,O1,1000,,4000\n"
+).encode()
+
+
+def test_rejected_stale_balance_never_reaches_the_rendered_page(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Story 1.9 AC1, route level, against a real agent rather than a mock.
+
+    The bug lives inside ``TraderAgent.import_sipp``'s own value flow, so a
+    ``MagicMock`` import_sipp cannot reproduce it — the route faithfully
+    forwards whatever the result carries. Import a newer file, then an older
+    one whose balance the stale-date guard rejects, and assert the second
+    render shows the still-in-effect 9000, never the rejected 4000.
+    """
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.IMPORTED_FILES_DIR", tmp_path / "imported"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    trader = TraderService(agent)
+
+    contexts = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            contexts.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: PortfolioService(trader)
+    app.dependency_overrides[get_notifications_repository] = lambda: MagicMock()
+    try:
+        _upload(content=_NEWER_CSV, portfolio_id=pf.id)
+        _upload(content=_OLDER_CSV, portfolio_id=pf.id)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert contexts[-1]["cash_balance"] == 9000.0
+    assert "9,000.00" in contexts[-1]["import_message"]
+    assert "4,000.00" not in contexts[-1]["import_message"]
 
 
 def test_forbidden_without_token(monkeypatch: pytest.MonkeyPatch):
