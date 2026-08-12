@@ -168,13 +168,15 @@ The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pensi
 
 1. **Export SIPP CSV** from your provider (interactive investor, AJ Bell, etc.)
    - File format: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance
-   - Recommended filename: `merged.csv` in `data/processed/SIPP/`
+   - Any filename works — the CSV is parsed directly from its own uploaded bytes, not a shared path
 
 2. **Run the import** (typically done via portfolio tab in web UI):
    ```python
+   from pathlib import Path
+
    from agents.trader.trader_agent import TraderAgent
    agent = TraderAgent()
-   cash_balance = agent.import_sipp('data/processed/SIPP/merged.csv')
+   cash_balance = agent.import_sipp(Path('your_export.csv').read_bytes())
    ```
 
 3. **Verify results**:

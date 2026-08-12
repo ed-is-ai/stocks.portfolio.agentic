@@ -1,6 +1,7 @@
 """Repository for the ``account_state`` key/value table in ``trades.db``."""
 
 from datetime import datetime, timezone
+from typing import Any
 
 from app.repositories.db import Connect, session
 
@@ -17,6 +18,18 @@ class AccountStateRepository:
             row = conn.execute(
                 "SELECT value FROM account_state WHERE key = ?", (key,)
             ).fetchone()
+        return row[0] if row else None
+
+    def get_on_connection(self, conn: Any, key: str) -> str | None:
+        """Return the stored value for ``key`` on the caller's open connection.
+
+        Takes the caller's open connection and does not commit — used by the
+        SIPP import so the cash-balance read/write joins the same
+        transaction as its trade/cash-flow writes.
+        """
+        row = conn.execute(
+            "SELECT value FROM account_state WHERE key = ?", (key,)
+        ).fetchone()
         return row[0] if row else None
 
     def exists(self, key: str) -> bool:
@@ -41,3 +54,19 @@ class AccountStateRepository:
                 (key, value, updated_at),
             )
             conn.commit()
+
+    def set_on_connection(self, conn: Any, key: str, value: str) -> None:
+        """Upsert ``key`` on the caller's open connection; does not commit.
+
+        Mirrors ``TradesRepository.insert_ignore``'s batch-friendly
+        convention — the caller (``TraderAgent.import_sipp``) controls the
+        transaction boundary.
+        """
+        updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        conn.execute(
+            "INSERT INTO account_state (key, value, updated_at)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET"
+            "  value=excluded.value, updated_at=excluded.updated_at",
+            (key, value, updated_at),
+        )

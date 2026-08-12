@@ -56,12 +56,10 @@ ANALYSIS_PROGRESS_TXT = (
     ROOT_DIR / "app" / "agents" / "analyst" / "analysis_progress.txt"
 )
 PORTFOLIO_VALUE_CSV = ROOT_DIR / "data" / "portfolio_value.csv"
-# Where uploaded SIPP portfolio CSVs are saved for import (#145).
-SIPP_IMPORT_DIR = ROOT_DIR / "data" / "processed" / "SIPP"
-# Archive of every uploaded file, one copy per import, kept alongside (not
-# instead of) SIPP_IMPORT_DIR's single working copy so past imports can be
-# re-inspected or replayed after SIPP_IMPORT_DIR's "merged.csv" is
-# overwritten by the next upload.
+# Archive of every uploaded SIPP import file, one copy per import, so past
+# imports can be re-inspected after the fact. Each upload is parsed directly
+# from its own request-owned bytes (#210) — there is no shared working copy
+# for this archive to sit "alongside".
 IMPORTED_FILES_DIR = ROOT_DIR / "data" / "imported"
 PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
 PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"

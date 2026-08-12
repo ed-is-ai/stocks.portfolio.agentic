@@ -170,8 +170,8 @@ def test_import_is_idempotent_within_a_portfolio(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
     csv_path = _write_csv(tmp_path)
-    agent.import_sipp(csv_path, pf.id)
-    agent.import_sipp(csv_path, pf.id)  # re-import must not duplicate
+    agent.import_sipp(csv_path.read_bytes(), pf.id)
+    agent.import_sipp(csv_path.read_bytes(), pf.id)  # re-import must not duplicate
     positions = agent.get_portfolio(portfolio_id=pf.id)
     assert len(positions) == 1
     assert positions[0].shares == 10
@@ -182,12 +182,51 @@ def test_same_csv_imports_into_two_portfolios_independently(tmp_path: Path) -> N
     a = agent.create_portfolio("SIPP")
     b = agent.create_portfolio("ISA")
     csv_path = _write_csv(tmp_path)
-    agent.import_sipp(csv_path, a.id)
-    agent.import_sipp(csv_path, b.id)  # same references, different portfolio
+    agent.import_sipp(csv_path.read_bytes(), a.id)
+    agent.import_sipp(
+        csv_path.read_bytes(), b.id
+    )  # same references, different portfolio
     assert len(agent.get_portfolio(portfolio_id=a.id)) == 1
     assert len(agent.get_portfolio(portfolio_id=b.id)) == 1
     assert agent.get_cash_balance(a.id) == 5000.0
     assert agent.get_cash_balance(b.id) == 5000.0
+
+
+def test_two_different_files_into_two_portfolios_never_cross_contaminate(
+    tmp_path: Path,
+) -> None:
+    """AC #4: the Running Balance captured for one upload can never be
+    attributed to the other. The cash-balance/ticker assertions below are
+    the real proof, since each import parses its own caller-owned bytes
+    (#210). The ``SIPP`` directory check is a regression guard specific to
+    this call layer (``TraderAgent`` directly, bypassing the route) — the
+    route-level proof that no such directory is ever created from an actual
+    upload lives in ``tests/test_portfolio_import.py``."""
+    agent = _agent(tmp_path)
+    sipp = agent.create_portfolio("SIPP")
+    isa = agent.create_portfolio("ISA")
+    sipp_csv = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,AAPL,B0,10,100,Buy AAPL,SIPP-R1,1000,,4000\n"
+    ).encode("utf-8")
+    isa_csv = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,MSFT,B1,5,200,Buy MSFT,ISA-R1,1000,,9999\n"
+    ).encode("utf-8")
+
+    agent.import_sipp(sipp_csv, sipp.id)
+    agent.import_sipp(isa_csv, isa.id)
+
+    assert agent.get_cash_balance(sipp.id) == 4000.0
+    assert agent.get_cash_balance(isa.id) == 9999.0
+    sipp_tickers = {p.ticker for p in agent.get_portfolio(portfolio_id=sipp.id)}
+    isa_tickers = {p.ticker for p in agent.get_portfolio(portfolio_id=isa.id)}
+    assert sipp_tickers == {"AAPL"}
+    assert isa_tickers == {"MSFT"}
+    # No shared filesystem path was ever created for either import to race on.
+    assert not (tmp_path / "SIPP").exists()
 
 
 # --- import row order (#158) -----------------------------------------------
@@ -215,9 +254,12 @@ def test_cash_balance_is_independent_of_row_order(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     fwd = agent.create_portfolio("Forward")
     rev = agent.create_portfolio("Reversed")
-    agent.import_sipp(_write_rows(tmp_path, "fwd.csv", _MULTI_ROWS), fwd.id)
     agent.import_sipp(
-        _write_rows(tmp_path, "rev.csv", list(reversed(_MULTI_ROWS))), rev.id
+        _write_rows(tmp_path, "fwd.csv", _MULTI_ROWS).read_bytes(), fwd.id
+    )
+    agent.import_sipp(
+        _write_rows(tmp_path, "rev.csv", list(reversed(_MULTI_ROWS))).read_bytes(),
+        rev.id,
     )
     # Authoritative balance is the latest-dated row (2024-03-10 -> 2450),
     # whether the file is oldest-first or fully reversed.
@@ -242,10 +284,10 @@ def test_cash_balance_does_not_regress_when_older_file_imported_after_newer(
     # the balance with the older file's (stale) Running Balance.
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
-    agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE), pf.id)
+    agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE).read_bytes(), pf.id)
     assert agent.get_cash_balance(pf.id) == 9000.0
     # Now import the OLDER file — balance must stay on the newer date.
-    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE), pf.id)
+    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(), pf.id)
     assert agent.get_cash_balance(pf.id) == 9000.0
 
 
@@ -255,9 +297,9 @@ def test_cash_balance_advances_when_newer_file_imported_after_older(
     # The normal order still advances the balance to the newer date.
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
-    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE), pf.id)
+    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(), pf.id)
     assert agent.get_cash_balance(pf.id) == 4000.0
-    agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE), pf.id)
+    agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE).read_bytes(), pf.id)
     assert agent.get_cash_balance(pf.id) == 9000.0
 
 

@@ -161,6 +161,28 @@ class TradesRepository:
         with session(self._connect) as conn:
             return conn.execute(sql, params).fetchall()
 
+    def open_rows_on_connection(
+        self, conn: Any, portfolio_id: int | None = None
+    ) -> list[tuple[Any, ...]]:
+        """Return valid-ticker trade rows for replay on the caller's connection.
+
+        Identical query to ``open_rows`` but executed against the caller's
+        open connection instead of a fresh one — used by the SIPP import so
+        its in-transaction snapshot calculation sees this transaction's own
+        not-yet-committed trade inserts (a separate connection would only
+        see the database's last *committed* state and silently miss them).
+        """
+        sql = (
+            f"SELECT {_REPLAY_COLUMNS} FROM trades"
+            " WHERE ticker NOT IN ('', 'n/a', 'N/A')"
+        )
+        params: tuple[Any, ...] = ()
+        if portfolio_id is not None:
+            sql += " AND portfolio_id = ?"
+            params = (portfolio_id,)
+        sql += f" ORDER BY {_DATE_SORT}, id"
+        return conn.execute(sql, params).fetchall()
+
     def held_tickers(self) -> set[str]:
         """Return the set of tickers with a net-positive position in any
         portfolio (used for the watchlist "held" flag, which spans accounts)."""

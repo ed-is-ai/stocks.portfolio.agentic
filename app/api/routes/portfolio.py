@@ -17,7 +17,7 @@ from app.api.dependencies import (
 )
 from app.api.params import optional_int
 from app.api.templating import templates
-from app.core.config import IMPORTED_FILES_DIR, SIPP_IMPORT_DIR
+from app.core.config import IMPORTED_FILES_DIR
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
@@ -50,10 +50,11 @@ def _archive_upload(filename: str, content: bytes) -> None:
 
     Called for every upload attempt, not just successful imports — a file
     rejected for a bad portfolio, wrong extension, or a failed parse still
-    needs to be inspectable to diagnose why. Kept separate from
-    ``SIPP_IMPORT_DIR``'s single working copy (which the next upload
-    overwrites) so every past attempt stays around. Best effort — a failure
-    here must not fail an otherwise-successful import.
+    needs to be inspectable to diagnose why. Each upload is parsed directly
+    from its own request-owned bytes (#210), so this archive copy is the
+    only on-disk trace of an import attempt; every past attempt stays
+    around. Best effort — a failure here must not fail an otherwise-
+    successful import.
     """
     try:
         IMPORTED_FILES_DIR.mkdir(parents=True, exist_ok=True)
@@ -163,18 +164,19 @@ async def import_sipp(
 ) -> HTMLResponse:
     """Import an uploaded SIPP portfolio CSV into the selected portfolio.
 
-    Saves the upload under ``data/processed/SIPP/`` then replays it through
-    ``TraderService.import_sipp``. A missing/unknown portfolio, a non-CSV
-    upload, or a failing import returns the portfolio partial with an error
-    message rather than raising (#147). Every upload — success or failure —
-    is archived as a timestamped copy under ``data/imported/`` (a permanent
-    per-attempt record, since ``data/processed/SIPP/merged.csv`` is
-    overwritten by the next upload, and a failed file still needs to be
-    inspectable to diagnose why). On success, also records one Event per
-    file in the notification centre (#184) — the multi-file import queue
-    (index.html's ``handleSippImportSubmit``) calls this endpoint once per
-    queued file, so this naturally yields one archived file and one event
-    per file.
+    Passes the upload's own bytes straight through to
+    ``TraderService.import_sipp`` — no shared filesystem path is written or
+    read, so concurrent uploads (different tabs, retries, overlapping
+    requests) can never read or overwrite one another's *input CSV* on disk
+    (#210). A missing/unknown portfolio, a non-CSV upload, or a failing import returns
+    the portfolio partial with an error message rather than raising (#147).
+    Every upload — success or failure — is archived as a timestamped copy
+    under ``data/imported/`` (a permanent per-attempt record; a failed file
+    still needs to be inspectable to diagnose why). On success, also
+    records one Event per file in the notification centre (#184) — the
+    multi-file import queue (index.html's ``handleSippImportSubmit``) calls
+    this endpoint once per queued file, so this naturally yields one
+    archived file and one event per file.
     """
     filename = file.filename or ""
     content = await file.read()
@@ -197,11 +199,8 @@ async def import_sipp(
             request, "_portfolio.html", context=context, status_code=400
         )
 
-    SIPP_IMPORT_DIR.mkdir(parents=True, exist_ok=True)
-    destination = SIPP_IMPORT_DIR / "merged.csv"
     try:
-        destination.write_bytes(content)
-        result = trader.import_sipp(destination, pid)
+        result = trader.import_sipp(content, pid)
     except SippImportError as e:
         # Validation failure (e.g. missing columns) — show the reason verbatim.
         context = portfolio.default_portfolio_context(pid)
@@ -217,6 +216,34 @@ async def import_sipp(
             request, "_portfolio.html", context=context, status_code=400
         )
 
+    if result.status == "rejected":
+        # All-or-nothing commit (#210 follow-up): at least one row failed,
+        # so nothing from this plan was persisted -- never claim buy/sell/
+        # cash counts (there are none), never call get_portfolio (nothing
+        # changed), and surface every failing row/reason instead.
+        context = portfolio.default_portfolio_context(pid)
+        message = "Import rejected — nothing was saved. " + _describe_issues(
+            "row(s) failed", result.failed_rows
+        )
+        context["error_message"] = message
+        try:
+            account = trader.get_portfolio_meta(pid)
+            notifications.record(
+                NotificationCategory.PORTFOLIO,
+                "sipp_import",
+                f"SIPP CSV import rejected — {filename}",
+                severity=NotificationSeverity.ERROR,
+                body=f"{account.name if account else 'account'}: {message}",
+                portfolio_id=pid,
+            )
+        except Exception:
+            # Never let notification bookkeeping fail an otherwise-handled
+            # rejection (matches the success path's best-effort pattern).
+            logger.exception("Failed to record SIPP import rejection notification")
+        return templates.TemplateResponse(
+            request, "_portfolio.html", context=context, status_code=400
+        )
+
     positions = trader.get_portfolio(portfolio_id=pid)
     context = portfolio.portfolio_partial_context(
         positions, cash_balance=result.cash_balance, portfolio_id=pid
@@ -227,6 +254,12 @@ async def import_sipp(
         f"position(s); cash balance £{result.cash_balance:,.2f}."
     )
     warnings = []
+    # As of Story 1.2, a successful (non-"rejected") result from the real
+    # TraderAgent.import_sipp never populates skipped_rows -- every row-level
+    # problem now either rejects the whole plan (failed_rows, handled above)
+    # or is a genuine no-op. This branch is kept live for a future story that
+    # may reintroduce a real "skip" outcome, and for route-level tests that
+    # construct a SippImportResult directly.
     if result.skipped_rows:
         warnings.append(_describe_issues("row(s) skipped", result.skipped_rows))
     if result.parse_errors:

@@ -6,9 +6,10 @@ Run as part of the web UI backend.
 """
 
 import csv
+import io
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -382,9 +383,24 @@ class TraderAgent(Agent):
         display_info: optional {ticker: (original_price, currency)} for template display.
         """
         rows = self._trades.open_rows(portfolio_id)
-        state = self._replay_trades(rows)
+        return self._compute_positions(rows, current_prices, display_info)
+
+    @staticmethod
+    def _compute_positions(
+        rows: list[tuple[Any, ...]],
+        current_prices: dict[str, float] | None,
+        display_info: dict[str, tuple[float, str]] | None,
+    ) -> list[Position]:
+        """Replay trade rows into open Positions with live P&L.
+
+        Shared by ``get_portfolio`` (reading committed rows via
+        ``open_rows``) and ``import_sipp``'s in-transaction snapshot calc
+        (reading via ``open_rows_on_connection``) so both use one
+        implementation.
+        """
+        state = TraderAgent._replay_trades(rows)
         return [
-            self._build_position(ticker, s, current_prices, display_info)
+            TraderAgent._build_position(ticker, s, current_prices, display_info)
             for ticker, s in state.items()
             if s["shares"] > 0
         ]
@@ -560,19 +576,45 @@ class TraderAgent(Agent):
         )
 
     def import_sipp(
-        self, csv_path: str | Path, portfolio_id: int | None = None
+        self, csv_content: bytes, portfolio_id: int | None = None
     ) -> SippImportResult:
         """Import a SIPP CSV into ``portfolio_id``; return counts and problems.
 
-        Validates the header row first (missing required columns abort the
-        import with ``SippImportError`` before any DB write). Unparseable
-        numeric values and skipped trade rows are collected and reported rather
-        than silently swallowed (#152). Idempotency is keyed per-portfolio, so
-        the same CSV imported into two portfolios does not collide (#147).
+        Parses each request's own uploaded bytes exactly once — never a
+        shared filesystem path — so concurrent uploads can never read or
+        overwrite one another's *input CSV* on disk (#210; this does not by
+        itself guarantee DB-level isolation for two concurrent imports into
+        the *same* ``portfolio_id``, which is separate, later-story
+        territory). Validates the header row first
+        (missing required columns abort the import with ``SippImportError``
+        before any DB write). Unparseable numeric values are surfaced in
+        ``parse_errors`` rather than silently swallowed (#152). Idempotency
+        is keyed per-portfolio, so the same CSV imported into two portfolios
+        does not collide (#147).
+
+        Every row is first evaluated into an in-memory plan with no database
+        writes. Only if every row is safe to write (none resolve to
+        ``failed``) does the method open one write transaction and commit
+        trades, cash flows, the per-currency cash balance, and the portfolio
+        snapshot together. If any row is ``failed``, the whole plan is
+        rejected and nothing is persisted — see ``failed_rows`` and
+        ``status="rejected"`` on the returned result (#210's atomic-commit
+        follow-up). ``parse_errors`` and ``failed_rows`` are independent and
+        may both be non-empty on a rejected result: a value can fail to
+        parse (recorded in ``parse_errors``) without its row necessarily
+        being ``failed`` (e.g. it defaults to 0 and the row is a benign
+        no-op), and a row can be ``failed`` for a reason unrelated to any
+        parse error (e.g. a well-formed but non-positive price).
         """
-        csv_path = Path(csv_path)
         parse_errors: list[str] = []
         skipped_rows: list[str] = []
+        failed_rows: list[str] = []
+        # Staged writes -- the exact positional args ``insert_ignore`` needs,
+        # minus the connection, which is supplied only once the plan is known
+        # to be fully valid (Gate 3: no DB connection is opened for writes
+        # until every row has been evaluated).
+        planned_trades: list[tuple[Any, ...]] = []
+        planned_cash_flows: list[tuple[Any, ...]] = []
         # Rows with genuinely no signal (no quantity, no debit/credit, no
         # parse error) -- counted toward the row-count reconciliation below
         # so a benign informational row never falsely flags status="error",
@@ -616,21 +658,29 @@ class TraderAgent(Agent):
                 return "WITHDRAWAL"
             return "OTHER"
 
-        with open(csv_path, encoding="utf-8-sig") as f:
-            reader = csv.DictReader(f)
-            # Some provider exports prepend a run of BOM noise to the very
-            # first header cell (e.g. "﻿...﻿Date" or "ï»¿...ï»¿Date").
-            # ``utf-8-sig`` strips only one real BOM, so the first column key
-            # stays polluted and every ``row.get("Date")`` misses it —
-            # silently blanking the trade date (#166, #171). Normalise the
-            # header names before reading rows so the value lookups use the
-            # clean column names.
-            reader.fieldnames = [
-                _HEADER_BOM_NOISE_RE.sub("", h or "").strip()
-                for h in (reader.fieldnames or [])
-            ]
-            fieldnames = reader.fieldnames
-            rows = list(reader)
+        # The single in-memory transformation this method performs: decode
+        # the caller-owned bytes once, then parse via a StringIO-backed
+        # DictReader. No file path is ever opened, read, or re-read (#210).
+        # ``newline=None`` reproduces the universal-newline translation that
+        # ``open(..., encoding="utf-8-sig")`` (the previous implementation)
+        # applied by default -- without it, a bare ``\r``-terminated CSV
+        # (classic Mac-style line endings, occasionally seen in older
+        # broker exports) raises ``_csv.Error`` instead of parsing cleanly.
+        text = csv_content.decode("utf-8-sig")
+        reader = csv.DictReader(io.StringIO(text, newline=None))
+        # Some provider exports prepend a run of BOM noise to the very
+        # first header cell (e.g. "﻿...﻿Date" or "ï»¿...ï»¿Date").
+        # ``utf-8-sig`` strips only one real BOM, so the first column key
+        # stays polluted and every ``row.get("Date")`` misses it —
+        # silently blanking the trade date (#166, #171). Normalise the
+        # header names before reading rows so the value lookups use the
+        # clean column names.
+        reader.fieldnames = [
+            _HEADER_BOM_NOISE_RE.sub("", h or "").strip()
+            for h in (reader.fieldnames or [])
+        ]
+        fieldnames = reader.fieldnames
+        rows = list(reader)
 
         present = set(fieldnames)
         missing = [c for c in REQUIRED_SIPP_COLUMNS if c not in present]
@@ -639,7 +689,6 @@ class TraderAgent(Agent):
                 "CSV is missing required columns: " + ", ".join(missing)
             )
 
-        conn = self._conn()
         buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
         # The authoritative cash balance is the running balance of the
         # latest-dated row, chosen independently of the CSV's row order so a
@@ -650,79 +699,77 @@ class TraderAgent(Agent):
         # degrades to the previous last-row-in-file behaviour.
         cash_balance_rank: tuple[int, str, int] | None = None
 
-        try:
-            for idx, row in enumerate(rows):
-                qty = row.get("Quantity", "").strip()
-                symbol = row.get("Symbol", "").strip()
-                reference_raw = row.get("Reference", "").strip()
-                # Blank/"n/a" means "this provider didn't give one" — treat it
-                # as no reference (None), not a literal value. Every insert is
-                # deduped per-portfolio on (portfolio_id, reference) via a
-                # partial unique index that exempts NULL references (#147);
-                # passing the literal string "n/a" through would make every
-                # such row collide with the first one and get silently
-                # dropped by INSERT OR IGNORE (#186) — real SIPP exports
-                # commonly leave Reference "n/a" on every interest/dividend
-                # row, so this wasn't a hypothetical edge case.
-                reference = (
-                    reference_raw if reference_raw and reference_raw != "n/a" else None
-                )
-                # Many providers leave Reference blank/"n/a" on non-trade rows
-                # (interest, dividends) — fall back to a 1-based CSV row number
-                # (accounting for the header row) so issue detail can still
-                # point at a specific row instead of a useless "row n/a" for
-                # every such row (#185).
-                row_label = reference if reference else f"CSV row {idx + 2}"
-                _parse_errors_before = len(parse_errors)
-                debit = clean_amount(row.get("Debit", ""), "Debit", row_label)
-                credit = clean_amount(row.get("Credit", ""), "Credit", row_label)
-                # Scoped to just Debit/Credit (not Price, which is irrelevant
-                # to a non-trade row) so a cash-flow-shaped row whose amount
-                # failed to parse -- and therefore defaulted to 0.0 and would
-                # otherwise vanish with no action taken and no skip entry --
-                # gets flagged below instead of silently dropped (#187).
-                amount_had_parse_error = len(parse_errors) > _parse_errors_before
-                price = clean_amount(row.get("Price", ""), "Price", row_label)
-                date = _to_iso_date(row.get("Date", "").strip())
-                description = row.get("Description", "").strip()
+        for idx, row in enumerate(rows):
+            qty = row.get("Quantity", "").strip()
+            symbol = row.get("Symbol", "").strip()
+            reference_raw = row.get("Reference", "").strip()
+            # Blank/"n/a" means "this provider didn't give one" — treat it
+            # as no reference (None), not a literal value. Every insert is
+            # deduped per-portfolio on (portfolio_id, reference) via a
+            # partial unique index that exempts NULL references (#147);
+            # passing the literal string "n/a" through would make every
+            # such row collide with the first one and get silently
+            # dropped by INSERT OR IGNORE (#186) — real SIPP exports
+            # commonly leave Reference "n/a" on every interest/dividend
+            # row, so this wasn't a hypothetical edge case.
+            reference = (
+                reference_raw if reference_raw and reference_raw != "n/a" else None
+            )
+            # Many providers leave Reference blank/"n/a" on non-trade rows
+            # (interest, dividends) — fall back to a 1-based CSV row number
+            # (accounting for the header row) so issue detail can still
+            # point at a specific row instead of a useless "row n/a" for
+            # every such row (#185).
+            row_label = reference if reference else f"CSV row {idx + 2}"
+            _parse_errors_before = len(parse_errors)
+            debit = clean_amount(row.get("Debit", ""), "Debit", row_label)
+            credit = clean_amount(row.get("Credit", ""), "Credit", row_label)
+            # Scoped to just Debit/Credit (not Price, which is irrelevant
+            # to a non-trade row) so a cash-flow-shaped row whose amount
+            # failed to parse -- and therefore defaulted to 0.0 and would
+            # otherwise vanish with no action taken and no skip entry --
+            # gets flagged below instead of silently dropped (#187).
+            amount_had_parse_error = len(parse_errors) > _parse_errors_before
+            price = clean_amount(row.get("Price", ""), "Price", row_label)
+            date = _to_iso_date(row.get("Date", "").strip())
+            description = row.get("Description", "").strip()
 
-                if qty and qty != "n/a":
-                    # Trade if Symbol is valid or if HSBC GLOB
-                    is_trade = symbol and symbol != "n/a"
-                    is_hsbc_glob = "HSBC GLOB" in description.upper()
+            if qty and qty != "n/a":
+                # Trade if Symbol is valid or if HSBC GLOB
+                is_trade = symbol and symbol != "n/a"
+                is_hsbc_glob = "HSBC GLOB" in description.upper()
 
-                    if is_trade or is_hsbc_glob:
-                        try:
-                            shares = float(qty.replace("£", "").replace(",", ""))
-                        except ValueError:
-                            skipped_rows.append(
-                                f"row {row_label}: unparseable quantity {qty!r}"
+                if is_trade or is_hsbc_glob:
+                    try:
+                        shares = float(qty.replace("£", "").replace(",", ""))
+                    except ValueError:
+                        # A row that cannot be safely written must not be
+                        # written at all -- and per AC #2, one such row
+                        # rejects the *entire* plan, not just itself.
+                        failed_rows.append(
+                            f"row {row_label}: unparseable quantity {qty!r}"
+                        )
+                        logger.warning(
+                            "rejecting import: unparseable quantity %r (ref %s)",
+                            qty,
+                            row_label,
+                        )
+                        shares = None
+
+                    if shares is not None:
+                        if shares <= 0 or price <= 0:
+                            failed_rows.append(
+                                f"row {row_label}: non-positive "
+                                f"shares/price ({shares}, {price})"
                             )
-                            logger.warning(
-                                "skipping trade row with unparseable quantity %r (ref %s)",
-                                qty,
-                                row_label,
+                        else:
+                            action = (
+                                "BUY" if debit > 0 else "SELL" if credit > 0 else None
                             )
-                            shares = None
-
-                        if shares is not None:
-                            if shares <= 0 or price <= 0:
-                                skipped_rows.append(
-                                    f"row {row_label}: non-positive "
-                                    f"shares/price ({shares}, {price})"
-                                )
-                            else:
-                                action = (
-                                    "BUY"
-                                    if debit > 0
-                                    else "SELL"
-                                    if credit > 0
-                                    else None
-                                )
-                                if action:
-                                    ticker = symbol.upper() if is_trade else "HSFWA"
-                                    self._trades.insert_ignore(
-                                        conn,
+                            if action:
+                                ticker = symbol.upper() if is_trade else "HSFWA"
+                                planned_trades.append(
+                                    (
                                         ticker,
                                         action,
                                         shares,
@@ -732,21 +779,22 @@ class TraderAgent(Agent):
                                         reference or None,
                                         portfolio_id,
                                     )
-                                    if action == "BUY":
-                                        buy_count += 1
-                                    else:
-                                        sell_count += 1
+                                )
+                                if action == "BUY":
+                                    buy_count += 1
                                 else:
-                                    skipped_rows.append(
-                                        f"row {row_label}: trade with no "
-                                        "debit/credit amount"
-                                    )
-                    else:
-                        amount = credit if credit > 0 else debit
-                        if amount > 0:
-                            flow_type = classify_flow_type(description)
-                            self._cash_flows.insert_ignore(
-                                conn,
+                                    sell_count += 1
+                            else:
+                                failed_rows.append(
+                                    f"row {row_label}: trade with no "
+                                    "debit/credit amount"
+                                )
+                else:
+                    amount = credit if credit > 0 else debit
+                    if amount > 0:
+                        flow_type = classify_flow_type(description)
+                        planned_cash_flows.append(
+                            (
                                 date,
                                 flow_type,
                                 None,
@@ -755,29 +803,30 @@ class TraderAgent(Agent):
                                 reference,
                                 portfolio_id,
                             )
-                            cash_count += 1
-                        elif amount_had_parse_error:
-                            skipped_rows.append(
-                                f"row {row_label}: unparseable cash amount, row skipped"
-                            )
-                        else:
-                            benign_empty_count += 1
-                else:
-                    # No Quantity means this can't be a share trade regardless
-                    # of whether Symbol/Sedol is populated — some providers
-                    # tag a cash dividend with the paying company's symbol for
-                    # reference (e.g. "Div 60 SIGNIFY NV") even though no
-                    # shares changed hands. Previously any populated Symbol
-                    # here caused a silent `continue` that dropped the row
-                    # with zero visibility — not even counted as skipped
-                    # (#186). Fall through to the same cash-flow handling as
-                    # a blank-Symbol row; a genuine no-amount/no-signal row
-                    # still does nothing below.
-                    amount = credit if credit > 0 else debit
-                    if amount > 0:
-                        flow_type = classify_flow_type(description)
-                        self._cash_flows.insert_ignore(
-                            conn,
+                        )
+                        cash_count += 1
+                    elif amount_had_parse_error:
+                        failed_rows.append(
+                            f"row {row_label}: unparseable cash amount, row skipped"
+                        )
+                    else:
+                        benign_empty_count += 1
+            else:
+                # No Quantity means this can't be a share trade regardless
+                # of whether Symbol/Sedol is populated — some providers
+                # tag a cash dividend with the paying company's symbol for
+                # reference (e.g. "Div 60 SIGNIFY NV") even though no
+                # shares changed hands. Previously any populated Symbol
+                # here caused a silent `continue` that dropped the row
+                # with zero visibility — not even counted as skipped
+                # (#186). Fall through to the same cash-flow handling as
+                # a blank-Symbol row; a genuine no-amount/no-signal row
+                # still does nothing below.
+                amount = credit if credit > 0 else debit
+                if amount > 0:
+                    flow_type = classify_flow_type(description)
+                    planned_cash_flows.append(
+                        (
                             date,
                             flow_type,
                             None,
@@ -786,23 +835,86 @@ class TraderAgent(Agent):
                             reference,
                             portfolio_id,
                         )
-                        cash_count += 1
-                    elif amount_had_parse_error:
-                        skipped_rows.append(
-                            f"row {row_label}: unparseable cash amount, row skipped"
-                        )
-                    else:
-                        benign_empty_count += 1
+                    )
+                    cash_count += 1
+                elif amount_had_parse_error:
+                    failed_rows.append(
+                        f"row {row_label}: unparseable cash amount, row skipped"
+                    )
+                else:
+                    benign_empty_count += 1
 
-                running_balance = row.get("Running Balance", "").strip()
-                if running_balance and running_balance != "n/a":
-                    rb = clean_amount(running_balance, "Running Balance", row_label)
-                    if rb > 0:
-                        is_iso = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date))
-                        rank = (1 if is_iso else 0, date if is_iso else "", idx)
-                        if cash_balance_rank is None or rank > cash_balance_rank:
-                            cash_balance_rank = rank
-                            cash_balance = rb
+            running_balance = row.get("Running Balance", "").strip()
+            if running_balance and running_balance != "n/a":
+                rb = clean_amount(running_balance, "Running Balance", row_label)
+                if rb > 0:
+                    is_iso = bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", date))
+                    rank = (1 if is_iso else 0, date if is_iso else "", idx)
+                    if cash_balance_rank is None or rank > cash_balance_rank:
+                        cash_balance_rank = rank
+                        cash_balance = rb
+
+        total_rows = len(rows)
+
+        if failed_rows:
+            # AC #2/#4: the plan is rejected in full -- nothing planned above
+            # was ever written (no connection was opened for writes), and
+            # every failing row/reason is reported so the CSV can be
+            # corrected and re-uploaded.
+            return SippImportResult(
+                cash_balance=0.0,
+                buy_count=0,
+                sell_count=0,
+                cash_flow_count=0,
+                skipped_rows=[],
+                parse_errors=parse_errors,
+                failed_rows=failed_rows,
+                total_rows=total_rows,
+                status="rejected",
+            )
+
+        # Commit phase: every row was safe to write. Persist trades, cash
+        # flows, the per-currency cash balance, and the portfolio snapshot
+        # together in one transaction (AC #1) so a failure partway through
+        # leaves no partial state (AC #3) -- SQLite discards an uncommitted
+        # transaction when its connection closes, which is the rollback
+        # mechanism relied on below; no explicit ``conn.rollback()`` call is
+        # required for it to work, though one is included for clarity.
+        # Load current prices once, before opening the write transaction --
+        # this is a filesystem read unrelated to trades.db, so doing it while
+        # holding BEGIN IMMEDIATE's write lock would needlessly widen the
+        # lock window for concurrent imports without any correctness benefit.
+        prices: dict[str, float] = {}
+        if portfolio_id is not None:
+            data = self._artifacts.read_json(ANALYSIS_JSON, default=None)
+            if data is not None:
+                try:
+                    prices = {r["ticker"]: r["price"] for r in data}
+                except (TypeError, KeyError) as exc:
+                    logger.warning("price/value computation failed: %s", exc)
+
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for trade_args in planned_trades:
+                self._trades.insert_ignore(conn, *trade_args)
+            for flow_args in planned_cash_flows:
+                self._cash_flows.insert_ignore(conn, *flow_args)
+
+            if cash_balance > 0:
+                # The winning row's date (its ISO date, or None if
+                # unparseable).
+                cash_asof = (
+                    cash_balance_rank[1]
+                    if cash_balance_rank is not None and cash_balance_rank[0] == 1
+                    else None
+                )
+                self._apply_import_cash_balance(
+                    conn, portfolio_id, cash_balance, cash_asof
+                )
+
+            if portfolio_id is not None:
+                self._write_import_snapshot(conn, portfolio_id, cash_balance, prices)
 
             conn.commit()
         except Exception:
@@ -811,21 +923,19 @@ class TraderAgent(Agent):
         finally:
             conn.close()
 
-        if cash_balance > 0:
-            # The winning row's date (its ISO date, or None if unparseable).
-            cash_asof = (
-                cash_balance_rank[1]
-                if cash_balance_rank is not None and cash_balance_rank[0] == 1
-                else None
-            )
-            self._apply_import_cash_balance(portfolio_id, cash_balance, cash_asof)
-        self.update_portfolio_snapshot(cash_balance, portfolio_id)
+        if portfolio_id is None:
+            # The legacy single-portfolio path appends to
+            # ``portfolio_value.csv``, a different artifact outside
+            # ``trades.db``'s one-transaction contract -- best-effort, and
+            # only run after the transaction above has successfully
+            # committed (never for a rejected plan, never before the cash
+            # balance it reads has landed).
+            self.update_portfolio_snapshot(cash_balance, portfolio_id)
 
         # Every data row must land in exactly one bucket -- a mismatch means
         # some row was silently unaccounted for (a bug), not just a
         # data-quality issue, so it's flagged distinctly from an ordinary
         # skipped-row warning (#187).
-        total_rows = len(rows)
         total_actions = (
             buy_count + sell_count + cash_count + len(skipped_rows) + benign_empty_count
         )
@@ -844,6 +954,7 @@ class TraderAgent(Agent):
             cash_flow_count=cash_count,
             skipped_rows=skipped_rows,
             parse_errors=parse_errors,
+            failed_rows=[],
             total_rows=total_rows,
             status=status,
         )
@@ -903,10 +1014,12 @@ class TraderAgent(Agent):
         )
 
     def _apply_import_cash_balance(
-        self, portfolio_id: int | None, amount: float, as_of: str | None
+        self, conn: Any, portfolio_id: int | None, amount: float, as_of: str | None
     ) -> None:
         """Store an imported cash balance only if it's not older than the one
-        already stored (#160).
+        already stored (#160), writing on the caller's open connection so
+        the balance update joins the same transaction as the import's
+        trade/cash-flow writes (AC #1). Does not commit.
 
         The provider Running Balance is a snapshot, so importing an *older*
         SIPP file after a newer one must not regress the balance to a stale
@@ -915,11 +1028,56 @@ class TraderAgent(Agent):
         An incoming balance with no parseable date can't be compared, so it
         overwrites — matching the pre-#160 behaviour for undated files.
         """
-        stored_date = self._account.get(self._cash_date_key(portfolio_id))
+        stored_date = self._account.get_on_connection(
+            conn, self._cash_date_key(portfolio_id)
+        )
         if as_of is None or stored_date is None or as_of >= stored_date:
-            self.set_cash_balance(amount, portfolio_id)
+            self._account.set_on_connection(
+                conn, self._cash_key(portfolio_id), str(amount)
+            )
             if as_of is not None:
-                self._account.set(self._cash_date_key(portfolio_id), as_of)
+                self._account.set_on_connection(
+                    conn, self._cash_date_key(portfolio_id), as_of
+                )
+
+    def _write_import_snapshot(
+        self,
+        conn: Any,
+        portfolio_id: int,
+        cash_balance: float,
+        prices: dict[str, float],
+    ) -> None:
+        """Append this import's portfolio snapshot on the same open connection.
+
+        ``prices`` is read by the caller *before* the write transaction
+        opens (a filesystem read, unrelated to ``trades.db``, that should
+        not extend the ``BEGIN IMMEDIATE`` lock window). Reads trades through
+        ``open_rows_on_connection`` (not ``get_portfolio``/``open_rows``,
+        which open their own connection) so the snapshot's
+        total_cost/total_value reflect this transaction's own
+        not-yet-committed trade inserts — a separate connection would only
+        see the database's last *committed* state and silently miss them,
+        producing a snapshot that is atomically committed but numerically
+        wrong (the "read-your-own-writes hazard"). Does not commit.
+        """
+        rows = self._trades.open_rows_on_connection(conn, portfolio_id)
+        positions = self._compute_positions(rows, prices if prices else None, None)
+        total_cost = sum(p.total_cost for p in positions if p.total_cost is not None)
+        total_value = sum(
+            p.current_value for p in positions if p.current_value is not None
+        )
+        if total_value is None:
+            total_value = total_cost
+
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self._snapshots.append_on_connection(
+            conn,
+            portfolio_id,
+            timestamp,
+            round(total_value, 2),
+            round(total_cost, 2),
+            round(cash_balance, 2) if cash_balance is not None else None,
+        )
 
     def snapshot_history(
         self, portfolio_id: int, limit: int = 180

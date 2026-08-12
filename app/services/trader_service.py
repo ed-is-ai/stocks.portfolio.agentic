@@ -6,7 +6,6 @@ the trade/portfolio business logic still lives in the agent and repositories,
 but the rest of the app talks to persistence only through here.
 """
 
-from pathlib import Path
 from typing import Any
 
 from app.agents.trader.trader_agent import TraderAgent
@@ -180,7 +179,7 @@ class TraderService:
         self._agent.set_unmatched_sell_ack(trade_id, acknowledged)
 
     def import_sipp(
-        self, csv_path: str | Path, portfolio_id: int | None = None
+        self, csv_content: bytes, portfolio_id: int | None = None
     ) -> SippImportResult:
         """Import a SIPP CSV; return the outcome (cash balance + counts)."""
-        return self._agent.import_sipp(csv_path, portfolio_id)
+        return self._agent.import_sipp(csv_content, portfolio_id)

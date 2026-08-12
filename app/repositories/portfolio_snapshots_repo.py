@@ -33,6 +33,28 @@ class PortfolioSnapshotsRepository:
                 (portfolio_id, timestamp, total_value, total_cost, cash_balance),
             )
 
+    def append_on_connection(
+        self,
+        conn: Any,
+        portfolio_id: int,
+        timestamp: str,
+        total_value: float,
+        total_cost: float,
+        cash_balance: float | None,
+    ) -> None:
+        """Append one value snapshot on the caller's open connection.
+
+        Takes the caller's open connection and does not commit — used by the
+        SIPP import so the snapshot append joins the same transaction as its
+        trade/cash-flow writes (AC #1).
+        """
+        conn.execute(
+            "INSERT INTO portfolio_snapshots "
+            "(portfolio_id, timestamp, total_value, total_cost, cash_balance) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (portfolio_id, timestamp, total_value, total_cost, cash_balance),
+        )
+
     def history(self, portfolio_id: int, limit: int = 180) -> list[tuple[Any, ...]]:
         """Return the most recent ``limit`` snapshots oldest-first.
 

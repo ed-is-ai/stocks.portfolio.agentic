@@ -198,13 +198,16 @@ Date, Symbol, Sedol, Quantity, Price, Description,
 Reference, Debit, Credit, Running Balance
 ```
 
-Save it as `data/processed/SIPP/merged.csv`, then import it from the portfolio tab or in Python:
+Import it from the portfolio tab, or in Python — any filename works, since the
+CSV is parsed directly from its own uploaded bytes:
 
 ```python
+from pathlib import Path
+
 from app.agents.trader.trader_agent import TraderAgent
 
 agent = TraderAgent()
-cash_balance = agent.import_sipp("data/processed/SIPP/merged.csv")
+cash_balance = agent.import_sipp(Path("your_export.csv").read_bytes())
 ```
 
 Only rows with a valid symbol become trades. Other activity is stored as cash flow, trades are replayed chronologically, and the final running balance is treated as the authoritative cash position. Always compare imported positions, cash, and P&L with the original statement.
