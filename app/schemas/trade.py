@@ -7,10 +7,9 @@ from typing import Literal
 from pydantic import BaseModel
 
 #: The four possible outcomes of one SIPP import row (FR-13/AD-25). Story
-#: 1.2 only needs this vocabulary to gate the all-or-nothing commit ("did
-#: any row resolve to failed?") — repository insert methods do not yet
-#: return a per-row outcome, so ``inserted``/``duplicate`` aren't
-#: distinguished in practice until Story 1.8.
+#: 1.2 uses this vocabulary to gate the all-or-nothing commit ("did any row
+#: resolve to failed?"); as of Story 1.8 the repository insert methods also
+#: return ``inserted``/``duplicate`` so the two are no longer conflated.
 SippImportRowOutcome = Literal["inserted", "duplicate", "skipped", "failed"]
 
 
@@ -32,6 +31,13 @@ class SippImportResult(BaseModel):
       ``failed_rows``), so — per the all-or-nothing commit rule — nothing
       from this plan was persisted: no trades, cash flows, cash-balance
       update, or portfolio snapshot (#210).
+
+    Every row resolves to exactly one of the four FR-13 outcomes, so
+    ``inserted_count + duplicate_count + skipped_count + len(failed_rows)``
+    always equals ``total_rows``. For ``status="ok"`` those counts describe
+    what was actually persisted; for ``status="rejected"`` they are
+    provisional ("what would have happened") and describe no committed
+    state at all.
     """
 
     cash_balance: float
@@ -45,10 +51,13 @@ class SippImportResult(BaseModel):
     # handle it, and a future story (e.g. a genuine reconciliation "skip"
     # outcome) may repopulate it -- see Story 1.2's Dev Notes.
     skipped_rows: list[str] = []
+    inserted_count: int = 0
+    duplicate_count: int = 0
+    skipped_count: int = 0
     parse_errors: list[str] = []
     failed_rows: list[str] = []
     total_rows: int = 0
-    status: str = "ok"
+    status: Literal["ok", "rejected", "error"] = "ok"
 
 
 class Portfolio(BaseModel):

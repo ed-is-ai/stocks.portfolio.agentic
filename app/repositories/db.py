@@ -198,6 +198,11 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")
         except sqlite3.OperationalError as exc:
             logger.debug("schema migration step skipped: %s", exc)
+    for table in ("trades", "cash_flows"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN idempotency_key TEXT")
+        except sqlite3.OperationalError as exc:
+            logger.debug("schema migration step skipped: %s", exc)
     for col_def in ("currency TEXT DEFAULT 'GBP'", "original_price REAL"):
         try:
             conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
@@ -211,20 +216,28 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     if not _has_column(conn, "cash_flows", "portfolio_id"):
         _rebuild_cash_flows(conn)
 
+    # The legacy cash-flow rebuild above creates a fresh table, so apply this
+    # additive migration after the rebuild as well.
+    for table in ("trades", "cash_flows"):
+        if not _has_column(conn, table, "idempotency_key"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN idempotency_key TEXT")
+
     # Idempotency keys are per-portfolio: the same reference may recur across
     # portfolios, so drop the old global-unique index in favour of composite.
     # Idempotency is keyed on (portfolio_id, reference). ``ifnull`` collapses a
     # NULL portfolio to a single bucket so legacy imports with no portfolio_id
     # still dedupe (SQLite treats bare NULLs as distinct in a unique index).
     conn.execute("DROP INDEX IF EXISTS idx_trades_reference")
+    conn.execute("DROP INDEX IF EXISTS idx_trades_portfolio_reference")
+    conn.execute("DROP INDEX IF EXISTS idx_cash_flows_portfolio_reference")
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_portfolio_reference "
-        "ON trades(ifnull(portfolio_id, -1), reference) WHERE reference IS NOT NULL"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_trades_portfolio_idempotency "
+        "ON trades(ifnull(portfolio_id, -1), idempotency_key) WHERE idempotency_key IS NOT NULL"
     )
     conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_flows_portfolio_reference "
-        "ON cash_flows(ifnull(portfolio_id, -1), reference) "
-        "WHERE reference IS NOT NULL"
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_cash_flows_portfolio_idempotency "
+        "ON cash_flows(ifnull(portfolio_id, -1), idempotency_key) "
+        "WHERE idempotency_key IS NOT NULL"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_snapshots_portfolio "

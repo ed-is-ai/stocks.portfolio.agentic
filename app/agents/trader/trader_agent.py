@@ -6,6 +6,7 @@ Run as part of the web UI backend.
 """
 
 import csv
+import hashlib
 import io
 import logging
 import re
@@ -76,6 +77,21 @@ def _to_iso_date(value: str) -> str:
             continue
     logger.warning("unrecognized trade date format: %r (stored unchanged)", value)
     return value
+
+
+def _idempotency_key(
+    date: str, symbol: str, sedol: str, quantity: str, description: str
+) -> str:
+    """Return the deterministic dedupe key for one SIPP row.
+
+    Derived from the row's own content rather than its provider Reference,
+    which real exports commonly leave blank or ``"n/a"`` on non-trade rows.
+    The same row re-uploaded in an overlapping CSV therefore produces the
+    same key and is suppressed by the ``(portfolio_id, idempotency_key)``
+    unique index.
+    """
+    raw = "|".join((date, symbol, sedol, quantity, description))
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
 class TraderAgent(Agent):
@@ -589,8 +605,10 @@ class TraderAgent(Agent):
         (missing required columns abort the import with ``SippImportError``
         before any DB write). Unparseable numeric values are surfaced in
         ``parse_errors`` rather than silently swallowed (#152). Idempotency
-        is keyed per-portfolio, so the same CSV imported into two portfolios
-        does not collide (#147).
+        is keyed on ``(portfolio_id, idempotency_key)`` — a hash of the row's
+        own content, not its provider Reference — so overlapping quarterly
+        exports dedupe deterministically and the same CSV imported into two
+        portfolios does not collide (#147).
 
         Every row is first evaluated into an in-memory plan with no database
         writes. Only if every row is safe to write (none resolve to
@@ -605,6 +623,13 @@ class TraderAgent(Agent):
         being ``failed`` (e.g. it defaults to 0 and the row is a benign
         no-op), and a row can be ``failed`` for a reason unrelated to any
         parse error (e.g. a well-formed but non-positive price).
+
+        Every row resolves to exactly one of ``inserted``/``duplicate``/
+        ``skipped``/``failed``, and the returned counts say which. For a
+        committed plan those come from the write itself, so a row suppressed
+        by the unique index is reported as a duplicate rather than counted
+        as a fresh buy/sell/cash success; for a rejected plan they come from
+        a read-only pre-check and describe no persisted state at all.
         """
         parse_errors: list[str] = []
         skipped_rows: list[str] = []
@@ -690,6 +715,28 @@ class TraderAgent(Agent):
             )
 
         buy_count, sell_count, cash_count, cash_balance = 0, 0, 0, 0.0
+        inserted_count = duplicate_count = 0
+        # A rejected plan never opens a write connection, so its per-row
+        # inserted/duplicate outcomes can only come from a read-only
+        # pre-check. One query per table per import (not per row): the keys
+        # already persisted for this portfolio. Newly planned keys are added
+        # as they're classified so a row repeated *within* one CSV reads as a
+        # duplicate too, exactly as INSERT OR IGNORE would treat it.
+        existing_trade_keys = self._trades.idempotency_keys_for_portfolio(portfolio_id)
+        existing_cash_flow_keys = self._cash_flows.idempotency_keys_for_portfolio(
+            portfolio_id
+        )
+        provisional_inserted_count = provisional_duplicate_count = 0
+
+        def classify(key: str, seen: set[str]) -> None:
+            """Count ``key`` as provisionally inserted or duplicate."""
+            nonlocal provisional_inserted_count, provisional_duplicate_count
+            if key in seen:
+                provisional_duplicate_count += 1
+            else:
+                provisional_inserted_count += 1
+                seen.add(key)
+
         # The authoritative cash balance is the running balance of the
         # latest-dated row, chosen independently of the CSV's row order so a
         # newest-first export yields the same balance as an oldest-first one
@@ -713,7 +760,9 @@ class TraderAgent(Agent):
             # commonly leave Reference "n/a" on every interest/dividend
             # row, so this wasn't a hypothetical edge case.
             reference = (
-                reference_raw if reference_raw and reference_raw != "n/a" else None
+                reference_raw
+                if reference_raw and reference_raw.lower() != "n/a"
+                else None
             )
             # Many providers leave Reference blank/"n/a" on non-trade rows
             # (interest, dividends) — fall back to a 1-based CSV row number
@@ -732,7 +781,9 @@ class TraderAgent(Agent):
             amount_had_parse_error = len(parse_errors) > _parse_errors_before
             price = clean_amount(row.get("Price", ""), "Price", row_label)
             date = _to_iso_date(row.get("Date", "").strip())
+            sedol = row.get("Sedol", "").strip()
             description = row.get("Description", "").strip()
+            idempotency_key = _idempotency_key(date, symbol, sedol, qty, description)
 
             if qty and qty != "n/a":
                 # Trade if Symbol is valid or if HSBC GLOB
@@ -778,12 +829,10 @@ class TraderAgent(Agent):
                                         "",
                                         reference or None,
                                         portfolio_id,
+                                        idempotency_key,
                                     )
                                 )
-                                if action == "BUY":
-                                    buy_count += 1
-                                else:
-                                    sell_count += 1
+                                classify(idempotency_key, existing_trade_keys)
                             else:
                                 failed_rows.append(
                                     f"row {row_label}: trade with no "
@@ -802,9 +851,10 @@ class TraderAgent(Agent):
                                 description,
                                 reference,
                                 portfolio_id,
+                                idempotency_key,
                             )
                         )
-                        cash_count += 1
+                        classify(idempotency_key, existing_cash_flow_keys)
                     elif amount_had_parse_error:
                         failed_rows.append(
                             f"row {row_label}: unparseable cash amount, row skipped"
@@ -834,9 +884,10 @@ class TraderAgent(Agent):
                             description,
                             reference,
                             portfolio_id,
+                            idempotency_key,
                         )
                     )
-                    cash_count += 1
+                    classify(idempotency_key, existing_cash_flow_keys)
                 elif amount_had_parse_error:
                     failed_rows.append(
                         f"row {row_label}: unparseable cash amount, row skipped"
@@ -860,13 +911,19 @@ class TraderAgent(Agent):
             # AC #2/#4: the plan is rejected in full -- nothing planned above
             # was ever written (no connection was opened for writes), and
             # every failing row/reason is reported so the CSV can be
-            # corrected and re-uploaded.
+            # corrected and re-uploaded. The inserted/duplicate counts are
+            # the read-only provisional ones -- "what would have happened" --
+            # since no write was ever attempted. buy/sell/cash stay at 0:
+            # those three describe committed state only.
             return SippImportResult(
                 cash_balance=0.0,
                 buy_count=0,
                 sell_count=0,
                 cash_flow_count=0,
                 skipped_rows=[],
+                inserted_count=provisional_inserted_count,
+                duplicate_count=provisional_duplicate_count,
+                skipped_count=benign_empty_count,
                 parse_errors=parse_errors,
                 failed_rows=failed_rows,
                 total_rows=total_rows,
@@ -896,10 +953,23 @@ class TraderAgent(Agent):
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            # Write-time outcomes are authoritative: a row suppressed by the
+            # unique index is a duplicate, never a buy/sell/cash "success".
             for trade_args in planned_trades:
-                self._trades.insert_ignore(conn, *trade_args)
+                if self._trades.insert_ignore(conn, *trade_args) == "duplicate":
+                    duplicate_count += 1
+                    continue
+                inserted_count += 1
+                if trade_args[1] == "BUY":
+                    buy_count += 1
+                else:
+                    sell_count += 1
             for flow_args in planned_cash_flows:
-                self._cash_flows.insert_ignore(conn, *flow_args)
+                if self._cash_flows.insert_ignore(conn, *flow_args) == "duplicate":
+                    duplicate_count += 1
+                    continue
+                inserted_count += 1
+                cash_count += 1
 
             if cash_balance > 0:
                 # The winning row's date (its ISO date, or None if
@@ -936,14 +1006,18 @@ class TraderAgent(Agent):
         # some row was silently unaccounted for (a bug), not just a
         # data-quality issue, so it's flagged distinctly from an ordinary
         # skipped-row warning (#187).
+        # Reconciled on the four FR-13 outcomes rather than on buy/sell/cash,
+        # which no longer cover every written row now that a duplicate is
+        # counted as a duplicate instead of a success.
         total_actions = (
-            buy_count + sell_count + cash_count + len(skipped_rows) + benign_empty_count
+            inserted_count + duplicate_count + len(skipped_rows) + benign_empty_count
         )
         status = "ok" if total_actions == total_rows else "error"
 
         print(
             f"SIPP import complete: {buy_count} BUY, {sell_count} SELL, "
-            f"{cash_count} cash flows, {len(skipped_rows)} skipped, "
+            f"{cash_count} cash flows, {duplicate_count} duplicates, "
+            f"{benign_empty_count} skipped, "
             f"{len(parse_errors)} parse errors, status={status}. "
             f"Cash balance: GBP {cash_balance:,.2f}"
         )
@@ -953,6 +1027,9 @@ class TraderAgent(Agent):
             sell_count=sell_count,
             cash_flow_count=cash_count,
             skipped_rows=skipped_rows,
+            inserted_count=inserted_count,
+            duplicate_count=duplicate_count,
+            skipped_count=benign_empty_count,
             parse_errors=parse_errors,
             failed_rows=[],
             total_rows=total_rows,

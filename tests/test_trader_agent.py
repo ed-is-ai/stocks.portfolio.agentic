@@ -6,6 +6,7 @@ import pytest
 from app.agents.trader.trader_agent import (
     SippImportError,
     TraderAgent,
+    _idempotency_key,
     _to_iso_date,
 )
 from app.core.config import PORTFOLIO_VALUE_CSV
@@ -118,6 +119,183 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
     assert len(portfolio) == 1
     assert portfolio[0].ticker == "AAPL"
     assert portfolio[0].shares == 10.0  # not 20.0
+
+
+def test_sipp_reports_inserted_then_duplicate_outcomes(tmp_path: Path) -> None:
+    """Re-importing the same CSV reports duplicates, not a second success.
+
+    Story 1.8, AC #2/#4: ``buy_count`` counts only rows that genuinely
+    inserted, so a row suppressed by the unique index shows up as a
+    duplicate instead of being folded into the success count.
+    """
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,5000.00\n"
+    )
+    csv_bytes = csv_text.encode("utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    first = agent.import_sipp(csv_bytes)
+    second = agent.import_sipp(csv_bytes)
+
+    assert (first.inserted_count, first.duplicate_count, first.buy_count) == (2, 0, 2)
+    assert (second.inserted_count, second.duplicate_count, second.buy_count) == (
+        0,
+        2,
+        0,
+    )
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 2
+
+
+def test_sipp_rejected_plan_reports_four_outcomes_without_writing(
+    tmp_path: Path,
+) -> None:
+    """Story 1.8, AC #5: a rejected plan still reports all four outcomes.
+
+    The inserted/duplicate counts come from the read-only pre-check (no
+    write is ever attempted), and they still reconcile against total_rows.
+    """
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B456,not-a-number,200.00,Buy MSFT,REF-B,1000.00,,5000.00\n"
+        ",,,,,,,,,\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert result.status == "rejected"
+    assert (result.inserted_count, result.duplicate_count, result.skipped_count) == (
+        1,
+        0,
+        1,
+    )
+    assert len(result.failed_rows) == 1
+    assert result.total_rows == 3
+    assert (
+        result.inserted_count
+        + result.duplicate_count
+        + result.skipped_count
+        + len(result.failed_rows)
+        == result.total_rows
+    )
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+
+
+def test_sipp_mixed_plan_counts_all_four_outcomes_simultaneously(
+    tmp_path: Path,
+) -> None:
+    """Story 1.8, AC #1: one CSV holding one row of each outcome.
+
+    Each row resolves to exactly one of inserted/duplicate/skipped/failed,
+    and the four reconcile against total_rows. The failed row rejects the
+    whole plan, so the inserted/duplicate counts here describe nothing that
+    was persisted — proved by reading the tables directly rather than
+    trusting the same counters under test.
+    """
+    header = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+    )
+    already_imported = (
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.import_sipp((header + already_imported).encode("utf-8"))
+
+    mixed = (
+        header
+        # duplicate -- byte-identical to the row imported above
+        + already_imported
+        # inserted -- genuinely new
+        + "03/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,4000.00\n"
+        # skipped -- no quantity, no debit/credit, nothing actionable
+        + "04/02/2024,n/a,n/a,n/a,n/a,Statement note,n/a,,,4000.00\n"
+        # failed -- unparseable quantity
+        + "05/02/2024,TSLA,B789,notanumber,300.00,Buy TSLA,REF-D,900.00,,3100.00\n"
+    )
+
+    result = agent.import_sipp(mixed.encode("utf-8"))
+
+    assert result.status == "rejected"
+    assert result.inserted_count == 1
+    assert result.duplicate_count == 1
+    assert result.skipped_count == 1
+    assert len(result.failed_rows) == 1
+    assert result.total_rows == 4
+    assert (
+        result.inserted_count
+        + result.duplicate_count
+        + result.skipped_count
+        + len(result.failed_rows)
+        == result.total_rows
+    )
+    with sqlite3.connect(agent.db_path) as conn:
+        tickers = [r[0] for r in conn.execute("SELECT ticker FROM trades").fetchall()]
+    # Only the first import's row survives: the rejected plan wrote nothing,
+    # so the "inserted" MSFT row never landed.
+    assert tickers == ["AAPL"]
+
+
+def test_idempotency_key_is_content_based_and_excludes_reference() -> None:
+    key = _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
+    assert key == _idempotency_key("2024-02-01", "AAPL", "B123", "10", "Buy AAPL")
+    assert key != _idempotency_key("2024-02-02", "AAPL", "B123", "10", "Buy AAPL")
+
+
+def test_overlapping_sipp_files_dedupe_without_reference(tmp_path: Path) -> None:
+    header = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+    )
+    first = header + "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,,1000.00,,5000.00\n"
+    second = header + "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,N/A,1000.00,,5000.00\n"
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    agent.import_sipp(first.encode("utf-8"))
+    result = agent.import_sipp(second.encode("utf-8"))
+
+    # The second file's row is the same content with a different Reference --
+    # the content-based key still recognises it as an already-imported row.
+    assert (result.inserted_count, result.duplicate_count) == (0, 1)
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
+
+
+def test_reference_no_reference_casing_is_normalized(tmp_path: Path) -> None:
+    header = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+    )
+    rows = "".join(
+        f"01/02/2024,AAPL,B123,10,100.00,Buy AAPL,{ref},1000.00,,5000.00\n"
+        for ref in ("N/A", "n/a")
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp((header + rows).encode("utf-8"))
+
+    # Two identical rows within one file: the second is a duplicate, and the
+    # read-only pre-check must agree with what INSERT OR IGNORE actually did.
+    assert (result.inserted_count, result.duplicate_count) == (1, 1)
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
 
 
 def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None:
@@ -655,8 +833,12 @@ def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> Non
     result = agent.import_sipp(csv_path.read_bytes())
 
     assert result.total_rows == 1
-    assert result.skipped_rows == []
     assert result.status == "ok"
+    # The FR-13 "skipped" outcome is its own count, populated from the benign
+    # no-signal rows. The vestigial skipped_rows list is a different thing
+    # and stays empty -- wiring skipped_count to it would be wrong.
+    assert result.skipped_count == 1
+    assert result.skipped_rows == []
 
 
 def test_record_buy_normalizes_ddmmyyyy_to_iso(tmp_path: Path) -> None:

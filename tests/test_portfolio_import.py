@@ -310,20 +310,98 @@ def test_happy_path_context_carries_buy_sell_counts_for_queue_aggregation(
     assert calls[-1]["import_status"] == "ok"
 
 
+def test_duplicate_rows_are_reported_as_duplicates_not_successes(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Story 1.8, AC #2/#4: re-importing an overlapping CSV must read as
+    "already imported", not as a fresh success — the counts the queue
+    aggregates carry the duplicate/inserted split, and the prose says so."""
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=5000.0,
+        buy_count=0,
+        sell_count=0,
+        cash_flow_count=0,
+        inserted_count=0,
+        duplicate_count=3,
+        skipped_count=1,
+        total_rows=4,
+        status="ok",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload()
+
+    assert resp.status_code == 200
+    assert calls[-1]["import_status"] == "ok"
+    assert calls[-1]["import_duplicate_count"] == 3
+    assert calls[-1]["import_inserted_count"] == 0
+    assert calls[-1]["import_skipped_count"] == 1
+    assert calls[-1]["import_failed_count"] == 0
+    assert "3 duplicate(s) already imported" in calls[-1]["import_message"]
+    assert "1 row(s) skipped" in calls[-1]["import_message"]
+    # A duplicate never inflates the buy count.
+    assert "Imported 0 buy(s)" in calls[-1]["import_message"]
+
+
+def test_rejected_plan_reports_all_four_outcomes_as_provisional(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Story 1.8, AC #5: a rejected plan still reports all four outcomes,
+    framed as what *would* have happened so the counts can't be mistaken for
+    a partial success."""
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=0.0,
+        inserted_count=2,
+        duplicate_count=1,
+        skipped_count=1,
+        failed_rows=["row REF-BAD: unparseable quantity 'notanumber'"],
+        total_rows=5,
+        status="rejected",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload()
+
+    assert resp.status_code == 400
+    message = calls[-1]["error_message"]
+    assert "nothing was saved" in message
+    assert "2 row(s) would have inserted" in message
+    assert "1 would have been duplicates" in message
+    assert "1 skipped" in message
+    assert "Imported" not in message  # never the ordinary success phrasing
+    assert calls[-1]["import_failed_count"] == 1
+    assert calls[-1]["import_status"] == "rejected"
+
+
 def test_row_count_mismatch_flags_error_status_and_severity(
     monkeypatch: pytest.MonkeyPatch, mocked_import
 ):
-    """When TraderAgent.import_sipp reports status="error" (buy/sell/cash/
-    skipped counts didn't add up to total_rows, #187), the route must carry
-    that through: the banner status context, an ERROR line in the message,
-    and ERROR notification severity — not folded into an ordinary WARNING
-    the way a data-quality skip is."""
+    """When TraderAgent.import_sipp reports status="error" (the four outcome
+    counts didn't add up to total_rows, #187), the route must carry that
+    through: the banner status context, an ERROR line in the message, and
+    ERROR notification severity — not folded into an ordinary WARNING the
+    way a data-quality skip is."""
     mock_trader, _, mock_notifications, _ = mocked_import
     mock_trader.import_sipp.return_value = SippImportResult(
         cash_balance=5000.0,
         buy_count=2,
         sell_count=0,
         cash_flow_count=1,
+        inserted_count=3,
         total_rows=4,
         status="error",
     )

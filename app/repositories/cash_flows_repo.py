@@ -3,7 +3,7 @@
 from typing import Any
 
 from app.repositories.db import Connect, session
-from app.schemas.trade import CashFlow
+from app.schemas.trade import CashFlow, SippImportRowOutcome
 
 
 def _row_to_cash_flow(row: tuple[Any, ...]) -> CashFlow:
@@ -53,16 +53,47 @@ class CashFlowsRepository:
         description: str | None,
         reference: str | None,
         portfolio_id: int | None = None,
-    ) -> None:
+        idempotency_key: str | None = None,
+    ) -> SippImportRowOutcome:
         """Insert a cash flow with ``INSERT OR IGNORE`` on the given connection.
 
-        The ``(portfolio_id, reference)`` pair makes the SIPP import idempotent
-        per-portfolio. Inserts share the import's connection so the whole import
-        is one transaction.
+        The ``(portfolio_id, idempotency_key)`` pair makes the SIPP import
+        idempotent per-portfolio. Inserts share the import's connection so the
+        whole import is one transaction.
+
+        Returns the row's actual outcome: ``"inserted"`` when the row was
+        written, ``"duplicate"`` when the unique index silently suppressed
+        it. Never returns ``"skipped"``/``"failed"`` — those are decided at
+        plan-build time and such a row never reaches this call.
         """
-        conn.execute(
+        cur = conn.execute(
             "INSERT OR IGNORE INTO cash_flows "
-            "(date, flow_type, ticker, amount, description, reference, portfolio_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (date, flow_type, ticker, amount, description, reference, portfolio_id),
+            "(date, flow_type, ticker, amount, description, reference, portfolio_id, idempotency_key) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                date,
+                flow_type,
+                ticker,
+                amount,
+                description,
+                reference,
+                portfolio_id,
+                idempotency_key,
+            ),
         )
+        return "inserted" if cur.rowcount else "duplicate"
+
+    def idempotency_keys_for_portfolio(self, portfolio_id: int | None) -> set[str]:
+        """Return every cash-flow idempotency key already stored for a portfolio.
+
+        Read-only: lets the SIPP import classify a row as inserted or
+        duplicate before deciding whether to write anything at all.
+        """
+        bucket = -1 if portfolio_id is None else portfolio_id
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT idempotency_key FROM cash_flows "
+                "WHERE ifnull(portfolio_id, -1) = ? AND idempotency_key IS NOT NULL",
+                (bucket,),
+            ).fetchall()
+        return {str(row[0]) for row in rows}

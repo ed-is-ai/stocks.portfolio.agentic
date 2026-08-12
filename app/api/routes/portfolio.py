@@ -222,10 +222,21 @@ async def import_sipp(
         # cash counts (there are none), never call get_portfolio (nothing
         # changed), and surface every failing row/reason instead.
         context = portfolio.default_portfolio_context(pid)
-        message = "Import rejected — nothing was saved. " + _describe_issues(
-            "row(s) failed", result.failed_rows
-        )
+        # All four outcomes are still reported, but framed as what *would*
+        # have happened so the would-have counts can't read as a partial
+        # success.
+        message = (
+            f"Import rejected — nothing was saved. "
+            f"{result.inserted_count} row(s) would have inserted, "
+            f"{result.duplicate_count} would have been duplicates, "
+            f"{result.skipped_count} skipped. "
+        ) + _describe_issues("row(s) failed", result.failed_rows)
         context["error_message"] = message
+        context["import_inserted_count"] = result.inserted_count
+        context["import_duplicate_count"] = result.duplicate_count
+        context["import_skipped_count"] = result.skipped_count
+        context["import_failed_count"] = len(result.failed_rows)
+        context["import_status"] = result.status
         try:
             account = trader.get_portfolio_meta(pid)
             notifications.record(
@@ -253,6 +264,13 @@ async def import_sipp(
         f"{result.cash_flow_count} cash transaction(s); {len(positions)} open "
         f"position(s); cash balance £{result.cash_balance:,.2f}."
     )
+    # A duplicate is reported as a duplicate, never folded into the buy/sell/
+    # cash counts above — re-importing an overlapping CSV should read as
+    # "already imported", not as a fresh success.
+    if result.duplicate_count:
+        message += f" {result.duplicate_count} duplicate(s) already imported."
+    if result.skipped_count:
+        message += f" {result.skipped_count} row(s) skipped."
     warnings = []
     # As of Story 1.2, a successful (non-"rejected") result from the real
     # TraderAgent.import_sipp never populates skipped_rows -- every row-level
@@ -267,14 +285,14 @@ async def import_sipp(
     if warnings:
         message += " Note: " + " | ".join(warnings) + "."
     if result.status == "error":
-        # buy/sell/cash/skipped counts didn't add up to total_rows — some
-        # row was silently unaccounted for (#187). Distinct from an ordinary
+        # The four outcome counts didn't add up to total_rows — some row was
+        # silently unaccounted for (#187). Distinct from an ordinary
         # data-quality warning: this points at a bug in the import, so it's
         # called out on its own rather than folded into `warnings` above.
         accounted_rows = (
-            result.buy_count
-            + result.sell_count
-            + result.cash_flow_count
+            result.inserted_count
+            + result.duplicate_count
+            + result.skipped_count
             + len(result.skipped_rows)
         )
         message += (
@@ -288,15 +306,19 @@ async def import_sipp(
     context["import_buy_count"] = result.buy_count
     context["import_sell_count"] = result.sell_count
     context["import_cash_count"] = result.cash_flow_count
-    context["import_skipped_count"] = len(result.skipped_rows)
+    context["import_inserted_count"] = result.inserted_count
+    context["import_duplicate_count"] = result.duplicate_count
+    context["import_failed_count"] = len(result.failed_rows)
+    context["import_skipped_count"] = result.skipped_count
     context["import_status"] = result.status
     logger.info(
-        "SIPP import: %d buys, %d sells, %d cash flows, %d skipped, "
-        "%d parse errors, cash £%.2f, status=%s",
+        "SIPP import: %d buys, %d sells, %d cash flows, %d duplicates, "
+        "%d skipped, %d parse errors, cash £%.2f, status=%s",
         result.buy_count,
         result.sell_count,
         result.cash_flow_count,
-        len(result.skipped_rows),
+        result.duplicate_count,
+        result.skipped_count,
         len(result.parse_errors),
         result.cash_balance,
         result.status,
