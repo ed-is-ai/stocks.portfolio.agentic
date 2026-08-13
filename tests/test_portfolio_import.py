@@ -490,6 +490,8 @@ def test_row_count_mismatch_response_is_not_a_success_status(
 
     assert resp.status_code >= 400
     assert resp.status_code < 500
+
+
 _STALE_HEADER = (
     "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
     "Running Balance\n"
@@ -547,6 +549,69 @@ def test_rejected_stale_balance_never_reaches_the_rendered_page(
     assert contexts[-1]["cash_balance"] == 9000.0
     assert "9,000.00" in contexts[-1]["import_message"]
     assert "4,000.00" not in contexts[-1]["import_message"]
+
+
+_NO_BALANCE_CSV = (
+    _STALE_HEADER + "01/01/2024,AAPL,B0,10,100,Buy AAPL,O1,1000,,\n"
+).encode()
+
+
+def test_import_with_no_cash_balance_row_never_shows_a_phantom_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Story 1.9 AC2, route level, against a real agent rather than a mock.
+
+    ``SippImportResult.cash_balance`` is a non-optional ``float`` — 0.0 both
+    for a genuine zero and for "never recorded" — so a route that passed it
+    straight through to the template would render a phantom CASH £0.00 row
+    for a stock-only import into a portfolio with no cash history at all.
+    The route must re-read ``get_cash_balance`` (``None`` when unset) rather
+    than trust the result, so the "no data" case keeps hiding the CASH row.
+    """
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.IMPORTED_FILES_DIR", tmp_path / "imported"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    trader = TraderService(agent)
+
+    contexts = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            contexts.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: PortfolioService(trader)
+    app.dependency_overrides[get_notifications_repository] = lambda: MagicMock()
+    try:
+        resp = _upload(content=_NO_BALANCE_CSV, portfolio_id=pf.id)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200, "import did not reach the success path"
+    assert contexts, "TemplateResponse was never called"
+    assert agent.get_cash_balance(pf.id) is None
+    assert contexts[-1]["cash_balance"] is None
+    assert "none on record" in contexts[-1]["import_message"]
+    assert "£0.00" not in contexts[-1]["import_message"]
+    # Prove the real template render hides the row too, not just the
+    # context value -- a context-only assertion can't catch a future
+    # regression in the "is not none" gate itself.
+    rendered = templates.get_template("_portfolio.html").render(**contexts[-1])
+    assert (
+        '<span class="fw-bold" style="color:#0f2744; font-size:0.85rem">CASH</span>'
+        not in rendered
+    )
 
 
 def test_reconciliation_route_renders_detected_issue(tmp_path: Path) -> None:

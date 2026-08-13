@@ -260,13 +260,37 @@ async def import_sipp(
         )
 
     positions = trader.get_portfolio(portfolio_id=pid)
+    cash_balance = result.cash_balance
+    if cash_balance == 0.0:
+        # 0.0 is ambiguous: SippImportResult.cash_balance can't represent
+        # "no cash balance was ever recorded" separately from a genuine
+        # zero (Story 1.9 AC2) -- it's a non-optional float. Re-read
+        # storage only to break that tie: get_cash_balance() returns None
+        # when nothing was ever recorded, which the "is not none" template
+        # gate needs to keep hiding the CASH row for e.g. a stock-only
+        # import into a portfolio with no cash history at all. Scoped to
+        # the 0.0 case only, not every import, and falls back to the
+        # already-committed result value if the re-read itself fails, so
+        # this presentation refinement never turns an otherwise-successful
+        # import into a 500.
+        try:
+            cash_balance = trader.get_cash_balance(pid)
+        except Exception:
+            logger.exception("Failed to re-read cash balance after import")
     context = portfolio.portfolio_partial_context(
-        positions, cash_balance=result.cash_balance, portfolio_id=pid
+        positions, cash_balance=cash_balance, portfolio_id=pid
+    )
+    # Reuses the same cash_balance the page just rendered so the response
+    # message can never disagree with what the page shows (AC1) -- e.g. a
+    # stock-only import must not say "cash balance £0.00" while the page
+    # correctly shows no CASH row at all.
+    cash_balance_text = (
+        f"£{cash_balance:,.2f}" if cash_balance is not None else "none on record"
     )
     message = (
         f"Imported {result.buy_count} buy(s), {result.sell_count} sell(s), "
         f"{result.cash_flow_count} cash transaction(s); {len(positions)} open "
-        f"position(s); cash balance £{result.cash_balance:,.2f}."
+        f"position(s); cash balance {cash_balance_text}."
     )
     # A duplicate is reported as a duplicate, never folded into the buy/sell/
     # cash counts above — re-importing an overlapping CSV should read as
