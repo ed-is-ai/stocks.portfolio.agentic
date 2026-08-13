@@ -49,7 +49,7 @@
 # epics-sipp-import-safety.md).
 
 generated: 2026-08-11
-last_updated: 2026-08-13 (Story 1.9's deferred review finding resolved on branch fix/sipp-1-9-phantom-cash-balance (PR #224), moved in-progress -> review: the phantom CASH £0.00 row, blocked on Story 1.5, is fixed now that 1.5 has landed; every other 2026-08-12 review finding was confirmed already independently resolved by Stories 1.4-1.6. A follow-up pass on the same PR also guarded the new storage re-read against a raised exception, scoped it to only the ambiguous 0.0 case, and made the response message/notification text agree with the page instead of still showing a stale balance. Tracking issue #210 was closed 2026-08-12 before Story 1.9's follow-up and Epic 2's stories were complete; reopened as #219 with an identical canonical defect list -- #219 is now the live tracking issue, #210 stays as historical record. Prior: 2026-08-12 reconciled to merged SIPP PRs #212, #213, and #216; Story 1.9 moved review -> in-progress by code review on PR #217; Story 1.3 recovered from an unpushed local branch and moved ready-for-dev -> review on PR #218; Story 1.4 implemented on branch feat/sipp-1-4-money-typing and moved ready-for-dev -> review, 985 tests passing; Story 1.5 implemented on branch feat/sipp-1-5-cash-balance (stacked on 1.4) and moved ready-for-dev -> review, 1001 tests passing; Story 1.6 implemented on branch feat/sipp-1-6-gbp-valuation (stacked on 1.5) and moved ready-for-dev -> review, 1017 tests passing)
+last_updated: 2026-08-13 (full reconciliation to main -- Stories 1.3-1.6 merged -- 1.3 via PR #218, and the 1.4/1.5/1.6 stack merged branch-into-branch then squash-merged to main as PR #220 -- move review -> done. Story 1.9's deferred phantom-CASH-£0.00-row review finding, blocked on Story 1.5's zero/negative ingest fix, is resolved now that 1.5 has landed and PR #224 (branch fix/sipp-1-9-phantom-cash-balance) merged -- move in-progress -> done. Only Story 1.10 and all of Epic 2 remain unstarted. Fuller history of individual story landings is in git log and each story file's own Change Log; not repeated here to keep this field legible. Tracking issue is #219 (formerly #210, closed 2026-08-12 and reopened with an identical body -- see epics-sipp-import-safety.md overview for why))
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -60,13 +60,13 @@ development_status:
   epic-1: in-progress
   1-1-per-request-isolated-single-pass-parsing: done
   1-2-atomic-all-or-nothing-import-commit: done
-  1-3-accurate-multi-file-queue-signaling: review
-  1-4-currency-preserving-money-typing: review
-  1-5-correct-cash-balance-handling: review
-  1-6-auditable-gbp-valuation: review
+  1-3-accurate-multi-file-queue-signaling: done
+  1-4-currency-preserving-money-typing: done
+  1-5-correct-cash-balance-handling: done
+  1-6-auditable-gbp-valuation: done
   1-7-deterministic-idempotency-and-reference-normalization: done
   1-8-accurate-four-outcome-reporting: done
-  1-9-stale-free-presentation: review
+  1-9-stale-free-presentation: done
   1-10-bounded-post-commit-archive: ready-for-dev
   epic-1-retrospective: optional
   epic-2: backlog
