@@ -69,6 +69,19 @@ DEFAULT_PIPELINE_STALE_AFTER_HOURS = 24.0
 # Portfolio-wide trailing-stop threshold: a held position that falls this
 # fraction from its high-water-mark triggers a large-adverse-move alert (#82).
 DEFAULT_TRAILING_STOP_PCT = 0.15
+# FR-23's confirmed 1-week retention for the import archive -- a fixed
+# constant, not a tunable, unlike the max-size default below (PRD OQ-1
+# leaves the size open but confirms the retention window).
+IMPORTED_FILES_RETENTION_DAYS = 7
+# A real SIPP export CSV (per-row header + numeric columns) runs roughly
+# 100-200 bytes/row, so even a multi-year, multi-thousand-row export stays
+# well under 1 MB. 10 MiB is a generous implementation-time default (PRD
+# OQ-1 leaves the exact number open) -- large enough that no legitimate
+# export is ever silently dropped, small enough to keep a pathological or
+# adversarial upload out of the archive. This only bounds the archived
+# copy; it does not limit how large an upload TraderAgent.import_sipp
+# itself will read into memory and parse.
+DEFAULT_IMPORTED_FILE_MAX_BYTES = 10 * 1024 * 1024
 
 # --- Web / static assets ---------------------------------------------------
 TEMPLATES_DIR = ROOT_DIR / "app" / "api" / "templates"
@@ -151,3 +164,19 @@ def trailing_stop_pct() -> float | None:
     except ValueError:
         return None
     return value if 0 < value < 1 else None
+
+
+def imported_file_max_bytes() -> int:
+    """Return the max size (bytes) an uploaded import file may be archived at.
+
+    Falls back to ``DEFAULT_IMPORTED_FILE_MAX_BYTES`` for a missing,
+    non-numeric, or non-positive value so a bad environment cannot silently
+    disable the size cap.
+    """
+    try:
+        value = int(
+            os.getenv("IMPORTED_FILE_MAX_BYTES", str(DEFAULT_IMPORTED_FILE_MAX_BYTES))
+        )
+    except ValueError:
+        return DEFAULT_IMPORTED_FILE_MAX_BYTES
+    return value if value > 0 else DEFAULT_IMPORTED_FILE_MAX_BYTES

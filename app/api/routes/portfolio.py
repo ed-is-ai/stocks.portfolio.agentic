@@ -2,6 +2,7 @@
 
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated
@@ -17,7 +18,11 @@ from app.api.dependencies import (
 )
 from app.api.params import optional_int
 from app.api.templating import templates
-from app.core.config import IMPORTED_FILES_DIR
+from app.core.config import (
+    IMPORTED_FILES_DIR,
+    IMPORTED_FILES_RETENTION_DAYS,
+    imported_file_max_bytes,
+)
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
@@ -45,26 +50,64 @@ _MAX_ISSUE_DETAILS = 5
 _UNSAFE_FILENAME_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
-def _archive_upload(filename: str, content: bytes) -> None:
-    """Save a timestamped copy of an uploaded import file for later reference.
+def _prune_old_archives() -> None:
+    """Delete archived files older than ``IMPORTED_FILES_RETENTION_DAYS``.
 
-    Called for every upload attempt, not just successful imports — a file
-    rejected for a bad portfolio, wrong extension, or a failed parse still
-    needs to be inspectable to diagnose why. Each upload is parsed directly
-    from its own request-owned bytes (#210), so this archive copy is the
-    only on-disk trace of an import attempt; every past attempt stays
-    around. Best effort — a failure here must not fail an otherwise-
-    successful import.
+    Mirrors ``NotificationsRepository``'s prune-on-write precedent
+    (``app/repositories/notifications_repo.py``) rather than adding a
+    scheduler — there is no cron/lifespan/startup-task infrastructure
+    anywhere in this app. This means a file only becomes *eligible* for
+    removal at the retention cutoff; it is actually deleted the next time
+    any successful import calls ``_archive_upload``, which may be later
+    than exactly the cutoff if no further imports happen.
+    """
+    cutoff = time.time() - IMPORTED_FILES_RETENTION_DAYS * 86400
+    for path in IMPORTED_FILES_DIR.glob("*"):
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink()
+        except FileNotFoundError:
+            pass  # already removed by a concurrent prune
+        except OSError:
+            logger.exception("Failed to prune archived file %s", path)
+
+
+def _archive_upload(filename: str, content: bytes) -> None:
+    """Save a timestamped copy of a successfully-committed import file.
+
+    Called exactly once per import, only after ``trader.import_sipp`` has
+    returned a non-``"rejected"`` result — never for an upload that failed
+    validation or whose plan was rejected under the whole-plan-failure rule
+    (AC1/AC2). The archived file is guaranteed to correspond to committed
+    database state (or, for ``status="error"``, a miscounted-but-committed
+    one — see the call site). Also enforces a configured max size (AC4) and
+    prunes files past the retention window (AC3). Best effort throughout —
+    a failure here must not fail an otherwise-successful import (AC5).
     """
     try:
-        IMPORTED_FILES_DIR.mkdir(parents=True, exist_ok=True)
-        safe_name = _UNSAFE_FILENAME_CHARS_RE.sub("_", filename) or "upload.csv"
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-        # A random suffix, not just the microsecond timestamp, guards against
-        # two same-named files in one multi-file queue import landing in the
-        # same microsecond and clobbering each other's archive copy.
-        unique = uuid.uuid4().hex[:8]
-        (IMPORTED_FILES_DIR / f"{stamp}_{unique}_{safe_name}").write_bytes(content)
+        max_bytes = imported_file_max_bytes()
+        if len(content) > max_bytes:
+            logger.warning(
+                "Skipping archive of %s: %d bytes exceeds max %d bytes",
+                filename,
+                len(content),
+                max_bytes,
+            )
+        else:
+            IMPORTED_FILES_DIR.mkdir(parents=True, exist_ok=True)
+            safe_name = _UNSAFE_FILENAME_CHARS_RE.sub("_", filename) or "upload.csv"
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+            # A random suffix, not just the microsecond timestamp, guards
+            # against two same-named files in one multi-file queue import
+            # landing in the same microsecond and clobbering each other's
+            # archive copy.
+            unique = uuid.uuid4().hex[:8]
+            (IMPORTED_FILES_DIR / f"{stamp}_{unique}_{safe_name}").write_bytes(content)
+        # Prune on every archive attempt, not just a successful write, so a
+        # stretch of only-oversized uploads doesn't starve retention (AC3) --
+        # a small, deliberate deviation from "prune after a successful write"
+        # that keeps AC3's "eligible, not exact" removal timing intact.
+        _prune_old_archives()
     except Exception:
         logger.exception("Failed to archive imported file %s", filename)
 
@@ -174,17 +217,16 @@ async def import_sipp(
     #187) is likewise reported with a non-2xx status rather than a 200 with
     an error field the caller might not check (#210) — the multi-file queue
     (see below) relies on this to know which uploads actually failed.
-    Every upload — success or failure — is archived as a timestamped copy
-    under ``data/imported/`` (a permanent per-attempt record; a failed file
-    still needs to be inspectable to diagnose why). On success, also
-    records one Event per file in the notification centre (#184) — the
-    multi-file import queue (index.html's ``handleSippImportSubmit``) calls
-    this endpoint once per queued file, so this naturally yields one
-    archived file and one event per file.
+    A copy is archived under ``data/imported/`` only once the import has
+    actually committed — never for a rejected plan or an upload that never
+    reached ``import_sipp`` at all (FR-23). On success, also records one
+    Event per file in the notification centre (#184) — the multi-file
+    import queue (index.html's ``handleSippImportSubmit``) calls this
+    endpoint once per queued file, so this naturally yields one archived
+    file and one event per file.
     """
     filename = file.filename or ""
     content = await file.read()
-    _archive_upload(filename, content)
 
     pid = optional_int(portfolio_id)
     if pid is None or not trader.portfolio_exists(pid):
@@ -219,6 +261,14 @@ async def import_sipp(
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=400
         )
+
+    # "ok" and "error" both mean the plan's writes were committed -- "error"
+    # is the pre-existing row-accounting-mismatch safety net (#187), not a
+    # rejected plan, and having the source file archived is exactly what
+    # helps diagnose why the count didn't add up. Only "rejected" (nothing
+    # persisted) skips archiving (AC1/AC2).
+    if result.status != "rejected":
+        _archive_upload(filename, content)
 
     if result.status == "rejected":
         # All-or-nothing commit (#210 follow-up): at least one row failed,

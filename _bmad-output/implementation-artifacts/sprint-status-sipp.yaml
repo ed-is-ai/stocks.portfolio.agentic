@@ -49,7 +49,7 @@
 # epics-sipp-import-safety.md).
 
 generated: 2026-08-11
-last_updated: 2026-08-13 (full reconciliation to main -- Stories 1.3-1.6 merged -- 1.3 via PR #218, and the 1.4/1.5/1.6 stack merged branch-into-branch then squash-merged to main as PR #220 -- move review -> done. Story 1.9's deferred phantom-CASH-£0.00-row review finding, blocked on Story 1.5's zero/negative ingest fix, is resolved now that 1.5 has landed and PR #224 (branch fix/sipp-1-9-phantom-cash-balance) merged -- move in-progress -> done. Only Story 1.10 and all of Epic 2 remain unstarted. Fuller history of individual story landings is in git log and each story file's own Change Log; not repeated here to keep this field legible. Tracking issue is #219 (formerly #210, closed 2026-08-12 and reopened with an identical body -- see epics-sipp-import-safety.md overview for why))
+last_updated: 2026-08-13 (Story 1.10 implemented and code-reviewed on branch feat/sipp-1-10-bounded-archive, moved review -> done: archiving relocated to post-commit/non-rejected only, added size cap + 7-day retention pruning; code review (Blind Hunter + Edge Case Hunter + Acceptance Auditor) found 0 AC violations, applied 7 patches (prune-on-every-attempt decision, race/non-file guards in _prune_old_archives, boundary tests), 2 pre-existing items deferred; 1080 tests passing)
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -67,7 +67,7 @@ development_status:
   1-7-deterministic-idempotency-and-reference-normalization: done
   1-8-accurate-four-outcome-reporting: done
   1-9-stale-free-presentation: done
-  1-10-bounded-post-commit-archive: ready-for-dev
+  1-10-bounded-post-commit-archive: done
   epic-1-retrospective: optional
   epic-2: backlog
   # Epic 2 regrouped 2026-08-12 to match issue #210's consolidated defects

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -16,6 +18,7 @@ from app.api.dependencies import (
     get_trader_service,
 )
 from app.api.templating import templates
+from app.core.config import IMPORTED_FILES_RETENTION_DAYS, imported_file_max_bytes
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.trade import Portfolio, SippImportResult
 from app.services.portfolio_service import PortfolioService
@@ -109,41 +112,36 @@ def test_repeated_imports_of_the_same_filename_are_both_archived(mocked_import):
     assert {p.read_bytes() for p in archived} == {b"a,b\n1,2\n", b"a,b\n3,4\n"}
 
 
-def test_failed_import_is_still_archived(mocked_import):
-    """A file that fails to import still needs to be inspectable to diagnose
-    why, so it's archived exactly like a successful one."""
+def test_failed_import_is_never_archived(mocked_import):
+    """A file that fails to import never reached a committed result, so it
+    must never be archived (AC2)."""
     mock_trader, _, _, tmp_path = mocked_import
     mock_trader.import_sipp.side_effect = ValueError("bad row")
     resp = _upload(filename="bad.csv")
 
     assert resp.status_code == 400
-    archived = list((tmp_path / "imported").glob("*_bad.csv"))
-    assert len(archived) == 1
-    assert archived[0].read_bytes() == _CSV
+    assert not (tmp_path / "imported").exists()
 
 
-def test_rejected_non_csv_upload_is_still_archived(mocked_import):
-    """Even a wrong-extension upload — rejected before any import is
-    attempted — is archived, since the point is a record of every upload
-    attempt, not just ones that got as far as parsing."""
+def test_rejected_non_csv_upload_is_never_archived(mocked_import):
+    """A wrong-extension upload — rejected before any import is attempted —
+    is never archived (AC2)."""
     _, _, _, tmp_path = mocked_import
     resp = _upload(filename="portfolio.txt")
 
     assert resp.status_code == 400
-    archived = list((tmp_path / "imported").glob("*_portfolio.txt"))
-    assert len(archived) == 1
+    assert not (tmp_path / "imported").exists()
 
 
-def test_missing_portfolio_upload_is_still_archived(mocked_import):
+def test_missing_portfolio_upload_is_never_archived(mocked_import):
     """The earliest rejection point — no valid portfolio selected, before
-    the file is even parsed — still archives the upload."""
+    the file is even parsed — is never archived (AC2)."""
     mock_trader, _, _, tmp_path = mocked_import
     mock_trader.portfolio_exists.return_value = False
     resp = _upload(filename="orphan.csv")
 
     assert resp.status_code == 400
-    archived = list((tmp_path / "imported").glob("*_orphan.csv"))
-    assert len(archived) == 1
+    assert not (tmp_path / "imported").exists()
 
 
 def test_archived_filename_is_sanitized(mocked_import):
@@ -158,6 +156,192 @@ def test_archived_filename_is_sanitized(mocked_import):
     # Written directly inside IMPORTED_FILES_DIR, not some traversed-to path.
     assert archived[0].parent == tmp_path / "imported"
     assert "/" not in archived[0].name
+
+
+def test_rejected_import_plan_is_never_archived(mocked_import):
+    """Story 1.2's whole-plan-rejection case (AC2): a plan with at least one
+    failed row commits nothing, so the source file must never be archived."""
+    mock_trader, _, _, tmp_path = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        status="rejected", cash_balance=0.0
+    )
+    resp = _upload(filename="rejected.csv")
+
+    assert resp.status_code == 400
+    assert not (tmp_path / "imported").exists()
+
+
+def test_error_status_import_is_still_archived(mocked_import):
+    """``status="error"`` (#187's row-accounting-mismatch safety net) still
+    means the plan's writes were committed, so it must still be archived —
+    the file helps diagnose why the count didn't add up (AC1)."""
+    mock_trader, _, _, tmp_path = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        status="error", cash_balance=5000.0
+    )
+    resp = _upload(filename="mismatch.csv")
+
+    assert resp.status_code == 400
+    archived = list((tmp_path / "imported").glob("*_mismatch.csv"))
+    assert len(archived) == 1
+
+
+def test_oversized_upload_is_not_archived(mocked_import, monkeypatch):
+    """A committed import whose file exceeds the configured max size is not
+    archived (AC4), but the import result itself is unaffected (AC5)."""
+    _, _, _, tmp_path = mocked_import
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.imported_file_max_bytes", lambda: len(_CSV) - 1
+    )
+    resp = _upload(filename="big.csv")
+
+    assert resp.status_code == 200
+    assert not (tmp_path / "imported").exists()
+
+
+def test_oversized_upload_still_prunes_old_archives(mocked_import, monkeypatch):
+    """Pruning runs on every archive *attempt*, not just a successful write,
+    so a stretch of only-oversized uploads doesn't starve retention (AC3
+    review finding: prune-on-every-attempt decision, 2026-08-13)."""
+    _, _, _, tmp_path = mocked_import
+    archive_dir = tmp_path / "imported"
+    archive_dir.mkdir(parents=True)
+    old_file = archive_dir / "old_file.csv"
+    old_file.write_bytes(b"stale")
+    old_ts = time.time() - 8 * 86400
+    os.utime(old_file, (old_ts, old_ts))
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.imported_file_max_bytes", lambda: len(_CSV) - 1
+    )
+
+    resp = _upload(filename="big.csv")
+
+    assert resp.status_code == 200
+    assert not old_file.exists()
+    assert list(archive_dir.iterdir()) == []
+
+
+def test_upload_at_exactly_max_bytes_is_archived(mocked_import, monkeypatch):
+    """The size check is a strict ``>``, not ``>=`` — a file exactly at the
+    configured limit is still archived (AC4's boundary)."""
+    _, _, _, tmp_path = mocked_import
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.imported_file_max_bytes", lambda: len(_CSV)
+    )
+    resp = _upload(filename="exact.csv")
+
+    assert resp.status_code == 200
+    archived = list((tmp_path / "imported").glob("*_exact.csv"))
+    assert len(archived) == 1
+
+
+def test_archive_retention_prunes_files_older_than_seven_days(mocked_import):
+    """An archived file older than the retention window is deleted the next
+    time a successful import runs (AC3)."""
+    _, _, _, tmp_path = mocked_import
+    archive_dir = tmp_path / "imported"
+    archive_dir.mkdir(parents=True)
+    old_file = archive_dir / "old_file.csv"
+    old_file.write_bytes(b"stale")
+    old_ts = time.time() - 8 * 86400
+    os.utime(old_file, (old_ts, old_ts))
+
+    resp = _upload(filename="fresh.csv")
+
+    assert resp.status_code == 200
+    remaining = list(archive_dir.iterdir())
+    assert old_file not in remaining
+    assert len(remaining) == 1
+
+
+def test_archive_retention_keeps_recent_files(mocked_import):
+    """An archived file within the retention window survives a prune run
+    triggered by a later successful import (AC3's 7-day boundary)."""
+    _, _, _, tmp_path = mocked_import
+    archive_dir = tmp_path / "imported"
+    archive_dir.mkdir(parents=True)
+    recent_file = archive_dir / "recent_file.csv"
+    recent_file.write_bytes(b"recent")
+    recent_ts = time.time() - 3 * 86400
+    os.utime(recent_file, (recent_ts, recent_ts))
+
+    resp = _upload(filename="fresh.csv")
+
+    assert resp.status_code == 200
+    assert recent_file.exists()
+
+
+def test_archive_retention_boundary_just_under_cutoff_is_kept(mocked_import):
+    """A file just inside the retention window (based on the actual
+    ``IMPORTED_FILES_RETENTION_DAYS`` constant, not a hardcoded day count)
+    survives a prune run — proves the cutoff math itself, not just an
+    8-day-vs-3-day example."""
+    _, _, _, tmp_path = mocked_import
+    archive_dir = tmp_path / "imported"
+    archive_dir.mkdir(parents=True)
+    boundary_file = archive_dir / "boundary_file.csv"
+    boundary_file.write_bytes(b"boundary")
+    boundary_ts = time.time() - (IMPORTED_FILES_RETENTION_DAYS * 86400 - 60)
+    os.utime(boundary_file, (boundary_ts, boundary_ts))
+
+    resp = _upload(filename="fresh.csv")
+
+    assert resp.status_code == 200
+    assert boundary_file.exists()
+
+
+def test_archive_retention_boundary_just_over_cutoff_is_pruned(mocked_import):
+    """A file just past the retention window (based on the actual
+    ``IMPORTED_FILES_RETENTION_DAYS`` constant) is pruned — the other side
+    of the same boundary as the "just under" test above."""
+    _, _, _, tmp_path = mocked_import
+    archive_dir = tmp_path / "imported"
+    archive_dir.mkdir(parents=True)
+    boundary_file = archive_dir / "boundary_file.csv"
+    boundary_file.write_bytes(b"boundary")
+    boundary_ts = time.time() - (IMPORTED_FILES_RETENTION_DAYS * 86400 + 60)
+    os.utime(boundary_file, (boundary_ts, boundary_ts))
+
+    resp = _upload(filename="fresh.csv")
+
+    assert resp.status_code == 200
+    assert not boundary_file.exists()
+
+
+def test_archive_write_failure_does_not_fail_the_import(mocked_import, monkeypatch):
+    """A failure inside the archive write step must only be logged and must
+    never change whether the import itself is reported succeeded or failed
+    (AC5) — this must hold now that archiving runs after ``result`` is known
+    (and before the response is built), not merely because archiving used
+    to run before ``import_sipp`` was even called."""
+    _, _, _, tmp_path = mocked_import
+
+    def _boom(self, content):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pathlib.Path.write_bytes", _boom)
+    resp = _upload(filename="q1_2024.csv")
+
+    assert resp.status_code == 200
+    archive_dir = tmp_path / "imported"
+    assert not archive_dir.exists() or not list(archive_dir.iterdir())
+
+
+def test_imported_file_max_bytes_falls_back_to_default(monkeypatch):
+    monkeypatch.delenv("IMPORTED_FILE_MAX_BYTES", raising=False)
+    default = imported_file_max_bytes()
+
+    monkeypatch.setenv("IMPORTED_FILE_MAX_BYTES", "not-a-number")
+    assert imported_file_max_bytes() == default
+    monkeypatch.setenv("IMPORTED_FILE_MAX_BYTES", "0")
+    assert imported_file_max_bytes() == default
+    monkeypatch.setenv("IMPORTED_FILE_MAX_BYTES", "-5")
+    assert imported_file_max_bytes() == default
+
+
+def test_imported_file_max_bytes_uses_valid_env_value(monkeypatch):
+    monkeypatch.setenv("IMPORTED_FILE_MAX_BYTES", "12345")
+    assert imported_file_max_bytes() == 12345
 
 
 def test_happy_path_records_one_notification_event(mocked_import):
