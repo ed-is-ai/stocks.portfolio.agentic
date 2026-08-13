@@ -53,12 +53,23 @@ _COLUMNS = (
     "read_at",
     "dismissed_at",
     "portfolio_id",
+    "job_id",
+    "job_status_version",
+    "target_url",
+    "actions_json",
 )
 
 
 def _row_to_notification(row: tuple) -> Notification:
     """Map a raw ``notifications`` row (in ``_COLUMNS`` order) to the schema."""
+    import json
+
     data = dict(zip(_COLUMNS, row))
+    raw_actions = data.pop("actions_json", "[]")
+    try:
+        data["actions"] = tuple(json.loads(raw_actions or "[]"))
+    except (TypeError, json.JSONDecodeError):
+        data["actions"] = ()
     return Notification.model_validate(data)
 
 
@@ -81,6 +92,22 @@ class NotificationsRepository:
                 )
             except sqlite3.OperationalError:
                 pass  # column already exists (idempotent, matches trades.db)
+            for name, definition in (
+                ("job_id", "TEXT"),
+                ("job_status_version", "INTEGER"),
+                ("target_url", "TEXT"),
+                ("actions_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE notifications ADD COLUMN {name} {definition}"
+                    )
+                except sqlite3.OperationalError:
+                    pass
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS notifications_job_id_unique "
+                "ON notifications(job_id) WHERE job_id IS NOT NULL"
+            )
             conn.commit()
 
     def record(
@@ -126,6 +153,74 @@ class NotificationsRepository:
             self._prune(conn, self._retention_days)
             conn.commit()
         return new_id
+
+    def upsert_job_notification(
+        self,
+        *,
+        job_id: str,
+        job_status_version: int,
+        category: NotificationCategory,
+        event_type: str,
+        severity: NotificationSeverity,
+        title: str,
+        body: str,
+        created_at: datetime,
+        target_url: str | None,
+        actions: tuple[str, ...],
+    ) -> int:
+        """Compare-and-upsert one mutable lifecycle notification by job."""
+        import json
+
+        with session(self._connect) as conn:
+            existing = conn.execute(
+                "SELECT id, job_status_version FROM notifications WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            if existing is not None and int(existing[1] or 0) > job_status_version:
+                raise ValueError("notification projection version is newer")
+            if existing is None:
+                cursor = conn.execute(
+                    """INSERT INTO notifications (
+                         category,event_type,severity,title,body,run_id,created_at,
+                         job_id,job_status_version,target_url,actions_json
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        str(category),
+                        event_type,
+                        str(severity),
+                        title,
+                        body,
+                        None,
+                        created_at.isoformat(),
+                        job_id,
+                        job_status_version,
+                        target_url,
+                        json.dumps(actions, separators=(",", ":")),
+                    ),
+                )
+                result = int(cursor.lastrowid or 0)
+            else:
+                conn.execute(
+                    """UPDATE notifications SET category=?, event_type=?, severity=?,
+                         title=?, body=?, created_at=?, job_status_version=?,
+                         target_url=?, actions_json=? WHERE id=?""",
+                    (
+                        str(category),
+                        event_type,
+                        str(severity),
+                        title,
+                        body,
+                        created_at.isoformat(),
+                        job_status_version,
+                        target_url,
+                        json.dumps(actions, separators=(",", ":")),
+                        int(existing[0]),
+                    ),
+                )
+                result = int(existing[0])
+            self._prune(conn, self._retention_days)
+            conn.commit()
+            return result
 
     def recent(
         self, limit: int = 50, include_dismissed: bool = False

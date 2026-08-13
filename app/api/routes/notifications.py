@@ -6,11 +6,15 @@ endpoints (mark-read, mark-all-read, dismiss) are guarded by
 """
 
 from typing import Annotated
+import sqlite3
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
-from app.api.dependencies import get_notifications_repository
+from app.api.dependencies import (
+    get_notifications_repository,
+    get_strategy_notification_projector,
+)
 from app.api.templating import templates
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
@@ -51,6 +55,10 @@ async def notifications_count(
     request: Request, notifications: NotificationsDep
 ) -> HTMLResponse:
     """Return just the unread badge — polled by the bell every few seconds."""
+    try:
+        get_strategy_notification_projector().project_pending()
+    except sqlite3.OperationalError:
+        pass
     return _badge(request, notifications)
 
 
@@ -59,6 +67,10 @@ async def partial_notifications(
     request: Request, notifications: NotificationsDep
 ) -> HTMLResponse:
     """Return the dropdown list of recent notifications."""
+    try:
+        get_strategy_notification_projector().project_pending()
+    except sqlite3.OperationalError:
+        pass
     return _panel(request, notifications)
 
 

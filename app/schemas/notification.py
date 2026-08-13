@@ -28,6 +28,8 @@ class NotificationCategory(StrEnum):
     REFRESH = "refresh"
     SOURCE = "source"
     PORTFOLIO = "portfolio"
+    STRATEGY_INITIALIZATION = "strategy_initialization"
+    BACKTEST = "backtest"
 
 
 class NotificationSeverity(StrEnum):
@@ -44,6 +46,8 @@ _DEEP_LINK_TABS: dict[NotificationCategory, str] = {
     NotificationCategory.REFRESH: "tab-runlog",
     NotificationCategory.SOURCE: "tab-runlog",
     NotificationCategory.PORTFOLIO: "tab-portfolio",
+    NotificationCategory.STRATEGY_INITIALIZATION: "tab-strategy-manager",
+    NotificationCategory.BACKTEST: "tab-strategy-manager",
 }
 
 #: bootstrap-icons glyph per severity.
@@ -66,6 +70,10 @@ class Notification(BaseModel):
     ticker: str | None = None
     run_id: str | None = None
     portfolio_id: int | None = None
+    job_id: str | None = None
+    job_status_version: int | None = None
+    target_url: str | None = None
+    actions: tuple[str, ...] = ()
     created_at: datetime = Field(default_factory=utc_now)
     read_at: datetime | None = None
     dismissed_at: datetime | None = None

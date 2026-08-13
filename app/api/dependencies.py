@@ -21,6 +21,7 @@ from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
 from app.services.backtest.strategy_job_service import StrategyJobService
+from app.services.backtest.notification_projector import StrategyNotificationProjector
 
 
 @lru_cache
@@ -79,6 +80,13 @@ def get_historical_price_repository() -> HistoricalPriceRepository:
 def get_strategy_job_service() -> StrategyJobService:
     """Return the one process-local dispatcher over the durable FIFO ledger."""
     return StrategyJobService(get_backtest_repository())
+
+
+@lru_cache
+def get_strategy_notification_projector() -> StrategyNotificationProjector:
+    return StrategyNotificationProjector(
+        get_backtest_repository(), get_notifications_repository()
+    )
 
 
 @lru_cache

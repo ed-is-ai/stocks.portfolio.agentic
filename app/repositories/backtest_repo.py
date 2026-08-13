@@ -524,9 +524,34 @@ WHEN OLD.ordered_month_digest IS NULL
  )
 BEGIN SELECT RAISE(ABORT, 'initialization digest requires running job'); END;
 
-CREATE TRIGGER IF NOT EXISTS initialization_run_immutable_delete
+DROP TRIGGER IF EXISTS initialization_run_immutable_delete;
+CREATE TRIGGER initialization_run_immutable_delete
 BEFORE DELETE ON initialization_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = OLD.job_id AND job.deleted_at IS NOT NULL
+)
 BEGIN SELECT RAISE(ABORT, 'initialization run is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id),
+    job_status_version INTEGER NOT NULL CHECK(job_status_version > 0),
+    payload_json TEXT NOT NULL,
+    pending INTEGER NOT NULL DEFAULT 1 CHECK(pending IN (0, 1)),
+    projected_status_version INTEGER CHECK(
+        projected_status_version IS NULL OR projected_status_version >= 0
+    ),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS strategy_job_restart_actions (
+    source_job_id TEXT NOT NULL REFERENCES strategy_jobs(id),
+    idempotency_key TEXT NOT NULL CHECK(length(idempotency_key) > 0),
+    child_job_id TEXT NOT NULL UNIQUE REFERENCES strategy_jobs(id),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(source_job_id, idempotency_key)
+);
 """
 
 
@@ -992,6 +1017,7 @@ class BacktestRepository:
                 )
                 job = self._load_strategy_job(conn, job_id)
                 initialization = self._load_initialization(conn, job_id)
+                self._upsert_notification_outbox_on_connection(conn, job)
             return InitializationEnqueueResultV1(
                 no_op=False, job=job, initialization=initialization
             )
@@ -1053,6 +1079,7 @@ class BacktestRepository:
                     if job.job_type is StrategyJobType.INITIALIZATION
                     else None
                 )
+                self._upsert_notification_outbox_on_connection(conn, job)
                 return ClaimedStrategyJobV1(
                     job=job, initialization=initialization, claim_token=token
                 )
@@ -1087,7 +1114,9 @@ class BacktestRepository:
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker progress ownership is stale")
-            return self._load_strategy_job(conn, job_id)
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
 
     def request_strategy_job_cancellation(
         self, job_id: str, *, expected_version: int
@@ -1119,7 +1148,9 @@ class BacktestRepository:
                 )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("cancellation request conflicted")
-            return self._load_strategy_job(conn, job_id)
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
 
     def cancel_claimed_strategy_job(
         self, job_id: str, claim_token: str, *, expected_version: int
@@ -1136,7 +1167,9 @@ class BacktestRepository:
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker cancellation ownership is stale")
-            return self._load_strategy_job(conn, job_id)
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
 
     def fail_claimed_strategy_job(
         self,
@@ -1176,7 +1209,9 @@ class BacktestRepository:
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker failure ownership is stale")
-            return self._load_strategy_job(conn, job_id)
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
 
     def complete_claimed_initialization_job(
         self, job_id: str, claim_token: str, *, expected_version: int
@@ -1215,7 +1250,9 @@ class BacktestRepository:
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker completion ownership is stale")
-            return self._load_strategy_job(conn, job_id)
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
 
     def reconcile_interrupted_strategy_jobs(self) -> tuple[StrategyJobV1, ...]:
         """Fail running claims left behind by a previous application process."""
@@ -1237,14 +1274,237 @@ class BacktestRepository:
                     (self._job_now(), str(row[0]), int(row[1])),
                 )
                 if cursor.rowcount == 1:
-                    reconciled.append(self._load_strategy_job(conn, str(row[0])))
+                    job = self._load_strategy_job(conn, str(row[0]))
+                    self._upsert_notification_outbox_on_connection(conn, job)
+                    reconciled.append(job)
             return tuple(reconciled)
+
+    def legal_strategy_job_actions(self, job_id: str) -> tuple[str, ...]:
+        with session(self._connect) as conn:
+            job = self._load_strategy_job(conn, job_id)
+            if job.deleted_at is not None:
+                return ()
+            if job.status in {StrategyJobStatus.QUEUED, StrategyJobStatus.RUNNING}:
+                return ("cancel",)
+            if job.status in {StrategyJobStatus.FAILED, StrategyJobStatus.CANCELLED}:
+                return ("restart", "delete")
+            return ()
+
+    def can_delete_strategy_job(self, job_id: str) -> bool:
+        return "delete" in self.legal_strategy_job_actions(job_id)
+
+    def restart_initialization_job(
+        self,
+        source_job_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> InitializationEnqueueResultV1:
+        """Create one replay-from-beginning child for an eligible terminal source."""
+        if not idempotency_key.strip():
+            raise ValueError("restart idempotency key must not be blank")
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            source = self._load_strategy_job(conn, source_job_id)
+            existing = conn.execute(
+                """SELECT child_job_id FROM strategy_job_restart_actions
+                   WHERE source_job_id=? AND idempotency_key=?""",
+                (source_job_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                child_id = str(existing[0])
+                return InitializationEnqueueResultV1(
+                    no_op=False,
+                    job=self._load_strategy_job(conn, child_id),
+                    initialization=self._load_initialization(conn, child_id),
+                )
+            if source.status_version != expected_version:
+                raise StrategyJobConflict("restart request is stale")
+            if source.status not in {
+                StrategyJobStatus.FAILED,
+                StrategyJobStatus.CANCELLED,
+            }:
+                raise StrategyJobConflict("strategy job cannot be restarted")
+            if source.deleted_at is not None:
+                raise StrategyJobConflict("deleted strategy job cannot be restarted")
+            prior_child = conn.execute(
+                "SELECT 1 FROM strategy_job_restart_actions WHERE source_job_id=?",
+                (source_job_id,),
+            ).fetchone()
+            if prior_child is not None:
+                raise StrategyJobConflict("strategy job already has a restart child")
+            initialization = self._load_initialization(conn, source_job_id)
+            now = self._job_now()
+            sequence = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
+                ).fetchone()[0]
+            )
+            child_id = self._id_generator()
+            conn.execute(
+                """INSERT INTO strategy_jobs (
+                     id, job_type, status, parent_job_id, enqueue_seq,
+                     claim_token, current_month, status_version, cancel_requested_at,
+                     failure_code, failed_month, failure_detail, deleted_at,
+                     audit_summary, created_at, updated_at
+                   ) VALUES (?, 'initialization', 'queued', ?, ?, NULL, NULL, 1,
+                              NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                (child_id, source_job_id, sequence, now, now),
+            )
+            conn.execute(
+                """INSERT INTO initialization_runs (
+                     job_id, profile_hash, requested_start, requested_end,
+                     requested_months_json, requested_month_digest,
+                     calendar_dataset_version, qualification_contract_digest,
+                     ordered_month_digest
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                (
+                    child_id,
+                    initialization.profile_hash,
+                    initialization.requested_start,
+                    initialization.requested_end,
+                    json.dumps(
+                        list(initialization.requested_months), separators=(",", ":")
+                    ),
+                    initialization.requested_month_digest,
+                    initialization.calendar_dataset_version,
+                    initialization.qualification_contract_digest,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO strategy_job_restart_actions
+                   (source_job_id, idempotency_key, child_job_id, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (source_job_id, idempotency_key, child_id, now),
+            )
+            child = self._load_strategy_job(conn, child_id)
+            self._upsert_notification_outbox_on_connection(conn, child)
+            return InitializationEnqueueResultV1(
+                no_op=False,
+                job=child,
+                initialization=self._load_initialization(conn, child_id),
+            )
+
+    def delete_strategy_job(
+        self, job_id: str, *, expected_version: int
+    ) -> StrategyJobV1:
+        """Tombstone a failed/cancelled attempt while retaining lineage and audit."""
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job = self._load_strategy_job(conn, job_id)
+            if job.deleted_at is not None:
+                return job
+            if job.status_version != expected_version:
+                raise StrategyJobConflict("delete request is stale")
+            if job.status not in {
+                StrategyJobStatus.FAILED,
+                StrategyJobStatus.CANCELLED,
+            }:
+                raise StrategyJobConflict("strategy job cannot be deleted")
+            initialization = self._load_initialization(conn, job_id)
+            summary = (
+                f"{job.job_type.value} {job.status.value}: "
+                f"{initialization.requested_start} to {initialization.requested_end}"
+            )
+            now = self._job_now()
+            cursor = conn.execute(
+                """UPDATE strategy_jobs
+                   SET deleted_at=?, audit_summary=?, status_version=status_version+1,
+                       updated_at=?
+                   WHERE id=? AND status_version=? AND deleted_at IS NULL""",
+                (now, summary, now, job_id, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("delete request conflicted")
+            tombstone = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, tombstone)
+            conn.execute("DELETE FROM initialization_runs WHERE job_id=?", (job_id,))
+            return tombstone
 
     def _job_now(self) -> str:
         value = self._instant_clock()
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("job clock must return a timezone-aware instant")
         return value.astimezone(timezone.utc).isoformat()
+
+    def _upsert_notification_outbox_on_connection(
+        self, conn: sqlite3.Connection, job: StrategyJobV1
+    ) -> None:
+        """Persist the authoritative lifecycle projection in the same transaction."""
+        initialization = None
+        if job.job_type is StrategyJobType.INITIALIZATION:
+            try:
+                initialization = self._load_initialization(conn, job.id).model_dump(
+                    mode="json"
+                )
+            except StrategyJobNotFound:
+                initialization = None
+        payload = {
+            "schema_version": "strategy_job_notification.v1",
+            "job": job.model_dump(mode="json"),
+            "initialization": initialization,
+            "tombstoned": job.deleted_at is not None,
+        }
+        now = self._job_now()
+        conn.execute(
+            """INSERT INTO notification_outbox (
+                   job_id, job_status_version, payload_json, pending,
+                   projected_status_version, created_at, updated_at
+               ) VALUES (?, ?, ?, 1, NULL, ?, ?)
+               ON CONFLICT(job_id) DO UPDATE SET
+                   job_status_version=excluded.job_status_version,
+                   payload_json=excluded.payload_json,
+                   pending=1,
+                   updated_at=excluded.updated_at
+               WHERE excluded.job_status_version > notification_outbox.job_status_version""",
+            (
+                job.id,
+                job.status_version,
+                json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                now,
+                now,
+            ),
+        )
+
+    def pending_notification_outbox(self) -> tuple[dict[str, object], ...]:
+        """Return pending lifecycle projections for the repairable projector."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT job_id, job_status_version, payload_json
+                   FROM notification_outbox
+                   WHERE pending=1 OR projected_status_version IS NULL
+                      OR projected_status_version < job_status_version
+                   ORDER BY updated_at, job_id"""
+            ).fetchall()
+        return tuple(
+            {
+                "job_id": str(row[0]),
+                "job_status_version": int(row[1]),
+                "payload": json.loads(str(row[2])),
+            }
+            for row in rows
+        )
+
+    def acknowledge_notification_outbox(
+        self, job_id: str, job_status_version: int
+    ) -> bool:
+        """Acknowledge only the exact version that was projected."""
+        with session(self._connect) as conn:
+            cursor = conn.execute(
+                """UPDATE notification_outbox
+                   SET pending=CASE WHEN job_status_version=? THEN 0 ELSE 1 END,
+                       projected_status_version=?, updated_at=?
+                   WHERE job_id=? AND job_status_version=?""",
+                (
+                    job_status_version,
+                    job_status_version,
+                    self._job_now(),
+                    job_id,
+                    job_status_version,
+                ),
+            )
+            conn.commit()
+            return cursor.rowcount == 1
 
     @staticmethod
     def _load_strategy_job(conn: sqlite3.Connection, job_id: str) -> StrategyJobV1:

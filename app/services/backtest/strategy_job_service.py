@@ -17,6 +17,9 @@ from app.services.backtest.strategy_job import (
     StrategyJobConflict,
     StrategyJobStatus,
     StrategyJobCancellationV1,
+    StrategyJobDeletionV1,
+    StrategyJobRestartV1,
+    StrategyJobActionV1,
 )
 
 logger = logging.getLogger(__name__)
@@ -75,6 +78,26 @@ class StrategyJobService:
     def request_cancellation(self, request: StrategyJobCancellationV1):
         return self._repository.request_strategy_job_cancellation(
             request.job_id, expected_version=request.expected_version
+        )
+
+    def restart_initialization(self, request: StrategyJobRestartV1):
+        return self._repository.restart_initialization_job(
+            request.source_job_id,
+            expected_version=request.expected_version,
+            idempotency_key=request.idempotency_key,
+        )
+
+    def delete_job(self, request: StrategyJobDeletionV1):
+        return self._repository.delete_strategy_job(
+            request.job_id, expected_version=request.expected_version
+        )
+
+    def legal_actions(self, job_id: str) -> StrategyJobActionV1:
+        job = self._repository.strategy_job(job_id)
+        return StrategyJobActionV1(
+            job_id=job_id,
+            expected_version=job.status_version,
+            legal_actions=self._repository.legal_strategy_job_actions(job_id),
         )
 
     def reconcile_startup(self):

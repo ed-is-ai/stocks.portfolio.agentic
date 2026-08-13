@@ -212,6 +212,23 @@ class StrategyJobFailureV1(_LifecycleModel):
     detail: Annotated[str, Field(min_length=1, max_length=500)]
 
 
+class StrategyJobActionV1(_LifecycleModel):
+    job_id: Annotated[str, Field(min_length=1)]
+    expected_version: Annotated[int, Field(gt=0)]
+    legal_actions: tuple[str, ...]
+
+
+class StrategyJobRestartV1(_LifecycleModel):
+    source_job_id: Annotated[str, Field(min_length=1)]
+    expected_version: Annotated[int, Field(gt=0)]
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=200)]
+
+
+class StrategyJobDeletionV1(_LifecycleModel):
+    job_id: Annotated[str, Field(min_length=1)]
+    expected_version: Annotated[int, Field(gt=0)]
+
+
 def requested_month_digest(
     profile_hash: str, months: tuple[str, ...], calendar_dataset_version: str
 ) -> str:
@@ -238,6 +255,9 @@ __all__ = [
     "StrategyJobStatus",
     "StrategyJobFailureV1",
     "StrategyJobProgressV1",
+    "StrategyJobActionV1",
+    "StrategyJobRestartV1",
+    "StrategyJobDeletionV1",
     "StrategyJobType",
     "StrategyJobV1",
     "requested_month_digest",
