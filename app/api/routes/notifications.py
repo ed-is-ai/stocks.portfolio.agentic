@@ -12,12 +12,15 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
+    get_backtest_repository,
     get_notifications_repository,
+    get_strategy_job_service,
     get_strategy_notification_projector,
 )
 from app.api.templating import templates
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
+from app.services.backtest.strategy_job import StrategyJobNotFound
 
 router = APIRouter()
 
@@ -40,12 +43,27 @@ def _badge(request: Request, repo: NotificationsRepository) -> HTMLResponse:
 
 def _panel(request: Request, repo: NotificationsRepository) -> HTMLResponse:
     """Render the dropdown panel plus an out-of-band badge refresh."""
+    targets: dict[int, dict[str, object]] = {}
+    for notification in repo.recent(limit=DROPDOWN_LIMIT):
+        if notification.job_id is None or notification.id is None:
+            continue
+        try:
+            job = get_backtest_repository().strategy_job(notification.job_id)
+            actions = get_strategy_job_service().legal_actions(job.id).legal_actions
+            targets[notification.id] = {
+                "url": f"/strategy-manager/activities/{job.id}",
+                "actions": actions,
+                "expected_version": job.status_version,
+            }
+        except (StrategyJobNotFound, sqlite3.OperationalError):
+            targets[notification.id] = {"deleted": True}
     return templates.TemplateResponse(
         request,
         "_notifications.html",
         {
             "notifications": repo.recent(limit=DROPDOWN_LIMIT),
             "unread_count": repo.unread_count(),
+            "strategy_targets": targets,
         },
     )
 

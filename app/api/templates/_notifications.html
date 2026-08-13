@@ -35,6 +35,9 @@
         {% if n.ticker %}<span class="notif-ticker">{{ n.ticker }}</span>{% endif %}
       </div>
       {% if n.body %}<div class="notif-text">{{ n.body }}</div>{% endif %}
+      {% set target = strategy_targets.get(n.id) %}
+      {% if target and target.deleted %}<div class="notif-text">Activity no longer available.</div>
+      {% elif target %}<a class="notif-text" href="{{ target.url }}" hx-get="{{ target.url }}" hx-target="#tab-content" hx-swap="innerHTML" onclick="event.stopPropagation()">Open initialization activity</a>{% endif %}
       <div class="notif-meta">{{ n.created_at.strftime('%b %d %H:%M') }} UTC</div>
     </div>
     <button type="button" class="notif-dismiss" title="Dismiss"

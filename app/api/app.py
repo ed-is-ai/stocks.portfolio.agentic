@@ -20,6 +20,7 @@ from app.api.routes import (
     portfolio,
     portfolios,
     settings,
+    strategy_manager,
     trades,
     views,
 )
@@ -85,6 +86,7 @@ def create_app(
     app.include_router(pipeline.router)
     app.include_router(notifications.router)
     app.include_router(settings.router)
+    app.include_router(strategy_manager.router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app
 

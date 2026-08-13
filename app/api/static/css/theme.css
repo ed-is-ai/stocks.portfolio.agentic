@@ -89,6 +89,12 @@ table,
   font-family: var(--font-num);
 }
 
+/* Strategy Manager: progress remains textual when motion is disabled. */
+.sm-card { border: 1px solid #e2e8f0; border-radius: .5rem; box-shadow: 0 1px 3px rgba(15,39,68,.05); }
+.month-progress { border-left: 3px solid #10b981; padding-left: .65rem; animation: sm-month-pulse 1.5s ease-in-out infinite; }
+@keyframes sm-month-pulse { 50% { border-left-color: #22d3ee; } }
+@media (prefers-reduced-motion: reduce) { .month-progress { animation: none; } }
+
 /* ── Notification centre (#80) ───────────────────────────── */
 .nav-bell { position: relative; }
 .nav-bell-btn {

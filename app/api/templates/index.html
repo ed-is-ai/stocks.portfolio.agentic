@@ -91,8 +91,10 @@
       padding: 0 0.5rem;
       display: flex;
       align-items: flex-end;
+      overflow-x: auto;
     }
-    .nav-tabs { border: none; }
+    .nav-tabs { border: none; flex-wrap: nowrap; }
+    .nav-tabs .nav-link { white-space: nowrap; }
     .nav-tabs .nav-item { margin-bottom: -2px; }
     .nav-tabs .nav-link {
       border: none;
@@ -458,6 +460,12 @@
         </a>
       </li>
       <li class="nav-item">
+        <a class="nav-link" id="tab-strategy-manager"
+           hx-get="/partials/strategy-manager" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+          <i class="bi bi-graph-up-arrow"></i>Strategy Manager
+        </a>
+      </li>
+      <li class="nav-item">
         <a class="nav-link" id="tab-settings"
            hx-get="/partials/settings" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
           <i class="bi bi-gear"></i>Settings
@@ -629,6 +637,11 @@
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 <script>
+  // Bootstrap provides Escape and focus trapping; keep the safer action first.
+  document.addEventListener('shown.bs.modal', (event) => {
+    event.target.querySelector('[data-initial-focus]')?.focus();
+  });
+
   // Active-portfolio selection is per-browser (localStorage), like the
   // watchlist controls (#147). "" means "no selection / use the default".
   function activePortfolio() {
