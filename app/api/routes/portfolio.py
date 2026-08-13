@@ -170,6 +170,10 @@ async def import_sipp(
     requests) can never read or overwrite one another's *input CSV* on disk
     (#210). A missing/unknown portfolio, a non-CSV upload, or a failing import returns
     the portfolio partial with an error message rather than raising (#147).
+    A successfully-parsed-but-``status="error"`` result (row-count mismatch,
+    #187) is likewise reported with a non-2xx status rather than a 200 with
+    an error field the caller might not check (#210) — the multi-file queue
+    (see below) relies on this to know which uploads actually failed.
     Every upload — success or failure — is archived as a timestamped copy
     under ``data/imported/`` (a permanent per-attempt record; a failed file
     still needs to be inspectable to diagnose why). On success, also
@@ -344,7 +348,17 @@ async def import_sipp(
         # Never let notification bookkeeping fail an otherwise-successful
         # import (matches AlertAgent's/orchestrator's best-effort pattern).
         logger.exception("Failed to record SIPP import notification")
-    return templates.TemplateResponse(request, "_portfolio.html", context=context)
+    # AD-25: "a rejected or failed plan returns a non-2xx response." Mapped
+    # explicitly per known status rather than `!= "ok"` so a status this
+    # dict doesn't recognize is unambiguously a bug (SippImportResult.status
+    # only ever takes these three values) and gets a 500, not a silent 400
+    # that would masquerade as an ordinary client error (#210). "rejected"
+    # is listed for documentation even though that status returns from a
+    # separate branch above, before this point is ever reached.
+    status_code = {"ok": 200, "rejected": 400, "error": 400}.get(result.status, 500)
+    return templates.TemplateResponse(
+        request, "_portfolio.html", context=context, status_code=status_code
+    )
 
 
 def _quick_add_error(

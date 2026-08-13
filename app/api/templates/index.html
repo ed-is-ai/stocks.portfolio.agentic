@@ -754,11 +754,22 @@
     const files = Array.from(fileInput.files || []);
     if (!files.length) return false;
 
+    // FR-5/AD-27: the portfolio ID this queue is importing into is captured
+    // once, up front, and reused unchanged for every queued file for the
+    // rest of this function — this is the "locked" ID both the selector
+    // disable below and the discard guard further down compare against.
     const portfolioId = form.querySelector('input[name=portfolio_id]').value;
     const btn = form.querySelector('button[type=submit]');
     const originalBtnHtml = btn.innerHTML;
+    // AD-27/AC3: disable the account selector for the duration of this
+    // queue so the active portfolio can't change out from under it via the
+    // one control this can directly block. `no_portfolios`'s empty state
+    // renders no #portfolioSelect at all (nothing to import into yet), so
+    // this element may legitimately be absent -- guard defensively.
+    const selectEl = document.getElementById('portfolioSelect');
     btn.disabled = true;
     fileInput.disabled = true;
+    if (selectEl) selectEl.disabled = true;
 
     let lastHtml = null;
     let lastSuccessHtml = null;
@@ -778,16 +789,31 @@
         const html = await response.text();
         lastHtml = html;
         const doc = new DOMParser().parseFromString(html, 'text/html');
-        if (response.ok) {
-          lastSuccessHtml = html;
-          const banner = doc.querySelector('[data-import-buy-count]');
+        if (response.ok) lastSuccessHtml = html;
+        const banner = doc.querySelector('[data-import-buy-count]');
+        // AC1/AC2: a non-2xx response with a result banner is a
+        // status="error" row-count mismatch (#187) — the import still
+        // committed real buy/sell/cash rows, it's a data-quality warning,
+        // not an outright failure. Surface its counts in the summary like
+        // a success, flagged, rather than lumping it into `failures` (which
+        // reports uploads that never produced a result at all — bad CSV,
+        // unknown portfolio, etc.) and losing that detail.
+        if (banner) {
           fileSummaries.push({
             name: file.name,
-            buys: banner ? parseInt(banner.getAttribute('data-import-buy-count'), 10) || 0 : 0,
-            sells: banner ? parseInt(banner.getAttribute('data-import-sell-count'), 10) || 0 : 0,
-            cash: banner ? parseInt(banner.getAttribute('data-import-cash-count'), 10) || 0 : 0,
-            skipped: banner ? parseInt(banner.getAttribute('data-import-skipped-count'), 10) || 0 : 0,
-            status: banner ? (banner.getAttribute('data-import-status') || 'ok') : 'ok',
+            buys: parseInt(banner.getAttribute('data-import-buy-count'), 10) || 0,
+            sells: parseInt(banner.getAttribute('data-import-sell-count'), 10) || 0,
+            cash: parseInt(banner.getAttribute('data-import-cash-count'), 10) || 0,
+            skipped: parseInt(banner.getAttribute('data-import-skipped-count'), 10) || 0,
+            mismatched: !response.ok,
+          });
+        } else if (response.ok) {
+          // A 2xx response with no result banner isn't a failure -- every
+          // known "ok"/"error" path renders one, so this is defensive: a
+          // successful response the summary has nothing to report for is
+          // not the same as a file that failed to import.
+          fileSummaries.push({
+            name: file.name, buys: 0, sells: 0, cash: 0, skipped: 0, mismatched: false,
           });
         } else {
           const errEl = doc.querySelector('.alert-danger span');
@@ -800,21 +826,63 @@
 
     const displayHtml = lastSuccessHtml || lastHtml;
     if (!displayHtml) {
-      // Every file failed before a response came back (e.g. offline) —
-      // leave the current view intact rather than blanking it.
+      // Every file failed before a response came back (e.g. offline) — the
+      // one path that finishes without the innerHTML swap below, which in
+      // every other path implicitly delivers a fresh, non-disabled
+      // selector from the server. Explicitly undo the disabled state here.
       btn.disabled = false;
       fileInput.disabled = false;
+      if (selectEl) selectEl.disabled = false;
       btn.innerHTML = originalBtnHtml;
       alert('Import failed: ' + failures.join('; '));
+      return false;
+    }
+    // AD-27/AC4: discard a response whose portfolio ID no longer matches
+    // the active view. Compares against the *live* activePortfolio() call
+    // (reads localStorage synchronously), not a value cached earlier, so
+    // it also catches ways the active portfolio can change *without* going
+    // through the now-disabled #portfolioSelect: the delete/create-portfolio
+    // forms (each replaces #tab-content and re-asserts data-active-portfolio
+    // via _portfolio.html's own bottom script), or a second tab/window
+    // changing the same localStorage key. Re-enable btn/fileInput/selectEl
+    // here too: typically a no-op for the delete/create case (one of those
+    // paths already replaced #tab-content wholesale, detaching these
+    // elements), but not guaranteed -- included defensively, and it is the
+    // one path that actually undoes the disable for the second-tab/window
+    // case (and clicking Delete then cancelling its confirm() --
+    // setActivePortfolio('') in its onclick fires before the confirm,
+    // unconditionally), where *this* tab's #tab-content was never touched
+    // by anything else and the controls would otherwise stay disabled
+    // until the user reloads the page.
+    if (activePortfolio() !== portfolioId) {
+      btn.disabled = false;
+      fileInput.disabled = false;
+      if (selectEl) selectEl.disabled = false;
+      btn.innerHTML = originalBtnHtml;
+      // AC4 discards the *rendered view*, not the writes themselves: every
+      // file already POSTed before the switch was written to the portfolio
+      // this queue was locked to (formData's portfolio_id, captured once,
+      // above), regardless of what's active now. A fully successful queue
+      // must not go silent just because nothing hard-failed -- the user
+      // needs to know data landed somewhere they're no longer looking.
+      const parts = [];
+      if (fileSummaries.length) {
+        parts.push(fileSummaries.length + ' file(s) were already imported '
+          + 'before the active portfolio changed');
+      }
+      if (failures.length) {
+        parts.push(failures.length + ' file(s) failed: ' + failures.join('; '));
+      }
+      alert('Import discarded (active portfolio changed). ' + parts.join('; '));
       return false;
     }
     document.getElementById('tab-content').innerHTML = displayHtml;
 
     if (files.length > 1) {
-      const successCount = files.length - failures.length;
-      const hasErrorStatus = fileSummaries.some((f) => f.status === 'error');
+      const mismatchedCount = fileSummaries.filter((f) => f.mismatched).length;
+      const successCount = files.length - failures.length - mismatchedCount;
       const lines = fileSummaries.map((f) => {
-        const flag = f.status === 'error' ? ' — ROW COUNT MISMATCH, check details' : '';
+        const flag = f.mismatched ? ' — ROW COUNT MISMATCH, check details' : '';
         return `${escapeHtml(f.name)}: ${f.buys} buy(s), ${f.sells} sell(s), `
           + `${f.cash} cash txn(s), ${f.skipped} skipped${flag}`;
       });
@@ -826,7 +894,7 @@
       const banner = document.querySelector('#tab-content [data-import-buy-count]');
       if (banner) {
         banner.querySelector('span').innerHTML = summaryHtml;
-        if ((hasErrorStatus || failures.length) && !banner.classList.contains('alert-danger')) {
+        if ((mismatchedCount || failures.length) && !banner.classList.contains('alert-danger')) {
           banner.classList.remove('alert-success');
           banner.classList.add('alert-danger');
         }
