@@ -13,11 +13,14 @@ from app.core.config import ALERTS_DB
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.notifications_repo import NotificationsRepository
+from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
+from app.services.backtest.strategy_job_service import StrategyJobService
 
 
 @lru_cache
@@ -52,6 +55,30 @@ def get_notifications_repository() -> NotificationsRepository:
     repo = NotificationsRepository(connect)
     repo.ensure_schema()
     return repo
+
+
+@lru_cache
+def get_backtest_repository() -> BacktestRepository:
+    """Return the process-shared durable Strategy Manager repository."""
+    repo = BacktestRepository(db.make_connect(lambda: str(config.BACKTEST_DB)))
+    repo.ensure_schema()
+    return repo
+
+
+@lru_cache
+def get_historical_price_repository() -> HistoricalPriceRepository:
+    """Return the immutable provider-evidence repository."""
+    repo = HistoricalPriceRepository(
+        db.make_connect(lambda: str(config.HISTORICAL_PRICE_CACHE))
+    )
+    repo.ensure_schema()
+    return repo
+
+
+@lru_cache
+def get_strategy_job_service() -> StrategyJobService:
+    """Return the one process-local dispatcher over the durable FIFO ledger."""
+    return StrategyJobService(get_backtest_repository())
 
 
 @lru_cache

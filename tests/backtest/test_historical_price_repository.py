@@ -135,6 +135,29 @@ def test_changed_content_and_overlapping_interval_are_distinct_revisions(
         )
 
 
+def test_find_cached_request_reuses_earliest_verified_revision(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    first = _payload(close=101.0)
+    later = _payload(
+        close=101.5,
+        acquired_at=datetime(2026, 8, 12, tzinfo=timezone.utc),
+    )
+    repo.commit(first)
+    repo.commit(later)
+
+    cached = repo.find_request(
+        security_id="security-1",
+        requested_symbol="AAPL",
+        alias_revision="alias-v1",
+        start="2024-01-01",
+        end="2024-02-01",
+        request_contract_version=first.request_contract_version,
+    )
+
+    assert cached is not None
+    assert cached.data_revision == first.data_revision
+
+
 def test_evidence_is_sql_immutable_and_foreign_keys_are_enforced(tmp_path) -> None:
     repo = _repo(tmp_path)
     payload = _payload()

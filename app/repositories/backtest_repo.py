@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+import json
 import sqlite3
 from typing import Callable, Protocol
+from uuid import uuid4
 
 from app.repositories.db import Connect, session
 from app.services.backtest.historical_scan_record import (
@@ -32,6 +34,18 @@ from app.services.backtest.snapshot_profile import (
     verified_evidence_manifest,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.strategy_job import (
+    ClaimedStrategyJobV1,
+    InitializationEnqueueResultV1,
+    InitializationRunV1,
+    JobFailureCode,
+    StrategyJobConflict,
+    StrategyJobNotFound,
+    StrategyJobStatus,
+    StrategyJobType,
+    StrategyJobV1,
+    requested_month_digest,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -349,6 +363,172 @@ BEFORE DELETE ON active_snapshot_profile
 BEGIN SELECT RAISE(ABORT, 'active snapshot profile cannot be deleted'); END;
 """
 
+_STRATEGY_JOB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS strategy_jobs (
+    id TEXT PRIMARY KEY,
+    job_type TEXT NOT NULL CHECK(job_type IN ('initialization', 'backtest')),
+    status TEXT NOT NULL CHECK(status IN (
+        'queued', 'running', 'complete', 'failed', 'cancelled'
+    )),
+    parent_job_id TEXT REFERENCES strategy_jobs(id),
+    enqueue_seq INTEGER NOT NULL UNIQUE CHECK(enqueue_seq > 0),
+    claim_token TEXT,
+    current_month TEXT,
+    status_version INTEGER NOT NULL CHECK(status_version > 0),
+    cancel_requested_at TEXT,
+    failure_code TEXT CHECK(failure_code IS NULL OR failure_code IN (
+        'provider_unavailable', 'provider_throttled', 'provider_contract_error',
+        'required_data_missing', 'identity_ambiguous', 'calendar_error',
+        'integrity_error', 'worker_interrupted'
+    )),
+    failed_month TEXT,
+    failure_detail TEXT,
+    deleted_at TEXT,
+    audit_summary TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK(status != 'queued' OR (claim_token IS NULL AND current_month IS NULL)),
+    CHECK(status != 'running' OR claim_token IS NOT NULL),
+    CHECK(status NOT IN ('complete', 'failed', 'cancelled') OR current_month IS NULL),
+    CHECK(
+        (status = 'failed' AND failure_code IS NOT NULL AND failure_detail IS NOT NULL)
+        OR
+        (status != 'failed' AND failure_code IS NULL AND failed_month IS NULL
+         AND failure_detail IS NULL)
+    ),
+    CHECK(status != 'cancelled' OR cancel_requested_at IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS one_running_strategy_job
+ON strategy_jobs(status) WHERE status = 'running' AND deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS strategy_job_fifo
+ON strategy_jobs(status, enqueue_seq);
+
+CREATE TABLE IF NOT EXISTS initialization_runs (
+    job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id),
+    profile_hash TEXT NOT NULL REFERENCES snapshot_profiles(profile_hash),
+    requested_start TEXT NOT NULL,
+    requested_end TEXT NOT NULL,
+    requested_months_json TEXT NOT NULL,
+    requested_month_digest TEXT NOT NULL CHECK(length(requested_month_digest) = 64),
+    calendar_dataset_version TEXT NOT NULL,
+    qualification_contract_digest TEXT NOT NULL CHECK(
+        length(qualification_contract_digest) = 64
+    ),
+    ordered_month_digest TEXT CHECK(
+        ordered_month_digest IS NULL OR length(ordered_month_digest) = 64
+    ),
+    CHECK(requested_start <= requested_end)
+);
+
+CREATE TRIGGER IF NOT EXISTS strategy_job_identity_immutable
+BEFORE UPDATE ON strategy_jobs
+WHEN NEW.id != OLD.id
+  OR NEW.job_type != OLD.job_type
+  OR NEW.parent_job_id IS NOT OLD.parent_job_id
+  OR NEW.enqueue_seq != OLD.enqueue_seq
+  OR NEW.created_at != OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'strategy job identity is immutable'); END;
+
+DROP TRIGGER IF EXISTS strategy_job_terminal_immutable;
+CREATE TRIGGER strategy_job_terminal_immutable
+BEFORE UPDATE ON strategy_jobs
+WHEN OLD.status IN ('complete', 'failed', 'cancelled')
+ AND (
+    NEW.status != OLD.status
+    OR NEW.claim_token IS NOT OLD.claim_token
+    OR NEW.current_month IS NOT OLD.current_month
+    OR NEW.cancel_requested_at IS NOT OLD.cancel_requested_at
+    OR NEW.failure_code IS NOT OLD.failure_code
+    OR NEW.failed_month IS NOT OLD.failed_month
+    OR NEW.failure_detail IS NOT OLD.failure_detail
+ )
+BEGIN SELECT RAISE(ABORT, 'terminal strategy job is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS strategy_job_legal_transition
+BEFORE UPDATE ON strategy_jobs
+WHEN NEW.status != OLD.status
+ AND NOT (
+    (OLD.status = 'queued' AND NEW.status IN ('running', 'cancelled', 'failed'))
+    OR
+    (OLD.status = 'running' AND NEW.status IN ('complete', 'failed', 'cancelled'))
+ )
+BEGIN SELECT RAISE(ABORT, 'illegal strategy job transition'); END;
+
+CREATE TRIGGER IF NOT EXISTS strategy_job_version_monotonic
+BEFORE UPDATE ON strategy_jobs
+WHEN NEW.status_version != OLD.status_version + 1
+BEGIN SELECT RAISE(ABORT, 'strategy job version is not monotonic'); END;
+
+CREATE TRIGGER IF NOT EXISTS strategy_job_version_requires_mutation
+BEFORE UPDATE ON strategy_jobs
+WHEN NEW.status_version != OLD.status_version
+ AND NEW.status IS OLD.status
+ AND NEW.claim_token IS OLD.claim_token
+ AND NEW.current_month IS OLD.current_month
+ AND NEW.cancel_requested_at IS OLD.cancel_requested_at
+ AND NEW.failure_code IS OLD.failure_code
+ AND NEW.failed_month IS OLD.failed_month
+ AND NEW.failure_detail IS OLD.failure_detail
+ AND NEW.deleted_at IS OLD.deleted_at
+ AND NEW.audit_summary IS OLD.audit_summary
+BEGIN SELECT RAISE(ABORT, 'strategy job version requires a lifecycle mutation'); END;
+
+CREATE TRIGGER IF NOT EXISTS initialization_job_requires_subtype_before_running
+BEFORE UPDATE OF status ON strategy_jobs
+WHEN NEW.job_type = 'initialization'
+ AND NEW.status = 'running'
+ AND NOT EXISTS (
+    SELECT 1 FROM initialization_runs run WHERE run.job_id = NEW.id
+ )
+BEGIN SELECT RAISE(ABORT, 'initialization subtype is missing'); END;
+
+CREATE TRIGGER IF NOT EXISTS initialization_job_requires_digest_before_complete
+BEFORE UPDATE OF status ON strategy_jobs
+WHEN NEW.job_type = 'initialization'
+ AND NEW.status = 'complete'
+ AND NOT EXISTS (
+    SELECT 1 FROM initialization_runs run
+    WHERE run.job_id = NEW.id AND run.ordered_month_digest IS NOT NULL
+ )
+BEGIN SELECT RAISE(ABORT, 'initialization completion digest is missing'); END;
+
+CREATE TRIGGER IF NOT EXISTS initialization_subtype_matches_job
+BEFORE INSERT ON initialization_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = NEW.job_id AND job.job_type = 'initialization'
+ )
+BEGIN SELECT RAISE(ABORT, 'initialization subtype does not match job'); END;
+
+CREATE TRIGGER IF NOT EXISTS initialization_run_immutable
+BEFORE UPDATE ON initialization_runs
+WHEN NEW.job_id != OLD.job_id
+  OR NEW.profile_hash != OLD.profile_hash
+  OR NEW.requested_start != OLD.requested_start
+  OR NEW.requested_end != OLD.requested_end
+  OR NEW.requested_months_json != OLD.requested_months_json
+  OR NEW.requested_month_digest != OLD.requested_month_digest
+  OR NEW.calendar_dataset_version != OLD.calendar_dataset_version
+  OR NEW.qualification_contract_digest != OLD.qualification_contract_digest
+  OR (OLD.ordered_month_digest IS NOT NULL AND NEW.ordered_month_digest IS NOT OLD.ordered_month_digest)
+  OR (OLD.ordered_month_digest IS NULL AND NEW.ordered_month_digest IS NULL)
+BEGIN SELECT RAISE(ABORT, 'initialization configuration is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS initialization_digest_requires_running_job
+BEFORE UPDATE OF ordered_month_digest ON initialization_runs
+WHEN OLD.ordered_month_digest IS NULL
+ AND NEW.ordered_month_digest IS NOT NULL
+ AND NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = NEW.job_id AND job.status = 'running'
+ )
+BEGIN SELECT RAISE(ABORT, 'initialization digest requires running job'); END;
+
+CREATE TRIGGER IF NOT EXISTS initialization_run_immutable_delete
+BEFORE DELETE ON initialization_runs
+BEGIN SELECT RAISE(ABORT, 'initialization run is immutable'); END;
+"""
+
 
 @dataclass(frozen=True)
 class QualificationResult:
@@ -442,6 +622,72 @@ def _row_to_result(row: tuple[object, ...]) -> QualificationResult:
     )
 
 
+_JOB_COLUMNS = (
+    "id",
+    "job_type",
+    "status",
+    "parent_job_id",
+    "enqueue_seq",
+    "claim_token",
+    "current_month",
+    "status_version",
+    "cancel_requested_at",
+    "failure_code",
+    "failed_month",
+    "failure_detail",
+    "deleted_at",
+    "audit_summary",
+    "created_at",
+    "updated_at",
+)
+
+
+def _optional_instant(value: object) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(str(value))
+
+
+def _row_to_strategy_job(row: sqlite3.Row | tuple[object, ...]) -> StrategyJobV1:
+    return StrategyJobV1(
+        id=str(row[0]),
+        job_type=StrategyJobType(str(row[1])),
+        status=StrategyJobStatus(str(row[2])),
+        parent_job_id=None if row[3] is None else str(row[3]),
+        enqueue_seq=int(str(row[4])),
+        claim_token=None if row[5] is None else str(row[5]),
+        current_month=None if row[6] is None else str(row[6]),
+        status_version=int(str(row[7])),
+        cancel_requested_at=_optional_instant(row[8]),
+        failure_code=(None if row[9] is None else JobFailureCode(str(row[9]))),
+        failed_month=None if row[10] is None else str(row[10]),
+        failure_detail=None if row[11] is None else str(row[11]),
+        deleted_at=_optional_instant(row[12]),
+        audit_summary=None if row[13] is None else str(row[13]),
+        created_at=datetime.fromisoformat(str(row[14])),
+        updated_at=datetime.fromisoformat(str(row[15])),
+    )
+
+
+def _row_to_initialization(
+    row: sqlite3.Row | tuple[object, ...],
+) -> InitializationRunV1:
+    months = json.loads(str(row[4]))
+    if not isinstance(months, list) or not all(
+        isinstance(item, str) for item in months
+    ):
+        raise BacktestIntegrityError("stored initialization month sequence is invalid")
+    return InitializationRunV1(
+        job_id=str(row[0]),
+        profile_hash=str(row[1]),
+        requested_start=str(row[2]),
+        requested_end=str(row[3]),
+        requested_months=tuple(months),
+        requested_month_digest=str(row[5]),
+        calendar_dataset_version=str(row[6]),
+        qualification_contract_digest=str(row[7]),
+        ordered_month_digest=None if row[8] is None else str(row[8]),
+    )
+
+
 class BacktestRepository:
     """Repository seed that later stories extend with jobs and results."""
 
@@ -450,9 +696,15 @@ class BacktestRepository:
         connect: Connect,
         *,
         clock: Callable[[], date] = lambda: datetime.now(timezone.utc).date(),
+        instant_clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        id_generator: Callable[[], str] = lambda: str(uuid4()),
+        token_generator: Callable[[], str] = lambda: str(uuid4()),
     ) -> None:
         self._connect = connect
         self._clock = clock
+        self._instant_clock = instant_clock
+        self._id_generator = id_generator
+        self._token_generator = token_generator
 
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
@@ -461,6 +713,7 @@ class BacktestRepository:
                 + _ROSTER_SCHEMA
                 + _SCAN_RECONSTRUCTION_CACHE_SCHEMA
                 + _SNAPSHOT_COVERAGE_SCHEMA
+                + _STRATEGY_JOB_SCHEMA
             )
             columns = {
                 str(row[1])
@@ -524,6 +777,70 @@ class BacktestRepository:
             ).fetchone()
         return None if row is None else _row_to_result(row)
 
+    def latest_recorded_qualification(self) -> QualificationResult | None:
+        """Return the latest immutable qualification result for worker revalidation."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT contract_digest, source_versions_json, fixture_digest,
+                          probe_definition_digest, probe_digest, qualified_at, passed,
+                          failure_code, failure_reason
+                   FROM historical_source_qualifications
+                   ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+        return None if row is None else _row_to_result(row)
+
+    @staticmethod
+    def _qualification_is_current(result: QualificationResult) -> bool:
+        from app.services.backtest.historical_data_qualification import (
+            FIXTURE_CONTRACT_VERSION,
+            REQUEST_CONTRACT_VERSION,
+            current_source_versions_json,
+        )
+
+        source_versions_json = current_source_versions_json()
+        if not result.passed or result.source_versions_json != source_versions_json:
+            return False
+        try:
+            sources = json.loads(source_versions_json)
+        except json.JSONDecodeError:
+            return False
+        expected = manifest_digest(
+            {
+                "sources": sources,
+                "calendar_digest": TradingCalendar().session_table_digest(),
+                "request_contract": REQUEST_CONTRACT_VERSION,
+                "fixture_contract": FIXTURE_CONTRACT_VERSION,
+                "fixture_digest": result.fixture_digest,
+                "probe_definition_digest": result.probe_definition_digest,
+            }
+        )
+        return result.contract_digest == expected
+
+    def current_qualification_contract_digest(self) -> str | None:
+        result = self.latest_recorded_qualification()
+        if result is None or not self._qualification_is_current(result):
+            return None
+        return result.contract_digest
+
+    @classmethod
+    def _require_qualification_on_connection(
+        cls, conn: sqlite3.Connection, expected_digest: str
+    ) -> None:
+        row = conn.execute(
+            """SELECT contract_digest, source_versions_json, fixture_digest,
+                      probe_definition_digest, probe_digest, qualified_at, passed,
+                      failure_code, failure_reason
+               FROM historical_source_qualifications ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        if row is None:
+            raise StrategyJobConflict("historical data contract is not qualified")
+        result = _row_to_result(row)
+        if (
+            result.contract_digest != expected_digest
+            or not cls._qualification_is_current(result)
+        ):
+            raise StrategyJobConflict("historical data contract is not qualified")
+
     def roster_digest_for_lineage(self, lineage_id: str) -> str | None:
         with session(self._connect) as conn:
             row = conn.execute(
@@ -547,6 +864,434 @@ class BacktestRepository:
                    FROM security_identities ORDER BY security_id"""
             ).fetchall()
         return [tuple(str(value) for value in row) for row in rows]  # type: ignore[return-value]
+
+    def effective_alias_bounds(
+        self,
+        *,
+        alias_revision: str,
+        security_id: str,
+        mic: str,
+        observed_symbol: str,
+        session_date: date,
+    ) -> tuple[date | None, date | None]:
+        """Return the one effective immutable yfinance alias interval."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT effective_from, effective_to
+                   FROM security_alias_entries
+                   WHERE alias_revision=? AND security_id=? AND provider='yfinance'
+                     AND mic=? AND observed_symbol=?
+                     AND (effective_from IS NULL OR effective_from<=?)
+                     AND (effective_to IS NULL OR ?<effective_to)""",
+                (
+                    alias_revision,
+                    security_id,
+                    mic,
+                    observed_symbol,
+                    session_date.isoformat(),
+                    session_date.isoformat(),
+                ),
+            ).fetchall()
+        if len(rows) != 1:
+            code = "identity_ambiguous" if len(rows) > 1 else "required_data_missing"
+            raise BacktestIntegrityError(
+                "effective alias evidence is unavailable", code=code
+            )
+        return (
+            None if rows[0][0] is None else date.fromisoformat(str(rows[0][0])),
+            None if rows[0][1] is None else date.fromisoformat(str(rows[0][1])),
+        )
+
+    def create_initialization_job(
+        self,
+        *,
+        profile_hash: str,
+        requested_start: str,
+        requested_end: str,
+        calendar_dataset_version: str,
+        qualification_contract_digest: str,
+        parent_job_id: str | None = None,
+    ) -> InitializationEnqueueResultV1:
+        """Atomically enqueue one initialization, or return a verified no-op."""
+        months = TradingCalendar.months_inclusive(requested_start, requested_end)
+        for month in months:
+            TradingCalendar.closed_month(month, as_of=self._clock())
+        now = self._job_now()
+        rendered_months = json.dumps(list(months), separators=(",", ":"))
+        month_digest = requested_month_digest(
+            profile_hash, months, calendar_dataset_version
+        )
+        try:
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._require_qualification_on_connection(
+                    conn, qualification_contract_digest
+                )
+                profile = conn.execute(
+                    """SELECT calendar_dataset_version
+                       FROM snapshot_profiles WHERE profile_hash=?""",
+                    (profile_hash,),
+                ).fetchone()
+                if profile is None:
+                    raise StrategyJobConflict("snapshot profile does not exist")
+                if str(profile[0]) != calendar_dataset_version:
+                    raise StrategyJobConflict(
+                        "snapshot profile calendar version is incompatible"
+                    )
+                active = conn.execute(
+                    "SELECT profile_hash FROM active_snapshot_profile "
+                    "WHERE singleton_id=1"
+                ).fetchone()
+                if active is None or str(active[0]) != profile_hash:
+                    raise StrategyJobConflict("snapshot profile is not active")
+                if self._interval_is_ready_for_job(
+                    conn, profile_hash, requested_start, requested_end
+                ):
+                    return InitializationEnqueueResultV1(no_op=True)
+                if (
+                    parent_job_id is not None
+                    and conn.execute(
+                        "SELECT 1 FROM strategy_jobs WHERE id=?", (parent_job_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise StrategyJobConflict("parent strategy job does not exist")
+                sequence_row = conn.execute(
+                    "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
+                ).fetchone()
+                enqueue_seq = int(sequence_row[0]) if sequence_row else 1
+                job_id = self._id_generator()
+                conn.execute(
+                    """INSERT INTO strategy_jobs (
+                           id, job_type, status, parent_job_id, enqueue_seq,
+                           claim_token, current_month, status_version,
+                           cancel_requested_at, failure_code, failed_month,
+                           failure_detail, deleted_at, audit_summary,
+                           created_at, updated_at
+                       ) VALUES (?, 'initialization', 'queued', ?, ?, NULL, NULL, 1,
+                                 NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                    (job_id, parent_job_id, enqueue_seq, now, now),
+                )
+                conn.execute(
+                    """INSERT INTO initialization_runs (
+                           job_id, profile_hash, requested_start, requested_end,
+                           requested_months_json, requested_month_digest,
+                           calendar_dataset_version, qualification_contract_digest,
+                           ordered_month_digest
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                    (
+                        job_id,
+                        profile_hash,
+                        requested_start,
+                        requested_end,
+                        rendered_months,
+                        month_digest,
+                        calendar_dataset_version,
+                        qualification_contract_digest,
+                    ),
+                )
+                job = self._load_strategy_job(conn, job_id)
+                initialization = self._load_initialization(conn, job_id)
+            return InitializationEnqueueResultV1(
+                no_op=False, job=job, initialization=initialization
+            )
+        except (StrategyJobConflict, StrategyJobNotFound):
+            raise
+        except sqlite3.IntegrityError as exc:
+            raise StrategyJobConflict("initialization job creation conflicted") from exc
+
+    def strategy_job(self, job_id: str) -> StrategyJobV1:
+        with session(self._connect) as conn:
+            return self._load_strategy_job(conn, job_id)
+
+    def initialization_run(self, job_id: str) -> InitializationRunV1:
+        with session(self._connect) as conn:
+            return self._load_initialization(conn, job_id)
+
+    def list_strategy_jobs(self) -> tuple[StrategyJobV1, ...]:
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(_JOB_COLUMNS)} FROM strategy_jobs "
+                "ORDER BY enqueue_seq"
+            ).fetchall()
+        return tuple(_row_to_strategy_job(row) for row in rows)
+
+    def claim_next_strategy_job(self) -> ClaimedStrategyJobV1 | None:
+        """Claim the smallest queued sequence while enforcing one running job."""
+        token = self._token_generator()
+        now = self._job_now()
+        try:
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM strategy_jobs WHERE status='running' "
+                        "AND deleted_at IS NULL LIMIT 1"
+                    ).fetchone()
+                    is not None
+                ):
+                    return None
+                row = conn.execute(
+                    """SELECT id, status_version FROM strategy_jobs
+                       WHERE status='queued' AND deleted_at IS NULL
+                       ORDER BY enqueue_seq LIMIT 1"""
+                ).fetchone()
+                if row is None:
+                    return None
+                cursor = conn.execute(
+                    """UPDATE strategy_jobs
+                       SET status='running', claim_token=?, current_month=NULL,
+                           status_version=status_version+1, updated_at=?
+                       WHERE id=? AND status='queued' AND status_version=?""",
+                    (token, now, str(row[0]), int(row[1])),
+                )
+                if cursor.rowcount != 1:
+                    raise StrategyJobConflict("queued job changed before claim")
+                job = self._load_strategy_job(conn, str(row[0]))
+                initialization = (
+                    self._load_initialization(conn, job.id)
+                    if job.job_type is StrategyJobType.INITIALIZATION
+                    else None
+                )
+                return ClaimedStrategyJobV1(
+                    job=job, initialization=initialization, claim_token=token
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StrategyJobConflict("strategy job claim conflicted") from exc
+
+    def set_strategy_job_current_month(
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        month: str,
+    ) -> StrategyJobV1:
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            initialization = self._load_initialization(conn, job_id)
+            if month not in initialization.requested_months:
+                raise StrategyJobConflict("progress month is outside requested range")
+            cursor = conn.execute(
+                """UPDATE strategy_jobs
+                   SET current_month=?, status_version=status_version+1, updated_at=?
+                   WHERE id=? AND status='running' AND claim_token=?
+                     AND status_version=? AND cancel_requested_at IS NULL""",
+                (
+                    month,
+                    self._job_now(),
+                    job_id,
+                    claim_token,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("worker progress ownership is stale")
+            return self._load_strategy_job(conn, job_id)
+
+    def request_strategy_job_cancellation(
+        self, job_id: str, *, expected_version: int
+    ) -> StrategyJobV1:
+        now = self._job_now()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job = self._load_strategy_job(conn, job_id)
+            if job.status_version != expected_version:
+                raise StrategyJobConflict("cancellation request is stale")
+            if job.status.terminal or job.cancel_requested_at is not None:
+                return job
+            if job.status is StrategyJobStatus.QUEUED:
+                cursor = conn.execute(
+                    """UPDATE strategy_jobs
+                       SET status='cancelled', cancel_requested_at=?, current_month=NULL,
+                           status_version=status_version+1, updated_at=?
+                       WHERE id=? AND status='queued' AND status_version=?""",
+                    (now, now, job_id, expected_version),
+                )
+            else:
+                cursor = conn.execute(
+                    """UPDATE strategy_jobs
+                       SET cancel_requested_at=?, status_version=status_version+1,
+                           updated_at=?
+                       WHERE id=? AND status='running' AND status_version=?
+                         AND cancel_requested_at IS NULL""",
+                    (now, now, job_id, expected_version),
+                )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("cancellation request conflicted")
+            return self._load_strategy_job(conn, job_id)
+
+    def cancel_claimed_strategy_job(
+        self, job_id: str, claim_token: str, *, expected_version: int
+    ) -> StrategyJobV1:
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """UPDATE strategy_jobs
+                   SET status='cancelled', claim_token=NULL, current_month=NULL,
+                       status_version=status_version+1, updated_at=?
+                   WHERE id=? AND status='running' AND claim_token=?
+                     AND status_version=? AND cancel_requested_at IS NOT NULL""",
+                (self._job_now(), job_id, claim_token, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("worker cancellation ownership is stale")
+            return self._load_strategy_job(conn, job_id)
+
+    def fail_claimed_strategy_job(
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        failure_code: JobFailureCode,
+        failed_month: str | None,
+        detail: str,
+    ) -> StrategyJobV1:
+        safe_detail = detail.strip()
+        if not safe_detail or len(safe_detail) > 500:
+            raise ValueError("failure detail must contain 1-500 characters")
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if failed_month is not None:
+                initialization = self._load_initialization(conn, job_id)
+                if failed_month not in initialization.requested_months:
+                    raise StrategyJobConflict("failed month is outside requested range")
+            cursor = conn.execute(
+                """UPDATE strategy_jobs
+                   SET status='failed', claim_token=NULL, current_month=NULL,
+                       failure_code=?, failed_month=?, failure_detail=?,
+                       status_version=status_version+1, updated_at=?
+                   WHERE id=? AND status='running' AND claim_token=?
+                     AND status_version=? AND cancel_requested_at IS NULL""",
+                (
+                    failure_code.value,
+                    failed_month,
+                    safe_detail,
+                    self._job_now(),
+                    job_id,
+                    claim_token,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("worker failure ownership is stale")
+            return self._load_strategy_job(conn, job_id)
+
+    def complete_claimed_initialization_job(
+        self, job_id: str, claim_token: str, *, expected_version: int
+    ) -> StrategyJobV1:
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job = self._load_strategy_job(conn, job_id)
+            if (
+                job.status is not StrategyJobStatus.RUNNING
+                or job.claim_token != claim_token
+                or job.status_version != expected_version
+                or job.cancel_requested_at is not None
+            ):
+                raise StrategyJobConflict("worker completion ownership is stale")
+            initialization = self._load_initialization(conn, job_id)
+            readiness = self._interval_readiness_on_connection(
+                conn,
+                initialization.profile_hash,
+                initialization.requested_start,
+                initialization.requested_end,
+            )
+            if not readiness.ready or readiness.ordered_month_digest is None:
+                raise StrategyJobConflict("initialization interval is not Ready")
+            conn.execute(
+                """UPDATE initialization_runs SET ordered_month_digest=?
+                   WHERE job_id=? AND ordered_month_digest IS NULL""",
+                (readiness.ordered_month_digest, job_id),
+            )
+            cursor = conn.execute(
+                """UPDATE strategy_jobs
+                   SET status='complete', claim_token=NULL, current_month=NULL,
+                       status_version=status_version+1, updated_at=?
+                   WHERE id=? AND status='running' AND claim_token=?
+                     AND status_version=? AND cancel_requested_at IS NULL""",
+                (self._job_now(), job_id, claim_token, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("worker completion ownership is stale")
+            return self._load_strategy_job(conn, job_id)
+
+    def reconcile_interrupted_strategy_jobs(self) -> tuple[StrategyJobV1, ...]:
+        """Fail running claims left behind by a previous application process."""
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id, status_version FROM strategy_jobs "
+                "WHERE status='running' ORDER BY enqueue_seq"
+            ).fetchall()
+            reconciled: list[StrategyJobV1] = []
+            for row in rows:
+                cursor = conn.execute(
+                    """UPDATE strategy_jobs
+                       SET status='failed', claim_token=NULL, current_month=NULL,
+                           failure_code='worker_interrupted', failed_month=NULL,
+                           failure_detail='Worker interrupted before completion',
+                           status_version=status_version+1, updated_at=?
+                       WHERE id=? AND status='running' AND status_version=?""",
+                    (self._job_now(), str(row[0]), int(row[1])),
+                )
+                if cursor.rowcount == 1:
+                    reconciled.append(self._load_strategy_job(conn, str(row[0])))
+            return tuple(reconciled)
+
+    def _job_now(self) -> str:
+        value = self._instant_clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("job clock must return a timezone-aware instant")
+        return value.astimezone(timezone.utc).isoformat()
+
+    @staticmethod
+    def _load_strategy_job(conn: sqlite3.Connection, job_id: str) -> StrategyJobV1:
+        row = conn.execute(
+            f"SELECT {', '.join(_JOB_COLUMNS)} FROM strategy_jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise StrategyJobNotFound(f"strategy job not found: {job_id}")
+        try:
+            return _row_to_strategy_job(row)
+        except Exception as exc:
+            raise BacktestIntegrityError("stored strategy job is invalid") from exc
+
+    @staticmethod
+    def _load_initialization(
+        conn: sqlite3.Connection, job_id: str
+    ) -> InitializationRunV1:
+        row = conn.execute(
+            """SELECT job_id, profile_hash, requested_start, requested_end,
+                      requested_months_json, requested_month_digest,
+                      calendar_dataset_version, qualification_contract_digest,
+                      ordered_month_digest
+               FROM initialization_runs WHERE job_id=?""",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise StrategyJobNotFound(f"initialization run not found: {job_id}")
+        try:
+            return _row_to_initialization(row)
+        except BacktestIntegrityError:
+            raise
+        except Exception as exc:
+            raise BacktestIntegrityError(
+                "stored initialization run is invalid"
+            ) from exc
+
+    def _interval_is_ready_for_job(
+        self,
+        conn: sqlite3.Connection,
+        profile_hash: str,
+        requested_start: str,
+        requested_end: str,
+    ) -> bool:
+        return self._interval_readiness_on_connection(
+            conn, profile_hash, requested_start, requested_end
+        ).ready
 
     def compare_and_insert_detector_fragment(
         self, key: DetectorCacheKey, canonical_json: str | bytes
@@ -729,6 +1474,8 @@ class BacktestRepository:
         self,
         commit: MonthlySnapshotCommitV1,
         evidence_verifier: HistoricalEvidenceVerifier,
+        *,
+        job_claim: tuple[str, str] | None = None,
     ) -> SnapshotMonthManifestV1:
         """Atomically compare-and-insert one complete Ready snapshot month."""
         try:
@@ -747,6 +1494,16 @@ class BacktestRepository:
             self._verify_snapshot_input_evidence(canonical, evidence_verifier)
             with session(self._connect) as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                if job_claim is not None:
+                    owned = conn.execute(
+                        """SELECT 1 FROM strategy_jobs
+                           WHERE id=? AND status='running' AND claim_token=?""",
+                        job_claim,
+                    ).fetchone()
+                    if owned is None:
+                        raise StrategyJobConflict(
+                            "snapshot publisher no longer owns the job"
+                        )
                 self._validate_snapshot_roster(conn, canonical)
                 self._insert_profile_on_connection(conn, canonical.profile)
                 existing = conn.execute(
@@ -859,7 +1616,7 @@ class BacktestRepository:
                 )
                 self._verify_snapshot_rows(conn, canonical)
                 return manifest
-        except BacktestIntegrityError:
+        except (BacktestIntegrityError, StrategyJobConflict):
             raise
         except Exception as exc:
             code = str(getattr(exc, "code", "integrity_error"))
@@ -1348,19 +2105,30 @@ class BacktestRepository:
     ) -> IntervalReadinessV1:
         if self.snapshot_profile(profile_hash) is None:
             raise BacktestIntegrityError("snapshot profile does not exist")
-        requested = TradingCalendar.months_inclusive(start_month, end_month)
         with session(self._connect) as conn:
-            rows = conn.execute(
-                """SELECT snapshot_month FROM snapshot_months
-                   WHERE profile_hash=? AND snapshot_month>=? AND snapshot_month<=?
-                     AND processing_complete=1 AND market_complete='unknown'
-                   ORDER BY snapshot_month""",
-                (profile_hash, start_month, end_month),
-            ).fetchall()
-            manifests = tuple(
-                self._load_verified_snapshot_month(conn, profile_hash, str(row[0]))
-                for row in rows
+            return self._interval_readiness_on_connection(
+                conn, profile_hash, start_month, end_month
             )
+
+    def _interval_readiness_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        profile_hash: str,
+        start_month: str,
+        end_month: str,
+    ) -> IntervalReadinessV1:
+        requested = TradingCalendar.months_inclusive(start_month, end_month)
+        rows = conn.execute(
+            """SELECT snapshot_month FROM snapshot_months
+               WHERE profile_hash=? AND snapshot_month>=? AND snapshot_month<=?
+                 AND processing_complete=1 AND market_complete='unknown'
+               ORDER BY snapshot_month""",
+            (profile_hash, start_month, end_month),
+        ).fetchall()
+        manifests = tuple(
+            self._load_verified_snapshot_month(conn, profile_hash, str(row[0]))
+            for row in rows
+        )
         if any(item is None for item in manifests):
             raise BacktestIntegrityError("snapshot interval evidence is invalid")
         manifests = tuple(item for item in manifests if item is not None)

@@ -440,6 +440,11 @@ def _source_versions() -> dict[str, str]:
     }
 
 
+def current_source_versions_json() -> str:
+    """Return the canonical runtime source-version identity used by qualification."""
+    return _canonical_bytes(_source_versions()).decode()
+
+
 def build_qualification_contract(
     calendar_digest: str,
     fixture_payload: Mapping[str, object],

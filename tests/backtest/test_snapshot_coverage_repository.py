@@ -14,6 +14,7 @@ from app.repositories import db
 from app.repositories.backtest_repo import (
     BacktestIntegrityError,
     BacktestRepository,
+    QualificationResult,
     RosterCaptureCommit,
 )
 from app.repositories.historical_price_repo import StoredHistoricalEvidence
@@ -30,6 +31,18 @@ from app.services.backtest.snapshot_profile import (
 )
 from app.services.backtest.source_manifest import detector_source_manifests
 from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.strategy_job import StrategyJobConflict
+from app.services.backtest.historical_data_qualification import (
+    FIXTURE_CONTRACT_VERSION,
+    REQUEST_CONTRACT_VERSION,
+    current_source_versions_json,
+)
+import json
+from app.services.backtest.historical_initialization_engine import (
+    HistoricalInitializationEngine,
+    InitializationMonthError,
+)
+from app.services.backtest.strategy_job import JobFailureCode, StrategyJobStatus
 
 
 DIGEST_A = "a" * 64
@@ -295,6 +308,36 @@ def _commit(
     return repo.commit_snapshot_month(snapshot, _Verifier(snapshot, evidence))
 
 
+def _record_current_qualification(repo: BacktestRepository) -> str:
+    fixture_digest = "1" * 64
+    probe_definition_digest = "2" * 64
+    source_versions_json = current_source_versions_json()
+    qualification_digest = manifest_digest(
+        {
+            "sources": json.loads(source_versions_json),
+            "calendar_digest": TradingCalendar().session_table_digest(),
+            "request_contract": REQUEST_CONTRACT_VERSION,
+            "fixture_contract": FIXTURE_CONTRACT_VERSION,
+            "fixture_digest": fixture_digest,
+            "probe_definition_digest": probe_definition_digest,
+        }
+    )
+    repo.record_qualification(
+        QualificationResult(
+            contract_digest=qualification_digest,
+            source_versions_json=source_versions_json,
+            fixture_digest=fixture_digest,
+            probe_definition_digest=probe_definition_digest,
+            probe_digest="3" * 64,
+            qualified_at=NOW.isoformat(),
+            passed=True,
+            failure_code=None,
+            failure_reason=None,
+        )
+    )
+    return qualification_digest
+
+
 def test_profile_month_commit_reopens_and_sql_evidence_is_immutable(tmp_path) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)
@@ -326,6 +369,86 @@ def test_profile_month_commit_reopens_and_sql_evidence_is_immutable(tmp_path) ->
             conn.execute("UPDATE snapshot_months SET valid_count=0")
     finally:
         conn.close()
+
+
+def test_reconciled_stale_claim_cannot_publish_snapshot_month(tmp_path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    snapshot = _snapshot(profile)
+    with repo._connect() as conn:
+        conn.execute(
+            """INSERT INTO strategy_jobs (
+                   id, job_type, status, enqueue_seq, claim_token, status_version,
+                   created_at, updated_at
+               ) VALUES ('job-1', 'backtest', 'running', 1, 'claim-1', 2, ?, ?)""",
+            (NOW.isoformat(), NOW.isoformat()),
+        )
+    repo.reconcile_interrupted_strategy_jobs()
+
+    with pytest.raises(StrategyJobConflict, match="no longer owns"):
+        repo.commit_snapshot_month(
+            snapshot,
+            _Verifier(snapshot),
+            job_claim=("job-1", "claim-1"),
+        )
+
+    with repo._connect() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM snapshot_profiles").fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM snapshot_months").fetchone() == (0,)
+
+
+def test_ready_snapshot_interval_returns_real_initialization_no_op(tmp_path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    snapshot = _snapshot(profile)
+    _commit(repo, snapshot)
+    repo.activate_snapshot_profile(profile.profile_hash, NOW)
+    qualification_digest = _record_current_qualification(repo)
+
+    result = repo.create_initialization_job(
+        profile_hash=profile.profile_hash,
+        requested_start="2026-07",
+        requested_end="2026-07",
+        calendar_dataset_version=profile.calendar_dataset_version,
+        qualification_contract_digest=qualification_digest,
+    )
+
+    assert result.no_op is True
+    assert repo.list_strategy_jobs() == ()
+
+
+def test_failed_later_month_retains_earlier_committed_snapshot(tmp_path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    repo.compare_and_insert_snapshot_profile(profile)
+    repo.activate_snapshot_profile(profile.profile_hash, NOW)
+    qualification_digest = _record_current_qualification(repo)
+    queued = repo.create_initialization_job(
+        profile_hash=profile.profile_hash,
+        requested_start="2026-05",
+        requested_end="2026-06",
+        calendar_dataset_version=profile.calendar_dataset_version,
+        qualification_contract_digest=qualification_digest,
+    ).job
+    assert queued is not None
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    def process(month: str) -> None:
+        if month == "2026-06":
+            raise InitializationMonthError(
+                JobFailureCode.REQUIRED_DATA_MISSING,
+                "Required historical data is unavailable",
+            )
+        _commit(repo, _snapshot(profile, month))
+
+    result = HistoricalInitializationEngine(repo, process).run(
+        claim.job.id, claim.claim_token
+    )
+
+    assert result.status is StrategyJobStatus.FAILED
+    assert repo.snapshot_month(profile.profile_hash, "2026-05") is not None
+    assert repo.snapshot_month(profile.profile_hash, "2026-06") is None
 
 
 def test_commit_rejects_roster_mismatch_and_rolls_back_all_rows(tmp_path) -> None:

@@ -264,6 +264,37 @@ class HistoricalPriceRepository:
             raise EvidenceMissingError("exact historical evidence is missing")
         return evidence
 
+    def find_request(
+        self,
+        *,
+        security_id: str,
+        requested_symbol: str,
+        alias_revision: str | None,
+        start: str,
+        end: str,
+        request_contract_version: str,
+    ) -> StoredHistoricalEvidence | None:
+        """Return the earliest immutable revision for one exact request identity."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT data_revision FROM historical_price_revisions
+                   WHERE security_id=? AND requested_symbol=?
+                     AND alias_revision IS ? AND start_date=? AND end_date=?
+                     AND request_contract_version=?
+                   ORDER BY first_acquired_at, data_revision LIMIT 1""",
+                (
+                    security_id,
+                    requested_symbol,
+                    alias_revision,
+                    start,
+                    end,
+                    request_contract_version,
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._verify_on_connection(conn, str(row[0]))
+
     def verify(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:
             return self._verify_on_connection(conn, data_revision)

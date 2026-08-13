@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 import re
 
@@ -104,6 +104,17 @@ class TradingCalendar:
         if len(sessions) == 0:
             raise ValueError(f"No sessions for {mic} in {month}")
         return sessions[-1].date()
+
+    def sessions_in_range(
+        self, mic: str, start: date, end_exclusive: date
+    ) -> tuple[date, ...]:
+        """Return canonical sessions in one inclusive/exclusive date interval."""
+        if start >= end_exclusive:
+            raise CalendarContractError("calendar interval must be non-empty")
+        sessions = self._calendar(mic).sessions_in_range(
+            pd.Timestamp(start), pd.Timestamp(end_exclusive - timedelta(days=1))
+        )
+        return tuple(timestamp.date() for timestamp in sessions)
 
     @staticmethod
     def closed_month(month: str, *, as_of: date) -> str:

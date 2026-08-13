@@ -92,6 +92,15 @@ def APP_AUTH_TOKEN() -> str | None:
     return os.getenv("APP_AUTH_TOKEN")
 
 
+def strategy_manager_worker_enabled() -> bool:
+    """Return whether this process owns the local Strategy Manager worker."""
+    return os.getenv("STRATEGY_MANAGER_WORKER_ENABLED", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def ANALYST_LLM_SCORING_ENABLED() -> bool:
     """Return whether the analyst should score stocks via Foundry Local.
 

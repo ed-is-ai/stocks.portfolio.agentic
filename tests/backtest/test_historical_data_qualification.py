@@ -15,6 +15,10 @@ from app.services.backtest.historical_data_qualification import (
     classify_missing_observation,
     fx_rate_is_fresh,
 )
+from app.services.backtest.historical_price_evidence import (
+    HistoricalEvidenceRequest,
+    YFinanceHistoricalEvidenceAdapter,
+)
 
 
 def _frame() -> pd.DataFrame:
@@ -108,6 +112,33 @@ def test_adapter_binds_contract_retains_identity_and_uses_injected_clock() -> No
     )
     assert payload.acquired_at == "2026-08-10T12:00:00+00:00"
     assert payload.rows[0]["dividends"] == "0x1.0000000000000p-2"
+
+
+def test_historical_adapter_allows_only_a_missing_prefix_for_full_history() -> None:
+    frame = _frame()
+    request = HistoricalEvidenceRequest(
+        security_id="security-1",
+        alias_revision="a" * 64,
+        symbol="AAPL",
+        start=date(1970, 1, 1),
+        end=date(2024, 2, 1),
+        expected_currency="USD",
+        expected_quote_unit="USD",
+        expected_timezone="America/New_York",
+        expected_sessions=(date(1970, 1, 2), date(2024, 1, 2), date(2024, 1, 3)),
+        allowed_observed_symbols=("AAPL",),
+        allow_missing_prefix=True,
+    )
+
+    payload = YFinanceHistoricalEvidenceAdapter(
+        lambda _: FakeTicker([frame]), provider_version="test"
+    ).fetch(request)
+
+    assert tuple(row["session"] for row in payload.rows) == (
+        "2024-01-02",
+        "2024-01-03",
+    )
+    assert "observation_policy" not in payload.request_contract
 
 
 def test_content_digest_is_repeatable_and_detects_change() -> None:

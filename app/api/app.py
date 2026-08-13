@@ -7,6 +7,9 @@ Run with:
     python -m uvicorn app.api.app:app --reload
 """
 
+from contextlib import asynccontextmanager
+from typing import AsyncIterator, Protocol
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -20,11 +23,44 @@ from app.api.routes import (
     views,
 )
 from app.core.config import STATIC_DIR
+from app.core import config
+from app.api.dependencies import get_strategy_job_service
 
 
-def create_app() -> FastAPI:
+class StrategyJobLifecycleService(Protocol):
+    def reconcile_startup(self) -> object: ...
+
+    def start_dispatcher(self) -> None: ...
+
+    def shutdown(self) -> None: ...
+
+
+def create_app(
+    *,
+    strategy_job_service: StrategyJobLifecycleService | None = None,
+    strategy_jobs_enabled: bool | None = None,
+) -> FastAPI:
     """Build and return the FastAPI application."""
-    app = FastAPI(title="Stock Trader")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        enabled = (
+            config.strategy_manager_worker_enabled()
+            if strategy_jobs_enabled is None
+            else strategy_jobs_enabled
+        )
+        service = None
+        if enabled:
+            service = strategy_job_service or get_strategy_job_service()
+            service.reconcile_startup()
+            service.start_dispatcher()
+        try:
+            yield
+        finally:
+            if service is not None:
+                service.shutdown()
+
+    app = FastAPI(title="Stock Trader", lifespan=lifespan)
     app.include_router(views.router)
     app.include_router(portfolios.router)
     app.include_router(portfolio.router)

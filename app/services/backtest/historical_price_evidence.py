@@ -59,6 +59,7 @@ class HistoricalEvidenceRequest:
     expected_timezone: str
     expected_sessions: tuple[date, ...]
     allowed_observed_symbols: tuple[str, ...]
+    allow_missing_prefix: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,7 @@ def _quote_contract(provider_unit: str) -> tuple[str, str, str]:
 
 
 def request_contract(request: HistoricalEvidenceRequest) -> dict[str, object]:
-    return {
+    contract: dict[str, object] = {
         "start": request.start.isoformat(),
         "end": request.end.isoformat(),
         "interval": "1d",
@@ -134,6 +135,7 @@ def request_contract(request: HistoricalEvidenceRequest) -> dict[str, object]:
         "timeout": 15,
         "raise_errors": True,
     }
+    return contract
 
 
 def normalize_historical_response(
@@ -202,7 +204,11 @@ def normalize_historical_response(
         localized.index = frame.index.tz_convert(exchange_timezone)
         localized = localized.sort_index()
         sessions = tuple(timestamp.date() for timestamp in localized.index)
-        if sessions != tuple(definition.expected_sessions) or any(
+        expected_sessions = tuple(definition.expected_sessions)
+        sessions_match = sessions == expected_sessions
+        if definition.allow_missing_prefix and sessions:
+            sessions_match = sessions == expected_sessions[-len(sessions) :]
+        if not sessions_match or any(
             session < definition.start or session >= definition.end
             for session in sessions
         ):
