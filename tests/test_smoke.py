@@ -74,6 +74,9 @@ class TestSmokeTests:
         import tempfile
         import app.orchestration.orchestrator as orchestrator
 
+        smoke_watchlist = orchestrator.load_watchlist()[:10]
+        assert len(smoke_watchlist) == 10
+
         mock_congress.get_stats_many.side_effect = lambda tickers, failed_tickers=None: (
             dict.fromkeys(tickers)
         )
@@ -110,6 +113,9 @@ class TestSmokeTests:
                 alert_lifecycle.append((by_stage["alerts"], by_stage["export"]))
 
             with (
+                patch.object(
+                    orchestrator, "load_watchlist", return_value=smoke_watchlist
+                ),
                 patch.object(orchestrator, "SCAN_OUTPUT", scan_out),
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
@@ -205,6 +211,9 @@ class TestSmokeTests:
                 return result
 
             with (
+                patch.object(
+                    orchestrator, "load_watchlist", return_value=smoke_watchlist
+                ),
                 patch.object(orchestrator, "SCAN_OUTPUT", scan_out),
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
@@ -248,6 +257,9 @@ class TestSmokeTests:
 
             failed_status_out = os.path.join(tmp, "failed_pipeline_status.json")
             with (
+                patch.object(
+                    orchestrator, "load_watchlist", return_value=smoke_watchlist
+                ),
                 patch.object(orchestrator, "PIPELINE_STATUS_JSON", failed_status_out),
                 patch.object(
                     orchestrator.AlertAgent,
