@@ -178,3 +178,45 @@ def test_notification_projection_rejects_lower_version(tmp_path):
             title="Old",
             body="Old",
         )
+
+
+def test_projection_ignores_malformed_row_and_keeps_polling(tmp_path):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue(repo, "2026-05", "2026-05")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE notification_outbox SET payload_json=?",
+            ("{not-json",),
+        )
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: tmp_path / "notifications.db")
+    )
+    notifications.ensure_schema()
+    assert StrategyNotificationProjector(repo, notifications).project_pending() == 0
+
+
+def test_existing_job_is_backfilled_and_restart_removes_restart_action(tmp_path):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    source = _enqueue(repo, "2026-05", "2026-05").job
+    assert source is not None
+    failed = _fail(repo, source.id)
+    child = repo.restart_initialization_job(
+        source.id, expected_version=failed.status_version, idempotency_key="retry"
+    ).job
+    assert child is not None
+    assert repo.legal_strategy_job_actions(source.id) == ("delete",)
+
+
+def test_delete_rejects_stale_version_after_tombstone(tmp_path):
+    repo = _repo(tmp_path / "backtest.db")
+    source = _enqueue(repo, "2026-05", "2026-05").job
+    assert source is not None
+    failed = _fail(repo, source.id)
+    deleted = repo.delete_strategy_job(
+        source.id, expected_version=failed.status_version
+    )
+    with pytest.raises(StrategyJobConflict, match="stale"):
+        repo.delete_strategy_job(source.id, expected_version=failed.status_version)
+    assert deleted.deleted_at is not None

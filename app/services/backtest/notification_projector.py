@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 from typing import cast
 
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
+
+logger = logging.getLogger(__name__)
 
 
 def _projection(payload: dict[str, object]) -> dict[str, object]:
@@ -73,34 +76,42 @@ class StrategyNotificationProjector:
     def project_pending(self) -> int:
         projected = 0
         for row in self._backtest.pending_notification_outbox():
-            payload = row["payload"]
-            if not isinstance(payload, dict):
-                raise ValueError("strategy job notification payload is invalid")
-            details = _projection(payload)
-            job = payload["job"]
-            if not isinstance(job, dict):
-                raise ValueError("strategy job notification job is invalid")
-            updated_at = datetime.fromisoformat(str(job["updated_at"]))
-            self._notifications.upsert_job_notification(
-                job_id=str(row["job_id"]),
-                job_status_version=int(row["job_status_version"]),
-                category=(
-                    NotificationCategory.BACKTEST
-                    if str(job.get("job_type")) == "backtest"
-                    else NotificationCategory.STRATEGY_INITIALIZATION
-                ),
-                event_type=str(details["event_type"]),
-                severity=cast(NotificationSeverity, details["severity"]),
-                title=str(details["title"]),
-                body=str(details["body"]),
-                created_at=updated_at,
-                target_url=cast(str | None, details["target_url"]),
-                actions=cast(tuple[str, ...], details["actions"]),
-            )
-            if self._backtest.acknowledge_notification_outbox(
-                str(row["job_id"]), int(row["job_status_version"])
-            ):
-                projected += 1
+            try:
+                payload = row["payload"]
+                if not isinstance(payload, dict):
+                    raise ValueError("strategy job notification payload is invalid")
+                details = _projection(payload)
+                job = payload["job"]
+                if not isinstance(job, dict):
+                    raise ValueError("strategy job notification job is invalid")
+                updated_at = datetime.fromisoformat(str(job["updated_at"]))
+                self._notifications.upsert_job_notification(
+                    job_id=str(row["job_id"]),
+                    job_status_version=int(row["job_status_version"]),
+                    category=(
+                        NotificationCategory.BACKTEST
+                        if str(job.get("job_type")) == "backtest"
+                        else NotificationCategory.STRATEGY_INITIALIZATION
+                    ),
+                    event_type=str(details["event_type"]),
+                    severity=cast(NotificationSeverity, details["severity"]),
+                    title=str(details["title"]),
+                    body=str(details["body"]),
+                    created_at=updated_at,
+                    target_url=cast(str | None, details["target_url"]),
+                    # Action legality is evaluated against live repository
+                    # state by later command routes; projections carry none.
+                    actions=(),
+                )
+                if self._backtest.acknowledge_notification_outbox(
+                    str(row["job_id"]), int(row["job_status_version"])
+                ):
+                    projected += 1
+            except Exception:
+                logger.exception(
+                    "Unable to project Strategy Manager notification for job %s",
+                    row.get("job_id"),
+                )
         return projected
 
 

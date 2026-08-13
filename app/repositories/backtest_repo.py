@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 import json
+import logging
 import sqlite3
 from typing import Callable, Protocol
 from uuid import uuid4
@@ -48,6 +49,7 @@ from app.services.backtest.strategy_job import (
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+logger = logging.getLogger(__name__)
 
 _QUALIFICATION_SCHEMA = """
 CREATE TABLE IF NOT EXISTS historical_source_qualifications (
@@ -754,6 +756,15 @@ class BacktestRepository:
                     )
                 except sqlite3.OperationalError:
                     raise
+            existing = conn.execute(
+                """SELECT id FROM strategy_jobs
+                   WHERE id NOT IN (SELECT job_id FROM notification_outbox)
+                   ORDER BY enqueue_seq"""
+            ).fetchall()
+            for row in existing:
+                self._upsert_notification_outbox_on_connection(
+                    conn, self._load_strategy_job(conn, str(row[0]))
+                )
 
     def record_qualification(self, result: QualificationResult) -> int:
         with session(self._connect) as conn:
@@ -1287,7 +1298,12 @@ class BacktestRepository:
             if job.status in {StrategyJobStatus.QUEUED, StrategyJobStatus.RUNNING}:
                 return ("cancel",)
             if job.status in {StrategyJobStatus.FAILED, StrategyJobStatus.CANCELLED}:
-                return ("restart", "delete")
+                child = conn.execute(
+                    """SELECT 1 FROM strategy_job_restart_actions
+                       WHERE source_job_id=? LIMIT 1""",
+                    (job_id,),
+                ).fetchone()
+                return ("delete",) if child is not None else ("restart", "delete")
             return ()
 
     def can_delete_strategy_job(self, job_id: str) -> bool:
@@ -1393,6 +1409,8 @@ class BacktestRepository:
             conn.execute("BEGIN IMMEDIATE")
             job = self._load_strategy_job(conn, job_id)
             if job.deleted_at is not None:
+                if job.status_version != expected_version:
+                    raise StrategyJobConflict("delete request is stale")
                 return job
             if job.status_version != expected_version:
                 raise StrategyJobConflict("delete request is stale")
@@ -1476,14 +1494,24 @@ class BacktestRepository:
                       OR projected_status_version < job_status_version
                    ORDER BY updated_at, job_id"""
             ).fetchall()
-        return tuple(
-            {
-                "job_id": str(row[0]),
-                "job_status_version": int(row[1]),
-                "payload": json.loads(str(row[2])),
-            }
-            for row in rows
-        )
+        pending: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                payload = json.loads(str(row[2]))
+            except json.JSONDecodeError:
+                logger.exception(
+                    "Invalid Strategy Manager notification payload for job %s",
+                    row[0],
+                )
+                continue
+            pending.append(
+                {
+                    "job_id": str(row[0]),
+                    "job_status_version": int(row[1]),
+                    "payload": payload,
+                }
+            )
+        return tuple(pending)
 
     def acknowledge_notification_outbox(
         self, job_id: str, job_status_version: int

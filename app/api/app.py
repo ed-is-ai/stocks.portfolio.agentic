@@ -63,6 +63,13 @@ def create_app(
         if enabled:
             service = strategy_job_service or get_strategy_job_service()
             service.reconcile_startup()
+        try:
+            get_strategy_notification_projector().project_pending()
+        except sqlite3.OperationalError:
+            # The notification centre remains available if the optional
+            # Strategy Manager store is not configured or temporarily offline.
+            pass
+        if service is not None:
             service.start_dispatcher()
         try:
             yield
