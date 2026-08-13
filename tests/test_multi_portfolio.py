@@ -330,6 +330,150 @@ def test_cash_balance_advances_when_newer_file_imported_after_older(
         )
 
 
+# --- correct cash balance handling (Story 1.5) ------------------------------
+
+
+def test_cash_balance_zero_running_balance_is_not_discarded(tmp_path: Path) -> None:
+    """Story 1.5, AC1: a closing Running Balance of exactly 0.00 becomes the
+    stored/displayed balance, not a stale prior positive value -- the
+    ``rb > 0`` gate's defect discarded a genuine zero closing balance."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(
+        _write_rows(
+            tmp_path,
+            "first.csv",
+            ["01/01/2024,n/a,n/a,n/a,n/a,Contribution,R1,,500.00,500.00"],
+        ).read_bytes(),
+        pf.id,
+    )
+    assert agent.get_cash_balance(pf.id) == 500.0
+    agent.import_sipp(
+        _write_rows(
+            tmp_path,
+            "second.csv",
+            ["01/02/2024,n/a,n/a,n/a,n/a,Withdrawal,R2,500.00,,0.00"],
+        ).read_bytes(),
+        pf.id,
+    )
+    assert agent.get_cash_balance(pf.id) == 0.0
+    cash_balances = CashBalancesRepository(db.make_connect(lambda: agent.db_path))
+    assert cash_balances.get(pf.id, "GBP") == (Decimal("0.00"), "2024-02-01")
+
+
+def test_cash_balance_negative_running_balance_is_accepted(tmp_path: Path) -> None:
+    """Story 1.5, AC2: a negative closing Running Balance is accepted and
+    stored as negative, not rejected or coerced to zero."""
+    from decimal import Decimal
+
+    from app.repositories.cash_balances_repo import CashBalancesRepository
+
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(
+        _write_rows(
+            tmp_path,
+            "sipp.csv",
+            ["01/01/2024,n/a,n/a,n/a,n/a,Overdraft,R1,150.50,,-150.50"],
+        ).read_bytes(),
+        pf.id,
+    )
+    assert agent.get_cash_balance(pf.id) == -150.50
+    cash_balances = CashBalancesRepository(db.make_connect(lambda: agent.db_path))
+    assert cash_balances.get(pf.id, "GBP") == (Decimal("-150.50"), "2024-01-01")
+
+
+def test_cash_balance_undated_running_balance_does_not_overwrite_dated(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC3: an incoming balance with no parseable as-of date must
+    never overwrite a stored balance that has a newer date."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(
+        _write_rows(
+            tmp_path,
+            "dated.csv",
+            ["01/01/2024,n/a,n/a,n/a,n/a,Contribution,R1,,500.00,500.00"],
+        ).read_bytes(),
+        pf.id,
+    )
+    assert agent.get_cash_balance(pf.id) == 500.0
+    agent.import_sipp(
+        _write_rows(
+            tmp_path,
+            "undated.csv",
+            ["not-a-date,n/a,n/a,n/a,n/a,Note,R2,,,999.00"],
+        ).read_bytes(),
+        pf.id,
+    )
+    assert agent.get_cash_balance(pf.id) == 500.0
+
+
+def test_cash_balance_undated_running_balance_applies_when_nothing_stored(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC3 (negative case): the pre-existing fallback for a
+    first-ever undated import must not regress -- when nothing is stored
+    yet, an undated balance still applies."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(
+        _write_rows(
+            tmp_path,
+            "undated.csv",
+            ["not-a-date,n/a,n/a,n/a,n/a,Note,R1,,,750.00"],
+        ).read_bytes(),
+        pf.id,
+    )
+    assert agent.get_cash_balance(pf.id) == 750.0
+
+
+def test_cash_balance_same_day_tie_break_prefers_first_listed_row(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC6: multiple rows sharing the same Date -- the closing
+    balance is always the Running Balance from the first-listed row for
+    that date, per the documented reverse-chronological export assumption
+    (the first-listed same-day row is the most recent transaction of that
+    day, PRD §10). Today's rank tuple picks the *last*-listed row instead
+    -- the opposite direction."""
+    same_day_rows = [
+        "15/03/2024,n/a,n/a,n/a,n/a,Note A,RA,,,1000.00",
+        "15/03/2024,n/a,n/a,n/a,n/a,Note B,RB,,,900.00",
+        "15/03/2024,n/a,n/a,n/a,n/a,Note C,RC,,,800.00",
+    ]
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(
+        _write_rows(tmp_path, "sameday.csv", same_day_rows).read_bytes(), pf.id
+    )
+    assert agent.get_cash_balance(pf.id) == 1000.0
+
+
+def test_cash_balance_same_day_tie_break_does_not_disturb_cross_date_ordering(
+    tmp_path: Path,
+) -> None:
+    """The same-day tie-break fix must not change which *date* wins -- a
+    later date's balance still always beats an earlier date's, regardless
+    of how many rows tie within either date."""
+    rows = [
+        "01/01/2024,n/a,n/a,n/a,n/a,Opening,R0,,,100.00",
+        "15/03/2024,n/a,n/a,n/a,n/a,Note A,RA,,,1000.00",
+        "15/03/2024,n/a,n/a,n/a,n/a,Note B,RB,,,900.00",
+    ]
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.import_sipp(_write_rows(tmp_path, "mixed.csv", rows).read_bytes(), pf.id)
+    # The later date (15/03) always wins over the earlier one (01/01), and
+    # within it, the first-listed row (RA, 1000) wins the same-day tie.
+    assert agent.get_cash_balance(pf.id) == 1000.0
+
+
 # --- snapshots -------------------------------------------------------------
 
 

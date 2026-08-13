@@ -470,6 +470,49 @@
 </small>
 {% endif %}
 
+<!-- Non-GBP cash balances (Story 1.6, AC1/AC3). The legacy GBP-only CASH
+     row above is untouched (Story 1.9's scope) -- this is additive: one
+     row per non-GBP currency held, native amount first (never a bare
+     unlabelled number, never a £ prefix on non-GBP money), then either an
+     inspectable GBP-equivalent figure (tooltip carries the FX pair,
+     provider, as-of date, and rate) or an explicit unavailable badge --
+     never a silently blank or silently guessed GBP figure. -->
+{% if cash_balances_by_currency %}
+<div class="mt-2">
+  {% for entry in cash_balances_by_currency %}
+  {% if entry.currency != "GBP" %}
+  <div class="d-flex align-items-center gap-2 mt-1" style="font-size:0.8rem">
+    <span class="fw-semibold">{{ entry.currency }} {{ "%.2f"|format(entry.amount) }}</span>
+    {% if entry.projection.status == "valued" %}
+    <span class="text-muted"
+          title="{{ entry.projection.quote.provider }} {{ entry.projection.quote.pair }} @ {{ entry.projection.quote.rate }}, as of {{ entry.projection.quote.as_of }}">
+      &asymp; £{{ "%.2f"|format(entry.projection.gbp_amount) }}
+    </span>
+    {% else %}
+    <span class="badge bg-warning text-dark" title="reason: {{ entry.projection.reason }}">
+      GBP valuation unavailable
+    </span>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Reconciliation badge (Story 1.5, AC5) — a pointer to the dedicated
+     view, not the detail itself; a passing import gives no visible warning
+     here at all. -->
+{% if reconciliation_issue_count %}
+<div class="mt-3">
+  <a href="#" class="text-danger" style="font-size:0.78rem;font-weight:600"
+     hx-get="/portfolio/{{ portfolio_id }}/reconciliation"
+     hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">
+    <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ reconciliation_issue_count }}
+    unreconciled balance{{ "s" if reconciliation_issue_count != 1 else "" }} &mdash; Reconcile
+  </a>
+</div>
+{% endif %}
+
 <!-- Cash activity ledger — read-only view of dividends, contributions, etc.
      for the selected account (#161). The balance above still comes from the
      provider's Running Balance, not a sum of these rows. -->
@@ -494,7 +537,10 @@
           <td class="text-muted" style="font-size:0.76rem">{{ cf.date }}</td>
           <td><span class="badge bg-light text-dark border">{{ cf.flow_type|replace('_', ' ')|title }}</span></td>
           <td class="text-muted" style="font-size:0.78rem">{{ cf.description or '—' }}</td>
-          <td class="text-end">£{{ "%.2f"|format(cf.amount) }}</td>
+          <td class="text-end">
+            {% if cf.currency == "GBP" %}£{{ "%.2f"|format(cf.amount) }}
+            {% else %}{{ cf.currency }} {{ "%.2f"|format(cf.amount) }}{% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>

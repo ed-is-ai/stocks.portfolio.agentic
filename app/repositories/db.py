@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS trades (
     notes       TEXT NOT NULL DEFAULT '',
     stop_loss   REAL,
     entry_price REAL,
-    reference   TEXT
+    reference   TEXT,
+    currency    TEXT NOT NULL DEFAULT 'GBP'
 );
 CREATE TABLE IF NOT EXISTS cash_flows (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS cash_flows (
     ticker      TEXT,
     amount      REAL NOT NULL CHECK(amount > 0),
     description TEXT,
-    reference   TEXT
+    reference   TEXT,
+    currency    TEXT NOT NULL DEFAULT 'GBP'
 );
 CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +87,34 @@ CREATE TABLE IF NOT EXISTS account_state (
 CREATE TABLE IF NOT EXISTS fx_rate_cache (
     date        TEXT PRIMARY KEY,
     gbpusd_rate REAL
+);
+CREATE TABLE IF NOT EXISTS cash_balances (
+    portfolio_id INTEGER,
+    currency     TEXT NOT NULL,
+    amount       TEXT NOT NULL,
+    as_of        TEXT,
+    updated_at   TEXT NOT NULL,
+    PRIMARY KEY (portfolio_id, currency)
+);
+CREATE TABLE IF NOT EXISTS cash_reconciliation_issues (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id     INTEGER,
+    date             TEXT NOT NULL,
+    prior_balance    REAL NOT NULL,
+    expected_balance REAL NOT NULL,
+    actual_balance   REAL NOT NULL,
+    difference       REAL NOT NULL,
+    row_ref          TEXT,
+    currency         TEXT NOT NULL DEFAULT 'GBP',
+    detected_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS fx_quotes (
+    quote_digest TEXT PRIMARY KEY,
+    provider     TEXT NOT NULL,
+    pair         TEXT NOT NULL,
+    as_of        TEXT NOT NULL,
+    rate         TEXT NOT NULL,
+    fetched_at   TEXT NOT NULL
 );
 """
 
@@ -203,6 +233,11 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN idempotency_key TEXT")
         except sqlite3.OperationalError as exc:
             logger.debug("schema migration step skipped: %s", exc)
+    for table in ("trades", "cash_flows"):
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN currency TEXT DEFAULT 'GBP'")
+        except sqlite3.OperationalError as exc:
+            logger.debug("schema migration step skipped: %s", exc)
     for col_def in ("currency TEXT DEFAULT 'GBP'", "original_price REAL"):
         try:
             conn.execute(f"ALTER TABLE price_cache ADD COLUMN {col_def}")
@@ -221,6 +256,8 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     for table in ("trades", "cash_flows"):
         if not _has_column(conn, table, "idempotency_key"):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN idempotency_key TEXT")
+        if not _has_column(conn, table, "currency"):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN currency TEXT DEFAULT 'GBP'")
 
     # Idempotency keys are per-portfolio: the same reference may recur across
     # portfolios, so drop the old global-unique index in favour of composite.
@@ -242,6 +279,13 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_snapshots_portfolio "
         "ON portfolio_snapshots(portfolio_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_reconciliation_portfolio "
+        "ON cash_reconciliation_issues(portfolio_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fx_quotes_pair_asof ON fx_quotes(pair, as_of)"
     )
 
     for table in ("trades", "cash_flows"):

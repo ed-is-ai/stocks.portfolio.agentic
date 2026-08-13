@@ -456,3 +456,32 @@ async def quick_add_holding(
     )
     logger.info("Quick-add: %s x%.4f (~£%.2f)", ticker, shares, value)
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+@router.get("/portfolio/{portfolio_id}/reconciliation", response_class=HTMLResponse)
+async def reconciliation_view(
+    request: Request, portfolio_id: int, trader: TraderDep
+) -> HTMLResponse:
+    """The dedicated cash-reconciliation view (Story 1.5, AC5) — every
+    detected statement-balance discrepancy for this portfolio, not just a
+    passing warning banner. A thin ``TraderService`` passthrough to
+    ``CashReconciliationRepository.list_issues``, matching every other
+    read path (e.g. ``get_cash_flows``)."""
+    raw_issues = trader.list_reconciliation_issues(portfolio_id)
+    issues = [
+        {
+            "date": row[2],
+            "prior_balance": row[3],
+            "expected_balance": row[4],
+            "actual_balance": row[5],
+            "difference": row[6],
+            "row_ref": row[7],
+            "currency": row[8],
+        }
+        for row in raw_issues
+    ]
+    return templates.TemplateResponse(
+        request,
+        "_reconciliation.html",
+        context={"issues": issues, "portfolio_id": portfolio_id},
+    )

@@ -1,0 +1,45 @@
+{% if not issues %}
+<div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
+  <i class="bi bi-info-circle-fill fs-5"></i>
+  No reconciliation issues recorded for this account.
+</div>
+{% else %}
+<div class="tbl-toolbar">
+  <span><i class="bi bi-exclamation-triangle-fill me-1"></i>{{ issues|length }} unreconciled balance(s)</span>
+</div>
+<div class="tbl-wrap">
+  <table class="table table-hover align-middle">
+    <thead>
+      <tr>
+        <th>Date</th>
+        <th>Currency</th>
+        <th class="text-end">Prior balance</th>
+        <th class="text-end">Expected balance</th>
+        <th class="text-end">Actual balance</th>
+        <th class="text-end">Difference</th>
+        <th>Row</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for issue in issues %}
+      <tr>
+        <td class="text-muted" style="font-size:0.76rem">{{ issue.date }}</td>
+        <td>{{ issue.currency }}</td>
+        <td class="text-end">{{ "%.2f"|format(issue.prior_balance) }}</td>
+        <td class="text-end">{{ "%.2f"|format(issue.expected_balance) }}</td>
+        <td class="text-end">{{ "%.2f"|format(issue.actual_balance) }}</td>
+        <td class="text-end {% if issue.difference < 0 %}text-danger{% else %}text-warning{% endif %}">{{ "%.2f"|format(issue.difference) }}</td>
+        <td class="text-muted" style="font-size:0.76rem">{{ issue.row_ref or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+<div class="mt-3">
+  <a href="#" style="font-size:0.78rem"
+     hx-get="/partials/portfolio?portfolio_id={{ portfolio_id }}"
+     hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">
+    <i class="bi bi-arrow-left me-1"></i>Back to portfolio
+  </a>
+</div>

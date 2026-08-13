@@ -279,6 +279,44 @@ def test_rejected_plan_returns_400_and_never_reads_the_portfolio(
     assert "REF-BAD" in kwargs["body"]
 
 
+def test_currency_rejected_plan_returns_400_with_issue_detail_rendered(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """Story 1.4, AC3: a currency validation failure (ambiguous/unsupported/
+    malformed-locale/contradictory) is a ``failed`` outcome in the same
+    FR-13/AD-25 vocabulary Story 1.2 already wires through this route -- no
+    new route logic is needed, only that a currency-shaped ``failed_rows``
+    entry renders via the existing ``_describe_issues`` helper exactly like
+    any other failure reason."""
+    mock_trader, _, mock_notifications, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=0.0,
+        buy_count=0,
+        sell_count=0,
+        cash_flow_count=0,
+        failed_rows=[
+            "row REF-FX: Debit unsupported_currency: unsupported currency in '¥123'"
+        ],
+        total_rows=1,
+        status="rejected",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload()
+
+    assert resp.status_code == 400
+    mock_trader.get_portfolio.assert_not_called()
+    assert "REF-FX" in calls[-1]["error_message"]
+    assert "unsupported_currency" in calls[-1]["error_message"]
+    mock_notifications.record.assert_called_once()
+
+
 def test_missing_columns_returns_400(mocked_import):
     from app.agents.trader.trader_agent import SippImportError
 
@@ -509,6 +547,136 @@ def test_rejected_stale_balance_never_reaches_the_rendered_page(
     assert contexts[-1]["cash_balance"] == 9000.0
     assert "9,000.00" in contexts[-1]["import_message"]
     assert "4,000.00" not in contexts[-1]["import_message"]
+
+
+def test_reconciliation_route_renders_detected_issue(tmp_path: Path) -> None:
+    """Story 1.5, AC5: the dedicated reconciliation view route returns 200
+    and renders a detected issue's date/expected/actual/difference -- no
+    new route-level logic beyond a thin passthrough was needed, since this
+    is an unauthenticated GET (read) matching ``/partials/portfolio``."""
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.trader_service import TraderService
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "03/01/2024,n/a,n/a,n/a,n/a,Statement,R3,,,600.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,R2,,100.00,500.00\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Opening,R1,,,400.00\n"
+    )
+    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+
+    trader = TraderService(agent)
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    try:
+        resp = client.get(f"/portfolio/{pf.id}/reconciliation")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert "2024-01-03" in resp.text
+    assert "500.00" in resp.text
+    assert "600.00" in resp.text
+    assert "R3" in resp.text
+
+
+def test_portfolio_partial_renders_non_gbp_balance_without_a_fabricated_gbp_figure(
+    tmp_path: Path,
+) -> None:
+    """Story 1.6, AC1/AC3: a non-GBP cash balance renders with its real
+    currency code -- never a bare/£-prefixed number -- and, when the GBP
+    valuation is unavailable, an explicit unavailable marker rather than a
+    computed figure. Injects a fake ``GbpValuationService`` so the test
+    never touches real yfinance."""
+    from typing import Any, cast
+
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.gbp_valuation_service import GbpValuationProjection
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,US dividend,n/a,n/a,$154.86,$154.86\n"
+    )
+    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+
+    trader = TraderService(agent)
+
+    class _FakeValuation:
+        def value_in_gbp(self, money: Any) -> GbpValuationProjection:
+            return GbpValuationProjection(
+                money=money, status="valuation_unavailable", reason="fetch_failed"
+            )
+
+    portfolio = PortfolioService(trader, gbp_valuation=cast(Any, _FakeValuation()))
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: portfolio
+    try:
+        resp = client.get(f"/partials/portfolio?portfolio_id={pf.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert "USD 154.86" in resp.text
+    assert "£154.86" not in resp.text
+    assert "GBP valuation unavailable" in resp.text
+
+
+def test_cash_flow_ledger_renders_real_currency_not_a_fabricated_gbp_prefix(
+    tmp_path: Path,
+) -> None:
+    """A ``CashFlow`` row with ``currency="USD"`` renders with its real
+    currency, not £; a ``currency="GBP"`` row (today's default, and every
+    currency-less legacy row) renders unchanged."""
+    from typing import Any, cast
+
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.gbp_valuation_service import GbpValuationProjection
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,US dividend,USD1,n/a,$1.25,$1.25\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,GBP interest,GBP1,n/a,10.00,11.25\n"
+    )
+    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+
+    trader = TraderService(agent)
+
+    class _FakeValuation:
+        def value_in_gbp(self, money: Any) -> GbpValuationProjection:
+            return GbpValuationProjection(
+                money=money, status="valuation_unavailable", reason="fetch_failed"
+            )
+
+    portfolio = PortfolioService(trader, gbp_valuation=cast(Any, _FakeValuation()))
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: portfolio
+    try:
+        resp = client.get(f"/partials/portfolio?portfolio_id={pf.id}")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert "USD 1.25" in resp.text
+    assert "£10.00" in resp.text
+    assert "£1.25" not in resp.text
 
 
 def test_forbidden_without_token(monkeypatch: pytest.MonkeyPatch):

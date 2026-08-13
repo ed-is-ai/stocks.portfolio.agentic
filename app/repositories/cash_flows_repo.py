@@ -16,6 +16,7 @@ def _row_to_cash_flow(row: tuple[Any, ...]) -> CashFlow:
         description=row[5],
         reference=row[6],
         portfolio_id=row[7],
+        currency=row[8] if len(row) > 8 and row[8] is not None else "GBP",
     )
 
 
@@ -31,7 +32,7 @@ class CashFlowsRepository:
         """Return cash flows newest-first, optionally scoped to a portfolio."""
         base = (
             "SELECT id, date, flow_type, ticker, amount, description, reference,"
-            " portfolio_id FROM cash_flows"
+            " portfolio_id, currency FROM cash_flows"
         )
         params: tuple[Any, ...] = ()
         if portfolio_id is not None:
@@ -54,6 +55,7 @@ class CashFlowsRepository:
         reference: str | None,
         portfolio_id: int | None = None,
         idempotency_key: str | None = None,
+        currency: str = "GBP",
     ) -> SippImportRowOutcome:
         """Insert a cash flow with ``INSERT OR IGNORE`` on the given connection.
 
@@ -68,8 +70,8 @@ class CashFlowsRepository:
         """
         cur = conn.execute(
             "INSERT OR IGNORE INTO cash_flows "
-            "(date, flow_type, ticker, amount, description, reference, portfolio_id, idempotency_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "(date, flow_type, ticker, amount, description, reference, portfolio_id, idempotency_key, currency) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 date,
                 flow_type,
@@ -79,6 +81,7 @@ class CashFlowsRepository:
                 reference,
                 portfolio_id,
                 idempotency_key,
+                currency,
             ),
         )
         return "inserted" if cur.rowcount else "duplicate"

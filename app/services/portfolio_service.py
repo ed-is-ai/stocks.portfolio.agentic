@@ -19,10 +19,15 @@ from app.core.config import (
     ANALYSIS_JSON,
     PORTFOLIO_VALUE_CSV,
     TICKER_ALIASES_JSON,
+    TRADES_DB,
 )
+from app.core.money import Money
+from app.repositories import db
+from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.schemas.analysis_artifact import read_analysis_records
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
+from app.services.gbp_valuation_service import GbpValuationService
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
@@ -37,9 +42,13 @@ class PortfolioService:
         self,
         trader: TraderService,
         evaluator: ExitEvaluator | None = None,
+        gbp_valuation: GbpValuationService | None = None,
     ) -> None:
         self._trader = trader
         self._evaluator = evaluator or ExitEvaluator()
+        self._gbp_valuation = gbp_valuation or GbpValuationService(
+            FxQuoteRepository(db.make_connect(lambda: TRADES_DB))
+        )
 
     # --- analysis + aliases ----------------------------------------------
 
@@ -533,12 +542,42 @@ class PortfolioService:
             if portfolio_id is not None
             else []
         )
+        # Story 1.5, AC5: a count-only pointer to the dedicated
+        # reconciliation view -- the detail lives there, not here.
+        reconciliation_issue_count = (
+            len(self._trader.list_reconciliation_issues(portfolio_id))
+            if portfolio_id is not None
+            else 0
+        )
+        # Story 1.6, AC3: every currency this portfolio holds a cash
+        # balance in, each paired with a GBP Valuation Projection -- never
+        # a fabricated GBP figure. Additive alongside the legacy GBP-only
+        # `cash_balance` scalar above, not a replacement for it.
+        cash_balances_by_currency = (
+            [
+                {
+                    "currency": currency,
+                    "amount": amount,
+                    "as_of": as_of,
+                    "projection": self._gbp_valuation.value_in_gbp(
+                        Money(amount=amount, currency=currency)
+                    ),
+                }
+                for currency, amount, as_of in self._trader.list_cash_balances(
+                    portfolio_id
+                )
+            ]
+            if portfolio_id is not None
+            else []
+        )
         return {
             "positions": positions,
             "portfolio_id": portfolio_id,
             "portfolios": portfolios,
             "active_portfolio": active_portfolio,
             "cash_flows": cash_flows,
+            "reconciliation_issue_count": reconciliation_issue_count,
+            "cash_balances_by_currency": cash_balances_by_currency,
             "positions_with_value": positions_with_value,
             "total_cost_gbp": total_cost_gbp,
             "total_value_gbp": total_value_gbp,

@@ -1,4 +1,5 @@
 import sqlite3
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 from app.agents.trader.trader_agent import (
     SippImportError,
     TraderAgent,
+    _detect_reconciliation_issues,
     _idempotency_key,
     _to_iso_date,
 )
@@ -651,10 +653,23 @@ def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
 
 
 def test_sipp_parses_eur_and_usd_amounts(tmp_path: Path) -> None:
-    """EUR/USD-denominated cash-flow rows must parse, not just GBP (#186) —
-    a real SIPP export can carry a EUR interest sub-account, and the
-    currency symbol was previously only stripped for £."""
+    """Story 1.4, AC1: EUR/USD-denominated cash-flow rows must parse with
+    their real currency preserved, not silently stripped and stored as a
+    bare number treated as GBP everywhere downstream (#186, #210) — a real
+    SIPP export can carry a EUR interest sub-account.
+
+    No GBP-marked row appears in this fixture, so the legacy GBP-only
+    ``cash_balance``/``account_state`` field correctly stays at 0.0 (AC1's
+    fix for "never present a number in a currency the source data didn't
+    actually carry") -- the EUR/USD winners are separately queryable via
+    ``CashBalancesRepository``. Imports into a real portfolio (not the
+    legacy ``portfolio_id=None`` bucket) so the assertion isn't at the
+    mercy of any other test's writes to the legacy single-portfolio state.
+    """
     import sqlite3
+
+    from app.repositories import db
+    from app.repositories.cash_balances_repo import CashBalancesRepository
 
     csv_text = (
         "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
@@ -668,18 +683,25 @@ def test_sipp_parses_eur_and_usd_amounts(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
+    pf = agent.create_portfolio("SIPP")
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
 
-    assert result.parse_errors == []
-    assert result.skipped_rows == []
+    assert result.status == "ok"
+    assert result.failed_rows == []
     conn = sqlite3.connect(agent.db_path)
     rows = conn.execute(
-        "SELECT flow_type, amount FROM cash_flows ORDER BY id"
+        "SELECT flow_type, amount, currency FROM cash_flows ORDER BY id"
     ).fetchall()
     conn.close()
-    assert rows == [("INTEREST", 0.38), ("DIVIDEND", 1.25)]
-    assert result.cash_balance == 154.86
+    assert rows == [("INTEREST", 0.38, "EUR"), ("DIVIDEND", 1.25, "USD")]
+    # No GBP evidence anywhere in this file -- the legacy field must not be
+    # backfilled with a mislabeled non-GBP number (the exact AC1 defect).
+    assert result.cash_balance == 0.0
+    cash_balances = CashBalancesRepository(db.make_connect(lambda: agent.db_path))
+    assert cash_balances.get(pf.id, "EUR") == (Decimal("153.61"), "2024-05-28")
+    assert cash_balances.get(pf.id, "USD") == (Decimal("154.86"), "2024-05-29")
+    assert cash_balances.get(pf.id, "GBP") is None
 
 
 def test_sipp_imports_dividend_row_that_has_symbol_but_no_quantity(
@@ -720,7 +742,10 @@ def test_sipp_issue_detail_falls_back_to_csv_row_when_reference_is_na(
 ) -> None:
     """When Reference is blank/"n/a" (common for interest/dividend rows),
     issue detail must still point at a specific row instead of a useless
-    "row n/a" repeated for every failure (#186)."""
+    "row n/a" repeated for every failure (#186). Story 1.4: an unparseable
+    monetary cell is now a ``failed_rows`` entry (AC3), not a
+    ``parse_errors`` one -- the row-label fallback this test guards applies
+    equally to that new channel."""
     csv_text = (
         "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
         "Running Balance\n"
@@ -734,10 +759,10 @@ def test_sipp_issue_detail_falls_back_to_csv_row_when_reference_is_na(
 
     result = agent.import_sipp(csv_path.read_bytes())
 
-    assert len(result.parse_errors) == 1
+    assert len(result.failed_rows) == 1
     # Row 1 is the header, so the first data row is CSV row 2.
-    assert "CSV row 2" in result.parse_errors[0]
-    assert "n/a" not in result.parse_errors[0].split(":")[0]
+    assert "CSV row 2" in result.failed_rows[0]
+    assert "n/a" not in result.failed_rows[0].split(":")[0]
 
 
 def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
@@ -786,11 +811,11 @@ def test_sipp_total_rows_and_status_ok_when_every_row_is_accounted_for(
 def test_sipp_unparseable_cash_amount_rejects_the_whole_plan(
     tmp_path: Path,
 ) -> None:
-    """A non-trade row whose Debit/Credit is unparseable lands at amount=0
-    with no Quantity/Symbol to make it a trade -- this row cannot be safely
-    written, so under the all-or-nothing commit rule (Story 1.2, AC #2) the
-    entire plan is rejected, not silently skipped-but-still-committed
-    (#187, #210)."""
+    """A non-trade row whose Debit is unparseable cannot be safely written,
+    so under the all-or-nothing commit rule (Story 1.2, AC #2) the entire
+    plan is rejected, not silently skipped-but-still-committed (#187,
+    #210). Story 1.4, AC3: the malformed cell is now surfaced by
+    ``parse_field_money`` directly, with a stable error code."""
     csv_text = (
         "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
         "Running Balance\n"
@@ -810,7 +835,8 @@ def test_sipp_unparseable_cash_amount_rejects_the_whole_plan(
     assert result.cash_flow_count == 0
     assert result.skipped_rows == []
     assert len(result.failed_rows) == 1
-    assert "unparseable cash amount" in result.failed_rows[0]
+    assert "Debit" in result.failed_rows[0]
+    assert "malformed_locale" in result.failed_rows[0]
     assert result.status == "rejected"
 
 
@@ -920,10 +946,11 @@ def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:
 
 
 def test_sipp_reports_parse_errors(tmp_path: Path) -> None:
-    """An unparseable Price is surfaced (not silently zeroed); the resulting
-    non-positive price makes the row ``failed``, which -- under Story 1.2's
-    all-or-nothing commit rule -- rejects the whole plan, including the
-    Running Balance that row carried (#152, #210)."""
+    """An unparseable Price is surfaced (not silently zeroed) -- Story 1.4,
+    AC3 routes this directly to ``failed_rows`` (with a stable error code)
+    rather than ``parse_errors``, which -- under Story 1.2's all-or-nothing
+    commit rule -- rejects the whole plan, including the Running Balance
+    that row carried (#152, #210)."""
     csv_text = (
         "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
         "Running Balance\n"
@@ -937,7 +964,7 @@ def test_sipp_reports_parse_errors(tmp_path: Path) -> None:
 
     result = agent.import_sipp(csv_path.read_bytes())
     assert agent.get_portfolio() == []
-    assert any("Price" in e for e in result.parse_errors)
+    assert any("Price" in e and "malformed_locale" in e for e in result.failed_rows)
     assert result.buy_count == 0
     assert result.status == "rejected"
     # Nothing was applied -- not even the Running Balance that row carried.
@@ -965,6 +992,374 @@ def test_sipp_clean_import_reports_counts(tmp_path: Path) -> None:
     assert result.skipped_rows == []
     assert result.parse_errors == []
     assert result.cash_balance == 720.0
+
+
+def test_sipp_hkd_row_imports_successfully(tmp_path: Path) -> None:
+    """Story 1.4, AC2: an HKD-denominated row must import successfully
+    end-to-end (parser + row loop + DB write) -- today's ``clean_amount``
+    silently fails this exact shape to 0.0 ("HK$1,234.56" strips its "$"/
+    "," to "HK1234.56", which ``float()`` rejects, and the row silently
+    defaults to 0.0 rather than surfacing an error)."""
+    import sqlite3
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        '01/06/2024,n/a,n/a,n/a,n/a,HK dividend,n/a,n/a,"HK$1,234.56",'
+        '"HK$1,234.56"\n'
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status != "rejected"
+    conn = sqlite3.connect(agent.db_path)
+    rows = conn.execute(
+        "SELECT flow_type, amount, currency FROM cash_flows ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert rows == [("DIVIDEND", 1234.56, "HKD")]
+
+
+def test_sipp_unsupported_currency_rejects_whole_plan(tmp_path: Path) -> None:
+    """Story 1.4, AC3: an unrecognized currency marker (e.g. yen) rejects
+    its row -- and under Story 1.2's all-or-nothing commit rule, the whole
+    plan, including an otherwise well-formed row in the same file. Nothing
+    is committed, not just the one bad row."""
+    import sqlite3
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Gross interest,n/a,n/a,¥123,¥123\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,n/a,n/a,500.00,500.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "rejected"
+    assert any("unsupported_currency" in e for e in result.failed_rows)
+    conn = sqlite3.connect(agent.db_path)
+    trade_count = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    flow_count = conn.execute("SELECT COUNT(*) FROM cash_flows").fetchone()[0]
+    conn.close()
+    assert (trade_count, flow_count) == (0, 0)
+
+
+def test_sipp_contradictory_currency_rejects_whole_plan(tmp_path: Path) -> None:
+    """Story 1.4, AC3: a trade row whose Price carries a different explicit
+    currency marker than its Debit is contradictory monetary evidence --
+    the row (and therefore the whole plan) is rejected, not silently
+    resolved to one currency or the other."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B1,5,€153.61,Buy AAPL,REF-FX,$1000.00,,5000.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "rejected"
+    assert any("contradictory" in e for e in result.failed_rows)
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_eu_locale_and_parenthesized_negative_are_parsed_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """Story 1.4, AC4: the PRD's own ``1.234,56`` EU-format example commits
+    with the correct currency and signed amount. A parenthesized-negative
+    Running Balance in the same file must parse successfully (never crash
+    the plan or get silently zeroed the way today's ``clean_amount`` does,
+    which doesn't strip parens at all) even though -- per this story's
+    documented scope boundary -- a non-positive balance still doesn't win
+    the ``#158`` rank (Story 1.5 owns fixing that gate itself)."""
+    import sqlite3
+
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        '01/01/2024,n/a,n/a,n/a,n/a,EUR contribution,n/a,n/a,"€1.234,56",'
+        '"€1.234,56"\n'
+        "02/01/2024,n/a,n/a,n/a,n/a,Statement note,n/a,,,(£45.00)\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "ok"
+    assert result.failed_rows == []
+    conn = sqlite3.connect(agent.db_path)
+    rows = conn.execute(
+        "SELECT flow_type, amount, currency FROM cash_flows ORDER BY id"
+    ).fetchall()
+    conn.close()
+    assert rows == [("CONTRIBUTION", 1234.56, "EUR")]
+
+
+def test_sipp_ambiguous_single_separator_three_digits_rejects_whole_plan(
+    tmp_path: Path,
+) -> None:
+    """Story 1.4, AC4: a genuinely ambiguous single-separator-3-digit amount
+    (could be a 3dp amount or a grouped whole number, and this story's
+    supported currencies are all 2dp) is rejected rather than silently
+    guessed either way."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Gross interest,n/a,n/a,€1.234,€1.234\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "rejected"
+    assert any("ambiguous_currency" in e for e in result.failed_rows)
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_row_with_both_debit_and_credit_rejects_whole_plan(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC4: a row with both Debit and Credit populated is
+    contradictory monetary evidence -- rejected as a validation error, not
+    silently resolved by preferring Debit (today's ``"BUY" if debit > 0
+    else "SELL" if credit > 0`` always prefers Debit when both are set)."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Contradictory row,REF-DC,100.00,50.00,500.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "rejected"
+    assert any(
+        "REF-DC" in e and "both Debit" in e and "Credit" in e
+        for e in result.failed_rows
+    )
+    assert agent.get_portfolio() == []
+
+
+def test_sipp_row_with_only_debit_or_only_credit_imports_normally(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC4 (negative case): the contradiction fix must not
+    reject legitimate single-sided rows."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Withdrawal,REF-D,100.00,,400.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,REF-C,,50.00,450.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status == "ok"
+    assert result.cash_flow_count == 2
+
+
+def test_detect_reconciliation_issues_flags_a_broken_checkpoint() -> None:
+    """Story 1.5, AC5: a statement balance that doesn't reconcile against
+    the intervening cash movements is detected. Rows are given in the
+    SIPP export's reverse-chronological file order (newest first); the
+    detector walks them in true chronological order internally."""
+    rows = [
+        {
+            "Date": "03/01/2024",
+            "Reference": "R3",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "600.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R2",
+            "Debit": "",
+            "Credit": "100.00",
+            "Running Balance": "500.00",
+        },
+        {
+            "Date": "01/01/2024",
+            "Reference": "R1",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "400.00",
+        },
+    ]
+    issues = _detect_reconciliation_issues(rows)
+    assert len(issues) == 1
+    currency, date, prior, expected, actual, difference, row_ref = issues[0]
+    assert currency == "GBP"
+    assert date == "2024-01-03"
+    assert prior == 500.0
+    assert expected == 500.0
+    assert actual == 600.0
+    assert difference == 100.0
+    assert row_ref == "R3"
+
+
+def test_detect_reconciliation_issues_clean_fixture_reports_nothing() -> None:
+    """Story 1.5, AC5 (negative case): a fully-reconciling fixture (every
+    checkpoint matches prior + intervening movements) reports zero issues."""
+    rows = [
+        {
+            "Date": "03/01/2024",
+            "Reference": "R3",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "500.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R2",
+            "Debit": "",
+            "Credit": "100.00",
+            "Running Balance": "500.00",
+        },
+        {
+            "Date": "01/01/2024",
+            "Reference": "R1",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "400.00",
+        },
+    ]
+    assert _detect_reconciliation_issues(rows) == []
+
+
+def test_detect_reconciliation_issues_scoped_per_currency() -> None:
+    """A EUR checkpoint must never reconcile against GBP/USD movements --
+    each currency tracks its own independent checkpoint/movement state."""
+    rows = [
+        # Newest first (reverse-chronological), interleaving two currencies.
+        {
+            "Date": "03/01/2024",
+            "Reference": "R4",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "€300.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R3",
+            "Debit": "",
+            "Credit": "£100.00",
+            "Running Balance": "£500.00",
+        },
+        {
+            "Date": "02/01/2024",
+            "Reference": "R2",
+            "Debit": "",
+            "Credit": "€100.00",
+            "Running Balance": "€200.00",
+        },
+        {
+            "Date": "01/01/2024",
+            "Reference": "R1",
+            "Debit": "",
+            "Credit": "",
+            "Running Balance": "£400.00",
+        },
+    ]
+    # GBP: 400 -> +100 -> 500 (matches). EUR: first checkpoint 200 (no
+    # prior EUR movement in this fixture) -> +0 -> 300 (mismatch: 200 != 300).
+    issues = _detect_reconciliation_issues(rows)
+    assert len(issues) == 1
+    currency, date, prior, expected, actual, difference, row_ref = issues[0]
+    assert currency == "EUR"
+    assert row_ref == "R4"
+    assert prior == 200.0
+    assert expected == 200.0
+    assert actual == 300.0
+
+
+def test_sipp_import_persists_reconciliation_issue_end_to_end(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC5: a fixture with a deliberately broken Running Balance
+    produces one row in ``cash_reconciliation_issues`` after import,
+    retrievable via ``list_reconciliation_issues``, and the count is
+    surfaced immediately on the result."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "03/01/2024,n/a,n/a,n/a,n/a,Statement,R3,,,600.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,R2,,100.00,500.00\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Opening,R1,,,400.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+
+    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
+
+    assert result.status == "ok"
+    assert result.reconciliation_issue_count == 1
+    issues = agent.list_reconciliation_issues(pf.id)
+    assert len(issues) == 1
+    assert issues[0][7] == "R3"  # row_ref
+
+
+def test_sipp_import_clean_fixture_records_no_reconciliation_issues(
+    tmp_path: Path,
+) -> None:
+    """Story 1.5, AC5 (negative case): a fully-reconciling fixture produces
+    zero reconciliation issues."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "03/01/2024,n/a,n/a,n/a,n/a,Statement,R3,,,500.00\n"
+        "02/01/2024,n/a,n/a,n/a,n/a,Contribution,R2,,100.00,500.00\n"
+        "01/01/2024,n/a,n/a,n/a,n/a,Opening,R1,,,400.00\n"
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+
+    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
+
+    assert result.status == "ok"
+    assert result.reconciliation_issue_count == 0
+    assert agent.list_reconciliation_issues(pf.id) == []
 
 
 def test_import_sipp_never_opens_a_file_path(

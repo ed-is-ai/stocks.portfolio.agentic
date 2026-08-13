@@ -1,4 +1,4 @@
-from typing import cast
+from typing import Any, cast
 
 import pandas as pd
 
@@ -76,6 +76,12 @@ class _StubTrader:
         return []
 
     def get_cash_flows(self, portfolio_id=None, limit=200):
+        return []
+
+    def list_reconciliation_issues(self, portfolio_id=None, limit=200):
+        return []
+
+    def list_cash_balances(self, portfolio_id=None):
         return []
 
 
@@ -157,6 +163,65 @@ def test_position_without_current_value_excluded_from_value_totals(
     assert ctx["total_cost_gbp"] == 150.0
     assert ctx["total_value_gbp"] == 120.0
     assert ctx["total_pnl_gbp"] == 20.0
+
+
+def test_cash_balances_by_currency_carries_a_gbp_valuation_projection_per_row(
+    monkeypatch,
+) -> None:
+    """Story 1.6, AC3: ``portfolio_partial_context`` enumerates every
+    currency in ``cash_balances``, each paired with a GBP Valuation
+    Projection -- a non-GBP entry with an injected ``valuation_unavailable``
+    projection is present and flagged, never silently dropped from the
+    context."""
+    from decimal import Decimal
+
+    from app.services.gbp_valuation_service import GbpValuationProjection
+
+    class _TraderWithBalances(_StubTrader):
+        def list_cash_balances(self, portfolio_id=None):
+            return [
+                ("GBP", Decimal("100.00"), "2024-01-01"),
+                ("USD", Decimal("50.00"), "2024-01-02"),
+            ]
+
+    class _FakeValuation:
+        def value_in_gbp(self, money):
+            if money.currency == "GBP":
+                return GbpValuationProjection(
+                    money=money, status="valued", gbp_amount=money.amount
+                )
+            return GbpValuationProjection(
+                money=money, status="valuation_unavailable", reason="fetch_failed"
+            )
+
+    svc = PortfolioService(
+        cast(TraderService, _TraderWithBalances()),
+        cast(ExitEvaluator, _StubEvaluator()),
+        gbp_valuation=cast(Any, _FakeValuation()),
+    )
+    monkeypatch.setattr(svc, "load_analysis", lambda: [])
+    monkeypatch.setattr(
+        svc,
+        "_load_portfolio_history",
+        lambda portfolio_id=None: {
+            "labels": [],
+            "values": [],
+            "costs": [],
+            "cash_values": [],
+        },
+    )
+
+    ctx = svc.portfolio_partial_context(
+        [], gbpusd_rate=2.0, cash_balance=100.0, portfolio_id=1
+    )
+
+    entries = {e["currency"]: e for e in ctx["cash_balances_by_currency"]}
+    assert set(entries) == {"GBP", "USD"}
+    assert entries["GBP"]["amount"] == Decimal("100.00")
+    assert entries["GBP"]["projection"].status == "valued"
+    assert entries["USD"]["amount"] == Decimal("50.00")
+    assert entries["USD"]["projection"].status == "valuation_unavailable"
+    assert entries["USD"]["projection"].reason == "fetch_failed"
 
 
 def test_fetch_all_prices_assembles_results(monkeypatch) -> None:

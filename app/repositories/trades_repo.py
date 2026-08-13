@@ -24,6 +24,7 @@ def _row_to_trade(row: tuple[Any, ...]) -> Trade:
         entry_price=row[8] if len(row) > 8 else None,
         portfolio_id=row[9] if len(row) > 9 else None,
         realised_pnl_ack_at=row[10] if len(row) > 10 else None,
+        currency=row[11] if len(row) > 11 and row[11] is not None else "GBP",
     )
 
 
@@ -44,13 +45,14 @@ class TradesRepository:
         stop_loss: float | None = None,
         entry_price: float | None = None,
         portfolio_id: int | None = None,
+        currency: str = "GBP",
     ) -> int:
         """Insert a trade and return its new id."""
         with session(self._connect) as conn:
             cur = conn.execute(
                 "INSERT INTO trades (ticker, action, shares, price, date, notes,"
-                " stop_loss, entry_price, portfolio_id)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " stop_loss, entry_price, portfolio_id, currency)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ticker,
                     action,
@@ -61,6 +63,7 @@ class TradesRepository:
                     stop_loss,
                     entry_price,
                     portfolio_id,
+                    currency,
                 ),
             )
             return int(cur.lastrowid)  # type: ignore[arg-type]
@@ -77,6 +80,7 @@ class TradesRepository:
         reference: str | None = None,
         portfolio_id: int | None = None,
         idempotency_key: str | None = None,
+        currency: str = "GBP",
     ) -> SippImportRowOutcome:
         """Insert a trade with ``INSERT OR IGNORE`` on the given connection.
 
@@ -91,8 +95,8 @@ class TradesRepository:
         """
         cur = conn.execute(
             "INSERT OR IGNORE INTO trades "
-            "(ticker, action, shares, price, date, notes, reference, portfolio_id, idempotency_key) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(ticker, action, shares, price, date, notes, reference, portfolio_id, idempotency_key, currency) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ticker,
                 action,
@@ -103,6 +107,7 @@ class TradesRepository:
                 reference,
                 portfolio_id,
                 idempotency_key,
+                currency,
             ),
         )
         return "inserted" if cur.rowcount else "duplicate"
@@ -158,7 +163,7 @@ class TradesRepository:
         """Return trades newest-first, optionally filtered by ticker/portfolio."""
         base = (
             "SELECT id, ticker, action, shares, price, date, notes, stop_loss,"
-            " entry_price, portfolio_id, realised_pnl_ack_at FROM trades"
+            " entry_price, portfolio_id, realised_pnl_ack_at, currency FROM trades"
         )
         order = f"{_DATE_SORT} DESC, id DESC"
         clauses: list[str] = []
