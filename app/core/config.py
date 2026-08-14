@@ -22,6 +22,7 @@ RESULTS_DB = ROOT_DIR / "app" / "agents" / "analyst" / "results.db"
 CONGRESS_CACHE_DB = ROOT_DIR / "app" / "agents" / "scanner" / "congress_cache.db"
 BACKTEST_DB = ROOT_DIR / "data" / "backtest.db"
 HISTORICAL_PRICE_CACHE = ROOT_DIR / "data" / "historical_price_cache.db"
+BAU_RUN_ENVELOPES_DIR = ROOT_DIR / "data" / "bau_run_envelopes"
 
 # --- Pipeline artifacts ----------------------------------------------------
 # Data/artifact files are colocated with each agent's code under app/agents/.

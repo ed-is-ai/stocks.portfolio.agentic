@@ -508,6 +508,9 @@ class ScannerAgent(Agent):
     name: str = "ScannerAgent"
     source_health: dict[SourceName, SourceHealth] = {}
     progress_callback: Callable[[str, str, int | None], None] | None = None
+    bau_capture_session: Any | None = None
+    bau_capture: Any | None = None
+    bau_capture_warning: str | None = None
 
     def _report_progress(
         self, stage: str, state: str, count: int | None = None
@@ -516,6 +519,13 @@ class ScannerAgent(Agent):
             self.progress_callback(stage, state, count)
 
     def run(self, payload: Iterable[str] | None = None) -> list[StockRecord]:
+        bau_roster_tickers: tuple[str, ...] = ()
+        if self.bau_capture_session is not None:
+            try:
+                self.bau_capture_session.preload()
+                bau_roster_tickers = self.bau_capture_session.roster_tickers()
+            except Exception as exc:
+                self.bau_capture_warning = str(exc)
         ww_tickers = list(payload) if payload else load_watchlist()
         print(f"\n[Scanner] WW extraction:    {len(ww_tickers)} tickers")
 
@@ -573,6 +583,7 @@ class ScannerAgent(Agent):
             ("vcp_screener", vcp_tickers),
             ("tv_screener", tv_tickers),
             ("tv_screener_uk", uk_tickers),
+            ("bau_profile_roster", bau_roster_tickers),
         ):
             for ticker in tickers:
                 labels = sources_by_ticker.setdefault(ticker, [])
@@ -593,9 +604,18 @@ class ScannerAgent(Agent):
         )
         for r in records:
             r.source = ",".join(sources_by_ticker[r.ticker])
+        if self.bau_capture_session is not None:
+            try:
+                self.bau_capture = self.bau_capture_session.complete_capture()
+            except Exception as exc:
+                self.bau_capture_warning = str(exc)
         return records
 
     def fetch_stock_data(self, ticker: str) -> pd.DataFrame | None:
+        if self.bau_capture_session is not None:
+            captured = self.bau_capture_session.frame_for(ticker)
+            if captured is not None:
+                return captured.copy() if len(captured) >= 50 else None
         end = datetime.today()
         start = end - timedelta(days=PERIOD_DAYS + 60)
         df = yf.download(

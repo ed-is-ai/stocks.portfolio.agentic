@@ -52,7 +52,7 @@ stories:
   1-7-run-initialization-through-the-durable-job-lifecycle: { issue: 190, status: open }
   1-8-recover-and-notify-initialization-activity: { issue: 191, status: open }
   1-9-use-historical-initialization-and-coverage-in-the-web-ui: { issue: 192, status: open }
-  1-10-extend-coverage-with-eligible-bau-scanner-snapshots: { issue: 193, status: open }
+  1-10-extend-coverage-with-eligible-bau-scanner-snapshots: { issue: 193, status: done }
   2-1-author-a-strategy-against-the-versioned-protocol: { issue: 194, status: open }
   2-2-discover-strategies-and-validate-their-parameters: { issue: 195, status: open }
   2-3-bind-backtests-to-bounded-views-and-a-replay-manifest: { issue: 196, status: open }

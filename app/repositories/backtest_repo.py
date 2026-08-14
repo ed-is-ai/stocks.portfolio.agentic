@@ -51,6 +51,32 @@ from app.services.backtest.strategy_job import (
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 
+
+@dataclass(frozen=True)
+class BauPromotionDecision:
+    """Repository-owned result for a durable BAU envelope eligibility check."""
+
+    eligible: bool
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class BauRunAuthority:
+    """Durable scanner-run authority independent of presentation artifacts."""
+
+    run_id: str
+    profile_hash: str
+    snapshot_month: str
+    state: str
+    attempted_at: datetime
+    analysis_payload_digest: str | None
+    capture_digest: str | None
+    prepared_envelope_digest: str | None
+    completed_envelope_digest: str | None
+    completed_at: datetime | None
+    failure_reason: str | None
+
+
 _QUALIFICATION_SCHEMA = """
 CREATE TABLE IF NOT EXISTS historical_source_qualifications (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -363,6 +389,76 @@ BEGIN SELECT RAISE(ABORT, 'active snapshot profile must start at sequence 1'); E
 CREATE TRIGGER IF NOT EXISTS active_snapshot_profile_immutable_delete
 BEFORE DELETE ON active_snapshot_profile
 BEGIN SELECT RAISE(ABORT, 'active snapshot profile cannot be deleted'); END;
+"""
+
+_BAU_RUN_AUTHORITY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS bau_run_authority (
+    run_id TEXT PRIMARY KEY,
+    profile_hash TEXT NOT NULL CHECK(length(profile_hash) = 64),
+    snapshot_month TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('attempted', 'prepared', 'completed', 'failed')),
+    attempted_at TEXT NOT NULL,
+    analysis_payload_digest TEXT CHECK(
+        analysis_payload_digest IS NULL OR length(analysis_payload_digest) = 64
+    ),
+    capture_digest TEXT CHECK(capture_digest IS NULL OR length(capture_digest) = 64),
+    prepared_envelope_digest TEXT CHECK(
+        prepared_envelope_digest IS NULL OR length(prepared_envelope_digest) = 64
+    ),
+    completed_envelope_digest TEXT CHECK(
+        completed_envelope_digest IS NULL OR length(completed_envelope_digest) = 64
+    ),
+    completed_at TEXT,
+    failure_reason TEXT,
+    UNIQUE(profile_hash, snapshot_month),
+    CHECK(
+        (state = 'attempted'
+         AND analysis_payload_digest IS NULL
+         AND capture_digest IS NULL
+         AND prepared_envelope_digest IS NULL
+         AND completed_envelope_digest IS NULL
+         AND completed_at IS NULL)
+        OR
+        (state = 'prepared'
+         AND analysis_payload_digest IS NOT NULL
+         AND capture_digest IS NOT NULL
+         AND prepared_envelope_digest IS NOT NULL
+         AND completed_envelope_digest IS NULL
+         AND completed_at IS NULL)
+        OR
+        (state = 'completed'
+         AND analysis_payload_digest IS NOT NULL
+         AND capture_digest IS NOT NULL
+         AND prepared_envelope_digest IS NOT NULL
+         AND completed_envelope_digest IS NOT NULL
+         AND completed_at IS NOT NULL
+         AND failure_reason IS NULL)
+        OR
+        (state = 'failed' AND completed_at IS NOT NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_bau_run_authority_state
+ON bau_run_authority(state, attempted_at);
+
+CREATE TRIGGER IF NOT EXISTS bau_run_authority_identity_immutable
+BEFORE UPDATE ON bau_run_authority
+WHEN NEW.run_id != OLD.run_id
+  OR NEW.profile_hash != OLD.profile_hash
+  OR NEW.snapshot_month != OLD.snapshot_month
+  OR NEW.attempted_at != OLD.attempted_at
+BEGIN SELECT RAISE(ABORT, 'BAU run authority identity is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS bau_run_authority_legal_transition
+BEFORE UPDATE ON bau_run_authority
+WHEN NOT (
+    (OLD.state = 'attempted' AND NEW.state IN ('prepared', 'failed'))
+    OR (OLD.state = 'prepared' AND NEW.state IN ('completed', 'failed'))
+)
+BEGIN SELECT RAISE(ABORT, 'illegal BAU run authority transition'); END;
+
+CREATE TRIGGER IF NOT EXISTS bau_run_authority_immutable_delete
+BEFORE DELETE ON bau_run_authority
+BEGIN SELECT RAISE(ABORT, 'BAU run authority is immutable'); END;
 """
 
 _STRATEGY_JOB_SCHEMA = """
@@ -740,6 +836,7 @@ class BacktestRepository:
                 + _ROSTER_SCHEMA
                 + _SCAN_RECONSTRUCTION_CACHE_SCHEMA
                 + _SNAPSHOT_COVERAGE_SCHEMA
+                + _BAU_RUN_AUTHORITY_SCHEMA
                 + _STRATEGY_JOB_SCHEMA
             )
             columns = {
@@ -1676,6 +1773,372 @@ class BacktestRepository:
         self._validate_profile_authority(profile)
         return profile
 
+    def claim_bau_capture_attempt(
+        self,
+        *,
+        run_id: str,
+        profile_hash: str,
+        snapshot_month: str,
+        attempted_at: datetime,
+    ) -> bool:
+        """Claim the one permitted live capture attempt for profile/month."""
+        stamp = attempted_at.astimezone(timezone.utc).isoformat()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO bau_run_authority (
+                       run_id, profile_hash, snapshot_month, state, attempted_at
+                   ) VALUES (?, ?, ?, 'attempted', ?)""",
+                (run_id, profile_hash, snapshot_month, stamp),
+            )
+            return cursor.rowcount == 1
+
+    def prepare_bau_run_authority(
+        self,
+        *,
+        run_id: str,
+        analysis_payload_digest: str,
+        capture_digest: str,
+        prepared_envelope_digest: str,
+    ) -> BauRunAuthority:
+        """Bind a published prepared envelope to its previously claimed run."""
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._load_bau_run_authority(conn, run_id)
+            if current.state == "prepared":
+                if (
+                    current.analysis_payload_digest,
+                    current.capture_digest,
+                    current.prepared_envelope_digest,
+                ) != (
+                    analysis_payload_digest,
+                    capture_digest,
+                    prepared_envelope_digest,
+                ):
+                    raise BacktestIntegrityError(
+                        "prepared BAU run authority has conflicting content"
+                    )
+                return current
+            if current.state != "attempted":
+                raise BacktestIntegrityError("BAU run cannot be prepared")
+            conn.execute(
+                """UPDATE bau_run_authority
+                   SET state='prepared', analysis_payload_digest=?,
+                       capture_digest=?, prepared_envelope_digest=?
+                   WHERE run_id=? AND state='attempted'""",
+                (
+                    analysis_payload_digest,
+                    capture_digest,
+                    prepared_envelope_digest,
+                    run_id,
+                ),
+            )
+            return self._load_bau_run_authority(conn, run_id)
+
+    def complete_bau_run_authority(
+        self,
+        *,
+        run_id: str,
+        completed_envelope_digest: str,
+        completed_at: datetime,
+    ) -> BauRunAuthority:
+        """Record terminal scanner success after the pipeline status commits."""
+        stamp = completed_at.astimezone(timezone.utc).isoformat()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._load_bau_run_authority(conn, run_id)
+            if current.state == "completed":
+                if current.completed_envelope_digest != completed_envelope_digest:
+                    raise BacktestIntegrityError(
+                        "completed BAU run authority has conflicting content"
+                    )
+                return current
+            if current.state != "prepared":
+                raise BacktestIntegrityError("BAU run cannot be completed")
+            conn.execute(
+                """UPDATE bau_run_authority
+                   SET state='completed', completed_envelope_digest=?, completed_at=?
+                   WHERE run_id=? AND state='prepared'""",
+                (completed_envelope_digest, stamp, run_id),
+            )
+            return self._load_bau_run_authority(conn, run_id)
+
+    def fail_bau_run_authority(
+        self, *, run_id: str, completed_at: datetime, reason: str
+    ) -> BauRunAuthority:
+        """Close an attempted/prepared run without promotable authority."""
+        stamp = completed_at.astimezone(timezone.utc).isoformat()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._load_bau_run_authority(conn, run_id)
+            if current.state in {"completed", "failed"}:
+                return current
+            conn.execute(
+                """UPDATE bau_run_authority
+                   SET state='failed', completed_at=?, failure_reason=?
+                   WHERE run_id=? AND state IN ('attempted', 'prepared')""",
+                (stamp, reason[:500], run_id),
+            )
+            return self._load_bau_run_authority(conn, run_id)
+
+    def bau_run_authority(self, run_id: str) -> BauRunAuthority | None:
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT run_id, profile_hash, snapshot_month, state, attempted_at,
+                          analysis_payload_digest, capture_digest,
+                          prepared_envelope_digest, completed_envelope_digest,
+                          completed_at, failure_reason
+                   FROM bau_run_authority WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+        return None if row is None else self._bau_run_authority_from_row(row)
+
+    def unfinished_bau_run_authorities(self) -> tuple[BauRunAuthority, ...]:
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT run_id, profile_hash, snapshot_month, state, attempted_at,
+                          analysis_payload_digest, capture_digest,
+                          prepared_envelope_digest, completed_envelope_digest,
+                          completed_at, failure_reason
+                   FROM bau_run_authority
+                   WHERE state IN ('attempted', 'prepared')
+                   ORDER BY attempted_at"""
+            ).fetchall()
+        return tuple(self._bau_run_authority_from_row(row) for row in rows)
+
+    @classmethod
+    def _load_bau_run_authority(
+        cls, conn: sqlite3.Connection, run_id: str
+    ) -> BauRunAuthority:
+        row = conn.execute(
+            """SELECT run_id, profile_hash, snapshot_month, state, attempted_at,
+                      analysis_payload_digest, capture_digest,
+                      prepared_envelope_digest, completed_envelope_digest,
+                      completed_at, failure_reason
+               FROM bau_run_authority WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise BacktestIntegrityError("BAU run authority does not exist")
+        return cls._bau_run_authority_from_row(row)
+
+    @staticmethod
+    def _bau_run_authority_from_row(row) -> BauRunAuthority:
+        return BauRunAuthority(
+            run_id=str(row[0]),
+            profile_hash=str(row[1]),
+            snapshot_month=str(row[2]),
+            state=str(row[3]),
+            attempted_at=datetime.fromisoformat(str(row[4])).astimezone(timezone.utc),
+            analysis_payload_digest=None if row[5] is None else str(row[5]),
+            capture_digest=None if row[6] is None else str(row[6]),
+            prepared_envelope_digest=None if row[7] is None else str(row[7]),
+            completed_envelope_digest=None if row[8] is None else str(row[8]),
+            completed_at=(
+                None
+                if row[9] is None
+                else datetime.fromisoformat(str(row[9])).astimezone(timezone.utc)
+            ),
+            failure_reason=None if row[10] is None else str(row[10]),
+        )
+
+    def is_promotable_bau(
+        self, profile: SnapshotProfileV1, envelope: object, *, envelope_store=None
+    ) -> BauPromotionDecision:
+        """Validate a completed scanner-owned envelope before immutable commit.
+
+        This intentionally accepts the envelope rather than presentation output.
+        It is read-only: the active-profile check is repeated inside the commit
+        transaction by ``commit_bau_snapshot`` below.
+        """
+        from app.services.backtest.bau_run_envelope import BauRunEnvelopeV1
+        from app.services.backtest.reconstruction_roster import CapturedRosterV1
+
+        if not isinstance(envelope, BauRunEnvelopeV1):
+            return BauPromotionDecision(False, "BAU envelope has the wrong type")
+        if envelope_store is None:
+            return BauPromotionDecision(False, "BAU envelope authority is unavailable")
+        try:
+            if envelope_store.load(envelope.run_id) != envelope:
+                return BauPromotionDecision(False, "BAU envelope is not durably owned")
+        except Exception:
+            return BauPromotionDecision(False, "BAU envelope is not durably owned")
+        capture = envelope.capture
+        if (
+            envelope.outcome != "successful"
+            or envelope.completion_state != "completed"
+            or capture is None
+            or envelope.capture_digest != capture.capture_digest
+        ):
+            return BauPromotionDecision(False, "BAU envelope is not completed")
+        if capture.profile != profile:
+            return BauPromotionDecision(False, "BAU envelope profile is incompatible")
+        try:
+            authority = self.bau_run_authority(envelope.run_id)
+            if (
+                authority is None
+                or authority.state != "completed"
+                or authority.profile_hash != profile.profile_hash
+                or authority.snapshot_month != capture.snapshot_month
+                or authority.analysis_payload_digest != envelope.analysis_payload_digest
+                or authority.capture_digest != envelope.capture_digest
+                or authority.completed_envelope_digest != envelope.digest()
+            ):
+                return BauPromotionDecision(
+                    False, "BAU run is not durably authoritative"
+                )
+            self.validate_bau_profile_authority(profile)
+            active = self.active_snapshot_profile()
+            if active is None or active.profile_hash != profile.profile_hash:
+                return BauPromotionDecision(False, "snapshot profile is not active")
+            roster_json = self.roster_manifest_json(profile.roster_digest)
+            if roster_json is None:
+                return BauPromotionDecision(False, "snapshot roster is unavailable")
+            roster = CapturedRosterV1.from_json(profile.roster_digest, roster_json)
+            expected = tuple((item.security_id, item.mic) for item in roster.members)
+            actual = tuple((item.security_id, item.mic) for item in capture.members)
+            if actual != expected:
+                return BauPromotionDecision(False, "BAU capture roster is incomplete")
+            roster_by_id = {item.security_id: item for item in roster.members}
+            calendar = TradingCalendar()
+            roster_payload = json.loads(roster.canonical_manifest_json)
+            alias_revision = str(roster_payload["alias_revision"])
+            sessions = {
+                mic: calendar.last_session_of_month(mic, capture.snapshot_month)
+                for mic in {member.mic for member in capture.members}
+            }
+            first_eligible = max(
+                tuple(
+                    stamp.date()
+                    for stamp in calendar._calendar(mic).sessions_window(session, 2)
+                )[1]
+                for mic, session in sessions.items()
+            )
+            if (
+                capture.roster_captured_at > capture.captured_at
+                or capture.captured_at.date() != first_eligible
+            ):
+                return BauPromotionDecision(False, "BAU capture window is incompatible")
+            from importlib.metadata import version
+
+            from app.services.backtest.detectors import DETECTOR_REGISTRY
+            from app.services.backtest.historical_price_evidence import (
+                HistoricalEvidenceRequest,
+                request_contract,
+            )
+            from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
+            from app.services.backtest.snapshot_profile import FULL_HISTORY_START
+            from app.services.backtest.source_manifest import detector_source_manifests
+
+            runtime_manifests = detector_source_manifests(_PROJECT_ROOT)
+            runtime_detectors = {
+                item.detector_id: (
+                    item.detector_api_version,
+                    runtime_manifests[item.detector_id].digest,
+                    dict(item.configuration),
+                )
+                for item in DETECTOR_REGISTRY
+            }
+            end_year, end_month = (
+                int(part) for part in capture.snapshot_month.split("-")
+            )
+            expected_end = date(end_year + (end_month == 12), end_month % 12 + 1, 1)
+            for member in capture.members:
+                manifest = member.input_manifest
+                raw = member.raw_evidence
+                roster_member = roster_by_id[member.security_id]
+                expected_session = calendar.last_session_of_month(
+                    member.mic, capture.snapshot_month
+                )
+                evidence_sessions = tuple(
+                    date.fromisoformat(str(row["session"])) for row in raw.rows
+                )
+                expected_timezone = (
+                    "Europe/London" if member.mic == "XLON" else "America/New_York"
+                )
+                expected_scale = "0.01" if roster_member.quote_unit == "GBp" else "1"
+                expected_request = request_contract(
+                    HistoricalEvidenceRequest(
+                        security_id=member.security_id,
+                        alias_revision=alias_revision,
+                        symbol=roster_member.provider_symbol,
+                        start=FULL_HISTORY_START,
+                        end=expected_end,
+                        expected_currency=roster_member.currency,
+                        expected_quote_unit=roster_member.quote_unit,
+                        expected_timezone=expected_timezone,
+                        expected_sessions=(),
+                        allowed_observed_symbols=(roster_member.provider_symbol,),
+                        allow_missing_prefix=True,
+                    )
+                )
+                actual_detectors = {
+                    item.detector_id: (
+                        item.detector_api_version,
+                        item.detector_version,
+                        dict(item.configuration),
+                    )
+                    for item in manifest.detectors
+                }
+                if (
+                    member.canonical_session != expected_session
+                    or member.source_cutoff != expected_session
+                    or not evidence_sessions
+                    or evidence_sessions[-1] != expected_session
+                    or any(item > member.source_cutoff for item in evidence_sessions)
+                    or raw.requested_symbol != roster_member.provider_symbol
+                    or raw.observed_symbol != roster_member.provider_symbol
+                    or raw.alias_revision != member.alias_revision
+                    or member.alias_revision != alias_revision
+                    or raw.provider != "yfinance"
+                    or raw.provider_version != version("yfinance")
+                    or raw.currency != roster_member.currency
+                    or raw.quote_unit != roster_member.quote_unit
+                    or raw.quote_unit_scale != expected_scale
+                    or raw.exchange_timezone != expected_timezone
+                    or raw.start != FULL_HISTORY_START
+                    or raw.end != expected_end
+                    or dict(raw.request_contract) != expected_request
+                    or raw.request_contract_version
+                    != profile.yfinance_request_contract_version
+                    or raw.acquired_at
+                    <= calendar.session_close(
+                        member.mic, expected_session
+                    ).to_pydatetime()
+                    or raw.acquired_at.date() != first_eligible
+                    or raw.acquired_at > capture.captured_at
+                    or manifest.roster_digest != profile.roster_digest
+                    or manifest.snapshot_month != capture.snapshot_month
+                    or manifest.as_of_session_date != member.canonical_session
+                    or manifest.calendar_dataset_version
+                    != profile.calendar_dataset_version
+                    or manifest.calendar_dataset_digest
+                    != profile.calendar_dataset_digest
+                    or manifest.yfinance_ingestion_version
+                    != profile.yfinance_ingestion_version
+                    or manifest.provider_request_contract_version
+                    != profile.yfinance_request_contract_version
+                    or manifest.provider_data_revision != raw.data_revision
+                    or manifest.provider_evidence_manifest_digest != raw.data_revision
+                    or manifest.evidence_start != raw.start
+                    or manifest.evidence_end != raw.end
+                    or manifest.market_plane_policy_version
+                    != PRICE_VOLUME_PLANE_VERSION
+                    or manifest.market_plane_policy_version
+                    != profile.market_plane_policy_version
+                    or manifest.record_schema_version != profile.record_schema_version
+                    or manifest.reconstructability_policy_version
+                    != profile.reconstructability_policy_version
+                    or manifest.detector_versions != profile.detector_versions
+                    or actual_detectors != runtime_detectors
+                ):
+                    return BauPromotionDecision(
+                        False, "BAU capture authority facts are incompatible"
+                    )
+        except Exception:
+            return BauPromotionDecision(False, "BAU capture authority is invalid")
+        return BauPromotionDecision(True)
+
     @classmethod
     def _validated_profile_row(
         cls, profile_hash: str, row: sqlite3.Row | tuple[object, ...]
@@ -1758,12 +2221,37 @@ class BacktestRepository:
                 "snapshot profile detector manifests do not match the runtime authority"
             )
 
+    @classmethod
+    def validate_bau_profile_authority(cls, profile: SnapshotProfileV1) -> None:
+        """Require the active profile to match every BAU capture runtime policy."""
+        from app.services.backtest.historical_data_qualification import (
+            REQUEST_CONTRACT_VERSION,
+        )
+        from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
+        from app.services.backtest.source_manifest import (
+            yfinance_ingestion_source_manifest,
+        )
+
+        cls._validate_profile_authority(profile)
+        if (
+            profile.yfinance_request_contract_version != REQUEST_CONTRACT_VERSION
+            or profile.yfinance_ingestion_version
+            != yfinance_ingestion_source_manifest(_PROJECT_ROOT).digest
+            or profile.market_plane_policy_version != PRICE_VOLUME_PLANE_VERSION
+            or profile.record_schema_version != "historical_scan_record.v1"
+            or profile.reconstructability_policy_version != "reconstructability.v1"
+        ):
+            raise BacktestIntegrityError(
+                "snapshot profile source policies do not match BAU runtime authority"
+            )
+
     def commit_snapshot_month(
         self,
         commit: MonthlySnapshotCommitV1,
         evidence_verifier: HistoricalEvidenceVerifier,
         *,
         job_claim: tuple[str, str] | None = None,
+        require_active_profile: bool = False,
     ) -> SnapshotMonthManifestV1:
         """Atomically compare-and-insert one complete Ready snapshot month."""
         try:
@@ -1792,6 +2280,13 @@ class BacktestRepository:
                         raise StrategyJobConflict(
                             "snapshot publisher no longer owns the job"
                         )
+                if require_active_profile:
+                    active = conn.execute(
+                        "SELECT profile_hash FROM active_snapshot_profile "
+                        "WHERE singleton_id=1"
+                    ).fetchone()
+                    if active is None or str(active[0]) != canonical.profile_hash:
+                        raise BacktestIntegrityError("snapshot profile is not active")
                 self._validate_snapshot_roster(conn, canonical)
                 self._insert_profile_on_connection(conn, canonical.profile)
                 existing = conn.execute(
@@ -1809,8 +2304,8 @@ class BacktestRepository:
                             "stored snapshot month manifest is invalid"
                         ) from exc
                     if (
-                        existing_manifest.content_digest
-                        != canonical.manifest.content_digest
+                        existing_manifest.semantic_content_digest
+                        != canonical.manifest.semantic_content_digest
                     ):
                         raise BacktestIntegrityError(
                             "immutable snapshot month has conflicting content"
@@ -2051,7 +2546,10 @@ class BacktestRepository:
                 "stored snapshot month manifest is invalid"
             ) from exc
         if allow_audit_metadata_difference:
-            if stored_manifest.content_digest != commit.manifest.content_digest:
+            if (
+                stored_manifest.semantic_content_digest
+                != commit.manifest.semantic_content_digest
+            ):
                 raise BacktestIntegrityError("stored snapshot month content is invalid")
         elif stored_manifest != commit.manifest:
             raise BacktestIntegrityError("stored snapshot month manifest is invalid")
@@ -2098,6 +2596,23 @@ class BacktestRepository:
             return self._load_verified_snapshot_month(
                 conn, profile_hash, snapshot_month
             )
+
+    def snapshot_member_revisions(
+        self, profile_hash: str, snapshot_month: str
+    ) -> tuple[tuple[str, str], ...]:
+        """Return immutable winner evidence IDs only after full month validation."""
+        with session(self._connect) as conn:
+            if (
+                self._load_verified_snapshot_month(conn, profile_hash, snapshot_month)
+                is None
+            ):
+                raise BacktestIntegrityError("snapshot month does not exist")
+            rows = conn.execute(
+                """SELECT security_id, provider_data_revision FROM snapshot_members
+                   WHERE profile_hash=? AND snapshot_month=? ORDER BY security_id""",
+                (profile_hash, snapshot_month),
+            ).fetchall()
+        return tuple((str(row[0]), str(row[1])) for row in rows)
 
     def _load_verified_snapshot_month(
         self,

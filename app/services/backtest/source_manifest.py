@@ -41,6 +41,7 @@ _COMMON_ALLOWLIST = (
     "app/services/backtest/source_manifest.py",
     "app/services/backtest/historical_scan_record.py",
     "app/services/backtest/historical_scan_reconstruction.py",
+    "app/services/backtest/observed_bau_record_builder.py",
     "app/services/backtest/detectors.py",
 )
 _DETECTOR_ALLOWLISTS: dict[str, tuple[str, ...]] = {
@@ -58,9 +59,12 @@ _DETECTOR_ALLOWLISTS: dict[str, tuple[str, ...]] = {
     ),
 }
 _YFINANCE_INGESTION_ALLOWLIST = (
+    "app/agents/scanner/scanner_agent.py",
     "app/services/backtest/canonical_manifest.py",
     "app/services/backtest/historical_data_qualification.py",
     "app/services/backtest/historical_price_evidence.py",
+    "app/services/backtest/bau_capture_coordinator.py",
+    "app/services/backtest/bau_run_envelope.py",
     "app/services/backtest/source_manifest.py",
 )
 

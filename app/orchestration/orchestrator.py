@@ -72,6 +72,9 @@ from app.schemas import StockRecord
 from app.core.config import (
     ANALYSIS_JSON,
     ANALYSIS_XLSX,
+    BACKTEST_DB,
+    BAU_RUN_ENVELOPES_DIR,
+    HISTORICAL_PRICE_CACHE,
     PIPELINE_RUN_TIMEOUT_SECONDS,
     PIPELINE_RUNS_CSV,
     PIPELINE_STALE_GRACE_SECONDS,
@@ -79,6 +82,9 @@ from app.core.config import (
     PORTFOLIO_VALUE_CSV,
     SCAN_RESULTS_JSON,
 )
+from app.repositories import db
+from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.notifications_repo import build_notifications_repository
 from app.repositories.pipeline_status_repo import (
     PipelineRunActiveError,
@@ -86,6 +92,10 @@ from app.repositories.pipeline_status_repo import (
     PipelineStatusRepository,
 )
 from app.schemas.analysis_artifact import build_analysis_payload
+from app.services.backtest.bau_capture_coordinator import BauCaptureCoordinator
+from app.services.backtest.bau_run_envelope import BauRunEnvelopeStore, BauRunEnvelopeV1
+from app.services.backtest.bau_snapshot_promotion import BauSnapshotPromotionService
+from app.services.backtest.canonical_manifest import manifest_digest
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
 from app.schemas.source_health import (
@@ -118,6 +128,7 @@ _RUN_LOG_FIELDS = [
 _SOURCE_COMMENTS: dict[str, str] = {
     "ww_extraction": "WhaleWisdom heat map – institutional filer top holdings",
     "vcp_screener": "Minervini pure VCP setup – S&P 500 screened via FMP API",
+    "bau_profile_roster": "Eligible month-end immutable Strategy Manager roster",
     "tv_screener": "TradingView screener – Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
     "tv_screener_uk": "TradingView screener – LSE Stage 2 pre-filter (price>SMA200, SMA50>SMA150, within 35% of 52w high)",
 }
@@ -260,6 +271,25 @@ def _emit_run_notifications(
             )
     except Exception as error:  # pragma: no cover - defensive
         print(f"[notify] run notification error: {error}")
+
+
+def _emit_bau_notification(
+    *, run_id: str, severity: NotificationSeverity, title: str, body: str
+) -> None:
+    """Surface optional BAU capture/promotion outcomes without affecting BAU."""
+    try:
+        build_notifications_repository().record(
+            NotificationCategory.BACKTEST,
+            "bau_snapshot_warning"
+            if severity is not NotificationSeverity.INFO
+            else "bau_snapshot_ready",
+            title,
+            severity=severity,
+            body=body,
+            run_id=run_id,
+        )
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"[notify] BAU notification error: {error}")
 
 
 def _cached_extraction_health(
@@ -760,6 +790,76 @@ def is_market_hours() -> bool:
     return open_mins <= current_mins <= close_mins
 
 
+def _recover_bau_run_authority(
+    backtest: BacktestRepository,
+    store: BauRunEnvelopeStore,
+    status_repo: PipelineStatusRepository,
+) -> tuple[str, ...]:
+    """Reconcile journaled attempts from durable terminal pipeline status."""
+    recovered: list[str] = []
+    failures: list[str] = []
+    # Loading first converts an expired active lease into a durable failed run.
+    status_repo.load()
+    for authority in backtest.unfinished_bau_run_authorities():
+        try:
+            status = status_repo.find_run(authority.run_id)
+            if status is None or status.state in {
+                PipelineState.IDLE,
+                PipelineState.RUNNING,
+            }:
+                continue
+            completed_at = status.completed_at or datetime.now(timezone.utc)
+            if (
+                authority.state == "prepared"
+                and status.state is PipelineState.COMPLETE
+                and status.analysis_artifact_produced
+            ):
+                envelope = store.load(authority.run_id)
+                if (
+                    envelope.analysis_payload_digest
+                    != authority.analysis_payload_digest
+                    or envelope.capture_digest != authority.capture_digest
+                    or (
+                        envelope.completion_state == "prepared"
+                        and envelope.digest() != authority.prepared_envelope_digest
+                    )
+                ):
+                    raise RuntimeError(
+                        "journaled BAU envelope authority does not match"
+                    )
+                if envelope.completion_state == "prepared":
+                    envelope = store.complete(
+                        authority.run_id, completed_at=completed_at
+                    )
+                if envelope.completion_state != "completed":
+                    raise RuntimeError("successful BAU run has no completed envelope")
+                backtest.complete_bau_run_authority(
+                    run_id=authority.run_id,
+                    completed_envelope_digest=envelope.digest(),
+                    completed_at=completed_at,
+                )
+                recovered.append(authority.run_id)
+                continue
+            if authority.state == "prepared":
+                try:
+                    store.fail(authority.run_id, completed_at=completed_at)
+                except Exception:
+                    pass
+            backtest.fail_bau_run_authority(
+                run_id=authority.run_id,
+                completed_at=completed_at,
+                reason=f"pipeline ended as {status.state.value}",
+            )
+        except Exception as exc:
+            failures.append(f"{authority.run_id}: {exc}")
+    if failures:
+        raise RuntimeError(
+            "BAU authority recovery failures after processing all runs: "
+            + "; ".join(failures)
+        )
+    return tuple(recovered)
+
+
 def pipeline(force: bool = False, extract: bool = False) -> bool:
     start_dt = datetime.now(timezone.utc)
     status_repo = PipelineStatusRepository(
@@ -770,6 +870,20 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
     )
     requested_run_id = os.getenv("PIPELINE_RUN_ID")
     run_id = requested_run_id or str(uuid4())
+    bau_store = BauRunEnvelopeStore(BAU_RUN_ENVELOPES_DIR)
+    bau_backtest: BacktestRepository | None = None
+    try:
+        bau_backtest = BacktestRepository(db.make_connect(lambda: str(BACKTEST_DB)))
+        bau_backtest.ensure_schema()
+        _recover_bau_run_authority(bau_backtest, bau_store, status_repo)
+    except Exception as exc:
+        print(f"[BAU envelope recovery warning] {exc}")
+        _emit_bau_notification(
+            run_id=run_id,
+            severity=NotificationSeverity.WARNING,
+            title="Historical BAU envelope recovery needs attention",
+            body=str(exc),
+        )
     try:
         status_repo.start(
             run_id=run_id,
@@ -815,6 +929,8 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
     terminal_state = PipelineState.FAILED
     temporary_artifacts: list[Path] = []
     last_analysis_update = 0.0
+    bau_capture = None
+    bau_prepared = False
 
     def report_scanner(stage_name: str, state_name: str, count: int | None) -> None:
         stage = PipelineStage(stage_name)
@@ -898,7 +1014,30 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         if not extract:
             source_health.update(_cached_extraction_health(source_map))
 
-        scanner = ScannerAgent(name="ScannerAgent", progress_callback=report_scanner)
+        bau_session = None
+        try:
+            if bau_backtest is None:
+                bau_backtest = BacktestRepository(
+                    db.make_connect(lambda: str(BACKTEST_DB))
+                )
+                bau_backtest.ensure_schema()
+            bau_session = BauCaptureCoordinator(
+                backtest_repository=bau_backtest,
+                envelope_directory=BAU_RUN_ENVELOPES_DIR,
+            ).prepare_for_run(run_id)
+        except Exception as exc:
+            print(f"[BAU capture warning] {exc}")
+            _emit_bau_notification(
+                run_id=run_id,
+                severity=NotificationSeverity.WARNING,
+                title="Historical BAU capture skipped",
+                body=str(exc),
+            )
+        scanner = ScannerAgent(
+            name="ScannerAgent",
+            progress_callback=report_scanner,
+            bau_capture_session=bau_session,
+        )
         analyst = AnalystAgent(progress_callback=report_analysis)
         alerter = AlertAgent(name="AlertAgent")
         # Inject the agents so the same alerter is reused below for portfolio
@@ -911,6 +1050,15 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         scanned = len(scan_results)
         analysed = len(analysis_results)
         source_health.update(scanner.source_health)
+        bau_capture = scanner.bau_capture
+        if scanner.bau_capture_warning:
+            print(f"[BAU capture warning] {scanner.bau_capture_warning}")
+            _emit_bau_notification(
+                run_id=run_id,
+                severity=NotificationSeverity.WARNING,
+                title="Historical BAU capture skipped",
+                body=scanner.bau_capture_warning,
+            )
         for source in SourceName:
             source_health.setdefault(
                 source,
@@ -1119,6 +1267,53 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
         )
         with open(analysis_temporary, "w", encoding="utf-8") as stream:
             json.dump(analysis_payload, stream, indent=2)
+        candidate_terminal_state = derive_pipeline_outcome(
+            source_health,
+            analysed=analysed,
+            artifact_produced=True,
+        )
+        if (
+            bau_capture is not None
+            and candidate_terminal_state is PipelineState.COMPLETE
+        ):
+            try:
+                prepared_at = datetime.now(timezone.utc)
+                prepared_envelope = BauRunEnvelopeV1(
+                    run_id=run_id,
+                    outcome="pending",
+                    analysis_payload_digest=manifest_digest(analysis_payload),
+                    prepared_at=prepared_at,
+                    completion_state="prepared",
+                    capture=bau_capture,
+                    capture_digest=bau_capture.capture_digest,
+                )
+                bau_store.prepare(prepared_envelope)
+                if bau_backtest is None:
+                    raise RuntimeError("BAU run authority repository is unavailable")
+                bau_backtest.prepare_bau_run_authority(
+                    run_id=run_id,
+                    analysis_payload_digest=prepared_envelope.analysis_payload_digest,
+                    capture_digest=bau_capture.capture_digest,
+                    prepared_envelope_digest=prepared_envelope.digest(),
+                )
+                bau_prepared = True
+            except Exception as exc:
+                if bau_backtest is not None:
+                    try:
+                        bau_backtest.fail_bau_run_authority(
+                            run_id=run_id,
+                            completed_at=datetime.now(timezone.utc),
+                            reason="BAU envelope preparation failed",
+                        )
+                    except Exception:
+                        pass
+                print(f"[BAU envelope warning] {exc}")
+                _emit_bau_notification(
+                    run_id=run_id,
+                    severity=NotificationSeverity.WARNING,
+                    title="Historical BAU envelope could not be prepared",
+                    body=str(exc),
+                )
 
         if new:
             print(f"      New tickers this run:     {len(new)}")
@@ -1141,11 +1336,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             StageState.COMPLETE,
             expected_run_id=run_id,
         )
-        terminal_state = derive_pipeline_outcome(
-            source_health,
-            analysed=analysed,
-            artifact_produced=True,
-        )
+        terminal_state = candidate_terminal_state
         status_repo.finish(
             terminal_state,
             expected_run_id=run_id,
@@ -1154,6 +1345,82 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             actionable=buy_alerts + sell_alerts,
             artifact_produced=True,
         )
+        if bau_prepared:
+            try:
+                if terminal_state is PipelineState.COMPLETE:
+                    completed_at = datetime.now(timezone.utc)
+                    completed_envelope = bau_store.complete(
+                        run_id, completed_at=completed_at
+                    )
+                    if bau_backtest is None:
+                        raise RuntimeError(
+                            "BAU run authority repository is unavailable"
+                        )
+                    bau_backtest.complete_bau_run_authority(
+                        run_id=run_id,
+                        completed_envelope_digest=completed_envelope.digest(),
+                        completed_at=completed_at,
+                    )
+                else:
+                    completed_at = datetime.now(timezone.utc)
+                    bau_store.fail(run_id, completed_at=completed_at)
+                    if bau_backtest is not None:
+                        bau_backtest.fail_bau_run_authority(
+                            run_id=run_id,
+                            completed_at=completed_at,
+                            reason=f"pipeline ended as {terminal_state.value}",
+                        )
+            except Exception as exc:
+                print(f"[BAU envelope warning] {exc}")
+                _emit_bau_notification(
+                    run_id=run_id,
+                    severity=NotificationSeverity.WARNING,
+                    title="Historical BAU envelope needs recovery",
+                    body=str(exc),
+                )
+        elif bau_backtest is not None:
+            try:
+                authority = bau_backtest.bau_run_authority(run_id)
+                if authority is not None and authority.state == "attempted":
+                    bau_backtest.fail_bau_run_authority(
+                        run_id=run_id,
+                        completed_at=datetime.now(timezone.utc),
+                        reason=(
+                            "eligible BAU capture did not produce a complete envelope"
+                        ),
+                    )
+            except Exception as exc:
+                print(f"[BAU envelope warning] {exc}")
+                _emit_bau_notification(
+                    run_id=run_id,
+                    severity=NotificationSeverity.WARNING,
+                    title="Historical BAU attempt could not be closed",
+                    body=str(exc),
+                )
+        try:
+            if bau_backtest is None:
+                bau_backtest = BacktestRepository(
+                    db.make_connect(lambda: str(BACKTEST_DB))
+                )
+                bau_backtest.ensure_schema()
+            bau_prices = HistoricalPriceRepository(
+                db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
+            )
+            bau_prices.ensure_schema()
+            promotion = BauSnapshotPromotionService(
+                backtest_repository=bau_backtest,
+                price_repository=bau_prices,
+                envelope_directory=BAU_RUN_ENVELOPES_DIR,
+            )
+            promotion.replay_completed_envelopes()
+        except Exception as exc:
+            print(f"[BAU promotion warning] {exc}")
+            _emit_bau_notification(
+                run_id=run_id,
+                severity=NotificationSeverity.WARNING,
+                title="Historical BAU promotion needs attention",
+                body=str(exc),
+            )
         print(f"\nPipeline {terminal_state.value}.")
 
     except Exception as error:
@@ -1167,6 +1434,22 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             actionable=buy_alerts + sell_alerts,
             error_summary=str(error),
         )
+        if bau_backtest is not None:
+            try:
+                authority = bau_backtest.bau_run_authority(run_id)
+                if authority is not None and authority.state == "prepared":
+                    bau_store.fail(run_id, completed_at=datetime.now(timezone.utc))
+                if authority is not None and authority.state in {
+                    "attempted",
+                    "prepared",
+                }:
+                    bau_backtest.fail_bau_run_authority(
+                        run_id=run_id,
+                        completed_at=datetime.now(timezone.utc),
+                        reason="pipeline failed",
+                    )
+            except Exception as exc:
+                print(f"[BAU envelope failure warning] {exc}")
         print(f"\n[ERROR] Pipeline failed:\n{errors[-1]}")
 
     finally:

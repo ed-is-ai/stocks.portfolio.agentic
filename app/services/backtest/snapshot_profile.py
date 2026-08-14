@@ -391,6 +391,25 @@ class SnapshotMonthManifestV1(CanonicalModel):
             raise ValueError("observed BAU month requires source evidence")
         return self
 
+    @property
+    def semantic_content_digest(self) -> str:
+        """Content identity excluding run/time audit metadata."""
+        return manifest_digest(
+            {
+                "schema_version": "snapshot_month_semantic_content.v1",
+                "profile_hash": self.profile_hash,
+                "snapshot_month": self.snapshot_month,
+                "provenance_quality": self.provenance_quality,
+                "roster_digest": self.roster_digest,
+                "expected_digest": self.expected_digest,
+                "input_revision_digest": self.input_revision_digest,
+                "result_digest": self.result_digest,
+                "expected_count": self.expected_count,
+                "valid_count": self.valid_count,
+                "excluded_count": self.excluded_count,
+            }
+        )
+
 
 class MonthlySnapshotCommitV1(CanonicalModel):
     schema_version: Literal["monthly_snapshot_commit.v1"]

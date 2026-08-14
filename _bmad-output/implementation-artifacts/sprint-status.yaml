@@ -1,5 +1,5 @@
 # generated: 2026-08-10
-# last_updated: 2026-08-11
+# last_updated: 2026-08-14
 # project: Agents.stocks
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: 2026-08-13 (Story 1.9 ready for review)
+last_updated: 2026-08-14 (Story 1.10 implementation and review complete)
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -57,8 +57,8 @@ development_status:
   1-6-commit-versioned-monthly-snapshot-coverage: done
   1-7-run-initialization-through-the-durable-job-lifecycle: done
   1-8-recover-and-notify-initialization-activity: done
-  1-9-use-historical-initialization-and-coverage-in-the-web-ui: review
-  1-10-extend-coverage-with-eligible-bau-scanner-snapshots: backlog
+  1-9-use-historical-initialization-and-coverage-in-the-web-ui: done
+  1-10-extend-coverage-with-eligible-bau-scanner-snapshots: done
   epic-1-retrospective: optional
   epic-2: backlog
   2-1-author-a-strategy-against-the-versioned-protocol: backlog
