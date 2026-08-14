@@ -223,6 +223,7 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
         "entry_price REAL",
         "reference TEXT",
         "realised_pnl_ack_at TEXT",
+        "source_row_index INTEGER",
     ):
         try:
             conn.execute(f"ALTER TABLE trades ADD COLUMN {col_def}")

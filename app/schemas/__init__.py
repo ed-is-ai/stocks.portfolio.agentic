@@ -36,7 +36,12 @@ from app.schemas.pipeline_status import (
     StageState,
     StageStatus,
 )
-from app.schemas.realised_pnl import RealisedPnlSummary, RoundTrip, UnmatchedSell
+from app.schemas.realised_pnl import (
+    RealisedPnlSummary,
+    RoundTrip,
+    SkippedInvalidDateTrade,
+    UnmatchedSell,
+)
 from app.schemas.source_health import (
     SourceHealth,
     SourceName,
@@ -66,6 +71,7 @@ __all__ = [
     "SectorAllocationSnapshot",
     "SectorDelta",
     "SectorShare",
+    "SkippedInvalidDateTrade",
     "StockAnalysis",
     "StockRecord",
     "StockScan",

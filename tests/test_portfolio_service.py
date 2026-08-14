@@ -520,3 +520,88 @@ def test_ticker_currency_resolves_usd_and_gbp_and_defaults_on_failure(
     assert svc.ticker_currency("AAPL") == "USD"
     assert svc.ticker_currency("VOD.L") == "GBP"
     assert svc.ticker_currency("BROKEN") == "GBP"
+
+
+def test_ticker_currency_resolves_canonical_ticker_fed_back(monkeypatch) -> None:
+    """Story 2.1: a canonical ticker (as ``get_portfolio()`` now returns --
+    here, an alias's chain terminal value) must resolve to the correct
+    yfinance symbol via an explicit multi-hop walk, not rely on the
+    coincidence that a one-hop ``aliases.get`` happens to pass it through
+    unchanged."""
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    monkeypatch.setattr(svc, "load_ticker_aliases", lambda: {"FUND_A": "0PXXXXXXXXX.L"})
+    calls: list[str] = []
+
+    def fake_ticker(symbol: str):
+        calls.append(symbol)
+        return _FakeTicker("USD")
+
+    monkeypatch.setattr("yfinance.Ticker", fake_ticker)
+
+    assert svc.ticker_currency("0PXXXXXXXXX.L") == "USD"
+    assert calls == ["0PXXXXXXXXX.L"]
+
+
+def test_ticker_currency_resolves_hsfwa_through_configured_alias(monkeypatch) -> None:
+    """Story 2.1: unlike every identity call site, HSFWA's own alias entry
+    must redirect *price/currency lookup* -- ``protect_hsfwa=False`` is
+    actually wired through ``ticker_currency``."""
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    monkeypatch.setattr(svc, "load_ticker_aliases", lambda: {"HSFWA": "REAL.L"})
+    calls: list[str] = []
+
+    def fake_ticker(symbol: str):
+        calls.append(symbol)
+        return _FakeTicker("GBP")
+
+    monkeypatch.setattr("yfinance.Ticker", fake_ticker)
+
+    assert svc.ticker_currency("HSFWA") == "GBP"
+    assert calls == ["REAL.L"]
+
+
+def test_fetch_all_prices_resolves_chained_alias(monkeypatch) -> None:
+    """Story 2.1: ``_resolve`` walks a multi-hop chain to its terminal
+    value, matching what ``canonical_ticker`` would produce directly."""
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    calls: list[str] = []
+
+    def fake_fetch(yf_sym, gbpusd):
+        calls.append(yf_sym)
+        if yf_sym == "ABC-YAHOO":
+            return (12.0, 12.0, "GBP")
+        return None
+
+    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    aliases = {"ABC.L": "ABC", "ABC": "ABC-YAHOO"}
+    prices, display = svc.fetch_all_prices(["ABC.L"], aliases, 1.35)
+
+    assert prices == {"ABC.L": 12.0}
+    assert calls == ["ABC-YAHOO"]
+
+
+def test_fetch_all_prices_resolves_hsfwa_through_configured_alias(monkeypatch) -> None:
+    """Story 2.1: HSFWA's price lookup resolves through its own configured
+    alias, unlike every identity call site (which must leave it untouched)."""
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    calls: list[str] = []
+
+    def fake_fetch(yf_sym, gbpusd):
+        calls.append(yf_sym)
+        if yf_sym == "REAL.L":
+            return (5.0, 5.0, "GBP")
+        return None
+
+    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    prices, display = svc.fetch_all_prices(["HSFWA"], {"HSFWA": "REAL.L"}, 1.35)
+
+    assert prices == {"HSFWA": 5.0}
+    assert calls == ["REAL.L"]

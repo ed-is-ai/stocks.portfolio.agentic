@@ -36,6 +36,9 @@ class _StubPortfolioService:
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         return {}
 
+    def load_ticker_aliases(self) -> dict[str, str]:
+        return {}
+
 
 def _make_service_with_agent(
     tmp_path: Path, portfolio_service: object | None = None
@@ -434,9 +437,15 @@ class _FakePortfolioService:
     ``historical_gbpusd_rates`` call's argument list so tests can assert on
     batching behaviour (AC2)."""
 
-    def __init__(self, currencies: dict[str, str], rates: dict[str, float]) -> None:
+    def __init__(
+        self,
+        currencies: dict[str, str],
+        rates: dict[str, float],
+        aliases: dict[str, str] | None = None,
+    ) -> None:
         self._currencies = currencies
         self._rates = rates
+        self._aliases = aliases or {}
         self.rate_lookup_calls: list[list[str]] = []
 
     def ticker_currency(self, ticker: str) -> str:
@@ -445,6 +454,9 @@ class _FakePortfolioService:
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         self.rate_lookup_calls.append(list(dates))
         return {d: self._rates[d] for d in dates if d in self._rates}
+
+    def load_ticker_aliases(self) -> dict[str, str]:
+        return self._aliases
 
 
 def test_gbp_ticker_round_trip_uses_rate_of_one_no_conversion(
@@ -707,6 +719,55 @@ def test_realised_pnl_service_calls_ticker_currency_not_yfinance_directly(
     assert "yfinance" not in inspect.getsource(RealisedPnlService)
 
 
+# --- Story 2.1: shared security identity for FIFO matching -----------------
+
+
+def test_fifo_cross_spelling_round_trip_matches_as_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A BUY under one raw spelling and a SELL under an alias-equivalent
+    raw spelling FIFO-match as one RoundTrip -- no UnmatchedSell."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    portfolio = _FakePortfolioService(
+        currencies={"ABC": "GBP"}, rates={}, aliases={"ABC.L": "ABC"}
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("ABC.L", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("ABC", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 1
+    assert summary.unmatched_count == 0
+    assert list(summary.round_trips) == ["ABC"]
+    rt = summary.round_trips["ABC"][0]
+    assert rt.ticker == "ABC"
+    assert rt.shares == 10
+
+
+def test_fifo_vs_avg_cost_agree_with_alias_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With an alias configured, FIFO's open-lot total and the avg-cost
+    replay's total agree -- no mismatched_tickers entry, mirroring
+    real-world behaviour where both replays read the same alias file."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    portfolio = _FakePortfolioService(
+        currencies={"ABC": "GBP"}, rates={}, aliases={"ABC.L": "ABC"}
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("ABC.L", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("ABC", 4, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.mismatched_tickers == []
+
+
 # --- Story 1.3: unmatched-sell detection -----------------------------------
 
 
@@ -929,3 +990,145 @@ def test_toggle_unmatched_sell_ack_unknown_trade_id_is_noop(tmp_path: Path) -> N
     summary = service.toggle_unmatched_sell_ack(999999, PORTFOLIO_ID)
 
     assert summary.unmatched_sells[0].acknowledged_at is None
+
+
+# --- Story 2.2: deterministic replay ordering, visible invalid dates -------
+
+_SAME_DAY_CSV_HEADER = (
+    "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+    "Running Balance\n"
+)
+
+
+def test_same_day_one_file_fifo_processes_last_listed_row_first(
+    tmp_path: Path,
+) -> None:
+    """I/O matrix: two same-ticker, same-date rows in one CSV, listed
+    [most-recent, earliest] -- FIFO replay processes the earliest
+    (last-listed) row first. A SELL is listed first (most recent) and a BUY
+    second (earliest); correct ordering replays the BUY before the SELL,
+    producing one RoundTrip and zero unmatched sells. The old
+    id/insertion-order bug would instead process the SELL first (no open
+    lot -> UnmatchedSell) and the BUY second (an open lot never sold)."""
+    service, agent = _make_service_with_agent(tmp_path)
+    csv_text = (
+        _SAME_DAY_CSV_HEADER
+        + "01/03/2024,ORDX,S001,5,150.00,Sell ORDX,REF-SELL,,750.00,5750.00\n"
+        + "01/03/2024,ORDX,S001,5,100.00,Buy ORDX,REF-BUY,500.00,,5000.00\n"
+    )
+    result = agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    assert result.status == "ok"
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 1
+    assert summary.unmatched_count == 0
+    rt = summary.round_trips["ORDX"][0]
+    assert rt.entry_price == 100.0
+    assert rt.exit_price == 150.0
+
+
+def test_same_day_cross_file_import_order_independence(tmp_path: Path) -> None:
+    """I/O matrix: the same two same-day rows, split across two files, must
+    produce a byte-for-byte identical outcome (RoundTrips/UnmatchedSells,
+    avg-cost position) regardless of which file is imported first -- each
+    file's row gets ``source_row_index == 0`` (its own 0-based position),
+    so the cross-file tie is resolved by the content-derived
+    ``idempotency_key``, never by import timing."""
+    file_buy = (
+        _SAME_DAY_CSV_HEADER
+        + "01/04/2024,ORDY,S002,5,100.00,Buy ORDY,REF-BUY,500.00,,5000.00\n"
+    )
+    file_sell = (
+        _SAME_DAY_CSV_HEADER
+        + "01/04/2024,ORDY,S002,5,150.00,Sell ORDY,REF-SELL,,750.00,5750.00\n"
+    )
+
+    dir_ab = tmp_path / "ab"
+    dir_ab.mkdir()
+    dir_ba = tmp_path / "ba"
+    dir_ba.mkdir()
+
+    service_ab, agent_ab = _make_service_with_agent(dir_ab)
+    agent_ab.import_sipp(file_buy.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    agent_ab.import_sipp(file_sell.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    summary_ab = service_ab.compute_summary(PORTFOLIO_ID)
+    portfolio_ab = agent_ab.get_portfolio(portfolio_id=PORTFOLIO_ID)
+
+    service_ba, agent_ba = _make_service_with_agent(dir_ba)
+    agent_ba.import_sipp(file_sell.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    agent_ba.import_sipp(file_buy.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    summary_ba = service_ba.compute_summary(PORTFOLIO_ID)
+    portfolio_ba = agent_ba.get_portfolio(portfolio_id=PORTFOLIO_ID)
+
+    assert summary_ab.round_trip_count == summary_ba.round_trip_count
+    assert summary_ab.unmatched_count == summary_ba.unmatched_count
+    assert summary_ab.round_trips == summary_ba.round_trips
+    assert summary_ab.unmatched_sells == summary_ba.unmatched_sells
+    assert [p.shares for p in portfolio_ab] == [p.shares for p in portfolio_ba]
+    assert [p.avg_cost for p in portfolio_ab] == [p.avg_cost for p in portfolio_ba]
+
+
+def test_fifo_invalid_date_row_retrievable_as_structured_skip_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I/O matrix: a trade row with an unparseable date is skipped from
+    FIFO replay and retrievable as structured data (trade id, ticker, raw
+    date, reason) from the returned summary -- not only a log line."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("TEST1", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("TEST1", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    real_trades = service._trader.get_trade_history(portfolio_id=PORTFOLIO_ID)
+    malformed_date_row = Trade(
+        id=9201,
+        ticker="TEST2",
+        action="BUY",
+        shares=5,
+        price=10.0,
+        date="not-a-date",
+        portfolio_id=PORTFOLIO_ID,
+    )
+    _stub_trade_history(service, monkeypatch, real_trades + [malformed_date_row])
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert len(summary.skipped_invalid_date_trades) == 1
+    skipped = summary.skipped_invalid_date_trades[0]
+    assert skipped.trade_id == 9201
+    assert skipped.ticker == "TEST2"
+    assert skipped.raw_date == "not-a-date"
+    assert skipped.reason  # non-empty, human-readable
+
+
+def test_fifo_source_row_index_null_sorts_last_in_date_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-Story-2.2 trade (``source_row_index IS NULL``) never crashes
+    the sort and is treated as the lowest possible position in its date
+    group -- a same-day trade that *does* carry a real
+    ``source_row_index`` always replays before it."""
+    service, agent = _make_service_with_agent(tmp_path)
+    real_buy = agent.record_buy(
+        "TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    assert real_buy.id is not None
+    buy_with_index = real_buy.model_copy(update={"source_row_index": 0})
+    sell_no_index = Trade(
+        id=9301,
+        ticker="TEST1",
+        action="SELL",
+        shares=5,
+        price=150.0,
+        date="2026-01-01",
+        portfolio_id=PORTFOLIO_ID,
+        source_row_index=None,
+    )
+    _stub_trade_history(service, monkeypatch, [sell_no_index, buy_with_index])
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.round_trip_count == 1
+    assert summary.unmatched_count == 0
+    rt = summary.round_trips["TEST1"][0]
+    assert rt.entry_price == 100.0
+    assert rt.exit_price == 150.0

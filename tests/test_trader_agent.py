@@ -1453,3 +1453,315 @@ def test_import_sipp_handles_bare_cr_terminated_csv(tmp_path: Path) -> None:
     assert result.buy_count == 1
     assert result.parse_errors == []
     assert result.cash_balance == 5000.0
+
+
+# --- Story 2.1: shared security identity for FIFO matching -----------------
+
+
+def _sipp_row(
+    date: str,
+    symbol: str,
+    ref: str,
+    qty: str = "10",
+    price: str = "100.00",
+    description: str = "Buy",
+    debit: str = "1000.00",
+) -> str:
+    return f"{date},{symbol},B1,{qty},{price},{description},{ref},{debit},,5000.00\n"
+
+
+_SIPP_HEADER = (
+    "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+    "Running Balance\n"
+)
+
+
+def test_correct_trade_regression_deletes_alias_equivalent_raw_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 2.1: ``correct_trade()`` (a live UI action) must actually
+    replace a position's trades when they're stored under a raw,
+    alias-equivalent spelling different from the canonical spelling the UI
+    now passes back -- the confirmed bug (silent no-op delete, double-
+    counted shares) that triggered this story's scope widening to
+    ``TradesRepository``."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    # Seed a raw, alias-equivalent trade directly -- simulates a trade
+    # imported before the alias was configured.
+    agent._trades.insert("ABC.L", "BUY", 10.0, 100.0, "2026-01-01")
+
+    agent.correct_trade("ABC", 4.0, 105.0, "2026-05-01")
+
+    history = agent.get_trade_history()
+    assert len(history) == 1
+    assert history[0].ticker == "ABC"
+    assert history[0].shares == 4.0
+
+
+def test_sipp_aliased_symbol_recorded_under_canonical_ticker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    csv_text = _SIPP_HEADER + _sipp_row("01/02/2024", "ABC.L", "REF-A")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert result.status == "ok"
+    with sqlite3.connect(agent.db_path) as conn:
+        tickers = [r[0] for r in conn.execute("SELECT ticker FROM trades").fetchall()]
+    assert tickers == ["ABC"]
+
+
+def test_sipp_ambiguous_ticker_alias_rejects_whole_plan_including_good_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two-row CSV (matching the sibling unparseable-quantity test's shape):
+    one row hits a genuine cycle, one row is otherwise valid -- proving the
+    whole plan is rejected, not just the bad row dropped."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases",
+        lambda: {"ABC.L": "ABC", "ABC": "ABC.L"},
+    )
+    csv_text = (
+        _SIPP_HEADER
+        + _sipp_row("01/02/2024", "ABC.L", "REF-BAD")
+        + _sipp_row("02/02/2024", "MSFT", "REF-OK", price="200.00")
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert agent.get_portfolio() == []
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    assert "REF-BAD" in result.failed_rows[0]
+    assert "ambiguous" in result.failed_rows[0].lower()
+    # The good MSFT row was still provisionally classified (matching the
+    # sibling unparseable-quantity test's counts) -- neither rejection
+    # branch is what's being counted here, only the surviving row is.
+    assert result.inserted_count == 1
+    assert result.duplicate_count == 0
+    assert result.total_rows == 2
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+
+
+def test_sipp_symbol_resolving_to_hsfwa_rejects_the_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 2.1, round 7: a genuine broker Symbol whose alias chain lands
+    on the reserved ``"HSFWA"`` literal must be rejected via
+    ``failed_rows``, not silently merged into the reserved HSBC GLOB
+    identity. Neither this branch nor the ambiguous-cycle branch calls
+    ``classify()``."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"XYZ": "HSFWA"}
+    )
+    csv_text = _SIPP_HEADER + _sipp_row("01/02/2024", "XYZ", "REF-BAD")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert agent.get_portfolio() == []
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    assert "HSFWA" in result.failed_rows[0]
+    assert "ambiguous" not in result.failed_rows[0].lower()
+    assert result.inserted_count == 0
+    assert result.duplicate_count == 0
+    with sqlite3.connect(agent.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
+
+
+def test_sipp_hsbc_glob_row_unaffected_by_configured_hsfwa_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HSBC GLOB rows keep the fixed literal ``"HSFWA"`` ticker -- never
+    run through canonicalization -- even with an ``"HSFWA"`` alias entry
+    configured."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"HSFWA": "REAL.L"}
+    )
+    csv_text = _SIPP_HEADER + _sipp_row(
+        "01/02/2024", "n/a", "REF-A", description="HSBC GLOB fund purchase"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert result.status == "ok"
+    with sqlite3.connect(agent.db_path) as conn:
+        tickers = [r[0] for r in conn.execute("SELECT ticker FROM trades").fetchall()]
+    assert tickers == ["HSFWA"]
+
+
+def test_replay_trades_degrades_to_raw_ticker_on_ambiguous_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Outside SIPP import, a cycle must never crash the Portfolio view --
+    log a warning and fall back to the raw ticker for that trade."""
+    import logging
+
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases",
+        lambda: {"ABC.L": "ABC", "ABC": "ABC.L"},
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("ABC.L", "BUY", 10.0, 100.0, "2026-01-01")
+
+    with caplog.at_level(logging.WARNING):
+        portfolio = agent.get_portfolio()
+
+    assert {p.ticker for p in portfolio} == {"ABC.L"}
+    assert any("ambiguous" in r.message.lower() for r in caplog.records)
+
+
+def test_replay_trades_hsfwa_unaffected_by_configured_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"HSFWA": "REAL.L"}
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("HSFWA", "BUY", 10.0, 100.0, "2026-01-01")
+
+    portfolio = agent.get_portfolio()
+
+    assert {p.ticker for p in portfolio} == {"HSFWA"}
+
+
+def test_replay_trades_cross_spelling_merges_into_one_position(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """FIFO/avg-cost identity agreement: two raw spellings of the same
+    security fold into one running position, not two."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("ABC.L", "BUY", 10.0, 100.0, "2026-01-01")
+    agent._trades.insert("ABC", "BUY", 5.0, 100.0, "2026-01-02")
+
+    portfolio = agent.get_portfolio()
+
+    assert len(portfolio) == 1
+    assert portfolio[0].ticker == "ABC"
+    assert portfolio[0].shares == 15.0
+
+
+# --- Story 2.2: deterministic replay ordering -------------------------------
+
+
+def test_import_sipp_persists_source_row_index_matching_csv_position(
+    tmp_path: Path,
+) -> None:
+    """Each inserted trade's ``source_row_index`` matches its 0-based
+    position within its own source CSV file -- the only place a row's file
+    position is known, so it must be captured at insert time."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,4000.00\n"
+        "03/02/2024,AAPL,B123,3,105.00,Sell AAPL,REF-C,,315.00,4315.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert result.status == "ok"
+    # Insertion order (ascending id) matches CSV row order exactly -- each
+    # row's persisted source_row_index must equal its own 0-based position.
+    by_insertion_order = sorted(agent._trades.history(), key=lambda t: t.id or 0)
+    assert [t.source_row_index for t in by_insertion_order] == [0, 1, 2]
+
+
+def test_replay_trades_skips_unparseable_date_row_log_only(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Average-cost replay (``_replay_trades``) skips a row with an
+    unparseable date, mirroring FIFO's existing skip (Story 2.2) --
+    log-only, no retrievable-data surface, no crash."""
+    import logging
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("GOOD", "BUY", 10.0, 100.0, "2026-01-01")
+    agent._trades.insert("BAD", "BUY", 5.0, 50.0, "not-a-date")
+
+    with caplog.at_level(logging.WARNING):
+        portfolio = agent.get_portfolio()
+
+    assert {p.ticker for p in portfolio} == {"GOOD"}
+    assert any(
+        "unparseable" in r.message.lower() and "BAD" in r.message
+        for r in caplog.records
+    )
+
+
+def test_replay_trades_null_source_row_index_does_not_crash(tmp_path: Path) -> None:
+    """A pre-Story-2.2 row (``source_row_index IS NULL``, simulated via a
+    direct insert bypassing the SIPP import) still replays without
+    crashing -- the NULL sentinel is a SQL-level ``ORDER BY`` concern
+    (``open_rows``), never a ``_replay_trades`` unpacking concern."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("TEST1", "BUY", 10.0, 100.0, "2026-01-01")
+
+    portfolio = agent.get_portfolio()
+
+    assert {p.ticker for p in portfolio} == {"TEST1"}
+
+
+def test_same_day_one_file_avg_cost_processes_last_listed_row_first(
+    tmp_path: Path,
+) -> None:
+    """I/O matrix: two same-ticker, same-date rows in one CSV, listed
+    [most-recent, earliest] -- average-cost replay processes the earliest
+    (last-listed) row first. Encoded here as a SELL listed first (most
+    recent) and a BUY listed second (earliest): correct ordering replays
+    the BUY before the SELL, fully closing the position (0 shares, filtered
+    out of the portfolio); the old id/insertion-order bug would instead
+    process the SELL first (an oversell, clamped to 0) and then the BUY,
+    leaving 5 shares open."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/03/2024,ORDX,S001,5,150.00,Sell ORDX,REF-SELL,,750.00,5750.00\n"
+        "01/03/2024,ORDX,S001,5,100.00,Buy ORDX,REF-BUY,500.00,,5000.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+    assert result.status == "ok"
+
+    portfolio = agent.get_portfolio()
+    assert all(p.ticker != "ORDX" for p in portfolio)

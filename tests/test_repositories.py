@@ -47,6 +47,118 @@ def test_trades_history_filter_and_delete(trades_connect):
     assert repo.history() == []
 
 
+def test_trades_held_tickers_canonicalizes(trades_connect, monkeypatch):
+    """Story 2.1: ``held_tickers()`` agrees with ``get_portfolio()``'s
+    canonical identity even when trades are stored under a raw,
+    alias-equivalent spelling -- the watchlist/orchestrator "held" check
+    must never disagree with the Portfolio tab's canonical display."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    assert repo.held_tickers() == {"ABC"}
+
+
+def test_trades_held_tickers_hsfwa_unaffected_by_alias(trades_connect, monkeypatch):
+    """HSFWA's identity must never be altered by alias-file contents, even
+    with a configured ``"HSFWA"`` alias entry."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"HSFWA": "REAL.L"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("HSFWA", "BUY", 10, 100.0, "01/02/2024")
+    assert repo.held_tickers() == {"HSFWA"}
+
+
+def test_trades_delete_by_ticker_matches_alias_equivalent_raw_rows(
+    trades_connect, monkeypatch
+):
+    """``correct_trade()`` regression: deleting by the canonical spelling
+    the UI now shows must delete rows stored under a raw alias-equivalent
+    spelling too -- never a silent no-op that double-counts shares."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    repo.delete_by_ticker("ABC")
+    assert repo.history() == []
+
+
+def test_trades_delete_by_ticker_alias_expansion_respects_portfolio_scope(
+    trades_connect, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024", portfolio_id=1)
+    repo.insert("ABC.L", "BUY", 5, 100.0, "01/02/2024", portfolio_id=2)
+    repo.delete_by_ticker("ABC", portfolio_id=1)
+    assert repo.history(portfolio_id=1) == []
+    assert len(repo.history(portfolio_id=2)) == 1
+
+
+def test_trades_history_filter_matches_alias_equivalent_raw_rows(
+    trades_connect, monkeypatch
+):
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    history = repo.history("ABC")
+    assert len(history) == 1
+    assert history[0].ticker == "ABC"
+
+
+def test_trades_history_canonicalizes_ticker_regardless_of_filter(
+    trades_connect, monkeypatch
+):
+    """Every returned ``Trade.ticker`` is canonicalized -- one consistent
+    display form -- whether or not a ``ticker`` filter was given."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    history = repo.history()
+    assert history[0].ticker == "ABC"
+
+
+def test_trades_delete_by_ticker_cyclic_alias_still_deletes_own_spelling(
+    trades_connect, monkeypatch
+):
+    """A cyclic (misconfigured) alias chain must not crash or silently
+    no-op ``delete_by_ticker`` -- it still deletes rows stored under the
+    exact spelling passed in, even though the cycle means no *other* raw
+    spelling can be safely assumed to be alias-equivalent."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases",
+        lambda: {"ABC.L": "ABC", "ABC": "ABC.L"},
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    repo.delete_by_ticker("ABC.L")
+    assert repo.history() == []
+
+
+def test_trades_history_cyclic_alias_degrades_to_raw_ticker(
+    trades_connect, monkeypatch
+):
+    """A cyclic alias chain degrades ``history()``'s displayed ticker to
+    its raw, unresolved spelling rather than raising."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases",
+        lambda: {"ABC.L": "ABC", "ABC": "ABC.L"},
+    )
+    repo = TradesRepository(trades_connect)
+    repo.insert("ABC.L", "BUY", 10, 100.0, "01/02/2024")
+    history = repo.history()
+    assert history[0].ticker == "ABC.L"
+
+
 def test_trades_open_rows_excludes_invalid(trades_connect):
     repo = TradesRepository(trades_connect)
     repo.insert("AAPL", "BUY", 10, 100.0, "01/02/2024")
@@ -134,6 +246,137 @@ def test_trades_set_ack_writes_and_clears(trades_connect):
 
     history = {t.id: t for t in repo.history()}
     assert history[target_id].realised_pnl_ack_at is None
+
+
+# --- Story 2.2: deterministic replay ordering -------------------------------
+
+
+def test_trades_insert_ignore_persists_source_row_index(trades_connect):
+    """``source_row_index`` (the row's 0-based position in its source CSV)
+    round-trips through ``insert_ignore`` into ``history()`` -- the only
+    place a row's file position is captured, so it must survive the write."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn,
+            "AAPL",
+            "BUY",
+            10,
+            100.0,
+            "2024-01-02",
+            "",
+            "REF1",
+            None,
+            "key-1",
+            "GBP",
+            3,
+        )
+    trade = repo.history()[0]
+    assert trade.source_row_index == 3
+    assert trade.idempotency_key == "key-1"
+
+
+def test_trades_insert_ignore_source_row_index_defaults_to_none(trades_connect):
+    """A caller that doesn't pass ``source_row_index`` (every pre-Story-2.2
+    call site) still inserts cleanly, with the column left ``NULL``."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn, "AAPL", "BUY", 10, 100.0, "2024-01-02", "", "REF1", None, "key-1"
+        )
+    trade = repo.history()[0]
+    assert trade.source_row_index is None
+
+
+def test_trades_open_rows_orders_same_day_by_descending_source_row_index(
+    trades_connect,
+):
+    """Story 2.2: within a same-day group, ``open_rows`` (average-cost
+    replay) processes the *highest* ``source_row_index`` first --
+    the first-listed CSV row (lowest index) is the most recent execution of
+    that day, so chronological (oldest-first) replay must reach it last."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        # idx 0 = first-listed/most-recent; idx 2 = last-listed/earliest.
+        repo.insert_ignore(
+            conn,
+            "MOSTRECENT",
+            "BUY",
+            1,
+            10.0,
+            "2024-01-02",
+            "",
+            None,
+            None,
+            "k0",
+            "GBP",
+            0,
+        )
+        repo.insert_ignore(
+            conn, "MIDDLE", "BUY", 1, 10.0, "2024-01-02", "", None, None, "k1", "GBP", 1
+        )
+        repo.insert_ignore(
+            conn,
+            "EARLIEST",
+            "BUY",
+            1,
+            10.0,
+            "2024-01-02",
+            "",
+            None,
+            None,
+            "k2",
+            "GBP",
+            2,
+        )
+    rows = repo.open_rows()
+    assert [r[0] for r in rows] == ["EARLIEST", "MIDDLE", "MOSTRECENT"]
+
+
+def test_trades_open_rows_null_source_row_index_sorts_last_in_date_group(
+    trades_connect,
+):
+    """A pre-Story-2.2 row (``source_row_index IS NULL``, simulated via
+    plain ``insert()``) participates in replay without crashing, and sorts
+    as the lowest possible position in its date group -- last among
+    same-day peers with a real index."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("NOINDEX", "BUY", 1, 10.0, "2024-01-02")  # source_row_index NULL
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn,
+            "HASINDEX",
+            "BUY",
+            1,
+            10.0,
+            "2024-01-02",
+            "",
+            None,
+            None,
+            "k0",
+            "GBP",
+            0,
+        )
+    rows = repo.open_rows()
+    assert [r[0] for r in rows] == ["HASINDEX", "NOINDEX"]
+
+
+def test_trades_open_rows_both_source_row_index_and_idempotency_key_null_falls_back_to_id(
+    trades_connect,
+):
+    """Two same-day rows with both ``source_row_index`` and
+    ``idempotency_key`` NULL -- e.g. two trades recorded manually via
+    ``insert()`` rather than SIPP import, which sets neither column --
+    must still sort deterministically by ascending ``id``, exactly like
+    ``RealisedPnlService._replay_sort_key``'s identical fallback and the
+    pre-Story-2.2 ``ORDER BY date, id`` this replaces. Without a trailing
+    ``id`` tiebreak in ``_REPLAY_ORDER``, this tie would fall back to
+    unspecified SQLite ordering."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("FIRST", "BUY", 1, 10.0, "2024-01-02")
+    repo.insert("SECOND", "BUY", 1, 10.0, "2024-01-02")
+    rows = repo.open_rows()
+    assert [r[0] for r in rows] == ["FIRST", "SECOND"]
 
 
 # --- CashFlowsRepository ---------------------------------------------------

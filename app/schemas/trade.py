@@ -129,6 +129,8 @@ class Trade(BaseModel):
     portfolio_id: int | None = None  # owning account (#147)
     realised_pnl_ack_at: str | None = None  # unmatched-sell ack timestamp (#170)
     currency: str = "GBP"  # source currency recorded on the SIPP row (#210)
+    source_row_index: int | None = None  # 0-based position in its source CSV
+    idempotency_key: str | None = None  # content-derived dedupe/tiebreak key
 
 
 class Position(BaseModel):

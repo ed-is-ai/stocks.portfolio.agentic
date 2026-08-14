@@ -15,13 +15,9 @@ from datetime import date, datetime, timedelta
 from typing import Any, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
-from app.core.config import (
-    ANALYSIS_JSON,
-    PORTFOLIO_VALUE_CSV,
-    TICKER_ALIASES_JSON,
-    TRADES_DB,
-)
+from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
 from app.core.money import Money
+from app.core.ticker_identity import canonicalize_or_fallback, load_aliases
 from app.repositories import db
 from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.schemas.analysis_artifact import read_analysis_records
@@ -81,11 +77,14 @@ class PortfolioService:
         return {r.ticker: r.price for r in records}
 
     def load_ticker_aliases(self) -> dict[str, str]:
-        """Load internal-ticker → Yahoo Finance symbol mappings."""
-        try:
-            return json.loads(TICKER_ALIASES_JSON.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}
+        """Load internal-ticker → Yahoo Finance symbol mappings.
+
+        Delegates to ``app.core.ticker_identity.load_aliases()`` -- the
+        single source of truth for alias data shared with ``TraderAgent``
+        and ``RealisedPnlService`` -- while keeping this method's exact
+        signature so existing bound-method monkeypatches keep working.
+        """
+        return load_aliases()
 
     # --- FX ---------------------------------------------------------------
 
@@ -245,13 +244,25 @@ class PortfolioService:
         same ``yf.Ticker(...).fast_info.currency`` classification
         ``_fetch_price_gbp`` already applies to current positions
         (``GBp`` normalised to ``GBP``, defaulting to ``GBP`` on any
-        failure). Resolved through ``load_ticker_aliases()`` first, matching
-        ``fetch_all_prices``'s ``_resolve`` pattern.
+        failure). Resolved through the same multi-hop
+        ``canonicalize_or_fallback`` walk ``fetch_all_prices``'s
+        ``_resolve`` uses (not a one-hop ``aliases.get``), so a canonical
+        ticker fed back in (e.g. from ``get_portfolio()``'s output) still
+        resolves correctly. ``protect_hsfwa=False`` -- unlike every
+        identity call site, HSFWA must resolve through its own configured
+        alias here, since that's this alias file's original, documented
+        purpose for exactly this ticker.
         """
         import yfinance as yf
 
         aliases = self.load_ticker_aliases()
-        yf_sym = aliases.get(ticker, ticker)
+        yf_sym = canonicalize_or_fallback(
+            ticker,
+            aliases,
+            logger=logger,
+            context="ticker_currency",
+            protect_hsfwa=False,
+        )
         try:
             currency = yf.Ticker(yf_sym).fast_info.currency or "GBP"
             if currency == "GBp":
@@ -308,9 +319,19 @@ class PortfolioService:
         """Fetch GBP-normalised prices for all portfolio tickers (concurrently)."""
 
         def _resolve(t: str) -> tuple[str, float, float, str] | None:
-            yf_sym = aliases.get(t, t)
+            yf_sym = canonicalize_or_fallback(
+                t,
+                aliases,
+                logger=logger,
+                context="fetch_all_prices",
+                protect_hsfwa=False,
+            )
             result = self._fetch_price_gbp(yf_sym, gbpusd)
-            if (result is None or result[0] < 0.01) and t not in aliases:
+            # ``.L``-suffix retry only when canonicalization left `t`
+            # unchanged (no alias configured for it, safe to guess) -- not
+            # raw `t not in aliases` membership, which would miss an
+            # explicitly configured alias reached via a chain.
+            if (result is None or result[0] < 0.01) and yf_sym == t:
                 result = self._fetch_price_gbp(f"{t}.L", gbpusd)
             if result is not None and result[0] >= 0.01:
                 gbp_price, orig_price, currency = result

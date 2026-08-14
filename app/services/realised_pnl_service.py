@@ -14,7 +14,14 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import date
 
-from app.schemas import RealisedPnlSummary, RoundTrip, Trade, UnmatchedSell
+from app.core.ticker_identity import canonicalize_or_fallback
+from app.schemas import (
+    RealisedPnlSummary,
+    RoundTrip,
+    SkippedInvalidDateTrade,
+    Trade,
+    UnmatchedSell,
+)
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -31,6 +38,11 @@ _INVALID_TICKERS = {"", "n/a", "N/A"}
 # factually wrong for the second case (a BUY plainly *was* found).
 _NO_PRIOR_BUY_REASON = "No prior BUY found to match this sell"
 _PARTIAL_SHORTFALL_REASON = "Sell exceeds available BUY lots by {shares:g} shares"
+
+# Story 2.2: reason text for a trade excluded from FIFO replay because its
+# stored ``date`` isn't valid ISO-8601 -- surfaced both in the log line and
+# in the retrievable ``SkippedInvalidDateTrade`` structure.
+_INVALID_DATE_REASON = "Trade date {raw_date!r} is not valid ISO-8601"
 
 # Share-quantity precision for an UnmatchedSell's `shares` -- matches the
 # `_EPSILON` tolerance used for lot-consumption comparisons, so a SELL that
@@ -105,7 +117,7 @@ class RealisedPnlService:
         Recomputed from scratch on every call — nothing is cached or
         persisted (AC 6).
         """
-        trades = self._sorted_valid_trades(portfolio_id)
+        trades, skipped_invalid_dates = self._sorted_valid_trades(portfolio_id)
         raw_round_trips, open_lots, unmatched_sells = self._replay_fifo(
             trades, portfolio_id
         )
@@ -125,6 +137,7 @@ class RealisedPnlService:
             unmatched_count=len(unmatched_sells),
             unmatched_sells=unmatched_sells,
             mismatched_tickers=mismatched,
+            skipped_invalid_date_trades=skipped_invalid_dates,
         )
 
     def toggle_unmatched_sell_ack(
@@ -151,7 +164,9 @@ class RealisedPnlService:
             summary = self.compute_summary(portfolio_id)
         return summary
 
-    def _sorted_valid_trades(self, portfolio_id: int) -> list[Trade]:
+    def _sorted_valid_trades(
+        self, portfolio_id: int
+    ) -> tuple[list[Trade], list[SkippedInvalidDateTrade]]:
         """Fetch, filter, and sort trades for FIFO replay.
 
         The only place trade rows are fetched/sorted for FIFO purposes.
@@ -161,10 +176,26 @@ class RealisedPnlService:
         philosophy as the shares/ticker filter below; this codebase has
         shipped and fixed real trade-date corruption before (#166, #167),
         so a malformed date reaching this far, while unexpected, must not
-        crash the whole Account's Realised P&L computation.
+        crash the whole Account's Realised P&L computation. Every such skip
+        is also collected into a returned, retrievable structure (Story
+        2.2) — trade id, ticker, raw date, reason — alongside the existing
+        log line, for a future Match Trace to surface.
+
+        Sort key (Story 2.2, applied identically to the average-cost path
+        in ``TradesRepository.open_rows``/``open_rows_on_connection``):
+        ``date`` ascending, then same-day rows by descending
+        ``source_row_index`` (the first-listed row in a source CSV's
+        same-day group is the most recent execution, so chronological replay
+        processes it last -- i.e. the highest index first), then
+        ``idempotency_key`` as the content-derived cross-file tiebreak.
+        ``source_row_index IS NULL`` (rows imported before this story
+        shipped) is treated as the lowest possible position in its date
+        group, so it replays last among same-day peers without crashing on
+        ``None`` arithmetic/comparison.
         """
         trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
         valid = []
+        skipped: list[SkippedInvalidDateTrade] = []
         for t in trades:
             if t.shares <= 0 or t.ticker in _INVALID_TICKERS:
                 continue
@@ -177,9 +208,49 @@ class RealisedPnlService:
                     t.ticker,
                     t.date,
                 )
+                if t.id is None:
+                    logger.warning(
+                        "Realised P&L: invalid-date trade for %s has no "
+                        "trade id -- this should be unreachable for a "
+                        "persisted row; falling back to trade_id=0",
+                        t.ticker,
+                    )
+                skipped.append(
+                    SkippedInvalidDateTrade(
+                        trade_id=t.id or 0,
+                        ticker=t.ticker,
+                        raw_date=t.date,
+                        reason=_INVALID_DATE_REASON.format(raw_date=t.date),
+                    )
+                )
                 continue
             valid.append(t)
-        return sorted(valid, key=lambda t: (t.date, t.id or 0))
+        ordered = sorted(valid, key=self._replay_sort_key)
+        return ordered, skipped
+
+    @staticmethod
+    def _replay_sort_key(t: Trade) -> tuple[str, int, str, int]:
+        """Deterministic same-day FIFO replay order (Story 2.2).
+
+        See ``_sorted_valid_trades`` for the full rule; ``None`` positions
+        are treated as ``-1`` (the lowest possible position) before
+        negating, so a pre-Story-2.2 row without a ``source_row_index``
+        never crashes the comparison and always sorts last within its date
+        group. A missing ``idempotency_key`` falls back to ``""`` for the
+        same reason.
+
+        Trailing ``id`` tiebreak: rows written outside the SIPP import
+        (e.g. ``record_buy``/``record_sell``) carry neither
+        ``source_row_index`` nor ``idempotency_key``, so two such same-day
+        rows would otherwise tie completely. Falling back to ascending
+        ``id`` preserves this codebase's pre-existing, already-tested
+        same-day tie-break for that case (AC 4) without reintroducing
+        insertion order as a signal for rows that *do* carry real Story 2.2
+        ordering evidence -- it only ever decides a tie the first three key
+        elements left unresolved.
+        """
+        position = t.source_row_index if t.source_row_index is not None else -1
+        return (t.date, -position, t.idempotency_key or "", t.id or 0)
 
     def _replay_fifo(
         self, trades: list[Trade], portfolio_id: int
@@ -198,12 +269,24 @@ class RealisedPnlService:
         revisited or retroactively filled by a later BUY for the same
         ticker, because the SELL that produced it is never re-examined once
         the loop has moved past it.
+
+        Each trade's ticker is canonicalized (via ``canonicalize_or_fallback``,
+        HSFWA protected) before it keys ``queues`` -- the shared identity
+        every ``RoundTrip``/``UnmatchedSell`` displays -- so cross-spelling
+        trades for one security fold into a single FIFO queue instead of
+        fragmenting, agreeing with the average-cost replay's identity. A
+        cycle or malformed alias file degrades to the raw ticker with a
+        logged warning rather than crashing this replay.
         """
+        aliases = self._portfolio.load_ticker_aliases()
         queues: dict[str, deque[_Lot]] = {}
         round_trips: list[_RawRoundTrip] = []
         unmatched_sells: list[UnmatchedSell] = []
         for t in trades:
-            queue = queues.setdefault(t.ticker, deque())
+            ticker = canonicalize_or_fallback(
+                t.ticker, aliases, logger=logger, context="_replay_fifo"
+            )
+            queue = queues.setdefault(ticker, deque())
             if t.action == "BUY":
                 queue.append(_Lot(t.shares, t.price, t.date))
                 continue
@@ -213,7 +296,7 @@ class RealisedPnlService:
                 lot = queue[0]
                 matched = min(lot.shares_remaining, remaining_to_sell)
                 round_trips.append(
-                    self._build_raw_round_trip(t, lot, matched, portfolio_id)
+                    self._build_raw_round_trip(t, lot, matched, portfolio_id, ticker)
                 )
                 lot.shares_remaining -= matched
                 remaining_to_sell -= matched
@@ -227,7 +310,7 @@ class RealisedPnlService:
                         "Realised P&L: unmatched SELL for %s has no trade id "
                         "-- this should be unreachable for a persisted row; "
                         "falling back to trade_id=0",
-                        t.ticker,
+                        ticker,
                     )
                 reason = (
                     _PARTIAL_SHORTFALL_REASON.format(shares=remaining_to_sell)
@@ -237,7 +320,7 @@ class RealisedPnlService:
                 unmatched_sells.append(
                     UnmatchedSell(
                         trade_id=t.id or 0,
-                        ticker=t.ticker,
+                        ticker=ticker,
                         portfolio_id=portfolio_id,
                         date=t.date,
                         shares=remaining_to_sell,
@@ -250,19 +333,25 @@ class RealisedPnlService:
 
     @staticmethod
     def _build_raw_round_trip(
-        sell: Trade, lot: _Lot, matched_shares: float, portfolio_id: int
+        sell: Trade, lot: _Lot, matched_shares: float, portfolio_id: int, ticker: str
     ) -> _RawRoundTrip:
         """Build one raw (pre-GBP-conversion) Round-trip for a lot (or
         partial lot) consumed by a SELL. Entry/exit price stay in the
         ticker's native currency here; GBP conversion is a separate pass
         (``_convert_to_gbp``) so trade dates can be batch-resolved once
         across every Round-trip instead of per leg (Story 1.2 AC1/AC2).
+
+        ``ticker`` is the caller's already-canonicalized identity (not
+        ``sell.ticker``, the raw persisted spelling) -- ``_replay_fifo``
+        resolves it once per trade and passes it in explicitly so this
+        method never has to re-canonicalize or risk disagreeing with the
+        queue key the caller used.
         """
         holding_days = (
             date.fromisoformat(sell.date) - date.fromisoformat(lot.buy_date)
         ).days
         return _RawRoundTrip(
-            ticker=sell.ticker,
+            ticker=ticker,
             portfolio_id=portfolio_id,
             entry_date=lot.buy_date,
             entry_price=lot.buy_price,

@@ -1,14 +1,51 @@
 """Repository for the ``trades`` table in ``trades.db``."""
 
+import logging
+from collections.abc import Iterable
 from typing import Any
 
+from app.core.ticker_identity import (
+    canonicalize_or_fallback,
+    load_aliases,
+    matching_raw_tickers,
+)
 from app.repositories.db import Connect, session
 from app.schemas import Trade
 from app.schemas.trade import SippImportRowOutcome
 
+logger = logging.getLogger(__name__)
+
 # Dates are stored ISO (YYYY-MM-DD), which sorts chronologically as text.
 _DATE_SORT = "date"
 _REPLAY_COLUMNS = "ticker, action, shares, price, date, stop_loss, entry_price"
+
+# Story 2.2: deterministic same-day replay order, applied identically to
+# average-cost (here, in SQL) and FIFO (``RealisedPnlService._sorted_valid_
+# trades``, in Python). Within one imported file the first-listed CSV row is
+# the most recent execution of that day, so chronological (oldest-first)
+# replay must process the *highest* ``source_row_index`` first within a date
+# group -- hence ``DESC``. ``source_row_index IS NULL`` (rows imported before
+# this story shipped) is coalesced to ``-1``, the lowest possible position,
+# so such a row always replays last among same-day peers. The next tiebreak
+# is the content-derived ``idempotency_key`` -- never an import-timing
+# signal. A trailing ``id`` guarantees a fully deterministic order even when
+# both of the above are NULL (e.g. two same-day trades recorded manually via
+# ``insert()`` rather than SIPP import, which sets neither column) -- this
+# mirrors ``RealisedPnlService._replay_sort_key``'s identical fallback and
+# restores the same guarantee the pre-Story-2.2 ``ORDER BY date, id`` gave
+# every row, not only imported ones.
+_REPLAY_ORDER = (
+    f"{_DATE_SORT}, COALESCE(source_row_index, -1) DESC, idempotency_key, id"
+)
+
+
+def _in_placeholders(values: Iterable[Any]) -> str:
+    """Return a ``"?, ?, ..."`` placeholder string, one per value.
+
+    Shared by ``delete_by_ticker``/``history`` so the ``WHERE ticker IN
+    (...)`` placeholder string is built once instead of inline in each.
+    """
+    return ", ".join("?" for _ in values)
 
 
 def _row_to_trade(row: tuple[Any, ...]) -> Trade:
@@ -25,6 +62,8 @@ def _row_to_trade(row: tuple[Any, ...]) -> Trade:
         portfolio_id=row[9] if len(row) > 9 else None,
         realised_pnl_ack_at=row[10] if len(row) > 10 else None,
         currency=row[11] if len(row) > 11 and row[11] is not None else "GBP",
+        source_row_index=row[12] if len(row) > 12 else None,
+        idempotency_key=row[13] if len(row) > 13 else None,
     )
 
 
@@ -81,12 +120,19 @@ class TradesRepository:
         portfolio_id: int | None = None,
         idempotency_key: str | None = None,
         currency: str = "GBP",
+        source_row_index: int | None = None,
     ) -> SippImportRowOutcome:
         """Insert a trade with ``INSERT OR IGNORE`` on the given connection.
 
         Used by the SIPP import, which batches many rows in one transaction.
         Dedupe is keyed on ``(portfolio_id, idempotency_key)`` so the same
         CSV can import into different portfolios independently.
+
+        ``source_row_index`` is the row's 0-based position within its own
+        source CSV file (Story 2.2) — used, together with
+        ``idempotency_key``, to deterministically order same-day trades for
+        FIFO/average-cost replay. ``None`` for rows imported before this
+        story shipped.
 
         Returns the row's actual outcome: ``"inserted"`` when the row was
         written, ``"duplicate"`` when the unique index silently suppressed
@@ -95,8 +141,9 @@ class TradesRepository:
         """
         cur = conn.execute(
             "INSERT OR IGNORE INTO trades "
-            "(ticker, action, shares, price, date, notes, reference, portfolio_id, idempotency_key, currency) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(ticker, action, shares, price, date, notes, reference, portfolio_id,"
+            " idempotency_key, currency, source_row_index) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ticker,
                 action,
@@ -108,6 +155,7 @@ class TradesRepository:
                 portfolio_id,
                 idempotency_key,
                 currency,
+                source_row_index,
             ),
         )
         return "inserted" if cur.rowcount else "duplicate"
@@ -147,30 +195,57 @@ class TradesRepository:
             return cur.rowcount > 0
 
     def delete_by_ticker(self, ticker: str, portfolio_id: int | None = None) -> None:
-        """Delete every trade for a ticker, optionally within one portfolio."""
+        """Delete every trade whose canonicalized ticker equals ``ticker``.
+
+        ``ticker`` is treated as a canonical identity (the reverse of
+        ``canonical_ticker``): every raw spelling that resolves to it via
+        ``matching_raw_tickers`` is deleted, not just rows stored under
+        ``ticker``'s exact spelling. This is what makes ``correct_trade()``
+        (a live UI action) actually replace a position's trades instead of
+        silently no-op-deleting when the stored rows use a different (but
+        alias-equivalent) raw spelling than the canonical ticker the UI
+        passed back.
+        """
+        raw_tickers = list(matching_raw_tickers(ticker, load_aliases()))
+        placeholders = _in_placeholders(raw_tickers)
         with session(self._connect) as conn:
             if portfolio_id is None:
-                conn.execute("DELETE FROM trades WHERE ticker = ?", (ticker,))
+                conn.execute(
+                    f"DELETE FROM trades WHERE ticker IN ({placeholders})",
+                    tuple(raw_tickers),
+                )
             else:
                 conn.execute(
-                    "DELETE FROM trades WHERE ticker = ? AND portfolio_id = ?",
-                    (ticker, portfolio_id),
+                    f"DELETE FROM trades WHERE ticker IN ({placeholders})"
+                    " AND portfolio_id = ?",
+                    (*raw_tickers, portfolio_id),
                 )
 
     def history(
         self, ticker: str | None = None, portfolio_id: int | None = None
     ) -> list[Trade]:
-        """Return trades newest-first, optionally filtered by ticker/portfolio."""
+        """Return trades newest-first, optionally filtered by ticker/portfolio.
+
+        A ``ticker`` filter is treated as a canonical identity: every raw
+        spelling that resolves to it (via ``matching_raw_tickers``) is
+        matched, not just rows stored under ``ticker``'s exact spelling.
+        Every returned ``Trade.ticker`` is canonicalized (via
+        ``canonicalize_or_fallback``), regardless of whether a filter was
+        given -- one consistent display form per underlying security.
+        """
+        aliases = load_aliases()
         base = (
             "SELECT id, ticker, action, shares, price, date, notes, stop_loss,"
-            " entry_price, portfolio_id, realised_pnl_ack_at, currency FROM trades"
+            " entry_price, portfolio_id, realised_pnl_ack_at, currency,"
+            " source_row_index, idempotency_key FROM trades"
         )
         order = f"{_DATE_SORT} DESC, id DESC"
         clauses: list[str] = []
         params: list[Any] = []
         if ticker:
-            clauses.append("ticker = ?")
-            params.append(ticker)
+            raw_tickers = list(matching_raw_tickers(ticker, aliases))
+            clauses.append(f"ticker IN ({_in_placeholders(raw_tickers)})")
+            params.extend(raw_tickers)
         if portfolio_id is not None:
             clauses.append("portfolio_id = ?")
             params.append(portfolio_id)
@@ -178,14 +253,22 @@ class TradesRepository:
         sql = f"{base}{where} ORDER BY {order}"
         with session(self._connect) as conn:
             rows = conn.execute(sql, tuple(params)).fetchall()
-        return [_row_to_trade(r) for r in rows]
+        trades = [_row_to_trade(r) for r in rows]
+        for trade in trades:
+            trade.ticker = canonicalize_or_fallback(
+                trade.ticker, aliases, logger=logger, context="history"
+            )
+        return trades
 
     def open_rows(self, portfolio_id: int | None = None) -> list[tuple[Any, ...]]:
         """Return valid-ticker trade rows in chronological order for replay.
 
         Columns: (ticker, action, shares, price, date, stop_loss, entry_price).
         Excludes blank/``n/a`` tickers, matching the legacy portfolio query.
-        Scoped to ``portfolio_id`` when given.
+        Scoped to ``portfolio_id`` when given. Ordered by ``_REPLAY_ORDER``
+        (Story 2.2): date ascending, then same-day rows deterministically by
+        descending ``source_row_index`` (NULL-safe), then ``idempotency_key``
+        as the cross-file tiebreak.
         """
         sql = (
             f"SELECT {_REPLAY_COLUMNS} FROM trades"
@@ -195,7 +278,7 @@ class TradesRepository:
         if portfolio_id is not None:
             sql += " AND portfolio_id = ?"
             params = (portfolio_id,)
-        sql += f" ORDER BY {_DATE_SORT}, id"
+        sql += f" ORDER BY {_REPLAY_ORDER}"
         with session(self._connect) as conn:
             return conn.execute(sql, params).fetchall()
 
@@ -204,9 +287,10 @@ class TradesRepository:
     ) -> list[tuple[Any, ...]]:
         """Return valid-ticker trade rows for replay on the caller's connection.
 
-        Identical query to ``open_rows`` but executed against the caller's
-        open connection instead of a fresh one — used by the SIPP import so
-        its in-transaction snapshot calculation sees this transaction's own
+        Identical query (including ``_REPLAY_ORDER``, Story 2.2) to
+        ``open_rows`` but executed against the caller's open connection
+        instead of a fresh one — used by the SIPP import so its
+        in-transaction snapshot calculation sees this transaction's own
         not-yet-committed trade inserts (a separate connection would only
         see the database's last *committed* state and silently miss them).
         """
@@ -218,14 +302,23 @@ class TradesRepository:
         if portfolio_id is not None:
             sql += " AND portfolio_id = ?"
             params = (portfolio_id,)
-        sql += f" ORDER BY {_DATE_SORT}, id"
+        sql += f" ORDER BY {_REPLAY_ORDER}"
         return conn.execute(sql, params).fetchall()
 
     def held_tickers(self) -> set[str]:
         """Return the set of tickers with a net-positive position in any
-        portfolio (used for the watchlist "held" flag, which spans accounts)."""
+        portfolio (used for the watchlist "held" flag, which spans accounts).
+
+        Accumulates net position per canonical ticker (via
+        ``canonicalize_or_fallback``, HSFWA protected) -- the same
+        "canonicalize before it becomes a dict key" shape ``_replay_trades``
+        uses -- so the returned set agrees with ``get_portfolio()``'s
+        canonicalized identity even when trades for one security are stored
+        under more than one raw spelling.
+        """
         from collections import defaultdict
 
+        aliases = load_aliases()
         by_pf: dict[Any, dict[str, float]] = defaultdict(lambda: defaultdict(float))
         with session(self._connect) as conn:
             rows = conn.execute(
@@ -234,8 +327,11 @@ class TradesRepository:
                 " ORDER BY date, id"
             ).fetchall()
         for pid, ticker, action, shares in rows:
+            canonical = canonicalize_or_fallback(
+                ticker, aliases, logger=logger, context="held_tickers"
+            )
             delta = shares if action == "BUY" else -shares
-            by_pf[pid][ticker] += delta
+            by_pf[pid][canonical] += delta
         held: set[str] = set()
         for positions in by_pf.values():
             for ticker, net in positions.items():

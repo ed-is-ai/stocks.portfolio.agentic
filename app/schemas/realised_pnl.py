@@ -59,6 +59,21 @@ class UnmatchedSell(BaseModel):
     acknowledged_at: str | None = None
 
 
+class SkippedInvalidDateTrade(BaseModel):
+    """A trade row FIFO replay excluded because ``date`` failed
+    ``date.fromisoformat`` (Story 2.2).
+
+    Makes the skip retrievable as structured data -- not only a log line --
+    for a future Match Trace (Story 2.4) to surface. ``raw_date`` is the
+    exact, unparsed value stored on the trade row.
+    """
+
+    trade_id: int
+    ticker: str
+    raw_date: str
+    reason: str
+
+
 class RealisedPnlSummary(BaseModel):
     """Account-level Realised P&L result for one ``compute_summary`` call.
 
@@ -66,7 +81,9 @@ class RealisedPnlSummary(BaseModel):
     group ordering (most-recent exit date first) — callers/templates must
     render this order as given, never re-sort. ``unmatched_sells`` is a
     separate, ungrouped list (Story 1.3) and is never merged into
-    ``round_trips``.
+    ``round_trips``. ``skipped_invalid_date_trades`` (Story 2.2) is a
+    similarly separate, ungrouped list of trades FIFO excluded for having an
+    unparseable date.
     """
 
     portfolio_id: int
@@ -76,3 +93,4 @@ class RealisedPnlSummary(BaseModel):
     unmatched_count: int = 0
     unmatched_sells: list[UnmatchedSell] = []
     mismatched_tickers: list[str] = []
+    skipped_invalid_date_trades: list[SkippedInvalidDateTrade] = []
