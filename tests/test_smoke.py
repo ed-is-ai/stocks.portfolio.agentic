@@ -74,7 +74,21 @@ class TestSmokeTests:
         import tempfile
         import app.orchestration.orchestrator as orchestrator
 
-        smoke_watchlist = orchestrator.load_watchlist()[:10]
+        # A fixed fixture list, not the real (gitignored, locally-generated)
+        # extraction_results.json -- this test only needs 10 tickers to
+        # exercise the pipeline, not any particular watchlist content.
+        smoke_watchlist = [
+            "AAPL",
+            "MSFT",
+            "GOOGL",
+            "AMZN",
+            "NVDA",
+            "META",
+            "TSLA",
+            "AMD",
+            "NFLX",
+            "INTC",
+        ]
         assert len(smoke_watchlist) == 10
 
         mock_congress.get_stats_many.side_effect = lambda tickers, failed_tickers=None: (
@@ -116,6 +130,7 @@ class TestSmokeTests:
                 patch.object(
                     orchestrator, "load_watchlist", return_value=smoke_watchlist
                 ),
+                patch.object(orchestrator, "load_source_map", return_value={}),
                 patch.object(orchestrator, "SCAN_OUTPUT", scan_out),
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
@@ -214,6 +229,7 @@ class TestSmokeTests:
                 patch.object(
                     orchestrator, "load_watchlist", return_value=smoke_watchlist
                 ),
+                patch.object(orchestrator, "load_source_map", return_value={}),
                 patch.object(orchestrator, "SCAN_OUTPUT", scan_out),
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
@@ -260,6 +276,7 @@ class TestSmokeTests:
                 patch.object(
                     orchestrator, "load_watchlist", return_value=smoke_watchlist
                 ),
+                patch.object(orchestrator, "load_source_map", return_value={}),
                 patch.object(orchestrator, "PIPELINE_STATUS_JSON", failed_status_out),
                 patch.object(
                     orchestrator.AlertAgent,

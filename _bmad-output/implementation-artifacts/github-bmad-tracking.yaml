@@ -18,17 +18,18 @@ implementation_readiness:
   non_blocking_observations: 9
 sprint_planning:
   status: refreshed
-  refreshed_at: 2026-08-10
+  refreshed_at: 2026-08-14
   source: epics.md
   readiness: ready
   epics: 3
   stories: 22
   status_changes: 2
+  selected_stories: ["2.6", "2.7", "2.8", "2.9"]
 create_story:
-  latest_story: 1-6-commit-versioned-monthly-snapshot-coverage
-  issue: 189
-  status: done
-  created_at: 2026-08-11
+  latest_story: 2-9-review-a-completed-backtest-result
+  issue: 202
+  status: ready-for-dev
+  created_at: 2026-08-14
 epics:
   epic-1:
     issue: 207
@@ -51,17 +52,17 @@ stories:
   1-6-commit-versioned-monthly-snapshot-coverage: { issue: 189, status: done }
   1-7-run-initialization-through-the-durable-job-lifecycle: { issue: 190, status: open }
   1-8-recover-and-notify-initialization-activity: { issue: 191, status: open }
-  1-9-use-historical-initialization-and-coverage-in-the-web-ui: { issue: 192, status: open }
+  1-9-use-historical-initialization-and-coverage-in-the-web-ui: { issue: 192, status: done }
   1-10-extend-coverage-with-eligible-bau-scanner-snapshots: { issue: 193, status: done }
-  2-1-author-a-strategy-against-the-versioned-protocol: { issue: 194, status: open }
-  2-2-discover-strategies-and-validate-their-parameters: { issue: 195, status: open }
-  2-3-bind-backtests-to-bounded-views-and-a-replay-manifest: { issue: 196, status: open }
-  2-4-execute-the-deterministic-portfolio-simulation: { issue: 197, status: open }
-  2-5-calculate-and-atomically-persist-backtest-results: { issue: 198, status: open }
-  2-6-run-backtests-through-the-durable-activity-lifecycle: { issue: 199, status: open }
-  2-7-configure-and-launch-a-strategy-in-the-web-ui: { issue: 200, status: open }
-  2-8-monitor-backtest-activity-and-browse-the-results-list: { issue: 201, status: open }
-  2-9-review-a-completed-backtest-result: { issue: 202, status: open }
+  2-1-author-a-strategy-against-the-versioned-protocol: { issue: 194, status: ready-for-dev }
+  2-2-discover-strategies-and-validate-their-parameters: { issue: 195, status: ready-for-dev }
+  2-3-bind-backtests-to-bounded-views-and-a-replay-manifest: { issue: 196, status: ready-for-dev }
+  2-4-execute-the-deterministic-portfolio-simulation: { issue: 197, status: ready-for-dev }
+  2-5-calculate-and-atomically-persist-backtest-results: { issue: 198, status: ready-for-dev }
+  2-6-run-backtests-through-the-durable-activity-lifecycle: { issue: 199, status: ready-for-dev }
+  2-7-configure-and-launch-a-strategy-in-the-web-ui: { issue: 200, status: ready-for-dev }
+  2-8-monitor-backtest-activity-and-browse-the-results-list: { issue: 201, status: ready-for-dev }
+  2-9-review-a-completed-backtest-result: { issue: 202, status: ready-for-dev }
   3-1-enforce-one-canonical-comparison-eligibility-predicate: { issue: 203, status: open }
   3-2-choose-an-eligible-result-through-the-compare-picker: { issue: 204, status: open }
   3-3-review-two-results-side-by-side: { issue: 205, status: open }

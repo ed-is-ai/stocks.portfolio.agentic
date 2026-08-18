@@ -213,6 +213,10 @@ class TestScannerAgent:
         assert results[0].price > 0
 
     @patch(
+        "app.agents.scanner.scanner_agent.load_watchlist",
+        return_value=["AAPL", "MSFT"],
+    )
+    @patch(
         "app.agents.scanner.scanner_agent.fetch_tv_screener_result",
         return_value=ScreenerResult([], "empty"),
     )
@@ -244,7 +248,14 @@ class TestScannerAgent:
     )
     @patch("app.agents.scanner.scanner_agent._congress_client")
     def test_run_method_default_watchlist(
-        self, mock_congress, _mock_vcp, _mock_fund, _mock_fill, _mock_tv_uk, _mock_tv
+        self,
+        mock_congress,
+        _mock_vcp,
+        _mock_fund,
+        _mock_fill,
+        _mock_tv_uk,
+        _mock_tv,
+        _mock_watchlist,
     ):
         """Test run method with default watchlist."""
         mock_congress.get_stats_many.return_value = {}

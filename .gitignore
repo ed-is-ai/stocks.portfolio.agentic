@@ -48,6 +48,7 @@ portfolio_value.csv
 pipeline_runs.csv
 app/agents/extraction/ww_context.json
 app/agents/extraction/stocktwits_email_watermark.json
+app/agents/extraction/extraction_results.json
 app/agents/scanner/scan_history.json
 app/agents/trader/trades.db.backup
 **/scan_history.json
