@@ -12,6 +12,34 @@
 </form>
 {% endmacro %}
 
+{% macro opening_lot_form(portfolio_id) %}
+{# Story 2.4 (AC3/AC4): records a manual "Opening Lot" -- a BUY trade
+   tagged source="opening_lot" -- for a holding with no matching import
+   history. Participates in FIFO/average-cost replay exactly like an
+   imported Buy; a duplicate (same ticker/shares/date already entered)
+   is rejected server-side with an error banner, not silently inserted. #}
+<form hx-post="/portfolio/opening-lot"
+      hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+      class="d-flex align-items-center gap-2 flex-wrap">
+  <input type="hidden" name="portfolio_id" value="{{ portfolio_id }}">
+  <input type="text" name="ticker" required placeholder="Ticker"
+         aria-label="Ticker symbol"
+         class="form-control form-control-sm text-uppercase" style="max-width:6rem">
+  <input type="number" name="shares" required min="0.0001" step="any" placeholder="Shares"
+         aria-label="Shares" class="form-control form-control-sm" style="max-width:6rem">
+  <div class="input-group input-group-sm" style="max-width:8rem">
+    <span class="input-group-text">£</span>
+    <input type="number" name="price" required min="0.0001" step="any" placeholder="Cost/share"
+           aria-label="Cost-basis price per share" class="form-control">
+  </div>
+  <input type="date" name="date" required aria-label="Effective date"
+         class="form-control form-control-sm" style="max-width:9.5rem">
+  <button type="submit" class="btn btn-sm btn-outline-primary d-flex align-items-center gap-2">
+    <i class="bi bi-plus-lg"></i> Add Opening Lot
+  </button>
+</form>
+{% endmacro %}
+
 {% macro quick_add_form(portfolio_id) %}
 <form hx-post="/portfolio/quick-add"
       hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
@@ -149,6 +177,17 @@
           file's own most recent row sets the cash balance, so importing out
           of order can make it regress.
         </div>
+        <hr class="my-3">
+        <div class="fw-semibold mb-2" style="font-size:0.78rem">
+          <i class="bi bi-journal-plus me-1"></i>Add Opening Lot
+        </div>
+        {{ opening_lot_form(portfolio_id) }}
+        <div class="text-muted mt-2" style="font-size:0.68rem; line-height:1.5">
+          For a holding whose cost-basis history wasn't imported (e.g. a
+          transfer-in). Records a manually-entered Buy lot that matches
+          against sells exactly like an imported one -- edit/delete it
+          later from Trade History while it's still unmatched.
+        </div>
       </div>
     </div>
     {% if positions %}
@@ -168,13 +207,13 @@
 {% endif %}
 
 {% if import_message %}
-<div class="alert {{ 'alert-danger' if import_status == 'error' else 'alert-success' }} border-0 d-flex align-items-center gap-2 mt-1 mb-3"
+<div class="alert {% if import_status == 'error' %}alert-danger{% elif import_status == 'warning' %}alert-warning{% else %}alert-success{% endif %} border-0 d-flex align-items-center gap-2 mt-1 mb-3"
      data-import-buy-count="{{ import_buy_count|default(0) }}"
      data-import-sell-count="{{ import_sell_count|default(0) }}"
      data-import-cash-count="{{ import_cash_count|default(0) }}"
      data-import-skipped-count="{{ import_skipped_count|default(0) }}"
      data-import-status="{{ import_status|default('ok') }}">
-  <i class="bi {{ 'bi-exclamation-octagon-fill' if import_status == 'error' else 'bi-check-circle-fill' }} fs-5"></i>
+  <i class="bi {% if import_status == 'error' %}bi-exclamation-octagon-fill{% elif import_status == 'warning' %}bi-exclamation-triangle-fill{% else %}bi-check-circle-fill{% endif %} fs-5"></i>
   <span>{{ import_message }}</span>
 </div>
 {% endif %}
@@ -373,7 +412,15 @@
       {% for p in positions %}
       {% set sym = '$' if p.price_currency == 'USD' else '£' %}
       <tr class="{% if p.exit_signal and p.exit_signal.action == 'EXIT' %}row-exit{% endif %}">
-        <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ p.ticker }}</span></td>
+        <td>
+          <span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ p.ticker }}</span>
+          {% if opening_lot_tickers and p.ticker in opening_lot_tickers %}
+          <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1"
+                style="font-size:0.6rem" title="Includes a manually-entered Opening Lot">
+            Manually entered
+          </span>
+          {% endif %}
+        </td>
         <td>{{ p.shares }}</td>
         <td>{{ sym }}{{ "%.2f"|format(p.avg_cost) }}</td>
         <td>
@@ -434,12 +481,18 @@
           {% endif %}
         </td>
         <td>
+          {# Story 2.3: an oversold position's `shares` can be negative --
+             never pre-fill that into these modals' shares field, since
+             both inputs require a positive value (min="0.0001") and would
+             silently block submission. Pass 0 (rendered as an empty
+             field by openAdjust/openSell's `shares || ''`) so the user
+             enters their own quantity instead. #}
           <button class="btn-adjust-sm me-2"
-                  onclick="openAdjust('{{ p.ticker }}', {{ p.shares }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %}, '{{ p.entry_date or '' }}', {% if p.stop_loss %}{{ p.stop_loss }}{% else %}''{% endif %}, {% if p.entry_price %}{{ p.entry_price }}{% else %}''{% endif %})">
+                  onclick="openAdjust('{{ p.ticker }}', {{ p.shares if p.shares > 0 else 0 }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %}, '{{ p.entry_date or '' }}', {% if p.stop_loss %}{{ p.stop_loss }}{% else %}''{% endif %}, {% if p.entry_price %}{{ p.entry_price }}{% else %}''{% endif %})">
             Adjust
           </button>
           <button class="btn-sell-sm"
-                  onclick="openSell('{{ p.ticker }}', {{ p.shares }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %})">
+                  onclick="openSell('{{ p.ticker }}', {{ p.shares if p.shares > 0 else 0 }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %})">
             Sell
           </button>
         </td>

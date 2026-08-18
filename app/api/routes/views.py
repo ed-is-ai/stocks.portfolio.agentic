@@ -135,7 +135,9 @@ async def ack_unmatched_sell(
 
 
 @router.get("/partials/history", response_class=HTMLResponse)
-async def partial_history(request: Request, trader: TraderDep) -> HTMLResponse:
+async def partial_history(
+    request: Request, trader: TraderDep, realised_pnl: RealisedPnlDep
+) -> HTMLResponse:
     # Trade History spans every portfolio; a name map feeds the Portfolio
     # column, disambiguating duplicate names with #id (#147).
     trades = trader.get_trade_history()
@@ -147,10 +149,24 @@ async def partial_history(request: Request, trader: TraderDep) -> HTMLResponse:
         pf.id: (f"{pf.name} #{pf.id}" if seen[pf.name] > 1 else pf.name)
         for pf in portfolios
     }
+    # Story 2.4 (AC6/AC7/AC8): an Opening Lot row is labelled "Manually
+    # entered" and its edit/delete actions are gated on a fresh
+    # consumed/unconsumed check -- computed here (not persisted) so the
+    # template can render a read-only state for a consumed lot without a
+    # second round trip.
+    opening_lot_status = {
+        t.id: realised_pnl.opening_lot_status(t.id, t.portfolio_id)
+        for t in trades
+        if t.source == "opening_lot" and t.id is not None and t.portfolio_id is not None
+    }
     return templates.TemplateResponse(
         request,
         "_history.html",
-        context={"trades": trades, "portfolio_names": names},
+        context={
+            "trades": trades,
+            "portfolio_names": names,
+            "opening_lot_status": opening_lot_status,
+        },
     )
 
 

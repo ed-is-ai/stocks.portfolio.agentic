@@ -56,6 +56,7 @@ async def record_trade(
     pid = optional_int(portfolio_id)
     if pid is None or not trader.portfolio_exists(pid):
         return _reject_missing_portfolio(request, portfolio, pid)
+    warning_message: str | None = None
     if action == "BUY":
         trader.record_buy(
             ticker, shares, price, date, notes, stop_loss, entry_price, pid
@@ -63,12 +64,27 @@ async def record_trade(
     elif action == "SELL":
         trader.record_sell(ticker, shares, price, date, notes, pid)
     elif action == "CORRECT":
+        # Story 2.4: correct_trade() wipes every trade for this ticker,
+        # including a manually-entered Opening Lot (consumed or not) --
+        # checked before the write so the response can tell the user,
+        # rather than silently discarding it. Warn, don't block: this
+        # tool's existing contract already wipes SELLs unconditionally.
+        existing = trader.get_trade_history(ticker, pid)
+        if any(t.source == "opening_lot" for t in existing):
+            warning_message = (
+                f"Corrected {ticker.strip().upper()}: this replaced an "
+                "existing Opening Lot for this ticker (and any match "
+                "history it had), which is now gone."
+            )
         trader.correct_trade(
             ticker, shares, price, date, notes, stop_loss, entry_price, pid
         )
     else:
         logger.warning("unsupported trade action: %s", action)
     context = portfolio.default_portfolio_context(pid)
+    if warning_message:
+        context["import_status"] = "warning"
+        context["import_message"] = warning_message
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 

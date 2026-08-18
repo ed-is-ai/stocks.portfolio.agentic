@@ -131,6 +131,13 @@ class Trade(BaseModel):
     currency: str = "GBP"  # source currency recorded on the SIPP row (#210)
     source_row_index: int | None = None  # 0-based position in its source CSV
     idempotency_key: str | None = None  # content-derived dedupe/tiebreak key
+    # Provenance (#Story 2.4): which write path produced this row --
+    # "sipp_import" | "manual" | "quick_add" | "correction" | "opening_lot".
+    # NULL for every row written before this story shipped (never backfilled).
+    source: str | None = None
+    # One id per ``import_sipp()`` call, stamped on every trade it writes.
+    # NULL for every non-SIPP-import write path.
+    import_batch_id: str | None = None
 
 
 class Position(BaseModel):

@@ -13,9 +13,13 @@ import logging
 from collections import deque
 from dataclasses import dataclass
 from datetime import date
+from typing import Literal
 
+from app.core.quantity import QUANTITY_EPSILON, round_quantity
 from app.core.ticker_identity import canonicalize_or_fallback
 from app.schemas import (
+    MatchTrace,
+    MatchTraceCandidateLot,
     RealisedPnlSummary,
     RoundTrip,
     SkippedInvalidDateTrade,
@@ -27,9 +31,6 @@ from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
 
-# Share-count epsilon for the FIFO-vs-avg-cost mismatch check (AD-10). Never
-# compare floats with a bare `==`.
-_EPSILON = 1e-6
 _INVALID_TICKERS = {"", "n/a", "N/A"}
 
 # Story 1.3: two reason strings depending on whether any prior lot existed
@@ -44,17 +45,24 @@ _PARTIAL_SHORTFALL_REASON = "Sell exceeds available BUY lots by {shares:g} share
 # in the retrievable ``SkippedInvalidDateTrade`` structure.
 _INVALID_DATE_REASON = "Trade date {raw_date!r} is not valid ISO-8601"
 
-# Share-quantity precision for an UnmatchedSell's `shares` -- matches the
-# `_EPSILON` tolerance used for lot-consumption comparisons, so a SELL that
-# is (within tolerance) fully matched never surfaces as a spurious
-# near-zero UnmatchedSell, and a genuine shortfall never displays
-# float-subtraction residue like `2.9999999997` in the UI.
-_SHARES_PRECISION = 6
-
 
 def _round2(x: float) -> float:
     """Round a GBP money amount to 2dp — the single money-rounding rule."""
     return round(x, 2)
+
+
+def _ordering_note(t: Trade) -> str:
+    """Describe Story 2.2's chronological/tie-break replay rule for the
+    Match Trace, using the *values this trade itself carried* into
+    ``_replay_sort_key`` -- exposition, not a re-derivation of the sort."""
+    return (
+        "Chronological replay: sorted by date, then (within the same "
+        "date) by descending source_row_index (NULL treated as -1, so an "
+        "unindexed row replays last in its date group), then "
+        "idempotency_key, then id. This trade's own "
+        f"source_row_index={t.source_row_index!r}, "
+        f"idempotency_key={t.idempotency_key!r}."
+    )
 
 
 @dataclass
@@ -64,6 +72,12 @@ class _Lot:
     shares_remaining: float
     buy_price: float
     buy_date: str
+    # Story 2.4: the id of the BUY trade this lot came from. Required to
+    # identify a *specific* lot after a fresh replay for both the Match
+    # Trace (which BUY a candidate lot came from) and the Opening Lot
+    # consumed/unconsumed check (ticker+date+price alone can collide, e.g.
+    # two same-day/same-price BUYs of one ticker).
+    trade_id: int | None = None
 
 
 @dataclass
@@ -118,12 +132,12 @@ class RealisedPnlService:
         persisted (AC 6).
         """
         trades, skipped_invalid_dates = self._sorted_valid_trades(portfolio_id)
-        raw_round_trips, open_lots, unmatched_sells = self._replay_fifo(
+        raw_round_trips, open_lots, unmatched_sells, _traces = self._replay_fifo(
             trades, portfolio_id
         )
         round_trips = self._convert_to_gbp(raw_round_trips)
         grouped = self._group_and_order(round_trips)
-        mismatched = self._mismatched_tickers(open_lots, portfolio_id)
+        mismatched = self._mismatched_tickers(open_lots, unmatched_sells, portfolio_id)
         # FX-unavailable Round-trips carry a 0.0 placeholder, not a real
         # figure, and must never enter the Account total (Story 1.2 AC7).
         total_pnl = _round2(
@@ -163,6 +177,75 @@ class RealisedPnlService:
             )
             summary = self.compute_summary(portfolio_id)
         return summary
+
+    def get_match_trace(self, trade_id: int, portfolio_id: int) -> MatchTrace | None:
+        """Return the full FIFO match explanation for one SELL trade
+        (Story 2.4) -- fetch-on-demand detail, mirroring this codebase's
+        existing "summary list + dedicated detail view" shape
+        (``RealisedPnlSummary.unmatched_sells`` + this).
+
+        Recomputed fresh from a full ``_replay_fifo`` run on every call --
+        nothing cached, matching ``compute_summary``'s no-caching design
+        (AC 6). Returns ``None`` if ``trade_id`` isn't a SELL trade found
+        in this portfolio's replay (e.g. a stale link, a BUY's id, or a
+        trade in a different portfolio).
+
+        AC2's duplicate/overlapping-import case is only partially
+        satisfiable: the returned trace's ``source``/``import_batch_id``
+        show which import produced *this sell*, never a specific
+        rejected/deduped row from a *different* import that may have
+        caused a missing lot -- direct investigation confirmed per-row
+        duplicate/skip/fail outcomes exist only transiently (the HTTP
+        response body and one prose notification per import file), never
+        persisted with a queryable link back to ``trades``. This is a
+        documented, accepted limitation, not a defect to fabricate around.
+        """
+        trades, skipped = self._sorted_valid_trades(portfolio_id)
+        _, _, _, traces = self._replay_fifo(trades, portfolio_id)
+        trace = traces.get(trade_id)
+        if trace is None:
+            return None
+        ticker_skips = [s for s in skipped if s.ticker == trace.ticker]
+        return trace.model_copy(update={"skipped_invalid_date_trades": ticker_skips})
+
+    def opening_lot_status(
+        self, trade_id: int, portfolio_id: int
+    ) -> Literal["unconsumed", "consumed"] | None:
+        """Return whether an Opening Lot trade has been touched by FIFO
+        matching (Story 2.4, AC7/AC8) -- never a persisted column.
+
+        Runs a fresh ``_replay_fifo`` (matching ``compute_summary``'s
+        no-caching design) and looks for the ``_Lot`` this trade produced,
+        identified by its ``trade_id`` (not ticker/date/price, which two
+        lots could share). A lot still present with ``shares_remaining``
+        equal (within ``QUANTITY_EPSILON``) to the trade's own ``shares``
+        was never touched by a SELL -- ``"unconsumed"``, safe to
+        edit/delete. A lot present with a smaller ``shares_remaining`` is
+        ``"consumed"`` (partially). A lot *absent* entirely is also
+        ``"consumed"`` (fully) -- ``_replay_fifo`` dequeues a lot the
+        instant its last share is matched, so "not found in the open-lot
+        queues" is the fully-consumed case here, not a sign of a bad id.
+
+        Returns ``None`` if ``trade_id`` doesn't exist in this portfolio's
+        trade history at all (caller should treat this the same as a
+        missing/invalid Opening Lot, distinct from ``"consumed"``).
+        """
+        all_trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
+        trade = next((t for t in all_trades if t.id == trade_id), None)
+        if trade is None:
+            return None
+        valid_trades, _ = self._sorted_valid_trades(portfolio_id)
+        _, open_lots, _, _ = self._replay_fifo(valid_trades, portfolio_id)
+        aliases = self._portfolio.load_ticker_aliases()
+        ticker = canonicalize_or_fallback(
+            trade.ticker, aliases, logger=logger, context="opening_lot_status"
+        )
+        for lot in open_lots.get(ticker, ()):
+            if lot.trade_id == trade.id:
+                if abs(lot.shares_remaining - trade.shares) <= QUANTITY_EPSILON:
+                    return "unconsumed"
+                return "consumed"
+        return "consumed"
 
     def _sorted_valid_trades(
         self, portfolio_id: int
@@ -254,7 +337,12 @@ class RealisedPnlService:
 
     def _replay_fifo(
         self, trades: list[Trade], portfolio_id: int
-    ) -> tuple[list[_RawRoundTrip], dict[str, deque[_Lot]], list[UnmatchedSell]]:
+    ) -> tuple[
+        list[_RawRoundTrip],
+        dict[str, deque[_Lot]],
+        list[UnmatchedSell],
+        dict[int, MatchTrace],
+    ]:
         """Replay trades in order, FIFO-matching SELLs against open lots.
 
         On BUY, push a new lot onto that ticker's queue. On SELL, pop from
@@ -277,34 +365,68 @@ class RealisedPnlService:
         fragmenting, agreeing with the average-cost replay's identity. A
         cycle or malformed alias file degrades to the raw ticker with a
         logged warning rather than crashing this replay.
+
+        Story 2.4: a ``MatchTrace`` is built for every SELL alongside this
+        same loop (not recomputed in a second pass) and returned in the
+        fourth element, keyed by the sell's own trade id -- one entry per
+        SELL regardless of whether it matched cleanly, partially, or not
+        at all. ``get_match_trace`` fetches from this dict on demand; a
+        SELL with no persisted ``id`` (unreachable for a real row) is
+        simply omitted, mirroring the same defensive ``t.id is None``
+        tolerance the ``UnmatchedSell`` branch already has.
         """
         aliases = self._portfolio.load_ticker_aliases()
+        # Every trade (BUY and SELL) keyed by id -- lets a SELL's trace look
+        # up the *originating* BUY trade's own source/import_batch_id for
+        # each candidate lot, purely by in-memory lookup (no second query).
+        trades_by_id = {t.id: t for t in trades if t.id is not None}
         queues: dict[str, deque[_Lot]] = {}
         round_trips: list[_RawRoundTrip] = []
         unmatched_sells: list[UnmatchedSell] = []
+        traces: dict[int, MatchTrace] = {}
         for t in trades:
             ticker = canonicalize_or_fallback(
                 t.ticker, aliases, logger=logger, context="_replay_fifo"
             )
             queue = queues.setdefault(ticker, deque())
             if t.action == "BUY":
-                queue.append(_Lot(t.shares, t.price, t.date))
+                queue.append(_Lot(t.shares, t.price, t.date, t.id))
                 continue
             remaining_to_sell = t.shares
             any_lot_matched = False
-            while remaining_to_sell > _EPSILON and queue:
+            candidate_lots: list[MatchTraceCandidateLot] = []
+            while remaining_to_sell > QUANTITY_EPSILON and queue:
                 lot = queue[0]
                 matched = min(lot.shares_remaining, remaining_to_sell)
                 round_trips.append(
                     self._build_raw_round_trip(t, lot, matched, portfolio_id, ticker)
                 )
+                buy_trade = (
+                    trades_by_id.get(lot.trade_id) if lot.trade_id is not None else None
+                )
+                candidate_lots.append(
+                    MatchTraceCandidateLot(
+                        trade_id=lot.trade_id or 0,
+                        buy_date=lot.buy_date,
+                        buy_price=lot.buy_price,
+                        shares_consumed=matched,
+                        source=buy_trade.source if buy_trade else None,
+                        import_batch_id=(
+                            buy_trade.import_batch_id if buy_trade else None
+                        ),
+                        is_opening_lot=bool(
+                            buy_trade and buy_trade.source == "opening_lot"
+                        ),
+                    )
+                )
                 lot.shares_remaining -= matched
                 remaining_to_sell -= matched
                 any_lot_matched = True
-                if lot.shares_remaining <= _EPSILON:
+                if lot.shares_remaining <= QUANTITY_EPSILON:
                     queue.popleft()
-            remaining_to_sell = round(remaining_to_sell, _SHARES_PRECISION)
-            if remaining_to_sell > _EPSILON:
+            remaining_to_sell = round_quantity(remaining_to_sell)
+            reason: str | None = None
+            if remaining_to_sell > QUANTITY_EPSILON:
                 if t.id is None:
                     logger.warning(
                         "Realised P&L: unmatched SELL for %s has no trade id "
@@ -329,7 +451,23 @@ class RealisedPnlService:
                         acknowledged_at=t.realised_pnl_ack_at,
                     )
                 )
-        return round_trips, queues, unmatched_sells
+            if t.id is not None:
+                traces[t.id] = MatchTrace(
+                    trade_id=t.id,
+                    ticker=ticker,
+                    portfolio_id=portfolio_id,
+                    date=t.date,
+                    shares=t.shares,
+                    price=t.price,
+                    shares_matched=round_quantity(t.shares - remaining_to_sell),
+                    shares_unmatched=remaining_to_sell,
+                    candidate_lots=candidate_lots,
+                    ordering_note=_ordering_note(t),
+                    source=t.source,
+                    import_batch_id=t.import_batch_id,
+                    reason=reason,
+                )
+        return round_trips, queues, unmatched_sells, traces
 
     @staticmethod
     def _build_raw_round_trip(
@@ -479,32 +617,55 @@ class RealisedPnlService:
         return {tk: by_ticker[tk] for tk in ordered_tickers}
 
     def _mismatched_tickers(
-        self, open_lots: dict[str, deque[_Lot]], portfolio_id: int
+        self,
+        open_lots: dict[str, deque[_Lot]],
+        unmatched_sells: list[UnmatchedSell],
+        portfolio_id: int,
     ) -> list[str]:
-        """Cross-check FIFO open-lot totals against the avg-cost replay.
+        """Cross-check FIFO's net position against the avg-cost replay.
 
-        Per AD-10, a ticker is reported only when its FIFO open-lot share
-        total disagrees with ``TraderService.get_portfolio()``'s avg-cost
-        total by more than ``_EPSILON`` shares — never a bare ``==``. Logs
-        a warning per mismatch; never raises.
+        Per AD-10, a ticker is reported only when FIFO's total disagrees
+        with ``TraderService.get_portfolio()``'s avg-cost total by more than
+        ``QUANTITY_EPSILON`` shares — never a bare ``==``. Logs a warning
+        per mismatch; never raises.
+
+        Story 2.3: FIFO's ``open_lots`` structurally can never go negative
+        — an oversell's shortfall is recorded separately, in
+        ``unmatched_sells``, never merged back into ``open_lots``. Since
+        the average-cost clamp was removed, its ``shares`` figure now goes
+        negative for the identical, legitimately-oversold ticker. Comparing
+        bare ``open_lots`` totals against avg-cost's negative-capable
+        ``shares`` would therefore read as a large false divergence for
+        every oversold ticker. Netting each ticker's ``unmatched_sells``
+        shortfall against its ``open_lots`` total first produces a FIFO-side
+        net position directly comparable to avg-cost's ``shares``, including
+        its negative range, before the two are compared.
         """
         fifo_shares = {
             ticker: sum(lot.shares_remaining for lot in lots)
             for ticker, lots in open_lots.items()
         }
+        shortfalls: dict[str, float] = {}
+        for unmatched in unmatched_sells:
+            shortfalls[unmatched.ticker] = (
+                shortfalls.get(unmatched.ticker, 0.0) + unmatched.shares
+            )
         avg_cost_positions = self._trader.get_portfolio(portfolio_id=portfolio_id)
         avg_cost_shares = {p.ticker: p.shares for p in avg_cost_positions}
         mismatched: list[str] = []
-        for ticker in sorted(set(fifo_shares) | set(avg_cost_shares)):
-            fifo_total = fifo_shares.get(ticker, 0.0)
-            avg_total = avg_cost_shares.get(ticker, 0.0)
-            if abs(fifo_total - avg_total) > _EPSILON:
+        all_tickers = set(fifo_shares) | set(avg_cost_shares) | set(shortfalls)
+        for ticker in sorted(all_tickers):
+            fifo_net = round_quantity(
+                fifo_shares.get(ticker, 0.0) - shortfalls.get(ticker, 0.0)
+            )
+            avg_total = round_quantity(avg_cost_shares.get(ticker, 0.0))
+            if abs(fifo_net - avg_total) > QUANTITY_EPSILON:
                 mismatched.append(ticker)
                 logger.warning(
                     "Realised P&L FIFO/avg-cost mismatch for %s: "
-                    "fifo_shares=%.6f avg_cost_shares=%.6f",
+                    "fifo_net_shares=%.8f avg_cost_shares=%.8f",
                     ticker,
-                    fifo_total,
+                    fifo_net,
                     avg_total,
                 )
         return mismatched

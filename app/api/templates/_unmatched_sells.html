@@ -51,6 +51,15 @@
                 Mark as known transfer
               </button>
             {% endif %}
+            {# Story 2.4: the Match Trace explains *why* this sell didn't
+               cleanly match -- identity, candidate lots, ordering
+               decision, skipped-date rows, import provenance -- rather
+               than only the coarse ``reason`` string already shown above. #}
+            <a href="#" class="ack-toggle" style="text-decoration:none"
+               hx-get="/portfolio/{{ us.portfolio_id }}/match-trace/{{ us.trade_id }}"
+               hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">
+              <i class="bi bi-search me-1"></i>View match trace
+            </a>
           </td>
         </tr>
         {% endfor %}

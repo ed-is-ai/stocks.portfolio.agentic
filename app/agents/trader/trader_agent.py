@@ -10,6 +10,7 @@ import hashlib
 import io
 import logging
 import re
+import uuid
 from datetime import date as _date
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -27,6 +28,7 @@ from app.core.money import (
     has_currency_marker,
     parse_money,
 )
+from app.core.quantity import QUANTITY_EPSILON, round_quantity
 from app.core.ticker_identity import (
     HSFWA_TICKER,
     AmbiguousTickerAliasError,
@@ -76,6 +78,12 @@ REQUIRED_SIPP_COLUMNS = (
 
 class SippImportError(ValueError):
     """Raised when a SIPP CSV cannot be imported (e.g. missing columns)."""
+
+
+class OpeningLotDuplicateError(ValueError):
+    """Raised when an Opening Lot entry duplicates an existing one (Story
+    2.4, AC4) -- same canonicalized ticker, ``shares``, and ``date`` already
+    recorded with ``source="opening_lot"`` for this portfolio."""
 
 
 def _to_iso_date(value: str) -> str:
@@ -360,8 +368,14 @@ class TraderAgent(Agent):
         stop_loss: float | None = None,
         entry_price: float | None = None,
         portfolio_id: int | None = None,
+        source: str = "manual",
     ) -> Trade:
-        """Record a buy transaction and return the saved Trade."""
+        """Record a buy transaction and return the saved Trade.
+
+        ``source`` tags this row's provenance (Story 2.4) -- defaults to
+        ``"manual"`` (the generic ``/trades`` BUY form); callers like
+        Quick-Add and the Opening Lot entry path pass their own value.
+        """
         trade_date = (
             _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
         )
@@ -375,6 +389,7 @@ class TraderAgent(Agent):
             stop_loss,
             entry_price,
             portfolio_id,
+            source=source,
         )
         return Trade(
             id=trade_id,
@@ -387,6 +402,7 @@ class TraderAgent(Agent):
             stop_loss=stop_loss,
             entry_price=entry_price,
             portfolio_id=portfolio_id,
+            source=source,
         )
 
     def record_sell(
@@ -397,8 +413,13 @@ class TraderAgent(Agent):
         date: str | None = None,
         notes: str = "",
         portfolio_id: int | None = None,
+        source: str = "manual",
     ) -> Trade:
-        """Record a sell transaction and return the saved Trade."""
+        """Record a sell transaction and return the saved Trade.
+
+        ``source`` tags this row's provenance (Story 2.4) -- defaults to
+        ``"manual"`` (the generic ``/trades`` SELL form).
+        """
         trade_date = (
             _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
         )
@@ -410,6 +431,7 @@ class TraderAgent(Agent):
             trade_date,
             notes,
             portfolio_id=portfolio_id,
+            source=source,
         )
         return Trade(
             id=trade_id,
@@ -420,6 +442,7 @@ class TraderAgent(Agent):
             date=trade_date,
             notes=notes,
             portfolio_id=portfolio_id,
+            source=source,
         )
 
     def correct_trade(
@@ -436,7 +459,9 @@ class TraderAgent(Agent):
         """Overwrite the position for a ticker: delete all trades and insert one BUY.
 
         Scoped to ``portfolio_id`` so correcting a ticker in one account never
-        touches the same ticker held in another.
+        touches the same ticker held in another. Always tags the written row
+        ``source="correction"`` (Story 2.4), regardless of what the
+        replaced trades' provenance was.
         """
         trade_date = (
             _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
@@ -452,6 +477,7 @@ class TraderAgent(Agent):
             stop_loss,
             entry_price,
             portfolio_id,
+            source="correction",
         )
         return Trade(
             id=trade_id,
@@ -464,10 +490,159 @@ class TraderAgent(Agent):
             stop_loss=stop_loss,
             entry_price=entry_price,
             portfolio_id=portfolio_id,
+            source="correction",
         )
 
     def delete_trade(self, trade_id: int) -> bool:
         """Delete a trade by ID. Returns True if a row was deleted."""
+        return self._trades.delete_by_id(trade_id)
+
+    def _opening_lot_duplicate_check(
+        self,
+        canonical_ticker_value: str,
+        shares: float,
+        trade_date: str,
+        portfolio_id: int | None,
+        exclude_trade_id: int | None = None,
+    ) -> None:
+        """Raise ``OpeningLotDuplicateError`` if an Opening Lot with the same
+        canonicalized ticker, ``shares``, and ``date`` already exists for
+        this portfolio (Story 2.4, AC4).
+
+        Shared by ``record_opening_lot`` and ``update_opening_lot``;
+        ``exclude_trade_id`` lets an edit collide-check against every
+        *other* Opening Lot without always rejecting against itself.
+        Distinct from SIPP import's idempotency-key dedup, which has no
+        equivalent content to key on for a manual entry.
+        """
+        for existing in self._trades.history(canonical_ticker_value, portfolio_id):
+            if (
+                existing.id != exclude_trade_id
+                and existing.source == "opening_lot"
+                and existing.action == "BUY"
+                and existing.date == trade_date
+                and abs(existing.shares - shares) <= QUANTITY_EPSILON
+            ):
+                raise OpeningLotDuplicateError(
+                    f"An Opening Lot for {canonical_ticker_value} on "
+                    f"{trade_date} with {shares:g} shares already exists."
+                )
+
+    def record_opening_lot(
+        self,
+        ticker: str,
+        shares: float,
+        price: float,
+        date: str,
+        notes: str = "",
+        portfolio_id: int | None = None,
+    ) -> Trade:
+        """Record a manual Opening Lot (Story 2.4).
+
+        A BUY trade tagged ``source="opening_lot"`` -- reuses the exact
+        insert path an imported Buy uses, so it participates in FIFO and
+        average-cost replay identically (AC3), including in the Match
+        Trace. Rejects (``OpeningLotDuplicateError``) a duplicate entry --
+        same canonicalized ticker, ``shares``, and ``date`` already
+        recorded as an Opening Lot for this portfolio (AC4) -- before any
+        write.
+        """
+        canonical = canonicalize_or_fallback(
+            ticker.upper(), load_aliases(), logger=logger, context="record_opening_lot"
+        )
+        trade_date = (
+            _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
+        )
+        self._opening_lot_duplicate_check(canonical, shares, trade_date, portfolio_id)
+        trade_id = self._trades.insert(
+            canonical,
+            "BUY",
+            shares,
+            price,
+            trade_date,
+            notes,
+            portfolio_id=portfolio_id,
+            source="opening_lot",
+        )
+        return Trade(
+            id=trade_id,
+            ticker=canonical,
+            action="BUY",
+            shares=shares,
+            price=price,
+            date=trade_date,
+            notes=notes,
+            portfolio_id=portfolio_id,
+            source="opening_lot",
+        )
+
+    def update_opening_lot(
+        self,
+        trade_id: int,
+        ticker: str,
+        shares: float,
+        price: float,
+        date: str,
+        notes: str = "",
+        portfolio_id: int | None = None,
+    ) -> Trade:
+        """Edit an existing Opening Lot's fields in place (Story 2.4).
+
+        Re-runs the same duplicate check as ``record_opening_lot``,
+        excluding the row being edited itself, so an edit that collides
+        with a *different* Opening Lot is still rejected (AC4). The
+        caller (the route) is responsible for the consumed/unconsumed gate
+        (AC7/AC8, via ``RealisedPnlService.opening_lot_status``) before
+        calling this -- this performs the write unconditionally once
+        called. Raises ``ValueError`` if no Opening Lot with ``trade_id``
+        exists for this portfolio.
+        """
+        canonical = canonicalize_or_fallback(
+            ticker.upper(), load_aliases(), logger=logger, context="update_opening_lot"
+        )
+        trade_date = (
+            _to_iso_date(date) if date else datetime.today().strftime("%Y-%m-%d")
+        )
+        self._opening_lot_duplicate_check(
+            canonical, shares, trade_date, portfolio_id, exclude_trade_id=trade_id
+        )
+        updated = self._trades.update_opening_lot(
+            trade_id, canonical, shares, price, trade_date, notes, portfolio_id
+        )
+        if not updated:
+            raise ValueError(
+                f"No Opening Lot with id={trade_id} exists for this portfolio."
+            )
+        return Trade(
+            id=trade_id,
+            ticker=canonical,
+            action="BUY",
+            shares=shares,
+            price=price,
+            date=trade_date,
+            notes=notes,
+            portfolio_id=portfolio_id,
+            source="opening_lot",
+        )
+
+    def delete_opening_lot(
+        self, trade_id: int, portfolio_id: int | None = None
+    ) -> bool:
+        """Delete an Opening Lot by id, scoped to ``portfolio_id``.
+
+        Only deletes a row that is in fact ``source="opening_lot"``
+        (defense in depth so this Opening-Lot-specific path can never
+        delete an unrelated trade). The caller (the route) is responsible
+        for the consumed/unconsumed gate (AC7/AC8) before calling this.
+        Returns True if a row was deleted.
+        """
+        history = self._trades.history(portfolio_id=portfolio_id)
+        target = next(
+            (t for t in history if t.id == trade_id and t.source == "opening_lot"),
+            None,
+        )
+        if target is None:
+            return False
         return self._trades.delete_by_id(trade_id)
 
     def get_trade_history(
@@ -520,12 +695,20 @@ class TraderAgent(Agent):
         ``open_rows``) and ``import_sipp``'s in-transaction snapshot calc
         (reading via ``open_rows_on_connection``) so both use one
         implementation.
+
+        A fully-closed position (``shares`` within ``QUANTITY_EPSILON`` of
+        0) is excluded -- there is nothing open to show, and a bare
+        ``!= 0`` would let residual float dust from a long replay surface
+        as a phantom near-zero row. A genuinely negative ``shares`` (an
+        oversell whose shortfall was never clamped away, Story 2.3) is
+        deliberately included: it must stay visible and trackable on the
+        Portfolio tab, not vanish the way a `> 0` filter would make it.
         """
         state = TraderAgent._replay_trades(rows)
         return [
             TraderAgent._build_position(ticker, s, current_prices, display_info)
             for ticker, s in state.items()
-            if s["shares"] > 0
+            if abs(s["shares"]) > QUANTITY_EPSILON
         ]
 
     @staticmethod
@@ -580,10 +763,29 @@ class TraderAgent(Agent):
                 }
             s = state[ticker]
             if action == "BUY":
-                new_total = s["shares"] + shares
-                s["avg_cost"] = (
-                    s["avg_cost"] * s["shares"] + price * shares
-                ) / new_total
+                # Story 2.3: `s["shares"]` is kept rounded to the shared 8dp
+                # policy after every update (below), so accumulated float
+                # dust from prior BUY/SELL arithmetic never carries forward
+                # -- this is what makes the zero-crossing check below
+                # reliable, rather than comparing a possibly-dust-laden raw
+                # float against `QUANTITY_EPSILON`.
+                new_total = round_quantity(s["shares"] + shares)
+                # Removing the oversell clamp lets `s["shares"]` be negative
+                # going in, so a BUY can now land `new_total` on exactly 0
+                # -- a position that was oversold and is now exactly closed
+                # out. There is no such thing as a weighted-average cost of
+                # zero shares, so this guard exists purely to avoid a
+                # ZeroDivisionError; it is not the "reset avg_cost on
+                # crossing zero" behavior the spec's Design Notes leave out
+                # of scope, since a flat (0-share) position is filtered out
+                # of every display path regardless of what its avg_cost
+                # holds.
+                if abs(new_total) < QUANTITY_EPSILON:
+                    s["avg_cost"] = 0.0
+                else:
+                    s["avg_cost"] = (
+                        s["avg_cost"] * s["shares"] + price * shares
+                    ) / new_total
                 s["shares"] = new_total
                 if s["entry_date"] is None:
                     s["entry_date"] = trade_date
@@ -592,14 +794,25 @@ class TraderAgent(Agent):
                 if entry_price is not None:
                     s["entry_price"] = entry_price
             else:  # SELL
-                if shares > s["shares"]:
+                # Epsilon-tolerant, not a bare `>` -- a SELL that (within
+                # float precision) exactly matches the held quantity must
+                # never register as an oversell purely from float-arithmetic
+                # dust accumulated across a long replay (mirrors FIFO's own
+                # `remaining_to_sell > QUANTITY_EPSILON` idiom).
+                if shares - s["shares"] > QUANTITY_EPSILON:
+                    # Story 2.3: no longer clamped to 0 -- the shortfall is
+                    # preserved as a negative share count, mirroring FIFO's
+                    # existing UnmatchedSell convention of reporting the
+                    # unconsumed remainder instead of discarding it.
                     logging.getLogger(__name__).warning(
-                        "Oversell for %s: sold %s but only %s held; clamping to 0",
+                        "Oversell for %s: sold %s but only %s held; "
+                        "recording a negative remainder of %s",
                         ticker,
                         shares,
                         s["shares"],
+                        shares - s["shares"],
                     )
-                s["shares"] = max(0.0, s["shares"] - shares)
+                s["shares"] = round_quantity(s["shares"] - shares)
         return state
 
     @staticmethod
@@ -614,6 +827,14 @@ class TraderAgent(Agent):
         For USD stocks, all monetary fields (current_price, current_value,
         unrealised_pnl) are kept in USD so that P&L is self-consistent.
         The web layer converts to GBP for aggregate totals.
+
+        ``shares``/``avg_cost`` are rounded via the shared
+        ``round_quantity`` (8dp round-half-even, Story 2.3) rather than
+        ``round(..., 4)``, unifying average-cost's precision policy with
+        FIFO's. Monetary fields below (``total_cost``, ``current_value``,
+        ``unrealised_pnl``, ``current_price``, profit targets) stay on the
+        pre-existing 2dp ``round()`` -- a distinct typed fact (AD-24), out
+        of this story's scope.
         """
         avg_cost = s["avg_cost"]
         remaining = s["shares"]
@@ -643,8 +864,8 @@ class TraderAgent(Agent):
         pt25 = round(entry_price * 1.25, 2) if entry_price else None
         return Position(
             ticker=ticker,
-            shares=round(remaining, 4),
-            avg_cost=round(avg_cost, 4),
+            shares=round_quantity(remaining),
+            avg_cost=round_quantity(avg_cost),
             current_price=round(cp, 2) if cp is not None else None,
             total_cost=total_cost,
             current_value=current_value,
@@ -785,6 +1006,10 @@ class TraderAgent(Agent):
         # until every row has been evaluated).
         planned_trades: list[tuple[Any, ...]] = []
         planned_cash_flows: list[tuple[Any, ...]] = []
+        # Story 2.4: one fresh id per import call, stamped on every trade
+        # this call writes -- traces a sell (or any trade) back to the
+        # specific import that produced it.
+        import_batch_id = uuid.uuid4().hex
         # Rows with genuinely no signal (no quantity, no debit/credit, no
         # parse error) -- counted toward the row-count reconciliation below
         # so a benign informational row never falsely flags status="error",
@@ -1097,6 +1322,8 @@ class TraderAgent(Agent):
                                             if price_money
                                             else "GBP",
                                             idx,
+                                            "sipp_import",
+                                            import_batch_id,
                                         )
                                     )
                                     classify(idempotency_key, existing_trade_keys)
@@ -1596,16 +1823,22 @@ class TraderAgent(Agent):
         state = self._replay_trades(rows)
         positions = []
 
+        # Story 2.3: epsilon-tolerant (not `> 0` or a bare `!= 0`) so an
+        # oversold, negative-share ticker stays visible on refresh too,
+        # matching `_compute_positions`'s identical fix -- otherwise this
+        # sibling replay path would still silently drop the ticker the
+        # clamp-removal was meant to surface, and a bare `!= 0` would let
+        # residual float dust from a long replay surface as a phantom row.
         missing_tickers = [
             ticker
             for ticker, s in state.items()
-            if s["shares"] > 0 and ticker not in current_prices
+            if abs(s["shares"]) > QUANTITY_EPSILON and ticker not in current_prices
         ]
         if missing_tickers:
             logger.warning(f"Could not fetch prices for: {missing_tickers}")
 
         for ticker, s in state.items():
-            if s["shares"] > 0:
+            if abs(s["shares"]) > QUANTITY_EPSILON:
                 pos = self._build_position(ticker, s, current_prices, display_info)
                 positions.append(pos)
 

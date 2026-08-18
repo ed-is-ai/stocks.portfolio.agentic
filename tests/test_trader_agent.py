@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app.agents.trader.trader_agent import (
+    OpeningLotDuplicateError,
     SippImportError,
     TraderAgent,
     _detect_reconciliation_issues,
@@ -359,7 +360,13 @@ def test_to_iso_date_strips_embedded_bom() -> None:
     assert _to_iso_date("﻿2024-02-01") == "2024-02-01"
 
 
-def test_oversell_is_logged_and_clamped(tmp_path: Path, caplog) -> None:
+def test_oversell_is_logged_and_visible_with_negative_shares(
+    tmp_path: Path, caplog
+) -> None:
+    """Story 2.3: an oversell is no longer clamped to 0 -- the ticker stays
+    in ``get_portfolio()``'s results with a negative ``shares`` count (the
+    unconsumed shortfall, mirroring FIFO's ``UnmatchedSell`` convention),
+    and the existing oversell warning still fires."""
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
@@ -371,9 +378,87 @@ def test_oversell_is_logged_and_clamped(tmp_path: Path, caplog) -> None:
     with caplog.at_level(logging.WARNING):
         portfolio = agent.get_portfolio()
 
-    # Position is gone (clamped to 0), and the oversell was logged
-    assert all(p.ticker != "TEST1" for p in portfolio)
+    position = next(p for p in portfolio if p.ticker == "TEST1")
+    assert position.shares == -15.0
     assert any("Oversell" in r.message for r in caplog.records)
+
+
+def test_replay_trades_sell_within_epsilon_of_held_is_not_an_oversell(
+    caplog,
+) -> None:
+    """Story 2.3 review fix: the oversell check compares the *difference*
+    against ``QUANTITY_EPSILON``, not a bare ``shares > s["shares"]`` --
+    a SELL that is, within float precision, an exact match for the held
+    quantity must never log a false "Oversell" warning or leave a
+    phantom negative-dust position behind. Constructed directly against
+    ``_replay_trades`` (bypassing the DB) so the epsilon-tolerance is
+    exercised deterministically, independent of whether ordinary
+    arithmetic happens to produce float noise naturally."""
+    import logging
+
+    rows = [
+        ("TEST1", "BUY", 5.0, 100.0, "2026-01-01", None, None),
+        # 2e-9 below QUANTITY_EPSILON (5e-9) -- an exact sell in every
+        # practical sense, not a genuine oversell.
+        ("TEST1", "SELL", 5.0 + 2e-9, 110.0, "2026-01-02", None, None),
+    ]
+
+    with caplog.at_level(logging.WARNING):
+        state = TraderAgent._replay_trades(rows)
+
+    assert not any("Oversell" in r.message for r in caplog.records)
+    assert abs(state["TEST1"]["shares"]) <= 5e-9
+
+
+def test_replay_trades_genuine_oversell_beyond_epsilon_still_warns() -> None:
+    """The epsilon tolerance must not swallow a real oversell -- only a
+    difference within ``QUANTITY_EPSILON`` is treated as a match."""
+    rows = [
+        ("TEST1", "BUY", 5.0, 100.0, "2026-01-01", None, None),
+        ("TEST1", "SELL", 5.01, 110.0, "2026-01-02", None, None),
+    ]
+
+    state = TraderAgent._replay_trades(rows)
+
+    assert state["TEST1"]["shares"] == -0.01
+
+
+def test_refresh_portfolio_prices_keeps_oversold_ticker_visible(
+    tmp_path: Path,
+) -> None:
+    """Story 2.3: the price-refresh path (a sibling of ``get_portfolio()``,
+    with its own copy of the visibility filter) must not silently drop an
+    oversold, negative-share ticker either -- it has to survive a live
+    price refresh the same way it survives the initial Portfolio tab
+    render."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.record_buy("TEST1", 10.0, 100.0, "2026-04-30")
+    agent.record_sell("TEST1", 25.0, 110.0, "2026-05-01")  # oversell -> -15
+
+    positions = agent.refresh_portfolio_prices(current_prices={"TEST1": 120.0})
+
+    position = next(p for p in positions if p.ticker == "TEST1")
+    assert position.shares == -15.0
+
+
+def test_replay_trades_buy_crossing_through_zero_does_not_crash() -> None:
+    """A BUY that pushes a negative (oversold) position *through* zero to a
+    new positive total -- not landing exactly on zero -- must not divide by
+    a near-zero denominator and crash. Per the spec's Design Notes, making
+    ``avg_cost`` economically "clean" while crossing zero is explicitly out
+    of scope; this only guards against a crash, matching the exact-zero
+    case's existing guard."""
+    rows = [
+        ("TEST1", "SELL", 3.0, 100.0, "2026-01-01", None, None),  # -> -3.0
+        ("TEST1", "BUY", 3.0000001, 50.0, "2026-01-02", None, None),
+    ]
+
+    state = TraderAgent._replay_trades(rows)
+
+    assert state["TEST1"]["shares"] == 1e-07
+    assert isinstance(state["TEST1"]["avg_cost"], float)
 
 
 def test_import_sipp_clean_well_formed_import_commits_and_closes_connection(
@@ -1801,3 +1886,267 @@ def test_same_day_one_file_avg_cost_processes_last_listed_row_first(
 
     portfolio = agent.get_portfolio()
     assert all(p.ticker != "ORDX" for p in portfolio)
+
+
+# --- Story 2.4: trade provenance + Opening Lots -----------------------------
+
+
+def test_record_buy_defaults_source_to_manual(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    trade = agent.record_buy("AAPL", 10, 100.0, "2026-01-01")
+    assert trade.source == "manual"
+    assert agent.get_trade_history()[0].source == "manual"
+
+
+def test_record_sell_defaults_source_to_manual(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    trade = agent.record_sell("AAPL", 10, 100.0, "2026-01-01")
+    assert trade.source == "manual"
+
+
+def test_record_buy_accepts_explicit_source(tmp_path: Path) -> None:
+    """Quick-Add (source="quick_add") and the Opening Lot path both call
+    through this same parameter rather than a duplicated insert path."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    trade = agent.record_buy("AAPL", 10, 100.0, "2026-01-01", source="quick_add")
+    assert trade.source == "quick_add"
+    assert agent.get_trade_history()[0].source == "quick_add"
+
+
+def test_correct_trade_always_tags_correction(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.record_buy("AAPL", 10, 100.0, "2026-01-01", source="quick_add")
+    corrected = agent.correct_trade("AAPL", 20, 110.0, "2026-01-02")
+    assert corrected.source == "correction"
+    history = agent.get_trade_history("AAPL")
+    assert len(history) == 1
+    assert history[0].source == "correction"
+
+
+def test_import_sipp_stamps_source_and_one_batch_id_per_call(tmp_path: Path) -> None:
+    """Every trade written by one ``import_sipp`` call shares a single
+    ``import_batch_id``; a second, separate call gets a fresh one."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,AAPL,B123,10,100.00,Buy AAPL,REF-A,1000.00,,5000.00\n"
+        "02/02/2024,MSFT,B456,5,200.00,Buy MSFT,REF-B,1000.00,,4000.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    agent.import_sipp(csv_text.encode("utf-8"))
+    first_history = agent.get_trade_history()
+    assert len(first_history) == 2
+    batch_ids = {t.import_batch_id for t in first_history}
+    assert len(batch_ids) == 1
+    assert None not in batch_ids
+    assert all(t.source == "sipp_import" for t in first_history)
+
+    csv_text_2 = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "03/02/2024,TSLA,T789,2,300.00,Buy TSLA,REF-C,600.00,,3400.00\n"
+    )
+    agent.import_sipp(csv_text_2.encode("utf-8"))
+    second_batch_trade = next(
+        t for t in agent.get_trade_history() if t.ticker == "TSLA"
+    )
+    assert second_batch_trade.import_batch_id is not None
+    assert second_batch_trade.import_batch_id not in batch_ids
+
+
+def test_import_sipp_cash_flow_rows_unaffected_by_trade_provenance_columns(
+    tmp_path: Path,
+) -> None:
+    """``source``/``import_batch_id`` (Story 2.4) are threaded only into
+    ``planned_trades``/``insert_ignore`` for ``trades`` -- a cash-flow-only
+    row (no Symbol/Quantity) must still import cleanly, proving the two
+    write paths weren't accidentally coupled."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "01/02/2024,n/a,,,,Contribution,REF-CASH,,1000.00,1000.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+    assert result.status == "ok"
+    assert result.cash_flow_count == 1
+    assert agent.get_trade_history() == []
+
+
+def test_record_opening_lot_writes_tagged_buy(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+
+    trade = agent.record_opening_lot(
+        "AAPL", 10, 100.0, "2026-01-01", "opening balance", pf.id
+    )
+
+    assert trade.action == "BUY"
+    assert trade.source == "opening_lot"
+    history = agent.get_trade_history("AAPL", pf.id)
+    assert len(history) == 1
+    assert history[0].source == "opening_lot"
+    # AC3: participates in average-cost replay exactly like an imported Buy.
+    portfolio = agent.get_portfolio(portfolio_id=pf.id)
+    assert portfolio[0].ticker == "AAPL"
+    assert portfolio[0].shares == 10
+
+
+def test_record_opening_lot_rejects_exact_duplicate(tmp_path: Path) -> None:
+    """AC4: same canonicalized ticker/shares/date already recorded as an
+    Opening Lot is rejected, not silently inserted as a second lot."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    agent.record_opening_lot("AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf.id)
+
+    with pytest.raises(OpeningLotDuplicateError):
+        agent.record_opening_lot("AAPL", 10, 150.0, "2026-01-01", portfolio_id=pf.id)
+
+    # No second row was written.
+    assert len(agent.get_trade_history("AAPL", pf.id)) == 1
+
+
+def test_record_opening_lot_allows_different_shares_or_date(tmp_path: Path) -> None:
+    """Only an exact ticker+shares+date match is a duplicate -- a
+    different quantity or date is a genuinely distinct lot."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    agent.record_opening_lot("AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf.id)
+
+    agent.record_opening_lot("AAPL", 5, 100.0, "2026-01-01", portfolio_id=pf.id)
+    agent.record_opening_lot("AAPL", 10, 100.0, "2026-02-01", portfolio_id=pf.id)
+
+    assert len(agent.get_trade_history("AAPL", pf.id)) == 3
+
+
+def test_record_opening_lot_duplicate_check_scoped_per_portfolio(
+    tmp_path: Path,
+) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf1 = agent.create_portfolio("SIPP")
+    pf2 = agent.create_portfolio("ISA")
+    agent.record_opening_lot("AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf1.id)
+
+    # Same ticker/shares/date but a different portfolio is not a duplicate.
+    agent.record_opening_lot("AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf2.id)
+
+    assert len(agent.get_trade_history("AAPL", pf1.id)) == 1
+    assert len(agent.get_trade_history("AAPL", pf2.id)) == 1
+
+
+def test_record_opening_lot_duplicate_check_resolves_ticker_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC4 + Story 2.1: a duplicate is still caught when the existing
+    Opening Lot is stored under a different but alias-equivalent raw
+    spelling -- ``_opening_lot_duplicate_check``'s ``history()`` lookup
+    resolves raw-spelling aliases the same way ``correct_trade``'s Story
+    2.1 regression fix already relies on."""
+    monkeypatch.setattr(
+        "app.repositories.trades_repo.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    # Seed an existing Opening Lot directly under the raw, alias-equivalent
+    # spelling -- simulates one entered before the alias was configured.
+    agent._trades.insert(
+        "ABC.L",
+        "BUY",
+        10.0,
+        100.0,
+        "2026-01-01",
+        portfolio_id=pf.id,
+        source="opening_lot",
+    )
+
+    with pytest.raises(OpeningLotDuplicateError):
+        agent.record_opening_lot("ABC", 10.0, 100.0, "2026-01-01", portfolio_id=pf.id)
+
+
+def test_update_opening_lot_edits_fields(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    trade = agent.record_opening_lot(
+        "AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf.id
+    )
+    assert trade.id is not None
+
+    updated = agent.update_opening_lot(
+        trade.id, "AAPL", 15, 120.0, "2026-01-02", "edited", pf.id
+    )
+
+    assert updated.shares == 15
+    assert updated.price == 120.0
+    assert updated.date == "2026-01-02"
+    history = agent.get_trade_history("AAPL", pf.id)
+    assert len(history) == 1
+    assert history[0].shares == 15
+
+
+def test_update_opening_lot_missing_id_raises(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    with pytest.raises(ValueError):
+        agent.update_opening_lot(
+            99999, "AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf.id
+        )
+
+
+def test_delete_opening_lot_removes_row(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    trade = agent.record_opening_lot(
+        "AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf.id
+    )
+    assert trade.id is not None
+
+    deleted = agent.delete_opening_lot(trade.id, pf.id)
+
+    assert deleted is True
+    assert agent.get_trade_history("AAPL", pf.id) == []
+
+
+def test_delete_opening_lot_never_deletes_non_opening_lot_trade(tmp_path: Path) -> None:
+    """Defense in depth: the Opening-Lot-specific delete path refuses to
+    remove a trade that isn't tagged ``source="opening_lot"``, even given
+    its exact id."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    trade = agent.record_buy("AAPL", 10, 100.0, "2026-01-01", portfolio_id=pf.id)
+    assert trade.id is not None
+
+    deleted = agent.delete_opening_lot(trade.id, pf.id)
+
+    assert deleted is False
+    assert len(agent.get_trade_history("AAPL", pf.id)) == 1

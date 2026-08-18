@@ -64,6 +64,8 @@ def _row_to_trade(row: tuple[Any, ...]) -> Trade:
         currency=row[11] if len(row) > 11 and row[11] is not None else "GBP",
         source_row_index=row[12] if len(row) > 12 else None,
         idempotency_key=row[13] if len(row) > 13 else None,
+        source=row[14] if len(row) > 14 else None,
+        import_batch_id=row[15] if len(row) > 15 else None,
     )
 
 
@@ -85,13 +87,19 @@ class TradesRepository:
         entry_price: float | None = None,
         portfolio_id: int | None = None,
         currency: str = "GBP",
+        source: str | None = None,
     ) -> int:
-        """Insert a trade and return its new id."""
+        """Insert a trade and return its new id.
+
+        ``source`` records which write path produced this row (Story 2.4)
+        -- e.g. ``"manual"``, ``"quick_add"``, ``"correction"``,
+        ``"opening_lot"``. ``None`` for callers that don't tag it.
+        """
         with session(self._connect) as conn:
             cur = conn.execute(
                 "INSERT INTO trades (ticker, action, shares, price, date, notes,"
-                " stop_loss, entry_price, portfolio_id, currency)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " stop_loss, entry_price, portfolio_id, currency, source)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     ticker,
                     action,
@@ -103,6 +111,7 @@ class TradesRepository:
                     entry_price,
                     portfolio_id,
                     currency,
+                    source,
                 ),
             )
             return int(cur.lastrowid)  # type: ignore[arg-type]
@@ -121,6 +130,8 @@ class TradesRepository:
         idempotency_key: str | None = None,
         currency: str = "GBP",
         source_row_index: int | None = None,
+        source: str | None = None,
+        import_batch_id: str | None = None,
     ) -> SippImportRowOutcome:
         """Insert a trade with ``INSERT OR IGNORE`` on the given connection.
 
@@ -134,6 +145,10 @@ class TradesRepository:
         FIFO/average-cost replay. ``None`` for rows imported before this
         story shipped.
 
+        ``source``/``import_batch_id`` (Story 2.4) record provenance --
+        which write path produced the row, and (for a SIPP import) which
+        import call. ``None`` for rows written before this story shipped.
+
         Returns the row's actual outcome: ``"inserted"`` when the row was
         written, ``"duplicate"`` when the unique index silently suppressed
         it. Never returns ``"skipped"``/``"failed"`` — those are decided at
@@ -142,8 +157,8 @@ class TradesRepository:
         cur = conn.execute(
             "INSERT OR IGNORE INTO trades "
             "(ticker, action, shares, price, date, notes, reference, portfolio_id,"
-            " idempotency_key, currency, source_row_index) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " idempotency_key, currency, source_row_index, source, import_batch_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 ticker,
                 action,
@@ -156,6 +171,8 @@ class TradesRepository:
                 idempotency_key,
                 currency,
                 source_row_index,
+                source,
+                import_batch_id,
             ),
         )
         return "inserted" if cur.rowcount else "duplicate"
@@ -187,6 +204,38 @@ class TradesRepository:
             "UPDATE trades SET realised_pnl_ack_at = ? WHERE id = ?",
             (acknowledged_at, trade_id),
         )
+
+    def update_opening_lot(
+        self,
+        trade_id: int,
+        ticker: str,
+        shares: float,
+        price: float,
+        date: str,
+        notes: str = "",
+        portfolio_id: int | None = None,
+    ) -> bool:
+        """Update an existing Opening Lot row's fields in place (Story 2.4).
+
+        Scoped to ``source = 'opening_lot'`` (and ``portfolio_id``, when
+        given) so this can never silently rewrite an unrelated trade even
+        if called with a stale/wrong id. Returns True if a row was updated.
+        """
+        with session(self._connect) as conn:
+            if portfolio_id is None:
+                cur = conn.execute(
+                    "UPDATE trades SET ticker = ?, shares = ?, price = ?,"
+                    " date = ?, notes = ? WHERE id = ? AND source = 'opening_lot'",
+                    (ticker, shares, price, date, notes, trade_id),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE trades SET ticker = ?, shares = ?, price = ?,"
+                    " date = ?, notes = ? WHERE id = ? AND source = 'opening_lot'"
+                    " AND portfolio_id = ?",
+                    (ticker, shares, price, date, notes, trade_id, portfolio_id),
+                )
+            return cur.rowcount > 0
 
     def delete_by_id(self, trade_id: int) -> bool:
         """Delete a trade by id. Returns True if a row was deleted."""
@@ -237,7 +286,8 @@ class TradesRepository:
         base = (
             "SELECT id, ticker, action, shares, price, date, notes, stop_loss,"
             " entry_price, portfolio_id, realised_pnl_ack_at, currency,"
-            " source_row_index, idempotency_key FROM trades"
+            " source_row_index, idempotency_key, source, import_batch_id"
+            " FROM trades"
         )
         order = f"{_DATE_SORT} DESC, id DESC"
         clauses: list[str] = []

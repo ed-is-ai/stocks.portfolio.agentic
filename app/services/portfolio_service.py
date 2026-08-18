@@ -591,12 +591,27 @@ class PortfolioService:
             if portfolio_id is not None
             else []
         )
+        # Story 2.4, AC6: every ticker with at least one manually-entered
+        # Opening Lot (source="opening_lot") in this portfolio -- lets the
+        # holdings table show a "Manually entered" indicator even though a
+        # ``Position`` is an aggregate over possibly-several trades, not
+        # one row this schema can tag itself.
+        opening_lot_tickers = (
+            {
+                t.ticker
+                for t in self._trader.get_trade_history(portfolio_id=portfolio_id)
+                if t.source == "opening_lot"
+            }
+            if portfolio_id is not None
+            else set()
+        )
         return {
             "positions": positions,
             "portfolio_id": portfolio_id,
             "portfolios": portfolios,
             "active_portfolio": active_portfolio,
             "cash_flows": cash_flows,
+            "opening_lot_tickers": opening_lot_tickers,
             "reconciliation_issue_count": reconciliation_issue_count,
             "cash_balances_by_currency": cash_balances_by_currency,
             "positions_with_value": positions_with_value,

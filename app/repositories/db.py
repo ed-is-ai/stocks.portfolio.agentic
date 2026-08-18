@@ -260,6 +260,15 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
         if not _has_column(conn, table, "currency"):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN currency TEXT DEFAULT 'GBP'")
 
+    # Trade provenance (Story 2.4): which write path produced a row and,
+    # for a SIPP import, which import call. Additive/nullable -- pre-
+    # existing rows keep NULL/NULL ("unknown/pre-migration"), never
+    # backfilled and never treated as an error.
+    if not _has_column(conn, "trades", "source"):
+        conn.execute("ALTER TABLE trades ADD COLUMN source TEXT")
+    if not _has_column(conn, "trades", "import_batch_id"):
+        conn.execute("ALTER TABLE trades ADD COLUMN import_batch_id TEXT")
+
     # Idempotency keys are per-portfolio: the same reference may recur across
     # portfolios, so drop the old global-unique index in favour of composite.
     # Idempotency is keyed on (portfolio_id, reference). ``ifnull`` collapses a

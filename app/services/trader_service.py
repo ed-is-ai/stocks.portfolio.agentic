@@ -148,10 +148,19 @@ class TraderService:
         stop_loss: float | None = None,
         entry_price: float | None = None,
         portfolio_id: int | None = None,
+        source: str = "manual",
     ) -> Trade:
-        """Record a BUY transaction."""
+        """Record a BUY transaction. ``source`` tags its provenance (#Story 2.4)."""
         return self._agent.record_buy(
-            ticker, shares, price, date, notes, stop_loss, entry_price, portfolio_id
+            ticker,
+            shares,
+            price,
+            date,
+            notes,
+            stop_loss,
+            entry_price,
+            portfolio_id,
+            source,
         )
 
     def record_sell(
@@ -162,9 +171,12 @@ class TraderService:
         date: str | None = None,
         notes: str = "",
         portfolio_id: int | None = None,
+        source: str = "manual",
     ) -> Trade:
-        """Record a SELL transaction."""
-        return self._agent.record_sell(ticker, shares, price, date, notes, portfolio_id)
+        """Record a SELL transaction. ``source`` tags its provenance (#Story 2.4)."""
+        return self._agent.record_sell(
+            ticker, shares, price, date, notes, portfolio_id, source
+        )
 
     def correct_trade(
         self,
@@ -177,10 +189,58 @@ class TraderService:
         entry_price: float | None = None,
         portfolio_id: int | None = None,
     ) -> Trade:
-        """Overwrite a ticker's position with a single corrected BUY."""
+        """Overwrite a ticker's position with a single corrected BUY.
+
+        Always tagged ``source="correction"`` by ``TraderAgent.correct_trade``.
+        """
         return self._agent.correct_trade(
             ticker, shares, price, date, notes, stop_loss, entry_price, portfolio_id
         )
+
+    def record_opening_lot(
+        self,
+        ticker: str,
+        shares: float,
+        price: float,
+        date: str,
+        notes: str = "",
+        portfolio_id: int | None = None,
+    ) -> Trade:
+        """Record a manual Opening Lot (Story 2.4). Raises
+        ``OpeningLotDuplicateError`` on a same ticker/shares/date duplicate."""
+        return self._agent.record_opening_lot(
+            ticker, shares, price, date, notes, portfolio_id
+        )
+
+    def update_opening_lot(
+        self,
+        trade_id: int,
+        ticker: str,
+        shares: float,
+        price: float,
+        date: str,
+        notes: str = "",
+        portfolio_id: int | None = None,
+    ) -> Trade:
+        """Edit an existing Opening Lot's fields in place (Story 2.4).
+
+        The caller must have already confirmed the lot is unconsumed
+        (AC7/AC8) -- this performs the write unconditionally.
+        """
+        return self._agent.update_opening_lot(
+            trade_id, ticker, shares, price, date, notes, portfolio_id
+        )
+
+    def delete_opening_lot(
+        self, trade_id: int, portfolio_id: int | None = None
+    ) -> bool:
+        """Delete an Opening Lot by id (Story 2.4).
+
+        The caller must have already confirmed the lot is unconsumed
+        (AC7/AC8) -- this performs the delete unconditionally. Returns
+        True if a row was deleted.
+        """
+        return self._agent.delete_opening_lot(trade_id, portfolio_id)
 
     def delete_trade(self, trade_id: int) -> bool:
         """Delete a trade by ID. Returns True if a row was deleted."""

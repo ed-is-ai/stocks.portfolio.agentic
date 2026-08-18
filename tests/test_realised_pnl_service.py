@@ -251,10 +251,11 @@ def test_mismatched_tickers_empty_when_fifo_and_avg_cost_agree(
 def test_oversell_unmatched_shortfall_does_not_itself_cause_mismatch(
     tmp_path: Path,
 ) -> None:
-    """An oversell (SELL exceeding the open lot) is recorded as an unmatched
-    occurrence, and -- since both the FIFO and avg-cost replays clamp an
-    oversell's shortfall at zero the same way -- it does not by itself
-    produce a false-positive mismatch."""
+    """Story 2.3 AC5: an oversell (SELL exceeding the open lot) is recorded
+    as an unmatched occurrence, and -- once the FIFO side nets its
+    ``unmatched_sells`` shortfall against its (structurally non-negative)
+    ``open_lots`` total -- it agrees with avg-cost's now-negative-capable
+    ``shares`` and does not by itself produce a false-positive mismatch."""
     service, agent = _make_service_with_agent(tmp_path)
     agent.record_buy("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
     agent.record_sell("TEST1", 8, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
@@ -263,6 +264,69 @@ def test_oversell_unmatched_shortfall_does_not_itself_cause_mismatch(
 
     assert summary.unmatched_count == 1
     assert summary.mismatched_tickers == []
+
+    # And the avg-cost side (get_portfolio) shows the same net oversold
+    # position: -3 shares, not clamped to 0 and not omitted.
+    portfolio = agent.get_portfolio(portfolio_id=PORTFOLIO_ID)
+    position = next(p for p in portfolio if p.ticker == "TEST1")
+    assert position.shares == -3.0
+
+
+def test_backdated_correcting_buy_resolves_unmatched_sell_into_round_trip(
+    tmp_path: Path,
+) -> None:
+    """Story 2.3 AC6: a SELL with no open lot, followed by a correcting Buy
+    dated *earlier* than the SELL, resolves into a RoundTrip on the next
+    ``compute_summary()`` call. Per the spec's Design Notes, this requires
+    no new re-match trigger code -- ``compute_summary`` already recomputes
+    fresh from live trade data (chronologically sorted) on every call, so
+    the correcting Buy naturally replays before the SELL it resolves."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_sell("TEST1", 5, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+    assert summary.unmatched_count == 1
+    assert summary.round_trip_count == 0
+
+    # Correcting Buy dated *before* the SELL it resolves.
+    agent.record_buy("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+
+    summary_after = service.compute_summary(PORTFOLIO_ID)
+    assert summary_after.unmatched_count == 0
+    assert summary_after.round_trip_count == 1
+    rt = summary_after.round_trips["TEST1"][0]
+    assert rt.entry_date == "2026-01-01"
+    assert rt.exit_date == "2026-02-01"
+    assert rt.shares == 5
+
+
+def test_partial_correcting_buy_leaves_smaller_remainder_same_identity(
+    tmp_path: Path,
+) -> None:
+    """Story 2.3 AC7: a correcting Buy smaller than the outstanding
+    shortfall leaves a smaller remainder tracked under the same SELL
+    trade_id/ticker identity, not re-reported as a new/different problem."""
+    service, agent = _make_service_with_agent(tmp_path)
+    sell = agent.record_sell("TEST1", 8, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+    assert summary.unmatched_count == 1
+    original = summary.unmatched_sells[0]
+    assert original.trade_id == sell.id
+    assert original.shares == 8
+
+    # Correcting Buy smaller than the shortfall, dated earlier than the SELL.
+    agent.record_buy("TEST1", 3, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+
+    summary_after = service.compute_summary(PORTFOLIO_ID)
+    assert summary_after.unmatched_count == 1
+    remainder = summary_after.unmatched_sells[0]
+    assert remainder.trade_id == sell.id
+    assert remainder.ticker == "TEST1"
+    assert remainder.shares == 5
+    # The correcting Buy's shares were consumed into one RoundTrip, not
+    # left floating separately.
+    assert summary_after.round_trip_count == 1
 
 
 def test_mismatched_tickers_flags_genuine_divergence(
@@ -1132,3 +1196,269 @@ def test_fifo_source_row_index_null_sorts_last_in_date_group(
     rt = summary.round_trips["TEST1"][0]
     assert rt.entry_price == 100.0
     assert rt.exit_price == 150.0
+
+
+# --- Story 2.4: Match Trace --------------------------------------------------
+
+
+def test_get_match_trace_content_for_partially_unmatched_sell(tmp_path: Path) -> None:
+    """AC1: the Match Trace shows canonicalized identity, each candidate
+    lot considered (trade id, buy date/price, quantity consumed), the
+    ordering decision, quantity matched vs. unmatched, and the sell's own
+    source/import_batch_id."""
+    service, agent = _make_service_with_agent(tmp_path)
+    buy = agent.record_buy("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    sell = agent.record_sell("TEST1", 8, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    assert buy.id is not None and sell.id is not None
+
+    trace = service.get_match_trace(sell.id, PORTFOLIO_ID)
+
+    assert trace is not None
+    assert trace.trade_id == sell.id
+    assert trace.ticker == "TEST1"
+    assert trace.portfolio_id == PORTFOLIO_ID
+    assert trace.date == "2026-02-01"
+    assert trace.shares == 8
+    assert trace.price == 150.0
+    assert trace.shares_matched == 5
+    assert trace.shares_unmatched == 3
+    assert trace.reason == "Sell exceeds available BUY lots by 3 shares"
+    # This sell's own provenance (Gate 1) -- record_sell defaults to "manual".
+    assert trace.source == "manual"
+    assert trace.import_batch_id is None
+    # The one candidate lot FIFO drew from.
+    assert len(trace.candidate_lots) == 1
+    lot = trace.candidate_lots[0]
+    assert lot.trade_id == buy.id
+    assert lot.buy_date == "2026-01-01"
+    assert lot.buy_price == 100.0
+    assert lot.shares_consumed == 5
+    assert lot.source == "manual"
+    assert lot.is_opening_lot is False
+    # The ordering/tie-break decision applied, with the actual values used.
+    assert "source_row_index" in trace.ordering_note
+    assert "idempotency_key" in trace.ordering_note
+
+
+def test_get_match_trace_cleanly_matched_sell_has_no_shortfall_or_reason(
+    tmp_path: Path,
+) -> None:
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("TEST1", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    sell = agent.record_sell(
+        "TEST1", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID
+    )
+    assert sell.id is not None
+
+    trace = service.get_match_trace(sell.id, PORTFOLIO_ID)
+
+    assert trace is not None
+    assert trace.shares_matched == 10
+    assert trace.shares_unmatched == 0
+    assert trace.reason is None
+
+
+def test_get_match_trace_lists_every_lot_for_a_multi_lot_sell(tmp_path: Path) -> None:
+    """AC1's "candidate lots considered" (plural): a sell spanning three
+    separate BUY lots must show all three, in FIFO consumption order, with
+    the correct per-lot ``shares_consumed`` split -- not just the first
+    lot drawn from."""
+    service, agent = _make_service_with_agent(tmp_path)
+    buy1 = agent.record_buy("TEST1", 3, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    buy2 = agent.record_buy("TEST1", 4, 110.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    buy3 = agent.record_buy("TEST1", 5, 120.0, "2026-01-03", portfolio_id=PORTFOLIO_ID)
+    sell = agent.record_sell("TEST1", 9, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    assert buy1.id is not None and buy2.id is not None and buy3.id is not None
+    assert sell.id is not None
+
+    trace = service.get_match_trace(sell.id, PORTFOLIO_ID)
+
+    assert trace is not None
+    assert trace.shares_matched == 9
+    assert trace.shares_unmatched == 0
+    assert [(lot.trade_id, lot.shares_consumed) for lot in trace.candidate_lots] == [
+        (buy1.id, 3),
+        (buy2.id, 4),
+        (buy3.id, 2),
+    ]
+
+
+def test_get_match_trace_marks_opening_lot_candidate(tmp_path: Path) -> None:
+    """AC3/AC6: an Opening Lot candidate is distinguishable in the trace,
+    the same way it participates in FIFO -- like an imported Buy, but
+    flagged so the UI can render "Manually entered"."""
+    service, agent = _make_service_with_agent(tmp_path)
+    lot = agent.record_opening_lot(
+        "TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    sell = agent.record_sell("TEST1", 5, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    assert lot.id is not None and sell.id is not None
+
+    trace = service.get_match_trace(sell.id, PORTFOLIO_ID)
+
+    assert trace is not None
+    assert len(trace.candidate_lots) == 1
+    candidate = trace.candidate_lots[0]
+    assert candidate.trade_id == lot.id
+    assert candidate.source == "opening_lot"
+    assert candidate.is_opening_lot is True
+
+
+def test_get_match_trace_no_prior_buy_has_empty_candidate_lots(tmp_path: Path) -> None:
+    service, agent = _make_service_with_agent(tmp_path)
+    sell = agent.record_sell(
+        "NEVERBOUGHT", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    assert sell.id is not None
+
+    trace = service.get_match_trace(sell.id, PORTFOLIO_ID)
+
+    assert trace is not None
+    assert trace.candidate_lots == []
+    assert trace.shares_matched == 0
+    assert trace.shares_unmatched == 5
+    assert trace.reason == "No prior BUY found to match this sell"
+
+
+def test_get_match_trace_unknown_trade_id_returns_none(tmp_path: Path) -> None:
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+
+    assert service.get_match_trace(999999, PORTFOLIO_ID) is None
+
+
+def test_get_match_trace_includes_only_same_ticker_skipped_date_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Skipped invalid-date rows attached to a Match Trace are scoped to
+    this sell's own ticker -- an unrelated ticker's skip never leaks in."""
+    service, agent = _make_service_with_agent(tmp_path)
+    sell = agent.record_sell("TEST1", 5, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    assert sell.id is not None
+    real_trades = service._trader.get_trade_history(portfolio_id=PORTFOLIO_ID)
+    same_ticker_bad_date = Trade(
+        id=9401,
+        ticker="TEST1",
+        action="BUY",
+        shares=5,
+        price=10.0,
+        date="not-a-date",
+        portfolio_id=PORTFOLIO_ID,
+    )
+    other_ticker_bad_date = Trade(
+        id=9402,
+        ticker="TEST2",
+        action="BUY",
+        shares=5,
+        price=10.0,
+        date="also-not-a-date",
+        portfolio_id=PORTFOLIO_ID,
+    )
+    _stub_trade_history(
+        service,
+        monkeypatch,
+        real_trades + [same_ticker_bad_date, other_ticker_bad_date],
+    )
+
+    trace = service.get_match_trace(sell.id, PORTFOLIO_ID)
+
+    assert trace is not None
+    assert [s.trade_id for s in trace.skipped_invalid_date_trades] == [9401]
+
+
+# --- Story 2.4: Opening Lot consumed/unconsumed check ------------------------
+
+
+def test_opening_lot_status_unconsumed_when_untouched(tmp_path: Path) -> None:
+    service, agent = _make_service_with_agent(tmp_path)
+    lot = agent.record_opening_lot(
+        "TEST1", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    assert lot.id is not None
+
+    assert service.opening_lot_status(lot.id, PORTFOLIO_ID) == "unconsumed"
+
+
+def test_opening_lot_status_consumed_when_partially_matched(tmp_path: Path) -> None:
+    service, agent = _make_service_with_agent(tmp_path)
+    lot = agent.record_opening_lot(
+        "TEST1", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    agent.record_sell("TEST1", 4, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    assert lot.id is not None
+
+    assert service.opening_lot_status(lot.id, PORTFOLIO_ID) == "consumed"
+
+
+def test_opening_lot_status_consumed_when_fully_matched(tmp_path: Path) -> None:
+    """A fully-drained lot is dequeued entirely by ``_replay_fifo`` -- the
+    "not found in the open-lot queues" case must still read as consumed,
+    not be mistaken for an invalid id."""
+    service, agent = _make_service_with_agent(tmp_path)
+    lot = agent.record_opening_lot(
+        "TEST1", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    agent.record_sell("TEST1", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    assert lot.id is not None
+
+    assert service.opening_lot_status(lot.id, PORTFOLIO_ID) == "consumed"
+
+
+def test_opening_lot_status_unknown_trade_id_returns_none(tmp_path: Path) -> None:
+    service, agent = _make_service_with_agent(tmp_path)
+
+    assert service.opening_lot_status(999999, PORTFOLIO_ID) is None
+
+
+# --- Story 2.4: Opening Lot re-match (AC5/AC9) -------------------------------
+
+
+def test_opening_lot_resolves_previously_unmatched_sell_on_next_compute_summary(
+    tmp_path: Path,
+) -> None:
+    """AC5: no separate manual re-match step -- ``compute_summary()``'s
+    existing "recompute fresh, no caching" design (Story 2.3) already picks
+    up a newly-recorded Opening Lot on the very next call."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_sell("TEST1", 5, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    before = service.compute_summary(PORTFOLIO_ID)
+    assert before.unmatched_count == 1
+    assert before.round_trip_count == 0
+
+    agent.record_opening_lot("TEST1", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+
+    after = service.compute_summary(PORTFOLIO_ID)
+    assert after.unmatched_count == 0
+    assert after.round_trip_count == 1
+    rt = after.round_trips["TEST1"][0]
+    assert rt.entry_price == 100.0
+    assert rt.exit_price == 150.0
+
+
+def test_opening_lot_dated_before_matched_sell_triggers_forward_rematch(
+    tmp_path: Path,
+) -> None:
+    """AC9: an Opening Lot dated earlier than an already-(partially)matched
+    sell triggers the same forward re-match behaviour as Story 2.3's
+    correcting Buy -- the shortfall resolves on the next compute, with no
+    new re-match trigger code (only the pre-existing recompute-fresh
+    design)."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("TEST1", 2, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("TEST1", 5, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    before = service.compute_summary(PORTFOLIO_ID)
+    assert before.round_trip_count == 1
+    assert before.unmatched_count == 1
+    assert before.unmatched_sells[0].shares == 3
+
+    # Opening Lot dated between the original BUY and the SELL -- FIFO
+    # replay must pick it up chronologically ahead of the SELL.
+    agent.record_opening_lot("TEST1", 3, 90.0, "2026-01-15", portfolio_id=PORTFOLIO_ID)
+
+    after = service.compute_summary(PORTFOLIO_ID)
+    assert after.unmatched_count == 0
+    assert after.round_trip_count == 2
+    entries = sorted((rt.entry_price, rt.shares) for rt in after.round_trips["TEST1"])
+    assert entries == [(90.0, 3.0), (100.0, 2.0)]

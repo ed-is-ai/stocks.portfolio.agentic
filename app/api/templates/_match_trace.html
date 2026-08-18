@@ -1,0 +1,123 @@
+<!-- Match Trace detail (Story 2.4) -- the full FIFO match explanation for
+     one SELL: canonicalized identity, candidate lots considered, the
+     ordering/tie-break decision applied, any invalid-date-skipped rows for
+     this ticker, and the sell's own import provenance. Dedicated detail
+     view alongside the coarse UnmatchedSell summary list, mirroring the
+     reconciliation view's shape (Story 1.5). -->
+{% if not trace %}
+<div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1">
+  <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+  No match trace found for trade #{{ trade_id }} (it may not be a SELL in
+  this portfolio, or the link is stale).
+</div>
+{% else %}
+<div class="mb-3">
+  <div class="fw-semibold" style="font-size:0.9rem">
+    <i class="bi bi-search me-1"></i>Match Trace &mdash; {{ trace.ticker }} SELL on {{ trace.date }}
+  </div>
+  <div class="text-muted" style="font-size:0.76rem">Trade #{{ trace.trade_id }} &middot; Portfolio #{{ trace.portfolio_id }}</div>
+</div>
+
+<div class="tbl-wrap mb-3">
+  <table class="table table-sm align-middle">
+    <tbody>
+      <tr><th style="width:14rem">Canonicalized identity</th><td>{{ trace.ticker }}</td></tr>
+      <tr><th>Shares sold</th><td>{{ trace.shares }}</td></tr>
+      <tr><th>Price</th><td>{{ "%.2f"|format(trace.price) }} (native currency, not GBP-converted)</td></tr>
+      <tr><th>Shares matched</th><td>{{ trace.shares_matched }}</td></tr>
+      <tr>
+        <th>Shares unmatched</th>
+        <td>
+          {% if trace.shares_unmatched > 0 %}
+            <span class="flag-badge">{{ trace.shares_unmatched }}</span>
+            {% if trace.reason %}<span class="text-muted ms-2" style="font-size:0.78rem">{{ trace.reason }}</span>{% endif %}
+          {% else %}
+            <span class="ack-badge">Fully matched</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr><th>Source of this sell</th><td>{{ trace.source or "Unknown / pre-migration" }}</td></tr>
+      <tr><th>Import batch</th><td>{{ trace.import_batch_id or "—" }}</td></tr>
+      <tr><th>Ordering decision</th><td class="text-muted" style="font-size:0.78rem">{{ trace.ordering_note }}</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="fw-semibold mb-2" style="font-size:0.82rem">Candidate lots considered</div>
+{% if not trace.candidate_lots %}
+<div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1 mb-3">
+  <i class="bi bi-info-circle-fill fs-5"></i>
+  No open BUY lot existed to draw from -- no prior BUY was found for this
+  ticker at the time of this sell.
+</div>
+{% else %}
+<div class="tbl-wrap mb-3">
+  <table class="table table-hover align-middle">
+    <thead>
+      <tr>
+        <th>Buy trade</th>
+        <th>Buy date</th>
+        <th class="text-end">Buy price</th>
+        <th class="text-end">Shares consumed</th>
+        <th>Provenance</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for lot in trace.candidate_lots %}
+      <tr>
+        <td>#{{ lot.trade_id }}</td>
+        <td class="text-muted" style="font-size:0.76rem">{{ lot.buy_date }}</td>
+        <td class="text-end">{{ "%.2f"|format(lot.buy_price) }}</td>
+        <td class="text-end">{{ lot.shares_consumed }}</td>
+        <td>
+          {% if lot.is_opening_lot %}
+          <span class="badge bg-secondary-subtle text-secondary-emphasis" style="font-size:0.68rem">Manually entered</span>
+          {% else %}
+          <span class="text-muted" style="font-size:0.74rem">
+            {{ lot.source or "Unknown / pre-migration" }}{% if lot.import_batch_id %} &middot; batch {{ lot.import_batch_id[:8] }}&hellip;{% endif %}
+          </span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if trace.skipped_invalid_date_trades %}
+<div class="fw-semibold mb-2" style="font-size:0.82rem">
+  <i class="bi bi-exclamation-triangle me-1"></i>Trades for {{ trace.ticker }} skipped for an unparseable date
+</div>
+<div class="tbl-wrap mb-3">
+  <table class="table table-sm">
+    <thead><tr><th>Trade</th><th>Raw date</th><th>Reason</th></tr></thead>
+    <tbody>
+      {% for s in trace.skipped_invalid_date_trades %}
+      <tr>
+        <td>#{{ s.trade_id }}</td>
+        <td>{{ s.raw_date }}</td>
+        <td class="text-muted" style="font-size:0.76rem">{{ s.reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="alert alert-secondary border-0" style="font-size:0.74rem">
+  <i class="bi bi-info-circle me-1"></i>
+  A duplicate/overlapping row from a <em>different</em> import that may have
+  caused a missing lot can't be reconstructed here -- only which import
+  produced <strong>this sell</strong> is shown above. Per-row import
+  outcomes aren't kept once an import finishes.
+</div>
+{% endif %}
+
+<div class="mt-3">
+  <a href="#" style="font-size:0.78rem"
+     hx-get="/partials/realised-pnl?portfolio_id={{ portfolio_id }}"
+     hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">
+    <i class="bi bi-arrow-left me-1"></i>Back to Realised P&amp;L
+  </a>
+</div>

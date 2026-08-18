@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,7 +32,9 @@ def mocked_trades(monkeypatch: pytest.MonkeyPatch):
     )
     mock_trader = MagicMock()
     mock_trader.portfolio_exists.return_value = True
+    mock_trader.get_trade_history.return_value = []
     mock_portfolio = MagicMock()
+    mock_portfolio.default_portfolio_context.return_value = {}
     app.dependency_overrides[get_trader_service] = lambda: mock_trader
     app.dependency_overrides[get_portfolio_service] = lambda: mock_portfolio
     try:
@@ -71,7 +74,7 @@ def test_sell_dispatches_record_sell(mocked_trades):
 
 
 def test_correct_dispatches_correct_trade(mocked_trades):
-    mock_trader, _ = mocked_trades
+    mock_trader, mock_portfolio = mocked_trades
     resp = _post("CORRECT")
     assert resp.status_code == 200
     mock_trader.correct_trade.assert_called_once_with(
@@ -79,6 +82,44 @@ def test_correct_dispatches_correct_trade(mocked_trades):
     )
     mock_trader.record_buy.assert_not_called()
     mock_trader.record_sell.assert_not_called()
+    # No pre-existing Opening Lot for this ticker (the fixture's default
+    # ``get_trade_history`` return), so no warning banner.
+    assert "import_status" not in mock_portfolio.default_portfolio_context.return_value
+
+
+def test_correct_warns_when_it_deletes_an_opening_lot(mocked_trades):
+    """Story 2.4: ``correct_trade`` unconditionally wipes every trade for
+    a ticker, including a manually-entered Opening Lot (consumed or not).
+    That's pre-existing, already-shipped behavior (it already wipes SELLs
+    the same way) -- not blocked here -- but the response now tells the
+    user it happened, instead of silently discarding the lot."""
+    mock_trader, mock_portfolio = mocked_trades
+    mock_trader.get_trade_history.return_value = [
+        SimpleNamespace(id=7, ticker="AAPL", action="BUY", source="opening_lot")
+    ]
+
+    resp = _post("CORRECT")
+
+    assert resp.status_code == 200
+    mock_trader.get_trade_history.assert_called_once_with("AAPL", 1)
+    mock_trader.correct_trade.assert_called_once_with(
+        "AAPL", 10.0, 100.0, "2024-01-01", "", None, None, 1
+    )
+    context = mock_portfolio.default_portfolio_context.return_value
+    assert context["import_status"] == "warning"
+    assert "Opening Lot" in context["import_message"]
+
+
+def test_correct_no_warning_when_no_opening_lot_present(mocked_trades):
+    mock_trader, mock_portfolio = mocked_trades
+    mock_trader.get_trade_history.return_value = [
+        SimpleNamespace(id=3, ticker="AAPL", action="SELL", source="manual")
+    ]
+
+    resp = _post("CORRECT")
+
+    assert resp.status_code == 200
+    assert "import_status" not in mock_portfolio.default_portfolio_context.return_value
 
 
 def test_buy_optional_fields_forwarded(mocked_trades):

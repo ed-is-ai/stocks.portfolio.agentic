@@ -37,6 +37,8 @@ from app.schemas.pipeline_status import (
     StageStatus,
 )
 from app.schemas.realised_pnl import (
+    MatchTrace,
+    MatchTraceCandidateLot,
     RealisedPnlSummary,
     RoundTrip,
     SkippedInvalidDateTrade,
@@ -59,6 +61,8 @@ __all__ = [
     "MarketCycleContext",
     "MarketNarrative",
     "MarketNarrativeSource",
+    "MatchTrace",
+    "MatchTraceCandidateLot",
     "MomentumScore",
     "Portfolio",
     "Position",

@@ -379,6 +379,104 @@ def test_trades_open_rows_both_source_row_index_and_idempotency_key_null_falls_b
     assert [r[0] for r in rows] == ["FIRST", "SECOND"]
 
 
+# --- Story 2.4: trade provenance (source / import_batch_id) ----------------
+
+
+def test_trades_insert_persists_source(trades_connect):
+    """``insert()``'s new ``source`` parameter round-trips through
+    ``history()`` -- the generic write path used by ``record_buy``/
+    ``record_sell``/``correct_trade``/``record_opening_lot``."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("AAPL", "BUY", 10, 100.0, "2024-01-02", source="manual")
+    assert repo.history()[0].source == "manual"
+
+
+def test_trades_insert_source_defaults_to_none(trades_connect):
+    """A caller that doesn't pass ``source`` (every pre-Story-2.4 call
+    site) still inserts cleanly, with the column left ``NULL``."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("AAPL", "BUY", 10, 100.0, "2024-01-02")
+    trade = repo.history()[0]
+    assert trade.source is None
+    assert trade.import_batch_id is None
+
+
+def test_trades_insert_ignore_persists_source_and_import_batch_id(trades_connect):
+    """``insert_ignore()``'s new ``source``/``import_batch_id`` parameters
+    (appended after ``source_row_index``) round-trip through ``history()``
+    -- the SIPP import write path."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn,
+            "AAPL",
+            "BUY",
+            10,
+            100.0,
+            "2024-01-02",
+            "",
+            "REF1",
+            None,
+            "key-1",
+            "GBP",
+            3,
+            "sipp_import",
+            "batch-abc123",
+        )
+    trade = repo.history()[0]
+    assert trade.source == "sipp_import"
+    assert trade.import_batch_id == "batch-abc123"
+
+
+def test_trades_insert_ignore_source_defaults_to_none(trades_connect):
+    """A caller that doesn't pass ``source``/``import_batch_id`` still
+    inserts cleanly, with both columns left ``NULL``."""
+    repo = TradesRepository(trades_connect)
+    with db.session(trades_connect) as conn:
+        repo.insert_ignore(
+            conn, "AAPL", "BUY", 10, 100.0, "2024-01-02", "", "REF1", None, "key-1"
+        )
+    trade = repo.history()[0]
+    assert trade.source is None
+    assert trade.import_batch_id is None
+
+
+def test_trades_update_opening_lot_updates_in_place(trades_connect):
+    repo = TradesRepository(trades_connect)
+    tid = repo.insert("AAPL", "BUY", 10, 100.0, "2024-01-02", source="opening_lot")
+    updated = repo.update_opening_lot(tid, "AAPL", 15, 110.0, "2024-01-03", "edited")
+    assert updated is True
+    trade = repo.history()[0]
+    assert trade.shares == 15
+    assert trade.price == 110.0
+    assert trade.date == "2024-01-03"
+    assert trade.notes == "edited"
+    assert trade.source == "opening_lot"
+
+
+def test_trades_update_opening_lot_refuses_non_opening_lot_row(trades_connect):
+    """``update_opening_lot`` never rewrites a trade that isn't itself an
+    Opening Lot, even if called with its id -- defense in depth against
+    editing an unrelated trade through this Opening-Lot-specific path."""
+    repo = TradesRepository(trades_connect)
+    tid = repo.insert("AAPL", "BUY", 10, 100.0, "2024-01-02", source="manual")
+    updated = repo.update_opening_lot(tid, "AAPL", 15, 110.0, "2024-01-03")
+    assert updated is False
+    trade = repo.history()[0]
+    assert trade.shares == 10  # unchanged
+
+
+def test_trades_update_opening_lot_scoped_to_portfolio(trades_connect):
+    repo = TradesRepository(trades_connect)
+    tid = repo.insert(
+        "AAPL", "BUY", 10, 100.0, "2024-01-02", portfolio_id=1, source="opening_lot"
+    )
+    updated = repo.update_opening_lot(
+        tid, "AAPL", 15, 110.0, "2024-01-03", portfolio_id=2
+    )
+    assert updated is False
+
+
 # --- CashFlowsRepository ---------------------------------------------------
 
 

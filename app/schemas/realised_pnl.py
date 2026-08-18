@@ -74,6 +74,73 @@ class SkippedInvalidDateTrade(BaseModel):
     reason: str
 
 
+class MatchTraceCandidateLot(BaseModel):
+    """One BUY lot FIFO drew from while matching a sell (Story 2.4).
+
+    ``is_opening_lot`` mirrors ``source == "opening_lot"`` so the UI can
+    render the "Manually entered" label (AC6) without a second lookup.
+    """
+
+    trade_id: int
+    buy_date: str
+    buy_price: float
+    shares_consumed: float
+    source: str | None = None
+    import_batch_id: str | None = None
+    is_opening_lot: bool = False
+
+
+class MatchTrace(BaseModel):
+    """Full explanation of how one SELL was (or wasn't) FIFO-matched
+    (Story 2.4) -- everything ``_replay_fifo`` already computes for this
+    sell while matching it, surfaced on demand via
+    ``RealisedPnlService.get_match_trace`` instead of folded into
+    ``UnmatchedSell``'s coarse ``reason`` string.
+
+    Sibling to ``UnmatchedSell``, not a replacement for it: the summary
+    list still shows the coarse reason; this is the dedicated detail view
+    (mirrors the ``RealisedPnlSummary.unmatched_sells`` + dedicated
+    reconciliation-view shape already used elsewhere in this app).
+
+    AC2's duplicate/overlapping-import case is only partially satisfiable:
+    ``source``/``import_batch_id`` show which import produced *this sell*,
+    never a specific rejected/deduped row from a *different* import --
+    that data is never persisted anywhere queryable (see
+    ``RealisedPnlService.get_match_trace`` docstring). This is a
+    documented limitation, not a defect.
+    """
+
+    trade_id: int
+    ticker: str
+    """Canonicalized identity (Story 2.1) -- the FIFO queue key this sell
+    matched against, not necessarily its raw stored spelling."""
+    portfolio_id: int
+    date: str
+    shares: float
+    """Total shares on the sell trade itself."""
+    price: float
+    """Native-currency price (never GBP-converted), matching ``UnmatchedSell.price``."""
+    shares_matched: float
+    """Sum of ``shares_consumed`` across ``candidate_lots``."""
+    shares_unmatched: float
+    """Remaining shortfall this sell couldn't match against any lot --
+    ``0.0`` for a sell that matched cleanly."""
+    candidate_lots: list[MatchTraceCandidateLot] = []
+    ordering_note: str
+    """The Story 2.2 chronological/tie-break rule applied, with the actual
+    ``source_row_index``/``idempotency_key`` values this sell carried --
+    the values used, not a re-derivation of the sort."""
+    skipped_invalid_date_trades: list[SkippedInvalidDateTrade] = []
+    """Trades for this ticker FIFO excluded for an unparseable date
+    (Story 2.2) -- could explain a missing lot."""
+    source: str | None = None
+    """This sell trade's own provenance (which import, if any, produced it)."""
+    import_batch_id: str | None = None
+    reason: str | None = None
+    """The coarse ``UnmatchedSell.reason`` text, when this sell has a
+    shortfall -- ``None`` for a sell that matched cleanly."""
+
+
 class RealisedPnlSummary(BaseModel):
     """Account-level Realised P&L result for one ``compute_summary`` call.
 

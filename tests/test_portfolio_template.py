@@ -89,6 +89,24 @@ def test_zero_cash_is_visible_for_cash_only_portfolio() -> None:
     assert "No open positions yet" not in html
 
 
+def test_oversold_position_does_not_prefill_adjust_or_sell_with_negative_shares() -> (
+    None
+):
+    """Story 2.3: an oversold position's ``shares`` can be negative -- the
+    Adjust/Sell modal shares field (``min="0.0001" required``) must never be
+    pre-filled with it, or the browser blocks submission outright. The
+    template must substitute ``0`` (rendered as an empty field by
+    ``openAdjust``/``openSell``'s ``shares || ''``) instead."""
+    oversold = _fake_position()
+    oversold.shares = -15.0
+    html = _render(0.0, positions=[oversold])
+
+    assert "openAdjust('AAPL', -15.0" not in html
+    assert "openSell('AAPL', -15.0" not in html
+    assert "openAdjust('AAPL', 0," in html
+    assert "openSell('AAPL', 0," in html
+
+
 def test_negative_cash_is_not_hidden() -> None:
     row = _cash_row(_render(-150.5))
 

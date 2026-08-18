@@ -49,7 +49,7 @@
 # epics-sipp-import-safety.md).
 
 generated: 2026-08-11
-last_updated: 2026-08-13 (create-story: authored all four Epic 2 story files (2.1-2.4) in sequence, each with full context-engine analysis against the PRD/architecture/existing code -- epic-2 moved backlog -> in-progress (first story created), all four stories moved backlog -> ready-for-dev. Notable cross-story findings: no import-provenance concept exists anywhere in this codebase (Story 2.4 gate 1 adds a lightweight source+import_batch_id column pair rather than the fuller un-built ImportReceipt module); RealisedPnlService.compute_summary's existing "no caching, recompute fresh" design likely already satisfies Story 2.3's re-match-on-correction ACs for free, pending verification tests; two real scope-shape decisions flagged for the dev agent to confirm rather than silently assume (Story 2.1's identity shape, Story 2.3's Decimal-storage depth))
+last_updated: 2026-08-18 (sprint-planning re-run validated all 14 items; merging Stories 2.2-2.4 into main alongside already-merged 2.1 -- epic-2 stories 2.1-2.4 and epic-2-retrospective status pending final update once the merge PR lands)
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
