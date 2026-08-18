@@ -14,6 +14,8 @@ from app.core.money import (
     Money,
     MoneyParseError,
     SUPPORTED_CURRENCIES,
+    establish_decimal_separator,
+    establish_row_decimal_separator,
     has_currency_marker,
     parse_money,
 )
@@ -130,3 +132,56 @@ def test_parse_money_constructs_decimal_from_string_not_float() -> None:
     money = parse_money("£0.1")
     assert money.amount == Decimal("0.1")
     assert str(money.amount) == "0.1"
+
+
+# -- decimal-separator hint (SIPP trade-price ambiguity fix) --------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("£1,501.99", ".", id="comma-group-dot-decimal"),
+        pytest.param("1.234,56", ",", id="dot-group-comma-decimal"),
+        pytest.param("£2.351", None, id="single-separator-still-ambiguous"),
+        pytest.param("1,234", None, id="single-comma-still-ambiguous"),
+        pytest.param("634", None, id="no-separator-no-evidence"),
+        pytest.param("n/a", None, id="not-applicable-no-evidence"),
+        pytest.param("", None, id="blank-no-evidence"),
+    ],
+)
+def test_establish_decimal_separator(raw: str, expected: str | None) -> None:
+    assert establish_decimal_separator(raw) == expected
+
+
+def test_establish_row_decimal_separator_agrees_across_cells() -> None:
+    assert establish_row_decimal_separator("£1,501.99", "n/a", "£12,345.67") == "."
+
+
+def test_establish_row_decimal_separator_none_when_no_evidence() -> None:
+    assert establish_row_decimal_separator("n/a", "n/a", "£45.00") is None
+
+
+def test_establish_row_decimal_separator_none_when_cells_disagree() -> None:
+    assert establish_row_decimal_separator("£1,501.99", "1.234,56") is None
+
+
+def test_parse_money_ambiguous_price_resolves_via_matching_hint() -> None:
+    # The real regression: "£2.351" alone is ambiguous, but a row where
+    # Debit/Running Balance establish "." as decimal resolves it as 2.351,
+    # not 2351.
+    money = parse_money("£2.351", decimal_separator_hint=".")
+    assert money.amount == Decimal("2.351")
+
+
+def test_parse_money_ambiguous_price_resolves_as_grouping_on_mismatched_hint() -> None:
+    # Hint says "," is decimal, so a lone "." in the amount must be
+    # grouping instead -- symmetric to the decimal-match case above.
+    money = parse_money("2.351", decimal_separator_hint=",")
+    assert money.amount == Decimal("2351")
+
+
+def test_parse_money_ambiguous_price_still_rejected_without_hint() -> None:
+    # No hint (the default) keeps today's strict, fail-closed behaviour.
+    with pytest.raises(MoneyParseError) as exc_info:
+        parse_money("£2.351")
+    assert exc_info.value.code == "ambiguous_currency"

@@ -1140,6 +1140,42 @@ def test_sipp_ambiguous_single_separator_three_digits_rejects_whole_plan(
     assert agent.get_portfolio() == []
 
 
+def test_sipp_three_decimal_unit_price_resolved_via_row_locale_evidence(
+    tmp_path: Path,
+) -> None:
+    """A real Ashmore SIPP row: Price "£2.351" is a single-separator/3dp
+    amount that's ambiguous on its own, but Debit "£1,501.99" and Running
+    Balance "£12,345.67" on the same row both mix grouping and decimal
+    separators, unambiguously establishing "." as this row's decimal
+    separator. That evidence resolves Price to 2.351 (not the false
+    positive of a 2351x-grouped whole number) while cash fields keep
+    strict ambiguity rejection."""
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "30/03/2022,ASHM,B132NW2,634,£2.351,634 ASHMORE GROUP  Del"
+        '    2.35 S Date 30/03/22,27700FAKE01,"£1,501.99",n/a,'
+        '"£12,345.67"\n'
+    )
+    csv_path = tmp_path / "sipp.csv"
+    csv_path.write_text(csv_text, encoding="utf-8")
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_path.read_bytes())
+
+    assert result.status != "rejected", result.failed_rows
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        row = conn.execute(
+            "SELECT ticker, action, shares, price FROM trades"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("ASHM", "BUY", 634.0, 2.351)
+
+
 def test_sipp_row_with_both_debit_and_credit_rejects_whole_plan(
     tmp_path: Path,
 ) -> None:

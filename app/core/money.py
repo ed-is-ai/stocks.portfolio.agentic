@@ -81,9 +81,17 @@ def _split_grouping(int_part: str, grouping_sep: str) -> str | None:
     return "".join(groups)
 
 
-def _resolve_digits(digits: str, ref: str) -> str:
+def _resolve_digits(
+    digits: str, ref: str, *, decimal_separator_hint: str | None = None
+) -> str:
     """Resolve a locale-formatted digit string to a plain decimal string
     (``int.frac`` or a bare integer), per the numeric-locale policy.
+
+    ``decimal_separator_hint`` (``"."``, ``","``, or ``None``) is evidence
+    from elsewhere on the same row about which separator is decimal --
+    see ``establish_row_decimal_separator``. It only changes behaviour for
+    the genuinely-ambiguous single-separator/3-digit case below; every
+    other case is already unambiguous on its own and ignores the hint.
     """
     if not _DIGITS_SHAPE_RE.fullmatch(digits):
         raise MoneyParseError("malformed_locale", f"unparseable amount {ref!r}")
@@ -120,7 +128,20 @@ def _resolve_digits(digits: str, ref: str) -> str:
         if n == 3:
             # Could be a 3-decimal-place amount or a whole number with one
             # grouping separator and no fraction -- these differ 1000x and
-            # neither reading is self-evidently right for a 2dp currency.
+            # neither reading is self-evidently right for a 2dp currency,
+            # *unless* another field on the same row already establishes
+            # this locale's decimal separator unambiguously.
+            if decimal_separator_hint == sep:
+                return f"{int_part}.{frac_part}"
+            if decimal_separator_hint is not None:
+                # The hint names the *other* separator as decimal, so this
+                # lone occurrence of `sep` must be grouping.
+                resolved = _split_grouping(digits, sep)
+                if resolved is None:
+                    raise MoneyParseError(
+                        "malformed_locale", f"unparseable amount {ref!r}"
+                    )
+                return resolved
             raise MoneyParseError(
                 "ambiguous_currency",
                 f"amount {ref!r} has exactly 3 digits after a single "
@@ -165,6 +186,48 @@ def _strip_sign_and_marker(
     return s, negative, currency, matched_marker
 
 
+def establish_decimal_separator(
+    raw: str, *, default_currency: str = "GBP"
+) -> str | None:
+    """Return the decimal separator (``"."`` or ``","``) that ``raw``
+    unambiguously establishes, or ``None`` if ``raw`` carries no such
+    evidence (blank/``"n/a"``, malformed, or itself genuinely ambiguous --
+    a single separator with no grouping counterpart proves nothing).
+
+    Only the "both separators present" shape is unambiguous on its own;
+    see ``_resolve_digits``, which this mirrors for just that branch.
+    """
+    if not raw or raw.strip() in ("", "n/a"):
+        return None
+    s = raw.replace("﻿", "").replace('"', "").strip()
+    s, _, _, _ = _strip_sign_and_marker(s, default_currency)
+    if s.startswith("-"):
+        s = s[1:]
+    if not _DIGITS_SHAPE_RE.fullmatch(s):
+        return None
+    has_dot = "." in s
+    has_comma = "," in s
+    if has_dot and has_comma:
+        return "." if s.rfind(".") > s.rfind(",") else ","
+    return None
+
+
+def establish_row_decimal_separator(
+    *raw_values: str, default_currency: str = "GBP"
+) -> str | None:
+    """Return the decimal separator a row's cells (e.g. Debit, Credit,
+    Running Balance) unambiguously agree on, or ``None`` if none of them
+    carries such evidence or they disagree.
+    """
+    found = {
+        sep
+        for raw in raw_values
+        if (sep := establish_decimal_separator(raw, default_currency=default_currency))
+        is not None
+    }
+    return found.pop() if len(found) == 1 else None
+
+
 def has_currency_marker(raw: str, *, default_currency: str = "GBP") -> bool:
     """Return True if ``raw`` carries an explicit currency marker.
 
@@ -177,13 +240,22 @@ def has_currency_marker(raw: str, *, default_currency: str = "GBP") -> bool:
     return _strip_sign_and_marker(s, default_currency)[3]
 
 
-def parse_money(raw: str, *, default_currency: str = "GBP", ref: str = "") -> Money:
+def parse_money(
+    raw: str,
+    *,
+    default_currency: str = "GBP",
+    ref: str = "",
+    decimal_separator_hint: str | None = None,
+) -> Money:
     """Parse a SIPP CSV cell into a ``Money``, raising ``MoneyParseError``
     rather than returning a guessed value.
 
     Caller contract: ``raw`` is a non-blank, non-``"n/a"`` cell -- blank/
     ``n/a`` handling stays the caller's job (matching ``clean_amount``'s
-    existing behaviour), not this function's.
+    existing behaviour), not this function's. ``decimal_separator_hint``
+    is optional outside evidence (see ``establish_row_decimal_separator``)
+    used to resolve an otherwise-ambiguous single-separator/3-digit
+    amount; pass ``None`` (the default) to keep strict rejection.
     """
     s = raw.replace("﻿", "").replace('"', "").strip()
     s, negative, currency, matched_marker = _strip_sign_and_marker(s, default_currency)
@@ -215,6 +287,8 @@ def parse_money(raw: str, *, default_currency: str = "GBP", ref: str = "") -> Mo
             "unsupported_currency", f"unsupported currency in {ref or raw!r}"
         )
 
-    resolved = _resolve_digits(s, ref or raw)
+    resolved = _resolve_digits(
+        s, ref or raw, decimal_separator_hint=decimal_separator_hint
+    )
     amount = Decimal(("-" if negative else "") + resolved)
     return Money(amount=amount, currency=currency)

@@ -20,7 +20,13 @@ from pydantic import PrivateAttr
 
 from app.agents.base import Agent
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
-from app.core.money import Money, MoneyParseError, has_currency_marker, parse_money
+from app.core.money import (
+    Money,
+    MoneyParseError,
+    establish_row_decimal_separator,
+    has_currency_marker,
+    parse_money,
+)
 from app.core.ticker_identity import (
     HSFWA_TICKER,
     AmbiguousTickerAliasError,
@@ -787,7 +793,11 @@ class TraderAgent(Agent):
         benign_empty_count = 0
 
         def parse_field_money(
-            s: str | None, field: str = "", ref: str = ""
+            s: str | None,
+            field: str = "",
+            ref: str = "",
+            *,
+            decimal_separator_hint: str | None = None,
         ) -> tuple[Money | None, bool]:
             """Parse one CSV cell into ``(Money, marker_present)``.
 
@@ -796,6 +806,11 @@ class TraderAgent(Agent):
             cell that failed to parse -- in the failure case, a row-cannot-
             proceed entry is appended to ``failed_rows`` here rather than
             falling back to a silently-guessed ``0.0`` (AC3).
+
+            ``decimal_separator_hint`` is only ever passed for the Price
+            field (see call site) -- Debit, Credit, and Running Balance
+            keep strict ambiguity rejection, since they're the row's own
+            source of that evidence and can't borrow it from themselves.
             """
             if not s or s.strip() in ("", "n/a"):
                 return None, False
@@ -803,7 +818,11 @@ class TraderAgent(Agent):
                 # No ``ref=`` passed: ``parse_money``'s own error messages
                 # should show the actual malformed cell text, not the row
                 # label -- the row label is prepended separately below.
-                money = parse_money(s, default_currency="GBP")
+                money = parse_money(
+                    s,
+                    default_currency="GBP",
+                    decimal_separator_hint=decimal_separator_hint,
+                )
             except MoneyParseError as exc:
                 failed_rows.append(
                     f"row {ref or '?'}: {field or 'amount'} {exc.code}: {exc.detail}"
@@ -951,8 +970,18 @@ class TraderAgent(Agent):
             credit_money, credit_marker = parse_field_money(
                 row.get("Credit", ""), "Credit", row_label
             )
+            rb_raw = row.get("Running Balance", "").strip()
             rb_money, rb_marker = parse_field_money(
                 row.get("Running Balance", ""), "Running Balance", row_label
+            )
+            # A trade row's Price can be a genuinely ambiguous 3dp amount
+            # (e.g. "£2.351") that's indistinguishable from a grouped
+            # whole number on its own -- but Debit/Credit/Running Balance
+            # on the *same* row, if any of them mixes both separators
+            # (e.g. "£1,501.99"), unambiguously establish this row's
+            # decimal separator, which resolves the Price reading too.
+            row_decimal_hint = establish_row_decimal_separator(
+                debit_raw, credit_raw, rb_raw
             )
             debit = debit_money.amount if debit_money else Decimal("0")
             credit = credit_money.amount if credit_money else Decimal("0")
@@ -993,7 +1022,10 @@ class TraderAgent(Agent):
 
                     if shares is not None:
                         price_money, price_marker = parse_field_money(
-                            row.get("Price", ""), "Price", row_label
+                            row.get("Price", ""),
+                            "Price",
+                            row_label,
+                            decimal_separator_hint=row_decimal_hint,
                         )
                         price = price_money.amount if price_money else Decimal("0")
                         if shares <= 0 or price <= 0:
