@@ -147,6 +147,41 @@ def build_source_manifest(
     return SourceManifestArtifact(manifest, canonical, manifest_digest(manifest))
 
 
+def build_strategy_source_manifest(
+    *,
+    project_root: Path,
+    strategy_id: str,
+    api_version: int,
+    allowlist: tuple[str, ...],
+    defaults: Mapping[str, object],
+    python_runtime: str,
+    dependency_versions: dict[str, str],
+) -> SourceManifestArtifact:
+    """Return the canonical source-identity manifest for a Backtest Strategy.
+
+    Delegates entirely to :func:`build_source_manifest`: Strategy identity
+    reuses the same explicit-allowlist, newline-normalization, canonical
+    JSON, and SHA-256 authority as detector and yfinance-ingestion
+    manifests instead of a second canonicalizer. ``api_version`` is a
+    plain positive integer (Story 2.2 owns ``SKILL.md`` discovery/parsing)
+    represented canonically as its decimal string, matching the shared
+    manifest's ``str`` field.
+    """
+    if isinstance(api_version, bool) or not isinstance(api_version, int):
+        raise ValueError("Strategy api_version must be a positive integer")
+    if api_version < 1:
+        raise ValueError("Strategy api_version must be a positive integer")
+    return build_source_manifest(
+        project_root=project_root,
+        producer_id=strategy_id,
+        api_version=str(api_version),
+        allowlist=allowlist,
+        defaults=defaults,
+        python_runtime=python_runtime,
+        dependency_versions=dependency_versions,
+    )
+
+
 def _installed_version(package: str) -> str:
     try:
         return version(package)
@@ -285,6 +320,7 @@ __all__ = [
     "SOURCE_MANIFEST_VERSION",
     "SourceManifestArtifact",
     "build_source_manifest",
+    "build_strategy_source_manifest",
     "detector_source_manifests",
     "yfinance_ingestion_source_manifest",
 ]

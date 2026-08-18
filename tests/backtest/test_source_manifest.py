@@ -10,6 +10,7 @@ from app.services.backtest.source_manifest import (
     DetectorInputIdentityV1,
     ReconstructionInputManifestV1,
     build_source_manifest,
+    build_strategy_source_manifest,
     detector_source_manifests,
     yfinance_ingestion_source_manifest,
 )
@@ -178,3 +179,126 @@ def test_yfinance_ingestion_identity_is_a_canonical_source_manifest() -> None:
     artifact = yfinance_ingestion_source_manifest(Path(__file__).resolve().parents[2])
     assert len(artifact.digest) == 64
     assert artifact.manifest["producer_id"] == "yfinance_historical_ingestion_v1"
+
+
+def _build_strategy_manifest(tmp_path: Path, *, api_version: int = 1, window: int = 20):
+    return build_strategy_source_manifest(
+        project_root=tmp_path,
+        strategy_id="fixture_minimal_v1",
+        api_version=api_version,
+        allowlist=("app/strategy.py",),
+        defaults={"window": window},
+        python_runtime="3.14",
+        dependency_versions={"pydantic": "2.13.4"},
+    )
+
+
+def test_strategy_source_manifest_delegates_to_build_source_manifest(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "app" / "strategy.py"
+    runtime.parent.mkdir()
+    runtime.write_text("STRATEGY_ID = 'fixture_minimal_v1'\n")
+
+    artifact = _build_strategy_manifest(tmp_path)
+
+    assert artifact.manifest["producer_id"] == "fixture_minimal_v1"
+    assert artifact.manifest["api_version"] == "1"
+    assert artifact.manifest["schema_version"] == "source_manifest.v1"
+    assert len(artifact.digest) == 64
+
+
+def test_strategy_source_manifest_normalizes_newlines_and_ignores_non_allowlisted(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "app" / "strategy.py"
+    runtime.parent.mkdir()
+    runtime.write_bytes(b"line1\r\nline2\r\n")
+    ignored = tmp_path / "tests" / "test_strategy.py"
+    ignored.parent.mkdir()
+    ignored.write_text("first")
+
+    first = _build_strategy_manifest(tmp_path)
+    runtime.write_bytes(b"line1\nline2\n")
+    ignored.write_text("changed")
+    second = _build_strategy_manifest(tmp_path)
+
+    assert second.digest == first.digest
+
+
+def test_strategy_source_manifest_changes_digest_on_material_config_change(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "app" / "strategy.py"
+    runtime.parent.mkdir()
+    runtime.write_text("STRATEGY_ID = 'fixture_minimal_v1'\n")
+
+    baseline = _build_strategy_manifest(tmp_path, window=20)
+    changed_config = _build_strategy_manifest(tmp_path, window=50)
+    changed_api_version = _build_strategy_manifest(tmp_path, api_version=2)
+
+    assert changed_config.digest != baseline.digest
+    assert changed_api_version.digest != baseline.digest
+
+
+@pytest.mark.parametrize(
+    "allowlist",
+    [
+        ("tests/test_strategy.py",),
+        ("app/strategy.py", "app/strategy.py"),
+        ("../outside.py",),
+        ("app/missing.py",),
+    ],
+)
+def test_strategy_source_manifest_rejects_non_runtime_allowlists(
+    tmp_path: Path, allowlist: tuple[str, ...]
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "strategy.py").write_text("runtime")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_strategy.py").write_text("test")
+    with pytest.raises(ValueError):
+        build_strategy_source_manifest(
+            project_root=tmp_path,
+            strategy_id="fixture_minimal_v1",
+            api_version=1,
+            allowlist=allowlist,
+            defaults={},
+            python_runtime="3.14",
+            dependency_versions={},
+        )
+
+
+def test_strategy_source_manifest_rejects_non_positive_api_version(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "strategy.py").write_text("runtime")
+    with pytest.raises(ValueError):
+        build_strategy_source_manifest(
+            project_root=tmp_path,
+            strategy_id="fixture_minimal_v1",
+            api_version=0,
+            allowlist=("app/strategy.py",),
+            defaults={},
+            python_runtime="3.14",
+            dependency_versions={},
+        )
+
+
+def test_strategy_source_manifest_rejects_bool_api_version(tmp_path: Path) -> None:
+    """``True`` is an ``int`` subclass and ``True < 1`` is ``False`` -- must
+    still be rejected rather than silently baked into the digest as the
+    string ``"True"``."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "strategy.py").write_text("runtime")
+    with pytest.raises(ValueError):
+        build_strategy_source_manifest(
+            project_root=tmp_path,
+            strategy_id="fixture_minimal_v1",
+            api_version=True,
+            allowlist=("app/strategy.py",),
+            defaults={},
+            python_runtime="3.14",
+            dependency_versions={},
+        )

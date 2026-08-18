@@ -1,3 +1,6 @@
 project-includes = ["app/**/*.py", "tests/**/*.py"]
-search-path = ["skills/vcp-screener/scripts"]
+search-path = [
+    "skills/vcp-screener/scripts",
+    "tests/fixtures/backtest-strategies/minimal-strategy/scripts",
+]
 infer-with-first-use = false

@@ -1,0 +1,2 @@
+This folder has no SKILL.md at all -- discover_strategies must silently
+skip it without a descriptor or a warning.
