@@ -12,12 +12,35 @@ from app.schemas.notification import NotificationCategory, NotificationSeverity
 logger = logging.getLogger(__name__)
 
 
+def _backtest_title(status: str, backtest: dict[str, object] | None) -> str:
+    strategy_id = backtest.get("strategy_id") if isinstance(backtest, dict) else None
+    suffix = f" ({strategy_id})" if strategy_id else ""
+    labels = {
+        "failed": "Backtest failed",
+        "cancelled": "Backtest cancelled",
+        "complete": "Backtest complete",
+        "running": "Backtest in progress",
+    }
+    return labels.get(status, "Backtest queued") + suffix
+
+
+def _initialization_title(status: str) -> str:
+    labels = {
+        "failed": "Historical initialization failed",
+        "cancelled": "Historical initialization cancelled",
+        "complete": "Historical initialization complete",
+        "running": "Historical initialization in progress",
+    }
+    return labels.get(status, "Historical initialization queued")
+
+
 def _projection(payload: dict[str, object]) -> dict[str, object]:
     job = payload.get("job")
     if not isinstance(job, dict):
         raise ValueError("strategy job notification payload has no job")
     status = str(job.get("status", ""))
     job_id = str(job.get("id", ""))
+    job_type = str(job.get("job_type", ""))
     tombstoned = bool(payload.get("tombstoned"))
     if tombstoned:
         return {
@@ -28,21 +51,17 @@ def _projection(payload: dict[str, object]) -> dict[str, object]:
             "target_url": None,
             "actions": (),
         }
-    if status == "failed":
-        title = "Historical initialization failed"
-        severity = NotificationSeverity.ERROR
-    elif status == "cancelled":
-        title = "Historical initialization cancelled"
-        severity = NotificationSeverity.WARNING
-    elif status == "complete":
-        title = "Historical initialization complete"
-        severity = NotificationSeverity.INFO
-    elif status == "running":
-        title = "Historical initialization in progress"
-        severity = NotificationSeverity.INFO
+    severity = {
+        "failed": NotificationSeverity.ERROR,
+        "cancelled": NotificationSeverity.WARNING,
+    }.get(status, NotificationSeverity.INFO)
+    if job_type == "backtest":
+        backtest = payload.get("backtest")
+        title = _backtest_title(
+            status, backtest if isinstance(backtest, dict) else None
+        )
     else:
-        title = "Historical initialization queued"
-        severity = NotificationSeverity.INFO
+        title = _initialization_title(status)
     detail = str(job.get("failure_detail") or "")
     body = f"Status: {status}."
     if detail:
@@ -59,7 +78,12 @@ def _projection(payload: dict[str, object]) -> dict[str, object]:
         "severity": severity,
         "title": title,
         "body": body,
-        "target_url": f"/strategy-manager?job_id={job_id}",
+        # Story 2.9 later changes a completed Backtest's target to its
+        # Result detail URL once that route exists; every other status
+        # (and initialization entirely) deep-links to this working
+        # Activity shell -- never the dead ``?job_id=`` query-string
+        # format the projector used to emit before this story.
+        "target_url": f"/strategy-manager/activities/{job_id}",
         "actions": actions,
     }
 

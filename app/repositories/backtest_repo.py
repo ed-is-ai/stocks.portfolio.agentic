@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from pathlib import Path
+import html
 import json
 import logging
 import sqlite3
-from typing import Callable, Protocol
+from typing import Callable, Mapping, Protocol, TYPE_CHECKING
 from uuid import uuid4
 
 from app.repositories.db import Connect, session
@@ -36,6 +38,9 @@ from app.services.backtest.snapshot_profile import (
 )
 from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.strategy_job import (
+    BacktestEnqueueResultV1,
+    BacktestRunV1,
+    BacktestSubmissionV1,
     ClaimedStrategyJobV1,
     InitializationEnqueueResultV1,
     InitializationRunV1,
@@ -47,6 +52,21 @@ from app.services.backtest.strategy_job import (
     StrategyJobV1,
     requested_month_digest,
 )
+
+if TYPE_CHECKING:
+    # Deferred to break the real import cycle: ``backtest_engine.py`` and
+    # ``metrics.py`` both import ``run_input_manifest.py``, which imports
+    # ``BacktestRepository`` from this module. Every runtime use below
+    # imports these names locally inside the method that needs them
+    # (matching this file's existing lazy-import convention, e.g.
+    # ``_qualification_is_current``); only static type-checking sees this
+    # block, guarded by ``from __future__ import annotations`` deferring
+    # every annotation in this file to a string.
+    from app.services.backtest.backtest_engine import (
+        EquityCurvePointV1,
+        TradeLogEvent,
+    )
+    from app.services.backtest.metrics import BacktestMetricsV1, MetricAvailabilityV1
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
@@ -652,6 +672,172 @@ CREATE TABLE IF NOT EXISTS strategy_job_restart_actions (
 );
 """
 
+#: Story 2.5 (AD-9): Strategy Run identity/pin, attempt-owned staging, and
+#: the immutable Result/Trade Log/Equity Curve a completed attempt
+#: promotes. Story 2.6 owns enqueue/claim/cancel/restart/delete -- it
+#: creates ``strategy_runs``/``run_input_manifests`` rows before a real
+#: backtest job may transition to ``running``. This schema deliberately
+#: does not add a trigger enforcing that on ``strategy_jobs`` itself:
+#: Story 2.2/2.3 already established a lightweight ``job_type='backtest'``
+#: placeholder (no subtype row) sharing the FIFO with initialization jobs
+#: (``test_initialization_and_backtest_placeholders_share_one_fifo``), and
+#: this story must not narrow that existing contract. ``write_backtest_
+#: staging``/``complete_claimed_backtest_job`` enforce the real
+#: prerequisite (a ``strategy_runs``/staging row must exist) themselves.
+_BACKTEST_RESULT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_input_manifests (
+    digest TEXT PRIMARY KEY CHECK(length(digest) = 64),
+    execution_contract_digest TEXT NOT NULL CHECK(
+        length(execution_contract_digest) = 64
+    ),
+    canonical_manifest_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_run_input_manifests_execution_contract
+ON run_input_manifests(execution_contract_digest);
+
+CREATE TRIGGER IF NOT EXISTS run_input_manifest_immutable_update
+BEFORE UPDATE ON run_input_manifests
+BEGIN SELECT RAISE(ABORT, 'run input manifest is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS run_input_manifest_immutable_delete
+BEFORE DELETE ON run_input_manifests
+BEGIN SELECT RAISE(ABORT, 'run input manifest is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS strategy_runs (
+    id TEXT PRIMARY KEY REFERENCES strategy_jobs(id),
+    strategy_id TEXT NOT NULL,
+    strategy_api_version INTEGER NOT NULL CHECK(strategy_api_version > 0),
+    strategy_source_digest TEXT NOT NULL CHECK(length(strategy_source_digest) = 64),
+    parameters_json TEXT NOT NULL,
+    profile_hash TEXT NOT NULL REFERENCES snapshot_profiles(profile_hash),
+    start_month TEXT NOT NULL,
+    end_month TEXT NOT NULL,
+    ordered_month_digest TEXT NOT NULL CHECK(length(ordered_month_digest) = 64),
+    base_currency TEXT NOT NULL CHECK(base_currency IN ('GBP', 'USD')),
+    starting_capital TEXT NOT NULL,
+    run_input_manifest_digest TEXT NOT NULL REFERENCES run_input_manifests(digest),
+    execution_contract_digest TEXT NOT NULL CHECK(
+        length(execution_contract_digest) = 64
+    ),
+    created_at TEXT NOT NULL,
+    CHECK(start_month <= end_month)
+);
+
+CREATE TRIGGER IF NOT EXISTS strategy_run_subtype_matches_job
+BEFORE INSERT ON strategy_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = NEW.id AND job.job_type = 'backtest'
+)
+BEGIN SELECT RAISE(ABORT, 'strategy run subtype does not match job'); END;
+
+CREATE TRIGGER IF NOT EXISTS strategy_run_immutable_update
+BEFORE UPDATE ON strategy_runs
+BEGIN SELECT RAISE(ABORT, 'strategy run configuration is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS strategy_run_immutable_delete
+BEFORE DELETE ON strategy_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job WHERE job.id = OLD.id AND job.deleted_at IS NOT NULL
+)
+BEGIN SELECT RAISE(ABORT, 'strategy run is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS backtest_staging (
+    run_id TEXT PRIMARY KEY REFERENCES strategy_runs(id),
+    state_schema_version TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    events_json TEXT NOT NULL,
+    equity_curve_json TEXT NOT NULL,
+    final_cash_base TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_results (
+    run_id TEXT PRIMARY KEY REFERENCES strategy_runs(id),
+    metrics_json TEXT NOT NULL,
+    final_cash_base TEXT NOT NULL,
+    result_digest TEXT NOT NULL CHECK(length(result_digest) = 64),
+    note TEXT,
+    note_version INTEGER NOT NULL CHECK(note_version > 0),
+    completed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS backtest_result_evidence_immutable
+BEFORE UPDATE ON backtest_results
+WHEN NEW.run_id != OLD.run_id
+  OR NEW.metrics_json != OLD.metrics_json
+  OR NEW.final_cash_base != OLD.final_cash_base
+  OR NEW.result_digest != OLD.result_digest
+  OR NEW.completed_at != OLD.completed_at
+BEGIN SELECT RAISE(ABORT, 'backtest result evidence is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS backtest_result_note_version_monotonic
+BEFORE UPDATE ON backtest_results
+WHEN NEW.note_version != OLD.note_version + 1
+BEGIN SELECT RAISE(ABORT, 'backtest result note version is not monotonic'); END;
+
+CREATE TRIGGER IF NOT EXISTS backtest_result_immutable_delete
+BEFORE DELETE ON backtest_results
+BEGIN SELECT RAISE(ABORT, 'backtest result is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS trade_log (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES backtest_results(run_id),
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    kind TEXT NOT NULL CHECK(kind IN (
+        'entry_fill', 'exit_fill', 'skipped_signal', 'split_applied',
+        'dividend_applied', 'open_position_mark'
+    )),
+    security_id TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    UNIQUE(run_id, sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_trade_log_run_sequence ON trade_log(run_id, sequence);
+
+CREATE TRIGGER IF NOT EXISTS trade_log_immutable_update
+BEFORE UPDATE ON trade_log
+BEGIN SELECT RAISE(ABORT, 'trade log is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS trade_log_immutable_delete
+BEFORE DELETE ON trade_log
+BEGIN SELECT RAISE(ABORT, 'trade log is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS equity_curve (
+    run_id TEXT NOT NULL REFERENCES backtest_results(run_id),
+    date TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    cash_base TEXT NOT NULL,
+    positions_value_base TEXT NOT NULL,
+    total_equity_base TEXT NOT NULL,
+    PRIMARY KEY(run_id, date),
+    UNIQUE(run_id, sequence)
+);
+
+CREATE TRIGGER IF NOT EXISTS equity_curve_immutable_update
+BEFORE UPDATE ON equity_curve
+BEGIN SELECT RAISE(ABORT, 'equity curve is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS equity_curve_immutable_delete
+BEFORE DELETE ON equity_curve
+BEGIN SELECT RAISE(ABORT, 'equity curve is immutable'); END;
+
+-- Story 2.6: enqueue-time action idempotency for ``create_backtest_job``,
+-- mirroring ``strategy_job_restart_actions``' idempotency-key shape but
+-- keyed on the key alone (no source job exists yet at initial enqueue).
+-- A caller-supplied key retrying the identical submission returns the
+-- same attempt; an enqueue with no key (NULL) never dedupes -- every
+-- distinct intentional submission with no key creates a distinct attempt.
+-- ``submission_digest`` pins the exact submission content a key was first
+-- committed with (Story 2.6 review), so a key replayed against a
+-- divergent submission is rejected rather than silently returning a
+-- stale attempt for the wrong content.
+CREATE TABLE IF NOT EXISTS backtest_enqueue_actions (
+    idempotency_key TEXT PRIMARY KEY CHECK(length(idempotency_key) > 0),
+    job_id TEXT NOT NULL UNIQUE REFERENCES strategy_jobs(id),
+    submission_digest TEXT NOT NULL CHECK(length(submission_digest) = 64),
+    created_at TEXT NOT NULL
+);
+"""
+
 
 @dataclass(frozen=True)
 class QualificationResult:
@@ -704,6 +890,79 @@ class BacktestIntegrityError(RuntimeError):
     def __init__(self, message: str, *, code: str = "integrity_error") -> None:
         self.code = code
         super().__init__(message)
+
+
+#: Unicode code-point cap on a Backtest Result note's escaped, persisted
+#: text (AC 5) -- checked after ``html.escape`` (whose entity expansion can
+#: grow the text) and before persistence, never truncated silently.
+_NOTE_MAX_CODE_POINTS = 10_000
+
+
+@dataclass(frozen=True)
+class _StrategyRunRow:
+    """One pinned Backtest Run identity, as ``strategy_runs`` stores it
+    (AD-9) -- created by Story 2.6's enqueue, read-only here."""
+
+    id: str
+    strategy_id: str
+    strategy_api_version: int
+    strategy_source_digest: str
+    parameters: dict[str, object]
+    profile_hash: str
+    start_month: str
+    end_month: str
+    ordered_month_digest: str
+    base_currency: str
+    starting_capital: Decimal
+    run_input_manifest_digest: str
+    execution_contract_digest: str
+
+
+@dataclass(frozen=True)
+class BacktestStagingV1:
+    """One attempt-owned staging row's canonical content (AC 1, 6) --
+    versioned portfolio state, ordered Trade Log events, and the ordered
+    Equity Curve a running attempt has produced so far."""
+
+    run_id: str
+    state_schema_version: str
+    portfolio_state: dict[str, object]
+    events: tuple[TradeLogEvent, ...]
+    equity_curve: tuple[EquityCurvePointV1, ...]
+    final_cash_base: Decimal
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class BacktestResultV1:
+    """One completed Backtest Result's full typed retrieval projection
+    (AC 5): Strategy ID/version, exact parameters, normalized period,
+    profile/ordered evidence, capital/base currency, full replay/
+    execution-contract digests, the four Metrics plus typed availability
+    reasons, the complete ordered Trade Log, the Equity Curve,
+    provenance, and optional note state."""
+
+    run_id: str
+    strategy_id: str
+    strategy_api_version: int
+    strategy_source_digest: str
+    parameters: dict[str, object]
+    profile_hash: str
+    start_month: str
+    end_month: str
+    ordered_month_digest: str
+    base_currency: str
+    starting_capital: Decimal
+    run_input_manifest_digest: str
+    execution_contract_digest: str
+    metrics: BacktestMetricsV1
+    metric_availability: MetricAvailabilityV1
+    events: tuple[TradeLogEvent, ...]
+    equity_curve: tuple[EquityCurvePointV1, ...]
+    final_cash_base: Decimal
+    completed_at: datetime
+    note: str | None
+    note_version: int
 
 
 SnapshotEvidenceV1 = HistoricalEvidenceV1
@@ -838,6 +1097,7 @@ class BacktestRepository:
                 + _SNAPSHOT_COVERAGE_SCHEMA
                 + _BAU_RUN_AUTHORITY_SCHEMA
                 + _STRATEGY_JOB_SCHEMA
+                + _BACKTEST_RESULT_SCHEMA
             )
             columns = {
                 str(row[1])
@@ -1149,6 +1409,186 @@ class BacktestRepository:
         except sqlite3.IntegrityError as exc:
             raise StrategyJobConflict("initialization job creation conflicted") from exc
 
+    # -- Story 2.6: Backtest atomic enqueue -------------------------------
+
+    @staticmethod
+    def _backtest_submission_content_digest(submission: BacktestSubmissionV1) -> str:
+        """Canonical content hash of one submission (minus its own
+        ``idempotency_key``), used to detect a replayed key whose
+        submission has actually diverged (Story 2.6 review) -- an
+        idempotency-key replay must return the exact already-committed
+        attempt, never silently paper over a different submission."""
+        payload = submission.model_dump(mode="python", exclude={"idempotency_key"})
+        payload["starting_capital"] = str(submission.starting_capital)
+        return manifest_digest(payload)
+
+    def create_backtest_job(
+        self, submission: BacktestSubmissionV1
+    ) -> BacktestEnqueueResultV1:
+        """Atomically enqueue one Backtest attempt (AC 1).
+
+        One ``BEGIN IMMEDIATE`` transaction revalidates the active
+        snapshot profile and the exact contiguous normalized month
+        sequence, recomputing ``ordered_month_digest`` fresh from live
+        coverage rather than trusting any caller-supplied value, then
+        persists exactly one queued ``backtest`` ``strategy_jobs`` row,
+        its immutable ``strategy_runs`` identity, and a content-addressed
+        ``run_input_manifests`` binding -- reused (never duplicated) when
+        an identical digest already exists. An explicit
+        ``idempotency_key`` retrying the identical submission returns the
+        already-committed attempt unchanged and creates nothing; omitting
+        it, or supplying a distinct key, always creates a distinct
+        attempt, even for otherwise-identical parameters. A key replayed
+        against a submission whose content has diverged from the one it
+        was first committed with is rejected rather than silently
+        returning the stale attempt.
+        """
+        now = self._job_now()
+        content_digest = self._backtest_submission_content_digest(submission)
+        try:
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if submission.idempotency_key is not None:
+                    existing = conn.execute(
+                        """SELECT job_id, submission_digest FROM backtest_enqueue_actions
+                           WHERE idempotency_key=?""",
+                        (submission.idempotency_key,),
+                    ).fetchone()
+                    if existing is not None:
+                        if str(existing[1]) != content_digest:
+                            raise StrategyJobConflict(
+                                "idempotency key was already used for a "
+                                "different backtest submission"
+                            )
+                        existing_id = str(existing[0])
+                        return BacktestEnqueueResultV1(
+                            job=self._load_strategy_job(conn, existing_id),
+                            backtest=self._load_strategy_run(conn, existing_id),
+                        )
+                profile = conn.execute(
+                    "SELECT 1 FROM snapshot_profiles WHERE profile_hash=?",
+                    (submission.profile_hash,),
+                ).fetchone()
+                if profile is None:
+                    raise StrategyJobConflict("snapshot profile does not exist")
+                active = conn.execute(
+                    "SELECT profile_hash FROM active_snapshot_profile "
+                    "WHERE singleton_id=1"
+                ).fetchone()
+                if active is None or str(active[0]) != submission.profile_hash:
+                    raise StrategyJobConflict("snapshot profile is not active")
+                if submission.parent_job_id is not None:
+                    try:
+                        parent = self._load_strategy_job(conn, submission.parent_job_id)
+                    except StrategyJobNotFound:
+                        raise StrategyJobConflict(
+                            "parent strategy job does not exist"
+                        ) from None
+                    if parent.job_type is not StrategyJobType.BACKTEST:
+                        raise StrategyJobConflict(
+                            "parent strategy job must be a backtest job"
+                        )
+                    if parent.status not in {
+                        StrategyJobStatus.FAILED,
+                        StrategyJobStatus.CANCELLED,
+                    }:
+                        raise StrategyJobConflict(
+                            "parent strategy job must be terminal"
+                        )
+                    if parent.deleted_at is not None:
+                        raise StrategyJobConflict(
+                            "deleted strategy job cannot be a parent"
+                        )
+                readiness = self._interval_readiness_on_connection(
+                    conn,
+                    submission.profile_hash,
+                    submission.start_month,
+                    submission.end_month,
+                )
+                if not readiness.ready or readiness.ordered_month_digest is None:
+                    raise StrategyJobConflict("snapshot coverage is not Ready")
+                if (
+                    manifest_digest(json.loads(submission.canonical_manifest_json))
+                    != submission.run_input_manifest_digest
+                ):
+                    raise StrategyJobConflict(
+                        "run input manifest digest does not match its "
+                        "canonical manifest"
+                    )
+                sequence_row = conn.execute(
+                    "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
+                ).fetchone()
+                enqueue_seq = int(sequence_row[0]) if sequence_row else 1
+                job_id = self._id_generator()
+                conn.execute(
+                    """INSERT INTO strategy_jobs (
+                           id, job_type, status, parent_job_id, enqueue_seq,
+                           claim_token, current_month, status_version,
+                           cancel_requested_at, failure_code, failed_month,
+                           failure_detail, deleted_at, audit_summary,
+                           created_at, updated_at
+                       ) VALUES (?, 'backtest', 'queued', ?, ?, NULL, NULL, 1,
+                                 NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                    (job_id, submission.parent_job_id, enqueue_seq, now, now),
+                )
+                conn.execute(
+                    """INSERT OR IGNORE INTO run_input_manifests (
+                           digest, execution_contract_digest,
+                           canonical_manifest_json, created_at
+                       ) VALUES (?, ?, ?, ?)""",
+                    (
+                        submission.run_input_manifest_digest,
+                        submission.execution_contract_digest,
+                        submission.canonical_manifest_json,
+                        now,
+                    ),
+                )
+                conn.execute(
+                    """INSERT INTO strategy_runs (
+                           id, strategy_id, strategy_api_version,
+                           strategy_source_digest, parameters_json, profile_hash,
+                           start_month, end_month, ordered_month_digest,
+                           base_currency, starting_capital,
+                           run_input_manifest_digest, execution_contract_digest,
+                           created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        job_id,
+                        submission.strategy_id,
+                        submission.strategy_api_version,
+                        submission.strategy_source_digest,
+                        json.dumps(
+                            dict(submission.parameters),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        submission.profile_hash,
+                        submission.start_month,
+                        submission.end_month,
+                        readiness.ordered_month_digest,
+                        submission.base_currency,
+                        str(submission.starting_capital),
+                        submission.run_input_manifest_digest,
+                        submission.execution_contract_digest,
+                        now,
+                    ),
+                )
+                if submission.idempotency_key is not None:
+                    conn.execute(
+                        """INSERT INTO backtest_enqueue_actions
+                           (idempotency_key, job_id, submission_digest, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (submission.idempotency_key, job_id, content_digest, now),
+                    )
+                job = self._load_strategy_job(conn, job_id)
+                backtest = self._load_strategy_run(conn, job_id)
+                self._upsert_notification_outbox_on_connection(conn, job)
+            return BacktestEnqueueResultV1(job=job, backtest=backtest)
+        except (StrategyJobConflict, StrategyJobNotFound):
+            raise
+        except sqlite3.IntegrityError as exc:
+            raise StrategyJobConflict("backtest job creation conflicted") from exc
+
     def strategy_job(self, job_id: str) -> StrategyJobV1:
         with session(self._connect) as conn:
             return self._load_strategy_job(conn, job_id)
@@ -1156,6 +1596,22 @@ class BacktestRepository:
     def initialization_run(self, job_id: str) -> InitializationRunV1:
         with session(self._connect) as conn:
             return self._load_initialization(conn, job_id)
+
+    def strategy_run(self, job_id: str) -> BacktestRunV1:
+        with session(self._connect) as conn:
+            return self._load_strategy_run(conn, job_id)
+
+    def run_input_manifest_json(self, digest: str) -> str | None:
+        """Return the stored content-addressed canonical manifest JSON for
+        ``digest``, or ``None`` if no such manifest has ever been bound --
+        the worker's read path for the manifest ``create_backtest_job``
+        pinned at enqueue time (never rebuilt or re-derived)."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT canonical_manifest_json FROM run_input_manifests WHERE digest=?",
+                (digest,),
+            ).fetchone()
+        return None if row is None else str(row[0])
 
     def list_strategy_jobs(self) -> tuple[StrategyJobV1, ...]:
         with session(self._connect) as conn:
@@ -1202,9 +1658,17 @@ class BacktestRepository:
                     if job.job_type is StrategyJobType.INITIALIZATION
                     else None
                 )
+                backtest = (
+                    self._load_strategy_run(conn, job.id)
+                    if job.job_type is StrategyJobType.BACKTEST
+                    else None
+                )
                 self._upsert_notification_outbox_on_connection(conn, job)
                 return ClaimedStrategyJobV1(
-                    job=job, initialization=initialization, claim_token=token
+                    job=job,
+                    initialization=initialization,
+                    backtest=backtest,
+                    claim_token=token,
                 )
         except sqlite3.IntegrityError as exc:
             raise StrategyJobConflict("strategy job claim conflicted") from exc
@@ -1219,9 +1683,19 @@ class BacktestRepository:
     ) -> StrategyJobV1:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            initialization = self._load_initialization(conn, job_id)
-            if month not in initialization.requested_months:
-                raise StrategyJobConflict("progress month is outside requested range")
+            job_type = self._require_job_type(conn, job_id)
+            if job_type is StrategyJobType.INITIALIZATION:
+                initialization = self._load_initialization(conn, job_id)
+                if month not in initialization.requested_months:
+                    raise StrategyJobConflict(
+                        "progress month is outside requested range"
+                    )
+            else:
+                backtest = self._load_strategy_run(conn, job_id)
+                if not (backtest.start_month <= month <= backtest.end_month):
+                    raise StrategyJobConflict(
+                        "progress month is outside requested range"
+                    )
             cursor = conn.execute(
                 """UPDATE strategy_jobs
                    SET current_month=?, status_version=status_version+1, updated_at=?
@@ -1280,6 +1754,7 @@ class BacktestRepository:
     ) -> StrategyJobV1:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            job_type = self._require_job_type(conn, job_id)
             cursor = conn.execute(
                 """UPDATE strategy_jobs
                    SET status='cancelled', claim_token=NULL, current_month=NULL,
@@ -1290,6 +1765,13 @@ class BacktestRepository:
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker cancellation ownership is stale")
+            if job_type is StrategyJobType.BACKTEST:
+                # AC 5: running cancellation atomically discards every
+                # attempt-owned staging row in the exact same commit that
+                # finalizes ``cancelled`` -- never a separate write, and
+                # shared content-addressed evidence (profile/manifest) is
+                # untouched.
+                conn.execute("DELETE FROM backtest_staging WHERE run_id=?", (job_id,))
             job = self._load_strategy_job(conn, job_id)
             self._upsert_notification_outbox_on_connection(conn, job)
             return job
@@ -1310,9 +1792,19 @@ class BacktestRepository:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
             if failed_month is not None:
-                initialization = self._load_initialization(conn, job_id)
-                if failed_month not in initialization.requested_months:
-                    raise StrategyJobConflict("failed month is outside requested range")
+                job_type = self._require_job_type(conn, job_id)
+                if job_type is StrategyJobType.INITIALIZATION:
+                    initialization = self._load_initialization(conn, job_id)
+                    if failed_month not in initialization.requested_months:
+                        raise StrategyJobConflict(
+                            "failed month is outside requested range"
+                        )
+                else:
+                    backtest = self._load_strategy_run(conn, job_id)
+                    if not (backtest.start_month <= failed_month <= backtest.end_month):
+                        raise StrategyJobConflict(
+                            "failed month is outside requested range"
+                        )
             cursor = conn.execute(
                 """UPDATE strategy_jobs
                    SET status='failed', claim_token=NULL, current_month=NULL,
@@ -1376,6 +1868,621 @@ class BacktestRepository:
             job = self._load_strategy_job(conn, job_id)
             self._upsert_notification_outbox_on_connection(conn, job)
             return job
+
+    # -- Story 2.5: Backtest staging, completion, note and retrieval -----
+
+    def write_backtest_staging(
+        self,
+        run_id: str,
+        *,
+        claim_token: str,
+        expected_version: int,
+        state_schema_version: str,
+        portfolio_state: Mapping[str, object],
+        events: tuple[TradeLogEvent, ...],
+        equity_curve: tuple[EquityCurvePointV1, ...],
+        final_cash_base: Decimal,
+    ) -> None:
+        """Attempt-owned compare-and-swap staging write (AC 1, 6).
+
+        Requires ``claim_token``/``expected_version`` to match the run's
+        *current* owning running job -- the identical ownership predicate
+        ``set_strategy_job_current_month`` enforces -- and atomically
+        replaces the whole canonical staging payload (versioned portfolio
+        state, ordered Trade Log events, ordered Equity Curve). Rejects a
+        stale, non-running, cancelled, or deleted owner with
+        ``StrategyJobConflict``; never partially writes, and staging stays
+        invisible to completed-Result queries (``backtest_results`` is a
+        separate table). This is the primitive a future ``SessionBatchSink``
+        adapter (Story 2.6) calls once per session -- it does not itself
+        claim, enqueue, schedule, or run anything.
+        """
+        if events:
+            sequences = [event.sequence for event in events]
+            if sequences != sorted(sequences) or len(set(sequences)) != len(sequences):
+                raise ValueError("staging events must be strictly ordered by sequence")
+        if equity_curve:
+            sessions = [point.session for point in equity_curve]
+            if sessions != sorted(sessions) or len(set(sessions)) != len(sessions):
+                raise ValueError(
+                    "staging equity curve must be strictly ordered by session"
+                )
+            sequences = [point.sequence for point in equity_curve]
+            if sequences != sorted(sequences) or len(set(sequences)) != len(sequences):
+                raise ValueError(
+                    "staging equity curve must be strictly ordered by sequence"
+                )
+        if not final_cash_base.is_finite():
+            raise ValueError("staging final_cash_base must be finite")
+        now = self._job_now()
+        try:
+            state_json = json.dumps(
+                dict(portfolio_state), sort_keys=True, separators=(",", ":")
+            )
+        except TypeError as exc:
+            raise ValueError(
+                "staging portfolio_state must be JSON-serializable"
+            ) from exc
+        events_json = json.dumps(
+            [event.model_dump(mode="json") for event in events],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        curve_json = json.dumps(
+            [point.model_dump(mode="json") for point in equity_curve],
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job = self._load_strategy_job(conn, run_id)
+            if (
+                job.status is not StrategyJobStatus.RUNNING
+                or job.claim_token != claim_token
+                or job.status_version != expected_version
+                or job.cancel_requested_at is not None
+            ):
+                raise StrategyJobConflict("staging write ownership is stale")
+            conn.execute(
+                """INSERT INTO backtest_staging (
+                       run_id, state_schema_version, state_json, events_json,
+                       equity_curve_json, final_cash_base, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id) DO UPDATE SET
+                       state_schema_version=excluded.state_schema_version,
+                       state_json=excluded.state_json,
+                       events_json=excluded.events_json,
+                       equity_curve_json=excluded.equity_curve_json,
+                       final_cash_base=excluded.final_cash_base,
+                       updated_at=excluded.updated_at""",
+                (
+                    run_id,
+                    state_schema_version,
+                    state_json,
+                    events_json,
+                    curve_json,
+                    str(final_cash_base),
+                    now,
+                ),
+            )
+
+    def complete_claimed_backtest_job(
+        self, job_id: str, claim_token: str, *, expected_version: int
+    ) -> StrategyJobV1:
+        """Atomically promote one claimed running Backtest attempt's
+        staging into an immutable Result + Trade Log + Equity Curve, in
+        the exact ``complete_claimed_initialization_job`` shape (AC 4, 6):
+        reload/validate the running job's ownership, load staging + the
+        pinned ``strategy_runs`` identity, compute Metrics via
+        ``metrics.py`` (the sole authority), insert Result/trade_log/
+        equity_curve, delete the winning staging row, transition the job
+        ``running -> complete``, and upsert the notification outbox -- all
+        in one ``BEGIN IMMEDIATE`` transaction.
+
+        Repeated completion once the job has already reached ``complete``
+        is an idempotent no-op (returns the already-committed job
+        unchanged, no duplicate rows). A proposed Result whose canonical
+        content diverges from an already-stored Result for the same
+        ``run_id`` raises :class:`BacktestIntegrityError` and leaves the
+        stored Result untouched; under this method's own atomic write
+        shape that can only occur via directly tampered state, since a
+        normal write always inserts the Result and transitions the job
+        together.
+        """
+        from app.services.backtest.backtest_engine import ExitFillEventV1
+        from app.services.backtest.metrics import MetricsError, calculate_metrics
+
+        now = self._job_now()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job = self._load_strategy_job(conn, job_id)
+            existing_digest = self._existing_result_digest(conn, job_id)
+
+            if (
+                job.status is not StrategyJobStatus.RUNNING
+                or job.claim_token != claim_token
+                or job.status_version != expected_version
+                or job.cancel_requested_at is not None
+            ):
+                if (
+                    job.status is StrategyJobStatus.COMPLETE
+                    and existing_digest is not None
+                ):
+                    return job  # idempotent no-op: already completed
+                raise StrategyJobConflict("worker completion ownership is stale")
+
+            strategy_run = self._load_strategy_run_row(conn, job_id)
+            staging = self._load_backtest_staging_row(conn, job_id)
+            if staging is None:
+                raise StrategyJobConflict("no staging exists for this run")
+
+            closed_trades = tuple(
+                event for event in staging.events if isinstance(event, ExitFillEventV1)
+            )
+            try:
+                metrics = calculate_metrics(
+                    starting_capital=strategy_run.starting_capital,
+                    equity_curve=staging.equity_curve,
+                    closed_trades=closed_trades,
+                )
+            except MetricsError as exc:
+                raise BacktestIntegrityError(str(exc)) from exc
+            payload = self._canonical_result_payload(
+                metrics=metrics,
+                events=staging.events,
+                equity_curve=staging.equity_curve,
+                final_cash_base=staging.final_cash_base,
+                completed_at=now,
+            )
+            proposed_digest = manifest_digest(payload)
+
+            if existing_digest is not None:
+                if existing_digest != proposed_digest:
+                    raise BacktestIntegrityError(
+                        "conflicting repeat completion for run_id"
+                    )
+            else:
+                self._insert_backtest_result(
+                    conn,
+                    job_id,
+                    metrics=metrics,
+                    events=staging.events,
+                    equity_curve=staging.equity_curve,
+                    final_cash_base=staging.final_cash_base,
+                    result_digest=proposed_digest,
+                    completed_at=now,
+                )
+
+            cursor = conn.execute(
+                """UPDATE strategy_jobs
+                   SET status='complete', claim_token=NULL, current_month=NULL,
+                       status_version=status_version+1, updated_at=?
+                   WHERE id=? AND status='running' AND claim_token=?
+                     AND status_version=? AND cancel_requested_at IS NULL""",
+                (now, job_id, claim_token, expected_version),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("worker completion ownership is stale")
+            conn.execute("DELETE FROM backtest_staging WHERE run_id=?", (job_id,))
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
+
+    def update_backtest_result_note(
+        self, run_id: str, *, expected_note_version: int, note: str | None
+    ) -> BacktestResultV1:
+        """Compare-and-swap note update (AC 5) -- the one repository
+        method permitted to touch a completed Result's note. Changes only
+        ``note``/``note_version``/``updated_at``; every other Result field
+        (digests, Metrics, Trade Log, Equity Curve) stays immutable,
+        independently enforced by the ``backtest_result_evidence_
+        immutable`` trigger. ``note`` is escaped plain text; the escaped
+        result is capped at 10,000 Unicode code points; empty or
+        whitespace-only input normalizes to ``None``.
+        """
+        normalized = self._normalize_note(note)
+        now = self._job_now()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """UPDATE backtest_results
+                   SET note=?, note_version=note_version+1, updated_at=?
+                   WHERE run_id=? AND note_version=?""",
+                (normalized, now, run_id, expected_note_version),
+            )
+            if cursor.rowcount != 1:
+                exists = conn.execute(
+                    "SELECT 1 FROM backtest_results WHERE run_id=?", (run_id,)
+                ).fetchone()
+                if exists is None:
+                    raise StrategyJobNotFound(f"backtest result not found: {run_id}")
+                raise StrategyJobConflict("note update version is stale")
+        return self.backtest_result(run_id)
+
+    def backtest_result(self, run_id: str) -> BacktestResultV1:
+        """Return one completed Backtest's full typed retrieval projection
+        (AC 5): Strategy ID/version, exact parameters, normalized period,
+        profile/ordered evidence, capital/base currency, full replay/
+        execution-contract digests, the four Metrics plus typed
+        availability reasons (recomputed via ``metrics.py``, the sole
+        authority -- never a second implementation), the complete ordered
+        Trade Log, the Equity Curve, provenance, and optional note state.
+
+        Raises :class:`StrategyJobNotFound` when no completed Result
+        exists for ``run_id``, and :class:`BacktestIntegrityError` if the
+        stored evidence no longer reconstructs to its own recorded digest
+        (tamper detection, mirroring ``activate_snapshot_profile``'s
+        rebuild-and-compare convention).
+        """
+        from app.services.backtest.backtest_engine import ExitFillEventV1
+        from app.services.backtest.metrics import (
+            BacktestMetricsV1,
+            MetricsError,
+            metric_availability,
+        )
+
+        with session(self._connect) as conn:
+            strategy_run = self._load_strategy_run_row(conn, run_id)
+            row = conn.execute(
+                """SELECT metrics_json, final_cash_base, result_digest, note,
+                          note_version, completed_at
+                   FROM backtest_results WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise StrategyJobNotFound(f"backtest result not found: {run_id}")
+            event_rows = conn.execute(
+                "SELECT event_json FROM trade_log WHERE run_id=? ORDER BY sequence",
+                (run_id,),
+            ).fetchall()
+            curve_rows = conn.execute(
+                """SELECT date, sequence, cash_base, positions_value_base,
+                          total_equity_base
+                   FROM equity_curve WHERE run_id=? ORDER BY date""",
+                (run_id,),
+            ).fetchall()
+
+        try:
+            metrics = BacktestMetricsV1.model_validate(json.loads(str(row[0])))
+            final_cash_base = Decimal(str(row[1]))
+            completed_at_raw = str(row[5])
+            completed_at = datetime.fromisoformat(completed_at_raw)
+            events = tuple(
+                self._parse_trade_log_event(json.loads(str(item[0])))
+                for item in event_rows
+            )
+            equity_curve = tuple(
+                self._parse_equity_curve_point(
+                    {
+                        "session": str(item[0]),
+                        "sequence": int(item[1]),
+                        "cash_base": str(item[2]),
+                        "positions_value_base": str(item[3]),
+                        "total_equity_base": str(item[4]),
+                    }
+                )
+                for item in curve_rows
+            )
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            InvalidOperation,
+        ) as exc:
+            raise BacktestIntegrityError("stored backtest result is invalid") from exc
+
+        payload = self._canonical_result_payload(
+            metrics=metrics,
+            events=events,
+            equity_curve=equity_curve,
+            final_cash_base=final_cash_base,
+            completed_at=completed_at_raw,
+        )
+        if manifest_digest(payload) != str(row[2]):
+            raise BacktestIntegrityError("stored backtest result digest is invalid")
+
+        closed_trades = tuple(
+            event for event in events if isinstance(event, ExitFillEventV1)
+        )
+        try:
+            availability = metric_availability(
+                equity_curve=equity_curve, closed_trades=closed_trades
+            )
+        except MetricsError as exc:
+            raise BacktestIntegrityError(str(exc)) from exc
+
+        return BacktestResultV1(
+            run_id=run_id,
+            strategy_id=strategy_run.strategy_id,
+            strategy_api_version=strategy_run.strategy_api_version,
+            strategy_source_digest=strategy_run.strategy_source_digest,
+            parameters=strategy_run.parameters,
+            profile_hash=strategy_run.profile_hash,
+            start_month=strategy_run.start_month,
+            end_month=strategy_run.end_month,
+            ordered_month_digest=strategy_run.ordered_month_digest,
+            base_currency=strategy_run.base_currency,
+            starting_capital=strategy_run.starting_capital,
+            run_input_manifest_digest=strategy_run.run_input_manifest_digest,
+            execution_contract_digest=strategy_run.execution_contract_digest,
+            metrics=metrics,
+            metric_availability=availability,
+            events=events,
+            equity_curve=equity_curve,
+            final_cash_base=final_cash_base,
+            completed_at=completed_at,
+            note=None if row[3] is None else str(row[3]),
+            note_version=int(row[4]),
+        )
+
+    @staticmethod
+    def _normalize_note(note: str | None) -> str | None:
+        if note is None:
+            return None
+        stripped = note.strip()
+        if not stripped:
+            return None
+        escaped = html.escape(stripped, quote=True)
+        if len(escaped) > _NOTE_MAX_CODE_POINTS:
+            raise ValueError(
+                f"note text exceeds {_NOTE_MAX_CODE_POINTS} Unicode code points"
+            )
+        return escaped
+
+    @staticmethod
+    def _existing_result_digest(conn: sqlite3.Connection, run_id: str) -> str | None:
+        row = conn.execute(
+            "SELECT result_digest FROM backtest_results WHERE run_id=?", (run_id,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    @staticmethod
+    def _load_strategy_run_row(
+        conn: sqlite3.Connection, run_id: str
+    ) -> _StrategyRunRow:
+        row = conn.execute(
+            """SELECT id, strategy_id, strategy_api_version, strategy_source_digest,
+                      parameters_json, profile_hash, start_month, end_month,
+                      ordered_month_digest, base_currency, starting_capital,
+                      run_input_manifest_digest, execution_contract_digest
+               FROM strategy_runs WHERE id=?""",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            raise StrategyJobNotFound(f"strategy run not found: {run_id}")
+        try:
+            parameters = json.loads(str(row[4]))
+            if not isinstance(parameters, dict):
+                raise ValueError("stored strategy run parameters are not an object")
+            starting_capital = Decimal(str(row[10]))
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            InvalidOperation,
+        ) as exc:
+            raise BacktestIntegrityError("stored strategy run is invalid") from exc
+        return _StrategyRunRow(
+            id=str(row[0]),
+            strategy_id=str(row[1]),
+            strategy_api_version=int(row[2]),
+            strategy_source_digest=str(row[3]),
+            parameters=parameters,
+            profile_hash=str(row[5]),
+            start_month=str(row[6]),
+            end_month=str(row[7]),
+            ordered_month_digest=str(row[8]),
+            base_currency=str(row[9]),
+            starting_capital=starting_capital,
+            run_input_manifest_digest=str(row[11]),
+            execution_contract_digest=str(row[12]),
+        )
+
+    @staticmethod
+    def _load_strategy_run(conn: sqlite3.Connection, job_id: str) -> BacktestRunV1:
+        """Return job ``job_id``'s pinned ``strategy_runs`` identity as
+        the typed :class:`BacktestRunV1` subtype (Story 2.6) -- the
+        backtest-side mirror of ``_load_initialization``, reusing
+        ``_load_strategy_run_row``'s existing parse/tamper handling."""
+        row = BacktestRepository._load_strategy_run_row(conn, job_id)
+        return BacktestRunV1(
+            job_id=row.id,
+            strategy_id=row.strategy_id,
+            strategy_api_version=row.strategy_api_version,
+            strategy_source_digest=row.strategy_source_digest,
+            parameters=row.parameters,
+            profile_hash=row.profile_hash,
+            start_month=row.start_month,
+            end_month=row.end_month,
+            ordered_month_digest=row.ordered_month_digest,
+            base_currency=row.base_currency,  # type: ignore[arg-type]
+            starting_capital=row.starting_capital,
+            run_input_manifest_digest=row.run_input_manifest_digest,
+            execution_contract_digest=row.execution_contract_digest,
+        )
+
+    @staticmethod
+    def _require_job_type(conn: sqlite3.Connection, job_id: str) -> StrategyJobType:
+        """Return ``job_id``'s ``job_type`` without loading the full row --
+        the minimal lookup type-aware lifecycle methods (progress,
+        failure, cancellation, deletion) need before deciding which
+        subtype table to consult."""
+        row = conn.execute(
+            "SELECT job_type FROM strategy_jobs WHERE id=?", (job_id,)
+        ).fetchone()
+        if row is None:
+            raise StrategyJobNotFound(f"strategy job not found: {job_id}")
+        return StrategyJobType(str(row[0]))
+
+    def _load_backtest_staging_row(
+        self, conn: sqlite3.Connection, run_id: str
+    ) -> BacktestStagingV1 | None:
+        row = conn.execute(
+            """SELECT run_id, state_schema_version, state_json, events_json,
+                      equity_curve_json, final_cash_base, updated_at
+               FROM backtest_staging WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            state = json.loads(str(row[2]))
+            if not isinstance(state, dict):
+                raise ValueError("stored staging state is not an object")
+            events = tuple(
+                self._parse_trade_log_event(item) for item in json.loads(str(row[3]))
+            )
+            equity_curve = tuple(
+                self._parse_equity_curve_point(item) for item in json.loads(str(row[4]))
+            )
+            final_cash_base = Decimal(str(row[5]))
+        except (
+            json.JSONDecodeError,
+            ValueError,
+            TypeError,
+            InvalidOperation,
+        ) as exc:
+            raise BacktestIntegrityError("stored backtest staging is invalid") from exc
+        return BacktestStagingV1(
+            run_id=str(row[0]),
+            state_schema_version=str(row[1]),
+            portfolio_state=state,
+            events=events,
+            equity_curve=equity_curve,
+            final_cash_base=final_cash_base,
+            updated_at=str(row[6]),
+        )
+
+    def _insert_backtest_result(
+        self,
+        conn: sqlite3.Connection,
+        run_id: str,
+        *,
+        metrics: BacktestMetricsV1,
+        events: tuple[TradeLogEvent, ...],
+        equity_curve: tuple[EquityCurvePointV1, ...],
+        final_cash_base: Decimal,
+        result_digest: str,
+        completed_at: str,
+    ) -> None:
+        metrics_json = json.dumps(
+            metrics.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        )
+        conn.execute(
+            """INSERT INTO backtest_results (
+                   run_id, metrics_json, final_cash_base, result_digest,
+                   note, note_version, completed_at, updated_at
+               ) VALUES (?, ?, ?, ?, NULL, 1, ?, ?)""",
+            (
+                run_id,
+                metrics_json,
+                str(final_cash_base),
+                result_digest,
+                completed_at,
+                completed_at,
+            ),
+        )
+        for event in events:
+            conn.execute(
+                """INSERT INTO trade_log (
+                       id, run_id, sequence, kind, security_id, event_json
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    self._id_generator(),
+                    run_id,
+                    event.sequence,
+                    event.kind,
+                    event.security_id,
+                    json.dumps(
+                        event.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                ),
+            )
+        for point in equity_curve:
+            conn.execute(
+                """INSERT INTO equity_curve (
+                       run_id, date, sequence, cash_base, positions_value_base,
+                       total_equity_base
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    point.session.isoformat(),
+                    point.sequence,
+                    str(point.cash_base),
+                    str(point.positions_value_base),
+                    str(point.total_equity_base),
+                ),
+            )
+
+    @staticmethod
+    def _canonical_result_payload(
+        *,
+        metrics: BacktestMetricsV1,
+        events: tuple[TradeLogEvent, ...],
+        equity_curve: tuple[EquityCurvePointV1, ...],
+        final_cash_base: Decimal,
+        completed_at: str,
+    ) -> dict[str, object]:
+        """The one canonical shape both digest computation (on write) and
+        tamper verification (on read) hash -- pre-stringifies every
+        Decimal via pydantic's own ``mode="json"`` dump before this ever
+        reaches ``canonical_manifest.jsonable`` (which has no native
+        ``Decimal`` case). ``completed_at`` is the exact stored ISO string
+        (the same value passed to ``_insert_backtest_result`` on write, or
+        read back verbatim from the ``backtest_results`` row) so a
+        tampered ``completed_at`` fails the digest rebuild-and-compare
+        just like every other evidence field."""
+        return {
+            "schema_version": "backtest_result.v1",
+            "metrics": metrics.model_dump(mode="json"),
+            "events": [event.model_dump(mode="json") for event in events],
+            "equity_curve": [point.model_dump(mode="json") for point in equity_curve],
+            "final_cash_base": str(final_cash_base),
+            "completed_at": completed_at,
+        }
+
+    @staticmethod
+    def _parse_trade_log_event(payload: object) -> TradeLogEvent:
+        from app.services.backtest.backtest_engine import (
+            DividendAppliedEventV1,
+            EntryFillEventV1,
+            ExitFillEventV1,
+            OpenPositionMarkEventV1,
+            SkippedSignalEventV1,
+            SplitAppliedEventV1,
+        )
+
+        if not isinstance(payload, dict):
+            raise ValueError("trade log event payload is not an object")
+        models: dict[str, type] = {
+            "entry_fill": EntryFillEventV1,
+            "exit_fill": ExitFillEventV1,
+            "skipped_signal": SkippedSignalEventV1,
+            "split_applied": SplitAppliedEventV1,
+            "dividend_applied": DividendAppliedEventV1,
+            "open_position_mark": OpenPositionMarkEventV1,
+        }
+        kind = payload.get("kind")
+        model = models.get(str(kind))
+        if model is None:
+            raise ValueError(f"unknown trade log event kind: {kind!r}")
+        # ``strict=False``: this payload round-tripped through this
+        # method's own ``model_dump(mode="json")`` writer, so ``date``/
+        # ``Decimal`` fields are JSON strings here -- coercing them back
+        # is exact and lossless, unlike relaxing validation of untrusted
+        # input. The model's own field constraints (patterns, ``gt``,
+        # ``ge``, ``allow_inf_nan=False``) still apply either way.
+        return model.model_validate(payload, strict=False)
+
+    @staticmethod
+    def _parse_equity_curve_point(payload: object) -> EquityCurvePointV1:
+        from app.services.backtest.backtest_engine import EquityCurvePointV1
+
+        if not isinstance(payload, dict):
+            raise ValueError("equity curve point payload is not an object")
+        return EquityCurvePointV1.model_validate(payload, strict=False)
 
     def reconcile_interrupted_strategy_jobs(self) -> tuple[StrategyJobV1, ...]:
         """Fail running claims left behind by a previous application process."""
@@ -1513,6 +2620,114 @@ class BacktestRepository:
                 initialization=self._load_initialization(conn, child_id),
             )
 
+    def restart_backtest_job(
+        self,
+        source_job_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+    ) -> BacktestEnqueueResultV1:
+        """Create one replay-from-beginning Backtest child for an eligible
+        terminal source (AC 7) -- mirrors ``restart_initialization_job``'s
+        idempotency-key/parent-child shape exactly, copying the source's
+        immutable Strategy/version/parameters/profile/range/capital/
+        currency identity and reusing (never duplicating) its existing
+        content-addressed ``run_input_manifests`` binding. Never copies
+        staging -- the child always starts from ``queued``/no progress.
+        """
+        if not idempotency_key.strip():
+            raise ValueError("restart idempotency key must not be blank")
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            source = self._load_strategy_job(conn, source_job_id)
+            if source.job_type is not StrategyJobType.BACKTEST:
+                raise StrategyJobConflict(
+                    "restart_backtest_job requires a backtest job"
+                )
+            existing = conn.execute(
+                """SELECT child_job_id FROM strategy_job_restart_actions
+                   WHERE source_job_id=? AND idempotency_key=?""",
+                (source_job_id, idempotency_key),
+            ).fetchone()
+            if existing is not None:
+                child_id = str(existing[0])
+                return BacktestEnqueueResultV1(
+                    job=self._load_strategy_job(conn, child_id),
+                    backtest=self._load_strategy_run(conn, child_id),
+                )
+            if source.status_version != expected_version:
+                raise StrategyJobConflict("restart request is stale")
+            if source.status not in {
+                StrategyJobStatus.FAILED,
+                StrategyJobStatus.CANCELLED,
+            }:
+                raise StrategyJobConflict("strategy job cannot be restarted")
+            if source.deleted_at is not None:
+                raise StrategyJobConflict("deleted strategy job cannot be restarted")
+            prior_child = conn.execute(
+                "SELECT 1 FROM strategy_job_restart_actions WHERE source_job_id=?",
+                (source_job_id,),
+            ).fetchone()
+            if prior_child is not None:
+                raise StrategyJobConflict("strategy job already has a restart child")
+            backtest = self._load_strategy_run(conn, source_job_id)
+            now = self._job_now()
+            sequence = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
+                ).fetchone()[0]
+            )
+            child_id = self._id_generator()
+            conn.execute(
+                """INSERT INTO strategy_jobs (
+                     id, job_type, status, parent_job_id, enqueue_seq,
+                     claim_token, current_month, status_version, cancel_requested_at,
+                     failure_code, failed_month, failure_detail, deleted_at,
+                     audit_summary, created_at, updated_at
+                   ) VALUES (?, 'backtest', 'queued', ?, ?, NULL, NULL, 1,
+                              NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                (child_id, source_job_id, sequence, now, now),
+            )
+            conn.execute(
+                """INSERT INTO strategy_runs (
+                     id, strategy_id, strategy_api_version, strategy_source_digest,
+                     parameters_json, profile_hash, start_month, end_month,
+                     ordered_month_digest, base_currency, starting_capital,
+                     run_input_manifest_digest, execution_contract_digest, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    child_id,
+                    backtest.strategy_id,
+                    backtest.strategy_api_version,
+                    backtest.strategy_source_digest,
+                    json.dumps(
+                        dict(backtest.parameters),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    backtest.profile_hash,
+                    backtest.start_month,
+                    backtest.end_month,
+                    backtest.ordered_month_digest,
+                    backtest.base_currency,
+                    str(backtest.starting_capital),
+                    backtest.run_input_manifest_digest,
+                    backtest.execution_contract_digest,
+                    now,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO strategy_job_restart_actions
+                   (source_job_id, idempotency_key, child_job_id, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (source_job_id, idempotency_key, child_id, now),
+            )
+            child = self._load_strategy_job(conn, child_id)
+            self._upsert_notification_outbox_on_connection(conn, child)
+            return BacktestEnqueueResultV1(
+                job=child, backtest=self._load_strategy_run(conn, child_id)
+            )
+
     def delete_strategy_job(
         self, job_id: str, *, expected_version: int
     ) -> StrategyJobV1:
@@ -1531,11 +2746,19 @@ class BacktestRepository:
                 StrategyJobStatus.CANCELLED,
             }:
                 raise StrategyJobConflict("strategy job cannot be deleted")
-            initialization = self._load_initialization(conn, job_id)
-            summary = (
-                f"{job.job_type.value} {job.status.value}: "
-                f"{initialization.requested_start} to {initialization.requested_end}"
-            )
+            if job.job_type is StrategyJobType.INITIALIZATION:
+                initialization = self._load_initialization(conn, job_id)
+                summary = (
+                    f"{job.job_type.value} {job.status.value}: "
+                    f"{initialization.requested_start} to "
+                    f"{initialization.requested_end}"
+                )
+            else:
+                backtest = self._load_strategy_run(conn, job_id)
+                summary = (
+                    f"{job.job_type.value} {job.status.value}: "
+                    f"{backtest.start_month} to {backtest.end_month}"
+                )
             now = self._job_now()
             cursor = conn.execute(
                 """UPDATE strategy_jobs
@@ -1548,7 +2771,20 @@ class BacktestRepository:
                 raise StrategyJobConflict("delete request conflicted")
             tombstone = self._load_strategy_job(conn, job_id)
             self._upsert_notification_outbox_on_connection(conn, tombstone)
-            conn.execute("DELETE FROM initialization_runs WHERE job_id=?", (job_id,))
+            if job.job_type is StrategyJobType.INITIALIZATION:
+                conn.execute(
+                    "DELETE FROM initialization_runs WHERE job_id=?", (job_id,)
+                )
+            else:
+                # AC 8: delete only this attempt's Strategy Run binding and
+                # any remaining staging -- never the shared content-
+                # addressed manifest, never a descendant, and never a
+                # completed Result (Story 2.5's schema makes
+                # ``backtest_results``/``trade_log``/``equity_curve``
+                # unconditionally immutable-delete, and a failed/cancelled
+                # attempt never has one).
+                conn.execute("DELETE FROM backtest_staging WHERE run_id=?", (job_id,))
+                conn.execute("DELETE FROM strategy_runs WHERE id=?", (job_id,))
             return tombstone
 
     def _job_now(self) -> str:
@@ -1569,10 +2805,17 @@ class BacktestRepository:
                 )
             except StrategyJobNotFound:
                 initialization = None
+        backtest = None
+        if job.job_type is StrategyJobType.BACKTEST:
+            try:
+                backtest = self._load_strategy_run(conn, job.id).model_dump(mode="json")
+            except StrategyJobNotFound:
+                backtest = None
         payload = {
             "schema_version": "strategy_job_notification.v1",
             "job": job.model_dump(mode="json"),
             "initialization": initialization,
+            "backtest": backtest,
             "tombstoned": job.deleted_at is not None,
         }
         now = self._job_now()

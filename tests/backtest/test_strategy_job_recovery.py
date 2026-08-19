@@ -6,13 +6,18 @@ import pytest
 
 from app.repositories import db
 from app.repositories.notifications_repo import NotificationsRepository
+from app.schemas.notification import NotificationCategory
 from app.services.backtest.notification_projector import StrategyNotificationProjector
 from app.services.backtest.strategy_job import (
     JobFailureCode,
     StrategyJobConflict,
 )
 
-from tests.backtest.test_strategy_job_repository import _enqueue, _repo
+from tests.backtest.test_strategy_job_repository import (
+    _enqueue,
+    _enqueue_backtest,
+    _repo,
+)
 
 
 def _fail(repo, job_id: str):
@@ -147,6 +152,26 @@ def test_tombstone_projection_removes_actions_and_target(tmp_path):
     assert item.actions == ()
 
 
+def test_queued_initialization_projects_activity_deep_link(tmp_path):
+    """A non-tombstoned initialization job's projected notification must
+    also deep-link to the working Activity shell -- never the dead
+    ``?job_id=`` query-string format the projector used to emit before
+    this story (mirrors the backtest deep-link assertion below)."""
+    path = tmp_path / "backtest.db"
+    notifications_path = tmp_path / "notifications.db"
+    repo = _repo(path)
+    job = _enqueue(repo, "2026-05", "2026-05").job
+    assert job is not None
+    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications.ensure_schema()
+    projector = StrategyNotificationProjector(repo, notifications)
+
+    assert projector.project_pending() == 1
+    item = notifications.recent(include_dismissed=True)[0]
+
+    assert item.target_url == f"/strategy-manager/activities/{job.id}"
+
+
 def test_notification_projection_rejects_lower_version(tmp_path):
     from datetime import datetime, timezone
 
@@ -220,3 +245,77 @@ def test_delete_rejects_stale_version_after_tombstone(tmp_path):
     with pytest.raises(StrategyJobConflict, match="stale"):
         repo.delete_strategy_job(source.id, expected_version=failed.status_version)
     assert deleted.deleted_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Story 2.6: Backtest notification projection -- title/body/target/category.
+# ---------------------------------------------------------------------------
+
+
+def _fail_backtest(repo, job_id: str):
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None and claim.job.id == job_id
+    return repo.fail_claimed_strategy_job(
+        job_id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        failure_code=JobFailureCode.REQUIRED_DATA_MISSING,
+        failed_month="2026-05",
+        detail="Required historical data is unavailable",
+    )
+
+
+def test_queued_backtest_projects_working_activity_deep_link_and_category(tmp_path):
+    path = tmp_path / "backtest.db"
+    notifications_path = tmp_path / "notifications.db"
+    repo = _repo(path)
+    enqueued = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
+    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications.ensure_schema()
+    projector = StrategyNotificationProjector(repo, notifications)
+
+    assert projector.project_pending() == 1
+    item = notifications.recent(include_dismissed=True)[0]
+
+    assert item.category is NotificationCategory.BACKTEST
+    assert item.title == "Backtest queued (momentum_v1)"
+    assert item.target_url == f"/strategy-manager/activities/{enqueued.job.id}"
+    assert item.body.startswith("Status: queued.")
+
+
+def test_failed_backtest_projects_strategy_identity_title_and_detail(tmp_path):
+    path = tmp_path / "backtest.db"
+    notifications_path = tmp_path / "notifications.db"
+    repo = _repo(path)
+    enqueued = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
+    failed = _fail_backtest(repo, enqueued.job.id)
+    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications.ensure_schema()
+    projector = StrategyNotificationProjector(repo, notifications)
+
+    assert projector.project_pending() == 1
+    item = notifications.recent(include_dismissed=True)[0]
+
+    assert item.title == "Backtest failed (momentum_v1)"
+    assert "Required historical data is unavailable" in item.body
+    assert item.job_status_version == failed.status_version
+    assert item.target_url == f"/strategy-manager/activities/{enqueued.job.id}"
+
+
+def test_backtest_tombstone_projection_removes_actions_and_target(tmp_path):
+    path = tmp_path / "backtest.db"
+    notifications_path = tmp_path / "notifications.db"
+    repo = _repo(path)
+    enqueued = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
+    failed = _fail_backtest(repo, enqueued.job.id)
+    repo.delete_strategy_job(enqueued.job.id, expected_version=failed.status_version)
+    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications.ensure_schema()
+    projector = StrategyNotificationProjector(repo, notifications)
+
+    assert projector.project_pending() == 1
+    item = notifications.recent(include_dismissed=True)[0]
+
+    assert item.title == "Activity no longer available"
+    assert item.target_url is None
+    assert item.actions == ()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 import sys
 import threading
@@ -9,9 +10,11 @@ import pytest
 
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_job import (
+    BacktestSubmissionV1,
     InitializationSubmissionV1,
     JobFailureCode,
     StrategyJobConflict,
+    StrategyJobRestartV1,
 )
 
 
@@ -34,11 +37,19 @@ class FakeRepository:
         self.claim = claim
         self.failed: list[tuple[str, str, dict[str, object]]] = []
         self.reconciled = ()
-        self.created: list[dict[str, object]] = []
+        self.created: list[object] = []
 
     def create_initialization_job(self, **configuration):
         self.created.append(configuration)
         return "queued"
+
+    def create_backtest_job(self, submission):
+        self.created.append(submission)
+        return "backtest-queued"
+
+    def restart_backtest_job(self, source_job_id, *, expected_version, idempotency_key):
+        self.created.append((source_job_id, expected_version, idempotency_key))
+        return "backtest-restarted"
 
     def claim_next_strategy_job(self):
         result, self.claim = self.claim, None
@@ -186,6 +197,43 @@ def test_qualified_enqueue_returns_without_running_the_worker_inline() -> None:
             "qualification_contract_digest": "b" * 64,
         }
     ]
+
+
+def test_enqueue_backtest_delegates_directly_to_the_repository() -> None:
+    repo = FakeRepository(None)
+    service = StrategyJobService(repo)
+
+    submission = BacktestSubmissionV1(
+        strategy_id="momentum_v1",
+        strategy_api_version=1,
+        strategy_source_digest="7" * 64,
+        parameters={"lookback": 20},
+        profile_hash="a" * 64,
+        start_month="2026-05",
+        end_month="2026-05",
+        base_currency="USD",
+        starting_capital=Decimal("10000"),
+        run_input_manifest_digest="9" * 64,
+        execution_contract_digest="8" * 64,
+        canonical_manifest_json="{}",
+    )
+
+    assert service.enqueue_backtest(submission) == "backtest-queued"
+    assert repo.created == [submission]
+
+
+def test_restart_backtest_delegates_directly_to_the_repository() -> None:
+    repo = FakeRepository(None)
+    service = StrategyJobService(repo)
+
+    result = service.restart_backtest(
+        StrategyJobRestartV1(
+            source_job_id="job-1", expected_version=3, idempotency_key="retry-1"
+        )
+    )
+
+    assert result == "backtest-restarted"
+    assert repo.created == [("job-1", 3, "retry-1")]
 
 
 def test_dispatch_loop_survives_one_repository_error() -> None:

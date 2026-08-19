@@ -215,36 +215,54 @@ async def submit_initialization(
     )
 
 
+#: Story 2.6 AC 9: the Activity route renders a minimal, correct status
+#: shell for either job type (no initialization-specific fields leak into
+#: a backtest view, and vice versa) -- Stories 2.8/2.9 own list/polling/
+#: Result presentation.
+_ACTIVITY_TEMPLATES: dict[StrategyJobType, str] = {
+    StrategyJobType.INITIALIZATION: "_initialization_activity.html",
+    StrategyJobType.BACKTEST: "_backtest_activity.html",
+}
+
+
 def _activity_context(
     repo: BacktestRepository, service: StrategyJobService, job_id: str
 ) -> dict[str, object]:
     job = repo.strategy_job(job_id)
-    if job.job_type is not StrategyJobType.INITIALIZATION:
-        raise StrategyJobNotFound("initialization activity not found")
+    if job.job_type is StrategyJobType.INITIALIZATION:
+        run: object = repo.initialization_run(job_id)
+    elif job.job_type is StrategyJobType.BACKTEST:
+        run = repo.strategy_run(job_id)
+    else:
+        raise StrategyJobNotFound("activity not found")
     return {
         "job": job,
-        "run": repo.initialization_run(job_id),
+        "run": run,
         "actions": service.legal_actions(job_id).legal_actions,
         "terminal": job.status in _TERMINAL,
     }
 
 
+def _activity_template(job_type: StrategyJobType) -> str:
+    return _ACTIVITY_TEMPLATES[job_type]
+
+
 @router.get("/strategy-manager/activities/{job_id}", response_class=HTMLResponse)
-async def initialization_activity(
+async def strategy_activity(
     request: Request, job_id: str, backtest: BacktestDep, jobs: JobsDep
 ) -> Response:
     try:
+        context = _activity_context(backtest, jobs, job_id)
+        job = cast(StrategyJobV1, context["job"])
         return templates.TemplateResponse(
-            request,
-            "_initialization_activity.html",
-            _activity_context(backtest, jobs, job_id),
+            request, _activity_template(job.job_type), context
         )
     except StrategyJobNotFound:
         return HTMLResponse("Activity no longer available.", status_code=404)
 
 
 @router.get("/strategy-manager/activities/{job_id}/status", response_class=HTMLResponse)
-async def initialization_activity_status(
+async def strategy_activity_status(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -258,7 +276,9 @@ async def initialization_activity_status(
     job = cast(StrategyJobV1, context["job"])
     if job.status_version <= last_seen_version:
         return HTMLResponse("", status_code=204)
-    return templates.TemplateResponse(request, "_initialization_activity.html", context)
+    return templates.TemplateResponse(
+        request, _activity_template(job.job_type), context
+    )
 
 
 @router.post(
@@ -266,7 +286,7 @@ async def initialization_activity_status(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def cancel_initialization(
+async def cancel_strategy_job(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -277,10 +297,10 @@ async def cancel_initialization(
         jobs.request_cancellation(
             StrategyJobCancellationV1(job_id=job_id, expected_version=expected_version)
         )
+        context = _activity_context(backtest, jobs, job_id)
+        job = cast(StrategyJobV1, context["job"])
         return templates.TemplateResponse(
-            request,
-            "_initialization_activity.html",
-            _activity_context(backtest, jobs, job_id),
+            request, _activity_template(job.job_type), context
         )
     except (StrategyJobConflict, StrategyJobNotFound, ValueError) as exc:
         return HTMLResponse(str(exc), status_code=409)
@@ -291,7 +311,7 @@ async def cancel_initialization(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def restart_initialization(
+async def restart_strategy_job(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -299,12 +319,16 @@ async def restart_initialization(
     expected_version: Annotated[int, Form()],
 ) -> Response:
     try:
-        result = jobs.restart_initialization(
-            StrategyJobRestartV1(
-                source_job_id=job_id,
-                expected_version=expected_version,
-                idempotency_key=str(uuid4()),
-            )
+        source = backtest.strategy_job(job_id)
+        restart_request = StrategyJobRestartV1(
+            source_job_id=job_id,
+            expected_version=expected_version,
+            idempotency_key=str(uuid4()),
+        )
+        result = (
+            jobs.restart_backtest(restart_request)
+            if source.job_type is StrategyJobType.BACKTEST
+            else jobs.restart_initialization(restart_request)
         )
         return RedirectResponse(
             f"/strategy-manager/activities/{result.job.id}", status_code=303

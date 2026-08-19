@@ -12,6 +12,7 @@ from typing import Callable, Protocol
 
 from app.core.config import ROOT_DIR
 from app.services.backtest.strategy_job import (
+    BacktestSubmissionV1,
     InitializationSubmissionV1,
     JobFailureCode,
     StrategyJobConflict,
@@ -75,6 +76,9 @@ class StrategyJobService:
             qualification_contract_digest=qualification_digest,
         )
 
+    def enqueue_backtest(self, submission: BacktestSubmissionV1):
+        return self._repository.create_backtest_job(submission)
+
     def request_cancellation(self, request: StrategyJobCancellationV1):
         return self._repository.request_strategy_job_cancellation(
             request.job_id, expected_version=request.expected_version
@@ -82,6 +86,13 @@ class StrategyJobService:
 
     def restart_initialization(self, request: StrategyJobRestartV1):
         return self._repository.restart_initialization_job(
+            request.source_job_id,
+            expected_version=request.expected_version,
+            idempotency_key=request.idempotency_key,
+        )
+
+    def restart_backtest(self, request: StrategyJobRestartV1):
+        return self._repository.restart_backtest_job(
             request.source_job_id,
             expected_version=request.expected_version,
             idempotency_key=request.idempotency_key,

@@ -72,6 +72,11 @@ class FakeRepo:
     def initialization_run(self, _job_id):
         return SimpleNamespace(requested_start="2024-01", requested_end="2024-03")
 
+    def strategy_run(self, _job_id):
+        return SimpleNamespace(
+            strategy_id="momentum_v1", start_month="2024-01", end_month="2024-03"
+        )
+
 
 class FakeJobs:
     def __init__(self):
@@ -86,6 +91,10 @@ class FakeJobs:
 
     def request_cancellation(self, request):
         self.cancel_request = request
+
+    def restart_backtest(self, request):
+        self.restart_request = request
+        return SimpleNamespace(job=SimpleNamespace(id="job-2"))
 
 
 @pytest.fixture
@@ -226,3 +235,92 @@ def test_cancel_is_guarded_and_uses_live_action_version(services):
     assert accepted.status_code == 200
     assert jobs.cancel_request.expected_version == 4
     assert "Cancel initialization?" in accepted.text
+
+
+def test_backtest_activity_renders_a_minimal_status_shell_instead_of_404(services):
+    """Story 2.6 AC 9: the Activity route used to 404 for a backtest job
+    (``_activity_context`` raised unconditionally for any non-
+    initialization job type); it now renders a correct, minimal status
+    shell using the Strategy Run's own fields, never initialization-only
+    ones."""
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=4,
+        current_month="2024-02",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    response = client.get("/strategy-manager/activities/job-1")
+    assert response.status_code == 200
+    assert "Backtest activity" in response.text
+    assert "momentum_v1" in response.text
+    assert "2024-01 to 2024-03" in response.text
+    assert "Historical initialization" not in response.text
+
+
+def test_backtest_activity_status_poll_uses_the_backtest_template(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=5,
+        current_month="2024-02",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    response = client.get(
+        "/strategy-manager/activities/job-1/status?last_seen_version=4"
+    )
+    assert response.status_code == 200
+    assert "Backtest activity" in response.text
+
+
+def test_backtest_cancel_reuses_the_generic_lifecycle_command(services):
+    repo, jobs = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=4,
+        current_month=None,
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    accepted = client.post(
+        "/strategy-manager/activities/job-1/cancel",
+        data={"expected_version": "4"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert accepted.status_code == 200
+    assert jobs.cancel_request.expected_version == 4
+    assert "Cancel backtest?" in accepted.text
+
+
+def test_backtest_restart_dispatches_to_restart_backtest(services):
+    repo, jobs = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.FAILED,
+        status_version=4,
+        current_month=None,
+        cancel_requested_at=None,
+        failed_month="2024-02",
+        failure_detail="Required historical data is unavailable",
+    )
+    response = client.post(
+        "/strategy-manager/activities/job-1/restart",
+        data={"expected_version": "4"},
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/strategy-manager/activities/job-2"
+    assert jobs.restart_request.source_job_id == "job-1"

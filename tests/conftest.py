@@ -28,6 +28,15 @@ def isolate_notifications_db(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.core.config.POSITION_STATE_DB", tmp_path / "position_state.db"
     )
+    # ``data/`` is untracked and absent on a fresh checkout -- without this,
+    # any test that builds a real HistoricalPriceRepository against the
+    # default path (e.g. build_backtest_engine) fails with
+    # "unable to open database file" unless a developer has already run the
+    # app locally and created data/ by hand.
+    monkeypatch.setattr(
+        "app.core.config.HISTORICAL_PRICE_CACHE",
+        tmp_path / "historical_price_cache.db",
+    )
     # Global FastAPI tests must never launch a real Strategy Manager child.
     # Dedicated lifespan tests opt in explicitly with an injected fake.
     monkeypatch.setenv("STRATEGY_MANAGER_WORKER_ENABLED", "false")

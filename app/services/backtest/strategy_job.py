@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.services.backtest.canonical_manifest import manifest_digest
+from app.services.backtest.historical_scan_record import FrozenDict
 from app.services.backtest.trading_calendar import TradingCalendar
 
 
@@ -141,9 +143,45 @@ class InitializationRunV1(_LifecycleModel):
         return self
 
 
+class BacktestRunV1(_LifecycleModel):
+    """One pinned Backtest Run's immutable ``strategy_runs`` identity
+    (AD-9): the exact Strategy/version/source, validated parameters,
+    pinned profile/period/evidence digest, capital/currency, and the
+    content-addressed Run-input-manifest binding a claimed worker replays
+    from -- mirrors ``InitializationRunV1``'s strict frozen shape."""
+
+    job_id: Annotated[str, Field(min_length=1)]
+    strategy_id: Annotated[str, Field(min_length=1)]
+    strategy_api_version: Annotated[int, Field(ge=1)]
+    strategy_source_digest: Digest
+    parameters: dict[str, object]
+    profile_hash: Digest
+    start_month: Month
+    end_month: Month
+    ordered_month_digest: Digest
+    base_currency: Literal["GBP", "USD"]
+    starting_capital: Decimal
+    run_input_manifest_digest: Digest
+    execution_contract_digest: Digest
+
+    @field_validator("parameters")
+    @classmethod
+    def _immutable_parameters(cls, value: dict[str, object]) -> dict[str, object]:
+        return cast(dict[str, object], FrozenDict(value))
+
+    @model_validator(mode="after")
+    def _valid_run(self) -> "BacktestRunV1":
+        if self.start_month > self.end_month:
+            raise ValueError("backtest start_month must not be after end_month")
+        if not self.starting_capital.is_finite() or self.starting_capital <= 0:
+            raise ValueError("backtest starting_capital must be positive and finite")
+        return self
+
+
 class ClaimedStrategyJobV1(_LifecycleModel):
     job: StrategyJobV1
     initialization: InitializationRunV1 | None = None
+    backtest: BacktestRunV1 | None = None
     claim_token: Annotated[str, Field(min_length=1)]
 
     @model_validator(mode="after")
@@ -156,6 +194,17 @@ class ClaimedStrategyJobV1(_LifecycleModel):
         if self.job.job_type is StrategyJobType.INITIALIZATION:
             if self.initialization is None or self.initialization.job_id != self.job.id:
                 raise ValueError("initialization claim requires its subtype")
+            if self.backtest is not None:
+                raise ValueError(
+                    "initialization claim must not carry a backtest subtype"
+                )
+        elif self.job.job_type is StrategyJobType.BACKTEST:
+            if self.backtest is None or self.backtest.job_id != self.job.id:
+                raise ValueError("backtest claim requires its subtype")
+            if self.initialization is not None:
+                raise ValueError(
+                    "backtest claim must not carry an initialization subtype"
+                )
         return self
 
 
@@ -175,6 +224,63 @@ class InitializationEnqueueResultV1(_LifecycleModel):
             or self.initialization.job_id != self.job.id
         ):
             raise ValueError("queued initialization requires matching job and subtype")
+        return self
+
+
+class BacktestEnqueueResultV1(_LifecycleModel):
+    """One durably enqueued (or idempotently returned) Backtest attempt --
+    always carries both the job and its matching Strategy Run, unlike
+    ``InitializationEnqueueResultV1``'s ``no_op`` shape: a Backtest
+    submission always creates or returns a real attempt, never a no-op."""
+
+    job: StrategyJobV1
+    backtest: BacktestRunV1
+
+    @model_validator(mode="after")
+    def _consistent_result(self) -> "BacktestEnqueueResultV1":
+        if self.backtest.job_id != self.job.id:
+            raise ValueError("backtest run does not match its job")
+        return self
+
+
+class BacktestSubmissionV1(_LifecycleModel):
+    """One caller-validated Backtest launch request (Story 2.6 AC 1).
+
+    Carries the exact immutable identity ``create_backtest_job`` persists
+    into ``strategy_runs`` plus the content-addressed Run-input-manifest
+    binding a caller (typically a launch flow built atop Story 2.3's
+    ``build_run_input_manifest``) already resolved and canonically
+    rendered. Deliberately excludes ``ordered_month_digest`` -- the
+    repository always revalidates and recomputes it fresh at enqueue time
+    rather than trusting a caller-supplied value that may have gone stale
+    between manifest build and submission.
+    """
+
+    strategy_id: Annotated[str, Field(min_length=1)]
+    strategy_api_version: Annotated[int, Field(ge=1)]
+    strategy_source_digest: Digest
+    parameters: dict[str, object]
+    profile_hash: Digest
+    start_month: Month
+    end_month: Month
+    base_currency: Literal["GBP", "USD"]
+    starting_capital: Decimal
+    run_input_manifest_digest: Digest
+    execution_contract_digest: Digest
+    canonical_manifest_json: Annotated[str, Field(min_length=1)]
+    parent_job_id: str | None = None
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+
+    @field_validator("parameters")
+    @classmethod
+    def _immutable_parameters(cls, value: dict[str, object]) -> dict[str, object]:
+        return cast(dict[str, object], FrozenDict(value))
+
+    @model_validator(mode="after")
+    def _valid_range(self) -> "BacktestSubmissionV1":
+        TradingCalendar.months_inclusive(self.start_month, self.end_month)
+        if not self.starting_capital.is_finite() or self.starting_capital <= 0:
+            raise ValueError("backtest starting_capital must be positive and finite")
         return self
 
 
@@ -243,6 +349,9 @@ def requested_month_digest(
 
 
 __all__ = [
+    "BacktestEnqueueResultV1",
+    "BacktestRunV1",
+    "BacktestSubmissionV1",
     "ClaimedStrategyJobV1",
     "InitializationEnqueueResultV1",
     "InitializationRunV1",
