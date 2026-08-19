@@ -38,6 +38,28 @@ def _portfolio(
     )
 
 
+class _View:
+    """Minimal ``MarketViewV1`` stand-in for this fixture Strategy's
+    contract tests -- ``MinimalStrategy`` only ever reads
+    ``view.as_of_session`` (see ``scripts/strategy.py``), never
+    ``.price_history``/``.scan_result``, so a real
+    ``app.services.backtest.market_view.MarketView`` (which needs live
+    repositories) would be unnecessary weight here. ``PortfolioView``
+    itself is no longer a valid stand-in for ``view`` -- Story 2.3 widened
+    ``MarketViewV1`` beyond the single ``as_of_session`` property
+    ``PortfolioView`` also happens to expose.
+    """
+
+    def __init__(self, as_of_session: date) -> None:
+        self.as_of_session = as_of_session
+
+    def price_history(self, security_id: str):  # noqa: ANN201
+        raise NotImplementedError
+
+    def scan_result(self, security_id: str):  # noqa: ANN201
+        raise NotImplementedError
+
+
 def test_fixture_identity_is_versioned() -> None:
     assert STRATEGY_ID == "fixture_minimal_v1"
     assert STRATEGY_API_VERSION == 1
@@ -50,11 +72,11 @@ def test_minimal_strategy_conforms_to_protocol_v1() -> None:
 def test_entry_signals_are_deterministic_across_repeated_calls() -> None:
     strategy = MinimalStrategy()
     as_of = date(2026, 1, 5)
-    portfolio = _portfolio(as_of)
+    view = _View(as_of)
     parameters = {"watch_security_id": "sec-aapl"}
 
-    first = validate_entry_signals(strategy.entry_signals(portfolio, parameters))
-    second = validate_entry_signals(strategy.entry_signals(portfolio, parameters))
+    first = validate_entry_signals(strategy.entry_signals(view, parameters))
+    second = validate_entry_signals(strategy.entry_signals(view, parameters))
 
     assert first == second
     assert first[0].security_id == "sec-aapl"
@@ -70,8 +92,9 @@ def test_exit_signals_cover_every_held_position() -> None:
         ),
     )
     portfolio = _portfolio(as_of, positions=held)
+    view = _View(as_of)
 
-    exits = validate_exit_signals(strategy.exit_signals(portfolio, portfolio, {}))
+    exits = validate_exit_signals(strategy.exit_signals(view, portfolio, {}))
 
     assert [signal.security_id for signal in exits] == ["sec-aapl"]
 
@@ -80,11 +103,12 @@ def test_position_size_passes_through_the_fixed_shares_parameter() -> None:
     strategy = MinimalStrategy()
     as_of = date(2026, 1, 5)
     portfolio = _portfolio(as_of)
+    view = _View(as_of)
     parameters = {"watch_security_id": "sec-aapl", "fixed_shares": 7}
-    signal = validate_entry_signals(strategy.entry_signals(portfolio, parameters))[0]
+    signal = validate_entry_signals(strategy.entry_signals(view, parameters))[0]
 
     size = validate_position_size(
-        strategy.position_size(signal, portfolio, portfolio, parameters)
+        strategy.position_size(signal, view, portfolio, parameters)
     )
 
     assert size == 7

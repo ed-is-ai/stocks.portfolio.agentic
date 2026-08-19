@@ -411,9 +411,36 @@ def test_strategy_protocol_v1_runtime_checkable_conformance() -> None:
     assert not isinstance(_NonConformingStrategy(), StrategyProtocolV1)
 
 
-def test_portfolio_view_satisfies_market_view_v1_structurally() -> None:
+class _ConformingMarketView:
+    """A minimal stand-in proving ``MarketViewV1``'s widened shape (Story
+    2.3): ``.as_of_session``/``.price_history``/``.scan_result``.
+
+    ``PortfolioView`` deliberately no longer satisfies ``MarketViewV1``
+    structurally -- it was only ever a stand-in for Story 2.1's original
+    single-property (``as_of_session``) stub, before the protocol grew
+    ``.price_history``/``.scan_result``. ``PortfolioView`` has no
+    concept of per-security price history or scan results (that is
+    exactly ``MarketView``'s job, in ``market_view.py``), so it must not
+    accidentally keep passing an ``isinstance`` check it no longer
+    genuinely means.
+    """
+
+    as_of_session = date(2026, 6, 1)
+
+    def price_history(self, security_id):  # noqa: ANN001, ANN201
+        raise NotImplementedError
+
+    def scan_result(self, security_id):  # noqa: ANN001, ANN201
+        raise NotImplementedError
+
+
+def test_market_view_v1_conformance_requires_the_widened_shape() -> None:
+    assert isinstance(_ConformingMarketView(), MarketViewV1)
+
+
+def test_portfolio_view_no_longer_satisfies_market_view_v1() -> None:
     view = _portfolio()
-    assert isinstance(view, MarketViewV1)
+    assert not isinstance(view, MarketViewV1)
 
 
 # ---------------------------------------------------------------------------

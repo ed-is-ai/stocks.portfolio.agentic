@@ -73,6 +73,21 @@ class FxQuoteRepository:
             ).fetchone()
         return _row_to_quote(row) if row else None
 
+    def get_by_digest(self, quote_digest: str) -> FxQuote | None:
+        """Return the stored quote with this exact content digest, or None.
+
+        The pinning lookup ``RunInputManifestV1``'s FX-evidence
+        verification needs: a caller pins an exact ``FxQuote.digest``, not
+        a ``(pair, as_of)`` pair, so replay must resolve by digest alone.
+        """
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT quote_digest, provider, pair, as_of, rate, fetched_at "
+                "FROM fx_quotes WHERE quote_digest = ?",
+                (quote_digest,),
+            ).fetchone()
+        return _row_to_quote(row) if row else None
+
     def insert_or_get(self, quote: FxQuote) -> None:
         """Persist ``quote``, keyed on its content digest.
 

@@ -990,6 +990,21 @@ class BacktestRepository:
             ).fetchone()
         return None if row is None else str(row[0])
 
+    def roster_alias_revision(self, roster_digest: str) -> str | None:
+        """Return the immutable alias revision one captured roster pins.
+
+        Read-only lookup ``RunInputManifestV1`` (Story 2.3) needs to pin
+        the single alias revision a Run's whole security universe was
+        resolved under -- distinct from each security's own price/action
+        evidence revision.
+        """
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT alias_revision FROM reconstruction_rosters WHERE roster_digest=?",
+                (roster_digest,),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
     def identity_rows(self) -> list[tuple[str, str, str, str]]:
         with session(self._connect) as conn:
             rows = conn.execute(
@@ -2973,6 +2988,62 @@ class BacktestRepository:
             missing_months=(),
             ordered_month_digest=ordered_month_digest,
         )
+
+    def latest_committed_scan_result(
+        self, *, profile_hash: str, security_id: str, as_of_session: date
+    ) -> HistoricalScanRecordV1 | None:
+        """Return the latest committed monthly scan record visible at a session.
+
+        ``MarketView.scan_result`` (Story 2.3) is the one caller: a
+        monthly scan candidate enters visibility only from its own
+        recorded month-end ``as_of_session_date`` onward and remains the
+        answer until superseded by ``security_id``'s next committed
+        month, so this picks the newest committed ``valid_scan`` member
+        with ``as_of_session_date <= as_of_session`` -- never a record
+        from a month that has not itself been fully committed
+        (``snapshot_months`` is the append-only commit ledger; a month
+        absent from it, or still mid-write, is invisible here). Returns
+        ``None`` when no such record exists yet -- "not visible yet" is
+        not a bound violation.
+        """
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """
+                SELECT r.snapshot_month, r.historical_scan_record_json, r.record_digest
+                FROM monthly_scan_results r
+                JOIN snapshot_months m
+                  ON m.profile_hash = r.profile_hash
+                 AND m.snapshot_month = r.snapshot_month
+                JOIN snapshot_members mem
+                  ON mem.profile_hash = r.profile_hash
+                 AND mem.snapshot_month = r.snapshot_month
+                 AND mem.security_id = r.security_id
+                WHERE r.profile_hash = ?
+                  AND r.security_id = ?
+                  AND mem.resolution = 'valid_scan'
+                  AND mem.as_of_session_date <= ?
+                  AND m.processing_complete = 1
+                  AND m.market_complete = 'unknown'
+                ORDER BY mem.as_of_session_date DESC, r.snapshot_month DESC
+                LIMIT 1
+                """,
+                (profile_hash, security_id, as_of_session.isoformat()),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            record = HistoricalScanRecordV1.from_canonical_json(str(row[1]))
+        except Exception as exc:
+            raise BacktestIntegrityError(
+                "stored monthly scan result is invalid"
+            ) from exc
+        if (
+            record.security_id != security_id
+            or record.snapshot_month != str(row[0])
+            or record.digest() != str(row[2])
+        ):
+            raise BacktestIntegrityError("stored monthly scan result is invalid")
+        return record
 
     @staticmethod
     def _verify_fragment_key(

@@ -13,12 +13,13 @@ reuse verbatim -- never a second validator.
 
 Scope boundary: this module owns only the minimum typing surface Stories
 2.2-2.4 build on. It does not define the concrete pandas-backed
-``MarketView`` (Story 2.3), ``SKILL.md`` frontmatter discovery itself
-(Story 2.2's ``skill_discovery.py`` owns that), or any engine invocation
-order/state mutation (Story 2.4). No type here accepts or returns a
-database connection, repository, ORM/session, job, run, or persistence
-model, and none of them may be imported anywhere near a Strategy runtime
-module -- that boundary is mechanically enforced by
+``MarketView`` (``app.services.backtest.market_view``, Story 2.3),
+``SKILL.md`` frontmatter discovery itself (Story 2.2's
+``skill_discovery.py`` owns that), or any engine invocation order/state
+mutation (Story 2.4). No type here accepts or returns a database
+connection, repository, ORM/session, job, run, or persistence model, and
+none of them may be imported anywhere near a Strategy runtime module --
+that boundary is mechanically enforced by
 ``tests/backtest/test_strategy_runtime_import_boundary.py``.
 """
 
@@ -29,9 +30,21 @@ from decimal import Decimal
 from enum import StrEnum
 import math
 from types import MappingProxyType
-from typing import Literal, Mapping, Protocol, Sequence, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 
 
 # ---------------------------------------------------------------------------
@@ -241,17 +254,42 @@ StrategyParameters = Mapping[str, JsonValue]
 
 @runtime_checkable
 class MarketViewV1(Protocol):
-    """Minimal bounded market-view typing seam a Strategy method receives.
+    """Bounded, no-look-ahead market-view typing seam a Strategy receives.
 
-    Story 2.3 owns the concrete pandas-backed implementation, snapshot/
-    evidence binding, and no-look-ahead cache access; this protocol only
-    fixes the one fact every bounded view (market or portfolio) must
-    expose, so ``StrategyProtocolV1`` can be typed and tested well before
-    that implementation exists.
+    ``app.services.backtest.market_view.MarketView`` is the concrete
+    pandas-backed implementation (AD-3/AD-18): it truncates Historical
+    Price/Corporate Action and monthly-scan evidence to
+    ``<= as_of_session`` and raises a stable bound-violation error for a
+    security whose pinned evidence does not itself cover
+    ``as_of_session``, so an accidental look-ahead read fails loudly at
+    the point of misuse instead of silently returning future data.
     """
 
     @property
     def as_of_session(self) -> date: ...
+
+    def price_history(self, security_id: str) -> pd.DataFrame:
+        """Return ``security_id``'s split-continuous OHLCV history through
+        ``as_of_session``, oldest first.
+
+        An unknown/untracked ``security_id`` returns an empty DataFrame
+        (not an error) -- the absence of *any* pinned evidence for a
+        security is distinct from a bound violation on a security this
+        view *does* track.
+        """
+        ...
+
+    def scan_result(self, security_id: str) -> HistoricalScanRecordV1 | None:
+        """Return the latest committed monthly scan record visible as of
+        ``as_of_session``, or ``None`` if none is yet visible.
+
+        A monthly scan candidate enters visibility only from its own
+        recorded month-end ``as_of_session_date`` onward and remains the
+        answer until superseded by that security's next committed month
+        -- never backdated, even when ``as_of_session`` falls inside a
+        later month than the one it was produced for.
+        """
+        ...
 
 
 # ---------------------------------------------------------------------------

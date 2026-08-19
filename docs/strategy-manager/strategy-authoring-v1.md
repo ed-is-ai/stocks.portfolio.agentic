@@ -176,11 +176,53 @@ cross this boundary.
 
 ### `MarketViewV1`
 
-Story 2.1 defines only the minimal typing seam every bounded view must
-expose -- a single `as_of_session: date` property. Story 2.3 owns the
-concrete pandas-backed `MarketView` (snapshot binding, no-look-ahead cache
-access); write and test your Strategy against this minimal seam today, and
-it will keep working unchanged once the concrete implementation lands.
+A bounded, no-look-ahead market-data seam: `as_of_session: date`, plus two
+typed accessors every Strategy method receives through `view`:
+
+```python
+from datetime import date
+from app.services.backtest.strategy_protocol import MarketViewV1
+
+def entry_signals(self, view: MarketViewV1, parameters):
+    history = view.price_history("sec-aapl")  # pandas DataFrame, oldest first
+    latest = view.scan_result("sec-aapl")      # HistoricalScanRecordV1 | None
+    ...
+```
+
+`app.services.backtest.market_view.MarketView` (Story 2.3) is the concrete
+pandas-backed implementation a future Backtest Engine (Story 2.4)
+constructs once per simulated session `D` and binds to `view`:
+
+- `price_history(security_id) -> pd.DataFrame` returns
+  `security_id`'s split-continuous OHLCV history through `D`, oldest
+  first, indexed by session date -- every split effective by `D` is
+  already applied and no future corporate action is ever exposed
+  (AD-6's `split_continuous_as_of_D` plane). Values are `Decimal` (object
+  dtype), matching this codebase's deterministic-rounding policy
+  everywhere else AD-6 evidence is consumed; convert a column explicitly
+  (e.g. `.astype(float)`) if a vectorized numeric library needs it.
+  A `security_id` this view has no pinned evidence for at all returns an
+  **empty** DataFrame -- not an error, since "nothing tracked" is not a
+  bound violation. A `security_id` the view *does* track, but whose
+  pinned evidence does not itself extend through `D`, raises
+  `MarketViewBoundError` (`.code == "bound_violation"`) immediately,
+  naming the security and `D` -- never a silent truncation to an earlier,
+  misleadingly-labeled "current" state.
+- `scan_result(security_id) -> HistoricalScanRecordV1 | None` returns the
+  latest *committed* monthly scan record visible as of `D`. A monthly
+  scan candidate enters visibility only from its own recorded month-end
+  `as_of_session_date` onward and remains the answer until superseded by
+  that security's next committed month -- so if `D` falls inside a later
+  month than the one a security's most recent committed record belongs
+  to, but before that later month's own `as_of_session_date`, this still
+  returns the *earlier* committed record, never backdating the later
+  one. Returns `None` when no committed record is visible yet -- not an
+  error.
+
+Write and test your Strategy against `MarketViewV1` alone (never import
+`market_view.py` itself, or any repository, from Strategy code -- see the
+import boundary above); a future engine hands you an already-constructed
+`MarketView` instance, never a way to construct one yourself.
 
 ### `PortfolioView`
 
