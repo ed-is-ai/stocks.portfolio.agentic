@@ -24,6 +24,7 @@ from app.services.backtest.historical_price_evidence import (
     HistoricalEvidenceRequest,
     YFinanceHistoricalEvidenceAdapter,
 )
+from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.run_input_manifest import (
     ENGINE_VERSION,
@@ -161,6 +162,115 @@ def test_digest_changes_when_a_pinned_evidence_revision_changes() -> None:
 def test_starting_capital_is_rendered_as_its_exact_decimal_string() -> None:
     manifest = _manifest(starting_capital=Decimal("12345.678"))
     assert manifest.canonical_payload()["starting_capital"] == "12345.678"
+
+
+# ---------------------------------------------------------------------------
+# Story 2.4 regression: the ledger/action/metrics digest now reflects real
+# ``backtest_engine.py`` source, not the pre-Story-2.4 placeholder.
+# ---------------------------------------------------------------------------
+
+
+def test_engine_and_protocol_schema_versions_bumped_for_real_engine_semantics() -> None:
+    assert ENGINE_VERSION == "backtest_engine.v2"
+    assert PROTOCOL_SCHEMA_VERSION == "strategy_protocol.v2"
+
+
+def test_ledger_action_metrics_digest_now_hashes_real_backtest_engine_source() -> None:
+    """Regression: prior to Story 2.4, ``_ledger_action_metrics_digest``
+    returned a deterministic placeholder identity unrelated to any source
+    file. It now delegates to ``build_source_manifest`` over the real
+    ``backtest_engine.py`` -- mirroring ``_market_view_source_manifest``'s
+    pattern exactly -- so it changes now that real engine semantics exist,
+    and it genuinely reflects that one allowlisted file's content."""
+    import app.services.backtest.run_input_manifest as run_input_manifest_module
+
+    real_digest = run_input_manifest_module._ledger_action_metrics_digest(PROJECT_ROOT)
+    assert len(real_digest) == 64
+    int(real_digest, 16)  # raises ValueError if not valid hex
+
+    placeholder_digest = manifest_digest(
+        {
+            "schema_version": "ledger_action_metrics_policy.v1",
+            "policy_version": "ledger_action_metrics.v1",
+        }
+    )
+    assert real_digest != placeholder_digest
+
+    artifact = run_input_manifest_module._ledger_action_metrics_source_manifest(
+        PROJECT_ROOT
+    )
+    assert artifact.digest == real_digest
+    assert artifact.manifest["producer_id"] == "backtest_engine"
+    assert artifact.manifest["api_version"] == "1"
+    assert len(artifact.manifest["files"]) == 1
+    (only_file,) = artifact.manifest["files"]
+    assert only_file["path"] == "app/services/backtest/backtest_engine.py"
+    assert len(only_file["sha256"]) == 64
+    int(only_file["sha256"], 16)
+
+
+def test_build_run_input_manifest_pins_the_real_ledger_action_metrics_digest(
+    tmp_path,
+) -> None:
+    """End-to-end regression: a manifest built through the real builder
+    now pins the real digest, and ``execution_contract_digest`` genuinely
+    changes relative to the pre-Story-2.4 placeholder identity -- so two
+    Runs compared before/after this story are correctly judged
+    incomparable."""
+    backtest_repo = _backtest_repo(tmp_path)
+    _commit_ready_month(backtest_repo)
+    price_repo = _price_repo(tmp_path)
+    revision = _commit_price_evidence(price_repo, security_id="sec-001")
+
+    manifest = build_run_input_manifest(
+        project_root=PROJECT_ROOT,
+        backtest_repo=backtest_repo,
+        historical_price_repo=price_repo,
+        fx_quote_repo=_fx_quote_repo(tmp_path),
+        strategy=_strategy(),
+        submitted_parameters={},
+        profile_hash=PROFILE_HASH,
+        start_month="2026-07",
+        end_month="2026-07",
+        base_currency="USD",
+        starting_capital=Decimal("10000"),
+        securities=(
+            PinnedSecurityEvidenceV1(
+                security_id="sec-001",
+                price_revision=revision,
+                action_revision=revision,
+                fx_revision=None,
+            ),
+        ),
+    )
+
+    import app.services.backtest.run_input_manifest as run_input_manifest_module
+
+    assert manifest.engine_version == "backtest_engine.v2"
+    assert manifest.protocol_schema_version == "strategy_protocol.v2"
+    assert manifest.ledger_action_metrics_digest == (
+        run_input_manifest_module._ledger_action_metrics_digest(PROJECT_ROOT)
+    )
+
+    placeholder_digest = manifest_digest(
+        {
+            "schema_version": "ledger_action_metrics_policy.v1",
+            "policy_version": "ledger_action_metrics.v1",
+        }
+    )
+    assert manifest.ledger_action_metrics_digest != placeholder_digest
+
+    pre_story_2_4 = manifest.model_copy(
+        update={
+            "engine_version": "backtest_engine.v1",
+            "protocol_schema_version": "strategy_protocol.v1",
+            "ledger_action_metrics_digest": placeholder_digest,
+        }
+    )
+    assert (
+        manifest.execution_contract_digest()
+        != pre_story_2_4.execution_contract_digest()
+    )
 
 
 # ---------------------------------------------------------------------------

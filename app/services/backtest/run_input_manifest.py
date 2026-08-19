@@ -68,23 +68,30 @@ from app.services.backtest.trading_calendar import TradingCalendar
 
 RUN_INPUT_MANIFEST_VERSION = "run_input_manifest.v1"
 
-#: Story 2.4's Backtest Engine and this protocol schema do not exist as
-#: versioned, hashable source yet -- these are stable semantic-version
+#: Story 2.4 lands the real deterministic Backtest Engine and its
+#: concrete Strategy protocol semantics (fill/ledger/action processing
+#: over ``StrategyProtocolV1``) -- these are stable semantic-version
 #: literals (matching ``RECONSTRUCTION_INPUT_MANIFEST_VERSION``'s literal-
-#: version convention), not source-code digests. Bump either the moment its
-#: real implementation lands or its behavior changes.
-ENGINE_VERSION = "backtest_engine.v1"
-PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v1"
+#: version convention), not source-code digests. Bumped from ``.v1`` to
+#: ``.v2`` now that real engine semantics exist, so any
+#: ``execution_contract_digest`` computed against the pre-Story-2.4
+#: placeholder semantics is no longer comparable. Bump again the moment
+#: engine/protocol behavior changes.
+ENGINE_VERSION = "backtest_engine.v2"
+PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v2"
 
-#: Fill/ledger/action/``metrics.py`` (Story 2.4) do not exist as source
-#: files yet, so there is nothing to hash. This policy version is a
-#: deliberate, deterministic placeholder identity for that not-yet-built
-#: semantic surface -- Story 2.4 replaces :func:`_ledger_action_metrics_digest`
-#: with a genuine ``build_source_manifest`` digest over the real files once
-#: they exist; bumping this version string beforehand is enough to
-#: invalidate any earlier ``execution_contract_digest`` comparison once
-#: real fill/ledger/action/metrics semantics land.
-LEDGER_ACTION_METRICS_POLICY_VERSION = "ledger_action_metrics.v1"
+#: Story 2.4 landed ``backtest_engine.py`` as real, hashable source, so
+#: :func:`_ledger_action_metrics_digest` now hashes it via
+#: ``build_source_manifest`` (mirroring :func:`_market_view_source_manifest`
+#: exactly) instead of returning this placeholder's digest. The version
+#: string itself is kept only as the ``defaults`` identity fed into that
+#: digest -- bump it whenever fill/ledger/action semantics change.
+LEDGER_ACTION_METRICS_POLICY_VERSION = "ledger_action_metrics.v2"
+
+#: The concrete file behind the real fill/ledger/action/skip-reason
+#: semantics ``_ledger_action_metrics_digest`` now hashes -- mirrors
+#: ``_MARKET_VIEW_ALLOWLIST``'s narrow, explicit-allowlist convention.
+_LEDGER_ACTION_METRICS_ALLOWLIST = ("app/services/backtest/backtest_engine.py",)
 
 #: The concrete files behind ``MarketView``'s Strategy-facing contract.
 #: Deliberately narrower than ``backtest_repo.py``'s whole surface (most of
@@ -338,15 +345,31 @@ def _runtime_lock_digest(project_root: Path) -> str:
     return sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _ledger_action_metrics_digest() -> str:
-    """Deterministic placeholder identity -- see
-    :data:`LEDGER_ACTION_METRICS_POLICY_VERSION`."""
-    return manifest_digest(
-        {
-            "schema_version": "ledger_action_metrics_policy.v1",
-            "policy_version": LEDGER_ACTION_METRICS_POLICY_VERSION,
-        }
+def _ledger_action_metrics_source_manifest(
+    project_root: Path,
+) -> SourceManifestArtifact:
+    """Return the real fill/ledger/action/skip-reason semantics identity.
+
+    Mirrors :func:`_market_view_source_manifest` exactly: Story 2.4 landed
+    ``backtest_engine.py`` as genuine, hashable source, so this now hashes
+    that one allowlisted file instead of returning a deterministic
+    placeholder digest.
+    """
+    return build_source_manifest(
+        project_root=project_root,
+        producer_id="backtest_engine",
+        api_version="1",
+        allowlist=_LEDGER_ACTION_METRICS_ALLOWLIST,
+        defaults={"policy_version": LEDGER_ACTION_METRICS_POLICY_VERSION},
+        python_runtime=_python_runtime(),
+        dependency_versions={"pandas": _installed_version("pandas")},
     )
+
+
+def _ledger_action_metrics_digest(project_root: Path) -> str:
+    """The real fill/ledger/action/skip-reason semantics digest -- see
+    :func:`_ledger_action_metrics_source_manifest`."""
+    return _ledger_action_metrics_source_manifest(project_root).digest
 
 
 def _market_view_source_manifest(project_root: Path) -> SourceManifestArtifact:
@@ -518,7 +541,7 @@ def build_run_input_manifest(
         engine_version=ENGINE_VERSION,
         protocol_schema_version=PROTOCOL_SCHEMA_VERSION,
         market_view_source_digest=_market_view_source_manifest(project_root).digest,
-        ledger_action_metrics_digest=_ledger_action_metrics_digest(),
+        ledger_action_metrics_digest=_ledger_action_metrics_digest(project_root),
         numeric_rounding_policy=PRICE_VOLUME_PLANE_VERSION,
         runtime_lock_digest=_runtime_lock_digest(project_root),
         calendar_session_table_digest=TradingCalendar().session_table_digest(),
