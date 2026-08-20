@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: 2026-08-19 (synced against merged PRs/closed issues: 2-1..2-6 done via PR #240 (2.1, 2.2), #241 (2.3), #242 (2.4), #243 (2.5, 2.6))
+last_updated: 2026-08-20 (2-9 done via bmad-dev-auto + code review, spec-2-9-review-a-completed-backtest-result.md)
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -69,7 +69,7 @@ development_status:
   2-6-run-backtests-through-the-durable-activity-lifecycle: done
   2-7-configure-and-launch-a-strategy-in-the-web-ui: ready-for-dev
   2-8-monitor-backtest-activity-and-browse-the-results-list: ready-for-dev
-  2-9-review-a-completed-backtest-result: ready-for-dev
+  2-9-review-a-completed-backtest-result: done
   epic-2-retrospective: optional
   epic-3: backlog
   3-1-enforce-one-canonical-comparison-eligibility-predicate: backlog

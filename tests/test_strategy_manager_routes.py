@@ -1,7 +1,9 @@
 """Route and rendered-accessibility tests for Strategy Manager Story 1.9."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timezone
 from decimal import Decimal
+import html
 from types import SimpleNamespace
 from typing import cast
 
@@ -17,21 +19,42 @@ from app.api.dependencies import (
 from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
     BacktestIntegrityError,
+    BacktestResultV1,
+)
+from app.services.backtest.backtest_engine import (
+    DividendAppliedEventV1,
+    EntryFillEventV1,
+    EquityCurvePointV1,
+    ExitFillEventV1,
+    OpenPositionMarkEventV1,
+    SkipReasonCode,
+    SkippedSignalEventV1,
+    SplitAppliedEventV1,
 )
 from app.services.backtest.backtest_launch_service import (
     BacktestConfigurationViewV1,
     BacktestLaunchValidationError,
     LaunchFieldError,
 )
-from app.services.backtest.metrics import BacktestMetricsV1, MetricAvailabilityV1
+from app.services.backtest.metrics import (
+    BacktestMetricsV1,
+    MetricAvailabilityV1,
+    MetricUnavailableReason,
+)
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
-from app.services.backtest.snapshot_profile import CoverageSummaryV1, SnapshotProfileV1
+from app.services.backtest.snapshot_profile import (
+    CoverageIntervalV1,
+    CoverageSummaryV1,
+    ProvenanceCoverageV1,
+    SnapshotProfileV1,
+)
 from app.services.backtest.strategy_job import (
+    StrategyJobConflict,
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
 )
-from app.services.backtest.strategy_protocol import StrategyParameterV1
+from app.services.backtest.strategy_protocol import SignalSide, StrategyParameterV1
 
 client = TestClient(app)
 
@@ -50,10 +73,19 @@ class FakeRepo:
         self.activity = None
         self.backtest_activities: tuple[object, ...] = ()
         self.backtest_activities_error: BacktestIntegrityError | None = None
+        # Story 2.9: Result page + note CAS fakes.
+        self.result: BacktestResultV1 | None = None
+        self.result_error: Exception | None = None
+        self.result_coverage: CoverageSummaryV1 | None = None
+        self.note_conflict = False
+        self.note_value_error: str | None = None
+        self.last_note_call: tuple[str, int, str] | None = None
 
-    def snapshot_coverage(self):
+    def snapshot_coverage(self, profile_hash=None):
         if self.coverage_error:
             raise BacktestIntegrityError(self.coverage_error)
+        if profile_hash is not None and self.result_coverage is not None:
+            return self.result_coverage
         return SimpleNamespace(
             display_version="Scanner v1",
             earliest_month="2024-01",
@@ -70,6 +102,39 @@ class FakeRepo:
                 ),
             ),
         )
+
+    def backtest_result(self, run_id):
+        from app.services.backtest.strategy_job import StrategyJobNotFound
+
+        if self.result_error is not None:
+            raise self.result_error
+        if self.result is None or self.result.run_id != run_id:
+            raise StrategyJobNotFound(f"missing result: {run_id}")
+        return self.result
+
+    def update_backtest_result_note(self, run_id, *, expected_note_version, note):
+        from app.services.backtest.strategy_job import StrategyJobNotFound
+
+        self.last_note_call = (run_id, expected_note_version, note)
+        if self.result is None or self.result.run_id != run_id:
+            raise StrategyJobNotFound(f"missing result: {run_id}")
+        stripped = note.strip()
+        if stripped:
+            escaped = html.escape(stripped, quote=True)
+            if len(escaped) > 10_000:
+                raise ValueError("note text exceeds 10,000 Unicode code points")
+        else:
+            escaped = None
+        if self.note_value_error:
+            raise ValueError(self.note_value_error)
+        if self.note_conflict:
+            raise StrategyJobConflict("note update version is stale")
+        if expected_note_version != self.result.note_version:
+            raise StrategyJobConflict("note update version is stale")
+        self.result = replace(
+            self.result, note=escaped, note_version=self.result.note_version + 1
+        )
+        return self.result
 
     def active_snapshot_profile(self):
         return SimpleNamespace(profile_hash=self.profile.profile_hash)
@@ -384,7 +449,7 @@ def test_backtest_activity_review_url_only_on_complete(services):
     )
     completed = client.get("/strategy-manager/activities/job-1")
     assert "Review this Backtest" in completed.text
-    assert 'href="/strategy-manager/activities/job-1"' in completed.text
+    assert 'href="/strategy-manager/results/job-1"' in completed.text
 
 
 # ---------------------------------------------------------------------------
@@ -732,3 +797,621 @@ def test_backtests_list_integrity_error_alert(services):
     assert response.status_code == 200
     assert "corrupt backtest row" in response.text
     assert "Reload" in response.text
+
+
+# ---------------------------------------------------------------------------
+# Story 2.9: standalone completed-Backtest Result review + note CAS
+# ---------------------------------------------------------------------------
+
+RESULT_RUN_ID = "run-1"
+RESULT_PROFILE_HASH = "a" * 64
+
+
+def _equity_point(day: int, equity: str, seq: int) -> EquityCurvePointV1:
+    return EquityCurvePointV1(
+        session=date(2024, 1, day),
+        cash_base=Decimal(equity),
+        positions_value_base=Decimal("0"),
+        total_equity_base=Decimal(equity),
+        sequence=seq,
+    )
+
+
+def _metrics(**overrides: object) -> BacktestMetricsV1:
+    defaults: dict[str, object] = dict(
+        total_return=0.10, sharpe_ratio=1.23, win_rate=0.5, max_drawdown=-0.05
+    )
+    defaults.update(overrides)
+    return BacktestMetricsV1(**defaults)  # type: ignore[arg-type]
+
+
+def _availability(**overrides: object) -> MetricAvailabilityV1:
+    defaults: dict[str, object] = dict(
+        win_rate_unavailable=None, sharpe_unavailable=None
+    )
+    defaults.update(overrides)
+    return MetricAvailabilityV1(**defaults)  # type: ignore[arg-type]
+
+
+def _skipped_event(seq: int = 1) -> SkippedSignalEventV1:
+    return SkippedSignalEventV1(
+        security_id="SEC1",
+        side=SignalSide.BUY,
+        signal_session=date(2024, 1, 2),
+        rule_id="rule-1",
+        reason=SkipReasonCode.INSUFFICIENT_CASH,
+        detail="not enough cash on hand",
+        sequence=seq,
+    )
+
+
+def _entry_event(seq: int = 1) -> EntryFillEventV1:
+    return EntryFillEventV1(
+        security_id="SEC1",
+        signal_session=date(2024, 1, 2),
+        fill_session=date(2024, 1, 3),
+        rule_id="rule-1",
+        shares=10,
+        fill_price_native=Decimal("100.00"),
+        fill_currency="USD",
+        fill_quote_unit="1",
+        cost_base=Decimal("1000.00"),
+        sequence=seq,
+    )
+
+
+def _exit_event(seq: int = 2, pnl: str = "50.00") -> ExitFillEventV1:
+    return ExitFillEventV1(
+        security_id="SEC1",
+        signal_session=date(2024, 1, 20),
+        fill_session=date(2024, 1, 21),
+        rule_id="rule-1",
+        shares=10,
+        fill_price_native=Decimal("105.00"),
+        fill_currency="USD",
+        fill_quote_unit="1",
+        proceeds_base=Decimal("1050.00"),
+        cost_basis_base=Decimal("1000.00"),
+        realized_pnl_base=Decimal(pnl),
+        sequence=seq,
+    )
+
+
+def _split_event(seq: int = 1) -> SplitAppliedEventV1:
+    return SplitAppliedEventV1(
+        security_id="SEC1",
+        session=date(2024, 1, 10),
+        ratio=Decimal("2"),
+        shares_before=Decimal("10"),
+        shares_after=Decimal("20"),
+        evidence_revision="f" * 64,
+        policy_version="v1",
+        sequence=seq,
+    )
+
+
+def _open_mark_event(seq: int = 1) -> OpenPositionMarkEventV1:
+    return OpenPositionMarkEventV1(
+        security_id="SEC1",
+        session=date(2024, 1, 31),
+        shares=10,
+        mark_price_native=Decimal("110.00"),
+        market_value_base=Decimal("1100.00"),
+        cost_basis_base=Decimal("1000.00"),
+        unrealized_pnl_base=Decimal("100.00"),
+        sequence=seq,
+    )
+
+
+def _dividend_event(seq: int = 1) -> DividendAppliedEventV1:
+    return DividendAppliedEventV1(
+        security_id="SEC1",
+        session=date(2024, 1, 15),
+        per_share_amount=Decimal("0.50"),
+        shares_carried=Decimal("10"),
+        cash_credit_native=Decimal("5.00"),
+        cash_credit_base=Decimal("5.00"),
+        currency="USD",
+        quote_unit="1",
+        evidence_revision="g" * 64,
+        policy_version="v1",
+        sequence=seq,
+    )
+
+
+def _result(
+    *,
+    run_id: str = RESULT_RUN_ID,
+    events: tuple = (),
+    equity_curve: tuple | None = None,
+    metrics: BacktestMetricsV1 | None = None,
+    availability: MetricAvailabilityV1 | None = None,
+    note: str | None = None,
+    note_version: int = 1,
+    start_month: str = "2024-01",
+    end_month: str = "2024-01",
+    profile_hash: str = RESULT_PROFILE_HASH,
+) -> BacktestResultV1:
+    curve = (
+        equity_curve
+        if equity_curve is not None
+        else (_equity_point(1, "10000.00", 1), _equity_point(31, "11000.00", 2))
+    )
+    return BacktestResultV1(
+        run_id=run_id,
+        strategy_id="momentum_v1",
+        strategy_api_version=1,
+        strategy_source_digest="b" * 64,
+        parameters={"lookback": 20},
+        profile_hash=profile_hash,
+        start_month=start_month,
+        end_month=end_month,
+        ordered_month_digest="c" * 64,
+        base_currency="GBP",
+        starting_capital=Decimal("10000.00"),
+        run_input_manifest_digest="d" * 64,
+        execution_contract_digest="e" * 64,
+        metrics=metrics or _metrics(),
+        metric_availability=availability or _availability(),
+        events=events,
+        equity_curve=curve,
+        final_cash_base=Decimal("1000.00"),
+        completed_at=datetime(2024, 2, 1, 12, 0, tzinfo=timezone.utc),
+        note=note,
+        note_version=note_version,
+    )
+
+
+def _complete_backtest_activity(run_id: str = RESULT_RUN_ID) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=run_id,
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.COMPLETE,
+        status_version=1,
+        current_month=None,
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+
+
+def test_result_page_renders_sections_in_order(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(events=(_entry_event(1), _exit_event(2)))
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    for label in (
+        "Run identity",
+        "Metrics",
+        "Equity Curve",
+        "Trade Log",
+        "Provenance",
+        "Decision note",
+    ):
+        assert label in text
+    assert text.index("Run identity") < text.index("Metrics")
+    assert text.index("Metrics") < text.index("Equity Curve")
+    assert text.index("Equity Curve") < text.index("Trade Log")
+    assert text.index("Trade Log") < text.index("Provenance")
+    assert text.index("Provenance") < text.index("Decision note")
+    assert "momentum_v1 v1" in text
+    assert "2024-01 to 2024-01" in text
+    assert "No live-portfolio" not in text  # sanity: no live-import copy leaks in
+
+
+def test_result_metrics_format_signed_and_neutral(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        metrics=_metrics(
+            total_return=0.125, sharpe_ratio=-1.5, win_rate=0.625, max_drawdown=-0.083
+        )
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "+12.5%" in response.text
+    assert "-1.50" in response.text
+    assert "62.5%" in response.text
+    assert "-8.3%" in response.text
+
+
+def test_result_metrics_neutral_zero_never_shows_a_sign(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(metrics=_metrics(total_return=0.0, max_drawdown=0.0))
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "+0.0%" not in response.text
+    assert "-0.0%" not in response.text
+    assert "0.0%" in response.text
+
+
+def test_result_no_closed_trades_shows_no_applicable_text(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        metrics=_metrics(sharpe_ratio=None, win_rate=None),
+        availability=_availability(
+            win_rate_unavailable=MetricUnavailableReason.NO_CLOSED_TRADES,
+            sharpe_unavailable=MetricUnavailableReason.INSUFFICIENT_DAILY_RETURNS,
+        ),
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "Not applicable — no closed trades" in response.text
+    assert "Not applicable — insufficient daily return variation" in response.text
+
+
+def test_result_sharpe_zero_variance_shows_insufficient_variation_text(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        metrics=_metrics(sharpe_ratio=None),
+        availability=_availability(
+            sharpe_unavailable=MetricUnavailableReason.ZERO_VARIANCE
+        ),
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "Not applicable — insufficient daily return variation" in response.text
+
+
+def test_result_no_events_states_no_simulated_trades(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(events=())
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "No simulated trades." in response.text
+
+
+def test_result_skipped_only_events_state_and_all_kinds_render(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        events=(
+            _skipped_event(1),
+            _split_event(2),
+            _open_mark_event(3),
+            _dividend_event(4),
+        )
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "No executed simulated trades" in response.text
+    assert "Skipped" in response.text
+    assert "Split" in response.text
+    assert "Open mark" in response.text
+    assert "Dividend" in response.text
+    assert "shares credited" in response.text
+    assert "not enough cash on hand" in response.text
+
+
+def test_result_all_event_kinds_render_without_forcing_buy_sell_shape(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        events=(
+            _skipped_event(1),
+            _entry_event(2),
+            _exit_event(3),
+            _split_event(4),
+            _open_mark_event(5),
+            _dividend_event(6),
+        )
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "No executed simulated trades" not in text
+    for label in ("Skipped", "Buy", "Sell", "Split", "Open mark", "Dividend"):
+        assert label in text
+
+
+def test_result_chart_and_table_share_the_same_ordered_payload(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        equity_curve=(_equity_point(1, "10000.00", 1), _equity_point(2, "10250.50", 2))
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    # The tojson payload feeding the chart and the table's rendered cells
+    # both derive from the exact same presenter output.
+    assert '"date": "2024-01-01"' in text
+    assert '"equity": 10000.0' in text
+    assert '"equity": 10250.5' in text
+    assert "10,000.00" in text
+    assert "10,250.50" in text
+
+
+def test_result_canvas_has_role_img_accessible_name_and_destroy_guard(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert 'role="img"' in text
+    assert "aria-label=" in text
+    assert "Chart.getChart(canvas)" in text
+    assert "existing.destroy()" in text
+    assert "View equity data table" in text
+
+
+def test_result_provenance_shows_reconstructed_and_observed_separately(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(start_month="2024-01", end_month="2024-03")
+    repo.result_coverage = CoverageSummaryV1(
+        profile_hash=RESULT_PROFILE_HASH,
+        display_version="Scanner v1",
+        earliest_month="2024-01",
+        latest_month="2024-06",
+        snapshot_count=6,
+        intervals=(CoverageIntervalV1(start_month="2024-01", end_month="2024-06"),),
+        provenance=(
+            ProvenanceCoverageV1(
+                provenance_quality="best_effort_reconstructed",
+                snapshot_count=2,
+                intervals=(
+                    CoverageIntervalV1(start_month="2024-01", end_month="2024-02"),
+                ),
+            ),
+            ProvenanceCoverageV1(
+                provenance_quality="observed_bau",
+                snapshot_count=4,
+                intervals=(
+                    CoverageIntervalV1(start_month="2024-03", end_month="2024-06"),
+                ),
+            ),
+        ),
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "Best Effort Reconstructed" in text
+    assert "Observed Bau" in text
+    assert "Best-effort yfinance." in text
+    # Clipped to the Result's own [2024-01, 2024-03] window, never the
+    # whole profile's [2024-01, 2024-06] coverage.
+    assert "2024-04" not in text
+    assert "2024-05" not in text
+    assert "2024-06" not in text
+
+
+def test_result_redirects_non_complete_job_to_activity_shell(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id=RESULT_RUN_ID,
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=1,
+        current_month="2024-01",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    response = client.get(
+        f"/strategy-manager/results/{RESULT_RUN_ID}", follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert (
+        response.headers["location"] == f"/strategy-manager/activities/{RESULT_RUN_ID}"
+    )
+
+
+def test_result_unknown_run_id_is_404(services):
+    response = client.get("/strategy-manager/results/does-not-exist")
+    assert response.status_code == 404
+
+
+def test_result_integrity_error_renders_no_partial_data(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result_error = BacktestIntegrityError(
+        "stored backtest result digest is invalid"
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "stored backtest result digest is invalid" in response.text
+    assert "Metrics" not in response.text
+    assert "Trade Log" not in response.text
+
+
+# --- Note CAS -----------------------------------------------------------
+
+
+def test_result_note_read_state_shows_no_note_by_default(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(note=None)
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "No note." in response.text
+
+
+def test_result_note_read_state_shows_saved_text_escaped_exactly_once(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    stored_escaped = html.escape("Tom & Jerry <script>", quote=True)
+    repo.result = _result(note=stored_escaped)
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "Tom &amp; Jerry &lt;script&gt;" in response.text
+    assert "&amp;amp;" not in response.text  # never double-escaped
+    # The user's hostile text must never appear unescaped/executable --
+    # distinct from this page's own legitimate inline chart <script> tag.
+    assert "Tom & Jerry <script>" not in response.text
+
+
+def test_result_note_save_success(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(note=None, note_version=1)
+    response = client.post(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/note",
+        data={"note": "Looks promising.", "expected_note_version": "1"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 200
+    assert "Saved." in response.text
+    assert "Looks promising." in response.text
+    assert repo.last_note_call == (RESULT_RUN_ID, 1, "Looks promising.")
+    assert repo.result is not None
+    assert repo.result.note_version == 2
+
+
+def test_result_note_save_empty_normalizes_to_no_note(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(note="existing", note_version=1)
+    response = client.post(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/note",
+        data={"note": "   ", "expected_note_version": "1"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 200
+    assert "No note." in response.text
+    assert repo.result is not None
+    assert repo.result.note is None
+
+
+def test_result_note_save_stale_version_conflict(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(note=None, note_version=3)
+    response = client.post(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/note",
+        data={"note": "my new note", "expected_note_version": "1"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 409
+    assert "changed since you loaded it" in response.text
+    assert "my new note" in response.text
+    assert "Retry" in response.text
+    assert "Saved." not in response.text
+    # The stale save never touched the persisted Result.
+    assert repo.result.note_version == 3
+
+
+def test_result_note_save_over_length_returns_422(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(note=None, note_version=1)
+    too_long = "x" * 10_001
+    response = client.post(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/note",
+        data={"note": too_long, "expected_note_version": "1"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    assert "exceeds" in response.text
+    assert "Saved." not in response.text
+    assert repo.result.note_version == 1
+
+
+def test_result_note_post_requires_auth_guard(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(note=None, note_version=1)
+    response = client.post(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/note",
+        data={"note": "hello", "expected_note_version": "1"},
+    )
+    assert response.status_code == 403
+    assert repo.last_note_call is None
+
+
+def test_result_note_save_only_changes_note_fields(services):
+    """AC 7: the only mutation this view permits is note/note_version --
+    every other Result field (Metrics, events, curve, digests) survives a
+    note save unchanged."""
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    before = _result(
+        events=(_entry_event(1), _exit_event(2)), note=None, note_version=1
+    )
+    repo.result = before
+    client.post(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/note",
+        data={"note": "a decision note", "expected_note_version": "1"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    after = repo.result
+    assert after is not None
+    assert after.note_version == before.note_version + 1
+    assert after.note != before.note
+    for field in (
+        "run_id",
+        "strategy_id",
+        "strategy_api_version",
+        "strategy_source_digest",
+        "parameters",
+        "profile_hash",
+        "start_month",
+        "end_month",
+        "ordered_month_digest",
+        "base_currency",
+        "starting_capital",
+        "run_input_manifest_digest",
+        "execution_contract_digest",
+        "metrics",
+        "metric_availability",
+        "events",
+        "equity_curve",
+        "final_cash_base",
+        "completed_at",
+    ):
+        assert getattr(after, field) == getattr(before, field)
+
+
+def test_backtests_list_links_complete_row_to_result_url(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        BacktestActivitySummaryV1(
+            job=cast(
+                StrategyJobV1,
+                SimpleNamespace(
+                    id="job-complete",
+                    enqueue_seq=1,
+                    status=StrategyJobStatus.COMPLETE,
+                    cancel_requested_at=None,
+                ),
+            ),
+            strategy_id="momentum_v1",
+            strategy_api_version=1,
+            parameter_summary="lookback=20",
+            start_month="2024-01",
+            end_month="2024-02",
+            metrics=cast(
+                BacktestMetricsV1, SimpleNamespace(total_return=0.1, win_rate=0.5)
+            ),
+            metric_availability=cast(MetricAvailabilityV1, SimpleNamespace()),
+        ),
+        BacktestActivitySummaryV1(
+            job=cast(
+                StrategyJobV1,
+                SimpleNamespace(
+                    id="job-running",
+                    enqueue_seq=2,
+                    status=StrategyJobStatus.RUNNING,
+                    cancel_requested_at=None,
+                ),
+            ),
+            strategy_id="momentum_v1",
+            strategy_api_version=1,
+            parameter_summary="lookback=20",
+            start_month="2024-01",
+            end_month="2024-02",
+            metrics=None,
+            metric_availability=None,
+        ),
+    )
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert 'href="/strategy-manager/results/job-complete"' in response.text
+    assert 'href="/strategy-manager/activities/job-running"' in response.text

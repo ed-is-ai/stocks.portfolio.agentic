@@ -20,8 +20,9 @@
       <thead><tr><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
       <tbody>
         {% for item in backtest_activities %}
+        {% set detail_url = "/strategy-manager/results/" ~ item.job.id if item.job.status.value == 'complete' else "/strategy-manager/activities/" ~ item.job.id %}
         <tr>
-          <td><a href="/strategy-manager/activities/{{ item.job.id }}" hx-get="/strategy-manager/activities/{{ item.job.id }}" hx-target="#tab-content" hx-swap="innerHTML">{{ item.strategy_id }} attempt {{ item.job.enqueue_seq }}</a></td>
+          <td><a href="{{ detail_url }}" hx-get="{{ detail_url }}" hx-target="#tab-content" hx-swap="innerHTML">{{ item.strategy_id }} attempt {{ item.job.enqueue_seq }}</a></td>
           <td>{{ item.job.status.value|title }}{% if item.job.status.value == 'running' and item.job.cancel_requested_at %} (cancellation requested){% endif %}</td>
           <td class="mono-num">{{ item.strategy_id }} v{{ item.strategy_api_version }}</td>
           <td class="text-wrap">{{ item.parameter_summary }}</td>

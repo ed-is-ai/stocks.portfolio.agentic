@@ -87,14 +87,16 @@
   });
 
   // ── Heading/error-summary focus on real user navigation into
-  // #tab-content only -- never on the in-place activity poll, which swaps
-  // the narrower #backtest-activity-{id} section instead (Story 2.7
-  // AC7,9; Story 2.8 AC4). Story 2.8 scopes the version gate/poll-safe
+  // #tab-content, and on a Story 2.9 note-save swap (#backtest-note-*) --
+  // never on the in-place activity poll, which swaps the narrower
+  // #backtest-activity-{id} section instead (Story 2.7 AC7,9; Story 2.8
+  // AC4; Story 2.9 AC7,8). Story 2.8 scopes the version gate/poll-safe
   // focus handling to Backtest activity only -- Initialization's
   // pre-existing polling is untouched by this story. ────────────────────
   document.body.addEventListener('htmx:afterSettle', function (event) {
     var target = event.detail && event.detail.target;
-    if (!target || target.id !== 'tab-content') return;
+    var isNoteSwap = target && target.id && target.id.indexOf('backtest-note-') === 0;
+    if (!target || (target.id !== 'tab-content' && !isNoteSwap)) return;
     // A 422 response's linked error summary takes priority over the
     // heading once per invalid submit (the same alert/tabindex="-1"
     // pattern _strategy_configuration.html and _historical_initialization

@@ -60,8 +60,20 @@ def _projection(payload: dict[str, object]) -> dict[str, object]:
         title = _backtest_title(
             status, backtest if isinstance(backtest, dict) else None
         )
+        # Story 2.9: keep the persisted target_url accurate for a
+        # completed Backtest's standalone Result page (consumed by
+        # notifications_repo storage/recovery, e.g.
+        # test_strategy_job_recovery.py) -- NOT the live bell-panel link,
+        # which notifications.py's _panel() builds fresh from a direct
+        # repository lookup and never reads this stored value.
+        target_url = (
+            f"/strategy-manager/results/{job_id}"
+            if status == "complete"
+            else f"/strategy-manager/activities/{job_id}"
+        )
     else:
         title = _initialization_title(status)
+        target_url = f"/strategy-manager/activities/{job_id}"
     detail = str(job.get("failure_detail") or "")
     body = f"Status: {status}."
     if detail:
@@ -78,12 +90,7 @@ def _projection(payload: dict[str, object]) -> dict[str, object]:
         "severity": severity,
         "title": title,
         "body": body,
-        # Story 2.9 later changes a completed Backtest's target to its
-        # Result detail URL once that route exists; every other status
-        # (and initialization entirely) deep-links to this working
-        # Activity shell -- never the dead ``?job_id=`` query-string
-        # format the projector used to emit before this story.
-        "target_url": f"/strategy-manager/activities/{job_id}",
+        "target_url": target_url,
         "actions": actions,
     }
 

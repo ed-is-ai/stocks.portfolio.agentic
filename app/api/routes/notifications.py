@@ -20,7 +20,11 @@ from app.api.dependencies import (
 from app.api.templating import templates
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
-from app.services.backtest.strategy_job import StrategyJobNotFound
+from app.services.backtest.strategy_job import (
+    StrategyJobNotFound,
+    StrategyJobStatus,
+    StrategyJobType,
+)
 
 router = APIRouter()
 
@@ -50,8 +54,17 @@ def _panel(request: Request, repo: NotificationsRepository) -> HTMLResponse:
         try:
             job = get_backtest_repository().strategy_job(notification.job_id)
             actions = get_strategy_job_service().legal_actions(job.id).legal_actions
+            # Story 2.9: a completed Backtest deep-links to its standalone
+            # Result page; every other job state (and initialization
+            # entirely) keeps the working Activity shell.
+            url = (
+                f"/strategy-manager/results/{job.id}"
+                if job.job_type is StrategyJobType.BACKTEST
+                and job.status is StrategyJobStatus.COMPLETE
+                else f"/strategy-manager/activities/{job.id}"
+            )
             targets[notification.id] = {
-                "url": f"/strategy-manager/activities/{job.id}",
+                "url": url,
                 "actions": actions,
                 "expected_version": job.status_version,
             }

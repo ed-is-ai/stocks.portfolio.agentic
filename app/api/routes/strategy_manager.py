@@ -23,11 +23,22 @@ from app.api.dependencies import (
 )
 from app.api.templating import templates
 from app.core.security import require_local_or_token
-from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
+from app.repositories.backtest_repo import (
+    BacktestIntegrityError,
+    BacktestRepository,
+    BacktestResultV1,
+)
 from app.services.backtest.backtest_launch_service import (
     BacktestLaunchCommandV1,
     BacktestLaunchService,
     BacktestLaunchValidationError,
+)
+from app.services.backtest.result_presenter import (
+    equity_curve_payload,
+    metrics_view,
+    note_view,
+    provenance_view,
+    trade_log_view,
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.snapshot_profile import SnapshotProfileV1
@@ -616,11 +627,12 @@ def _activity_context(
         run = repo.strategy_run(job_id)
     else:
         raise StrategyJobNotFound("activity not found")
-    #: Story 2.8 AC 3: a completed Backtest exposes a named review
-    #: destination, but Story 2.9 owns the real Result URL -- until that
-    #: route exists this stays the Activity shell itself (no dead link).
+    #: Story 2.8 AC 3 / Story 2.9: a completed Backtest exposes a named
+    #: review destination -- the real standalone Result URL this story
+    #: adds, never the Activity shell (which Story 2.9 now redirects away
+    #: from for a complete job).
     review_url = (
-        f"/strategy-manager/activities/{job_id}"
+        f"/strategy-manager/results/{job_id}"
         if job.job_type is StrategyJobType.BACKTEST
         and job.status is StrategyJobStatus.COMPLETE
         else None
@@ -747,4 +759,194 @@ async def delete_initialization(
         return HTMLResponse(str(exc), status_code=409)
     return HTMLResponse(
         '<h2 id="initialization-history" tabindex="-1">Initialization history</h2><p>Activity deleted.</p>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Story 2.9: standalone completed-Backtest Result review + note CAS
+# ---------------------------------------------------------------------------
+
+
+def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
+    """Build the Result page's full context from Story 2.5's aggregate
+    alone -- every Metrics/Equity-Curve/Trade-Log/provenance value is
+    formatted, never recomputed, by ``result_presenter.py``."""
+    try:
+        result = repo.backtest_result(run_id)
+    except StrategyJobNotFound as exc:
+        # The caller already confirmed job.status is COMPLETE, so a
+        # missing Result row here is a genuine integrity defect (Story
+        # 2.8's own "complete job with missing Result is an integrity
+        # error" boundary), never a 404/partial render.
+        raise BacktestIntegrityError(
+            f"backtest result evidence is missing for a complete job: {exc}"
+        ) from exc
+    coverage = repo.snapshot_coverage(profile_hash=result.profile_hash)
+    return {
+        "run_id": run_id,
+        "integrity_error": None,
+        "result": result,
+        "metrics": metrics_view(result),
+        "equity_curve_payload": equity_curve_payload(result),
+        "trade_log": trade_log_view(result),
+        "provenance": provenance_view(result, coverage),
+        "note": note_view(result),
+        "submitted_note_text": None,
+        "note_error": None,
+        "note_conflict": False,
+        "note_saved": False,
+    }
+
+
+def _note_context(
+    repo: BacktestRepository,
+    run_id: str,
+    *,
+    result: BacktestResultV1 | None = None,
+    submitted_text: str | None = None,
+    error: str | None = None,
+    conflict: bool = False,
+    saved: bool = False,
+) -> dict[str, object]:
+    """Build ``_backtest_note.html``'s context for the guarded POST route.
+
+    ``submitted_text`` -- this request's own just-submitted (unescaped,
+    not-yet-persisted) text -- is what the textarea always renders on a
+    422/409 retry. The read-state line and hidden expected-version field,
+    by contrast, always reflect a fresh read of the current persisted
+    Result (never the failed submission), so a Retry naturally carries the
+    correct ``expected_note_version`` forward.
+
+    ``result`` lets a caller that already holds a freshly-verified
+    ``BacktestResultV1`` (e.g. the successful CAS write's own return
+    value) pass it straight through instead of triggering a redundant
+    ``backtest_result()`` re-read/re-verification.
+    """
+    try:
+        current = note_view(
+            result if result is not None else repo.backtest_result(run_id)
+        )
+    except (BacktestIntegrityError, StrategyJobNotFound):
+        current = None
+    return {
+        "run_id": run_id,
+        "note": current,
+        "submitted_note_text": submitted_text,
+        "note_error": error,
+        "note_conflict": conflict,
+        "note_saved": saved,
+    }
+
+
+@router.get("/strategy-manager/results/{run_id}", response_class=HTMLResponse)
+async def backtest_result_view(
+    request: Request, run_id: str, backtest: BacktestDep
+) -> Response:
+    """Render a completed Backtest's standalone Result page (AC 1).
+
+    Non-complete/non-Backtest jobs redirect to the existing Activity
+    shell (never a partial Result render); an unknown ``run_id`` 404s;
+    missing/corrupt Result evidence renders an explicit integrity-error
+    state with no partial data.
+    """
+    try:
+        job = backtest.strategy_job(run_id)
+    except StrategyJobNotFound:
+        return HTMLResponse("Backtest result not found.", status_code=404)
+    if (
+        job.job_type is not StrategyJobType.BACKTEST
+        or job.status is not StrategyJobStatus.COMPLETE
+    ):
+        return RedirectResponse(
+            f"/strategy-manager/activities/{run_id}", status_code=303
+        )
+    try:
+        context = _result_context(backtest, run_id)
+    except BacktestIntegrityError as exc:
+        return templates.TemplateResponse(
+            request,
+            "_backtest_result.html",
+            {"run_id": run_id, "integrity_error": str(exc)},
+        )
+    return templates.TemplateResponse(request, "_backtest_result.html", context)
+
+
+@router.post(
+    "/strategy-manager/results/{run_id}/note",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def submit_backtest_result_note(
+    request: Request,
+    run_id: str,
+    backtest: BacktestDep,
+    note: Annotated[str, Form()] = "",
+    expected_note_version: Annotated[int, Form()] = 0,
+) -> HTMLResponse:
+    """Guarded note compare-and-swap (AC 7, 8) -- calls Story 2.5's
+    ``update_backtest_result_note`` exactly, retaining the submitted text
+    and an explicit error/conflict + Retry on 422/409, never announcing a
+    false Saved.
+    """
+    try:
+        result = backtest.update_backtest_result_note(
+            run_id, expected_note_version=expected_note_version, note=note
+        )
+    except ValueError as exc:
+        return templates.TemplateResponse(
+            request,
+            "_backtest_note.html",
+            _note_context(backtest, run_id, submitted_text=note, error=str(exc)),
+            status_code=422,
+        )
+    except StrategyJobConflict:
+        return templates.TemplateResponse(
+            request,
+            "_backtest_note.html",
+            _note_context(
+                backtest,
+                run_id,
+                submitted_text=note,
+                error=(
+                    "This note changed since you loaded it. Retry to save "
+                    "your text against the current version."
+                ),
+                conflict=True,
+            ),
+            status_code=409,
+        )
+    except StrategyJobNotFound:
+        return templates.TemplateResponse(
+            request,
+            "_backtest_note.html",
+            _note_context(
+                backtest,
+                run_id,
+                submitted_text=note,
+                error="Backtest result not found.",
+            ),
+            status_code=404,
+        )
+    except BacktestIntegrityError as exc:
+        # The CAS write itself succeeded, but the post-write re-read
+        # (``update_backtest_result_note``'s own ``backtest_result()``
+        # call) detected pre-existing corrupt evidence unrelated to the
+        # note. Report it explicitly rather than letting it propagate as
+        # an unhandled 500 -- the story's own "explicit error, never a
+        # false Saved" contract applies here too.
+        return templates.TemplateResponse(
+            request,
+            "_backtest_note.html",
+            _note_context(
+                backtest,
+                run_id,
+                submitted_text=note,
+                error=f"Result evidence needs attention: {exc}",
+            ),
+            status_code=500,
+        )
+    return templates.TemplateResponse(
+        request,
+        "_backtest_note.html",
+        _note_context(backtest, run_id, result=result, saved=True),
     )

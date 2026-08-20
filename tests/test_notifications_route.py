@@ -11,7 +11,11 @@ from app.api.dependencies import get_notifications_repository
 from app.repositories import db
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
-from app.services.backtest.strategy_job import StrategyJobNotFound
+from app.services.backtest.strategy_job import (
+    StrategyJobNotFound,
+    StrategyJobStatus,
+    StrategyJobType,
+)
 
 client = TestClient(app)
 
@@ -137,9 +141,18 @@ def test_mutating_endpoints_require_auth(repo) -> None:
 
 
 class FakeStrategyJob:
-    def __init__(self, job_id: str, status_version: int = 4) -> None:
+    def __init__(
+        self,
+        job_id: str,
+        status_version: int = 4,
+        *,
+        job_type: StrategyJobType = StrategyJobType.BACKTEST,
+        status: StrategyJobStatus = StrategyJobStatus.RUNNING,
+    ) -> None:
         self.id = job_id
         self.status_version = status_version
+        self.job_type = job_type
+        self.status = status
 
 
 class FakeBacktestRepoForNotifications:
@@ -218,6 +231,29 @@ def test_backtest_notification_deep_link_label_and_url(repo, monkeypatch) -> Non
     assert "Open backtest activity" in response.text
     assert "Open initialization activity" not in response.text
     assert 'href="/strategy-manager/activities/job-1"' in response.text
+
+
+def test_completed_backtest_notification_deep_links_to_the_result_page(
+    repo, monkeypatch
+) -> None:
+    """Story 2.9: once a Backtest job is COMPLETE, the notification's live
+    detail link points at the standalone Result URL, not the Activity
+    shell -- built fresh from the repository's own job state, not the
+    notification's stored ``target_url``."""
+    _wire_strategy_backend(
+        monkeypatch,
+        jobs={"job-1": FakeStrategyJob("job-1", status=StrategyJobStatus.COMPLETE)},
+        actions=(),
+    )
+    _upsert_job_notification(
+        repo, job_id="job-1", category=NotificationCategory.BACKTEST
+    )
+
+    response = client.get("/partials/notifications")
+
+    assert response.status_code == 200
+    assert 'href="/strategy-manager/results/job-1"' in response.text
+    assert 'href="/strategy-manager/activities/job-1"' not in response.text
 
 
 def test_initialization_notification_deep_link_label(repo, monkeypatch) -> None:
