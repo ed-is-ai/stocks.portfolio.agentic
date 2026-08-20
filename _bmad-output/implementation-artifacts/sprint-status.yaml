@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: 2026-08-18 (sprint-planning re-run: validated all 22 items against epics.md and story files in implementation-artifacts -- no status changes, all entries confirmed consistent)
+last_updated: 2026-08-19 (synced against merged PRs/closed issues: 2-1..2-6 done via PR #240 (2.1, 2.2), #241 (2.3), #242 (2.4), #243 (2.5, 2.6))
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -61,12 +61,12 @@ development_status:
   1-10-extend-coverage-with-eligible-bau-scanner-snapshots: done
   epic-1-retrospective: optional
   epic-2: in-progress
-  2-1-author-a-strategy-against-the-versioned-protocol: ready-for-dev
-  2-2-discover-strategies-and-validate-their-parameters: ready-for-dev
-  2-3-bind-backtests-to-bounded-views-and-a-replay-manifest: ready-for-dev
-  2-4-execute-the-deterministic-portfolio-simulation: ready-for-dev
-  2-5-calculate-and-atomically-persist-backtest-results: ready-for-dev
-  2-6-run-backtests-through-the-durable-activity-lifecycle: ready-for-dev
+  2-1-author-a-strategy-against-the-versioned-protocol: done
+  2-2-discover-strategies-and-validate-their-parameters: done
+  2-3-bind-backtests-to-bounded-views-and-a-replay-manifest: done
+  2-4-execute-the-deterministic-portfolio-simulation: done
+  2-5-calculate-and-atomically-persist-backtest-results: done
+  2-6-run-backtests-through-the-durable-activity-lifecycle: done
   2-7-configure-and-launch-a-strategy-in-the-web-ui: ready-for-dev
   2-8-monitor-backtest-activity-and-browse-the-results-list: ready-for-dev
   2-9-review-a-completed-backtest-result: ready-for-dev
