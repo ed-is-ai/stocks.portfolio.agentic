@@ -190,8 +190,8 @@
   {% include "_backtest_note.html" %}
 
   <p class="mt-4">
-    <a class="btn btn-outline-secondary disabled" aria-disabled="true" tabindex="-1"
-       href="/strategy-manager/compare?run_id={{ result.run_id }}">Compare (coming soon)</a>
+    <a class="btn btn-outline-secondary" href="/strategy-manager/compare?run_id={{ result.run_id }}"
+       hx-get="/strategy-manager/compare?run_id={{ result.run_id }}" hx-target="#tab-content" hx-swap="innerHTML">Compare</a>
   </p>
 
   {% endif %}

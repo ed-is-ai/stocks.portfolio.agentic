@@ -1,0 +1,46 @@
+{#- Story 3.2: Compare picker -- lists Story 3.1's comparison_candidates(run_id)
+    for the current standalone Result, or explains why none are eligible.
+    No candidate is ever preselected/defaulted; Compare only opens on an
+    explicit submit, revalidated server-side via is_comparable. -#}
+<section id="compare-picker-{{ run_id }}" aria-labelledby="compare-picker-heading">
+  <h1 id="compare-picker-heading" tabindex="-1" class="h3 mb-3">Compare Backtest result</h1>
+
+  {% if integrity_error %}
+  <div class="alert alert-danger" role="alert">
+    Result evidence needs attention: {{ integrity_error }}
+  </div>
+  {% else %}
+
+  <p class="mono-num">
+    Comparing against <strong>{{ anchor.strategy_id }} v{{ anchor.strategy_api_version }}</strong>,
+    {{ anchor.start_month }} to {{ anchor.end_month }}, run {{ anchor.run_id }}.
+  </p>
+
+  {% if picker_error %}
+  <div id="compare-picker-errors" class="alert alert-danger" role="alert" tabindex="-1">
+    {{ picker_error }}
+  </div>
+  {% endif %}
+
+  {% if not candidates %}
+  <div class="alert alert-info">
+    Another completed result using the same period, scanner evidence, base currency, and execution rules is required.
+  </div>
+  {% else %}
+  <form method="post" action="/strategy-manager/compare" hx-post="/strategy-manager/compare" hx-target="#tab-content" hx-swap="innerHTML" id="compare-picker-form">
+    <input type="hidden" name="run_id" value="{{ run_id }}">
+    <div class="mb-3">
+      <label for="candidate_run_id" class="form-label">Compare against</label>
+      <select class="form-select" id="candidate_run_id" name="candidate_run_id" required {% if picker_error %}aria-describedby="compare-picker-errors" aria-invalid="true"{% endif %}>
+        <option value="" selected disabled>Choose a Result…</option>
+        {% for candidate in candidates %}
+        <option value="{{ candidate.run_id }}">{{ candidate.strategy_id }} v{{ candidate.strategy_api_version }} — {{ candidate.parameter_summary }} — {{ candidate.start_month }} to {{ candidate.end_month }} — {{ candidate.base_currency }} — data version {{ candidate.profile_hash }} — run {{ candidate.run_id }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn btn-primary" type="submit">Compare</button>
+  </form>
+  {% endif %}
+
+  {% endif %}
+</section>

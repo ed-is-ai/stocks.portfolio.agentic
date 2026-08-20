@@ -27,6 +27,7 @@ from app.repositories.backtest_repo import (
     BacktestIntegrityError,
     BacktestRepository,
     BacktestResultV1,
+    ComparisonEligibilityV1,
 )
 from app.services.backtest.backtest_launch_service import (
     BacktestLaunchCommandV1,
@@ -949,4 +950,138 @@ async def submit_backtest_result_note(
         request,
         "_backtest_note.html",
         _note_context(backtest, run_id, result=result, saved=True),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Story 3.2: Compare picker -- choose an eligible Result to compare against
+# ---------------------------------------------------------------------------
+
+
+def _reraise_vanished_evidence(exc: StrategyJobNotFound) -> BacktestIntegrityError:
+    """Wrap a complete job's vanished Result exactly like ``_result_context``
+    does -- a missing Result row for a job already confirmed complete is a
+    genuine integrity defect, never a 404/partial render."""
+    return BacktestIntegrityError(
+        f"backtest result evidence is missing for a complete job: {exc}"
+    )
+
+
+def _compare_integrity_response(
+    request: Request, run_id: str, exc: BacktestIntegrityError
+) -> HTMLResponse:
+    """Render the Compare picker's explicit integrity-error branch --
+    the single call site every corrupt-evidence path in this section
+    routes through, so none of them can silently diverge."""
+    return templates.TemplateResponse(
+        request,
+        "_compare_picker.html",
+        {"run_id": run_id, "integrity_error": str(exc)},
+    )
+
+
+def _compare_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
+    """Build the Compare picker's context: the anchor Result's own
+    display fields plus Story 3.1's ``comparison_candidates(run_id)`` --
+    a pure read, never a mutation, and the sole candidate-listing call
+    (AC 1, 2, 3). No candidate is ever preselected/defaulted here."""
+    try:
+        anchor = repo.backtest_result(run_id)
+    except StrategyJobNotFound as exc:
+        raise _reraise_vanished_evidence(exc) from exc
+    return {
+        "run_id": run_id,
+        "integrity_error": None,
+        "anchor": anchor,
+        "candidates": repo.comparison_candidates(run_id),
+        "picker_error": None,
+    }
+
+
+def _revalidate_eligibility(
+    repo: BacktestRepository, run_id: str, candidate_run_id: str
+) -> ComparisonEligibilityV1:
+    """Revalidate eligibility at submit time (AC 4, 5) -- the sole call
+    site for ``is_comparable``; a rendered candidate must never be
+    trusted as still-eligible. Mirrors ``_compare_context``'s wrapping
+    of a vanished/corrupt Result into an explicit integrity error."""
+    try:
+        return repo.is_comparable(run_id, candidate_run_id)
+    except StrategyJobNotFound as exc:
+        raise _reraise_vanished_evidence(exc) from exc
+
+
+@router.get("/strategy-manager/compare", response_class=HTMLResponse)
+async def compare_picker(
+    request: Request, backtest: BacktestDep, run_id: str
+) -> Response:
+    """Render the Compare picker for a completed Backtest Result (Story
+    3.2 AC 1-3).
+
+    A non-existent/non-complete/non-Backtest anchor redirects to the
+    existing Activity shell, matching the read-only redirect pattern
+    Story 2.9's ``backtest_result_view`` already established; corrupt
+    anchor evidence (a malformed job row, or a vanished/corrupt Result)
+    renders the explicit integrity-error branch instead of raising.
+    """
+    try:
+        job = backtest.strategy_job(run_id)
+        anchor_ready = (
+            job.job_type is StrategyJobType.BACKTEST
+            and job.status is StrategyJobStatus.COMPLETE
+        )
+    except StrategyJobNotFound:
+        anchor_ready = False
+    except BacktestIntegrityError as exc:
+        return _compare_integrity_response(request, run_id, exc)
+    if not anchor_ready:
+        return RedirectResponse(
+            f"/strategy-manager/activities/{run_id}", status_code=303
+        )
+    try:
+        context = _compare_context(backtest, run_id)
+    except BacktestIntegrityError as exc:
+        return _compare_integrity_response(request, run_id, exc)
+    return templates.TemplateResponse(request, "_compare_picker.html", context)
+
+
+@router.post(
+    "/strategy-manager/compare",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def submit_compare(
+    request: Request,
+    backtest: BacktestDep,
+    run_id: Annotated[str, Form()],
+    candidate_run_id: Annotated[str, Form()] = "",
+) -> Response:
+    """Guarded Compare submit (AC 4, 5) -- revalidates eligibility via
+    ``is_comparable`` on every submit (never trusting a rendered
+    candidate), redirecting to Story 3.3's Comparison URL only when
+    ``eligible=True``. A missing/malformed/stale/ineligible
+    ``candidate_run_id`` re-renders the picker with a linked error and a
+    freshly re-fetched candidate list at 422; a broken anchor surfaces
+    the same explicit integrity-error branch the GET route uses. Neither
+    the Result, its note, nor its evidence manifest is ever mutated
+    here.
+    """
+    try:
+        eligibility = _revalidate_eligibility(backtest, run_id, candidate_run_id)
+    except BacktestIntegrityError as exc:
+        return _compare_integrity_response(request, run_id, exc)
+    if eligibility.eligible:
+        return RedirectResponse(
+            f"/strategy-manager/comparisons/{run_id}/{candidate_run_id}",
+            status_code=303,
+        )
+    try:
+        context = _compare_context(backtest, run_id)
+    except BacktestIntegrityError as exc:
+        return _compare_integrity_response(request, run_id, exc)
+    return templates.TemplateResponse(
+        request,
+        "_compare_picker.html",
+        {**context, "picker_error": eligibility.detail},
+        status_code=422,
     )

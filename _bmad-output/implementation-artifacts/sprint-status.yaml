@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: 2026-08-20 (2-9 done via bmad-dev-auto + code review, spec-2-9-review-a-completed-backtest-result.md)
+last_updated: "2026-08-20 (Correct Course approved: Epic 2 reconciled done; Epic 4 added to backlog; 3-1 marked done post-merge #262)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -60,19 +60,28 @@ development_status:
   1-9-use-historical-initialization-and-coverage-in-the-web-ui: done
   1-10-extend-coverage-with-eligible-bau-scanner-snapshots: done
   epic-1-retrospective: optional
-  epic-2: in-progress
+  epic-2: done
   2-1-author-a-strategy-against-the-versioned-protocol: done
   2-2-discover-strategies-and-validate-their-parameters: done
   2-3-bind-backtests-to-bounded-views-and-a-replay-manifest: done
   2-4-execute-the-deterministic-portfolio-simulation: done
   2-5-calculate-and-atomically-persist-backtest-results: done
   2-6-run-backtests-through-the-durable-activity-lifecycle: done
-  2-7-configure-and-launch-a-strategy-in-the-web-ui: ready-for-dev
-  2-8-monitor-backtest-activity-and-browse-the-results-list: ready-for-dev
+  2-7-configure-and-launch-a-strategy-in-the-web-ui: done
+  2-8-monitor-backtest-activity-and-browse-the-results-list: done
   2-9-review-a-completed-backtest-result: done
   epic-2-retrospective: optional
-  epic-3: backlog
-  3-1-enforce-one-canonical-comparison-eligibility-predicate: backlog
-  3-2-choose-an-eligible-result-through-the-compare-picker: backlog
-  3-3-review-two-results-side-by-side: backlog
+  epic-3: in-progress
+  3-1-enforce-one-canonical-comparison-eligibility-predicate: done
+  3-2-choose-an-eligible-result-through-the-compare-picker: ready-for-dev
+  3-3-review-two-results-side-by-side: ready-for-dev
   epic-3-retrospective: optional
+  epic-4: backlog
+  4-1-establish-canonical-strategy-manager-foundations: backlog
+  4-2-understand-setup-readiness-and-recover: backlog
+  4-3-select-a-security-from-the-active-profile: backlog
+  4-4-pin-selected-universe-evidence-compatibly: backlog
+  4-5-acquire-required-historical-fx-evidence: backlog
+  4-6-complete-the-clean-checkout-journey: backlog
+  4-7-diagnose-and-onboard-strategy-manager: backlog
+  epic-4-retrospective: optional

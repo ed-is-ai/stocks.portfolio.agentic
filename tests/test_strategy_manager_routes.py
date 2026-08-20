@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import html
+import re
 from types import SimpleNamespace
 from typing import cast
 
@@ -20,6 +21,9 @@ from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
     BacktestIntegrityError,
     BacktestResultV1,
+    ComparisonCandidateV1,
+    ComparisonEligibilityV1,
+    ComparisonIneligibleReason,
 )
 from app.services.backtest.backtest_engine import (
     DividendAppliedEventV1,
@@ -80,6 +84,13 @@ class FakeRepo:
         self.note_conflict = False
         self.note_value_error: str | None = None
         self.last_note_call: tuple[str, int, str] | None = None
+        # Story 3.2: Compare picker fakes.
+        self.candidates: tuple[ComparisonCandidateV1, ...] = ()
+        self.candidates_error: Exception | None = None
+        self.eligibility: ComparisonEligibilityV1 | None = None
+        self.eligibility_error: Exception | None = None
+        self.last_is_comparable_call: tuple[str, str] | None = None
+        self.strategy_job_error: Exception | None = None
 
     def snapshot_coverage(self, profile_hash=None):
         if self.coverage_error:
@@ -152,6 +163,8 @@ class FakeRepo:
         return SimpleNamespace(no_op=False)
 
     def strategy_job(self, job_id):
+        if self.strategy_job_error is not None:
+            raise self.strategy_job_error
         if self.activity is None or job_id != self.activity.id:
             from app.services.backtest.strategy_job import StrategyJobNotFound
 
@@ -170,6 +183,23 @@ class FakeRepo:
         if self.backtest_activities_error is not None:
             raise self.backtest_activities_error
         return self.backtest_activities
+
+    def comparison_candidates(self, run_id):
+        if self.candidates_error is not None:
+            raise self.candidates_error
+        return self.candidates
+
+    def is_comparable(self, left, right):
+        self.last_is_comparable_call = (left, right)
+        if self.eligibility_error is not None:
+            raise self.eligibility_error
+        if self.eligibility is not None:
+            return self.eligibility
+        return ComparisonEligibilityV1(
+            eligible=False,
+            reason=ComparisonIneligibleReason.NOT_FOUND,
+            detail=f"{right!r} is not eligible for comparison (not_found)",
+        )
 
 
 class FakeJobs:
@@ -1415,3 +1445,220 @@ def test_backtests_list_links_complete_row_to_result_url(services):
     assert response.status_code == 200
     assert 'href="/strategy-manager/results/job-complete"' in response.text
     assert 'href="/strategy-manager/activities/job-running"' in response.text
+
+
+# ---------------------------------------------------------------------------
+# Story 3.2: Compare picker -- choose an eligible Result to compare against
+# ---------------------------------------------------------------------------
+
+
+def _candidate(**overrides: object) -> ComparisonCandidateV1:
+    defaults: dict[str, object] = dict(
+        run_id="run-2",
+        strategy_id="mean_reversion_v1",
+        strategy_api_version=2,
+        parameter_summary="window=10",
+        start_month="2024-01",
+        end_month="2024-01",
+        base_currency="GBP",
+        profile_hash=RESULT_PROFILE_HASH,
+    )
+    defaults.update(overrides)
+    return ComparisonCandidateV1(**defaults)  # type: ignore[arg-type]
+
+
+def test_result_page_compare_link_is_active_not_disabled(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "Compare (coming soon)" not in text
+    match = re.search(r"<a [^>]*>Compare</a>", text)
+    assert match is not None, "Compare link not found"
+    compare_link = match.group(0)
+    assert "disabled" not in compare_link
+    assert "aria-disabled" not in compare_link
+    assert f'hx-get="/strategy-manager/compare?run_id={RESULT_RUN_ID}"' in compare_link
+    assert 'hx-target="#tab-content" hx-swap="innerHTML"' in compare_link
+
+
+def test_compare_picker_lists_eligible_candidates_none_preselected(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.candidates = (_candidate(),)
+    response = client.get(f"/strategy-manager/compare?run_id={RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "momentum_v1 v1" in text  # anchor identity named
+    assert RESULT_RUN_ID in text
+    assert "mean_reversion_v1 v2" in text
+    assert "window=10" in text
+    assert "2024-01 to 2024-01" in text
+    assert "GBP" in text
+    assert "run-2" in text
+    # No candidate option carries `selected` -- only the disabled placeholder does.
+    assert '<option value="run-2">' in text
+    assert '<option value="" selected disabled>' in text
+
+
+def test_compare_picker_empty_state_has_no_submit_control(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.candidates = ()
+    response = client.get(f"/strategy-manager/compare?run_id={RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert (
+        "Another completed result using the same period, scanner evidence, "
+        "base currency, and execution rules is required." in text
+    )
+    assert "<select" not in text
+    assert "<form" not in text
+    assert "Compare</button>" not in text
+
+
+def test_compare_picker_redirects_missing_anchor_to_activity_shell(services):
+    response = client.get(
+        "/strategy-manager/compare?run_id=does-not-exist", follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == "/strategy-manager/activities/does-not-exist"
+
+
+def test_compare_picker_redirects_non_complete_anchor_to_activity_shell(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id=RESULT_RUN_ID,
+        job_type=StrategyJobType.BACKTEST,
+        status=StrategyJobStatus.RUNNING,
+        status_version=1,
+        current_month="2024-01",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    response = client.get(
+        f"/strategy-manager/compare?run_id={RESULT_RUN_ID}", follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert (
+        response.headers["location"] == f"/strategy-manager/activities/{RESULT_RUN_ID}"
+    )
+
+
+def test_compare_picker_corrupt_job_row_renders_integrity_error(services):
+    repo, _ = services
+    repo.strategy_job_error = BacktestIntegrityError("stored strategy job is invalid")
+    response = client.get(
+        f"/strategy-manager/compare?run_id={RESULT_RUN_ID}", follow_redirects=False
+    )
+    assert response.status_code == 200
+    assert "stored strategy job is invalid" in response.text
+    assert "Compare against" not in response.text
+
+
+def test_compare_picker_integrity_error_renders_no_partial_data(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result_error = BacktestIntegrityError(
+        "stored backtest result digest is invalid"
+    )
+    response = client.get(f"/strategy-manager/compare?run_id={RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "stored backtest result digest is invalid" in response.text
+    assert "Compare against" not in response.text
+
+
+def test_compare_submit_success_redirects_and_mutates_nothing(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.post(
+        "/strategy-manager/compare",
+        data={"run_id": RESULT_RUN_ID, "candidate_run_id": "run-2"},
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert (
+        response.headers["location"]
+        == f"/strategy-manager/comparisons/{RESULT_RUN_ID}/run-2"
+    )
+    assert repo.last_is_comparable_call == (RESULT_RUN_ID, "run-2")
+    assert repo.last_note_call is None
+    assert repo.result is not None
+    assert repo.result.note_version == 1  # unchanged -- no mutation occurred
+
+
+def test_compare_submit_stale_ineligible_returns_422_with_reason(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.candidates = (_candidate(),)
+    repo.eligibility = ComparisonEligibilityV1(
+        eligible=False,
+        reason=ComparisonIneligibleReason.PERIOD_MISMATCH,
+        detail="start_month differs: '2024-01' vs '2024-02'",
+    )
+    response = client.post(
+        "/strategy-manager/compare",
+        data={"run_id": RESULT_RUN_ID, "candidate_run_id": "run-2"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    text = response.text
+    assert 'id="compare-picker-errors"' in text
+    assert 'role="alert"' in text
+    assert 'tabindex="-1"' in text
+    assert "start_month differs" in text
+    # A fresh candidate list is re-fetched, and nothing is preselected.
+    assert "mean_reversion_v1 v2" in text
+    assert '<option value="" selected disabled>' in text
+
+
+def test_compare_submit_missing_candidate_id_treated_as_ineligible(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.candidates = (_candidate(),)
+    response = client.post(
+        "/strategy-manager/compare",
+        data={"run_id": RESULT_RUN_ID},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    assert repo.last_is_comparable_call == (RESULT_RUN_ID, "")
+
+
+def test_compare_submit_anchor_integrity_error_branch_no_redirect(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.eligibility_error = BacktestIntegrityError(
+        "stored backtest result digest is invalid"
+    )
+    response = client.post(
+        "/strategy-manager/compare",
+        data={"run_id": RESULT_RUN_ID, "candidate_run_id": "run-2"},
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 200
+    assert "stored backtest result digest is invalid" in response.text
+
+
+def test_compare_submit_requires_auth_guard(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    response = client.post(
+        "/strategy-manager/compare",
+        data={"run_id": RESULT_RUN_ID, "candidate_run_id": "run-2"},
+    )
+    assert response.status_code == 403
+    assert repo.last_is_comparable_call is None
