@@ -1,0 +1,4 @@
+interface:
+  display_name: "Darvas Box Backtest"
+  short_description: "Backtest Darvas box breakout signals"
+  default_prompt: "Use $rtly-backtest-darvas-box to backtest a Darvas box breakout strategy."

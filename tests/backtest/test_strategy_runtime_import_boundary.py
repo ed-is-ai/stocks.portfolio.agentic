@@ -7,7 +7,9 @@ direct, aliased, ``from``, or transitive import of a forbidden dependency
 family: ``app.agents`` (covers ``TraderAgent`` and every live agent,
 including ``app.agents.analyst.analyst_agent``) and ``app.repositories``
 (covers live portfolio/trade/cash/position repositories and the
-``Connect``/DB-session factory in ``app.repositories.db``). This is a
+``Connect``/DB-session factory in ``app.repositories.db``). It also rejects
+process and network client modules that would bypass deterministic replay.
+This is a
 test-time guard, not a runtime sandbox: ``typing.Protocol``/Pyrefly give no
 such enforcement at call time, so the safety boundary documented in
 ``docs/strategy-manager/strategy-authoring-v1.md`` must be proven here
@@ -21,11 +23,45 @@ from pathlib import Path
 
 import pytest
 
+from app.services.backtest.skill_discovery import discover_strategies
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-#: Package roots a Strategy runtime module may never import, directly or
-#: transitively -- AD-10's forbidden dependency families.
-_FORBIDDEN_PREFIXES: tuple[str, ...] = ("app.agents", "app.repositories")
+#: Module roots reached transitively through the one allowed first-party host
+#: API may never import these live-state or nondeterministic dependency families.
+_FORBIDDEN_PREFIXES: tuple[str, ...] = (
+    "app.agents",
+    "app.repositories",
+    "aiohttp",
+    "http",
+    "httpx",
+    "requests",
+    "socket",
+    "subprocess",
+    "urllib",
+    "urllib3",
+    "yfinance",
+)
+
+#: Closed imports available directly to independently releasable Strategy
+#: runtimes. Methodology code stays inside the hashed runtime; the sole
+#: first-party dependency is the versioned host protocol.
+_ALLOWED_RUNTIME_PREFIXES: tuple[str, ...] = (
+    "__future__",
+    "bisect",
+    "collections",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "enum",
+    "functools",
+    "itertools",
+    "math",
+    "operator",
+    "statistics",
+    "typing",
+    "app.services.backtest.strategy_protocol",
+)
 
 FIXTURE_STRATEGY_PATH = (
     PROJECT_ROOT
@@ -36,13 +72,18 @@ FIXTURE_STRATEGY_PATH = (
     / "scripts"
     / "strategy.py"
 )
+LIVE_SKILLS_ROOT = PROJECT_ROOT / "skills"
+LIVE_STRATEGY_PATHS = tuple(
+    LIVE_SKILLS_ROOT / descriptor.runtime_path
+    for descriptor in discover_strategies(LIVE_SKILLS_ROOT).strategies
+)
 
 
 class ForbiddenImportError(AssertionError):
     """Raised naming the offending module and forbidden dependency."""
 
 
-def _imported_modules(source: str) -> list[str]:
+def _imported_modules(source: str, *, enforce_runtime_rules: bool = False) -> list[str]:
     """Return every absolute dotted module name a module's AST imports."""
     tree = ast.parse(source)
     modules: list[str] = []
@@ -50,8 +91,26 @@ def _imported_modules(source: str) -> list[str]:
         if isinstance(node, ast.Import):
             modules.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            if node.module is not None and node.level == 0:
+            if node.level != 0:
+                if enforce_runtime_rules:
+                    raise ForbiddenImportError(
+                        "Strategy runtimes may not use relative imports; "
+                        "methodology code must remain inside the hashed entrypoint"
+                    )
+            elif node.module is not None:
                 modules.append(node.module)
+        elif enforce_runtime_rules and isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id == "__import__":
+                raise ForbiddenImportError(
+                    "Strategy runtimes may not use dynamic __import__ calls"
+                )
+            if (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "import_module"
+            ):
+                raise ForbiddenImportError(
+                    "Strategy runtimes may not use dynamic import_module calls"
+                )
     return modules
 
 
@@ -59,6 +118,13 @@ def _is_forbidden(module: str) -> bool:
     return any(
         module == prefix or module.startswith(f"{prefix}.")
         for prefix in _FORBIDDEN_PREFIXES
+    )
+
+
+def _is_allowed_runtime_import(module: str) -> bool:
+    return any(
+        module == prefix or module.startswith(f"{prefix}.")
+        for prefix in _ALLOWED_RUNTIME_PREFIXES
     )
 
 
@@ -112,14 +178,21 @@ def assert_no_forbidden_imports(
     on import.
     """
     visited: set[Path] = set()
-    stack = [entry_path.resolve()]
+    entry = entry_path.resolve()
+    stack = [entry]
     while stack:
         current = stack.pop()
         if current in visited:
             continue
         visited.add(current)
         source = current.read_text(encoding="utf-8")
-        for module in _imported_modules(source):
+        is_runtime_entry = current == entry
+        for module in _imported_modules(source, enforce_runtime_rules=is_runtime_entry):
+            if is_runtime_entry and not _is_allowed_runtime_import(module):
+                raise ForbiddenImportError(
+                    f"{current} imports dependency {module!r} outside the closed "
+                    "Strategy runtime allowlist"
+                )
             if _is_forbidden(module):
                 raise ForbiddenImportError(
                     f"{current} imports forbidden dependency {module!r}"
@@ -186,6 +259,20 @@ def test_forbidden_repository_import_is_rejected(tmp_path: Path) -> None:
         assert_no_forbidden_imports(module)
 
 
+@pytest.mark.parametrize(
+    "module_name",
+    ("subprocess", "socket", "requests", "os", "multiprocessing", "ftplib"),
+)
+def test_process_and_network_imports_are_rejected(
+    tmp_path: Path, module_name: str
+) -> None:
+    module = tmp_path / "bad_strategy.py"
+    module.write_text(f"import {module_name}\n", encoding="utf-8")
+
+    with pytest.raises(ForbiddenImportError, match=module_name):
+        assert_no_forbidden_imports(module)
+
+
 def test_transitive_forbidden_import_is_rejected(tmp_path: Path) -> None:
     """A Strategy that only imports a real, non-``app.agents`` project
     module (``app.services.trader_service``) must still be rejected,
@@ -195,8 +282,29 @@ def test_transitive_forbidden_import_is_rejected(tmp_path: Path) -> None:
         "from app.services.trader_service import TraderService\n", encoding="utf-8"
     )
 
-    with pytest.raises(ForbiddenImportError, match="app.agents"):
+    with pytest.raises(ForbiddenImportError, match="closed Strategy runtime"):
         assert_no_forbidden_imports(module)
+
+
+def test_allowed_host_protocol_is_still_checked_transitively(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    protocol = project_root / "app" / "services" / "backtest" / "strategy_protocol.py"
+    protocol.parent.mkdir(parents=True)
+    for package in (
+        project_root / "app",
+        project_root / "app" / "services",
+        project_root / "app" / "services" / "backtest",
+    ):
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    protocol.write_text("import app.agents.trader\n", encoding="utf-8")
+    module = project_root / "strategy.py"
+    module.write_text(
+        "from app.services.backtest.strategy_protocol import Signal\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ForbiddenImportError, match="app.agents.trader"):
+        assert_no_forbidden_imports(module, project_root=project_root)
 
 
 # ---------------------------------------------------------------------------
@@ -204,14 +312,17 @@ def test_transitive_forbidden_import_is_rejected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_approved_dependency_free_core_import_passes(tmp_path: Path) -> None:
-    module = tmp_path / "good_strategy.py"
+def test_app_core_import_is_rejected_for_independently_releasable_skill(
+    tmp_path: Path,
+) -> None:
+    module = tmp_path / "bad_strategy.py"
     module.write_text(
         "from app.core.stage_classification import classify_weinstein_stage\n",
         encoding="utf-8",
     )
 
-    assert_no_forbidden_imports(module)  # does not raise
+    with pytest.raises(ForbiddenImportError, match="closed Strategy runtime"):
+        assert_no_forbidden_imports(module)
 
 
 def test_approved_strategy_protocol_import_passes(tmp_path: Path) -> None:
@@ -231,6 +342,25 @@ def test_stdlib_only_import_passes(tmp_path: Path) -> None:
     assert_no_forbidden_imports(module)  # does not raise
 
 
+def test_relative_helper_import_is_rejected(tmp_path: Path) -> None:
+    module = tmp_path / "bad_strategy.py"
+    module.write_text("from .helper import client\n", encoding="utf-8")
+
+    with pytest.raises(ForbiddenImportError, match="relative imports"):
+        assert_no_forbidden_imports(module)
+
+
+@pytest.mark.parametrize(
+    "source", ('__import__("requests")\n', 'importlib.import_module("requests")\n')
+)
+def test_dynamic_import_is_rejected(tmp_path: Path, source: str) -> None:
+    module = tmp_path / "bad_strategy.py"
+    module.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ForbiddenImportError, match="dynamic"):
+        assert_no_forbidden_imports(module)
+
+
 # ---------------------------------------------------------------------------
 # The real fixture Strategy proves the boundary end to end
 # ---------------------------------------------------------------------------
@@ -239,6 +369,14 @@ def test_stdlib_only_import_passes(tmp_path: Path) -> None:
 def test_fixture_strategy_imports_nothing_forbidden() -> None:
     assert FIXTURE_STRATEGY_PATH.is_file()
     assert_no_forbidden_imports(FIXTURE_STRATEGY_PATH)  # does not raise
+
+
+@pytest.mark.parametrize(
+    "strategy_path", LIVE_STRATEGY_PATHS, ids=lambda path: path.parts[-3]
+)
+def test_live_strategy_imports_nothing_forbidden(strategy_path: Path) -> None:
+    assert strategy_path.is_file()
+    assert_no_forbidden_imports(strategy_path)
 
 
 # ---------------------------------------------------------------------------
@@ -263,7 +401,7 @@ def test_forbidden_reexport_from_an_ancestor_package_init_is_rejected(
     module = project_root / "strategy.py"
     module.write_text("from app.services.leaf import something\n", encoding="utf-8")
 
-    with pytest.raises(ForbiddenImportError, match="app.agents.trader"):
+    with pytest.raises(ForbiddenImportError, match="closed Strategy runtime"):
         assert_no_forbidden_imports(module, project_root=project_root)
 
 

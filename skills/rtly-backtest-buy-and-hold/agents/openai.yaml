@@ -1,0 +1,4 @@
+interface:
+  display_name: "Buy and Hold Backtest"
+  short_description: "Backtest a passive buy-and-hold benchmark"
+  default_prompt: "Use $rtly-backtest-buy-and-hold to backtest a passive buy-and-hold benchmark."

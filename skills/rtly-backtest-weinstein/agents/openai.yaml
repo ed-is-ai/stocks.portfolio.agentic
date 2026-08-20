@@ -1,0 +1,4 @@
+interface:
+  display_name: "Weinstein Backtest"
+  short_description: "Backtest a deterministic Weinstein breakout"
+  default_prompt: "Use $rtly-backtest-weinstein to run a deterministic Weinstein stage breakout backtest."

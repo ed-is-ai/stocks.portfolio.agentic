@@ -1,0 +1,4 @@
+interface:
+  display_name: "Turtle Trend Backtest"
+  short_description: "Backtest Turtle trend channel signals"
+  default_prompt: "Use $rtly-backtest-turtle-trend to backtest a Turtle trend-following strategy."

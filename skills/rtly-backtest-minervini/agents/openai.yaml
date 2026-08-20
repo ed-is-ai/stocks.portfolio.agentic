@@ -1,0 +1,4 @@
+interface:
+  display_name: "Minervini Backtest"
+  short_description: "Backtest a deterministic Minervini breakout"
+  default_prompt: "Use $rtly-backtest-minervini to run a deterministic Minervini breakout backtest."

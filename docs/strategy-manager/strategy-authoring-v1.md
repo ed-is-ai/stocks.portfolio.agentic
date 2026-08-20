@@ -391,11 +391,14 @@ or per-session subprocess call.
 
 A Strategy runtime module may only import:
 
-- `app.services.backtest.strategy_protocol` (this module),
-- dependency-free `app.core` utilities (e.g. `app.core.stage_classification`,
-  which has no imports beyond `decimal`/`typing`),
-- the standard library, and
-- explicitly approved calculation modules for its own pattern logic.
+- `app.services.backtest.strategy_protocol` (the versioned host API), and
+- deterministic standard-library calculation modules on the mechanically
+  enforced allowlist.
+
+Methodology code stays inside the Skill's hashed `scripts/strategy.py`. A
+Strategy does not import `app.core` helpers: keeping application behavior out
+of the runtime makes the Skill independently releasable and prevents an
+unhashed shared module change from altering replay behavior.
 
 It must never import -- directly, aliased, via `from ... import ...`, or
 transitively through any other first-party module -- `TraderAgent`,
