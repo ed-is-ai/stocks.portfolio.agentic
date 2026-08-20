@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
 import html
@@ -984,6 +985,54 @@ class BacktestActivitySummaryV1:
     metric_availability: "MetricAvailabilityV1 | None"
 
 
+class ComparisonIneligibleReason(StrEnum):
+    """Stable, machine-readable reasons two Backtest Results are not
+    eligible for comparison (AD-19, Story 3.1) -- one code per rejection
+    dimension, mirroring ``MetricUnavailableReason``/``SkipReasonCode``'s
+    established enum-plus-frozen-dataclass idiom."""
+
+    NOT_FOUND = "not_found"
+    SELF_COMPARISON = "self_comparison"
+    TOMBSTONED = "tombstoned"
+    NOT_COMPLETE = "not_complete"
+    PERIOD_MISMATCH = "period_mismatch"
+    PROFILE_MISMATCH = "profile_mismatch"
+    EVIDENCE_DIGEST_MISMATCH = "evidence_digest_mismatch"
+    CURRENCY_MISMATCH = "currency_mismatch"
+    EXECUTION_CONTRACT_MISMATCH = "execution_contract_mismatch"
+
+
+@dataclass(frozen=True)
+class ComparisonEligibilityV1:
+    """The typed, exhaustive return of ``is_comparable`` (AD-19, Story
+    3.1) -- either eligible with no reason, or ineligible with a stable
+    machine-readable reason plus a human-readable ``detail`` naming what
+    differed. ``detail`` is a diagnostic string for logs/debugging, not
+    pre-approved UI copy -- callers building user-facing messages should
+    key off ``reason`` instead."""
+
+    eligible: bool
+    reason: ComparisonIneligibleReason | None
+    detail: str
+
+
+@dataclass(frozen=True)
+class ComparisonCandidateV1:
+    """One other Backtest Result eligible for comparison against an
+    anchor Result (Story 3.1 AC 3) -- exactly the fields the picker needs
+    to display: Strategy identity, parameter summary, normalized period,
+    base currency, and data-version context."""
+
+    run_id: str
+    strategy_id: str
+    strategy_api_version: int
+    parameter_summary: str
+    start_month: str
+    end_month: str
+    base_currency: str
+    profile_hash: str
+
+
 SnapshotEvidenceV1 = HistoricalEvidenceV1
 
 
@@ -1726,6 +1775,183 @@ class BacktestRepository:
                 )
             )
         return tuple(summaries)
+
+    def is_comparable(self, left: str, right: str) -> ComparisonEligibilityV1:
+        """Return AD-19's one canonical comparison-eligibility verdict for
+        two persisted Backtest Result IDs (Story 3.1 AC 1, 2, 5).
+
+        Self-comparison is rejected before any lookup. Each side is then
+        checked via the same ``strategy_jobs`` row :meth:`strategy_job`
+        already reads: a missing row, a tombstoned job
+        (``deleted_at IS NOT NULL``), or a non-complete Backtest job
+        (queued/running/failed/cancelled, or a non-Backtest job type) is
+        reported as an ordinary ``eligible=False`` outcome, never an
+        error. Once both jobs are confirmed complete, their Results are
+        loaded via :meth:`backtest_result` -- never re-parsed here -- and
+        any :class:`BacktestIntegrityError`/:class:`StrategyJobNotFound`
+        it raises for a complete job whose Result has vanished or been
+        tampered with propagates uncaught, mirroring
+        :meth:`list_backtest_activities`'s existing integrity boundary
+        rather than swallowing it into a false ineligibility reason.
+        Eligible Results are then compared on exactly the six AD-19
+        dimensions (``start_month``, ``end_month``, ``profile_hash``,
+        ``ordered_month_digest``, ``base_currency``,
+        ``execution_contract_digest``); ``strategy_id``, ``parameters``,
+        and ``starting_capital`` are never compared.
+
+        Only the first-encountered ineligibility reason or integrity
+        error is reported when both ``left`` and ``right`` are broken --
+        ``left`` is always checked first. Fixing it and calling again is
+        required to discover a second, independent problem on ``right``.
+        """
+        if left == right:
+            return ComparisonEligibilityV1(
+                eligible=False,
+                reason=ComparisonIneligibleReason.SELF_COMPARISON,
+                detail=f"{left!r} cannot be compared to itself",
+            )
+
+        for run_id in (left, right):
+            reason = self._comparison_job_reason(run_id)
+            if reason is not None:
+                return ComparisonEligibilityV1(
+                    eligible=False,
+                    reason=reason,
+                    detail=f"{run_id!r} is not eligible for comparison "
+                    f"({reason.value})",
+                )
+
+        left_result = self.backtest_result(left)
+        right_result = self.backtest_result(right)
+        return self._compare_eligible_results(left_result, right_result)
+
+    def _comparison_job_reason(self, run_id: str) -> ComparisonIneligibleReason | None:
+        """Return the reason ``run_id`` is not a comparable job, or
+        ``None`` if it is a non-tombstoned, complete Backtest job."""
+        try:
+            job = self.strategy_job(run_id)
+        except StrategyJobNotFound:
+            return ComparisonIneligibleReason.NOT_FOUND
+        if job.deleted_at is not None:
+            return ComparisonIneligibleReason.TOMBSTONED
+        if (
+            job.job_type is not StrategyJobType.BACKTEST
+            or job.status is not StrategyJobStatus.COMPLETE
+        ):
+            return ComparisonIneligibleReason.NOT_COMPLETE
+        return None
+
+    @staticmethod
+    def _compare_eligible_results(
+        left: BacktestResultV1, right: BacktestResultV1
+    ) -> ComparisonEligibilityV1:
+        """Compare two already-loaded complete Results on exactly AD-19's
+        six dimensions, returning the first mismatch's specific reason."""
+        dimensions: tuple[
+            tuple[ComparisonIneligibleReason, str, object, object], ...
+        ] = (
+            (
+                ComparisonIneligibleReason.PERIOD_MISMATCH,
+                "start_month",
+                left.start_month,
+                right.start_month,
+            ),
+            (
+                ComparisonIneligibleReason.PERIOD_MISMATCH,
+                "end_month",
+                left.end_month,
+                right.end_month,
+            ),
+            (
+                ComparisonIneligibleReason.PROFILE_MISMATCH,
+                "profile_hash",
+                left.profile_hash,
+                right.profile_hash,
+            ),
+            (
+                ComparisonIneligibleReason.EVIDENCE_DIGEST_MISMATCH,
+                "ordered_month_digest",
+                left.ordered_month_digest,
+                right.ordered_month_digest,
+            ),
+            (
+                ComparisonIneligibleReason.CURRENCY_MISMATCH,
+                "base_currency",
+                left.base_currency,
+                right.base_currency,
+            ),
+            (
+                ComparisonIneligibleReason.EXECUTION_CONTRACT_MISMATCH,
+                "execution_contract_digest",
+                left.execution_contract_digest,
+                right.execution_contract_digest,
+            ),
+        )
+        for reason, field, left_value, right_value in dimensions:
+            if left_value != right_value:
+                return ComparisonEligibilityV1(
+                    eligible=False,
+                    reason=reason,
+                    detail=f"{field} differs: {left_value!r} vs {right_value!r}",
+                )
+        return ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+
+    def comparison_candidates(self, run_id: str) -> tuple[ComparisonCandidateV1, ...]:
+        """Return every other eligible Backtest Result for ``run_id``
+        (Story 3.1 AC 3), newest first.
+
+        Loads the anchor via :meth:`backtest_result` first, propagating
+        :class:`StrategyJobNotFound`/:class:`BacktestIntegrityError`
+        unchanged for a missing/malformed anchor -- an ineligible
+        (e.g. tombstoned) but still-loadable anchor is not itself an
+        error here; it simply yields no candidates, since every pairing
+        against it would fail the same job-level check below. The anchor
+        is loaded exactly once and reused for every candidate comparison
+        (never re-verified per candidate) via the same
+        :meth:`_comparison_job_reason`/:meth:`_compare_eligible_results`
+        helpers :meth:`is_comparable` itself calls -- the identical
+        exhaustive predicate used at submission, never a second/
+        duplicated comparison. Only eligible peers are kept, ordered
+        ``enqueue_seq DESC``. No candidate is ever preselected.
+        """
+        anchor_result = self.backtest_result(run_id)
+        anchor_reason = self._comparison_job_reason(run_id)
+        if anchor_reason is not None:
+            return ()
+
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT id FROM strategy_jobs
+                   WHERE job_type='backtest' AND status='complete'
+                     AND deleted_at IS NULL AND id != ?
+                   ORDER BY enqueue_seq DESC""",
+                (run_id,),
+            ).fetchall()
+
+        candidates: list[ComparisonCandidateV1] = []
+        for row in rows:
+            candidate_id = str(row[0])
+            if self._comparison_job_reason(candidate_id) is not None:
+                continue
+            candidate_result = self.backtest_result(candidate_id)
+            eligibility = self._compare_eligible_results(
+                anchor_result, candidate_result
+            )
+            if not eligibility.eligible:
+                continue
+            candidates.append(
+                ComparisonCandidateV1(
+                    run_id=candidate_result.run_id,
+                    strategy_id=candidate_result.strategy_id,
+                    strategy_api_version=candidate_result.strategy_api_version,
+                    parameter_summary=_parameter_summary(candidate_result.parameters),
+                    start_month=candidate_result.start_month,
+                    end_month=candidate_result.end_month,
+                    base_currency=candidate_result.base_currency,
+                    profile_hash=candidate_result.profile_hash,
+                )
+            )
+        return tuple(candidates)
 
     def claim_next_strategy_job(self) -> ClaimedStrategyJobV1 | None:
         """Claim the smallest queued sequence while enforcing one running job."""
