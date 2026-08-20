@@ -5,7 +5,11 @@
 ![Purpose: Research](https://img.shields.io/badge/Purpose-Research-6f42c1)
 ![Execution: Manual](https://img.shields.io/badge/Execution-Manual-orange)
 
-A multi-agent research and portfolio-tracking application for growth and momentum traders. It combines CANSLIM, Weinstein Stage Analysis, and Mark Minervini-style Volatility Contraction Pattern (VCP) analysis to turn a broad stock universe into a smaller, ranked list of setups worth reviewing.
+A multi-agent research, portfolio-tracking, and deterministic backtesting
+application for growth and momentum traders. It combines CANSLIM, Weinstein
+Stage Analysis, and Mark Minervini-style Volatility Contraction Pattern (VCP)
+analysis to turn a broad stock universe into a smaller, ranked list of setups
+worth reviewing.
 
 > This is a decision-support tool, not an automated trading bot. It does not connect to a broker or place orders. You remain responsible for validating every setup, sizing risk, and executing trades.
 
@@ -27,8 +31,12 @@ It helps traders by automating the repetitive research loop:
 4. Identify pivots, entry zones, stops, execution state, and risk multiples.
 5. Surface actionable setups in the web dashboard and optional email alerts.
 6. Track manually entered trades and portfolio performance separately from the research pipeline.
+7. Replay versioned Strategy Skills against bounded historical evidence and
+   review their metrics, equity curves, trades, and provenance.
 
-The result is a prioritised research queue, not a buy or sell recommendation. The repository includes no backtest or independently verified performance record.
+The result is a prioritised research queue, not a buy or sell recommendation.
+The bundled backtest engine can produce local research results, but the
+repository does not publish an independently verified performance record.
 
 ## How it works
 
@@ -38,6 +46,8 @@ Extraction ──> Scanner ──> Analyst ──> Alert
                  └──> market context and source-health reporting
 
 Trader ──> manual trades, positions, cash flows, and P&L
+
+Qualified history ──> Monthly snapshots ──> Strategy Manager ──> Backtest results
 ```
 
 | Agent | Responsibility |
@@ -47,6 +57,11 @@ Trader ──> manual trades, positions, cash flows, and P&L
 | Analyst | Scores each setup using deterministic CANSLIM, Weinstein, SEPA, and VCP rules; an optional local LLM can provide a second opinion. |
 | Alert | Sends actionable setups by email and applies a per-ticker cooldown. |
 | Trader | Records trades entered by the user, imports SIPP activity, and calculates positions and P&L. |
+
+Strategy Manager is separate from the live research pipeline. It discovers
+versioned backtest Strategy Skills, binds each run to immutable historical
+evidence, evaluates signals without look-ahead, and stores reproducible results
+in a durable job ledger. It never submits an order to a broker.
 
 The deterministic analysis includes:
 
@@ -133,6 +148,7 @@ The app runs without paid API keys. Add only the integrations you need:
 | `EMAIL_USER`, `EMAIL_PASSWORD`, `EMAIL_TO` | Email alerts. Gmail users should use an app password. | Required only for alerts |
 | `EMAIL_HOST`, `EMAIL_PORT` | SMTP server; defaults to `smtp.gmail.com:587`. | Optional |
 | `APP_AUTH_TOKEN` | Shared secret for trade- and portfolio-mutating requests made from outside localhost. | Recommended for network exposure |
+| `STRATEGY_MANAGER_WORKER_ENABLED` | Lets this web process dispatch local historical-initialization and backtest workers. Defaults to `true`; one enabled process is the simplest local deployment. | Required for queued jobs to run |
 | `FMP_API_KEY` | Standalone skills that still use Financial Modeling Prep. | Skill-dependent |
 
 API keys can also be entered through the dashboard settings where supported. Do not commit `.env`.
@@ -158,6 +174,31 @@ uv run python -m app.main run-pipeline --extract
 ```
 
 If using the pip-created environment, omit `uv run` from these commands.
+
+### Strategy Manager and backtesting
+
+Open **Strategy Manager** in the dashboard to initialize historical coverage,
+configure a Strategy, monitor its durable activity, and review completed
+metrics, equity curves, trade logs, and provenance.
+
+A working run follows this sequence:
+
+1. Confirm that the historical provider contract, reconstruction roster, and
+   active snapshot profile have been provisioned.
+2. Use **Historical initialization** to create at least one Ready monthly
+   interval.
+3. Choose **Configure a Backtest**, select a discovered Strategy, use a real
+   active-roster `security_id`, and select months inside one Ready interval.
+4. Keep one worker-enabled application process running until the Activity page
+   reaches Complete, then review the result.
+
+> [!IMPORTANT]
+> A clean checkout does not currently provision the qualification, roster, or
+> active profile required by step 1. Mixed GBP/USD rosters may also require
+> pinned historical FX evidence. The
+> [Strategy Manager onboarding guide](docs/strategy-manager/onboarding.md)
+> provides copy-paste preflight checks, the supported UI flow, and a symptom
+> guide that distinguishes setup gaps from worker or Strategy failures.
 
 ## Main library dependencies
 
@@ -224,6 +265,9 @@ Common generated files include:
 | `app/agents/analyst/analysis_results.xlsx` | Human-readable analysis report. |
 | `app/agents/alert/alerts.db` | Alert cooldown history. |
 | `app/agents/trader/trades.db` | Trades and portfolio cash flows. |
+| `data/backtest.db` | Strategy Manager qualification, roster, profile, monthly coverage, job ledger, trade logs, equity curves, and results. |
+| `data/historical_price_cache.db` | Immutable provider-native price and corporate-action evidence pinned by historical initialization and backtests. |
+| `data/bau_run_envelopes/` | Content-addressed envelopes used to promote eligible completed scanner runs into monthly snapshot coverage. |
 | `logs/pipeline_runs.csv` | Per-run metrics. |
 | `data/portfolio_value.csv` | Portfolio value snapshots. |
 
@@ -242,7 +286,7 @@ app/
 └── workflows/       pipeline assembly
 
 config/              ticker aliases and curated watchlists
-skills/              standalone screening and analysis packages
+skills/              screening, analysis, and backtest Strategy packages
 tests/               automated test suite
 ```
 
@@ -268,6 +312,8 @@ Extraction sources ──> Scanner ──> Analyst ──> Alert
                               └── market-narrative ──> dashboard and email context
 
 market-top-detector (optional) ──> separate portfolio-risk context
+
+rtly-backtest-* ──> Strategy Manager ──> reproducible local results
 ```
 
 ### Skills used directly by the application
@@ -287,6 +333,26 @@ market-top-detector (optional) ──> separate portfolio-risk context
 | `finviz-screener` | Manual candidate discovery. | Converts screening criteria into a Finviz URL. Candidates can then be reviewed or added to a curated watchlist; its browser workflow is not called automatically. |
 | `institutional-flow-tracker` | Thesis validation and quarterly idea generation. | Uses 13F data to identify institutional accumulation or distribution. Its reports complement WhaleWisdom extraction, but are not automatically merged into a pipeline run. |
 | `market-top-detector` | Portfolio-level risk review alongside the pipeline. | Produces a tactical market-top risk score using distribution days, leadership deterioration, breadth, sentiment, and defensive rotation. It is broader than the pipeline's market narrative and runs separately. |
+
+### Backtest Strategy Skills
+
+The Strategy Manager discovers folders whose `SKILL.md` declares
+`kind: backtest-strategy`. Their runtimes receive bounded market and portfolio
+views; they do not fetch live data or import application business logic.
+
+| Strategy Skill | Method |
+| --- | --- |
+| `rtly-backtest-buy-and-hold` | Passive one-security baseline with a configurable first-entry date. |
+| `rtly-backtest-darvas-box` | Darvas box breakout and box-bottom exit with volume confirmation. |
+| `rtly-backtest-minervini` | Stage 2 Minervini VCP breakout with trend, score, volume, pivot-extension, and loss gates. |
+| `rtly-backtest-moving-average` | Fast/slow simple-moving-average crossover. |
+| `rtly-backtest-turtle-trend` | Donchian-style entry-high and exit-low channels. |
+| `rtly-backtest-weinstein` | Weinstein Stage 2 breakout with relative-volume and trend exits. |
+
+All six are deterministic, long-only, fixed-share v1 implementations. Each
+trades one configured internal `security_id`; see the
+[onboarding guide](docs/strategy-manager/onboarding.md#find-a-usable-security-id)
+before accepting the placeholder default in a live profile.
 
 In practical terms, the default automated path relies on `vcp-screener`, selected `technical-analyst` rules, `breakout-trade-planner`, and `market-narrative`. The other skills extend candidate discovery, confirmation, or market-risk analysis when a trader wants a deeper manual review.
 
@@ -316,10 +382,24 @@ package-local configurations so their generic module names (such as
 
 The tests cover the scoring engine, historical pivots, market context, source health, repositories, security, portfolio accounting, alerts, pipeline orchestration, and web routes.
 
+Strategy Manager and the bundled Strategy contracts can be checked separately:
+
+```bash
+uv run pytest tests/backtest tests/test_strategy_manager_routes.py -q
+uv run pytest skills/rtly-backtest-buy-and-hold/scripts/tests -q
+```
+
 ## Limitations
 
 - This is a personal project and has not been externally validated.
-- No backtest or performance evidence is included.
+- Bundled Strategy results are locally generated research artifacts, not
+  independently verified or predictive performance claims.
+- Strategy Manager is not yet self-provisioning on a clean checkout; provider
+  qualification, roster capture, and active-profile creation require an
+  operator/bootstrap workflow outside the current UI.
+- The current Strategy form does not provide an active-roster security picker,
+  and mixed-currency runs may require separately provisioned historical FX
+  evidence.
 - Scores can be wrong and should be checked against the underlying chart and data.
 - Third-party data sources can be stale, unavailable, throttled, or structurally changed.
 - The TradingView and QuiverQuant integrations use unofficial/public web interfaces that may change.

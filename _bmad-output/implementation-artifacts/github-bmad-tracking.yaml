@@ -3,33 +3,34 @@ repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
   ux_design: embedded-relevant-text
-  github_issues_verified: 31
+  github_issues_verified: 39
 correct_course:
-  proposal: sprint-change-proposal-2026-08-10.md
-  status: synchronized
-  synchronized_at: 2026-08-10
-  verified_issues: [184, 185, 187, 189, 195, 196, 199, 207, 208]
+  proposal: sprint-change-proposal-2026-08-20.md
+  status: approved-major-handoff
+  synchronized_at: 2026-08-20
+  verified_issues: [254, 255, 256, 257, 258, 259, 260, 261]
 implementation_readiness:
-  report: implementation-readiness-report-2026-08-10-rerun.md
-  status: ready
-  assessed_at: 2026-08-10
-  critical_issues: 0
-  major_issues: 0
-  non_blocking_observations: 9
+  report: implementation-readiness-report-2026-08-20-rerun.md
+  status: not-ready-canonical-amendments-pending
+  assessed_at: 2026-08-20
+  critical_issues: 2
+  major_issues: 4
+  minor_concerns: 2
+  actionable_findings: 8
+  next_gate: amend-canonical-artifacts-and-rerun-readiness
 sprint_planning:
-  status: refreshed
-  refreshed_at: 2026-08-14
-  source: epics.md
-  readiness: ready
-  epics: 3
-  stories: 22
-  status_changes: 2
-  selected_stories: ["2.6", "2.7", "2.8", "2.9"]
+  status: correct-course-approved
+  refreshed_at: 2026-08-20
+  source: sprint-change-proposal-2026-08-20.md
+  readiness: pending-canonical-artifact-amendments
+  epics: 4
+  stories: 29
+  selected_stories: ["4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "4.7"]
 create_story:
-  latest_story: 2-9-review-a-completed-backtest-result
-  issue: 202
+  latest_story: 3-3-review-two-results-side-by-side
+  issue: 205
   status: ready-for-dev
-  created_at: 2026-08-14
+  created_at: 2026-08-20
 epics:
   epic-1:
     issue: 207
@@ -43,6 +44,10 @@ epics:
     issue: 206
     status: open
     sub_issues: [203, 204, 205]
+  epic-4:
+    issue: 254
+    status: backlog
+    sub_issues: [257, 255, 258, 256, 261, 259, 260]
 stories:
   1-1-qualify-the-free-historical-data-contract: { issue: 184, status: done }
   1-2-capture-stable-security-identities-and-the-reconstruction-roster: { issue: 185, status: open }
@@ -60,12 +65,19 @@ stories:
   2-4-execute-the-deterministic-portfolio-simulation: { issue: 197, status: ready-for-dev }
   2-5-calculate-and-atomically-persist-backtest-results: { issue: 198, status: ready-for-dev }
   2-6-run-backtests-through-the-durable-activity-lifecycle: { issue: 199, status: ready-for-dev }
-  2-7-configure-and-launch-a-strategy-in-the-web-ui: { issue: 200, status: ready-for-dev }
-  2-8-monitor-backtest-activity-and-browse-the-results-list: { issue: 201, status: ready-for-dev }
-  2-9-review-a-completed-backtest-result: { issue: 202, status: ready-for-dev }
+  2-7-configure-and-launch-a-strategy-in-the-web-ui: { issue: 200, status: done }
+  2-8-monitor-backtest-activity-and-browse-the-results-list: { issue: 201, status: done }
+  2-9-review-a-completed-backtest-result: { issue: 202, status: done }
   3-1-enforce-one-canonical-comparison-eligibility-predicate: { issue: 203, status: open }
   3-2-choose-an-eligible-result-through-the-compare-picker: { issue: 204, status: open }
   3-3-review-two-results-side-by-side: { issue: 205, status: open }
+  4-1-establish-canonical-strategy-manager-foundations: { issue: 257, status: backlog }
+  4-2-understand-setup-readiness-and-recover: { issue: 255, status: backlog }
+  4-3-select-a-security-from-the-active-profile: { issue: 258, status: backlog }
+  4-4-pin-selected-universe-evidence-compatibly: { issue: 256, status: backlog }
+  4-5-acquire-required-historical-fx-evidence: { issue: 261, status: backlog }
+  4-6-complete-the-clean-checkout-journey: { issue: 259, status: backlog }
+  4-7-diagnose-and-onboard-strategy-manager: { issue: 260, status: backlog }
 backtest_strategy_skills:
   branch: feat/backtest-strategy-skills
   rtly-backtest-minervini: { issue: 251, status: done }
