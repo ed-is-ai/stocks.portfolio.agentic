@@ -965,6 +965,25 @@ class BacktestResultV1:
     note_version: int
 
 
+@dataclass(frozen=True)
+class BacktestActivitySummaryV1:
+    """One row of the Backtest activity/results list (Story 2.8 AC 1) --
+    persisted Strategy/version, a deterministic parameter summary built
+    from persisted typed parameters (independent of whether the Skill
+    still exists on disk), the normalized period, and Metrics only from a
+    verified complete Result -- ``None`` for every non-complete job,
+    never a zero-filled stand-in."""
+
+    job: StrategyJobV1
+    strategy_id: str
+    strategy_api_version: int
+    parameter_summary: str
+    start_month: str
+    end_month: str
+    metrics: "BacktestMetricsV1 | None"
+    metric_availability: "MetricAvailabilityV1 | None"
+
+
 SnapshotEvidenceV1 = HistoricalEvidenceV1
 
 
@@ -1026,6 +1045,15 @@ _JOB_COLUMNS = (
 
 def _optional_instant(value: object) -> datetime | None:
     return None if value is None else datetime.fromisoformat(str(value))
+
+
+def _parameter_summary(parameters: dict[str, object]) -> str:
+    """Deterministic, concise ``key=value`` summary in sorted key order --
+    independent of Skill discovery/schema order (Story 2.8 AC 1), since a
+    persisted attempt's identity must survive the Skill being removed."""
+    if not parameters:
+        return "(defaults)"
+    return ", ".join(f"{key}={value!r}" for key, value in sorted(parameters.items()))
 
 
 def _row_to_strategy_job(row: sqlite3.Row | tuple[object, ...]) -> StrategyJobV1:
@@ -1620,6 +1648,84 @@ class BacktestRepository:
                 "ORDER BY enqueue_seq"
             ).fetchall()
         return tuple(_row_to_strategy_job(row) for row in rows)
+
+    def list_backtest_activities(self) -> tuple[BacktestActivitySummaryV1, ...]:
+        """Return every non-tombstoned Backtest job, newest first (AC 1).
+
+        Filters strictly to ``job_type='backtest' AND deleted_at IS NULL``,
+        ordered by ``enqueue_seq DESC`` -- ``updated_at`` is never ordering
+        authority (Story 2.8 Dev Notes). The parameter summary is built
+        from each job's own persisted ``strategy_runs.parameters_json``
+        (sorted by key, independent of whether the current Skill still
+        discovers that Strategy at all) and Metrics are attached only via
+        :meth:`backtest_result`'s verified-complete projection. A
+        ``complete`` job whose Result is missing/malformed, or a
+        non-complete job that unexpectedly has one, raises
+        :class:`BacktestIntegrityError` rather than silently returning a
+        partial or zero-filled row.
+        """
+        with session(self._connect) as conn:
+            job_rows = conn.execute(
+                f"SELECT {', '.join(_JOB_COLUMNS)} FROM strategy_jobs "
+                "WHERE job_type='backtest' AND deleted_at IS NULL "
+                "ORDER BY enqueue_seq DESC"
+            ).fetchall()
+            jobs = tuple(_row_to_strategy_job(row) for row in job_rows)
+            run_by_id: dict[str, tuple[object, ...]] = {
+                str(row[0]): row
+                for row in conn.execute(
+                    "SELECT id, strategy_id, strategy_api_version, "
+                    "parameters_json, start_month, end_month FROM strategy_runs"
+                ).fetchall()
+            }
+            result_ids = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT run_id FROM backtest_results"
+                ).fetchall()
+            }
+
+        summaries: list[BacktestActivitySummaryV1] = []
+        for job in jobs:
+            run_row = run_by_id.get(job.id)
+            if run_row is None:
+                raise BacktestIntegrityError(
+                    f"backtest job {job.id!r} has no pinned strategy run"
+                )
+            try:
+                parameters = json.loads(str(run_row[3]))
+                if not isinstance(parameters, dict):
+                    raise ValueError("stored strategy run parameters are not an object")
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                raise BacktestIntegrityError(
+                    f"backtest job {job.id!r} has invalid stored parameters"
+                ) from exc
+            has_result = job.id in result_ids
+            is_complete = job.status is StrategyJobStatus.COMPLETE
+            if is_complete != has_result:
+                raise BacktestIntegrityError(
+                    f"backtest job {job.id!r} Result cardinality does not "
+                    "match its status"
+                )
+            metrics = None
+            availability = None
+            if is_complete:
+                result = self.backtest_result(job.id)
+                metrics = result.metrics
+                availability = result.metric_availability
+            summaries.append(
+                BacktestActivitySummaryV1(
+                    job=job,
+                    strategy_id=str(run_row[1]),
+                    strategy_api_version=int(str(run_row[2])),
+                    parameter_summary=_parameter_summary(parameters),
+                    start_month=str(run_row[4]),
+                    end_month=str(run_row[5]),
+                    metrics=metrics,
+                    metric_availability=availability,
+                )
+            )
+        return tuple(summaries)
 
     def claim_next_strategy_job(self) -> ClaimedStrategyJobV1 | None:
         """Claim the smallest queued sequence while enforcing one running job."""

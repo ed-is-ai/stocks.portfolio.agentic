@@ -1,0 +1,83 @@
+{#- Metadata-driven parameter/period section (Story 2.7 AC 2, 4, 5). Swapped
+    in full (outerHTML) whenever the selected Strategy radio changes -- no
+    Strategy-ID branches, everything driven off the descriptor/coverage the
+    route already resolved. -#}
+<div id="strategy-fields">
+{% if not selected %}
+<p class="text-muted">Choose a Strategy above to configure its parameters.</p>
+{% else %}
+<fieldset class="mt-3"><legend class="h6">Parameters for {{ selected.display_name }}</legend>
+{% for parameter in selected.parameters %}
+{% set field_id = 'param__' ~ parameter.name %}
+{% set raw = parameter_values.get(parameter.name) %}
+<div class="mb-3">
+  <label for="{{ field_id }}" class="form-label">{{ parameter.name }}{% if parameter.required %} <span class="text-danger" aria-hidden="true">*</span>{% endif %}</label>
+  <div id="{{ field_id }}-help" class="form-text">{{ parameter.description }}{% if parameter.minimum is not none or parameter.maximum is not none %} (range: {{ parameter.minimum if parameter.minimum is not none else '−∞' }}–{{ parameter.maximum if parameter.maximum is not none else '∞' }}){% endif %} Default: {{ parameter.default }}.</div>
+  {% if parameter.type == 'boolean' %}
+  {% set current = raw if raw is not none else ('true' if parameter.default else 'false') %}
+  <div class="btn-group" role="radiogroup" aria-labelledby="{{ field_id }}-help">
+    <div class="form-check form-check-inline"><input class="form-check-input" type="radio" name="{{ field_id }}" id="{{ field_id }}__true" value="true" {% if current == 'true' %}checked{% endif %} aria-describedby="{{ field_id }}-help{% if errors.get(field_id) %} {{ field_id }}-error{% endif %}" {% if errors.get(field_id) %}aria-invalid="true"{% endif %}><label class="form-check-label" for="{{ field_id }}__true">True</label></div>
+    <div class="form-check form-check-inline"><input class="form-check-input" type="radio" name="{{ field_id }}" id="{{ field_id }}__false" value="false" {% if current == 'false' %}checked{% endif %} aria-describedby="{{ field_id }}-help{% if errors.get(field_id) %} {{ field_id }}-error{% endif %}" {% if errors.get(field_id) %}aria-invalid="true"{% endif %}><label class="form-check-label" for="{{ field_id }}__false">False</label></div>
+  </div>
+  {% elif parameter.type == 'enum' %}
+  {% set current = raw if raw is not none else enum_default_tokens.get(parameter.name) %}
+  <div role="radiogroup" aria-labelledby="{{ field_id }}-help">
+  {% for token, label in enum_options.get(parameter.name, ()) %}
+    <div class="form-check form-check-inline"><input class="form-check-input" type="radio" name="{{ field_id }}" id="{{ field_id }}__{{ token }}" value="{{ token }}" {% if current == token %}checked{% endif %} aria-describedby="{{ field_id }}-help{% if errors.get(field_id) %} {{ field_id }}-error{% endif %}" {% if errors.get(field_id) %}aria-invalid="true"{% endif %}><label class="form-check-label" for="{{ field_id }}__{{ token }}">{{ label }}</label></div>
+  {% endfor %}
+  </div>
+  {% elif parameter.type == 'string' %}
+  <input type="text" class="form-control{% if errors.get(field_id) %} is-invalid{% endif %}" id="{{ field_id }}" name="{{ field_id }}" value="{{ raw if raw is not none else parameter.default }}" aria-describedby="{{ field_id }}-help{% if errors.get(field_id) %} {{ field_id }}-error{% endif %}" {% if errors.get(field_id) %}aria-invalid="true"{% endif %}>
+  {% else %}
+  <input type="number" {% if parameter.type == 'number' %}step="any"{% else %}step="1"{% endif %} class="form-control{% if errors.get(field_id) %} is-invalid{% endif %}" id="{{ field_id }}" name="{{ field_id }}" value="{{ raw if raw is not none else parameter.default }}" {% if parameter.minimum is not none %}min="{{ parameter.minimum }}"{% endif %} {% if parameter.maximum is not none %}max="{{ parameter.maximum }}"{% endif %} aria-describedby="{{ field_id }}-help{% if errors.get(field_id) %} {{ field_id }}-error{% endif %}" {% if errors.get(field_id) %}aria-invalid="true"{% endif %}>
+  {% endif %}
+  {% if errors.get(field_id) %}<div id="{{ field_id }}-error" class="invalid-feedback d-block">{{ errors[field_id] }}</div>{% endif %}
+</div>
+{% endfor %}
+</fieldset>
+
+<fieldset class="mt-3"><legend class="h6">Period</legend>
+{% if not coverage or not coverage.intervals %}
+<p class="alert alert-info">No Ready snapshot coverage is available yet.</p>
+{% else %}
+<p class="form-text">Scanner-data version <strong>{{ coverage.display_version }}</strong>. Choose months from one contiguous Ready interval below.</p>
+<div class="row g-3">
+  <div class="col-sm-6"><label for="start_month" class="form-label">Start month</label>
+    <select id="start_month" name="start_month" class="form-select{% if errors.get('start_month') %} is-invalid{% endif %}" aria-describedby="start-month-help{% if errors.get('start_month') %} start-month-error{% endif %}" {% if errors.get('start_month') %}aria-invalid="true"{% endif %}>
+      <option value="">Choose a month</option>
+      {% for interval, months in period_options %}<optgroup label="{{ interval.start_month }}–{{ interval.end_month }}">{% for month in months %}<option value="{{ month }}" {% if values.start_month == month %}selected{% endif %}>{{ month }}</option>{% endfor %}</optgroup>{% endfor %}
+    </select>
+    <div id="start-month-help" class="form-text">The active scanner-data version's Ready interval only.</div>
+    {% if errors.get('start_month') %}<div id="start-month-error" class="invalid-feedback">{{ errors.start_month }}</div>{% endif %}
+  </div>
+  <div class="col-sm-6"><label for="end_month" class="form-label">End month</label>
+    <select id="end_month" name="end_month" class="form-select{% if errors.get('end_month') %} is-invalid{% endif %}" aria-describedby="end-month-help{% if errors.get('end_month') %} end-month-error{% endif %}" {% if errors.get('end_month') %}aria-invalid="true"{% endif %}>
+      <option value="">Choose a month</option>
+      {% for interval, months in period_options %}<optgroup label="{{ interval.start_month }}–{{ interval.end_month }}">{% for month in months %}<option value="{{ month }}" {% if values.end_month == month %}selected{% endif %}>{{ month }}</option>{% endfor %}</optgroup>{% endfor %}
+    </select>
+    <div id="end-month-help" class="form-text">Must stay within the same Ready interval as the start month.</div>
+    {% if errors.get('end_month') %}<div id="end-month-error" class="invalid-feedback">{{ errors.end_month }}</div>{% endif %}
+  </div>
+</div>
+{% endif %}
+</fieldset>
+
+<fieldset class="mt-3"><legend class="h6">Capital</legend>
+<div class="row g-3">
+  <div class="col-sm-6"><label for="starting_capital" class="form-label">Starting capital</label>
+    <input type="text" inputmode="decimal" id="starting_capital" name="starting_capital" class="form-control{% if errors.get('starting_capital') %} is-invalid{% endif %}" value="{{ values.starting_capital }}" aria-describedby="starting-capital-help{% if errors.get('starting_capital') %} starting-capital-error{% endif %}" {% if errors.get('starting_capital') %}aria-invalid="true"{% endif %}>
+    <div id="starting-capital-help" class="form-text">A positive amount, e.g. 10000.00.</div>
+    {% if errors.get('starting_capital') %}<div id="starting-capital-error" class="invalid-feedback">{{ errors.starting_capital }}</div>{% endif %}
+  </div>
+  <div class="col-sm-6"><label for="base_currency" class="form-label">Base currency</label>
+    <select id="base_currency" name="base_currency" class="form-select{% if errors.get('base_currency') %} is-invalid{% endif %}" aria-describedby="base-currency-help{% if errors.get('base_currency') %} base-currency-error{% endif %}" {% if errors.get('base_currency') %}aria-invalid="true"{% endif %}>
+      <option value="GBP" {% if values.base_currency == 'GBP' %}selected{% endif %}>GBP</option>
+      <option value="USD" {% if values.base_currency == 'USD' %}selected{% endif %}>USD</option>
+    </select>
+    <div id="base-currency-help" class="form-text">Mixed-market valuation uses pinned historical FX evidence, not a live rate.</div>
+    {% if errors.get('base_currency') %}<div id="base-currency-error" class="invalid-feedback">{{ errors.base_currency }}</div>{% endif %}
+  </div>
+</div>
+</fieldset>
+{% endif %}
+</div>

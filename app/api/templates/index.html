@@ -702,6 +702,18 @@
     }
   }
 
+  // Marks one notification read as a side effect of clicking its native
+  // detail link, without blocking that link's own navigation request
+  // (#80, Story 2.8 AC6 markup fix -- the row is no longer one synthetic
+  // clickable <li>, so its detail <a> triggers this itself).
+  function markNotificationRead(notificationId) {
+    if (window.htmx) {
+      htmx.ajax('POST', `/notifications/${notificationId}/read`, {
+        target: '#notif-list', swap: 'innerHTML',
+      });
+    }
+  }
+
   // Keep active tab in sync with navigation clicks
   document.getElementById('mainTabs').addEventListener('click', function(e) {
     const link = e.target.closest('.nav-link');
@@ -920,5 +932,6 @@
 </script>
 <script src="/static/js/watchlist.js?v=20260802-1"></script>
 <script src="/static/js/pipeline-refresh.js"></script>
+<script src="/static/js/strategy-manager.js" defer></script>
 </body>
 </html>

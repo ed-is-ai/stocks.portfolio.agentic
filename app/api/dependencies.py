@@ -9,17 +9,19 @@ module-level ``trader`` instance.
 from functools import lru_cache
 
 from app.core import config
-from app.core.config import ALERTS_DB
+from app.core.config import ALERTS_DB, TRADES_DB
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.notifications_repo import NotificationsRepository
 from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
+from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.notification_projector import StrategyNotificationProjector
 
@@ -77,9 +79,32 @@ def get_historical_price_repository() -> HistoricalPriceRepository:
 
 
 @lru_cache
+def get_fx_quote_repository() -> FxQuoteRepository:
+    """Return the shared ``FxQuoteRepository`` instance (``trades.db``).
+
+    The same content-addressed FX-quote store Story 1.6's live valuation
+    uses -- reused directly, never through ``GbpValuationService`` (Story
+    1.6's live-valuation-only tool, forbidden from any cross-epic import
+    into ``app/services/backtest/``, AD-10).
+    """
+    return FxQuoteRepository(db.make_connect(lambda: str(TRADES_DB)))
+
+
+@lru_cache
 def get_strategy_job_service() -> StrategyJobService:
     """Return the one process-local dispatcher over the durable FIFO ledger."""
     return StrategyJobService(get_backtest_repository())
+
+
+@lru_cache
+def get_backtest_launch_service() -> BacktestLaunchService:
+    """Return the shared Backtest launch orchestration boundary (Story 2.7)."""
+    return BacktestLaunchService(
+        backtest_repo=get_backtest_repository(),
+        historical_price_repo=get_historical_price_repository(),
+        fx_quote_repo=get_fx_quote_repository(),
+        jobs=get_strategy_job_service(),
+    )
 
 
 @lru_cache

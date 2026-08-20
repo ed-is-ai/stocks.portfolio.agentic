@@ -10,7 +10,7 @@ import sqlite3
 import pytest
 
 from app.repositories import db
-from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
 from app.repositories.backtest_repo import QualificationResult
 from app.services.backtest.strategy_job import (
     BacktestEnqueueResultV1,
@@ -1141,3 +1141,176 @@ def test_delete_backtest_job_rejects_running_and_completed_jobs(
         repo.delete_strategy_job(
             completed.id, expected_version=completed.status_version
         )
+
+
+# ---------------------------------------------------------------------------
+# Story 2.8: ``list_backtest_activities()`` -- the Backtest activity/list
+# projection.
+# ---------------------------------------------------------------------------
+
+
+def _complete_backtest(repo: BacktestRepository, job_id: str) -> None:
+    """Claim, stage, and complete one already-queued Backtest attempt --
+    exact same sequence as ``test_delete_backtest_job_rejects_running_and_
+    completed_jobs`` above, factored out for reuse."""
+    from app.services.backtest.backtest_engine import EquityCurvePointV1
+
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None and claim.job.id == job_id
+    repo.write_backtest_staging(
+        claim.job.id,
+        claim_token=claim.claim_token,
+        expected_version=claim.job.status_version,
+        state_schema_version="backtest_portfolio_state.v1",
+        portfolio_state={"cash": "10000.00000000", "positions": []},
+        events=(),
+        equity_curve=(
+            EquityCurvePointV1(
+                session=date(2026, 5, 4),
+                cash_base=Decimal("10000"),
+                positions_value_base=Decimal("0"),
+                total_equity_base=Decimal("10000"),
+                sequence=1,
+            ),
+        ),
+        final_cash_base=Decimal("10000"),
+    )
+    repo.complete_claimed_backtest_job(
+        claim.job.id, claim.claim_token, expected_version=claim.job.status_version
+    )
+
+
+def _seed_bare_job(
+    path: Path,
+    job_id: str,
+    *,
+    status: str,
+    enqueue_seq: int,
+    status_version: int = 1,
+) -> None:
+    """Insert a minimal ``strategy_jobs`` row directly -- used only to
+    construct the two integrity-error scenarios ``list_backtest_activities``
+    must reject (a status/Result-cardinality mismatch that
+    ``complete_claimed_backtest_job`` itself could never produce)."""
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """INSERT INTO strategy_jobs (
+                   id, job_type, status, enqueue_seq, status_version,
+                   created_at, updated_at
+               ) VALUES (?, 'backtest', ?, ?, ?, ?, ?)""",
+            (
+                job_id,
+                status,
+                enqueue_seq,
+                status_version,
+                NOW.isoformat(),
+                NOW.isoformat(),
+            ),
+        )
+
+
+def _seed_bare_backtest_result(path: Path, job_id: str) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """INSERT INTO backtest_results (
+                   run_id, metrics_json, final_cash_base, result_digest,
+                   note, note_version, completed_at, updated_at
+               ) VALUES (?, '{}', '10000.00000000', ?, NULL, 1, ?, ?)""",
+            (job_id, "9" * 64, NOW.isoformat(), NOW.isoformat()),
+        )
+
+
+def test_list_backtest_activities_empty(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    assert repo.list_backtest_activities() == ()
+
+
+def test_list_backtest_activities_excludes_initialization_jobs(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue(repo, "2026-05", "2026-05")
+    backtest = _enqueue_backtest(repo)
+
+    activities = repo.list_backtest_activities()
+
+    assert [item.job.id for item in activities] == [backtest.job.id]
+
+
+def test_list_backtest_activities_strict_reverse_enqueue_seq_order(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    first = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
+    second = _enqueue_backtest(repo, start_month="2026-06", end_month="2026-06")
+
+    activities = repo.list_backtest_activities()
+
+    assert [item.job.id for item in activities] == [second.job.id, first.job.id]
+    assert activities[0].job.enqueue_seq > activities[1].job.enqueue_seq
+
+
+def test_list_backtest_activities_parameter_summary_from_persisted_parameters(
+    tmp_path: Path,
+) -> None:
+    """The summary is built from each job's own persisted
+    ``strategy_runs.parameters_json`` (``_enqueue_backtest`` always writes
+    ``{"lookback": 20}``), independent of whether the current Skill still
+    discovers ``momentum_v1`` at all -- discovery is never consulted here."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue_backtest(repo)
+
+    activities = repo.list_backtest_activities()
+
+    assert activities[0].parameter_summary == "lookback=20"
+    assert activities[0].strategy_id == "momentum_v1"
+    assert activities[0].strategy_api_version == 1
+
+
+def test_list_backtest_activities_metrics_present_only_for_complete_job(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    # The FIFO claims smallest enqueue_seq first, so the *first* enqueued
+    # attempt is the one that gets claimed/completed below.
+    to_complete = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
+    still_queued = _enqueue_backtest(repo, start_month="2026-06", end_month="2026-06")
+    _complete_backtest(repo, to_complete.job.id)
+
+    activities = {item.job.id: item for item in repo.list_backtest_activities()}
+
+    assert activities[still_queued.job.id].metrics is None
+    assert activities[still_queued.job.id].metric_availability is None
+    completed = activities[to_complete.job.id]
+    assert completed.job.status is StrategyJobStatus.COMPLETE
+    assert completed.metrics is not None
+    assert completed.metric_availability is not None
+
+
+def test_list_backtest_activities_rejects_complete_job_missing_result(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_bare_job(path, "complete-without-result", status="complete", enqueue_seq=1)
+    _seed_strategy_run(path, "complete-without-result")
+
+    with pytest.raises(BacktestIntegrityError, match="Result cardinality"):
+        repo.list_backtest_activities()
+
+
+def test_list_backtest_activities_rejects_noncomplete_job_with_result(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_bare_job(path, "queued-with-result", status="queued", enqueue_seq=1)
+    _seed_strategy_run(path, "queued-with-result")
+    _seed_bare_backtest_result(path, "queued-with-result")
+
+    with pytest.raises(BacktestIntegrityError, match="Result cardinality"):
+        repo.list_backtest_activities()

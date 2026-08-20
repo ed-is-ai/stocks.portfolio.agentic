@@ -1,0 +1,53 @@
+{#- Semantic reverse-chronological Backtest results list (Story 2.8 AC 1, 2, 7).
+    Reuses the ``.tbl-wrap``/``table table-hover`` pattern from
+    ``_portfolio.html``'s positions table. One named detail link per row;
+    unavailable Metrics render an em dash, never zero. -#}
+<section id="backtest-results-list" aria-labelledby="backtest-results-heading" class="mt-4">
+  <h2 id="backtest-results-heading" tabindex="-1" class="h5">Backtest results</h2>
+  {% if backtest_activities_error %}
+  <div class="alert alert-danger" role="alert">
+    Backtest results could not be loaded: {{ backtest_activities_error }}
+    <button type="button" class="btn btn-sm btn-outline-danger ms-2" hx-get="/strategy-manager/backtests" hx-target="#backtest-results-list" hx-swap="outerHTML">Reload</button>
+  </div>
+  {% elif not backtest_activities %}
+  <div class="alert alert-info">
+    No backtests yet.
+    <a href="/strategy-manager/configuration" hx-get="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML">Configure a Backtest</a>
+  </div>
+  {% else %}
+  <div class="tbl-wrap">
+    <table class="table table-hover align-middle">
+      <thead><tr><th scope="col">Attempt</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
+      <tbody>
+        {% for item in backtest_activities %}
+        <tr>
+          <td><a href="/strategy-manager/activities/{{ item.job.id }}" hx-get="/strategy-manager/activities/{{ item.job.id }}" hx-target="#tab-content" hx-swap="innerHTML">{{ item.strategy_id }} attempt {{ item.job.enqueue_seq }}</a></td>
+          <td>{{ item.job.status.value|title }}{% if item.job.status.value == 'running' and item.job.cancel_requested_at %} (cancellation requested){% endif %}</td>
+          <td class="mono-num">{{ item.strategy_id }} v{{ item.strategy_api_version }}</td>
+          <td class="text-wrap">{{ item.parameter_summary }}</td>
+          <td class="mono-num">{{ item.start_month }} to {{ item.end_month }}</td>
+          <td class="mono-num">
+            {%- if item.metrics and item.job.status.value == 'complete' -%}
+              {{ '%.2f'|format(item.metrics.total_return * 100) }}%
+            {%- else -%}
+              <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
+            {%- endif -%}
+          </td>
+          <td class="mono-num">
+            {%- if item.job.status.value == 'complete' and item.metrics -%}
+              {%- if item.metrics.win_rate is none -%}
+                Not applicable — no closed trades
+              {%- else -%}
+                {{ '%.1f'|format(item.metrics.win_rate * 100) }}%
+              {%- endif -%}
+            {%- else -%}
+              <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
+            {%- endif -%}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</section>

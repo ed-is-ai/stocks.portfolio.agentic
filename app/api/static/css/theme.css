@@ -175,7 +175,6 @@ table,
   gap: 0.6rem;
   padding: 0.6rem 0.85rem;
   border-bottom: 1px solid #f1f5f9;
-  cursor: pointer;
   transition: background 0.12s;
 }
 .notif-item:hover { background: #f8fafc; }
@@ -214,3 +213,31 @@ table,
   font-size: 0.95rem;
 }
 .notif-dismiss:hover { color: #dc2626; }
+.notif-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+.notif-action {
+  border: 1px solid #cbd5e1;
+  background: none;
+  color: #334155;
+  cursor: pointer;
+  padding: 0.05rem 0.4rem;
+  line-height: 1.4;
+  font-size: 0.68rem;
+  border-radius: 0.25rem;
+}
+.notif-action:hover { background: #f1f5f9; }
+.notif-mark-read-inline {
+  border: none;
+  background: none;
+  color: #2563eb;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 0.4rem;
+  font-size: inherit;
+  text-decoration: underline;
+}
+.notif-mark-read-inline:hover { color: #1d4ed8; }

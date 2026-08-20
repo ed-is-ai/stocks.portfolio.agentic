@@ -1,0 +1,54 @@
+{#- Strategy launch form (Story 2.7). Native radio Strategy selector +
+    metadata-driven parameter/period/capital fields; nothing here launches a
+    Backtest merely by loading or selecting a Strategy -- only the explicit
+    Run Backtest submit does. -#}
+<section aria-labelledby="strategy-configuration-heading">
+  <h1 id="strategy-configuration-heading" tabindex="-1" class="h3">Configure a Backtest</h1>
+  <p class="text-muted">Select a Strategy, review or edit its parameters, then choose a Ready period and starting capital.</p>
+
+  {% if errors %}
+  <div id="configuration-errors" class="alert alert-danger" role="alert" tabindex="-1">
+    <strong>Correct the following:</strong>
+    <ul class="mb-0">
+      {% for field, error in errors.items() %}<li>{% if field != 'form' %}<a href="#{{ field }}">{{ error }}</a>{% else %}{{ error }}{% endif %}</li>{% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if warnings %}
+  <div class="alert alert-warning" role="alert">
+    <strong>Some Skills were not discoverable as Strategies:</strong>
+    <ul class="mb-0">{% for warning in warnings %}<li>{{ warning.folder }}: {{ warning.message }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  {% if not strategies %}
+  <div class="alert alert-info">No valid Strategy Skills are currently discoverable. Add a <code>kind: backtest-strategy</code> Skill to the <code>skills/</code> directory to configure a Backtest.</div>
+  {% else %}
+  <form method="post" action="/strategy-manager/configuration" hx-post="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML" id="strategy-configuration-form">
+    <input type="hidden" name="profile_hash" value="{{ profile.profile_hash if profile else '' }}">
+    <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+
+    <fieldset class="card sm-card"><div class="card-body">
+      <legend class="h5">Strategy</legend>
+      {% if errors.get('strategy_id') %}<div id="strategy_id-error" class="text-danger">{{ errors.strategy_id }}</div>{% endif %}
+      {% for strategy in strategies %}
+      <div class="form-check mb-2">
+        <input class="form-check-input" type="radio" name="strategy_id" id="strategy_id__{{ strategy.strategy_id }}" value="{{ strategy.strategy_id }}" {% if selected and selected.strategy_id == strategy.strategy_id %}checked{% endif %} {% if errors.get('strategy_id') %}aria-describedby="strategy_id-error" aria-invalid="true"{% endif %} hx-get="/strategy-manager/configuration/fields?strategy_id={{ strategy.strategy_id | urlencode }}" hx-include="#start_month, #end_month, #base_currency, #starting_capital" hx-target="#strategy-fields" hx-swap="outerHTML" hx-trigger="change">
+        <label class="form-check-label" for="strategy_id__{{ strategy.strategy_id }}">
+          <strong>{{ strategy.display_name }}</strong> — {{ strategy.description }}
+          <div class="text-muted small">Parameters: {% for parameter in strategy.parameters %}{{ parameter.name }} (default {{ parameter.default }}){% if not loop.last %}, {% endif %}{% endfor %}{% if not strategy.parameters %}none{% endif %}</div>
+        </label>
+      </div>
+      {% endfor %}
+    </div></fieldset>
+
+    {% include "_strategy_configuration_fields.html" %}
+
+    {% if not coverage or not coverage.snapshot_count or coverage_error %}
+    <p class="alert alert-warning mt-3 mb-0">{{ coverage_error or 'Historical monthly snapshots must be initialized before a backtest can run.' }}</p>
+    {% endif %}
+    <button class="btn btn-primary mt-3" type="submit" {% if not coverage or not coverage.snapshot_count or coverage_error %}disabled aria-disabled="true"{% endif %}>Run Backtest</button>
+  </form>
+  {% endif %}
+</section>

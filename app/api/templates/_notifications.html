@@ -23,12 +23,12 @@
 {% else %}
 <ul class="notif-list">
   {% for n in notifications %}
-  <li class="notif-item notif-{{ n.severity.value }}{{ '' if n.is_read else ' unread' }}"
-      hx-post="/notifications/{{ n.id }}/read"
-      hx-target="#notif-list" hx-swap="innerHTML"
-      hx-on::after-request="notifDeepLink('{{ n.deep_link_tab }}')"
-      role="button" tabindex="0">
-    <i class="notif-icon bi {{ n.icon }}"></i>
+  {#- A plain, non-interactive row (#80 accessibility fix): no
+      role="button"/tabindex/hx-post on the <li> itself, so it never nests
+      a synthetic interactive row around a real <a>/<button>. Exactly one
+      native detail link plus separate native action/dismiss buttons. -#}
+  <li class="notif-item notif-{{ n.severity.value }}{{ '' if n.is_read else ' unread' }}">
+    <i class="notif-icon bi {{ n.icon }}" aria-hidden="true"></i>
     <div class="notif-body">
       <div class="notif-title">
         {{ n.title }}
@@ -36,16 +36,78 @@
       </div>
       {% if n.body %}<div class="notif-text">{{ n.body }}</div>{% endif %}
       {% set target = strategy_targets.get(n.id) %}
-      {% if target and target.deleted %}<div class="notif-text">Activity no longer available.</div>
-      {% elif target %}<a class="notif-text" href="{{ target.url }}" hx-get="{{ target.url }}" hx-target="#tab-content" hx-swap="innerHTML" onclick="event.stopPropagation()">Open initialization activity</a>{% endif %}
+      {% if target and target.deleted %}
+      {#- No detail link exists for a deleted target, so this row has no
+          other interactive element to mark it read (dismiss() never sets
+          read_at -- dismissing and marking read are not equivalent). -#}
+      <div class="notif-text">Activity no longer available.
+        {% if not n.is_read %}<button type="button" class="notif-mark-read-inline" hx-post="/notifications/{{ n.id }}/read" hx-target="#notif-list" hx-swap="innerHTML">Mark read</button>{% endif %}
+      </div>
+      {% elif target %}
+      {#- Backtest-aware deep-link label (Story 2.8 AC6): the projector's
+          own title already distinguishes Backtest/initialization, so the
+          link label mirrors that same distinction rather than the old
+          hardcoded "Open initialization activity" text. -#}
+      <a class="notif-text" href="{{ target.url }}"
+         hx-get="{{ target.url }}" hx-target="#tab-content" hx-swap="innerHTML"
+         hx-on::after-request="markNotificationRead({{ n.id }}); notifDeepLink('{{ n.deep_link_tab }}');">
+        {% if n.category.value == 'backtest' %}Open backtest activity{% else %}Open initialization activity{% endif %}
+      </a>
+      {% else %}
+      <a class="notif-text" href="#{{ n.deep_link_tab }}"
+         hx-on:click="markNotificationRead({{ n.id }}); notifDeepLink('{{ n.deep_link_tab }}');">
+        View details
+      </a>
+      {% endif %}
       <div class="notif-meta">{{ n.created_at.strftime('%b %d %H:%M') }} UTC</div>
     </div>
-    <button type="button" class="notif-dismiss" title="Dismiss"
-            hx-post="/notifications/{{ n.id }}/dismiss"
-            hx-target="#notif-list" hx-swap="innerHTML"
-            onclick="event.stopPropagation()">
-      <i class="bi bi-x"></i>
-    </button>
+    <div class="notif-actions">
+      {% if target and not target.deleted %}
+      {% if 'cancel' in target.actions %}
+      <button type="button" class="notif-action" data-bs-toggle="modal" data-bs-target="#notif-cancel-{{ n.id }}">Cancel</button>
+      <div class="modal fade" id="notif-cancel-{{ n.id }}" tabindex="-1" aria-labelledby="notif-cancel-title-{{ n.id }}" aria-describedby="notif-cancel-description-{{ n.id }}">
+        <div class="modal-dialog"><div class="modal-content">
+          <div class="modal-header"><h2 class="modal-title fs-5" id="notif-cancel-title-{{ n.id }}">Cancel this attempt?</h2></div>
+          <div class="modal-body" id="notif-cancel-description-{{ n.id }}">The attempt stops after a safe month boundary. Attempt progress cannot resume.</div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" data-bs-dismiss="modal" data-initial-focus="true">Keep running</button>
+            <form method="post" action="/strategy-manager/activities/{{ n.job_id }}/cancel" hx-post="/strategy-manager/activities/{{ n.job_id }}/cancel" hx-target="#notif-list" hx-swap="innerHTML">
+              <input type="hidden" name="expected_version" value="{{ target.expected_version }}">
+              <button class="btn btn-outline-warning">Cancel attempt</button>
+            </form>
+          </div>
+        </div></div>
+      </div>
+      {% endif %}
+      {% if 'restart' in target.actions %}
+      <form method="post" action="/strategy-manager/activities/{{ n.job_id }}/restart" hx-post="/strategy-manager/activities/{{ n.job_id }}/restart" hx-target="#tab-content" hx-swap="innerHTML" class="d-inline">
+        <input type="hidden" name="expected_version" value="{{ target.expected_version }}">
+        <button type="submit" class="notif-action">Restart</button>
+      </form>
+      {% endif %}
+      {% if 'delete' in target.actions %}
+      <button type="button" class="notif-action" data-bs-toggle="modal" data-bs-target="#notif-delete-{{ n.id }}">Delete</button>
+      <div class="modal fade" id="notif-delete-{{ n.id }}" tabindex="-1" aria-labelledby="notif-delete-title-{{ n.id }}" aria-describedby="notif-delete-description-{{ n.id }}">
+        <div class="modal-dialog"><div class="modal-content">
+          <div class="modal-header"><h2 class="modal-title fs-5" id="notif-delete-title-{{ n.id }}">Delete attempt details?</h2></div>
+          <div class="modal-body" id="notif-delete-description-{{ n.id }}">This permanently removes attempt details. Shared cached evidence and minimal audit lineage remain.</div>
+          <div class="modal-footer">
+            <button class="btn btn-secondary" data-bs-dismiss="modal" data-initial-focus="true">Keep attempt</button>
+            <form method="post" action="/strategy-manager/activities/{{ n.job_id }}/delete" hx-post="/strategy-manager/activities/{{ n.job_id }}/delete" hx-target="#notif-list" hx-swap="innerHTML">
+              <input type="hidden" name="expected_version" value="{{ target.expected_version }}">
+              <button class="btn btn-outline-danger">Delete attempt details</button>
+            </form>
+          </div>
+        </div></div>
+      </div>
+      {% endif %}
+      {% endif %}
+      <button type="button" class="notif-dismiss" title="Dismiss" aria-label="Dismiss notification"
+              hx-post="/notifications/{{ n.id }}/dismiss"
+              hx-target="#notif-list" hx-swap="innerHTML">
+        <i class="bi bi-x"></i>
+      </button>
+    </div>
   </li>
   {% endfor %}
 </ul>
