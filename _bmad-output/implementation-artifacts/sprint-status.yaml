@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-08-20 (Correct Course approved: Epic 2 reconciled done; Epic 4 added to backlog; 3-1 marked done post-merge #262)"
+last_updated: "2026-08-21 (Epic 3 reconciled done post-merge #264/#265; Epic 4 backlog resynced to the finalized 9-story epics.md shape post canonical-artifact reconciliation)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -71,17 +71,19 @@ development_status:
   2-8-monitor-backtest-activity-and-browse-the-results-list: done
   2-9-review-a-completed-backtest-result: done
   epic-2-retrospective: optional
-  epic-3: in-progress
+  epic-3: done
   3-1-enforce-one-canonical-comparison-eligibility-predicate: done
-  3-2-choose-an-eligible-result-through-the-compare-picker: ready-for-dev
-  3-3-review-two-results-side-by-side: ready-for-dev
+  3-2-choose-an-eligible-result-through-the-compare-picker: done
+  3-3-review-two-results-side-by-side: done
   epic-3-retrospective: optional
   epic-4: backlog
-  4-1-establish-canonical-strategy-manager-foundations: backlog
-  4-2-understand-setup-readiness-and-recover: backlog
-  4-3-select-a-security-from-the-active-profile: backlog
-  4-4-pin-selected-universe-evidence-compatibly: backlog
-  4-5-acquire-required-historical-fx-evidence: backlog
-  4-6-complete-the-clean-checkout-journey: backlog
-  4-7-diagnose-and-onboard-strategy-manager: backlog
+  4-1-establish-the-four-activity-schema-and-fenced-lifecycle: backlog
+  4-2-publish-independent-strategies-with-declared-run-universes: backlog
+  4-3-set-up-strategy-manager-on-first-run: backlog
+  4-4-understand-readiness-and-recover-through-diagnostics: backlog
+  4-5-select-securities-for-a-backtest: backlog
+  4-6-prepare-the-evidence-needed-for-a-backtest: backlog
+  4-7-run-and-restart-backtests-from-pinned-evidence: backlog
+  4-8-compare-results-using-compatible-evidence-rules: backlog
+  4-9-complete-the-first-backtest-from-a-clean-checkout: backlog
   epic-4-retrospective: optional
