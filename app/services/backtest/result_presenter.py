@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 import html
 
-from app.repositories.backtest_repo import BacktestResultV1
+from app.repositories.backtest_repo import BacktestIntegrityError, BacktestResultV1
 from app.services.backtest.backtest_engine import (
     DividendAppliedEventV1,
     EntryFillEventV1,
@@ -191,6 +191,46 @@ def equity_curve_payload(result: BacktestResultV1) -> tuple[dict[str, object], .
                 "date": point.session.isoformat(),
                 "equity": equity,
                 "equity_display": f"{equity:,.2f}",
+            }
+        )
+    return tuple(payload)
+
+
+def comparison_equity_payload(
+    left: BacktestResultV1, right: BacktestResultV1
+) -> tuple[dict[str, object], ...]:
+    """Return one ordered, shared-timeline ``{date, equity_a,
+    equity_a_display, equity_b, equity_b_display}`` series for Story 3.3's
+    Comparison view.
+
+    The two Results' Equity Curves are zipped by index -- never merged or
+    reindexed -- after verifying their session dates match exactly. AD-20's
+    determinism guarantee plus Story 3.1's period/profile-hash equality
+    make a divergent sequence a genuine data-corruption signal for an
+    already-eligible pair, so a mismatch always raises
+    :class:`BacktestIntegrityError` rather than being reconciled. Equity is
+    rounded to 2dp for display only, via the same convention
+    ``equity_curve_payload`` uses; neither Result's ``equity_curve`` is
+    ever touched.
+    """
+    left_sessions = tuple(point.session for point in left.equity_curve)
+    right_sessions = tuple(point.session for point in right.equity_curve)
+    if left_sessions != right_sessions:
+        raise BacktestIntegrityError(
+            "comparison equity curves diverge: session dates do not match "
+            "between the two Results"
+        )
+    payload: list[dict[str, object]] = []
+    for left_point, right_point in zip(left.equity_curve, right.equity_curve):
+        equity_a = float(left_point.total_equity_base.quantize(Decimal("0.01")))
+        equity_b = float(right_point.total_equity_base.quantize(Decimal("0.01")))
+        payload.append(
+            {
+                "date": left_point.session.isoformat(),
+                "equity_a": equity_a,
+                "equity_a_display": f"{equity_a:,.2f}",
+                "equity_b": equity_b,
+                "equity_b_display": f"{equity_b:,.2f}",
             }
         )
     return tuple(payload)
@@ -378,6 +418,7 @@ __all__ = [
     "NoteViewV1",
     "metrics_view",
     "equity_curve_payload",
+    "comparison_equity_payload",
     "trade_log_view",
     "provenance_view",
     "note_view",

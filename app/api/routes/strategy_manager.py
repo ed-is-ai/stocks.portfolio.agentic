@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Annotated, Literal, cast
+from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -35,6 +36,7 @@ from app.services.backtest.backtest_launch_service import (
     BacktestLaunchValidationError,
 )
 from app.services.backtest.result_presenter import (
+    comparison_equity_payload,
     equity_curve_payload,
     metrics_view,
     note_view,
@@ -1013,7 +1015,10 @@ def _revalidate_eligibility(
 
 @router.get("/strategy-manager/compare", response_class=HTMLResponse)
 async def compare_picker(
-    request: Request, backtest: BacktestDep, run_id: str
+    request: Request,
+    backtest: BacktestDep,
+    run_id: str,
+    reason: str | None = None,
 ) -> Response:
     """Render the Compare picker for a completed Backtest Result (Story
     3.2 AC 1-3).
@@ -1023,6 +1028,12 @@ async def compare_picker(
     Story 2.9's ``backtest_result_view`` already established; corrupt
     anchor evidence (a malformed job row, or a vanished/corrupt Result)
     renders the explicit integrity-error branch instead of raising.
+
+    ``reason`` (Story 3.3) is the optional query param the Comparison
+    route's ``303`` redirects an ineligible/stale pair back through --
+    when present it populates ``picker_error`` exactly like a failed
+    submit's re-render does, so the existing ``role="alert"
+    tabindex="-1"`` template branch needs no change.
     """
     try:
         job = backtest.strategy_job(run_id)
@@ -1042,6 +1053,8 @@ async def compare_picker(
         context = _compare_context(backtest, run_id)
     except BacktestIntegrityError as exc:
         return _compare_integrity_response(request, run_id, exc)
+    if reason:
+        context = {**context, "picker_error": reason}
     return templates.TemplateResponse(request, "_compare_picker.html", context)
 
 
@@ -1085,3 +1098,107 @@ async def submit_compare(
         {**context, "picker_error": eligibility.detail},
         status_code=422,
     )
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3: Comparison -- review two eligible Results side by side
+# ---------------------------------------------------------------------------
+
+
+def _comparison_integrity_response(
+    request: Request, run_id_a: str, run_id_b: str, exc: BacktestIntegrityError
+) -> HTMLResponse:
+    """Render the Comparison page's explicit integrity-error branch --
+    the single call site every corrupt-evidence path in this section
+    routes through, mirroring ``_compare_integrity_response``'s shape."""
+    return templates.TemplateResponse(
+        request,
+        "_comparison.html",
+        {
+            "run_id_a": run_id_a,
+            "run_id_b": run_id_b,
+            "integrity_error": str(exc),
+        },
+    )
+
+
+def _comparison_side_context(
+    repo: BacktestRepository, run_id: str
+) -> dict[str, object]:
+    """Build one side of the Comparison page's context: the same Story
+    2.9 Metrics/Trade-Log/Provenance formatting ``_result_context`` uses,
+    called once per side -- reusing ``result_presenter.py``, never a
+    second formatter. Notes stay a standalone-Result (Story 2.9) concern,
+    so ``note_view`` is never called here."""
+    try:
+        result = repo.backtest_result(run_id)
+    except StrategyJobNotFound as exc:
+        raise _reraise_vanished_evidence(exc) from exc
+    coverage = repo.snapshot_coverage(profile_hash=result.profile_hash)
+    return {
+        "run_id": run_id,
+        "result": result,
+        "metrics": metrics_view(result),
+        "trade_log": trade_log_view(result),
+        "provenance": provenance_view(result, coverage),
+    }
+
+
+def _comparison_context(
+    repo: BacktestRepository, run_id_a: str, run_id_b: str
+) -> dict[str, object]:
+    """Build the Comparison page's full context: both sides' independent
+    presenter context (AC 1-4) plus the shared-timeline
+    ``comparison_equity_payload`` (AC 3) -- a pure read, never a
+    mutation of either Result, its note, or its manifest."""
+    side_a = _comparison_side_context(repo, run_id_a)
+    side_b = _comparison_side_context(repo, run_id_b)
+    equity = comparison_equity_payload(
+        cast(BacktestResultV1, side_a["result"]),
+        cast(BacktestResultV1, side_b["result"]),
+    )
+    return {
+        "run_id_a": run_id_a,
+        "run_id_b": run_id_b,
+        "integrity_error": None,
+        "a": side_a,
+        "b": side_b,
+        "comparison_equity_payload": equity,
+    }
+
+
+@router.get(
+    "/strategy-manager/comparisons/{run_id_a}/{run_id_b}",
+    response_class=HTMLResponse,
+)
+async def comparison_view(
+    request: Request, run_id_a: str, run_id_b: str, backtest: BacktestDep
+) -> Response:
+    """Render two eligible Backtest Results side by side (Story 3.3).
+
+    Eligibility is revalidated fresh via ``is_comparable`` on every load
+    -- this route is reachable directly/bookmarked after either Result's
+    state has changed, so a stale referring picker/session is never
+    trusted. An ineligible pair (including a self-comparison, which
+    ``is_comparable`` already rejects) redirects back to the Compare
+    picker with the reason. Corrupt/vanished evidence on either side, or
+    a divergent shared-timeline equity-curve date sequence, renders this
+    page's own explicit integrity-error branch with no partial data --
+    read-only end to end, so neither original Result is ever touched and
+    both remain independently accessible.
+    """
+    try:
+        eligibility = _revalidate_eligibility(backtest, run_id_a, run_id_b)
+    except BacktestIntegrityError as exc:
+        return _comparison_integrity_response(request, run_id_a, run_id_b, exc)
+    if not eligibility.eligible:
+        return RedirectResponse(
+            f"/strategy-manager/compare?run_id={quote(run_id_a)}"
+            f"&reason={quote(eligibility.detail)}",
+            status_code=303,
+        )
+    try:
+        context = _comparison_context(backtest, run_id_a, run_id_b)
+    except BacktestIntegrityError as exc:
+        return _comparison_integrity_response(request, run_id_a, run_id_b, exc)
+    return templates.TemplateResponse(request, "_comparison.html", context)

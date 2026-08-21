@@ -1,0 +1,327 @@
+{#- Story 3.3: Comparison -- review two eligible Backtest Results side by
+    side. Eligibility is revalidated fresh on every GET (never trusted from
+    the picker); every Metrics/Trade-Log/Provenance value for each side
+    comes from the same Story 2.9 presenter functions
+    (``result_presenter.py``) ``_backtest_result.html`` already uses,
+    duplicated per side here rather than redesigned. The only new element
+    is the shared-timeline Equity Curve chart, built from
+    ``comparison_equity_payload``. Notes stay a standalone-Result concern
+    and are never shown here. Bootstrap's ``row``/``col-md-6`` grid keeps
+    Result A ahead of Result B in DOM order at every width, so a narrow
+    viewport/400% zoom stacks A above B without interleaving. -#}
+<section id="comparison-{{ run_id_a }}-{{ run_id_b }}" aria-labelledby="comparison-heading">
+  <h1 id="comparison-heading" tabindex="-1" class="h3 mb-3">Compare Backtest results</h1>
+
+  {% if integrity_error %}
+  <div class="alert alert-danger" role="alert" tabindex="-1">
+    Comparison evidence needs attention: {{ integrity_error }}
+  </div>
+  <p class="mt-3 d-flex flex-wrap gap-2">
+    <a class="btn btn-outline-secondary" href="/strategy-manager/comparisons/{{ run_id_a|urlencode }}/{{ run_id_b|urlencode }}"
+       hx-get="/strategy-manager/comparisons/{{ run_id_a|urlencode }}/{{ run_id_b|urlencode }}" hx-target="#tab-content" hx-swap="innerHTML">Reload comparison</a>
+    <a class="btn btn-outline-secondary" href="/strategy-manager/results/{{ run_id_a|urlencode }}"
+       hx-get="/strategy-manager/results/{{ run_id_a|urlencode }}" hx-target="#tab-content" hx-swap="innerHTML">View Result A</a>
+    <a class="btn btn-outline-secondary" href="/strategy-manager/results/{{ run_id_b|urlencode }}"
+       hx-get="/strategy-manager/results/{{ run_id_b|urlencode }}" hx-target="#tab-content" hx-swap="innerHTML">View Result B</a>
+  </p>
+  {% else %}
+
+  <!-- Run identity -->
+  <div class="row g-3 mb-3">
+    <div class="col-md-6">
+      <article class="card sm-card"><div class="card-body">
+        <h2 class="h5">Result A</h2>
+        <dl class="row mb-0 mono-num">
+          <dt class="col-sm-4">Strategy</dt>
+          <dd class="col-sm-8">{{ a.result.strategy_id }} v{{ a.result.strategy_api_version }}</dd>
+          <dt class="col-sm-4">Period</dt>
+          <dd class="col-sm-8">{{ a.result.start_month }} to {{ a.result.end_month }}</dd>
+          <dt class="col-sm-4">Base currency</dt>
+          <dd class="col-sm-8">{{ a.result.base_currency }}</dd>
+          <dt class="col-sm-4">Starting capital</dt>
+          <dd class="col-sm-8">{{ '%.2f'|format(a.result.starting_capital) }} {{ a.result.base_currency }}</dd>
+          <dt class="col-sm-4">Completed</dt>
+          <dd class="col-sm-8">{{ a.result.completed_at.strftime('%Y-%m-%d %H:%M') }} UTC</dd>
+          <dt class="col-sm-4">Parameters</dt>
+          <dd class="col-sm-8">{% for key, value in a.result.parameters|dictsort %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% else %}(defaults){% endfor %}</dd>
+          <dt class="col-sm-4">Run</dt>
+          <dd class="col-sm-8 text-break">{{ a.result.run_id }}</dd>
+        </dl>
+      </div></article>
+    </div>
+    <div class="col-md-6">
+      <article class="card sm-card"><div class="card-body">
+        <h2 class="h5">Result B</h2>
+        <dl class="row mb-0 mono-num">
+          <dt class="col-sm-4">Strategy</dt>
+          <dd class="col-sm-8">{{ b.result.strategy_id }} v{{ b.result.strategy_api_version }}</dd>
+          <dt class="col-sm-4">Period</dt>
+          <dd class="col-sm-8">{{ b.result.start_month }} to {{ b.result.end_month }}</dd>
+          <dt class="col-sm-4">Base currency</dt>
+          <dd class="col-sm-8">{{ b.result.base_currency }}</dd>
+          <dt class="col-sm-4">Starting capital</dt>
+          <dd class="col-sm-8">{{ '%.2f'|format(b.result.starting_capital) }} {{ b.result.base_currency }}</dd>
+          <dt class="col-sm-4">Completed</dt>
+          <dd class="col-sm-8">{{ b.result.completed_at.strftime('%Y-%m-%d %H:%M') }} UTC</dd>
+          <dt class="col-sm-4">Parameters</dt>
+          <dd class="col-sm-8">{% for key, value in b.result.parameters|dictsort %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% else %}(defaults){% endfor %}</dd>
+          <dt class="col-sm-4">Run</dt>
+          <dd class="col-sm-8 text-break">{{ b.result.run_id }}</dd>
+        </dl>
+      </div></article>
+    </div>
+  </div>
+
+  <!-- Metrics -->
+  <h2 class="h5">Metrics</h2>
+  <div class="row g-3 mb-4">
+    <div class="col-md-6">
+      <p class="mono-num mb-2"><strong>Result A</strong></p>
+      <div class="d-flex flex-wrap gap-3">
+        <div class="stat-card">
+          <div class="slbl">Total Return</div>
+          <div class="sval">{{ a.metrics.total_return }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="slbl">Sharpe Ratio</div>
+          <div class="sval">{{ a.metrics.sharpe_ratio }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="slbl">Win Rate</div>
+          <div class="sval">{{ a.metrics.win_rate }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="slbl">Max Drawdown</div>
+          <div class="sval">{{ a.metrics.max_drawdown }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <p class="mono-num mb-2"><strong>Result B</strong></p>
+      <div class="d-flex flex-wrap gap-3">
+        <div class="stat-card">
+          <div class="slbl">Total Return</div>
+          <div class="sval">{{ b.metrics.total_return }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="slbl">Sharpe Ratio</div>
+          <div class="sval">{{ b.metrics.sharpe_ratio }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="slbl">Win Rate</div>
+          <div class="sval">{{ b.metrics.win_rate }}</div>
+        </div>
+        <div class="stat-card">
+          <div class="slbl">Max Drawdown</div>
+          <div class="sval">{{ b.metrics.max_drawdown }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Equity Curve: one shared aligned timeline, two datasets -->
+  <h2 class="h5">Equity Curve</h2>
+  {% if comparison_equity_payload %}
+  <div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1rem 1.25rem;margin-bottom:1rem">
+    <canvas id="comparison-equity-chart" role="img"
+            aria-label="Equity curves for Result A ({{ a.result.strategy_id }} v{{ a.result.strategy_api_version }}, run {{ a.result.run_id }}) and Result B ({{ b.result.strategy_id }} v{{ b.result.strategy_api_version }}, run {{ b.result.run_id }})"
+            style="max-height:280px">Chart unavailable — see the equity data table below for exact values.</canvas>
+    <p id="comparison-equity-chart-status" class="text-muted small mb-0 mt-2" hidden>Chart unavailable — see the equity data table below for exact values.</p>
+  </div>
+  <script>
+  (function () {
+    var payload = {{ comparison_equity_payload|tojson }};
+    var canvas = document.getElementById('comparison-equity-chart');
+    var status = document.getElementById('comparison-equity-chart-status');
+    var details = document.getElementById('comparison-equity-curve-table');
+    function showChartUnavailable() {
+      if (status) status.hidden = false;
+      if (details) details.open = true;
+    }
+    if (!canvas || typeof Chart === 'undefined') {
+      showChartUnavailable();
+      return;
+    }
+    try {
+      var existing = Chart.getChart(canvas);
+      if (existing) existing.destroy();
+      new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+          labels: payload.map(function (p) { return p.date; }),
+          datasets: [
+            {
+              label: {{ ("Result A: " ~ a.result.strategy_id ~ " v" ~ a.result.strategy_api_version ~ " (run " ~ a.result.run_id ~ ")")|tojson }},
+              data: payload.map(function (p) { return p.equity_a; }),
+              borderColor: '#1d4ed8',
+              backgroundColor: 'rgba(29,78,216,0.08)',
+              borderWidth: 2,
+              borderDash: [],
+              pointStyle: 'circle',
+              pointRadius: payload.length > 60 ? 0 : 3,
+              pointHoverRadius: 5,
+              fill: false,
+              tension: 0.2,
+            },
+            {
+              label: {{ ("Result B: " ~ b.result.strategy_id ~ " v" ~ b.result.strategy_api_version ~ " (run " ~ b.result.run_id ~ ")")|tojson }},
+              data: payload.map(function (p) { return p.equity_b; }),
+              borderColor: '#b45309',
+              backgroundColor: 'rgba(180,83,9,0.08)',
+              borderWidth: 2,
+              borderDash: [6, 3],
+              pointStyle: 'triangle',
+              pointRadius: payload.length > 60 ? 0 : 3,
+              pointHoverRadius: 5,
+              fill: false,
+              tension: 0.2,
+            },
+          ],
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: true },
+            tooltip: { mode: 'index', intersect: false },
+          },
+          scales: {
+            x: { title: { display: true, text: 'Date' } },
+            y: { title: { display: true, text: 'Equity' } },
+          },
+        },
+      });
+    } catch (err) {
+      showChartUnavailable();
+    }
+  })();
+  </script>
+  {% endif %}
+  <details id="comparison-equity-curve-table" {% if not comparison_equity_payload %}open{% endif %} class="mb-4">
+    <summary>View equity data table</summary>
+    <div class="tbl-wrap mt-2" style="overflow-x:auto" tabindex="0" role="region" aria-label="Equity curve data table">
+      <table class="table table-hover align-middle mono-num">
+        <caption class="visually-hidden">Equity curve values by date for Result A and Result B</caption>
+        <thead><tr><th scope="col">Date</th><th scope="col">Result A equity</th><th scope="col">Result B equity</th></tr></thead>
+        <tbody>
+          {% for point in comparison_equity_payload %}
+          <tr><td>{{ point.date }}</td><td>{{ point.equity_a_display }}</td><td>{{ point.equity_b_display }}</td></tr>
+          {% else %}
+          <tr><td colspan="3">No equity curve data.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+  <!-- Trade Log -->
+  <h2 class="h5">Trade Log</h2>
+  <div class="row g-3 mb-4">
+    <div class="col-md-6">
+      <h3 class="h6">Result A</h3>
+      {% if not a.trade_log.has_events %}
+      <p>No simulated trades.</p>
+      {% else %}
+      {% if not a.trade_log.has_executed_fills %}
+      <p>No executed simulated trades</p>
+      {% endif %}
+      <div class="tbl-wrap mb-3" style="overflow-x:auto" tabindex="0" role="region" aria-label="Result A Trade Log">
+        <table class="table table-hover align-middle mono-num">
+          <caption class="visually-hidden">Result A: every persisted Trade Log event in sequence order</caption>
+          <thead>
+            <tr>
+              <th scope="col">#</th><th scope="col">Event</th><th scope="col">Security</th>
+              <th scope="col">Date</th><th scope="col">Shares</th><th scope="col">Price</th>
+              <th scope="col">P&amp;L</th><th scope="col">Rule</th><th scope="col">Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in a.trade_log.rows %}
+            <tr>
+              <td>{{ row.sequence }}</td>
+              <td>{{ row.kind_label }}</td>
+              <td>{{ row.security_id }}</td>
+              <td>{{ row.date }}</td>
+              <td>{{ row.shares }}</td>
+              <td>{{ row.price }}</td>
+              <td>{{ row.pnl }}</td>
+              <td>{{ row.rule_id }}</td>
+              <td class="text-wrap">{{ row.detail }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+    <div class="col-md-6">
+      <h3 class="h6">Result B</h3>
+      {% if not b.trade_log.has_events %}
+      <p>No simulated trades.</p>
+      {% else %}
+      {% if not b.trade_log.has_executed_fills %}
+      <p>No executed simulated trades</p>
+      {% endif %}
+      <div class="tbl-wrap mb-3" style="overflow-x:auto" tabindex="0" role="region" aria-label="Result B Trade Log">
+        <table class="table table-hover align-middle mono-num">
+          <caption class="visually-hidden">Result B: every persisted Trade Log event in sequence order</caption>
+          <thead>
+            <tr>
+              <th scope="col">#</th><th scope="col">Event</th><th scope="col">Security</th>
+              <th scope="col">Date</th><th scope="col">Shares</th><th scope="col">Price</th>
+              <th scope="col">P&amp;L</th><th scope="col">Rule</th><th scope="col">Detail</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in b.trade_log.rows %}
+            <tr>
+              <td>{{ row.sequence }}</td>
+              <td>{{ row.kind_label }}</td>
+              <td>{{ row.security_id }}</td>
+              <td>{{ row.date }}</td>
+              <td>{{ row.shares }}</td>
+              <td>{{ row.price }}</td>
+              <td>{{ row.pnl }}</td>
+              <td>{{ row.rule_id }}</td>
+              <td class="text-wrap">{{ row.detail }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Provenance -->
+  <h2 class="h5">Provenance</h2>
+  <div class="row g-3">
+    <div class="col-md-6">
+      <h3 class="h6">Result A</h3>
+      <p class="mono-num mb-1">Scanner-data version: {{ a.provenance.display_version }}</p>
+      {% if not a.provenance.entries %}
+      <p class="text-muted">No provenance evidence is pinned for this run's period.</p>
+      {% endif %}
+      {% for source in a.provenance.entries %}
+      <p class="mt-2 mb-0"><strong>{{ source.provenance_quality|replace('_', ' ')|title }}:</strong> {{ source.snapshot_count }} snapshots {% for interval in source.intervals %}({{ interval.start_month }}–{{ interval.end_month }}){% endfor %}</p>
+      {% if source.provenance_quality == 'best_effort_reconstructed' %}
+      <p class="text-muted">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>
+      {% endif %}
+      {% endfor %}
+    </div>
+    <div class="col-md-6">
+      <h3 class="h6">Result B</h3>
+      <p class="mono-num mb-1">Scanner-data version: {{ b.provenance.display_version }}</p>
+      {% if not b.provenance.entries %}
+      <p class="text-muted">No provenance evidence is pinned for this run's period.</p>
+      {% endif %}
+      {% for source in b.provenance.entries %}
+      <p class="mt-2 mb-0"><strong>{{ source.provenance_quality|replace('_', ' ')|title }}:</strong> {{ source.snapshot_count }} snapshots {% for interval in source.intervals %}({{ interval.start_month }}–{{ interval.end_month }}){% endfor %}</p>
+      {% if source.provenance_quality == 'best_effort_reconstructed' %}
+      <p class="text-muted">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+
+  {% endif %}
+</section>

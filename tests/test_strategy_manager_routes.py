@@ -45,6 +45,7 @@ from app.services.backtest.metrics import (
     MetricAvailabilityV1,
     MetricUnavailableReason,
 )
+from app.services.backtest.result_presenter import comparison_equity_payload
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.snapshot_profile import (
     CoverageIntervalV1,
@@ -81,6 +82,13 @@ class FakeRepo:
         self.result: BacktestResultV1 | None = None
         self.result_error: Exception | None = None
         self.result_coverage: CoverageSummaryV1 | None = None
+        # Story 3.3: a second, independently-settable Result/error so
+        # Comparison tests can express "side A loads fine, side B is
+        # corrupt/vanished" (and vice versa) -- `self.result`/
+        # `self.result_error` above always own side A's outcome; this
+        # pair owns side B's.
+        self.result_b: BacktestResultV1 | None = None
+        self.result_b_error: Exception | None = None
         self.note_conflict = False
         self.note_value_error: str | None = None
         self.last_note_call: tuple[str, int, str] | None = None
@@ -117,6 +125,19 @@ class FakeRepo:
     def backtest_result(self, run_id):
         from app.services.backtest.strategy_job import StrategyJobNotFound
 
+        if (
+            self.result_b is not None
+            and self.result is not None
+            and self.result_b.run_id == self.result.run_id
+        ):
+            raise AssertionError(
+                "FakeRepo misconfigured: result and result_b share a run_id "
+                "-- give each side a distinct run_id"
+            )
+        if self.result_b is not None and run_id == self.result_b.run_id:
+            if self.result_b_error is not None:
+                raise self.result_b_error
+            return self.result_b
         if self.result_error is not None:
             raise self.result_error
         if self.result is None or self.result.run_id != run_id:
@@ -1662,3 +1683,211 @@ def test_compare_submit_requires_auth_guard(services):
     )
     assert response.status_code == 403
     assert repo.last_is_comparable_call is None
+
+
+def test_compare_picker_reason_query_param_populates_picker_error(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.candidates = (_candidate(),)
+    response = client.get(
+        "/strategy-manager/compare",
+        params={"run_id": RESULT_RUN_ID, "reason": "some reason text"},
+    )
+    assert response.status_code == 200
+    text = response.text
+    assert 'id="compare-picker-errors"' in text
+    assert 'role="alert"' in text
+    assert 'tabindex="-1"' in text
+    assert "some reason text" in text
+
+
+def test_compare_picker_without_reason_shows_no_picker_error(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.candidates = (_candidate(),)
+    response = client.get(f"/strategy-manager/compare?run_id={RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert 'id="compare-picker-errors"' not in response.text
+
+
+def test_compare_picker_empty_reason_shows_no_picker_error(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    repo.candidates = (_candidate(),)
+    response = client.get(
+        "/strategy-manager/compare", params={"run_id": RESULT_RUN_ID, "reason": ""}
+    )
+    assert response.status_code == 200
+    assert 'id="compare-picker-errors"' not in response.text
+
+
+# ---------------------------------------------------------------------------
+# Story 3.3: Comparison -- review two eligible Results side by side
+# ---------------------------------------------------------------------------
+
+
+def test_comparison_equity_payload_zips_matching_date_sequences():
+    left = _result(
+        run_id="run-1",
+        equity_curve=(_equity_point(1, "10000.00", 1), _equity_point(2, "10450.00", 2)),
+    )
+    right = _result(
+        run_id="run-2",
+        equity_curve=(_equity_point(1, "9500.00", 1), _equity_point(2, "9820.50", 2)),
+    )
+    payload = comparison_equity_payload(left, right)
+    assert payload == (
+        {
+            "date": "2024-01-01",
+            "equity_a": 10000.0,
+            "equity_a_display": "10,000.00",
+            "equity_b": 9500.0,
+            "equity_b_display": "9,500.00",
+        },
+        {
+            "date": "2024-01-02",
+            "equity_a": 10450.0,
+            "equity_a_display": "10,450.00",
+            "equity_b": 9820.5,
+            "equity_b_display": "9,820.50",
+        },
+    )
+
+
+def test_comparison_equity_payload_raises_on_divergent_dates():
+    left = _result(run_id="run-1", equity_curve=(_equity_point(1, "10000.00", 1),))
+    right = _result(run_id="run-2", equity_curve=(_equity_point(2, "9500.00", 1),))
+    with pytest.raises(BacktestIntegrityError):
+        comparison_equity_payload(left, right)
+
+
+def test_comparison_happy_path_renders_both_sides(services):
+    repo, _ = services
+    repo.result = _result(run_id="run-1")
+    repo.result_b = _result(run_id="run-2")
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.get("/strategy-manager/comparisons/run-1/run-2")
+    assert response.status_code == 200
+    text = response.text
+    assert repo.last_is_comparable_call == ("run-1", "run-2")
+    assert "Result A" in text
+    assert "Result B" in text
+    assert "run-1" in text
+    assert "run-2" in text
+    assert "Metrics" in text
+    assert "Trade Log" in text
+    assert "Provenance" in text
+    assert "comparison-equity-chart" in text
+    assert "View equity data table" in text
+    # Notes are a standalone-Result concern -- never rendered here.
+    assert "Decision note" not in text
+
+
+def test_comparison_ineligible_redirects_to_picker_with_reason(services):
+    repo, _ = services
+    repo.eligibility = ComparisonEligibilityV1(
+        eligible=False,
+        reason=ComparisonIneligibleReason.TOMBSTONED,
+        detail="'run-2' is not eligible for comparison (tombstoned)",
+    )
+    response = client.get(
+        "/strategy-manager/comparisons/run-1/run-2", follow_redirects=False
+    )
+    assert response.status_code == 303
+    location = response.headers["location"]
+    assert location.startswith("/strategy-manager/compare?run_id=run-1&reason=")
+    assert repo.last_is_comparable_call == ("run-1", "run-2")
+
+    # Following the redirect re-renders the picker with the reason surfaced
+    # as `picker_error` -- never a stale/trusted eligibility state.
+    repo.activity = _complete_backtest_activity(run_id="run-1")
+    repo.result = _result(run_id="run-1")
+    follow = client.get(location)
+    assert follow.status_code == 200
+    assert "is not eligible for comparison (tombstoned)" in follow.text
+    assert 'id="compare-picker-errors"' in follow.text
+
+
+def test_comparison_self_comparison_redirects_same_as_ineligible(services):
+    repo, _ = services
+    repo.eligibility = ComparisonEligibilityV1(
+        eligible=False,
+        reason=ComparisonIneligibleReason.SELF_COMPARISON,
+        detail="'run-1' cannot be compared to itself",
+    )
+    response = client.get(
+        "/strategy-manager/comparisons/run-1/run-1", follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"].startswith(
+        "/strategy-manager/compare?run_id=run-1&reason="
+    )
+
+
+def test_comparison_ineligible_redirect_urlencodes_run_id_a(services):
+    repo, _ = services
+    repo.eligibility = ComparisonEligibilityV1(
+        eligible=False,
+        reason=ComparisonIneligibleReason.NOT_FOUND,
+        detail="'run&1' is not eligible for comparison (not found)",
+    )
+    response = client.get(
+        "/strategy-manager/comparisons/run%261/run-2", follow_redirects=False
+    )
+    assert response.status_code == 303
+    location = response.headers["location"]
+    # A raw `&` in run_id_a must not be reflected unescaped into the
+    # redirect's query string -- that would inject a second query param
+    # (e.g. a bare `1&reason=...`) ahead of the real `reason`.
+    assert location.startswith("/strategy-manager/compare?run_id=run%261&reason=")
+    assert location.count("&") == 1
+
+
+def test_comparison_vanished_side_a_result_renders_integrity_error(services):
+    repo, _ = services
+    repo.result_b = _result(run_id="run-2")
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.get("/strategy-manager/comparisons/run-1/run-2")
+    assert response.status_code == 200
+    text = response.text
+    assert "backtest result evidence is missing for a complete job" in text
+    assert "Metrics" not in text
+    assert "Trade Log" not in text
+    assert "Reload comparison" in text
+    assert "View Result A" in text
+    assert "View Result B" in text
+
+
+def test_comparison_corrupt_side_b_result_renders_integrity_error(services):
+    repo, _ = services
+    repo.result = _result(run_id="run-1")
+    repo.result_b = _result(run_id="run-2")
+    repo.result_b_error = BacktestIntegrityError(
+        "stored backtest result digest is invalid"
+    )
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.get("/strategy-manager/comparisons/run-1/run-2")
+    assert response.status_code == 200
+    text = response.text
+    assert "stored backtest result digest is invalid" in text
+    assert "Metrics" not in text
+    assert "Trade Log" not in text
+
+
+def test_comparison_equity_date_mismatch_renders_integrity_error(services):
+    repo, _ = services
+    repo.result = _result(run_id="run-1")
+    repo.result_b = _result(
+        run_id="run-2",
+        equity_curve=(_equity_point(2, "9500.00", 1), _equity_point(30, "9800.00", 2)),
+    )
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.get("/strategy-manager/comparisons/run-1/run-2")
+    assert response.status_code == 200
+    text = response.text
+    assert "comparison equity curves diverge" in text
+    assert "Metrics" not in text
+    assert "Trade Log" not in text
