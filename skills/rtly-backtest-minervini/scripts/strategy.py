@@ -20,6 +20,22 @@ _ENTRY_RULE = "minervini_vcp_breakout_v1"
 _EXIT_RULE = "minervini_risk_exit_v1"
 
 
+UNIVERSE_PARAMETER = "selected_securities"
+
+
+def _universe(parameters: StrategyParameters) -> tuple[str, ...]:
+    """Return the host-bound selected universe as a canonical ID tuple.
+
+    The host injects an already sorted, deduplicated tuple; re-deriving it
+    here keeps iteration deterministic for any caller and makes a
+    malformed or empty universe fail closed with no signals.
+    """
+    raw = parameters.get(UNIVERSE_PARAMETER)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(sorted({value for value in raw if isinstance(value, str) and value}))
+
+
 def _decimal(value: Any) -> Decimal | None:
     try:
         result = Decimal(str(value))
@@ -87,21 +103,41 @@ class MinerviniStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
-        security_id = str(parameters["security_id"])
+        signals = [
+            self._entry_signal(view, parameters, security_id)
+            for security_id in _universe(parameters)
+        ]
+        return [signal for signal in signals if signal is not None]
+
+    def exit_signals(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+    ) -> list[Signal]:
+        signals = [
+            self._exit_signal(view, portfolio, parameters, security_id)
+            for security_id in _universe(parameters)
+        ]
+        return [signal for signal in signals if signal is not None]
+
+    def _entry_signal(
+        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
+    ) -> Signal | None:
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
         if history is None or scan is None or len(history) < 51:
-            return []
+            return None
 
         closes = _decimals(history["close"])
         volumes = _decimals(history["volume"])
         if closes is None or volumes is None:
-            return []
+            return None
         close = closes[-1]
         current_volume = volumes[-1]
         mean_volume = sum(volumes[-51:-1], Decimal(0)) / Decimal(50)
         if mean_volume <= 0 or current_volume < 0:
-            return []
+            return None
 
         vcp = getattr(scan, "vcp", None)
         stage = getattr(getattr(scan, "stage", None), "value", None)
@@ -120,7 +156,7 @@ class MinerviniStrategy:
             maximum_extension,
             minimum_vcp_score,
         ):
-            return []
+            return None
         assert pivot is not None
         assert trend_score is not None
         assert minimum_trend is not None
@@ -142,32 +178,30 @@ class MinerviniStrategy:
             and current_volume >= mean_volume * minimum_volume
         )
         if not qualifies:
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.BUY,
-                session=view.as_of_session,
-                rule_id=_ENTRY_RULE,
-            )
-        ]
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.BUY,
+            session=view.as_of_session,
+            rule_id=_ENTRY_RULE,
+        )
 
-    def exit_signals(
+    def _exit_signal(
         self,
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> list[Signal]:
-        security_id = str(parameters["security_id"])
+        security_id: str,
+    ) -> Signal | None:
         held = _position(portfolio, security_id)
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
         if held is None or held.quantity <= 0 or history is None or len(history) < 50:
-            return []
+            return None
         closes = _decimals(history["close"].iloc[-50:])
         maximum_loss = _decimal(parameters["maximum_loss_pct"])
         if closes is None or maximum_loss is None:
-            return []
+            return None
         close = closes[-1]
         sma50 = sum(closes, Decimal(0)) / Decimal(50)
         stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
@@ -177,15 +211,13 @@ class MinerviniStrategy:
             stage != "Stage 2" or state in {"Invalid", "Damaged"}
         )
         if not (close <= stop or close < sma50 or scan_failure):
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.SELL,
-                session=view.as_of_session,
-                rule_id=_EXIT_RULE,
-            )
-        ]
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.SELL,
+            session=view.as_of_session,
+            rule_id=_EXIT_RULE,
+        )
 
     def position_size(
         self,

@@ -13,10 +13,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
+from typing import Mapping
 
 import pytest
 
 import app.services.backtest.skill_discovery as skill_discovery_module
+from app.services.backtest.run_universe import (
+    RunUniverseError,
+    RunUniverseErrorCode,
+    run_universe_digest,
+)
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
     StrategyDiscoveryWarningV1,
@@ -35,19 +41,16 @@ LIVE_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
 
 EXPECTED_LIVE_STRATEGY_DEFAULTS = {
     "rtly-backtest-buy-and-hold": {
-        "security_id": "sec-aapl",
         "fixed_shares": 10,
         "entry_on_or_after": "2000-01-01",
     },
     "rtly-backtest-darvas-box": {
-        "security_id": "sec-aapl",
         "fixed_shares": 10,
         "box_lookback_sessions": 20,
         "maximum_box_depth_pct": 15.0,
         "volume_multiplier": 1.5,
     },
     "rtly-backtest-minervini": {
-        "security_id": "sec-aapl",
         "fixed_shares": 10,
         "minimum_vcp_score": 70,
         "minimum_trend_score": 85.0,
@@ -56,25 +59,33 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "maximum_loss_pct": 8.0,
     },
     "rtly-backtest-moving-average": {
-        "security_id": "sec-aapl",
         "fixed_shares": 10,
         "fast_window": 50,
         "slow_window": 200,
     },
     "rtly-backtest-turtle-trend": {
-        "security_id": "sec-aapl",
         "fixed_shares": 10,
         "entry_lookback_sessions": 20,
         "exit_lookback_sessions": 10,
     },
     "rtly-backtest-weinstein": {
-        "security_id": "sec-aapl",
         "fixed_shares": 10,
         "breakout_lookback_sessions": 50,
         "minimum_relative_volume": 1.5,
         "maximum_loss_pct": 10.0,
     },
 }
+
+#: The packaging/universe frontmatter every ``kind: backtest-strategy``
+#: manifest must now declare, reused by the ad-hoc fixtures below.
+_UNIVERSE_BLOCK = (
+    "strategy_universe:\n"
+    "  schema_version: strategy_universe.v1\n"
+    "  mode: selected-securities\n"
+    "  parameter: selected_securities\n"
+)
+
+_UNIVERSE_FRONTMATTER = "runtime_files:\n  - scripts/strategy.py\n" + _UNIVERSE_BLOCK
 
 OLD_LIVE_STRATEGY_IDS = {
     "buy-and-hold-backtest",
@@ -219,6 +230,12 @@ def test_discover_strategies_display_name_falls_back_deterministically(
         "name: no-display-name\n"
         "description: Fallback display name check.\n"
         "api_version: 1\n"
+        "runtime_files:\n"
+        "  - scripts/strategy.py\n"
+        "strategy_universe:\n"
+        "  schema_version: strategy_universe.v1\n"
+        "  mode: selected-securities\n"
+        "  parameter: selected_securities\n"
         "---\n",
         encoding="utf-8",
     )
@@ -304,6 +321,12 @@ def test_discover_strategies_duplicate_identity_is_case_insensitive(
             f"display_name: {display_name}\n"
             "description: Case-insensitive duplicate check.\n"
             "api_version: 1\n"
+            "runtime_files:\n"
+            "  - scripts/strategy.py\n"
+            "strategy_universe:\n"
+            "  schema_version: strategy_universe.v1\n"
+            "  mode: selected-securities\n"
+            "  parameter: selected_securities\n"
             "---\n",
             encoding="utf-8",
         )
@@ -348,6 +371,12 @@ def test_discover_strategies_rejects_multi_document_frontmatter(
         "name: multi-doc\n"
         "description: First document.\n"
         "api_version: 1\n"
+        "runtime_files:\n"
+        "  - scripts/strategy.py\n"
+        "strategy_universe:\n"
+        "  schema_version: strategy_universe.v1\n"
+        "  mode: selected-securities\n"
+        "  parameter: selected_securities\n"
         "---\n"
         "---\n"
         "second: document\n"
@@ -571,7 +600,7 @@ def test_discover_strategies_unexpected_exception_is_isolated_not_fatal(
     good.mkdir()
     (good / "SKILL.md").write_text(
         "---\nkind: backtest-strategy\nname: valid\n"
-        "description: d\napi_version: 1\n---\n",
+        "description: d\napi_version: 1\n" + _UNIVERSE_FRONTMATTER + "---\n",
         encoding="utf-8",
     )
     (good / "scripts").mkdir()
@@ -595,3 +624,410 @@ def test_discover_strategies_unexpected_exception_is_isolated_not_fatal(
     assert any(descriptor.strategy_id == "valid" for descriptor in result.strategies)
     warning = _warnings_by_folder(result.warnings)["boom"]
     assert "simulated unexpected failure" in warning.message
+
+
+# ---------------------------------------------------------------------------
+# Story 4.2: packaging, import safety and the selected-universe contract
+# ---------------------------------------------------------------------------
+
+
+def _write_skill(
+    root: Path,
+    name: str,
+    *,
+    runtime_files: str = "runtime_files:\n  - scripts/strategy.py\n",
+    universe: str = _UNIVERSE_BLOCK,
+    parameters: str = "parameters: []\n",
+    files: Mapping[str, str] | None = None,
+) -> Path:
+    """Write one ``kind: backtest-strategy`` Skill folder under ``root``.
+
+    Every frontmatter block is injectable so a test can vary exactly the
+    one rule it is pinning and leave the rest of the manifest valid.
+    """
+    folder = root / name
+    for relative, content in {
+        "scripts/strategy.py": "STRATEGY_API_VERSION = 1\n",
+        **(files or {}),
+    }.items():
+        path = folder / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    (folder / "SKILL.md").write_text(
+        "---\n"
+        "kind: backtest-strategy\n"
+        f"name: {name}\n"
+        f"display_name: {name}\n"
+        "description: Story 4.2 contract fixture.\n"
+        "api_version: 1\n" + runtime_files + universe + parameters + "---\n",
+        encoding="utf-8",
+    )
+    return folder
+
+
+def _only_warning(root: Path, name: str) -> StrategyDiscoveryWarningV1:
+    """Scan ``root`` and return ``name``'s single isolating warning.
+
+    Also asserts a valid sibling written by the caller still discovers, so
+    every rejection case doubles as proof one bad Skill never blocks the
+    rest of the scan.
+    """
+    result = discover_strategies(root)
+    assert name not in _strategies_by_id(result.strategies)
+    return _warnings_by_folder(result.warnings)[name]
+
+
+@pytest.mark.parametrize(
+    ("case", "runtime_files", "files", "reason"),
+    (
+        ("no-declaration", "", None, "missing_runtime_files"),
+        (
+            "not-a-list",
+            "runtime_files: scripts/strategy.py\n",
+            None,
+            "malformed_runtime_files",
+        ),
+        ("empty-list", "runtime_files: []\n", None, "malformed_runtime_files"),
+        (
+            "blank-entry",
+            "runtime_files:\n  - scripts/strategy.py\n  - '  '\n",
+            None,
+            "malformed_runtime_files",
+        ),
+        (
+            "repeated-entry",
+            "runtime_files:\n  - scripts/strategy.py\n  - scripts/strategy.py\n",
+            None,
+            "duplicate_runtime_file",
+        ),
+        (
+            "no-entrypoint",
+            "runtime_files:\n  - scripts/helper.py\n",
+            None,
+            "undeclared_entrypoint",
+        ),
+        (
+            "traversing-entry",
+            "runtime_files:\n  - scripts/strategy.py\n  - ../outside.py\n",
+            None,
+            "runtime_file_escapes_skill",
+        ),
+        (
+            "absolute-entry",
+            "runtime_files:\n  - scripts/strategy.py\n  - /etc/passwd\n",
+            None,
+            "runtime_file_escapes_skill",
+        ),
+        (
+            "declared-but-absent",
+            "runtime_files:\n  - scripts/strategy.py\n  - scripts/helper.py\n",
+            None,
+            "missing_runtime_file",
+        ),
+    ),
+)
+def test_discover_strategies_rejects_a_malformed_runtime_files_allowlist(
+    tmp_path: Path,
+    case: str,
+    runtime_files: str,
+    files: Mapping[str, str] | None,
+    reason: str,
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root, case, runtime_files=runtime_files, files=files)
+    _write_skill(root, "good-neighbour")
+
+    warning = _only_warning(root, case)
+
+    assert warning.code == "invalid_runtime_files"
+    assert warning.field == "runtime_files"
+    assert warning.message.startswith(f"{reason}:")
+    assert "good-neighbour" in {
+        descriptor.strategy_id for descriptor in discover_strategies(root).strategies
+    }
+
+
+def test_discover_strategies_rejects_a_symlinked_runtime_file(tmp_path: Path) -> None:
+    """Only content provably inside the Skill may participate in its
+    ``source_digest`` -- a symlink could point anywhere after hashing."""
+    root = tmp_path / "skills"
+    outside = tmp_path / "outside.py"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+    folder = _write_skill(
+        root,
+        "symlinked",
+        runtime_files="runtime_files:\n  - scripts/strategy.py\n  - scripts/helper.py\n",
+    )
+    try:
+        (folder / "scripts" / "helper.py").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are not supported on this filesystem")
+
+    warning = _only_warning(root, "symlinked")
+
+    assert warning.code == "invalid_runtime_files"
+    assert warning.message.startswith("runtime_file_symlink:")
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "reason"),
+    (
+        ("forbidden-module", "import subprocess\n", "forbidden_import"),
+        (
+            "forbidden-repository",
+            "from app.repositories.trades_repo import TradesRepository\n",
+            "forbidden_import",
+        ),
+        (
+            "app-internal",
+            "from app.core.stage_classification import classify\n",
+            "import_outside_runtime_allowlist",
+        ),
+        (
+            "undeclared-relative",
+            "from .helper import sma\n",
+            "undeclared_runtime_import",
+        ),
+        (
+            "relative-escape",
+            "from ...other_skill import client\n",
+            "relative_import_escape",
+        ),
+        ("dynamic-import", '__import__("requests")\n', "dynamic_import"),
+        (
+            "dynamic-import-module",
+            'importlib.import_module("requests")\n',
+            "dynamic_import",
+        ),
+        ("unparsable", "def broken(:\n", "unparsable_runtime_file"),
+    ),
+)
+def test_discover_strategies_rejects_an_unsafe_runtime_import(
+    tmp_path: Path, case: str, source: str, reason: str
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root, case, files={"scripts/strategy.py": source})
+    _write_skill(root, "good-neighbour")
+
+    warning = _only_warning(root, case)
+
+    assert warning.code == "unsafe_runtime_import"
+    assert warning.field == "runtime_files"
+    assert warning.message.startswith(f"{reason}:")
+    assert "good-neighbour" in {
+        descriptor.strategy_id for descriptor in discover_strategies(root).strategies
+    }
+
+
+def test_discover_strategies_allows_a_declared_same_skill_relative_import(
+    tmp_path: Path,
+) -> None:
+    """The one relaxation over the old blanket relative-import ban: a
+    helper declared in ``runtime_files`` is part of the same hashed Skill."""
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "with-helper",
+        runtime_files="runtime_files:\n  - scripts/helper.py\n  - scripts/strategy.py\n",
+        files={
+            "scripts/helper.py": "import math\n\n\ndef sma(values):\n    return values\n",
+            "scripts/strategy.py": "from .helper import sma\n",
+        },
+    )
+
+    result = discover_strategies(root)
+
+    descriptor = _strategies_by_id(result.strategies)["with-helper"]
+    assert result.warnings == ()
+    assert descriptor.runtime_files == (
+        "with-helper/scripts/helper.py",
+        "with-helper/scripts/strategy.py",
+    )
+
+
+def test_discover_strategies_holds_a_declared_helper_to_the_same_import_rules(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "unsafe-helper",
+        runtime_files="runtime_files:\n  - scripts/helper.py\n  - scripts/strategy.py\n",
+        files={
+            "scripts/helper.py": "import socket\n",
+            "scripts/strategy.py": "from .helper import connect\n",
+        },
+    )
+
+    warning = _only_warning(root, "unsafe-helper")
+
+    assert warning.code == "unsafe_runtime_import"
+    assert warning.message.startswith("forbidden_import:")
+    assert "scripts/helper.py" in warning.message
+
+
+@pytest.mark.parametrize(
+    ("case", "universe", "reason"),
+    (
+        ("absent", "", "missing_universe_metadata"),
+        (
+            "not-a-mapping",
+            "strategy_universe: selected_securities\n",
+            "malformed_universe_metadata",
+        ),
+        (
+            "unknown-key",
+            _UNIVERSE_BLOCK + "  maximum: 10\n",
+            "malformed_universe_metadata",
+        ),
+        (
+            "wrong-schema",
+            "strategy_universe:\n"
+            "  schema_version: strategy_universe.v2\n"
+            "  mode: selected-securities\n"
+            "  parameter: selected_securities\n",
+            "unsupported_universe_schema",
+        ),
+        (
+            "wrong-mode",
+            "strategy_universe:\n"
+            "  schema_version: strategy_universe.v1\n"
+            "  mode: whole-market\n"
+            "  parameter: selected_securities\n",
+            "unsupported_universe_mode",
+        ),
+        (
+            "empty-parameter",
+            "strategy_universe:\n"
+            "  schema_version: strategy_universe.v1\n"
+            "  mode: selected-securities\n"
+            "  parameter: ''\n",
+            "empty_universe_parameter",
+        ),
+        (
+            "padded-parameter",
+            "strategy_universe:\n"
+            "  schema_version: strategy_universe.v1\n"
+            "  mode: selected-securities\n"
+            "  parameter: ' selected_securities '\n",
+            "empty_universe_parameter",
+        ),
+    ),
+)
+def test_discover_strategies_rejects_malformed_universe_metadata(
+    tmp_path: Path, case: str, universe: str, reason: str
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root, case, universe=universe)
+    _write_skill(root, "good-neighbour")
+
+    warning = _only_warning(root, case)
+
+    assert warning.code == "invalid_universe_metadata"
+    assert warning.field == "strategy_universe"
+    assert warning.message.startswith(f"{reason}:")
+    assert "good-neighbour" in {
+        descriptor.strategy_id for descriptor in discover_strategies(root).strategies
+    }
+
+
+def test_discover_strategies_rejects_a_host_bound_parameter_declared_generically(
+    tmp_path: Path,
+) -> None:
+    """The universe parameter is host-bound, so a second declaration in
+    ``parameters`` would give it a conflicting editable/default identity."""
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "conflicting",
+        parameters=(
+            "parameters:\n"
+            "  - name: selected_securities\n"
+            "    type: string\n"
+            "    default: sec-aapl\n"
+            "    description: Duplicated host-bound name.\n"
+            "    required: true\n"
+        ),
+    )
+
+    warning = _only_warning(root, "conflicting")
+
+    assert warning.code == "invalid_universe_metadata"
+    assert warning.message.startswith("universe_parameter_conflict:")
+
+
+def test_universe_parameter_has_no_editable_or_default_identity() -> None:
+    """Every live Skill's host-bound parameter stays out of the generic
+    parameter schema and its defaults -- nothing to render or edit."""
+    result = discover_strategies(LIVE_SKILLS_ROOT)
+
+    for descriptor in result.strategies:
+        assert descriptor.universe.schema_version == "strategy_universe.v1"
+        assert descriptor.universe.mode == "selected-securities"
+        assert descriptor.universe.parameter not in {
+            parameter.name for parameter in descriptor.parameters
+        }
+        assert descriptor.universe.parameter not in descriptor.default_parameters
+
+
+def test_bind_universe_is_identical_across_selection_orders() -> None:
+    descriptor = _strategies_by_id(discover_strategies(LIVE_SKILLS_ROOT).strategies)[
+        "rtly-backtest-buy-and-hold"
+    ]
+
+    first = descriptor.bind_universe(["sec-msft", "sec-aapl", "sec-goog"])
+    second = descriptor.bind_universe(["sec-goog", "sec-msft", "sec-aapl", "sec-msft"])
+
+    assert first == second
+    assert first[descriptor.universe.parameter] == ["sec-aapl", "sec-goog", "sec-msft"]
+    assert run_universe_digest(
+        first[descriptor.universe.parameter]  # type: ignore[arg-type]
+    ) == run_universe_digest(["sec-msft", "sec-goog", "sec-aapl"])
+
+
+def test_bind_universe_rejects_an_empty_selection() -> None:
+    descriptor = _strategies_by_id(discover_strategies(LIVE_SKILLS_ROOT).strategies)[
+        "rtly-backtest-buy-and-hold"
+    ]
+
+    with pytest.raises(RunUniverseError) as exc_info:
+        descriptor.bind_universe([])
+
+    assert exc_info.value.code is RunUniverseErrorCode.EMPTY_UNIVERSE
+
+
+def test_source_digest_covers_every_declared_runtime_file(tmp_path: Path) -> None:
+    """A declared helper's content is part of Strategy identity: editing it
+    moves the digest, while an undeclared sibling file never can."""
+    root = tmp_path / "skills"
+    folder = _write_skill(
+        root,
+        "digest-check",
+        runtime_files="runtime_files:\n  - scripts/helper.py\n  - scripts/strategy.py\n",
+        files={
+            "scripts/helper.py": "WINDOW = 20\n",
+            "scripts/strategy.py": "from .helper import WINDOW\n",
+            "scripts/notes.md": "not declared\n",
+        },
+    )
+
+    def _digest() -> str:
+        return _strategies_by_id(discover_strategies(root).strategies)[
+            "digest-check"
+        ].source_digest
+
+    original = _digest()
+    assert _digest() == original  # stable across repeated scans
+
+    (folder / "scripts" / "notes.md").write_text(
+        "still not declared\n", encoding="utf-8"
+    )
+    assert _digest() == original
+
+    (folder / "scripts" / "helper.py").write_text("WINDOW = 21\n", encoding="utf-8")
+    changed = _digest()
+    assert changed != original
+
+    (folder / "scripts" / "helper.py").write_text("WINDOW = 20\n", encoding="utf-8")
+    assert _digest() == original  # deterministic, content-addressed

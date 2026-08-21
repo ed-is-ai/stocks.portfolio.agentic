@@ -9,11 +9,18 @@ including ``app.agents.analyst.analyst_agent``) and ``app.repositories``
 (covers live portfolio/trade/cash/position repositories and the
 ``Connect``/DB-session factory in ``app.repositories.db``). It also rejects
 process and network client modules that would bypass deterministic replay.
-This is a
-test-time guard, not a runtime sandbox: ``typing.Protocol``/Pyrefly give no
-such enforcement at call time, so the safety boundary documented in
-``docs/strategy-manager/strategy-authoring-v1.md`` must be proven here
-instead.
+
+Scope split with production discovery: ``skill_discovery`` now owns the
+per-Skill packaging check (every declared ``runtime_files`` entry, same-Skill
+relative imports allowed, escapes/dynamic imports rejected) and this module
+reuses its :data:`FORBIDDEN_RUNTIME_PREFIXES`/
+:data:`ALLOWED_RUNTIME_PREFIXES` vocabularies verbatim -- there is one
+allow/deny list, never two. What stays here is the part discovery
+deliberately does not do: following an allowed *host* import
+(``app.services.backtest.strategy_protocol``) transitively through the
+first-party module graph, including ancestor ``__init__.py`` side effects.
+The relative-import rule matches discovery's: a same-Skill relative import
+is allowed (and followed), one that reaches above the Skill is rejected.
 """
 
 from __future__ import annotations
@@ -23,45 +30,13 @@ from pathlib import Path
 
 import pytest
 
-from app.services.backtest.skill_discovery import discover_strategies
+from app.services.backtest.skill_discovery import (
+    ALLOWED_RUNTIME_PREFIXES as _ALLOWED_RUNTIME_PREFIXES,
+    FORBIDDEN_RUNTIME_PREFIXES as _FORBIDDEN_PREFIXES,
+    discover_strategies,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-#: Module roots reached transitively through the one allowed first-party host
-#: API may never import these live-state or nondeterministic dependency families.
-_FORBIDDEN_PREFIXES: tuple[str, ...] = (
-    "app.agents",
-    "app.repositories",
-    "aiohttp",
-    "http",
-    "httpx",
-    "requests",
-    "socket",
-    "subprocess",
-    "urllib",
-    "urllib3",
-    "yfinance",
-)
-
-#: Closed imports available directly to independently releasable Strategy
-#: runtimes. Methodology code stays inside the hashed runtime; the sole
-#: first-party dependency is the versioned host protocol.
-_ALLOWED_RUNTIME_PREFIXES: tuple[str, ...] = (
-    "__future__",
-    "bisect",
-    "collections",
-    "dataclasses",
-    "datetime",
-    "decimal",
-    "enum",
-    "functools",
-    "itertools",
-    "math",
-    "operator",
-    "statistics",
-    "typing",
-    "app.services.backtest.strategy_protocol",
-)
 
 FIXTURE_STRATEGY_PATH = (
     PROJECT_ROOT
@@ -83,19 +58,34 @@ class ForbiddenImportError(AssertionError):
     """Raised naming the offending module and forbidden dependency."""
 
 
-def _imported_modules(source: str, *, enforce_runtime_rules: bool = False) -> list[str]:
-    """Return every absolute dotted module name a module's AST imports."""
+def _imported_modules(
+    source: str, *, enforce_runtime_rules: bool = False
+) -> tuple[list[str], list[str]]:
+    """Return a module's absolute imports and its same-Skill relative ones.
+
+    Relative imports are reported as bare, current-directory-relative
+    dotted names (``.helper`` -> ``helper``). One that reaches above its
+    own folder (``from ..other import x``) is rejected outright, matching
+    discovery's escape rule.
+    """
     tree = ast.parse(source)
     modules: list[str] = []
+    siblings: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             modules.extend(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             if node.level != 0:
                 if enforce_runtime_rules:
-                    raise ForbiddenImportError(
-                        "Strategy runtimes may not use relative imports; "
-                        "methodology code must remain inside the hashed entrypoint"
+                    if node.level > 1:
+                        raise ForbiddenImportError(
+                            "Strategy runtimes may not use a relative import that "
+                            "escapes their own Skill folder"
+                        )
+                    siblings.extend(
+                        [node.module]
+                        if node.module is not None
+                        else [alias.name for alias in node.names]
                     )
             elif node.module is not None:
                 modules.append(node.module)
@@ -111,7 +101,7 @@ def _imported_modules(source: str, *, enforce_runtime_rules: bool = False) -> li
                 raise ForbiddenImportError(
                     "Strategy runtimes may not use dynamic import_module calls"
                 )
-    return modules
+    return modules, siblings
 
 
 def _is_forbidden(module: str) -> bool:
@@ -179,6 +169,10 @@ def assert_no_forbidden_imports(
     """
     visited: set[Path] = set()
     entry = entry_path.resolve()
+    # Every same-Skill module reached by a relative import is itself a
+    # Strategy runtime module, so the closed runtime allowlist applies to
+    # it too -- a helper may not import what its entrypoint may not.
+    runtime_modules: set[Path] = {entry}
     stack = [entry]
     while stack:
         current = stack.pop()
@@ -186,8 +180,16 @@ def assert_no_forbidden_imports(
             continue
         visited.add(current)
         source = current.read_text(encoding="utf-8")
-        is_runtime_entry = current == entry
-        for module in _imported_modules(source, enforce_runtime_rules=is_runtime_entry):
+        is_runtime_entry = current in runtime_modules
+        modules, siblings = _imported_modules(
+            source, enforce_runtime_rules=is_runtime_entry
+        )
+        for name in siblings:
+            sibling = current.parent.joinpath(*name.split(".")).with_suffix(".py")
+            if sibling.is_file():
+                runtime_modules.add(sibling.resolve())
+                stack.append(sibling.resolve())
+        for module in modules:
             if is_runtime_entry and not _is_allowed_runtime_import(module):
                 raise ForbiddenImportError(
                     f"{current} imports dependency {module!r} outside the closed "
@@ -342,11 +344,30 @@ def test_stdlib_only_import_passes(tmp_path: Path) -> None:
     assert_no_forbidden_imports(module)  # does not raise
 
 
-def test_relative_helper_import_is_rejected(tmp_path: Path) -> None:
-    module = tmp_path / "bad_strategy.py"
-    module.write_text("from .helper import client\n", encoding="utf-8")
+def test_same_skill_relative_helper_import_passes(tmp_path: Path) -> None:
+    """Matches discovery's rule: a helper alongside the entrypoint (and
+    declared in ``runtime_files``) is part of the same hashed Skill."""
+    (tmp_path / "helper.py").write_text("import math\n", encoding="utf-8")
+    module = tmp_path / "good_strategy.py"
+    module.write_text("from .helper import sma\n", encoding="utf-8")
 
-    with pytest.raises(ForbiddenImportError, match="relative imports"):
+    assert_no_forbidden_imports(module)  # does not raise
+
+
+def test_same_skill_helper_is_held_to_the_runtime_allowlist(tmp_path: Path) -> None:
+    (tmp_path / "helper.py").write_text("import subprocess\n", encoding="utf-8")
+    module = tmp_path / "bad_strategy.py"
+    module.write_text("from .helper import run\n", encoding="utf-8")
+
+    with pytest.raises(ForbiddenImportError, match="subprocess"):
+        assert_no_forbidden_imports(module)
+
+
+def test_relative_import_escaping_the_skill_is_rejected(tmp_path: Path) -> None:
+    module = tmp_path / "bad_strategy.py"
+    module.write_text("from ..other_skill import client\n", encoding="utf-8")
+
+    with pytest.raises(ForbiddenImportError, match="escapes their own Skill"):
         assert_no_forbidden_imports(module)
 
 

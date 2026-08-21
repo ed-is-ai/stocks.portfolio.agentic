@@ -16,6 +16,20 @@ from app.services.backtest.strategy_protocol import (
 
 STRATEGY_ID = "rtly-backtest-turtle-trend"
 STRATEGY_API_VERSION = 1
+UNIVERSE_PARAMETER = "selected_securities"
+
+
+def _universe(parameters: StrategyParameters) -> tuple[str, ...]:
+    """Return the host-bound selected universe as a canonical ID tuple.
+
+    The host injects an already sorted, deduplicated tuple; re-deriving it
+    here keeps iteration deterministic for any caller and makes a
+    malformed or empty universe fail closed with no signals.
+    """
+    raw = parameters.get(UNIVERSE_PARAMETER)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(sorted({value for value in raw if isinstance(value, str) and value}))
 
 
 def _decimal(value: object) -> Decimal | None:
@@ -90,25 +104,11 @@ class TurtleTrendStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
-        security_id = str(parameters.get("security_id", ""))
-        lookback = _plain_int(parameters, "entry_lookback_sessions")
-        history = _bounded_history(view, security_id)
-        if not security_id or lookback is None or lookback < 1 or history is None:
-            return []
-        values = _channel_values(history, "high", lookback)
-        if values is None:
-            return []
-        prior_highs, current_high = values
-        if current_high <= max(prior_highs):
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.BUY,
-                session=view.as_of_session,
-                rule_id="turtle_entry_channel_breakout_v1",
-            )
+        signals = [
+            self._entry_signal(view, parameters, security_id)
+            for security_id in _universe(parameters)
         ]
+        return [signal for signal in signals if signal is not None]
 
     def exit_signals(
         self,
@@ -116,27 +116,57 @@ class TurtleTrendStrategy:
         portfolio: PortfolioView,
         parameters: StrategyParameters,
     ) -> list[Signal]:
-        security_id = str(parameters.get("security_id", ""))
+        signals = [
+            self._exit_signal(view, portfolio, parameters, security_id)
+            for security_id in _universe(parameters)
+        ]
+        return [signal for signal in signals if signal is not None]
+
+    def _entry_signal(
+        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
+    ) -> Signal | None:
+        lookback = _plain_int(parameters, "entry_lookback_sessions")
+        history = _bounded_history(view, security_id)
+        if lookback is None or lookback < 1 or history is None:
+            return None
+        values = _channel_values(history, "high", lookback)
+        if values is None:
+            return None
+        prior_highs, current_high = values
+        if current_high <= max(prior_highs):
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.BUY,
+            session=view.as_of_session,
+            rule_id="turtle_entry_channel_breakout_v1",
+        )
+
+    def _exit_signal(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> Signal | None:
         if _held_quantity(portfolio, security_id) == 0:
-            return []
+            return None
         lookback = _plain_int(parameters, "exit_lookback_sessions")
         history = _bounded_history(view, security_id)
         if lookback is None or lookback < 1 or history is None:
-            return []
+            return None
         values = _channel_values(history, "low", lookback)
         if values is None:
-            return []
+            return None
         prior_lows, current_low = values
         if current_low >= min(prior_lows):
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.SELL,
-                session=view.as_of_session,
-                rule_id="turtle_exit_channel_breach_v1",
-            )
-        ]
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.SELL,
+            session=view.as_of_session,
+            rule_id="turtle_exit_channel_breach_v1",
+        )
 
     def position_size(
         self,

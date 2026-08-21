@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import json
@@ -15,11 +15,15 @@ from app.repositories.backtest_repo import QualificationResult
 from app.services.backtest.strategy_job import (
     BacktestEnqueueResultV1,
     BacktestSubmissionV1,
+    BootstrapStage,
     JobFailureCode,
+    PreparationStage,
+    STAGE_VALUES,
     StrategyJobConflict,
     StrategyJobNotFound,
     StrategyJobStatus,
     StrategyJobType,
+    WorkerLeaseFenceV1,
 )
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.historical_data_qualification import (
@@ -1187,19 +1191,22 @@ def _seed_bare_job(
     status: str,
     enqueue_seq: int,
     status_version: int = 1,
+    job_type: str = "backtest",
 ) -> None:
     """Insert a minimal ``strategy_jobs`` row directly -- used only to
-    construct the two integrity-error scenarios ``list_backtest_activities``
-    must reject (a status/Result-cardinality mismatch that
-    ``complete_claimed_backtest_job`` itself could never produce)."""
+    construct integrity scenarios no legitimate write path can produce
+    (a status/Result-cardinality mismatch that
+    ``complete_claimed_backtest_job`` could never write, or a
+    subtype-less stage job)."""
     with sqlite3.connect(path) as conn:
         conn.execute(
             """INSERT INTO strategy_jobs (
                    id, job_type, status, enqueue_seq, status_version,
                    created_at, updated_at
-               ) VALUES (?, 'backtest', ?, ?, ?, ?, ?)""",
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (
                 job_id,
+                job_type,
                 status,
                 enqueue_seq,
                 status_version,
@@ -1314,3 +1321,486 @@ def test_list_backtest_activities_rejects_noncomplete_job_with_result(
 
     with pytest.raises(BacktestIntegrityError, match="Result cardinality"):
         repo.list_backtest_activities()
+
+
+# ---------------------------------------------------------------------------
+# Story 4.1: four-activity schema + singleton worker lease.
+# ---------------------------------------------------------------------------
+
+
+LEASE_TTL = 30.0
+INSTANCE_A = "worker-a"
+INSTANCE_B = "worker-b"
+
+
+class _MovableClock:
+    """An instant clock the lease's expiry-driven takeovers can advance."""
+
+    def __init__(self, start: datetime = NOW) -> None:
+        self.now = start
+
+    def __call__(self) -> datetime:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now = self.now + timedelta(seconds=seconds)
+
+
+def _leased_repo(path: Path, clock: _MovableClock) -> BacktestRepository:
+    """Build a repository whose instant clock the lease tests control."""
+    repo = BacktestRepository(
+        db.make_connect(lambda: path),
+        clock=lambda: date(2026, 8, 12),
+        instant_clock=clock,
+    )
+    repo.ensure_schema()
+    _seed_profile(path)
+    return repo
+
+
+def _fail_claimed(
+    repo: BacktestRepository,
+    job_id: str,
+    claim_token: str,
+    *,
+    expected_version: int,
+    lease: WorkerLeaseFenceV1 | None = None,
+):
+    """Free the single running slot so the next FIFO claim can proceed."""
+    return repo.fail_claimed_strategy_job(
+        job_id,
+        claim_token,
+        expected_version=expected_version,
+        failure_code=JobFailureCode.WORKER_INTERRUPTED,
+        failed_month=None,
+        detail="freed for the next claim",
+        lease=lease,
+    )
+
+
+def test_ensure_schema_is_repeatable_and_creates_the_four_activity_schema(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+
+    repo.ensure_schema()
+
+    with sqlite3.connect(path) as conn:
+        tables = {
+            str(row[0])
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO strategy_jobs (
+                       id, job_type, status, enqueue_seq, status_version,
+                       created_at, updated_at
+                   ) VALUES ('unknown-type', 'compaction', 'queued', 99, 1, ?, ?)""",
+                (NOW.isoformat(), NOW.isoformat()),
+            )
+    assert {
+        "bootstrap_runs",
+        "initialization_runs",
+        "preparation_runs",
+        "strategy_runs",
+        "strategy_worker_lease",
+    } <= tables
+    assert repo.read_worker_lease() is None
+
+
+def test_each_activity_type_enqueues_with_exactly_one_subtype_row(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+
+    bootstrap = repo.create_bootstrap_job()
+    preparation = repo.create_preparation_job()
+
+    assert bootstrap.job_type is StrategyJobType.BOOTSTRAP
+    assert preparation.job_type is StrategyJobType.PREPARATION
+    assert repo.bootstrap_run(bootstrap.id).job_id == bootstrap.id
+    assert repo.preparation_run(preparation.id).job_id == preparation.id
+    with pytest.raises(StrategyJobNotFound):
+        repo.preparation_run(bootstrap.id)
+    with pytest.raises(StrategyJobNotFound):
+        repo.bootstrap_run(preparation.id)
+
+
+def test_subtype_rows_cannot_be_duplicated_or_attached_to_another_type(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    bootstrap = repo.create_bootstrap_job()
+
+    with sqlite3.connect(path) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO bootstrap_runs (job_id) VALUES (?)", (bootstrap.id,)
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO preparation_runs (job_id) VALUES (?)", (bootstrap.id,)
+            )
+
+
+def test_claiming_a_subtype_less_stage_job_is_rejected_and_leaves_it_queued(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_bare_job(
+        path, "orphan-bootstrap", status="queued", enqueue_seq=1, job_type="bootstrap"
+    )
+
+    with pytest.raises(StrategyJobConflict):
+        repo.claim_next_strategy_job()
+
+    assert repo.strategy_job("orphan-bootstrap").status is StrategyJobStatus.QUEUED
+
+
+def test_claim_is_fifo_across_all_four_activity_types(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    initialization = _enqueue(repo, "2026-05", "2026-05").job
+    bootstrap = repo.create_bootstrap_job()
+    backtest = _enqueue_backtest(repo).job
+    preparation = repo.create_preparation_job()
+    assert backtest is not None and initialization is not None
+
+    claimed: list[str] = []
+    for _ in range(4):
+        claim = repo.claim_next_strategy_job()
+        assert claim is not None
+        claimed.append(claim.job.id)
+        _fail_claimed(
+            repo,
+            claim.job.id,
+            claim.claim_token,
+            expected_version=claim.job.status_version,
+        )
+
+    assert claimed == [initialization.id, bootstrap.id, backtest.id, preparation.id]
+    assert repo.claim_next_strategy_job() is None
+
+
+def test_claim_carries_only_its_own_subtype_for_each_stage_type(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    bootstrap = repo.create_bootstrap_job()
+
+    claim = repo.claim_next_strategy_job()
+
+    assert claim is not None and claim.job.id == bootstrap.id
+    assert claim.bootstrap is not None and claim.bootstrap.job_id == bootstrap.id
+    assert claim.preparation is None
+    assert claim.initialization is None
+    assert claim.backtest is None
+
+
+def test_stage_walk_advances_a_closed_stage_sequence_then_completes(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    preparation = repo.create_preparation_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    job = claim.job
+    for stage in PreparationStage:
+        job = repo.set_strategy_job_current_stage(
+            preparation.id,
+            claim.claim_token,
+            expected_version=job.status_version,
+            stage=stage.value,
+        )
+        assert job.current_stage == stage.value
+        assert job.current_month is None
+
+    completed = repo.complete_claimed_stage_job(
+        preparation.id, claim.claim_token, expected_version=job.status_version
+    )
+
+    assert completed.status is StrategyJobStatus.COMPLETE
+    assert completed.current_stage is None
+
+
+def test_stage_and_month_progress_mechanisms_never_cross_job_types(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    with pytest.raises(StrategyJobConflict):
+        repo.set_strategy_job_current_month(
+            bootstrap.id,
+            claim.claim_token,
+            expected_version=claim.job.status_version,
+            month="2026-05",
+        )
+    with pytest.raises(StrategyJobConflict):
+        repo.set_strategy_job_current_stage(
+            bootstrap.id,
+            claim.claim_token,
+            expected_version=claim.job.status_version,
+            stage=PreparationStage.FX_PINNING.value,
+        )
+    assert repo.strategy_job(bootstrap.id).current_stage is None
+
+
+def test_month_typed_job_cannot_report_a_stage(tmp_path: Path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    initialization = _enqueue(repo, "2026-05", "2026-05").job
+    assert initialization is not None
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    with pytest.raises(StrategyJobConflict):
+        repo.set_strategy_job_current_stage(
+            initialization.id,
+            claim.claim_token,
+            expected_version=claim.job.status_version,
+            stage=BootstrapStage.QUALIFICATION.value,
+        )
+
+
+def test_first_lease_starts_at_generation_one_and_renewal_keeps_it(
+    tmp_path: Path,
+) -> None:
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+
+    acquired = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+    clock.advance(1)
+    renewed = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+
+    assert acquired.generation == 1
+    assert renewed.generation == 1
+    assert renewed.instance_id == INSTANCE_A
+    assert renewed.expires_at > acquired.expires_at
+
+
+def test_live_lease_is_never_taken_over_by_a_second_instance(tmp_path: Path) -> None:
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+
+    clock.advance(LEASE_TTL - 1)
+    with pytest.raises(StrategyJobConflict):
+        repo.acquire_or_renew_worker_lease(INSTANCE_B, ttl_seconds=LEASE_TTL)
+
+    held = repo.read_worker_lease()
+    assert held is not None and held.instance_id == INSTANCE_A
+
+
+def test_expired_lease_is_taken_over_at_the_next_generation(tmp_path: Path) -> None:
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    first = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+
+    clock.advance(LEASE_TTL + 1)
+    second = repo.acquire_or_renew_worker_lease(INSTANCE_B, ttl_seconds=LEASE_TTL)
+
+    assert second.generation == first.generation + 1
+    assert second.instance_id == INSTANCE_B
+
+
+def test_reading_the_lease_never_renews_or_bumps_it(tmp_path: Path) -> None:
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    acquired = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+
+    clock.advance(LEASE_TTL + 1)
+    assert repo.read_worker_lease() == acquired
+    assert repo.read_worker_lease() == acquired
+
+
+def test_stale_generation_writer_is_rejected_without_mutating_the_job(
+    tmp_path: Path,
+) -> None:
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    _seed_profile(tmp_path / "backtest.db")
+    first = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job(lease=first.fence)
+    assert claim is not None and claim.lease_generation == first.generation
+
+    clock.advance(LEASE_TTL + 1)
+    second = repo.acquire_or_renew_worker_lease(INSTANCE_B, ttl_seconds=LEASE_TTL)
+    before = repo.strategy_job(bootstrap.id)
+
+    with pytest.raises(StrategyJobConflict):
+        repo.set_strategy_job_current_stage(
+            bootstrap.id,
+            claim.claim_token,
+            expected_version=before.status_version,
+            stage=BootstrapStage.QUALIFICATION.value,
+            lease=first.fence,
+        )
+    with pytest.raises(StrategyJobConflict):
+        repo.complete_claimed_stage_job(
+            bootstrap.id,
+            claim.claim_token,
+            expected_version=before.status_version,
+            lease=first.fence,
+        )
+    with pytest.raises(StrategyJobConflict):
+        _fail_claimed(
+            repo,
+            bootstrap.id,
+            claim.claim_token,
+            expected_version=before.status_version,
+            lease=first.fence,
+        )
+
+    assert repo.strategy_job(bootstrap.id) == before
+    assert second.generation == first.generation + 1
+
+
+def test_current_generation_writer_still_owns_the_job_after_a_takeover_attempt(
+    tmp_path: Path,
+) -> None:
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    lease = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job(lease=lease.fence)
+    assert claim is not None
+
+    clock.advance(1)
+    with pytest.raises(StrategyJobConflict):
+        repo.acquire_or_renew_worker_lease(INSTANCE_B, ttl_seconds=LEASE_TTL)
+    completed = repo.complete_claimed_stage_job(
+        bootstrap.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        lease=lease.fence,
+    )
+
+    assert completed.status is StrategyJobStatus.COMPLETE
+    assert completed.owner_instance_id is None
+    assert completed.lease_generation is None
+
+
+def test_unfenced_writer_is_rejected_once_a_lease_is_held(tmp_path: Path) -> None:
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    lease = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job(lease=lease.fence)
+    assert claim is not None
+
+    with pytest.raises(StrategyJobConflict):
+        repo.complete_claimed_stage_job(
+            bootstrap.id,
+            claim.claim_token,
+            expected_version=claim.job.status_version,
+        )
+
+    assert repo.strategy_job(bootstrap.id).status is StrategyJobStatus.RUNNING
+
+
+def test_terminal_completion_that_commits_first_wins_the_cancellation_race(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    completed = repo.complete_claimed_stage_job(
+        bootstrap.id, claim.claim_token, expected_version=claim.job.status_version
+    )
+    late = repo.request_strategy_job_cancellation(
+        bootstrap.id, expected_version=completed.status_version
+    )
+
+    assert late == completed
+    assert late.status is StrategyJobStatus.COMPLETE
+
+
+def test_cancellation_requested_before_completion_blocks_the_terminal_write(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    requested = repo.request_strategy_job_cancellation(
+        bootstrap.id, expected_version=claim.job.status_version
+    )
+
+    with pytest.raises(StrategyJobConflict):
+        repo.complete_claimed_stage_job(
+            bootstrap.id, claim.claim_token, expected_version=requested.status_version
+        )
+    cancelled = repo.cancel_claimed_strategy_job(
+        bootstrap.id, claim.claim_token, expected_version=requested.status_version
+    )
+
+    assert cancelled.status is StrategyJobStatus.CANCELLED
+
+
+def test_stage_job_terminal_states_offer_delete_but_never_restart(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    preparation = repo.create_preparation_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    failed = _fail_claimed(
+        repo,
+        preparation.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+    )
+
+    assert failed.failure_code is JobFailureCode.WORKER_INTERRUPTED
+    assert repo.legal_strategy_job_actions(preparation.id) == ("delete",)
+
+
+def test_deleting_a_stage_job_tombstones_it_and_drops_its_subtype_row(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    failed = _fail_claimed(
+        repo, bootstrap.id, claim.claim_token, expected_version=claim.job.status_version
+    )
+
+    tombstone = repo.delete_strategy_job(
+        bootstrap.id, expected_version=failed.status_version
+    )
+
+    assert tombstone.deleted_at is not None
+    assert tombstone.audit_summary is not None
+    with pytest.raises(StrategyJobNotFound):
+        repo.bootstrap_run(bootstrap.id)
+
+
+def test_stage_check_constraint_mirrors_the_declared_stage_enums(
+    tmp_path: Path,
+) -> None:
+    """Guard the one place the closed stage set is written twice: the
+    ``current_stage`` CHECK and the two ``StrategyJobType`` stage enums."""
+    path = tmp_path / "backtest.db"
+    _repo(path)
+
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='strategy_jobs'"
+        ).fetchone()
+    ddl = str(row[0])
+
+    for stage in STAGE_VALUES:
+        assert f"'{stage}'" in ddl
+    assert STAGE_VALUES == tuple(BootstrapStage) + tuple(PreparationStage)

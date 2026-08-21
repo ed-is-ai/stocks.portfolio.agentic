@@ -16,6 +16,20 @@ from app.services.backtest.strategy_protocol import (
 
 STRATEGY_ID = "rtly-backtest-moving-average"
 STRATEGY_API_VERSION = 1
+UNIVERSE_PARAMETER = "selected_securities"
+
+
+def _universe(parameters: StrategyParameters) -> tuple[str, ...]:
+    """Return the host-bound selected universe as a canonical ID tuple.
+
+    The host injects an already sorted, deduplicated tuple; re-deriving it
+    here keeps iteration deterministic for any caller and makes a
+    malformed or empty universe fail closed with no signals.
+    """
+    raw = parameters.get(UNIVERSE_PARAMETER)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(sorted({value for value in raw if isinstance(value, str) and value}))
 
 
 def _as_date(value: object) -> date | None:
@@ -79,8 +93,9 @@ def _windows(parameters: StrategyParameters) -> tuple[int, int] | None:
     return fast, slow
 
 
-def _crossover(view: MarketViewV1, parameters: StrategyParameters) -> int:
-    security_id = str(parameters.get("security_id", "sec-aapl"))
+def _crossover(
+    view: MarketViewV1, parameters: StrategyParameters, security_id: str
+) -> int:
     windows = _windows(parameters)
     history = _fresh_history(view, security_id)
     if windows is None or history is None:
@@ -107,15 +122,15 @@ class MovingAverageStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
-        if _crossover(view, parameters) != 1:
-            return []
         return [
             Signal(
-                security_id=str(parameters.get("security_id", "sec-aapl")),
+                security_id=security_id,
                 side=SignalSide.BUY,
                 session=view.as_of_session,
                 rule_id="moving_average_bullish_crossover_v1",
             )
+            for security_id in _universe(parameters)
+            if _crossover(view, parameters, security_id) == 1
         ]
 
     def exit_signals(
@@ -124,14 +139,11 @@ class MovingAverageStrategy:
         portfolio: PortfolioView,
         parameters: StrategyParameters,
     ) -> list[Signal]:
-        security_id = str(parameters.get("security_id", "sec-aapl"))
-        if not any(
-            position.security_id == security_id and position.quantity > 0
+        held = {
+            position.security_id
             for position in portfolio.positions
-        ):
-            return []
-        if _crossover(view, parameters) != -1:
-            return []
+            if position.quantity > 0
+        }
         return [
             Signal(
                 security_id=security_id,
@@ -139,6 +151,9 @@ class MovingAverageStrategy:
                 session=view.as_of_session,
                 rule_id="moving_average_bearish_crossover_v1",
             )
+            for security_id in _universe(parameters)
+            if security_id in held
+            and _crossover(view, parameters, security_id) == -1
         ]
 
     def position_size(

@@ -22,6 +22,11 @@ from app.services.backtest.market_view import (
     MarketView,
     MarketViewBoundError,
     PRICE_HISTORY_COLUMNS,
+    UnselectedSecurityError,
+)
+from app.services.backtest.run_universe import (
+    RunUniverseError,
+    RunUniverseErrorCode,
 )
 from app.services.backtest.snapshot_profile import (
     MonthlySnapshotCommitV1,
@@ -366,6 +371,7 @@ def test_price_history_returns_only_rows_on_or_before_the_bound(tmp_path) -> Non
         as_of_session=date(2026, 6, 3),
         profile_hash=PROFILE_HASH,
         security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=_backtest_repo(tmp_path),
         historical_price_repo=price_repo,
     )
@@ -393,6 +399,7 @@ def test_price_history_out_of_bound_evidence_raises_stable_error(tmp_path) -> No
         as_of_session=beyond_bound,
         profile_hash=PROFILE_HASH,
         security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=_backtest_repo(tmp_path),
         historical_price_repo=price_repo,
     )
@@ -426,6 +433,7 @@ def test_price_history_as_of_session_exactly_at_exclusive_end_raises(
         as_of_session=date(2026, 6, 10),
         profile_hash=PROFILE_HASH,
         security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=_backtest_repo(tmp_path),
         historical_price_repo=price_repo,
     )
@@ -434,17 +442,20 @@ def test_price_history_as_of_session_exactly_at_exclusive_end_raises(
         view.price_history(SECURITY_ID)
 
 
-def test_price_history_unknown_security_returns_empty_frame(tmp_path) -> None:
+def test_price_history_selected_security_without_evidence_returns_empty_frame(
+    tmp_path,
+) -> None:
     price_repo = _price_repo(tmp_path)
     view = MarketView(
         as_of_session=date(2026, 6, 3),
         profile_hash=PROFILE_HASH,
         security_price_revisions={},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=_backtest_repo(tmp_path),
         historical_price_repo=price_repo,
     )
 
-    frame = view.price_history("sec-unknown")
+    frame = view.price_history(SECURITY_ID)
 
     assert frame.empty
     assert tuple(frame.columns) == PRICE_HISTORY_COLUMNS
@@ -459,6 +470,7 @@ def test_security_price_revisions_mapping_is_detached_from_caller_mutation(
         as_of_session=date(2026, 6, 3),
         profile_hash=PROFILE_HASH,
         security_price_revisions=revisions,
+        selected_universe=(SECURITY_ID,),
         backtest_repo=_backtest_repo(tmp_path),
         historical_price_repo=price_repo,
     )
@@ -474,18 +486,19 @@ def test_security_price_revisions_mapping_is_detached_from_caller_mutation(
 # ---------------------------------------------------------------------------
 
 
-def test_scan_result_unknown_security_returns_none(tmp_path) -> None:
+def test_scan_result_without_any_committed_month_returns_none(tmp_path) -> None:
     backtest_repo = _backtest_repo(tmp_path)
     price_repo = _price_repo(tmp_path)
     view = MarketView(
         as_of_session=date(2026, 6, 30),
         profile_hash=PROFILE_HASH,
         security_price_revisions={},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=backtest_repo,
         historical_price_repo=price_repo,
     )
 
-    assert view.scan_result("sec-unknown") is None
+    assert view.scan_result(SECURITY_ID) is None
 
 
 def test_scan_result_is_invisible_before_its_own_as_of_session(tmp_path) -> None:
@@ -498,6 +511,7 @@ def test_scan_result_is_invisible_before_its_own_as_of_session(tmp_path) -> None
         as_of_session=date(2026, 6, 29),
         profile_hash=PROFILE_HASH,
         security_price_revisions={},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=backtest_repo,
         historical_price_repo=price_repo,
     )
@@ -520,6 +534,7 @@ def test_scan_result_returns_prior_committed_month_while_inside_the_next(
         as_of_session=date(2026, 7, 15),
         profile_hash=PROFILE_HASH,
         security_price_revisions={},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=backtest_repo,
         historical_price_repo=price_repo,
     )
@@ -544,6 +559,7 @@ def test_scan_result_switches_once_superseded_by_the_next_committed_month(
         as_of_session=date(2026, 7, 31),
         profile_hash=PROFILE_HASH,
         security_price_revisions={},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=backtest_repo,
         historical_price_repo=price_repo,
     )
@@ -567,8 +583,60 @@ def test_market_view_satisfies_market_view_v1(tmp_path) -> None:
         as_of_session=date(2026, 6, 3),
         profile_hash=PROFILE_HASH,
         security_price_revisions={},
+        selected_universe=(SECURITY_ID,),
         backtest_repo=_backtest_repo(tmp_path),
         historical_price_repo=_price_repo(tmp_path),
     )
 
     assert isinstance(view, MarketViewV1)
+
+
+# ---------------------------------------------------------------------------
+# Selected-universe scoping (Story 4.2)
+# ---------------------------------------------------------------------------
+
+
+def _universe_view(tmp_path, universe: tuple[str, ...]) -> MarketView:
+    return MarketView(
+        as_of_session=date(2026, 6, 3),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={},
+        selected_universe=universe,
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=_price_repo(tmp_path),
+    )
+
+
+def test_selected_universe_is_canonicalized_on_construction(tmp_path) -> None:
+    view = _universe_view(tmp_path, ("sec-msft", SECURITY_ID, "sec-msft"))
+
+    assert view.selected_universe == (SECURITY_ID, "sec-msft")
+
+
+def test_unselected_security_signal_is_rejected_not_silently_dropped(
+    tmp_path,
+) -> None:
+    view = _universe_view(tmp_path, (SECURITY_ID,))
+
+    with pytest.raises(UnselectedSecurityError) as exc_info:
+        view.require_selected("sec-not-selected")
+
+    assert exc_info.value.code == "unselected_security"
+    assert exc_info.value.security_id == "sec-not-selected"
+    assert exc_info.value.selected_universe == (SECURITY_ID,)
+
+
+def test_unselected_security_reads_are_rejected(tmp_path) -> None:
+    view = _universe_view(tmp_path, (SECURITY_ID,))
+
+    with pytest.raises(UnselectedSecurityError):
+        view.price_history("sec-not-selected")
+    with pytest.raises(UnselectedSecurityError):
+        view.scan_result("sec-not-selected")
+
+
+def test_empty_selected_universe_is_rejected(tmp_path) -> None:
+    with pytest.raises(RunUniverseError) as exc_info:
+        _universe_view(tmp_path, ())
+
+    assert exc_info.value.code is RunUniverseErrorCode.EMPTY_UNIVERSE

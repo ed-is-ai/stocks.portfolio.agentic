@@ -46,10 +46,12 @@ from app.services.backtest.skill_discovery import (
 from app.services.backtest.strategy_job import (
     BacktestRunV1,
     JobFailureCode,
+    STAGE_SEQUENCES,
     StrategyJobConflict,
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
+    WorkerLeaseFenceV1,
 )
 from app.services.backtest.strategy_protocol import StrategyProtocolV1
 
@@ -117,6 +119,129 @@ def build_initialization_engine(
         qualification_check=qualified,
         profile_check=profile_is_current,
     )
+
+
+# ---------------------------------------------------------------------------
+# Story 4.1: stage-walking Bootstrap/Preparation workers.
+# ---------------------------------------------------------------------------
+
+
+class StageWalkEngine:
+    """Walk one claimed ``bootstrap``/``preparation`` job's stage sequence.
+
+    Deliberately a stub: every stage transition is a no-op that only
+    advances ``current_stage``, and the final stage marks the job
+    complete. Bootstrap's real qualification / roster-identity-capture /
+    profile-activation logic (Story 4.3) and Preparation's real
+    evidence-selection / historical-FX-pinning / manifest-sealing logic
+    (Story 4.6) layer onto this already-proven lifecycle rather than being
+    invented alongside it.
+
+    Each stage boundary is the activity's one declared *safe step*:
+    cancellation is honored only there, so a cancellation requested
+    mid-stage leaves the job ``running`` until the next boundary, and a
+    completion that commits first wins outright.
+    """
+
+    def __init__(
+        self,
+        repository: BacktestRepository,
+        job_type: StrategyJobType,
+        *,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> None:
+        self._repository = repository
+        self._job_type = job_type
+        self._lease = lease
+
+    def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
+        job = self._repository.strategy_job(job_id)
+        if not _owns(job, claim_token):
+            return job
+        if job.job_type is not self._job_type:
+            return self._fail(job, claim_token, "Worker job type does not match")
+        for stage in STAGE_SEQUENCES[self._job_type]:
+            job = self._repository.strategy_job(job_id)
+            if not _owns(job, claim_token):
+                return job
+            if job.cancel_requested_at is not None:
+                return self._cancel(job_id, claim_token)
+            try:
+                job = self._repository.set_strategy_job_current_stage(
+                    job_id,
+                    claim_token,
+                    expected_version=job.status_version,
+                    stage=stage,
+                    lease=self._lease,
+                )
+            except StrategyJobConflict:
+                return self._repository.strategy_job(job_id)
+        try:
+            return self._repository.complete_claimed_stage_job(
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
+            )
+        except StrategyJobConflict:
+            current = self._repository.strategy_job(job_id)
+            if current.status is StrategyJobStatus.COMPLETE:
+                return current
+            if _owns(current, claim_token) and current.cancel_requested_at is not None:
+                return self._cancel(job_id, claim_token)
+            return current
+
+    def _cancel(self, job_id: str, claim_token: str) -> StrategyJobV1:
+        current = self._repository.strategy_job(job_id)
+        if not _owns(current, claim_token):
+            return current
+        try:
+            return self._repository.cancel_claimed_strategy_job(
+                job_id,
+                claim_token,
+                expected_version=current.status_version,
+                lease=self._lease,
+            )
+        except StrategyJobConflict:
+            return self._repository.strategy_job(job_id)
+
+    def _fail(self, job: StrategyJobV1, claim_token: str, detail: str) -> StrategyJobV1:
+        try:
+            return self._repository.fail_claimed_strategy_job(
+                job.id,
+                claim_token,
+                expected_version=job.status_version,
+                failure_code=JobFailureCode.INTEGRITY_ERROR,
+                failed_month=None,
+                detail=detail,
+                lease=self._lease,
+            )
+        except StrategyJobConflict:
+            return self._repository.strategy_job(job.id)
+
+
+def _owns(job: StrategyJobV1, claim_token: str) -> bool:
+    return job.status is StrategyJobStatus.RUNNING and job.claim_token == claim_token
+
+
+def build_stage_walk_engine(
+    job_id: str,
+    backtest: BacktestRepository,
+    job_type: StrategyJobType,
+    *,
+    lease: WorkerLeaseFenceV1 | None = None,
+) -> StageWalkEngine:
+    """Build one claimed stage-walking activity's engine.
+
+    Loads the job's subtype identity row eagerly so a subtype-inconsistent
+    job fails through ``main``'s construction guard with the stable
+    ``integrity_error`` code rather than stage-walking against nothing.
+    """
+    if job_type is StrategyJobType.BOOTSTRAP:
+        backtest.bootstrap_run(job_id)
+    else:
+        backtest.preparation_run(job_id)
+    return StageWalkEngine(backtest, job_type, lease=lease)
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +603,9 @@ class BacktestExecutionEngine:
                     item.security_id: item.price_revision
                     for item in manifest.securities
                 },
+                selected_universe=tuple(
+                    item.security_id for item in manifest.securities
+                ),
                 backtest_repo=self._repository,
                 historical_price_repo=self._prices,
             )
@@ -716,7 +844,16 @@ def main(
     parser = argparse.ArgumentParser(description="Run one claimed Strategy job")
     parser.add_argument("--job-id", required=True)
     parser.add_argument("--claim-token", required=True)
+    parser.add_argument("--owner-instance-id", default=None)
+    parser.add_argument("--lease-generation", type=int, default=None)
     args = parser.parse_args(argv)
+    lease = (
+        WorkerLeaseFenceV1(
+            instance_id=args.owner_instance_id, generation=args.lease_generation
+        )
+        if args.owner_instance_id is not None and args.lease_generation is not None
+        else None
+    )
     if engine_factory is not None:
         engine = engine_factory(args.job_id)
         result = engine.run(args.job_id, args.claim_token)
@@ -741,6 +878,10 @@ def main(
             )
         elif job.job_type is StrategyJobType.BACKTEST:
             engine = build_backtest_engine(args.job_id, args.claim_token, repository)
+        elif job.job_type in STAGE_SEQUENCES:
+            engine = build_stage_walk_engine(
+                args.job_id, repository, job.job_type, lease=lease
+            )
         else:
             raise RuntimeError("Unsupported Strategy job type")
     except Exception:
@@ -754,6 +895,7 @@ def main(
                     current.id,
                     args.claim_token,
                     expected_version=current.status_version,
+                    lease=lease,
                 )
             else:
                 repository.fail_claimed_strategy_job(
@@ -763,6 +905,7 @@ def main(
                     failure_code=JobFailureCode.INTEGRITY_ERROR,
                     failed_month=None,
                     detail="Strategy worker configuration is invalid",
+                    lease=lease,
                 )
         return 1
     result = engine.run(args.job_id, args.claim_token)

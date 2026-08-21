@@ -8,12 +8,13 @@ description: >
   comparing box breakouts, tuning Darvas lookbacks, or replaying strict
   breakout and box-bottom exit rules in Strategy Manager.
 api_version: 1
+runtime_files:
+  - scripts/strategy.py
+strategy_universe:
+  schema_version: strategy_universe.v1
+  mode: selected-securities
+  parameter: selected_securities
 parameters:
-  - name: security_id
-    type: string
-    default: sec-aapl
-    description: Stable security identifier to trade.
-    required: true
   - name: fixed_shares
     type: integer
     default: 10
@@ -47,8 +48,10 @@ parameters:
 # Darvas Box Backtest
 
 Use `scripts/strategy.py` through Strategy Manager's in-process
-`StrategyProtocolV1` runtime. Trade one configured security with fixed-share
-sizing. Enter when the current close strictly exceeds the prior-window box top,
+`StrategyProtocolV1` runtime. The host binds the Run's canonical
+selected-security tuple to `selected_securities`; iterate it in that order and
+trade each selected security independently with fixed-share sizing. Enter when
+the current close strictly exceeds the prior-window box top,
 the box depth is within the configured maximum, and current volume is at least
 the configured multiple of the prior-window mean. Exit a held position when the
 current close is strictly below the prior-window box bottom.

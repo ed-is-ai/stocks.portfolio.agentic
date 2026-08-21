@@ -3,15 +3,17 @@ kind: backtest-strategy
 name: rtly-backtest-weinstein
 display_name: Weinstein Backtest
 description: >
-  Backtest a deterministic long-only Weinstein Stage 2 breakout against
-  bounded monthly scan and daily OHLCV evidence with fixed-share sizing.
+  Backtest a deterministic long-only Weinstein Stage 2 breakout across the
+  Run's selected securities against bounded monthly scan and daily OHLCV
+  evidence with fixed-share sizing.
 api_version: 1
+runtime_files:
+  - scripts/strategy.py
+strategy_universe:
+  schema_version: strategy_universe.v1
+  mode: selected-securities
+  parameter: selected_securities
 parameters:
-  - name: security_id
-    type: string
-    default: sec-aapl
-    description: Stable security identifier to trade.
-    required: true
   - name: fixed_shares
     type: integer
     default: 10
@@ -44,10 +46,12 @@ parameters:
 
 # Weinstein Backtest
 
-Use `scripts/strategy.py` through `StrategyProtocolV1`. Evaluate one configured
-security after the session close and accept the engine's next-session-open
-fill convention. Require current bounded daily history and visible monthly
-scan evidence; emit nothing when evidence is missing, stale, or too short.
+Use `scripts/strategy.py` through `StrategyProtocolV1`. The host binds the
+Run's canonical selected-security tuple to `selected_securities`; iterate it
+in that order and evaluate each selected security independently after the
+session close, accepting the engine's next-session-open fill convention.
+Require current bounded daily history and visible monthly scan evidence; emit
+nothing for a security whose evidence is missing, stale, or too short.
 
 Enter only when the visible scan and the dependency-neutral daily classifier
 both report Stage 2, the close strictly exceeds the prior configured high, and

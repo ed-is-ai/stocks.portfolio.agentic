@@ -11,11 +11,17 @@ from app.services.backtest.notification_projector import StrategyNotificationPro
 from app.services.backtest.strategy_job import (
     JobFailureCode,
     StrategyJobConflict,
+    StrategyJobStatus,
 )
 
 from tests.backtest.test_strategy_job_repository import (
+    INSTANCE_A,
+    INSTANCE_B,
+    LEASE_TTL,
+    _MovableClock,
     _enqueue,
     _enqueue_backtest,
+    _leased_repo,
     _repo,
 )
 
@@ -319,3 +325,90 @@ def test_backtest_tombstone_projection_removes_actions_and_target(tmp_path):
     assert item.title == "Activity no longer available"
     assert item.target_url is None
     assert item.actions == ()
+
+
+# ---------------------------------------------------------------------------
+# Story 4.1: lease-takeover reconciliation and stage-activity notifications.
+# ---------------------------------------------------------------------------
+
+
+def test_lease_takeover_fails_the_claim_its_evicted_owner_abandoned(tmp_path):
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    first = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+    bootstrap = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job(lease=first.fence)
+    assert claim is not None
+
+    clock.advance(LEASE_TTL + 1)
+    second = repo.acquire_or_renew_worker_lease(INSTANCE_B, ttl_seconds=LEASE_TTL)
+    reconciled = repo.reconcile_interrupted_strategy_jobs(lease=second.fence)
+
+    assert [job.id for job in reconciled] == [bootstrap.id]
+    abandoned = repo.strategy_job(bootstrap.id)
+    assert abandoned.status is StrategyJobStatus.FAILED
+    assert abandoned.failure_code is JobFailureCode.WORKER_INTERRUPTED
+    assert abandoned.owner_instance_id is None
+
+
+def test_reconciliation_never_touches_a_row_the_current_lease_owns(tmp_path):
+    clock = _MovableClock()
+    repo = _leased_repo(tmp_path / "backtest.db", clock)
+    lease = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
+    preparation = repo.create_preparation_job()
+    claim = repo.claim_next_strategy_job(lease=lease.fence)
+    assert claim is not None
+    running = repo.strategy_job(preparation.id)
+
+    assert repo.reconcile_interrupted_strategy_jobs(lease=lease.fence) == ()
+
+    assert repo.strategy_job(preparation.id) == running
+    assert running.status is StrategyJobStatus.RUNNING
+    assert running.owner_instance_id == INSTANCE_A
+    assert running.lease_generation == lease.generation
+
+
+def test_stage_activity_notifications_carry_their_own_title_and_actions(tmp_path):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    bootstrap = repo.create_bootstrap_job()
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: tmp_path / "notifications.db")
+    )
+    notifications.ensure_schema()
+    projector = StrategyNotificationProjector(repo, notifications)
+
+    assert projector.project_pending() == 1
+    item = notifications.recent(include_dismissed=True)[0]
+
+    assert item.title == "Bootstrap queued"
+    assert item.target_url == f"/strategy-manager/activities/{bootstrap.id}"
+    assert item.category is NotificationCategory.STRATEGY_INITIALIZATION
+
+
+def test_failed_preparation_offers_delete_only(tmp_path):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    preparation = repo.create_preparation_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    repo.fail_claimed_strategy_job(
+        preparation.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        failure_code=JobFailureCode.WORKER_INTERRUPTED,
+        failed_month=None,
+        detail="Worker interrupted before completion",
+    )
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: tmp_path / "notifications.db")
+    )
+    notifications.ensure_schema()
+    projector = StrategyNotificationProjector(repo, notifications)
+
+    assert projector.project_pending() == 1
+    item = notifications.recent(include_dismissed=True)[0]
+
+    assert item.title == "Evidence preparation failed"
+    assert "Worker interrupted before completion" in item.body
+    assert repo.legal_strategy_job_actions(preparation.id) == ("delete",)

@@ -29,7 +29,7 @@ MovingAverageStrategy = _MODULE.MovingAverageStrategy
 
 AS_OF = date(2026, 1, 8)
 PARAMETERS = {
-    "security_id": "sec-aapl",
+    "selected_securities": ["sec-aapl"],
     "fixed_shares": 10,
     "fast_window": 2,
     "slow_window": 3,
@@ -150,3 +150,49 @@ def test_position_size_uses_fixed_buy_and_full_integral_sell() -> None:
     assert strategy.position_size(sell, view, _portfolio("7"), PARAMETERS) == 7
     assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio(), PARAMETERS) == 0
+
+
+def test_multi_security_universe_crosses_each_selected_security() -> None:
+    strategy = MovingAverageStrategy()
+    view = _View([Decimal("3"), Decimal("2"), Decimal("1"), Decimal("4")])
+
+    signals = validate_entry_signals(
+        strategy.entry_signals(
+            view,
+            {**PARAMETERS, "selected_securities": ["sec-msft", "sec-aapl", "sec-msft"]},
+        )
+    )
+
+    assert [signal.security_id for signal in signals] == ["sec-aapl", "sec-msft"]
+
+
+def test_multi_security_universe_exits_only_held_securities() -> None:
+    strategy = MovingAverageStrategy()
+    view = _View([Decimal("1"), Decimal("2"), Decimal("3"), Decimal("0")])
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(
+            view,
+            _portfolio("7"),
+            {**PARAMETERS, "selected_securities": ["sec-msft", "sec-aapl"]},
+        )
+    )
+
+    assert [signal.security_id for signal in exits] == ["sec-aapl"]
+
+
+def test_empty_or_malformed_universe_emits_nothing() -> None:
+    strategy = MovingAverageStrategy()
+    view = _View([Decimal("3"), Decimal("2"), Decimal("1"), Decimal("4")])
+    without_universe = {
+        name: value
+        for name, value in PARAMETERS.items()
+        if name != "selected_securities"
+    }
+
+    assert strategy.entry_signals(view, {**PARAMETERS, "selected_securities": []}) == []
+    assert (
+        strategy.entry_signals(view, {**PARAMETERS, "selected_securities": "sec-aapl"})
+        == []
+    )
+    assert strategy.entry_signals(view, without_universe) == []

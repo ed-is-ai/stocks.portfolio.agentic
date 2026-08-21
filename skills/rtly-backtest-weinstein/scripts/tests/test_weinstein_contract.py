@@ -30,7 +30,7 @@ WeinsteinStrategy = MODULE.WeinsteinStrategy
 
 AS_OF = date(2026, 8, 20)
 PARAMETERS = {
-    "security_id": "sec-aapl",
+    "selected_securities": ["sec-aapl"],
     "fixed_shares": 10,
     "breakout_lookback_sessions": 50,
     "minimum_relative_volume": 1.5,
@@ -185,3 +185,73 @@ def test_price_risk_exit_does_not_require_scan_and_zero_quantity_does_not_sell()
         )
         == []
     )
+
+
+class _UniverseView(_View):
+    """Serves the same evidence for every selected security."""
+
+    def scan_result(self, security_id: str) -> SimpleNamespace | None:
+        if self._scan is None:
+            return None
+        return SimpleNamespace(**{**vars(self._scan), "security_id": security_id})
+
+
+def test_multi_security_universe_enters_each_qualifying_security() -> None:
+    strategy = WeinsteinStrategy()
+    view = _UniverseView(_history(), _scan())
+
+    signals = validate_entry_signals(
+        strategy.entry_signals(
+            view,
+            {**PARAMETERS, "selected_securities": ["sec-msft", "sec-aapl", "sec-msft"]},
+        )
+    )
+
+    assert [signal.security_id for signal in signals] == ["sec-aapl", "sec-msft"]
+
+
+def test_multi_security_universe_skips_securities_without_matching_scan() -> None:
+    """``_View`` only ever serves ``sec-aapl``'s scan, so a second selected
+    security has no visible evidence of its own and must not enter."""
+    strategy = WeinsteinStrategy()
+
+    signals = validate_entry_signals(
+        strategy.entry_signals(
+            _View(_history(), _scan()),
+            {**PARAMETERS, "selected_securities": ["sec-msft", "sec-aapl"]},
+        )
+    )
+
+    assert [signal.security_id for signal in signals] == ["sec-aapl"]
+
+
+def test_multi_security_universe_exits_only_held_securities() -> None:
+    strategy = WeinsteinStrategy()
+    view = _UniverseView(_history(), _scan("Stage 3"))
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(
+            view,
+            _portfolio(),
+            {**PARAMETERS, "selected_securities": ["sec-msft", "sec-aapl"]},
+        )
+    )
+
+    assert [signal.security_id for signal in exits] == ["sec-aapl"]
+
+
+def test_empty_or_malformed_universe_emits_nothing() -> None:
+    strategy = WeinsteinStrategy()
+    view = _UniverseView(_history(), _scan())
+    without_universe = {
+        name: value
+        for name, value in PARAMETERS.items()
+        if name != "selected_securities"
+    }
+
+    assert strategy.entry_signals(view, {**PARAMETERS, "selected_securities": []}) == []
+    assert (
+        strategy.entry_signals(view, {**PARAMETERS, "selected_securities": "sec-aapl"})
+        == []
+    )
+    assert strategy.entry_signals(view, without_universe) == []

@@ -71,7 +71,7 @@ def _history(
 
 def _parameters() -> dict[str, object]:
     return {
-        "security_id": "sec-aapl",
+        "selected_securities": ["sec-aapl"],
         "fixed_shares": 10,
         "entry_lookback_sessions": 3,
         "exit_lookback_sessions": 2,
@@ -194,3 +194,58 @@ def test_position_size_uses_fixed_buy_and_full_integral_sell_quantity() -> None:
         == 7
     )
     assert strategy.position_size(sell, view, _portfolio("7.5"), _parameters()) == 0
+
+
+def test_multi_security_universe_breaks_out_per_selected_security() -> None:
+    strategy = MODULE.TurtleTrendStrategy()
+    as_of, history = _history()
+    view = _View(as_of, history)
+
+    signals = validate_entry_signals(
+        strategy.entry_signals(
+            view,
+            {
+                **_parameters(),
+                "selected_securities": ["sec-msft", "sec-aapl", "sec-msft"],
+            },
+        )
+    )
+
+    assert [signal.security_id for signal in signals] == ["sec-aapl", "sec-msft"]
+
+
+def test_multi_security_universe_exits_only_held_securities() -> None:
+    strategy = MODULE.TurtleTrendStrategy()
+    as_of, breach = _history(current_low="7.99")
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(
+            _View(as_of, breach),
+            _portfolio("7"),
+            {**_parameters(), "selected_securities": ["sec-msft", "sec-aapl"]},
+        )
+    )
+
+    assert [signal.security_id for signal in exits] == ["sec-aapl"]
+
+
+def test_empty_or_malformed_universe_emits_nothing() -> None:
+    strategy = MODULE.TurtleTrendStrategy()
+    as_of, history = _history()
+    view = _View(as_of, history)
+    without_universe = {
+        name: value
+        for name, value in _parameters().items()
+        if name != "selected_securities"
+    }
+
+    assert (
+        strategy.entry_signals(view, {**_parameters(), "selected_securities": []}) == []
+    )
+    assert (
+        strategy.entry_signals(
+            view, {**_parameters(), "selected_securities": "sec-aapl"}
+        )
+        == []
+    )
+    assert strategy.entry_signals(view, without_universe) == []

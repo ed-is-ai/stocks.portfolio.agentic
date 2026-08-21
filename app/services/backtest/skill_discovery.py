@@ -8,10 +8,20 @@ consume without any hand-maintained Strategy registry list.
 
 Design constraints, all deliberate:
 
-- **Metadata-only.** :func:`discover_strategies` never imports or executes
-  a discovered Strategy's ``scripts/strategy.py`` -- only its ``SKILL.md``
-  frontmatter is read, and only to build a source-identity manifest via
-  ``build_strategy_source_manifest`` (never a second canonicalizer).
+- **Never executes a Strategy.** :func:`discover_strategies` never imports
+  or runs a discovered Strategy's runtime modules. It reads its
+  ``SKILL.md`` frontmatter, hashes the content of every file the manifest
+  declares in ``runtime_files`` via ``build_strategy_source_manifest``
+  (never a second canonicalizer), and walks those files' import graph by
+  static AST parsing only.
+- **Packaging and universe contract.** A manifest declares an ordered
+  ``runtime_files`` allowlist containing its ``scripts/strategy.py``
+  entrypoint, plus ``strategy_universe.v1`` metadata binding
+  ``mode: selected-securities`` to exactly one host-bound parameter. That
+  parameter is never part of the generic ``parameters`` schema, so it has
+  no editable or default identity and is excluded from generic parameter
+  rendering; the host injects the canonical selected-security tuple into
+  it at launch (:meth:`StrategyDescriptorV1.bind_universe`).
 - **Ordinary Skills are invisible.** A folder with no ``SKILL.md``, or
   whose ``SKILL.md`` frontmatter has no ``kind: backtest-strategy`` line
   at all, is silently skipped -- no descriptor, no warning. Every other
@@ -21,7 +31,9 @@ Design constraints, all deliberate:
   *does* declare ``kind: backtest-strategy``, any problem with it --
   malformed metadata, an unsupported ``api_version``, an invalid
   parameter schema, an out-of-range declared default, a missing runtime
-  entrypoint, an unsafe YAML construct, or a colliding identity -- isolates
+  entrypoint, an undeclared/escaping runtime file, an unsafe import, a
+  malformed universe contract, an unsafe YAML construct, or a colliding
+  identity -- isolates
   that one Strategy with a structured :class:`StrategyDiscoveryWarningV1`
   and the scan continues. An unexpected exception anywhere in one folder's
   processing is caught and converted into the same kind of warning rather
@@ -41,25 +53,28 @@ Design constraints, all deliberate:
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import sys
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, cast
+from typing import Any, Iterable, Literal, Mapping, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 import yaml
 from yaml.events import AliasEvent
 from yaml.resolver import BaseResolver
 
+from app.services.backtest.run_universe import canonical_run_universe
 from app.services.backtest.source_manifest import (
     SOURCE_MANIFEST_VERSION,
     build_strategy_source_manifest,
 )
 from app.services.backtest.strategy_protocol import (
     JsonScalar,
+    JsonValue,
     StrategyParameterV1,
     StrategyProtocolError,
     validate_strategy_parameters,
@@ -85,6 +100,55 @@ _SUPPORTED_API_VERSION = 1
 
 _KEBAB_CASE_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 
+#: The one Skill-relative runtime entrypoint every Strategy declares and
+#: the worker loads; it must appear in the manifest's ``runtime_files``.
+RUNTIME_ENTRYPOINT = "scripts/strategy.py"
+
+#: The only ``strategy_universe`` schema/mode pair this generation binds.
+STRATEGY_UNIVERSE_VERSION = "strategy_universe.v1"
+SELECTED_SECURITIES_MODE = "selected-securities"
+
+#: Module families a Strategy runtime file may never reach: live agents and
+#: repositories (AD-10's trust boundary) plus the process/network clients
+#: that would break deterministic replay. Shared verbatim with
+#: ``tests/backtest/test_strategy_runtime_import_boundary.py``, which walks
+#: the *host* modules a runtime import reaches transitively -- there is one
+#: vocabulary, never two.
+FORBIDDEN_RUNTIME_PREFIXES: tuple[str, ...] = (
+    "app.agents",
+    "app.repositories",
+    "aiohttp",
+    "http",
+    "httpx",
+    "requests",
+    "socket",
+    "subprocess",
+    "urllib",
+    "urllib3",
+    "yfinance",
+)
+
+#: The closed set of absolute imports a Strategy runtime file may use.
+#: Methodology code stays inside the Skill's own declared ``runtime_files``
+#: (reachable by same-Skill relative import); the sole first-party
+#: dependency is the versioned host protocol.
+ALLOWED_RUNTIME_PREFIXES: tuple[str, ...] = (
+    "__future__",
+    "bisect",
+    "collections",
+    "dataclasses",
+    "datetime",
+    "decimal",
+    "enum",
+    "functools",
+    "itertools",
+    "math",
+    "operator",
+    "statistics",
+    "typing",
+    "app.services.backtest.strategy_protocol",
+)
+
 #: Closed, stable warning-code vocabulary a caller can branch on -- see the
 #: module docstring for what triggers each one.
 WarningCode = Literal[
@@ -93,6 +157,9 @@ WarningCode = Literal[
     "invalid_parameter_schema",
     "invalid_defaults",
     "missing_runtime_entrypoint",
+    "invalid_runtime_files",
+    "unsafe_runtime_import",
+    "invalid_universe_metadata",
     "source_identity_failure",
     "duplicate_identity",
 ]
@@ -103,8 +170,59 @@ WARNING_CODES: tuple[WarningCode, ...] = (
     "invalid_parameter_schema",
     "invalid_defaults",
     "missing_runtime_entrypoint",
+    "invalid_runtime_files",
+    "unsafe_runtime_import",
+    "invalid_universe_metadata",
     "source_identity_failure",
     "duplicate_identity",
+)
+
+#: Stable rejection reasons every ``invalid_runtime_files``,
+#: ``unsafe_runtime_import``, and ``invalid_universe_metadata`` warning
+#: message starts with, so a caller (or a test) can branch on the precise
+#: rule broken without matching on prose.
+RejectionReason = Literal[
+    "missing_runtime_files",
+    "malformed_runtime_files",
+    "duplicate_runtime_file",
+    "undeclared_entrypoint",
+    "runtime_file_escapes_skill",
+    "runtime_file_symlink",
+    "missing_runtime_file",
+    "unparsable_runtime_file",
+    "forbidden_import",
+    "import_outside_runtime_allowlist",
+    "undeclared_runtime_import",
+    "relative_import_escape",
+    "dynamic_import",
+    "missing_universe_metadata",
+    "malformed_universe_metadata",
+    "unsupported_universe_schema",
+    "unsupported_universe_mode",
+    "empty_universe_parameter",
+    "universe_parameter_conflict",
+]
+
+REJECTION_REASONS: tuple[RejectionReason, ...] = (
+    "missing_runtime_files",
+    "malformed_runtime_files",
+    "duplicate_runtime_file",
+    "undeclared_entrypoint",
+    "runtime_file_escapes_skill",
+    "runtime_file_symlink",
+    "missing_runtime_file",
+    "unparsable_runtime_file",
+    "forbidden_import",
+    "import_outside_runtime_allowlist",
+    "undeclared_runtime_import",
+    "relative_import_escape",
+    "dynamic_import",
+    "missing_universe_metadata",
+    "malformed_universe_metadata",
+    "unsupported_universe_schema",
+    "unsupported_universe_mode",
+    "empty_universe_parameter",
+    "universe_parameter_conflict",
 )
 
 
@@ -141,6 +259,21 @@ class StrategyDiscoveryWarningV1(_DiscoveryModel):
     field: str | None = None
 
 
+class StrategyUniverseContractV1(_DiscoveryModel):
+    """One Skill's declared ``strategy_universe.v1`` binding.
+
+    ``parameter`` names the single host-bound parameter the canonical
+    selected-security tuple is injected into. It is deliberately absent
+    from the Strategy's generic ``parameters`` schema, so it has no
+    editable or default identity and never reaches generic parameter
+    rendering.
+    """
+
+    schema_version: Literal["strategy_universe.v1"]
+    mode: Literal["selected-securities"]
+    parameter: str = Field(min_length=1)
+
+
 class StrategyDescriptorV1(_DiscoveryModel):
     """One discovered, fully-validated ``kind: backtest-strategy`` Skill.
 
@@ -148,7 +281,10 @@ class StrategyDescriptorV1(_DiscoveryModel):
     folder name it was discovered under. ``default_parameters`` is the
     normalized mapping :func:`validate_strategy_parameters` returns when
     applying every declared default to an empty submission -- already
-    proven runnable, not deferred to launch time.
+    proven runnable, not deferred to launch time. ``runtime_files`` is the
+    manifest's ordered allowlist as ``skills_root``-relative POSIX paths
+    (the same convention as ``runtime_path``, which is always one of
+    them); every one of them participates in ``source_digest``.
     """
 
     strategy_id: str = Field(min_length=1)
@@ -160,6 +296,8 @@ class StrategyDescriptorV1(_DiscoveryModel):
     parameters: tuple[StrategyParameterV1, ...]
     default_parameters: Mapping[str, JsonScalar]
     runtime_path: str = Field(min_length=1)
+    runtime_files: tuple[str, ...] = Field(min_length=1)
+    universe: StrategyUniverseContractV1
 
     @field_validator("default_parameters", mode="after")
     @classmethod
@@ -167,6 +305,24 @@ class StrategyDescriptorV1(_DiscoveryModel):
         cls, value: Mapping[str, JsonScalar]
     ) -> Mapping[str, JsonScalar]:
         return MappingProxyType(dict(value))
+
+    def bind_universe(
+        self, selected_security_ids: Iterable[object]
+    ) -> Mapping[str, JsonValue]:
+        """Return this Strategy's host-bound universe parameter binding.
+
+        The host canonicalizes the selection (sorted, deduplicated) before
+        injection, so two selection orders of the same set bind the
+        identical value. Raises
+        :class:`~app.services.backtest.run_universe.RunUniverseError` for
+        an empty selection or a malformed security ID -- the universe
+        parameter accepts any non-empty list of unique IDs and has no
+        per-Strategy maximum.
+        """
+        canonical = canonical_run_universe(selected_security_ids)
+        return MappingProxyType(
+            {self.universe.parameter: cast(JsonValue, list(canonical))}
+        )
 
 
 class StrategyDiscoveryResultV1(_DiscoveryModel):
@@ -340,6 +496,262 @@ def _parameter_schema_from_frontmatter(
     return tuple(parameters)
 
 
+# ---------------------------------------------------------------------------
+# Packaging, import-safety and universe contract validation
+# ---------------------------------------------------------------------------
+
+
+class _RejectedSkill(ValueError):
+    """One Skill rejected by a named, stable :data:`RejectionReason`.
+
+    ``str(exc)`` always starts with the reason token, so a warning message
+    stays branchable without matching on prose.
+    """
+
+    def __init__(self, reason: RejectionReason, detail: str) -> None:
+        self.reason: RejectionReason = reason
+        super().__init__(f"{reason}: {detail}")
+
+
+def _matches_prefix(module: str, prefixes: tuple[str, ...]) -> bool:
+    return any(
+        module == prefix or module.startswith(f"{prefix}.") for prefix in prefixes
+    )
+
+
+def _declared_runtime_files(raw: object) -> tuple[PurePosixPath, ...]:
+    """Return the manifest's ordered ``runtime_files`` allowlist.
+
+    Rejects a missing/empty/non-list declaration, a non-string or
+    absolute/traversing/backslash entry, a repeated entry, and an
+    allowlist that does not contain :data:`RUNTIME_ENTRYPOINT`.
+    """
+    if raw is None:
+        raise _RejectedSkill(
+            "missing_runtime_files",
+            "'runtime_files' must declare every file that can change Strategy behavior",
+        )
+    if not isinstance(raw, list) or not raw:
+        raise _RejectedSkill(
+            "malformed_runtime_files", "'runtime_files' must be a non-empty list"
+        )
+    declared: list[PurePosixPath] = []
+    seen: set[str] = set()
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            raise _RejectedSkill(
+                "malformed_runtime_files",
+                f"runtime_files entry must be a non-empty string, got {entry!r}",
+            )
+        path = PurePosixPath(entry)
+        if "\\" in entry or path.is_absolute() or ".." in path.parts:
+            raise _RejectedSkill(
+                "runtime_file_escapes_skill",
+                f"runtime_files entry must be a Skill-relative path, got {entry!r}",
+            )
+        if entry in seen:
+            raise _RejectedSkill(
+                "duplicate_runtime_file", f"runtime_files repeats {entry!r}"
+            )
+        seen.add(entry)
+        declared.append(path)
+    if RUNTIME_ENTRYPOINT not in seen:
+        raise _RejectedSkill(
+            "undeclared_entrypoint",
+            f"runtime_files must declare the {RUNTIME_ENTRYPOINT!r} entrypoint",
+        )
+    return tuple(declared)
+
+
+def _resolved_runtime_file(skill_dir: Path, relative: PurePosixPath) -> Path:
+    """Return ``relative``'s real file inside ``skill_dir``.
+
+    A symlink at any step, a path that resolves outside the Skill, or a
+    missing/non-regular file is rejected: only content that provably lives
+    inside this Skill may participate in its ``source_digest``.
+    """
+    current = skill_dir
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            raise _RejectedSkill(
+                "runtime_file_symlink",
+                f"{relative.as_posix()} resolves through a symlink",
+            )
+    try:
+        current.resolve().relative_to(skill_dir.resolve())
+    except (ValueError, OSError) as exc:
+        raise _RejectedSkill(
+            "runtime_file_escapes_skill",
+            f"{relative.as_posix()} resolves outside its Skill folder",
+        ) from exc
+    if not current.is_file():
+        raise _RejectedSkill(
+            "missing_runtime_file", f"declared runtime file is missing: {relative}"
+        )
+    return current
+
+
+def _check_absolute_import(module: str, relative: PurePosixPath) -> None:
+    if _matches_prefix(module, FORBIDDEN_RUNTIME_PREFIXES):
+        raise _RejectedSkill(
+            "forbidden_import",
+            f"{relative.as_posix()} imports forbidden dependency {module!r}",
+        )
+    if not _matches_prefix(module, ALLOWED_RUNTIME_PREFIXES):
+        raise _RejectedSkill(
+            "import_outside_runtime_allowlist",
+            f"{relative.as_posix()} imports {module!r}, outside the closed "
+            "Strategy runtime allowlist",
+        )
+
+
+def _relative_import_base(relative: PurePosixPath, level: int) -> PurePosixPath:
+    base = relative.parent
+    for _ in range(level - 1):
+        if base == PurePosixPath("."):
+            raise _RejectedSkill(
+                "relative_import_escape",
+                f"{relative.as_posix()} imports above its own Skill folder",
+            )
+        base = base.parent
+    return base
+
+
+def _check_relative_import(
+    node: ast.ImportFrom, relative: PurePosixPath, declared: frozenset[str]
+) -> None:
+    """Require a relative import to name a declared file in this Skill."""
+    base = _relative_import_base(relative, node.level)
+    if node.module is not None:
+        targets = [base.joinpath(*node.module.split("."))]
+    else:
+        targets = [base / alias.name for alias in node.names]
+    for target in targets:
+        candidates = (f"{target.as_posix()}.py", f"{target}/__init__.py")
+        if not any(candidate in declared for candidate in candidates):
+            raise _RejectedSkill(
+                "undeclared_runtime_import",
+                f"{relative.as_posix()} imports {target.as_posix()!r}, which is "
+                "not a declared runtime_files entry",
+            )
+
+
+def _check_dynamic_import(node: ast.Call, relative: PurePosixPath) -> None:
+    is_dynamic = (isinstance(node.func, ast.Name) and node.func.id == "__import__") or (
+        isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
+    )
+    if is_dynamic:
+        raise _RejectedSkill(
+            "dynamic_import",
+            f"{relative.as_posix()} uses a dynamic import; the import graph "
+            "must be statically declarable",
+        )
+
+
+def validate_runtime_import_graph(
+    *, skill_dir: Path, declared: tuple[PurePosixPath, ...]
+) -> None:
+    """Statically walk one Skill's declared runtime files' import graph.
+
+    Production counterpart of AD-10's import boundary: every declared
+    ``*.py`` file is AST-parsed (never imported or executed) and must
+    import only :data:`ALLOWED_RUNTIME_PREFIXES` absolutely, resolve every
+    relative import to another declared file inside the same Skill, and
+    never use a dynamic import. Raises :class:`_RejectedSkill` naming the
+    stable reason for the first violation found.
+    """
+    declared_posix = frozenset(path.as_posix() for path in declared)
+    for relative in declared:
+        if relative.suffix != ".py":
+            continue
+        path = _resolved_runtime_file(skill_dir, relative)
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise _RejectedSkill(
+                "unparsable_runtime_file", f"{relative.as_posix()} is unreadable"
+            ) from exc
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            raise _RejectedSkill(
+                "unparsable_runtime_file", f"{relative.as_posix()} does not parse"
+            ) from exc
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    _check_absolute_import(alias.name, relative)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level == 0:
+                    if node.module is not None:
+                        _check_absolute_import(node.module, relative)
+                else:
+                    _check_relative_import(node, relative, declared_posix)
+            elif isinstance(node, ast.Call):
+                _check_dynamic_import(node, relative)
+
+
+def _universe_contract(
+    raw: object, parameter_names: frozenset[str]
+) -> StrategyUniverseContractV1:
+    """Validate the manifest's ``strategy_universe`` block.
+
+    The declared parameter must not also appear in the generic
+    ``parameters`` schema: it is host-bound, so a second declaration would
+    give it a conflicting editable/default identity.
+    """
+    if raw is None:
+        raise _RejectedSkill(
+            "missing_universe_metadata",
+            f"'strategy_universe' must declare {STRATEGY_UNIVERSE_VERSION}",
+        )
+    if not isinstance(raw, dict):
+        raise _RejectedSkill(
+            "malformed_universe_metadata", "'strategy_universe' must be a mapping"
+        )
+    unknown = sorted(set(raw) - {"schema_version", "mode", "parameter"})
+    if unknown:
+        raise _RejectedSkill(
+            "malformed_universe_metadata",
+            f"'strategy_universe' declares unknown keys: {unknown}",
+        )
+    if raw.get("schema_version") != STRATEGY_UNIVERSE_VERSION:
+        raise _RejectedSkill(
+            "unsupported_universe_schema",
+            f"'strategy_universe.schema_version' must be "
+            f"{STRATEGY_UNIVERSE_VERSION!r}, got {raw.get('schema_version')!r}",
+        )
+    if raw.get("mode") != SELECTED_SECURITIES_MODE:
+        raise _RejectedSkill(
+            "unsupported_universe_mode",
+            f"'strategy_universe.mode' must be {SELECTED_SECURITIES_MODE!r}, "
+            f"got {raw.get('mode')!r}",
+        )
+    parameter = raw.get("parameter")
+    if (
+        not isinstance(parameter, str)
+        or not parameter
+        or parameter.strip() != parameter
+    ):
+        raise _RejectedSkill(
+            "empty_universe_parameter",
+            "'strategy_universe.parameter' must name one unpadded, non-empty "
+            f"host-bound parameter, got {parameter!r}",
+        )
+    if parameter in parameter_names:
+        raise _RejectedSkill(
+            "universe_parameter_conflict",
+            f"{parameter!r} is host-bound and must not also be declared in "
+            "'parameters'",
+        )
+    return StrategyUniverseContractV1(
+        schema_version=STRATEGY_UNIVERSE_VERSION,
+        mode=SELECTED_SECURITIES_MODE,
+        parameter=parameter,
+    )
+
+
 def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
     """Discover at most one Strategy from ``folder``, never raising."""
     name = folder.name
@@ -444,22 +856,45 @@ def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
             field="parameters",
         )
 
-    runtime_relative = f"{name}/scripts/strategy.py"
-    runtime_path = skills_root / name / "scripts" / "strategy.py"
+    runtime_relative = f"{name}/{RUNTIME_ENTRYPOINT}"
+    runtime_path = folder / RUNTIME_ENTRYPOINT
     if not runtime_path.is_file():
         return _warning(
             name,
             "missing_runtime_entrypoint",
             f"runtime entrypoint is missing: {runtime_relative}",
-            field="scripts/strategy.py",
+            field=RUNTIME_ENTRYPOINT,
         )
 
+    try:
+        declared_files = _declared_runtime_files(parsed.get("runtime_files"))
+        for relative in declared_files:
+            _resolved_runtime_file(folder, relative)
+    except _RejectedSkill as exc:
+        return _warning(name, "invalid_runtime_files", str(exc), field="runtime_files")
+
+    try:
+        universe = _universe_contract(
+            parsed.get("strategy_universe"),
+            frozenset(parameter.name for parameter in schema),
+        )
+    except _RejectedSkill as exc:
+        return _warning(
+            name, "invalid_universe_metadata", str(exc), field="strategy_universe"
+        )
+
+    try:
+        validate_runtime_import_graph(skill_dir=folder, declared=declared_files)
+    except _RejectedSkill as exc:
+        return _warning(name, "unsafe_runtime_import", str(exc), field="runtime_files")
+
+    runtime_files = tuple(f"{name}/{path.as_posix()}" for path in declared_files)
     try:
         manifest_artifact = build_strategy_source_manifest(
             project_root=skills_root,
             strategy_id=name,
             api_version=api_version,
-            allowlist=(runtime_relative,),
+            allowlist=runtime_files,
             defaults=dict(validated_defaults),
             python_runtime=f"{sys.version_info.major}.{sys.version_info.minor}",
             dependency_versions={"pydantic": _installed_pydantic_version()},
@@ -481,6 +916,8 @@ def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
         # value it returns here is actually a ``JsonScalar``.
         default_parameters=cast(Mapping[str, JsonScalar], dict(validated_defaults)),
         runtime_path=runtime_relative,
+        runtime_files=runtime_files,
+        universe=universe,
     )
     return _FolderOutcome(folder=name, descriptor=descriptor, warning=None)
 
@@ -596,10 +1033,19 @@ def discover_strategies(skills_root: Path) -> StrategyDiscoveryResultV1:
 
 
 __all__ = [
+    "ALLOWED_RUNTIME_PREFIXES",
+    "FORBIDDEN_RUNTIME_PREFIXES",
+    "REJECTION_REASONS",
+    "RUNTIME_ENTRYPOINT",
+    "RejectionReason",
+    "SELECTED_SECURITIES_MODE",
+    "STRATEGY_UNIVERSE_VERSION",
     "StrategyDescriptorV1",
     "StrategyDiscoveryResultV1",
     "StrategyDiscoveryWarningV1",
+    "StrategyUniverseContractV1",
     "WARNING_CODES",
     "WarningCode",
     "discover_strategies",
+    "validate_runtime_import_graph",
 ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import sys
@@ -15,7 +16,12 @@ from app.services.backtest.strategy_job import (
     JobFailureCode,
     StrategyJobConflict,
     StrategyJobRestartV1,
+    WorkerLeaseFenceV1,
+    WorkerLeaseV1,
 )
+
+
+NOW = datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc)
 
 
 @dataclass
@@ -33,11 +39,31 @@ class FakeClaim:
 
 
 class FakeRepository:
+    """Mirror only the repository surface the dispatcher itself calls."""
+
     def __init__(self, claim: FakeClaim | None) -> None:
         self.claim = claim
         self.failed: list[tuple[str, str, dict[str, object]]] = []
         self.reconciled = ()
         self.created: list[object] = []
+        self.generation = 1
+        self.lease_conflict = False
+        self.acquisitions: list[str] = []
+        self.reconcile_fences: list[WorkerLeaseFenceV1 | None] = []
+        self.claim_fences: list[WorkerLeaseFenceV1 | None] = []
+
+    def acquire_or_renew_worker_lease(
+        self, instance_id: str, *, ttl_seconds: float
+    ) -> WorkerLeaseV1:
+        self.acquisitions.append(instance_id)
+        if self.lease_conflict:
+            raise StrategyJobConflict("worker lease is held by another live instance")
+        return WorkerLeaseV1(
+            instance_id=instance_id,
+            generation=self.generation,
+            heartbeat_at=NOW,
+            expires_at=NOW + timedelta(seconds=ttl_seconds),
+        )
 
     def create_initialization_job(self, **configuration):
         self.created.append(configuration)
@@ -51,7 +77,8 @@ class FakeRepository:
         self.created.append((source_job_id, expected_version, idempotency_key))
         return "backtest-restarted"
 
-    def claim_next_strategy_job(self):
+    def claim_next_strategy_job(self, *, lease: WorkerLeaseFenceV1 | None = None):
+        self.claim_fences.append(lease)
         result, self.claim = self.claim, None
         return result
 
@@ -62,7 +89,10 @@ class FakeRepository:
         self.failed.append((str(args[0]), str(args[1]), kwargs))
         return None
 
-    def reconcile_interrupted_strategy_jobs(self):
+    def reconcile_interrupted_strategy_jobs(
+        self, *, lease: WorkerLeaseFenceV1 | None = None
+    ):
+        self.reconcile_fences.append(lease)
         return self.reconciled
 
 
@@ -279,3 +309,146 @@ def test_shutdown_kills_child_after_graceful_wait_failure() -> None:
 
     assert process.terminated and process.killed
     assert len(repo.failed) == 1
+
+
+# ---------------------------------------------------------------------------
+# Story 4.1: lease acquisition, generation-fenced dispatch, and takeover.
+# ---------------------------------------------------------------------------
+
+
+def test_startup_takes_the_lease_then_reconciles_fenced_by_its_generation() -> None:
+    repo = FakeRepository(None)
+    service = StrategyJobService(repo, instance_id="worker-a")
+
+    service.reconcile_startup()
+
+    assert repo.acquisitions == ["worker-a"]
+    assert repo.reconcile_fences == [
+        WorkerLeaseFenceV1(instance_id="worker-a", generation=1)
+    ]
+
+
+def test_dispatch_hands_the_worker_its_owner_instance_and_lease_generation() -> None:
+    repo = FakeRepository(FakeClaim(FakeJob("job-1", 2), "claim-1"))
+    calls: list[list[str]] = []
+    service = StrategyJobService(
+        repo,
+        popen=lambda argv, **_k: (calls.append(argv), FakeProcess())[1],
+        project_root=Path("/project"),
+        instance_id="worker-a",
+    )
+    service.acquire_lease()
+
+    assert service.dispatch_once() is True
+
+    fence = WorkerLeaseFenceV1(instance_id="worker-a", generation=1)
+    assert repo.claim_fences == [fence]
+    assert calls[0][-4:] == [
+        "--owner-instance-id",
+        "worker-a",
+        "--lease-generation",
+        "1",
+    ]
+
+
+def test_unleased_dispatch_omits_the_fence_arguments() -> None:
+    repo = FakeRepository(FakeClaim(FakeJob("job-1", 2), "claim-1"))
+    calls: list[list[str]] = []
+    service = StrategyJobService(
+        repo,
+        popen=lambda argv, **_k: (calls.append(argv), FakeProcess())[1],
+        project_root=Path("/project"),
+    )
+
+    assert service.dispatch_once() is True
+
+    assert repo.claim_fences == [None]
+    assert "--owner-instance-id" not in calls[0]
+
+
+def test_heartbeat_renewal_at_the_same_generation_reconciles_nothing() -> None:
+    repo = FakeRepository(None)
+    service = StrategyJobService(repo, instance_id="worker-a")
+    service.acquire_lease()
+
+    service._heartbeat()
+
+    assert repo.reconcile_fences == []
+    assert service.lease is not None and service.lease.generation == 1
+
+
+def test_heartbeat_that_retakes_the_lease_reconciles_the_inherited_claims() -> None:
+    repo = FakeRepository(None)
+    service = StrategyJobService(repo, instance_id="worker-a")
+    service.acquire_lease()
+
+    repo.generation = 2
+    service._heartbeat()
+
+    assert repo.reconcile_fences == [
+        WorkerLeaseFenceV1(instance_id="worker-a", generation=2)
+    ]
+    assert service.lease is not None and service.lease.generation == 2
+
+
+def test_interrupted_owned_child_is_failed_under_the_current_fence() -> None:
+    repo = FakeRepository(FakeClaim(FakeJob("job-1", 2), "claim-1"))
+    process = FakeProcess(returncode=1)
+    service = StrategyJobService(
+        repo,
+        popen=lambda *_a, **_k: process,
+        project_root=Path("/project"),
+        instance_id="worker-a",
+    )
+    service.acquire_lease()
+    assert service.dispatch_once() is True
+
+    assert service.dispatch_once() is False
+
+    assert repo.failed[0][-1]["lease"] == WorkerLeaseFenceV1(
+        instance_id="worker-a", generation=1
+    )
+
+
+def test_stage_activities_enqueue_through_their_own_repository_writes() -> None:
+    class StageRepository(FakeRepository):
+        def create_bootstrap_job(self, *, parent_job_id=None):
+            self.created.append(("bootstrap", parent_job_id))
+            return "bootstrap-queued"
+
+        def create_preparation_job(self, *, parent_job_id=None):
+            self.created.append(("preparation", parent_job_id))
+            return "preparation-queued"
+
+    repo = StageRepository(None)
+    service = StrategyJobService(repo)
+
+    assert service.enqueue_bootstrap() == "bootstrap-queued"
+    assert service.enqueue_preparation(parent_job_id="job-1") == "preparation-queued"
+    assert repo.created == [("bootstrap", None), ("preparation", "job-1")]
+
+
+def test_startup_against_a_live_foreign_lease_reconciles_nothing() -> None:
+    repo = FakeRepository(None)
+    repo.lease_conflict = True
+    service = StrategyJobService(repo, instance_id="worker-b")
+
+    assert service.reconcile_startup() == ()
+
+    assert service.lease is None
+    assert repo.reconcile_fences == []
+
+
+def test_dispatcher_takes_a_lease_it_could_not_get_at_startup() -> None:
+    repo = FakeRepository(None)
+    repo.lease_conflict = True
+    service = StrategyJobService(repo, instance_id="worker-b")
+    service.reconcile_startup()
+
+    repo.lease_conflict = False
+    service._heartbeat()
+
+    assert service.lease is not None
+    assert repo.reconcile_fences == [
+        WorkerLeaseFenceV1(instance_id="worker-b", generation=1)
+    ]

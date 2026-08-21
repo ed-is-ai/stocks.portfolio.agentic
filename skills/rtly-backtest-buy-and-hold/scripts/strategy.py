@@ -16,6 +16,20 @@ from app.services.backtest.strategy_protocol import (
 
 STRATEGY_ID = "rtly-backtest-buy-and-hold"
 STRATEGY_API_VERSION = 1
+UNIVERSE_PARAMETER = "selected_securities"
+
+
+def _universe(parameters: StrategyParameters) -> tuple[str, ...]:
+    """Return the host-bound selected universe as a canonical ID tuple.
+
+    The host injects an already sorted, deduplicated tuple; re-deriving it
+    here keeps iteration deterministic for any caller and makes a
+    malformed or empty universe fail closed with no signals.
+    """
+    raw = parameters.get(UNIVERSE_PARAMETER)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(sorted({value for value in raw if isinstance(value, str) and value}))
 
 
 def _as_date(value: object) -> date | None:
@@ -64,13 +78,8 @@ class BuyAndHoldStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
-        security_id = str(parameters.get("security_id", "sec-aapl"))
         cutoff = _cutoff(parameters)
-        if (
-            cutoff is None
-            or view.as_of_session < cutoff
-            or not _has_fresh_history(view, security_id)
-        ):
+        if cutoff is None or view.as_of_session < cutoff:
             return []
         return [
             Signal(
@@ -79,6 +88,8 @@ class BuyAndHoldStrategy:
                 session=view.as_of_session,
                 rule_id="buy_and_hold_entry_v1",
             )
+            for security_id in _universe(parameters)
+            if _has_fresh_history(view, security_id)
         ]
 
     def exit_signals(

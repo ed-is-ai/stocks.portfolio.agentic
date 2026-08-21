@@ -9,6 +9,7 @@ import sys
 import threading
 import logging
 from typing import Callable, Protocol
+from uuid import uuid4
 
 from app.core.config import ROOT_DIR
 from app.services.backtest.strategy_job import (
@@ -21,9 +22,16 @@ from app.services.backtest.strategy_job import (
     StrategyJobDeletionV1,
     StrategyJobRestartV1,
     StrategyJobActionV1,
+    WorkerLeaseFenceV1,
+    WorkerLeaseV1,
 )
 
 logger = logging.getLogger(__name__)
+
+#: How long an acquired worker lease stays valid without a heartbeat.
+#: Deliberately several dispatcher poll intervals wide so an ordinary
+#: scheduling hiccup never lets a second instance evict a healthy worker.
+DEFAULT_LEASE_TTL_SECONDS = 30.0
 
 
 class ProcessLike(Protocol):
@@ -53,6 +61,8 @@ class StrategyJobService:
         popen: Callable[..., ProcessLike] = subprocess.Popen,
         project_root: Path = ROOT_DIR,
         qualification_digest: Callable[[], str | None] | None = None,
+        instance_id: str | None = None,
+        lease_ttl_seconds: float = DEFAULT_LEASE_TTL_SECONDS,
     ) -> None:
         self._repository = repository
         self._popen = popen
@@ -60,10 +70,52 @@ class StrategyJobService:
         self._qualification_digest = qualification_digest or (
             lambda: self._repository.current_qualification_contract_digest()
         )
+        self._instance_id = instance_id or str(uuid4())
+        self._lease_ttl_seconds = lease_ttl_seconds
+        self._lease: WorkerLeaseV1 | None = None
         self._owned: _OwnedChild | None = None
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    @property
+    def instance_id(self) -> str:
+        """This process's stable worker identity for the singleton lease."""
+        return self._instance_id
+
+    @property
+    def lease(self) -> WorkerLeaseV1 | None:
+        """The lease this service currently believes it holds, if any."""
+        return self._lease
+
+    def acquire_lease(self) -> WorkerLeaseV1 | None:
+        """Acquire, take over, or heartbeat the singleton worker lease.
+
+        A renewal by the current owner keeps its generation, so a
+        heartbeat never fences this instance's own in-flight writes out.
+        Returns ``None`` while a different live instance still owns the
+        lease: this process simply is not the worker, and every dispatcher
+        poll retries until that lease expires.
+        """
+        try:
+            self._lease = self._repository.acquire_or_renew_worker_lease(
+                self._instance_id, ttl_seconds=self._lease_ttl_seconds
+            )
+        except StrategyJobConflict:
+            self._lease = None
+        return self._lease
+
+    def _heartbeat(self) -> None:
+        """Renew the lease, reconciling whatever a new generation inherits."""
+        previous = self._lease
+        lease = self.acquire_lease()
+        if lease is not None and (
+            previous is None or previous.generation != lease.generation
+        ):
+            self._repository.reconcile_interrupted_strategy_jobs(lease=lease.fence)
+
+    def _fence(self) -> WorkerLeaseFenceV1 | None:
+        return None if self._lease is None else self._lease.fence
 
     def enqueue_initialization(self, submission: InitializationSubmissionV1):
         qualification_digest = self._qualification_digest()
@@ -78,6 +130,12 @@ class StrategyJobService:
 
     def enqueue_backtest(self, submission: BacktestSubmissionV1):
         return self._repository.create_backtest_job(submission)
+
+    def enqueue_bootstrap(self, *, parent_job_id: str | None = None):
+        return self._repository.create_bootstrap_job(parent_job_id=parent_job_id)
+
+    def enqueue_preparation(self, *, parent_job_id: str | None = None):
+        return self._repository.create_preparation_job(parent_job_id=parent_job_id)
 
     def request_cancellation(self, request: StrategyJobCancellationV1):
         return self._repository.request_strategy_job_cancellation(
@@ -112,10 +170,27 @@ class StrategyJobService:
         )
 
     def reconcile_startup(self):
-        return self._repository.reconcile_interrupted_strategy_jobs()
+        """Take the worker lease, then fail every claim it inherited.
+
+        A ``running`` row owned by the generation just acquired is left
+        untouched; every claim an evicted owner abandoned becomes
+        ``worker_interrupted``. Reconciles nothing while another live
+        instance still owns the lease -- those rows are its business, not
+        this process's.
+        """
+        lease = self.acquire_lease()
+        if lease is None:
+            return ()
+        return self._repository.reconcile_interrupted_strategy_jobs(lease=lease.fence)
 
     def dispatch_once(self) -> bool:
-        """Poll an owned child or claim and spawn one queued job."""
+        """Poll an owned child or claim and spawn one queued job.
+
+        Claims across all four activity types -- the ledger's FIFO is
+        keyed on ``enqueue_seq`` alone -- and hands the claimed job's id,
+        claim token, and (once a lease is held) the owning instance and
+        lease generation to one typed worker child.
+        """
         with self._lock:
             if self._owned is not None:
                 if self._owned.process.poll() is None:
@@ -126,7 +201,8 @@ class StrategyJobService:
                 )
                 return False
 
-            claim = self._repository.claim_next_strategy_job()
+            fence = self._fence()
+            claim = self._repository.claim_next_strategy_job(lease=fence)
             if claim is None:
                 return False
             argv = [
@@ -138,6 +214,13 @@ class StrategyJobService:
                 "--claim-token",
                 claim.claim_token,
             ]
+            if fence is not None:
+                argv += [
+                    "--owner-instance-id",
+                    fence.instance_id,
+                    "--lease-generation",
+                    str(fence.generation),
+                ]
             try:
                 process = self._popen(argv, cwd=str(self._project_root))
             except Exception:
@@ -169,6 +252,7 @@ class StrategyJobService:
     def _dispatch_loop(self, poll_interval: float) -> None:
         while not self._stop.wait(poll_interval):
             try:
+                self._heartbeat()
                 self.dispatch_once()
             except Exception:
                 logger.exception("Strategy job dispatcher iteration failed")
@@ -218,10 +302,11 @@ class StrategyJobService:
                 failure_code=JobFailureCode.WORKER_INTERRUPTED,
                 failed_month=None,
                 detail=detail,
+                lease=self._fence(),
             )
         except StrategyJobConflict:
             # A terminal worker write or newer owner won the race.
             return
 
 
-__all__ = ["StrategyJobService"]
+__all__ = ["DEFAULT_LEASE_TTL_SECONDS", "StrategyJobService"]

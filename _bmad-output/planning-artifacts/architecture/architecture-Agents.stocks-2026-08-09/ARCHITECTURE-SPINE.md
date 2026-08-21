@@ -7,15 +7,19 @@ paradigm: 'Layered: Routes -> Services -> Domain Agents/Engine -> Repositories (
 scope: 'Strategy Manager (Backtesting) plus issue #210 currency-aware SIPP import and realised-P&L integrity within Agents.stocks'
 status: final
 created: '2026-08-09'
-updated: '2026-08-11'
-binds: ['FR-1', 'FR-2', 'FR-3', 'FR-4', 'FR-5', 'FR-6', 'FR-7', 'FR-8', 'FR-9', 'FR-10', 'FR-11', 'FR-12', 'FR-13', 'FR-14', 'FR-15']
+updated: '2026-08-20'
+binds: ['FR-1', 'FR-2', 'FR-3', 'FR-4', 'FR-5', 'FR-6', 'FR-7', 'FR-8', 'FR-9', 'FR-10', 'FR-11', 'FR-12', 'FR-13', 'FR-14', 'FR-15', 'FR-16', 'FR-17', 'FR-18', 'FR-19', 'FR-20', 'FR-21', 'NFR-14']
 sources:
   - ../../prds/prd-Agents.stocks-2026-08-09/prd.md
+  - ../../../specs/spec-strategy-manager-backtesting/SPEC.md
+  - ../../../specs/spec-strategy-manager-backtesting/operational-readiness.md
   - ../../ux-designs/ux-Agents.stocks-2026-08-09/EXPERIENCE.md
   - ../../ux-designs/ux-Agents.stocks-2026-08-09/DESIGN.md
 companions:
   - reviews/reconcile-prd.md
   - reviews/reconcile-ux.md
+  - reviews/reconcile-spec.md
+  - reviews/reconcile-brownfield.md
 ---
 
 # Architecture Spine — Strategy Manager and Currency-Aware SIPP Import
@@ -98,14 +102,15 @@ graph LR
   shelling out per ticker/date the way `scanner_agent.py` invokes
   `screen_vcp.py` (subprocess, full-S&P500 batch, network fetch, 300s
   timeout) — infeasible across a multi-year backtest replay.
-- **Rule:** Detection logic (VCP calculators, and any future detector) is
-  called in-process, following the Analyst's existing `sys.path`-import
-  convention for `skills/*/scripts/calculators/`, operating on
-  already-fetched Historical Price Data. No Strategy Skill or
-  reconstruction path may invoke a `skills/*/scripts/*.py` CLI entry
-  point via subprocess. Strategy Skill code runs in-process and
-  unsandboxed, as a deliberate consequence — see AD-3's note on the trust
-  boundary this implies.
+- **Rule:** Strategy logic is called in-process against the versioned host
+  protocol and bounded views. Each independently releasable Skill declares a
+  canonical ordered `runtime_files` allowlist and entrypoint; discovery,
+  source hashing, loading, and CI use one path/import-graph validator over
+  every declared executable file. Declared intra-Skill relative imports are
+  allowed, but path escapes, symlinks, dynamic imports, application internals,
+  repositories, agents, network/socket clients, and subprocess are rejected.
+  Strategy runtime code is trusted and unsandboxed, but it owns its methodology
+  and cannot acquire data outside the host boundary.
 
 ### AD-2 — Application Stage logic is shared; releasable Skills own methodology
 
@@ -140,52 +145,59 @@ graph LR
   `MarketView` **raises** if queried for a ticker/date outside its bound,
   turning an accidental look-ahead bug into a hard error at the point of
   misuse.
-  **Trust boundary, stated plainly:** this guards the intended interface,
-  not the Python process. AD-1 makes Strategy Skill code in-process and
-  unsandboxed by design (performance-forced); nothing stops a Strategy
-  Skill from directly importing a repository or `Connect` factory instead
-  of using `MarketView`. That is guarded only by convention — a single
-  trusted author (Edyau) and code review — not by runtime enforcement.
-  Acceptable for a single-user tool; would need revisiting before
-  accepting untrusted third-party Strategy Skills (see PRD Non-Goals on
-  no external marketplace).
+  The engine rejects reads outside the selected V2 universe and rejects any
+  emitted `Signal.security_id` outside that universe. This remains an
+  in-process trust boundary rather than an operating-system sandbox; AD-1's
+  discovery/CI enforcement prevents forbidden dependency paths for trusted
+  local Skills. Untrusted third-party execution and an external marketplace
+  remain out of scope.
 
 ### AD-4 — Strategy job lifecycle has one ledger and race-safe writers
 
-- **Binds:** FR-9, FR-8, §7.1 Sequential execution & Observability (PRD)
-- **Prevents:** Initialization and Backtest workers, routes, and the job
+- **Binds:** FR-8, FR-9, FR-16–FR-20, §7.1 Sequential execution & Observability (PRD)
+- **Prevents:** Bootstrap, initialization, preparation, and Backtest workers, routes, and the job
   launcher each inventing a lifecycle representation or racing to write a
   terminal status.
 - **Rule:** `strategy_jobs` in `BACKTEST_DB` is the only lifecycle ledger
-  for both `initialization` and `backtest` jobs. Stored statuses are exactly
+  for exactly `bootstrap`, `initialization`, `preparation`, and `backtest`
+  jobs. Stored statuses are exactly
   `queued`, `running`, `complete`, `failed`, `cancelled`; cancellation intent
   is the separate nullable `cancel_requested_at` field. `StrategyJobService`
   writes initial `queued`, atomically claims `queued -> running`, may cancel a
   still-queued job, and may write
   fallback `failed` only when its child exits without a terminal worker
   write. A running cancel request is cooperative: the worker checks at the
-  next month boundary and writes `cancelled`; a terminal state that commits
+  subtype's declared safe steps and writes `cancelled`; a terminal state that commits
   first wins over a late request. Commands are idempotent, each mutation
   increments `status_version`, and UI polling rejects an older version. Job
   plus exactly one matching subtype is created atomically while `deleted_at`
   is null. Integer
   `enqueue_seq` fixes FIFO order; one SQLite write transaction conditionally
   claims the smallest queued sequence and assigns a unique `claim_token`.
-  Every worker mutation compares that token and current status/version. On
+  `StrategyJobService` owns one persisted singleton worker lease through
+  `WorkerLeasePolicyV1`. Acquire/takeover increments a generation; renew,
+  claim, reconcile, dispatch, release, and every child write compare instance
+  identity plus generation. Takeover atomically invalidates the prior running
+  claim before further dispatch. Every worker mutation compares claim token,
+  lease generation, current status, and version. On
   application startup, an unowned `running` claim becomes `failed` with code
   `worker_interrupted`; queued rows remain queued and no job auto-replays.
   After atomic claim-to-running it spawns exactly
-  `python -m app.services.backtest.worker --job-id <id> --claim-token <token>`.
-  The child validates token/status before every progress or terminal write;
+  `python -m app.services.backtest.worker --job-id <id> --claim-token <token>
+  --lease-generation <generation>`. The child validates token, generation,
+  and status before every progress or terminal write;
   spawn failure or exit without a terminal write becomes fallback `failed`.
   Shutdown terminates the owned child and records `worker_interrupted`; a stale
   child from an earlier process cannot pass compare-and-swap after startup.
   Legal transitions are only `queued -> running|cancelled|failed` and
   `running -> complete|failed|cancelled`; terminal rows never transition.
   `current_month` means the month actively being processed and is set before
-  its work begins. Workers check cancellation before a month, after its commit,
-  and in the final conditional completion write, so a late cancel cannot
-  overwrite `complete`.
+  its work begins. Workers check cancellation at every declared safe step and
+  in the final conditional completion write, so a late cancel cannot overwrite
+  `complete`. Bootstrap final activation and preparation manifest-seal plus
+  initial-Backtest creation are non-cancellable transactions: acknowledged
+  cancellation guarantees no activation/no Backtest, while a transaction that
+  commits first wins and completes.
   Routes/UI read lifecycle through `BacktestRepository`; no status sidecar
   is authoritative.
 
@@ -559,20 +571,22 @@ graph LR
 - **Prevents:** UI selectors implying continuity from min/max/count, mixing
   profile versions, or accepting a stale/ineligible comparison.
 - **Rule:** `active_snapshot_profile` is an explicit repository pointer with a
-  monotonically increasing activation sequence. Initialization creates and
-  activates a profile only when no compatible active profile exists; Restart
-  and extension keep their pinned profile. A policy/version change creates and
-  atomically activates a new profile; in-flight jobs remain pinned to the old
+  monotonically increasing activation sequence. Only AD-28 Bootstrap creates
+  or activates a profile. Initialization requires and pins a compatible active
+  profile; Restart and extension keep their pinned profile. A Bootstrap
+  policy/version change creates and atomically activates a new profile;
+  in-flight jobs remain pinned to the old
   one. Old profiles remain immutable and never merge into the active Ready
   range. Coverage discovery returns maximal contiguous committed month
   intervals plus earliest/latest/count. Queue acceptance stores profile hash,
   normalized range, and an ordered-month digest over every month's roster,
   input-revision, provenance-quality, and content digests; worker start
   revalidates them.
-  `is_comparable(left,right)` is exhaustive: it requires distinct,
+  `is_comparable(left,right)` dispatches by manifest version. V1 requires distinct,
   non-tombstoned, `complete` Backtest Results with exact range, profile hash,
   ordered-month digest, base currency, and execution-contract digest. Strategy
-  source, parameters, and starting capital may deliberately differ. It is
+  source, parameters, and starting capital may deliberately differ. AD-31
+  supplies the complete V2 predicate; cross-version comparison is rejected. It is
   used both for candidates and submit-time validation. The results
   projection contains only backtests, ordered by `enqueue_seq DESC`, with
   metrics absent until complete.
@@ -797,13 +811,118 @@ graph LR
   present zero/negative balance and source currency; GBP reporting values only
   render when AD-24 valuation is available.
 
+### AD-28 — Bootstrap is explicit, idempotent orchestration
+
+- **Binds:** FR-16, FR-20, CAP-2, CAP-7
+- **Prevents:** CLI, UI, tests, and recovery paths sequencing qualification,
+  roster capture, profile construction, and activation differently or exposing
+  partial foundations as usable.
+- **Rule:** `StrategyBootstrapService` enqueues a `bootstrap` job under
+  `BootstrapContractV1`, which pins qualification, runtime, roster, source
+  bundle, and profile-policy identities. The worker advances through the
+  closed stages `qualification`, `roster_identity_capture`,
+  `profile_validation`, and `final_activation`. It retains immutable audit
+  evidence when a prior stage fails, but only one final repository transaction
+  may verify the claimed job/evidence, insert or reuse the profile,
+  compare-and-swap the active profile, mark the job complete, and write its
+  notification outbox. Repository-owned compatibility compares the contract
+  and active-profile identities; a compatible repeat is a persisted verified
+  no-op without live roster recapture. Fixture and Production use one
+  `StrategyProviderBundleV1` composition boundary; fixture identity is pinned,
+  isolated to temporary Strategy stores, and rejected outside the explicit
+  test environment.
+
+### AD-29 — Readiness is one typed read-only projection
+
+- **Binds:** FR-17, FR-21, CAP-6, CAP-7
+- **Prevents:** Routes, diagnostics, onboarding, and tests inventing different
+  prerequisite, worker, failure, or recovery meanings; readiness GETs repairing
+  state as a side effect.
+- **Rule:** `StrategyReadinessService` composes qualification, roster, active
+  profile and activation sequence, contiguous coverage, the AD-4 persisted
+  worker lease, queue/busy state, Strategy discovery warnings, and a bounded
+  allowlisted `RecentJobFailureV1` into `StrategyReadinessV1`. Prerequisites use
+  only `missing`, `running`, `ready`, `stale_incompatible`, `failed`, and
+  `integrity_error`; `WorkerReadinessV1` uses only `disabled`,
+  `unavailable_interrupted`, `busy`, and `ready`. Each non-ready item carries a
+  stable reason and recovery action from one versioned vocabulary. Page loads,
+  diagnostics, and readiness never mutate the lease, jobs, or evidence.
+  Run-specific evidence readiness is absent until Strategy, universe, period,
+  capital, and base currency are complete. Diagnostics expose only allowlisted
+  identities, bounded type/stage/code/time/recovery fields, and fixture/live
+  distinction—never secrets, paths, payloads, raw `failure_detail`, or database
+  mutation advice.
+
+### AD-30 — Declared Run universe is Strategy metadata, not a parameter convention
+
+- **Binds:** FR-18, FR-20, CAP-1, CAP-3
+- **Prevents:** The host inferring universe semantics from a parameter named
+  `security_id`, accepting stale/free-text identities, or allowing an unrelated
+  security into a V2 view or signal.
+- **Rule:** SKILL frontmatter declares `universe` with
+  `schema_version: strategy_universe.v1`, `mode: single-security`, and
+  `parameter_name` mapped to one declared string parameter. Discovery validates
+  the declaration and mapping. A roster-backed selector reads immutable active-
+  profile identities in deterministic symbol/MIC order and emits
+  `RunUniverseSelectionV1` containing profile hash, activation sequence, and
+  exactly one immutable security ID. Launch revalidates all fields and injects
+  the host-bound parameter server-side; it is never a generic editable/default
+  field. `run_universe_digest` hashes universe schema, mode, mapping, profile
+  hash, and sorted selected IDs—never activation sequence. V2 bounds both
+  `MarketView` reads and emitted signals to those IDs.
+
+### AD-31 — Evidence preparation is durable and selected-universe scoped
+
+- **Binds:** FR-18, FR-19, FR-20, CAP-3, CAP-4, CAP-7, NFR-14
+- **Prevents:** Synchronous launch fetching the full roster or live FX,
+  unrelated members blocking a Run, failed acquisition creating a Backtest,
+  or V1/V2 evidence and comparison semantics being conflated.
+- **Rule:** **Prepare & run backtest** atomically creates a `preparation` job
+  that pins active-profile identity/activation sequence, the AD-30 selection,
+  period, capital/base currency, and non-universe parameters.
+  `RunEvidencePreparationService` prepares only selected monthly member/scan,
+  price, corporate-action, alias, and warm-up evidence. Immediately before its
+  final transaction it revalidates profile and activation sequence; mismatch
+  fails with no Backtest. Same-currency runs pin no FX. Cross-currency runs use
+  `FXEvidenceBoundsV1` and `HistoricalPriceEvidenceService` to acquire the exact
+  bounded immutable `GBPUSD=X` revision under AD-20 orientation/carry and AD-21
+  retries, never the live-valuation `FxQuoteRepository`. Success seals
+  `RunInputManifestV2` and atomically enqueues exactly one initial linked
+  Backtest; failure/cancellation enqueues none. Initial V2 linkage uses
+  `source_preparation_job_id`; V2 restart uses `parent_job_id`, keeps
+  `source_preparation_job_id` null, reuses the exact manifest, and never fetches
+  evidence.
+
+  V2 contains manifest/universe schema and mapping, sorted selected IDs and
+  `run_universe_digest`, one selected resolution for every normalized month and
+  `selected_ordered_month_digest`, price/action/alias/bounds, optional historical
+  FX revision, and the existing engine/protocol/runtime/profile/period/currency/
+  capital identities. Readers dispatch by schema version. V2 comparison requires
+  equal manifest version, profile hash, Run-universe digest, selected ordered-
+  month digest, normalized period, base currency, and execution contract; it
+  does not compare unrelated full-roster evidence, and cross-version comparison
+  is rejected. Existing V1 bytes/digests stay immutable. `LegacyV1FxResolver`
+  provides cache-only replay from the exact pinned `FxQuoteRepository` digest,
+  never selects/refetches/replaces evidence, and fails closed if it is absent or
+  invalid.
+
+  One transactional `StrategySchemaUpgradeV2` inventories and labels legacy V1
+  rows without changing manifest bytes/digests, rebuilds the widened job/run/
+  result constraints and triggers, and verifies row counts, digests, foreign
+  keys, lifecycle, outbox, tombstone, restart, and Result invariants. The
+  deterministic `StrategyProviderBundleV1` fixture test gates release by taking
+  empty isolated stores through Bootstrap, historical coverage, roster-backed
+  selection, preparation, FIFO Backtest execution, and a completed provenance-
+  bearing Result using supported surfaces only. Live-provider smoke is bounded,
+  optional, and non-gating.
+
 ## Consistency Conventions
 
 | Concern | Convention |
 | --- | --- |
 | Naming (entities, files, interfaces, events) | `Strategy Skill`, `Backtest Run`, `Backtest Result` etc. match the PRD Glossary verbatim in code identifiers where practical (e.g. `BacktestRun`, `BacktestResult` classes). New repositories follow `<Concern>Repository` naming (`HistoricalPriceRepository`, `BacktestRepository`), matching `PriceCacheRepository`/`TradesRepository`. |
 | Data & formats (ids, dates, error shapes, envelopes) | Session dates: `YYYY-MM-DD`; snapshot month: `YYYY-MM`; stored timestamps: UTC ISO-8601 instants. Stored job status is `queued`/`running`/`complete`/`failed`/`cancelled`; `cancel_requested_at` is intent, not a sixth status (AD-4). Failures carry stable `failure_code`, optional `failed_month`, and human-readable detail. JSON shapes: AD-8/AD-18. |
-| State & cross-cutting (mutation, errors, logging, config, auth) | Routes never touch a `Connect`/session directly and mutating routes use `require_local_or_token`. Typed workers mediate type-specific writes; `StrategyJobService` owns claims/cancel/fallback per AD-4. New DB paths (`HISTORICAL_PRICE_CACHE`, `BACKTEST_DB`) live in `app/core/config.py`. Notifications project from the AD-17 outbox. |
+| State & cross-cutting (mutation, errors, logging, config, auth) | Routes never touch a `Connect`/session directly and mutating routes use `require_local_or_token`. Typed workers mediate the four exact job types; `StrategyJobService` owns fenced lease/claims/cancel/fallback per AD-4. New DB paths (`HISTORICAL_PRICE_CACHE`, `BACKTEST_DB`) live in `app/core/config.py`. Notifications project from the AD-17 outbox. Readiness and diagnostics are read-only through AD-29. |
 | SIPP import | `SippImportPlan`, `Money`, and receipt/outcome vocabulary are service contracts. `trades.db` owns its atomic unit of work; currency-aware source ledger facts are never overwritten by GBP presentation values (AD-23–AD-27). |
 
 ## Stack
@@ -826,9 +945,12 @@ graph LR
 
 ```mermaid
 erDiagram
+    STRATEGY_JOBS ||--o| BOOTSTRAP_RUNS : configures
     STRATEGY_JOBS ||--o| INITIALIZATION_RUNS : configures
+    STRATEGY_JOBS ||--o| RUN_PREPARATIONS : configures
     STRATEGY_JOBS ||--o| STRATEGY_RUNS : configures
     STRATEGY_JOBS o|--o{ STRATEGY_JOBS : parent_of
+    RUN_PREPARATIONS ||--o| STRATEGY_RUNS : creates_initial
     STRATEGY_RUNS ||--o| BACKTEST_RESULTS : produces
     STRATEGY_RUNS ||--o| BACKTEST_STAGING : builds
     BACKTEST_RESULTS ||--o{ TRADE_LOG : contains
@@ -842,15 +964,18 @@ erDiagram
     SNAPSHOT_PROFILES ||--o{ MONTHLY_SCAN_RESULTS : shapes
     SNAPSHOT_MONTHS ||--o{ MONTHLY_SCAN_RESULTS : contains
     STRATEGY_JOBS ||--|| NOTIFICATION_OUTBOX : projects
-    STRATEGY_RUNS ||--|| RUN_INPUT_MANIFESTS : pins
+    RUN_INPUT_MANIFESTS ||--o{ STRATEGY_RUNS : pinned_by
     PRICE_EVIDENCE_MANIFESTS ||--o{ HISTORICAL_PRICE_CACHE : owns
+    WORKER_LEASES ||--o{ STRATEGY_JOBS : fences
     STRATEGY_JOBS {
         string id PK
-        string job_type "initialization | backtest"
+        string job_type "bootstrap | initialization | preparation | backtest"
         string status "queued | running | complete | failed | cancelled"
         string parent_job_id FK "nullable"
         integer enqueue_seq UK
         string claim_token "nullable"
+        integer lease_generation "nullable; fenced owner generation"
+        string current_stage "nullable; bootstrap/preparation"
         string current_month "nullable"
         integer status_version
         string cancel_requested_at "nullable"
@@ -862,6 +987,21 @@ erDiagram
         string created_at
         string updated_at
     }
+    WORKER_LEASES {
+        integer singleton_id PK "always 1"
+        string instance_id
+        integer lease_generation
+        string heartbeat_at
+        string expires_at
+    }
+    BOOTSTRAP_RUNS {
+        string job_id PK_FK
+        string bootstrap_contract_digest
+        string provider_bundle_identity
+        string candidate_roster_digest "nullable"
+        string candidate_profile_hash "nullable"
+        string verified_noop_at "nullable"
+    }
     INITIALIZATION_RUNS {
         string job_id PK_FK
         string profile_hash FK
@@ -869,6 +1009,20 @@ erDiagram
         string requested_end
         string ordered_month_digest
         string calendar_dataset_version
+    }
+    RUN_PREPARATIONS {
+        string job_id PK_FK
+        string profile_hash FK
+        integer activation_seq
+        string universe_schema_version
+        string selected_security_ids_json
+        string run_universe_digest
+        string requested_start
+        string requested_end
+        float starting_capital
+        string base_currency
+        string sealed_manifest_digest FK "nullable until complete"
+        string initial_backtest_job_id UK_FK "nullable; one successful child"
     }
     STRATEGY_RUNS {
         string id PK_FK "STRATEGY_JOBS.id"
@@ -883,9 +1037,16 @@ erDiagram
         string base_currency "GBP | USD"
         string run_input_manifest_digest FK
         string execution_contract_digest
+        string manifest_schema_version "run_input_manifest.v1 | run_input_manifest.v2"
+        string run_universe_digest "nullable; required for V2"
+        string selected_ordered_month_digest "nullable; required for V2"
+        string source_preparation_job_id UK_FK "nullable; initial V2 only"
     }
     BACKTEST_RESULTS {
         string run_id PK_FK "AD-9: 1:0..1 with STRATEGY_RUNS"
+        string manifest_schema_version
+        string run_universe_digest "nullable; V2"
+        string selected_ordered_month_digest "nullable; V2"
         string metrics_json "AD-8: total_return/sharpe_ratio/win_rate/max_drawdown"
         string note
     }
@@ -1025,7 +1186,7 @@ erDiagram
     }
     RUN_INPUT_MANIFESTS {
         string manifest_digest PK
-        string run_id UK_FK
+        string manifest_schema_version "run_input_manifest.v1 | run_input_manifest.v2"
         string canonical_manifest_json
         string runtime_lock_digest
         string created_at
@@ -1139,18 +1300,25 @@ skills/
 
 | Capability / Area | Lives in | Governed by |
 | --- | --- | --- |
-| FR-1 Strategy Skill authoring interface | `skills/<name>/scripts/`, `strategy_protocol.py` | AD-1, AD-3, AD-20 |
+| FR-1 Strategy Skill authoring interface | `skills/<name>/scripts/`, `strategy_protocol.py` | AD-1–AD-3, AD-20, AD-30 |
 | FR-2 Strategy Parameters declaration | `skills/<name>/SKILL.md` frontmatter | AD-7 |
 | FR-3 Strategy discovery | `app/services/backtest/skill_discovery.py` | AD-7, AD-11 |
 | FR-4 Historical Scan Reconstruction | initialization/reconstruction, calendar, canonical historical record | AD-1, AD-13, AD-14, AD-18, AD-20, AD-21 |
 | FR-5 Historical ticker universe | `ReconstructionRosterManifestV1`, snapshot members/manifest; user-approved best-effort downgrade from point-in-time completeness | AD-13, AD-14, AD-18, AD-22 |
 | FR-6 Split/dividend-adjusted price data | `app/repositories/historical_price_repo.py` | AD-6 |
 | FR-7 Reconstruction caching | detector cache + snapshot profile/month/results tables | AD-5, AD-9, AD-13, AD-14 |
-| FR-8 Start a Backtest Run | `backtest_engine.py`, `market_view.py`, `strategy_protocol.py` | AD-3, AD-4, AD-7, AD-8, AD-12–AD-15, AD-19, AD-20 |
-| FR-9 Background job execution | `strategy_job_service.py`, typed workers | AD-4, AD-15–AD-17, AD-21 |
+| FR-8 Start a Backtest Run | configuration, preparation, `backtest_engine.py`, `market_view.py`, `strategy_protocol.py` | AD-3, AD-4, AD-7, AD-8, AD-12–AD-15, AD-19, AD-20, AD-30, AD-31 |
+| FR-9 Background job execution | `strategy_job_service.py`, fenced lease, four typed workers | AD-4, AD-15–AD-17, AD-21, AD-28, AD-31 |
 | FR-10 Backtest Result persistence | `app/repositories/backtest_repo.py` | AD-5, AD-8, AD-9, AD-15 |
-| FR-11 Compare two Backtest Results | repository-owned `is_comparable` + route | AD-9, AD-13, AD-19 |
-| FR-12–15 Strategy Manager UI | routes, templates, coverage/result projections, notifications | Design Paradigm, AD-7, AD-13–AD-21 |
+| FR-11 Compare two Backtest Results | version-dispatched repository-owned `is_comparable` + route | AD-9, AD-13, AD-19, AD-31 |
+| FR-12–15 Strategy Manager UI | routes, templates, readiness/coverage/result projections, notifications | Design Paradigm, AD-7, AD-13–AD-21, AD-28–AD-31 |
+| FR-16 Bootstrap canonical foundations | `StrategyBootstrapService`, bootstrap worker/repository transaction | AD-4, AD-28 |
+| FR-17 Prerequisite readiness and recovery | `StrategyReadinessService`, `StrategyReadinessV1`, worker lease | AD-4, AD-29 |
+| FR-18 Select a Strategy Run universe | discovery universe schema, roster selector, launch validation | AD-1, AD-3, AD-30 |
+| FR-19 Pin selected-universe evidence | `RunEvidencePreparationService`, `RunInputManifestV2` | AD-20, AD-21, AD-30, AD-31 |
+| FR-20 Complete the clean-checkout journey | fixture composition root and deterministic E2E | AD-28–AD-31 |
+| FR-21 Diagnose and onboard | read-only readiness/diagnostics projection and authoritative guide | AD-29 |
+| NFR-14 Clean-state release verification | deterministic fixture E2E; optional non-gating live smoke | AD-28–AD-31 |
 | #210 isolated SIPP CSV processing | `sipp_import_service.py`, typed import plan, one `trades.db` unit of work | AD-23 |
 | #210 currency-aware cash and valuations | `money.py`, cash ledger, `fx_quote_repo.py`, Portfolio presentation | AD-24, AD-27 |
 | #210 idempotency and client outcome | receipt/row repositories, route and queue response | AD-25, AD-27 |

@@ -8,12 +8,13 @@ description: >
   independent entry and exit lookbacks, or replaying strict Donchian-style
   channel signals in Strategy Manager.
 api_version: 1
+runtime_files:
+  - scripts/strategy.py
+strategy_universe:
+  schema_version: strategy_universe.v1
+  mode: selected-securities
+  parameter: selected_securities
 parameters:
-  - name: security_id
-    type: string
-    default: sec-aapl
-    description: Stable security identifier to trade.
-    required: true
   - name: fixed_shares
     type: integer
     default: 10
@@ -40,8 +41,10 @@ parameters:
 # Turtle Trend Backtest
 
 Use `scripts/strategy.py` through Strategy Manager's in-process
-`StrategyProtocolV1` runtime. Trade one configured security with fixed-share
-sizing. Enter when the current high strictly exceeds the highest high in the
+`StrategyProtocolV1` runtime. The host binds the Run's canonical
+selected-security tuple to `selected_securities`; iterate it in that order and
+trade each selected security independently with fixed-share sizing. Enter when
+the current high strictly exceeds the highest high in the
 prior entry channel. Exit a held position when the current low strictly falls
 below the lowest low in the prior exit channel.
 

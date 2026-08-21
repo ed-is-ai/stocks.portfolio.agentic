@@ -4,15 +4,17 @@ name: rtly-backtest-moving-average
 display_name: Moving Average Backtest
 description: >
   Backtests a deterministic, long-only fast/slow simple moving-average
-  crossover for one security. Use to compare a transparent trend strategy
-  with other replayable StrategyProtocolV1 methods.
+  crossover across the Run's selected securities. Use to compare a
+  transparent trend strategy with other replayable StrategyProtocolV1
+  methods.
 api_version: 1
+runtime_files:
+  - scripts/strategy.py
+strategy_universe:
+  schema_version: strategy_universe.v1
+  mode: selected-securities
+  parameter: selected_securities
 parameters:
-  - name: security_id
-    type: string
-    default: sec-aapl
-    description: Stable security identifier to trade.
-    required: true
   - name: fixed_shares
     type: integer
     default: 10
@@ -38,11 +40,14 @@ parameters:
 
 # Moving Average Backtest
 
-Use `scripts/strategy.py` through the Backtest Engine. Emit a BUY only when
-the fast SMA crosses strictly above the slow SMA, and a SELL only when it
-crosses strictly below. Require one session beyond the slow window to prove a
-crossover, ignore equality, reject `fast_window >= slow_window`, and fail
-closed on missing, malformed, short, or stale history.
+Use `scripts/strategy.py` through the Backtest Engine. The host binds the
+Run's canonical selected-security tuple to `selected_securities`; iterate it
+in that order and apply the crossover rule independently per security. Emit a
+BUY only when the fast SMA crosses strictly above the slow SMA, and a SELL
+only when it crosses strictly below a held position. Require one session
+beyond the slow window to prove a crossover, ignore equality, reject
+`fast_window >= slow_window`, and fail closed on missing, malformed, short,
+or stale history.
 
 Use `fixed_shares` for BUY sizing. Close only an integral held quantity for a
 SELL. Make decisions from bounded close-of-session evidence; the engine fills

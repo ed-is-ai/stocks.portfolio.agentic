@@ -29,7 +29,7 @@ BuyAndHoldStrategy = _MODULE.BuyAndHoldStrategy
 
 AS_OF = date(2026, 1, 8)
 PARAMETERS = {
-    "security_id": "sec-aapl",
+    "selected_securities": ["sec-aapl"],
     "fixed_shares": 10,
     "entry_on_or_after": "2000-01-01",
 }
@@ -179,3 +179,37 @@ def test_position_size_uses_fixed_buy_and_integral_sell_defensively() -> None:
     assert strategy.position_size(sell, view, _portfolio("7"), PARAMETERS) == 7
     assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio(), PARAMETERS) == 0
+
+
+def test_multi_security_universe_holds_every_selected_security() -> None:
+    strategy = BuyAndHoldStrategy()
+    view = _View()
+
+    signals = validate_entry_signals(
+        strategy.entry_signals(
+            view,
+            {**PARAMETERS, "selected_securities": ["sec-msft", "sec-aapl", "sec-msft"]},
+        )
+    )
+
+    assert [signal.security_id for signal in signals] == ["sec-aapl", "sec-msft"]
+    assert {signal.rule_id for signal in signals} == {"buy_and_hold_entry_v1"}
+
+
+def test_empty_or_malformed_universe_emits_nothing() -> None:
+    strategy = BuyAndHoldStrategy()
+    view = _View()
+    without_universe = {
+        name: value
+        for name, value in PARAMETERS.items()
+        if name != "selected_securities"
+    }
+
+    assert strategy.entry_signals(view, {**PARAMETERS, "selected_securities": []}) == []
+    assert (
+        strategy.entry_signals(
+            view, {**PARAMETERS, "selected_securities": "sec-aapl"}
+        )
+        == []
+    )
+    assert strategy.entry_signals(view, without_universe) == []

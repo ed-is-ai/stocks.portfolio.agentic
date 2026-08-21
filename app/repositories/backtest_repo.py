@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from hashlib import sha256
@@ -42,15 +42,20 @@ from app.services.backtest.strategy_job import (
     BacktestEnqueueResultV1,
     BacktestRunV1,
     BacktestSubmissionV1,
+    BootstrapRunV1,
     ClaimedStrategyJobV1,
     InitializationEnqueueResultV1,
     InitializationRunV1,
     JobFailureCode,
+    PreparationRunV1,
+    STAGE_SEQUENCES,
     StrategyJobConflict,
     StrategyJobNotFound,
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
+    WorkerLeaseFenceV1,
+    WorkerLeaseV1,
     requested_month_digest,
 )
 
@@ -483,9 +488,31 @@ BEGIN SELECT RAISE(ABORT, 'BAU run authority is immutable'); END;
 """
 
 _STRATEGY_JOB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS strategy_worker_lease (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+    instance_id TEXT NOT NULL CHECK(length(instance_id) > 0),
+    generation INTEGER NOT NULL CHECK(generation > 0),
+    heartbeat_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    CHECK(expires_at > heartbeat_at)
+);
+
+CREATE TRIGGER IF NOT EXISTS strategy_worker_lease_generation_monotonic
+BEFORE UPDATE ON strategy_worker_lease
+WHEN NEW.generation < OLD.generation
+   OR (NEW.instance_id != OLD.instance_id
+       AND NEW.generation != OLD.generation + 1)
+BEGIN SELECT RAISE(ABORT, 'worker lease generation is not monotonic'); END;
+
+CREATE TRIGGER IF NOT EXISTS strategy_worker_lease_immutable_delete
+BEFORE DELETE ON strategy_worker_lease
+BEGIN SELECT RAISE(ABORT, 'worker lease is immutable'); END;
+
 CREATE TABLE IF NOT EXISTS strategy_jobs (
     id TEXT PRIMARY KEY,
-    job_type TEXT NOT NULL CHECK(job_type IN ('initialization', 'backtest')),
+    job_type TEXT NOT NULL CHECK(job_type IN (
+        'bootstrap', 'initialization', 'preparation', 'backtest'
+    )),
     status TEXT NOT NULL CHECK(status IN (
         'queued', 'running', 'complete', 'failed', 'cancelled'
     )),
@@ -493,6 +520,12 @@ CREATE TABLE IF NOT EXISTS strategy_jobs (
     enqueue_seq INTEGER NOT NULL UNIQUE CHECK(enqueue_seq > 0),
     claim_token TEXT,
     current_month TEXT,
+    current_stage TEXT CHECK(current_stage IS NULL OR current_stage IN (
+        'qualification', 'roster_capture', 'profile_activation',
+        'evidence_selection', 'fx_pinning', 'manifest_sealing'
+    )),
+    owner_instance_id TEXT,
+    lease_generation INTEGER CHECK(lease_generation IS NULL OR lease_generation > 0),
     status_version INTEGER NOT NULL CHECK(status_version > 0),
     cancel_requested_at TEXT,
     failure_code TEXT CHECK(failure_code IS NULL OR failure_code IN (
@@ -506,9 +539,18 @@ CREATE TABLE IF NOT EXISTS strategy_jobs (
     audit_summary TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    CHECK(status != 'queued' OR (claim_token IS NULL AND current_month IS NULL)),
+    CHECK(status != 'queued' OR (
+        claim_token IS NULL AND current_month IS NULL AND current_stage IS NULL
+        AND owner_instance_id IS NULL AND lease_generation IS NULL
+    )),
     CHECK(status != 'running' OR claim_token IS NOT NULL),
-    CHECK(status NOT IN ('complete', 'failed', 'cancelled') OR current_month IS NULL),
+    CHECK((owner_instance_id IS NULL) = (lease_generation IS NULL)),
+    CHECK(status NOT IN ('complete', 'failed', 'cancelled') OR (
+        current_month IS NULL AND current_stage IS NULL
+        AND owner_instance_id IS NULL AND lease_generation IS NULL
+    )),
+    CHECK(job_type IN ('bootstrap', 'preparation') OR current_stage IS NULL),
+    CHECK(job_type IN ('initialization', 'backtest') OR current_month IS NULL),
     CHECK(
         (status = 'failed' AND failure_code IS NOT NULL AND failure_detail IS NOT NULL)
         OR
@@ -556,6 +598,9 @@ WHEN OLD.status IN ('complete', 'failed', 'cancelled')
     NEW.status != OLD.status
     OR NEW.claim_token IS NOT OLD.claim_token
     OR NEW.current_month IS NOT OLD.current_month
+    OR NEW.current_stage IS NOT OLD.current_stage
+    OR NEW.owner_instance_id IS NOT OLD.owner_instance_id
+    OR NEW.lease_generation IS NOT OLD.lease_generation
     OR NEW.cancel_requested_at IS NOT OLD.cancel_requested_at
     OR NEW.failure_code IS NOT OLD.failure_code
     OR NEW.failed_month IS NOT OLD.failed_month
@@ -578,12 +623,16 @@ BEFORE UPDATE ON strategy_jobs
 WHEN NEW.status_version != OLD.status_version + 1
 BEGIN SELECT RAISE(ABORT, 'strategy job version is not monotonic'); END;
 
-CREATE TRIGGER IF NOT EXISTS strategy_job_version_requires_mutation
+DROP TRIGGER IF EXISTS strategy_job_version_requires_mutation;
+CREATE TRIGGER strategy_job_version_requires_mutation
 BEFORE UPDATE ON strategy_jobs
 WHEN NEW.status_version != OLD.status_version
  AND NEW.status IS OLD.status
  AND NEW.claim_token IS OLD.claim_token
  AND NEW.current_month IS OLD.current_month
+ AND NEW.current_stage IS OLD.current_stage
+ AND NEW.owner_instance_id IS OLD.owner_instance_id
+ AND NEW.lease_generation IS OLD.lease_generation
  AND NEW.cancel_requested_at IS OLD.cancel_requested_at
  AND NEW.failure_code IS OLD.failure_code
  AND NEW.failed_month IS OLD.failed_month
@@ -651,6 +700,74 @@ WHEN NOT EXISTS (
     WHERE job.id = OLD.job_id AND job.deleted_at IS NOT NULL
 )
 BEGIN SELECT RAISE(ABORT, 'initialization run is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS bootstrap_runs (
+    job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id)
+);
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_subtype_matches_job
+BEFORE INSERT ON bootstrap_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = NEW.job_id AND job.job_type = 'bootstrap'
+ )
+BEGIN SELECT RAISE(ABORT, 'bootstrap subtype does not match job'); END;
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_job_requires_subtype_before_running
+BEFORE UPDATE OF status ON strategy_jobs
+WHEN NEW.job_type = 'bootstrap'
+ AND NEW.status = 'running'
+ AND NOT EXISTS (
+    SELECT 1 FROM bootstrap_runs run WHERE run.job_id = NEW.id
+ )
+BEGIN SELECT RAISE(ABORT, 'bootstrap subtype is missing'); END;
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_run_immutable
+BEFORE UPDATE ON bootstrap_runs
+BEGIN SELECT RAISE(ABORT, 'bootstrap run is immutable'); END;
+
+DROP TRIGGER IF EXISTS bootstrap_run_immutable_delete;
+CREATE TRIGGER bootstrap_run_immutable_delete
+BEFORE DELETE ON bootstrap_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = OLD.job_id AND job.deleted_at IS NOT NULL
+)
+BEGIN SELECT RAISE(ABORT, 'bootstrap run is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS preparation_runs (
+    job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id)
+);
+
+CREATE TRIGGER IF NOT EXISTS preparation_subtype_matches_job
+BEFORE INSERT ON preparation_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = NEW.job_id AND job.job_type = 'preparation'
+ )
+BEGIN SELECT RAISE(ABORT, 'preparation subtype does not match job'); END;
+
+CREATE TRIGGER IF NOT EXISTS preparation_job_requires_subtype_before_running
+BEFORE UPDATE OF status ON strategy_jobs
+WHEN NEW.job_type = 'preparation'
+ AND NEW.status = 'running'
+ AND NOT EXISTS (
+    SELECT 1 FROM preparation_runs run WHERE run.job_id = NEW.id
+ )
+BEGIN SELECT RAISE(ABORT, 'preparation subtype is missing'); END;
+
+CREATE TRIGGER IF NOT EXISTS preparation_run_immutable
+BEFORE UPDATE ON preparation_runs
+BEGIN SELECT RAISE(ABORT, 'preparation run is immutable'); END;
+
+DROP TRIGGER IF EXISTS preparation_run_immutable_delete;
+CREATE TRIGGER preparation_run_immutable_delete
+BEFORE DELETE ON preparation_runs
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    WHERE job.id = OLD.job_id AND job.deleted_at IS NOT NULL
+)
+BEGIN SELECT RAISE(ABORT, 'preparation run is immutable'); END;
 
 CREATE TABLE IF NOT EXISTS notification_outbox (
     job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id),
@@ -1080,6 +1197,9 @@ _JOB_COLUMNS = (
     "enqueue_seq",
     "claim_token",
     "current_month",
+    "current_stage",
+    "owner_instance_id",
+    "lease_generation",
     "status_version",
     "cancel_requested_at",
     "failure_code",
@@ -1090,6 +1210,45 @@ _JOB_COLUMNS = (
     "created_at",
     "updated_at",
 )
+
+
+#: Appended to every job-mutating CAS predicate. A database with no
+#: persisted lease row has no worker-ownership concept at all, so the
+#: fence is vacuously satisfied; once a lease exists, only a writer
+#: presenting that exact ``(instance_id, generation)`` pair may mutate a
+#: job, and a writer whose generation has been superseded by a takeover
+#: matches no row and leaves the job untouched.
+_LEASE_FENCE_SQL = """
+                     AND (
+                        NOT EXISTS (
+                            SELECT 1 FROM strategy_worker_lease WHERE singleton_id=1
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM strategy_worker_lease
+                            WHERE singleton_id=1 AND instance_id=? AND generation=?
+                        )
+                     )"""
+
+
+#: The one ``(table, job-id column)`` each job type's identity row lives
+#: in -- every ``strategy_jobs`` row has exactly one row in exactly one of
+#: these. ``strategy_runs`` predates the four-type schema and keys its own
+#: job id as ``id`` rather than ``job_id``.
+_SUBTYPE_TABLES: dict[StrategyJobType, tuple[str, str]] = {
+    StrategyJobType.BOOTSTRAP: ("bootstrap_runs", "job_id"),
+    StrategyJobType.INITIALIZATION: ("initialization_runs", "job_id"),
+    StrategyJobType.PREPARATION: ("preparation_runs", "job_id"),
+    StrategyJobType.BACKTEST: ("strategy_runs", "id"),
+}
+
+
+def _lease_fence_params(
+    lease: "WorkerLeaseFenceV1 | None",
+) -> tuple[str | None, int | None]:
+    """Return the ``(instance_id, generation)`` bindings ``_LEASE_FENCE_SQL``
+    expects -- ``(None, None)`` never matches a persisted lease row, so an
+    unfenced write is rejected the moment any lease is held."""
+    return (None, None) if lease is None else (lease.instance_id, lease.generation)
 
 
 def _optional_instant(value: object) -> datetime | None:
@@ -1114,15 +1273,18 @@ def _row_to_strategy_job(row: sqlite3.Row | tuple[object, ...]) -> StrategyJobV1
         enqueue_seq=int(str(row[4])),
         claim_token=None if row[5] is None else str(row[5]),
         current_month=None if row[6] is None else str(row[6]),
-        status_version=int(str(row[7])),
-        cancel_requested_at=_optional_instant(row[8]),
-        failure_code=(None if row[9] is None else JobFailureCode(str(row[9]))),
-        failed_month=None if row[10] is None else str(row[10]),
-        failure_detail=None if row[11] is None else str(row[11]),
-        deleted_at=_optional_instant(row[12]),
-        audit_summary=None if row[13] is None else str(row[13]),
-        created_at=datetime.fromisoformat(str(row[14])),
-        updated_at=datetime.fromisoformat(str(row[15])),
+        current_stage=None if row[7] is None else str(row[7]),
+        owner_instance_id=None if row[8] is None else str(row[8]),
+        lease_generation=None if row[9] is None else int(str(row[9])),
+        status_version=int(str(row[10])),
+        cancel_requested_at=_optional_instant(row[11]),
+        failure_code=(None if row[12] is None else JobFailureCode(str(row[12]))),
+        failed_month=None if row[13] is None else str(row[13]),
+        failure_detail=None if row[14] is None else str(row[14]),
+        deleted_at=_optional_instant(row[15]),
+        audit_summary=None if row[16] is None else str(row[16]),
+        created_at=datetime.fromisoformat(str(row[17])),
+        updated_at=datetime.fromisoformat(str(row[18])),
     )
 
 
@@ -1486,6 +1648,62 @@ class BacktestRepository:
         except sqlite3.IntegrityError as exc:
             raise StrategyJobConflict("initialization job creation conflicted") from exc
 
+    def create_bootstrap_job(
+        self, *, parent_job_id: str | None = None
+    ) -> StrategyJobV1:
+        """Atomically enqueue one ``bootstrap`` activity and its subtype row."""
+        return self._create_stage_job(StrategyJobType.BOOTSTRAP, parent_job_id)
+
+    def create_preparation_job(
+        self, *, parent_job_id: str | None = None
+    ) -> StrategyJobV1:
+        """Atomically enqueue one ``preparation`` activity and its subtype row."""
+        return self._create_stage_job(StrategyJobType.PREPARATION, parent_job_id)
+
+    def _create_stage_job(
+        self, job_type: StrategyJobType, parent_job_id: str | None
+    ) -> StrategyJobV1:
+        now = self._job_now()
+        table, _ = _SUBTYPE_TABLES[job_type]
+        try:
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if (
+                    parent_job_id is not None
+                    and conn.execute(
+                        "SELECT 1 FROM strategy_jobs WHERE id=?", (parent_job_id,)
+                    ).fetchone()
+                    is None
+                ):
+                    raise StrategyJobConflict("parent strategy job does not exist")
+                sequence_row = conn.execute(
+                    "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
+                ).fetchone()
+                enqueue_seq = int(sequence_row[0]) if sequence_row else 1
+                job_id = self._id_generator()
+                conn.execute(
+                    """INSERT INTO strategy_jobs (
+                           id, job_type, status, parent_job_id, enqueue_seq,
+                           claim_token, current_month, current_stage,
+                           owner_instance_id, lease_generation, status_version,
+                           cancel_requested_at, failure_code, failed_month,
+                           failure_detail, deleted_at, audit_summary,
+                           created_at, updated_at
+                       ) VALUES (?, ?, 'queued', ?, ?, NULL, NULL, NULL, NULL, NULL,
+                                 1, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                    (job_id, job_type.value, parent_job_id, enqueue_seq, now, now),
+                )
+                conn.execute(f"INSERT INTO {table} (job_id) VALUES (?)", (job_id,))
+                job = self._load_strategy_job(conn, job_id)
+                self._upsert_notification_outbox_on_connection(conn, job)
+            return job
+        except (StrategyJobConflict, StrategyJobNotFound):
+            raise
+        except sqlite3.IntegrityError as exc:
+            raise StrategyJobConflict(
+                f"{job_type.value} job creation conflicted"
+            ) from exc
+
     # -- Story 2.6: Backtest atomic enqueue -------------------------------
 
     @staticmethod
@@ -1673,6 +1891,20 @@ class BacktestRepository:
     def initialization_run(self, job_id: str) -> InitializationRunV1:
         with session(self._connect) as conn:
             return self._load_initialization(conn, job_id)
+
+    def bootstrap_run(self, job_id: str) -> BootstrapRunV1:
+        """Return one ``bootstrap`` job's subtype identity row."""
+        with session(self._connect) as conn:
+            job = self._load_strategy_job(conn, job_id)
+            self._require_own_subtype(conn, job, StrategyJobType.BOOTSTRAP)
+            return self._load_bootstrap(conn, job_id)
+
+    def preparation_run(self, job_id: str) -> PreparationRunV1:
+        """Return one ``preparation`` job's subtype identity row."""
+        with session(self._connect) as conn:
+            job = self._load_strategy_job(conn, job_id)
+            self._require_own_subtype(conn, job, StrategyJobType.PREPARATION)
+            return self._load_preparation(conn, job_id)
 
     def strategy_run(self, job_id: str) -> BacktestRunV1:
         with session(self._connect) as conn:
@@ -1953,10 +2185,109 @@ class BacktestRepository:
             )
         return tuple(candidates)
 
-    def claim_next_strategy_job(self) -> ClaimedStrategyJobV1 | None:
-        """Claim the smallest queued sequence while enforcing one running job."""
+    # -- Story 4.1: singleton worker lease --------------------------------
+
+    def acquire_or_renew_worker_lease(
+        self, instance_id: str, *, ttl_seconds: float
+    ) -> WorkerLeaseV1:
+        """Acquire, renew, or take over the singleton worker lease.
+
+        A first acquisition starts at generation 1. The current owner
+        renewing keeps its generation (a heartbeat never fences its own
+        in-flight writes out). Any other instance may only take over once
+        the persisted ``expires_at`` has passed, and does so at
+        ``generation + 1`` -- the monotonic value every job mutation is
+        compare-and-swapped against.
+
+        Raises :class:`StrategyJobConflict` when a different instance
+        still holds an unexpired lease.
+        """
+        if not instance_id.strip():
+            raise ValueError("worker lease instance id must not be blank")
+        if ttl_seconds <= 0:
+            raise ValueError("worker lease ttl must be positive")
+        now = self._instant_now()
+        expires_at = now + timedelta(seconds=ttl_seconds)
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._load_worker_lease(conn)
+            if current is None:
+                generation = 1
+            elif current.instance_id == instance_id:
+                generation = current.generation
+            elif current.expires_at > now:
+                raise StrategyJobConflict(
+                    "worker lease is held by another live instance"
+                )
+            else:
+                generation = current.generation + 1
+            conn.execute(
+                """INSERT INTO strategy_worker_lease (
+                       singleton_id, instance_id, generation, heartbeat_at, expires_at
+                   ) VALUES (1, ?, ?, ?, ?)
+                   ON CONFLICT(singleton_id) DO UPDATE SET
+                       instance_id=excluded.instance_id,
+                       generation=excluded.generation,
+                       heartbeat_at=excluded.heartbeat_at,
+                       expires_at=excluded.expires_at""",
+                (
+                    instance_id,
+                    generation,
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+            lease = self._load_worker_lease(conn)
+        if lease is None:
+            raise BacktestIntegrityError("worker lease vanished after its own write")
+        return lease
+
+    def read_worker_lease(self) -> WorkerLeaseV1 | None:
+        """Return the persisted lease without ever mutating it.
+
+        Read-only by contract: inspecting readiness never renews the
+        lease, extends its expiry, or bumps its generation.
+        """
+        with session(self._connect) as conn:
+            return self._load_worker_lease(conn)
+
+    @staticmethod
+    def _load_worker_lease(conn: sqlite3.Connection) -> WorkerLeaseV1 | None:
+        row = conn.execute(
+            """SELECT instance_id, generation, heartbeat_at, expires_at
+               FROM strategy_worker_lease WHERE singleton_id=1"""
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return WorkerLeaseV1(
+                instance_id=str(row[0]),
+                generation=int(str(row[1])),
+                heartbeat_at=datetime.fromisoformat(str(row[2])),
+                expires_at=datetime.fromisoformat(str(row[3])),
+            )
+        except Exception as exc:
+            raise BacktestIntegrityError("stored worker lease is invalid") from exc
+
+    def _instant_now(self) -> datetime:
+        value = self._instant_clock()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("job clock must return a timezone-aware instant")
+        return value.astimezone(timezone.utc)
+
+    def claim_next_strategy_job(
+        self, *, lease: WorkerLeaseFenceV1 | None = None
+    ) -> ClaimedStrategyJobV1 | None:
+        """Claim the smallest queued sequence while enforcing one running job.
+
+        Considers all four job types -- the FIFO is keyed on
+        ``enqueue_seq`` alone, never on type -- and records ``lease``'s
+        owner/generation on the claimed row so a later takeover can tell
+        an abandoned claim from one the current healthy lease still owns.
+        """
         token = self._token_generator()
         now = self._job_now()
+        fence = _lease_fence_params(lease)
         try:
             with session(self._connect) as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -1976,31 +2307,45 @@ class BacktestRepository:
                 if row is None:
                     return None
                 cursor = conn.execute(
-                    """UPDATE strategy_jobs
+                    f"""UPDATE strategy_jobs
                        SET status='running', claim_token=?, current_month=NULL,
+                           current_stage=NULL, owner_instance_id=?,
+                           lease_generation=?,
                            status_version=status_version+1, updated_at=?
-                       WHERE id=? AND status='queued' AND status_version=?""",
-                    (token, now, str(row[0]), int(row[1])),
+                       WHERE id=? AND status='queued' AND status_version=?
+                         {_LEASE_FENCE_SQL}""",
+                    (token, *fence, now, str(row[0]), int(row[1]), *fence),
                 )
                 if cursor.rowcount != 1:
                     raise StrategyJobConflict("queued job changed before claim")
                 job = self._load_strategy_job(conn, str(row[0]))
-                initialization = (
-                    self._load_initialization(conn, job.id)
-                    if job.job_type is StrategyJobType.INITIALIZATION
-                    else None
-                )
-                backtest = (
-                    self._load_strategy_run(conn, job.id)
-                    if job.job_type is StrategyJobType.BACKTEST
-                    else None
-                )
+                self._require_exclusive_subtype(conn, job)
                 self._upsert_notification_outbox_on_connection(conn, job)
+                job_type = job.job_type
                 return ClaimedStrategyJobV1(
                     job=job,
-                    initialization=initialization,
-                    backtest=backtest,
+                    bootstrap=(
+                        self._load_bootstrap(conn, job.id)
+                        if job_type is StrategyJobType.BOOTSTRAP
+                        else None
+                    ),
+                    initialization=(
+                        self._load_initialization(conn, job.id)
+                        if job_type is StrategyJobType.INITIALIZATION
+                        else None
+                    ),
+                    preparation=(
+                        self._load_preparation(conn, job.id)
+                        if job_type is StrategyJobType.PREPARATION
+                        else None
+                    ),
+                    backtest=(
+                        self._load_strategy_run(conn, job.id)
+                        if job_type is StrategyJobType.BACKTEST
+                        else None
+                    ),
                     claim_token=token,
+                    lease_generation=job.lease_generation,
                 )
         except sqlite3.IntegrityError as exc:
             raise StrategyJobConflict("strategy job claim conflicted") from exc
@@ -2012,6 +2357,7 @@ class BacktestRepository:
         *,
         expected_version: int,
         month: str,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -2022,27 +2368,114 @@ class BacktestRepository:
                     raise StrategyJobConflict(
                         "progress month is outside requested range"
                     )
-            else:
+            elif job_type is StrategyJobType.BACKTEST:
                 backtest = self._load_strategy_run(conn, job_id)
                 if not (backtest.start_month <= month <= backtest.end_month):
                     raise StrategyJobConflict(
                         "progress month is outside requested range"
                     )
+            else:
+                raise StrategyJobConflict(
+                    f"{job_type.value} jobs report stages, not months"
+                )
+            fence = _lease_fence_params(lease)
             cursor = conn.execute(
-                """UPDATE strategy_jobs
+                f"""UPDATE strategy_jobs
                    SET current_month=?, status_version=status_version+1, updated_at=?
                    WHERE id=? AND status='running' AND claim_token=?
-                     AND status_version=? AND cancel_requested_at IS NULL""",
+                     AND status_version=? AND cancel_requested_at IS NULL
+                     {_LEASE_FENCE_SQL}""",
                 (
                     month,
                     self._job_now(),
                     job_id,
                     claim_token,
                     expected_version,
+                    *fence,
                 ),
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker progress ownership is stale")
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
+
+    def set_strategy_job_current_stage(
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        stage: str,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> StrategyJobV1:
+        """Record one stage-walking activity's next declared safe step.
+
+        The stage-typed mirror of :meth:`set_strategy_job_current_month`:
+        ``bootstrap``/``preparation`` progress is one closed
+        ``current_stage`` value, never a month.
+        """
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job_type = self._require_job_type(conn, job_id)
+            sequence = STAGE_SEQUENCES.get(job_type)
+            if sequence is None:
+                raise StrategyJobConflict(
+                    f"{job_type.value} jobs report months, not stages"
+                )
+            if stage not in sequence:
+                raise StrategyJobConflict(f"{stage!r} is not a {job_type.value} stage")
+            fence = _lease_fence_params(lease)
+            cursor = conn.execute(
+                f"""UPDATE strategy_jobs
+                   SET current_stage=?, status_version=status_version+1, updated_at=?
+                   WHERE id=? AND status='running' AND claim_token=?
+                     AND status_version=? AND cancel_requested_at IS NULL
+                     {_LEASE_FENCE_SQL}""",
+                (
+                    stage,
+                    self._job_now(),
+                    job_id,
+                    claim_token,
+                    expected_version,
+                    *fence,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("worker progress ownership is stale")
+            job = self._load_strategy_job(conn, job_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            return job
+
+    def complete_claimed_stage_job(
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> StrategyJobV1:
+        """Mark one claimed ``bootstrap``/``preparation`` activity complete."""
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job_type = self._require_job_type(conn, job_id)
+            if job_type not in STAGE_SEQUENCES:
+                raise StrategyJobConflict(
+                    f"{job_type.value} jobs do not complete through a stage walk"
+                )
+            fence = _lease_fence_params(lease)
+            cursor = conn.execute(
+                f"""UPDATE strategy_jobs
+                   SET status='complete', claim_token=NULL, current_stage=NULL,
+                       owner_instance_id=NULL, lease_generation=NULL,
+                       status_version=status_version+1, updated_at=?
+                   WHERE id=? AND status='running' AND claim_token=?
+                     AND status_version=? AND cancel_requested_at IS NULL
+                     {_LEASE_FENCE_SQL}""",
+                (self._job_now(), job_id, claim_token, expected_version, *fence),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("worker completion ownership is stale")
             job = self._load_strategy_job(conn, job_id)
             self._upsert_notification_outbox_on_connection(conn, job)
             return job
@@ -2082,18 +2515,27 @@ class BacktestRepository:
             return job
 
     def cancel_claimed_strategy_job(
-        self, job_id: str, claim_token: str, *, expected_version: int
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
             job_type = self._require_job_type(conn, job_id)
+            fence = _lease_fence_params(lease)
             cursor = conn.execute(
-                """UPDATE strategy_jobs
+                f"""UPDATE strategy_jobs
                    SET status='cancelled', claim_token=NULL, current_month=NULL,
+                       current_stage=NULL, owner_instance_id=NULL,
+                       lease_generation=NULL,
                        status_version=status_version+1, updated_at=?
                    WHERE id=? AND status='running' AND claim_token=?
-                     AND status_version=? AND cancel_requested_at IS NOT NULL""",
-                (self._job_now(), job_id, claim_token, expected_version),
+                     AND status_version=? AND cancel_requested_at IS NOT NULL
+                     {_LEASE_FENCE_SQL}""",
+                (self._job_now(), job_id, claim_token, expected_version, *fence),
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker cancellation ownership is stale")
@@ -2117,6 +2559,7 @@ class BacktestRepository:
         failure_code: JobFailureCode,
         failed_month: str | None,
         detail: str,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1:
         safe_detail = detail.strip()
         if not safe_detail or len(safe_detail) > 500:
@@ -2131,19 +2574,27 @@ class BacktestRepository:
                         raise StrategyJobConflict(
                             "failed month is outside requested range"
                         )
-                else:
+                elif job_type is StrategyJobType.BACKTEST:
                     backtest = self._load_strategy_run(conn, job_id)
                     if not (backtest.start_month <= failed_month <= backtest.end_month):
                         raise StrategyJobConflict(
                             "failed month is outside requested range"
                         )
+                else:
+                    raise StrategyJobConflict(
+                        f"{job_type.value} jobs cannot carry a failed month"
+                    )
+            fence = _lease_fence_params(lease)
             cursor = conn.execute(
-                """UPDATE strategy_jobs
+                f"""UPDATE strategy_jobs
                    SET status='failed', claim_token=NULL, current_month=NULL,
+                       current_stage=NULL, owner_instance_id=NULL,
+                       lease_generation=NULL,
                        failure_code=?, failed_month=?, failure_detail=?,
                        status_version=status_version+1, updated_at=?
                    WHERE id=? AND status='running' AND claim_token=?
-                     AND status_version=? AND cancel_requested_at IS NULL""",
+                     AND status_version=? AND cancel_requested_at IS NULL
+                     {_LEASE_FENCE_SQL}""",
                 (
                     failure_code.value,
                     failed_month,
@@ -2152,6 +2603,7 @@ class BacktestRepository:
                     job_id,
                     claim_token,
                     expected_version,
+                    *fence,
                 ),
             )
             if cursor.rowcount != 1:
@@ -2161,7 +2613,12 @@ class BacktestRepository:
             return job
 
     def complete_claimed_initialization_job(
-        self, job_id: str, claim_token: str, *, expected_version: int
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -2187,13 +2644,16 @@ class BacktestRepository:
                    WHERE job_id=? AND ordered_month_digest IS NULL""",
                 (readiness.ordered_month_digest, job_id),
             )
+            fence = _lease_fence_params(lease)
             cursor = conn.execute(
-                """UPDATE strategy_jobs
+                f"""UPDATE strategy_jobs
                    SET status='complete', claim_token=NULL, current_month=NULL,
+                       owner_instance_id=NULL, lease_generation=NULL,
                        status_version=status_version+1, updated_at=?
                    WHERE id=? AND status='running' AND claim_token=?
-                     AND status_version=? AND cancel_requested_at IS NULL""",
-                (self._job_now(), job_id, claim_token, expected_version),
+                     AND status_version=? AND cancel_requested_at IS NULL
+                     {_LEASE_FENCE_SQL}""",
+                (self._job_now(), job_id, claim_token, expected_version, *fence),
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker completion ownership is stale")
@@ -2299,7 +2759,12 @@ class BacktestRepository:
             )
 
     def complete_claimed_backtest_job(
-        self, job_id: str, claim_token: str, *, expected_version: int
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1:
         """Atomically promote one claimed running Backtest attempt's
         staging into an immutable Result + Trade Log + Equity Curve, in
@@ -2385,13 +2850,16 @@ class BacktestRepository:
                     completed_at=now,
                 )
 
+            fence = _lease_fence_params(lease)
             cursor = conn.execute(
-                """UPDATE strategy_jobs
+                f"""UPDATE strategy_jobs
                    SET status='complete', claim_token=NULL, current_month=NULL,
+                       owner_instance_id=NULL, lease_generation=NULL,
                        status_version=status_version+1, updated_at=?
                    WHERE id=? AND status='running' AND claim_token=?
-                     AND status_version=? AND cancel_requested_at IS NULL""",
-                (now, job_id, claim_token, expected_version),
+                     AND status_version=? AND cancel_requested_at IS NULL
+                     {_LEASE_FENCE_SQL}""",
+                (now, job_id, claim_token, expected_version, *fence),
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker completion ownership is stale")
@@ -2633,6 +3101,66 @@ class BacktestRepository:
             execution_contract_digest=row.execution_contract_digest,
         )
 
+    @classmethod
+    def _require_own_subtype(
+        cls, conn: sqlite3.Connection, job: StrategyJobV1, wanted: StrategyJobType
+    ) -> None:
+        """Raise unless ``job`` is a ``wanted`` job with only its own subtype."""
+        if job.job_type is not wanted:
+            raise StrategyJobNotFound(f"{wanted.value} run not found: {job.id}")
+        cls._require_exclusive_subtype(conn, job)
+
+    @staticmethod
+    def _require_exclusive_subtype(
+        conn: sqlite3.Connection, job: StrategyJobV1
+    ) -> None:
+        """Reject a job carrying a subtype row that is not its own.
+
+        Every ``strategy_jobs`` row has exactly one matching subtype row.
+        A *missing* matching row surfaces from the subtype loader itself
+        as :class:`StrategyJobNotFound`; this guards the other half of the
+        invariant -- a row in some other type's subtype table, which no
+        legitimate write path can produce and which would otherwise let a
+        claimed job run against the wrong identity.
+        """
+        for job_type, (table, column) in _SUBTYPE_TABLES.items():
+            if job_type is job.job_type:
+                continue
+            if (
+                conn.execute(
+                    f"SELECT 1 FROM {table} WHERE {column}=?", (job.id,)
+                ).fetchone()
+                is not None
+            ):
+                raise BacktestIntegrityError(
+                    f"{job.job_type.value} job {job.id} also has a "
+                    f"{job_type.value} subtype row"
+                )
+
+    @staticmethod
+    def _require_stage_subtype_row(
+        conn: sqlite3.Connection, job_id: str, job_type: StrategyJobType
+    ) -> None:
+        """Raise unless ``job_id`` has its stage-typed subtype identity row."""
+        table, column = _SUBTYPE_TABLES[job_type]
+        if (
+            conn.execute(
+                f"SELECT 1 FROM {table} WHERE {column}=?", (job_id,)
+            ).fetchone()
+            is None
+        ):
+            raise StrategyJobNotFound(f"{job_type.value} run not found: {job_id}")
+
+    def _load_bootstrap(self, conn: sqlite3.Connection, job_id: str) -> BootstrapRunV1:
+        self._require_stage_subtype_row(conn, job_id, StrategyJobType.BOOTSTRAP)
+        return BootstrapRunV1(job_id=job_id)
+
+    def _load_preparation(
+        self, conn: sqlite3.Connection, job_id: str
+    ) -> PreparationRunV1:
+        self._require_stage_subtype_row(conn, job_id, StrategyJobType.PREPARATION)
+        return PreparationRunV1(job_id=job_id)
+
     @staticmethod
     def _require_job_type(conn: sqlite3.Connection, job_id: str) -> StrategyJobType:
         """Return ``job_id``'s ``job_type`` without loading the full row --
@@ -2816,19 +3344,38 @@ class BacktestRepository:
             raise ValueError("equity curve point payload is not an object")
         return EquityCurvePointV1.model_validate(payload, strict=False)
 
-    def reconcile_interrupted_strategy_jobs(self) -> tuple[StrategyJobV1, ...]:
-        """Fail running claims left behind by a previous application process."""
+    def reconcile_interrupted_strategy_jobs(
+        self, *, lease: WorkerLeaseFenceV1 | None = None
+    ) -> tuple[StrategyJobV1, ...]:
+        """Fail running claims left behind by a previous application process.
+
+        With ``lease`` supplied (startup or a takeover), a ``running`` row
+        the current healthy lease still owns is left completely untouched
+        and only abandoned claims -- those owned by a stale generation, or
+        by no lease at all -- become ``worker_interrupted``.
+        """
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT id, status_version FROM strategy_jobs "
-                "WHERE status='running' ORDER BY enqueue_seq"
-            ).fetchall()
+            if lease is None:
+                rows = conn.execute(
+                    "SELECT id, status_version FROM strategy_jobs "
+                    "WHERE status='running' ORDER BY enqueue_seq"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """SELECT id, status_version FROM strategy_jobs
+                       WHERE status='running'
+                         AND NOT (owner_instance_id IS ? AND lease_generation IS ?)
+                       ORDER BY enqueue_seq""",
+                    (lease.instance_id, lease.generation),
+                ).fetchall()
             reconciled: list[StrategyJobV1] = []
             for row in rows:
                 cursor = conn.execute(
                     """UPDATE strategy_jobs
                        SET status='failed', claim_token=NULL, current_month=NULL,
+                           current_stage=NULL, owner_instance_id=NULL,
+                           lease_generation=NULL,
                            failure_code='worker_interrupted', failed_month=NULL,
                            failure_detail='Worker interrupted before completion',
                            status_version=status_version+1, updated_at=?
@@ -2849,6 +3396,11 @@ class BacktestRepository:
             if job.status in {StrategyJobStatus.QUEUED, StrategyJobStatus.RUNNING}:
                 return ("cancel",)
             if job.status in {StrategyJobStatus.FAILED, StrategyJobStatus.CANCELLED}:
+                if job.job_type in STAGE_SEQUENCES:
+                    # Bootstrap/Preparation have no replay-from-beginning
+                    # restart path: their real domain logic (and therefore
+                    # what a restart would even replay) is Story 4.3/4.6.
+                    return ("delete",)
                 child = conn.execute(
                     """SELECT 1 FROM strategy_job_restart_actions
                        WHERE source_job_id=? LIMIT 1""",
@@ -3085,11 +3637,16 @@ class BacktestRepository:
                     f"{initialization.requested_start} to "
                     f"{initialization.requested_end}"
                 )
-            else:
+            elif job.job_type is StrategyJobType.BACKTEST:
                 backtest = self._load_strategy_run(conn, job_id)
                 summary = (
                     f"{job.job_type.value} {job.status.value}: "
                     f"{backtest.start_month} to {backtest.end_month}"
+                )
+            else:
+                stages = STAGE_SEQUENCES[job.job_type]
+                summary = (
+                    f"{job.job_type.value} {job.status.value}: {len(stages)} stages"
                 )
             now = self._job_now()
             cursor = conn.execute(
@@ -3103,7 +3660,10 @@ class BacktestRepository:
                 raise StrategyJobConflict("delete request conflicted")
             tombstone = self._load_strategy_job(conn, job_id)
             self._upsert_notification_outbox_on_connection(conn, tombstone)
-            if job.job_type is StrategyJobType.INITIALIZATION:
+            if job.job_type in STAGE_SEQUENCES:
+                table, _ = _SUBTYPE_TABLES[job.job_type]
+                conn.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
+            elif job.job_type is StrategyJobType.INITIALIZATION:
                 conn.execute(
                     "DELETE FROM initialization_runs WHERE job_id=?", (job_id,)
                 )

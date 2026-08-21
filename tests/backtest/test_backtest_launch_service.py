@@ -548,6 +548,12 @@ def _write_minimal_strategy_skill(root: Path, folder: str, strategy_id: str) -> 
         f"display_name: {strategy_id}\n"
         "description: A minimal ad-hoc fixture Strategy.\n"
         "api_version: 1\n"
+        "runtime_files:\n"
+        "  - scripts/strategy.py\n"
+        "strategy_universe:\n"
+        "  schema_version: strategy_universe.v1\n"
+        "  mode: selected-securities\n"
+        "  parameter: selected_securities\n"
         "parameters: []\n"
         "---\n\n# fixture\n",
         encoding="utf-8",

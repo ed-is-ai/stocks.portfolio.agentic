@@ -24,14 +24,24 @@ def _backtest_title(status: str, backtest: dict[str, object] | None) -> str:
     return labels.get(status, "Backtest queued") + suffix
 
 
-def _initialization_title(status: str) -> str:
-    labels = {
-        "failed": "Historical initialization failed",
-        "cancelled": "Historical initialization cancelled",
-        "complete": "Historical initialization complete",
-        "running": "Historical initialization in progress",
+#: Human label per non-Backtest activity type, completed by the status
+#: suffixes below.
+_ACTIVITY_LABELS = {
+    "bootstrap": "Bootstrap",
+    "preparation": "Evidence preparation",
+    "initialization": "Historical initialization",
+}
+
+
+def _activity_title(job_type: str, status: str) -> str:
+    label = _ACTIVITY_LABELS.get(job_type, _ACTIVITY_LABELS["initialization"])
+    suffixes = {
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "complete": "complete",
+        "running": "in progress",
     }
-    return labels.get(status, "Historical initialization queued")
+    return f"{label} {suffixes.get(status, 'queued')}"
 
 
 def _projection(payload: dict[str, object]) -> dict[str, object]:
@@ -72,7 +82,7 @@ def _projection(payload: dict[str, object]) -> dict[str, object]:
             else f"/strategy-manager/activities/{job_id}"
         )
     else:
-        title = _initialization_title(status)
+        title = _activity_title(job_type, status)
         target_url = f"/strategy-manager/activities/{job_id}"
     detail = str(job.get("failure_detail") or "")
     body = f"Status: {status}."

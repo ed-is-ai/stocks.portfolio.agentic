@@ -16,6 +16,20 @@ from app.services.backtest.strategy_protocol import (
 
 STRATEGY_ID = "rtly-backtest-darvas-box"
 STRATEGY_API_VERSION = 1
+UNIVERSE_PARAMETER = "selected_securities"
+
+
+def _universe(parameters: StrategyParameters) -> tuple[str, ...]:
+    """Return the host-bound selected universe as a canonical ID tuple.
+
+    The host injects an already sorted, deduplicated tuple; re-deriving it
+    here keeps iteration deterministic for any caller and makes a
+    malformed or empty universe fail closed with no signals.
+    """
+    raw = parameters.get(UNIVERSE_PARAMETER)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(sorted({value for value in raw if isinstance(value, str) and value}))
 
 
 def _decimal(value: object) -> Decimal | None:
@@ -73,21 +87,40 @@ class DarvasBoxStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
-        security_id = str(parameters.get("security_id", ""))
+        signals = [
+            self._entry_signal(view, parameters, security_id)
+            for security_id in _universe(parameters)
+        ]
+        return [signal for signal in signals if signal is not None]
+
+    def exit_signals(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+    ) -> list[Signal]:
+        signals = [
+            self._exit_signal(view, portfolio, parameters, security_id)
+            for security_id in _universe(parameters)
+        ]
+        return [signal for signal in signals if signal is not None]
+
+    def _entry_signal(
+        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
+    ) -> Signal | None:
         lookback = _plain_int(parameters, "box_lookback_sessions")
         maximum_depth = _decimal(parameters.get("maximum_box_depth_pct"))
         volume_multiplier = _decimal(parameters.get("volume_multiplier"))
         history = _bounded_history(view, security_id)
         if (
-            not security_id
-            or lookback is None
+            lookback is None
             or lookback < 1
             or maximum_depth is None
             or volume_multiplier is None
             or history is None
             or len(history) < lookback + 1
         ):
-            return []
+            return None
 
         prior = history.iloc[-lookback - 1 : -1]
         current = history.iloc[-1]
@@ -98,13 +131,13 @@ class DarvasBoxStrategy:
             current_close = _decimal(current["close"])
             current_volume = _decimal(current["volume"])
         except (KeyError, TypeError):
-            return []
+            return None
         if (
             any(value is None for value in highs + lows + volumes)
             or current_close is None
             or current_volume is None
         ):
-            return []
+            return None
 
         valid_highs = [value for value in highs if value is not None]
         valid_lows = [value for value in lows if value is not None]
@@ -112,7 +145,7 @@ class DarvasBoxStrategy:
         box_top = max(valid_highs)
         box_bottom = min(valid_lows)
         if box_top <= 0 or box_bottom < 0:
-            return []
+            return None
         box_depth_pct = (box_top - box_bottom) * Decimal(100) / box_top
         mean_volume = sum(valid_volumes, Decimal(0)) / Decimal(lookback)
         if (
@@ -122,25 +155,23 @@ class DarvasBoxStrategy:
             or current_close <= box_top
             or current_volume < mean_volume * volume_multiplier
         ):
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.BUY,
-                session=view.as_of_session,
-                rule_id="darvas_box_breakout_v1",
-            )
-        ]
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.BUY,
+            session=view.as_of_session,
+            rule_id="darvas_box_breakout_v1",
+        )
 
-    def exit_signals(
+    def _exit_signal(
         self,
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> list[Signal]:
-        security_id = str(parameters.get("security_id", ""))
+        security_id: str,
+    ) -> Signal | None:
         if _held_quantity(portfolio, security_id) == 0:
-            return []
+            return None
         lookback = _plain_int(parameters, "box_lookback_sessions")
         history = _bounded_history(view, security_id)
         if (
@@ -149,27 +180,25 @@ class DarvasBoxStrategy:
             or history is None
             or len(history) < lookback + 1
         ):
-            return []
+            return None
         prior = history.iloc[-lookback - 1 : -1]
         current = history.iloc[-1]
         try:
             lows = [_decimal(value) for value in prior["low"]]
             current_close = _decimal(current["close"])
         except (KeyError, TypeError):
-            return []
+            return None
         if any(value is None for value in lows) or current_close is None:
-            return []
+            return None
         box_bottom = min(value for value in lows if value is not None)
         if current_close >= box_bottom:
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.SELL,
-                session=view.as_of_session,
-                rule_id="darvas_box_breakdown_v1",
-            )
-        ]
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.SELL,
+            session=view.as_of_session,
+            rule_id="darvas_box_breakdown_v1",
+        )
 
     def position_size(
         self,

@@ -46,7 +46,10 @@ from app.services.backtest.metrics import (
     MetricUnavailableReason,
 )
 from app.services.backtest.result_presenter import comparison_equity_payload
-from app.services.backtest.skill_discovery import StrategyDescriptorV1
+from app.services.backtest.skill_discovery import (
+    StrategyDescriptorV1,
+    StrategyUniverseContractV1,
+)
 from app.services.backtest.snapshot_profile import (
     CoverageIntervalV1,
     CoverageSummaryV1,
@@ -578,6 +581,12 @@ STRATEGY_ALPHA = StrategyDescriptorV1(
         "mode": "a",
     },
     runtime_path="alpha/scripts/strategy.py",
+    runtime_files=("alpha/scripts/strategy.py",),
+    universe=StrategyUniverseContractV1(
+        schema_version="strategy_universe.v1",
+        mode="selected-securities",
+        parameter="selected_securities",
+    ),
 )
 
 

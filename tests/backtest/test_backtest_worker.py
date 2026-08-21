@@ -25,7 +25,10 @@ from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
     RunInputManifestV1,
 )
-from app.services.backtest.skill_discovery import StrategyDescriptorV1
+from app.services.backtest.skill_discovery import (
+    StrategyDescriptorV1,
+    StrategyUniverseContractV1,
+)
 from app.services.backtest.snapshot_profile import (
     IntervalReadinessV1,
     ProfileDetectorV1,
@@ -35,6 +38,7 @@ from app.services.backtest.source_manifest import detector_source_manifests
 from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
     JobFailureCode,
+    STAGE_SEQUENCES,
     StrategyJobStatus,
     StrategyJobType,
 )
@@ -412,6 +416,14 @@ def _enqueue(repo: BacktestRepository, manifest: RunInputManifestV1):
     )
 
 
+def _fixture_universe() -> StrategyUniverseContractV1:
+    return StrategyUniverseContractV1(
+        schema_version="strategy_universe.v1",
+        mode="selected-securities",
+        parameter="selected_securities",
+    )
+
+
 def _fake_descriptor() -> StrategyDescriptorV1:
     return StrategyDescriptorV1(
         strategy_id="momentum_v1",
@@ -423,6 +435,8 @@ def _fake_descriptor() -> StrategyDescriptorV1:
         parameters=(),
         default_parameters={},
         runtime_path="minimal-strategy/scripts/strategy.py",
+        runtime_files=("minimal-strategy/scripts/strategy.py",),
+        universe=_fixture_universe(),
     )
 
 
@@ -668,6 +682,8 @@ def test_worker_maps_strategy_identity_mismatch_to_integrity_error(
             parameters=(),
             default_parameters={},
             runtime_path="minimal-strategy/scripts/strategy.py",
+            runtime_files=("minimal-strategy/scripts/strategy.py",),
+            universe=_fixture_universe(),
         ),
     )
     monkeypatch.setattr(config, "SKILLS_DIR", FIXTURES_ROOT)
@@ -756,3 +772,136 @@ def test_progress_observer_raises_engine_defect_for_out_of_range_month(
         observer.on_month_boundary(month="2099-01")
 
     assert repo.strategy_job(claim.job.id).current_month is None
+
+
+# ---------------------------------------------------------------------------
+# Story 4.1: stage-walking Bootstrap/Preparation stub workers.
+# ---------------------------------------------------------------------------
+
+
+def _stage_repo(path: Path) -> BacktestRepository:
+    repo = BacktestRepository(
+        db.make_connect(lambda: path),
+        clock=lambda: date(2026, 8, 21),
+        instant_clock=lambda: datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc),
+    )
+    repo.ensure_schema()
+    return repo
+
+
+def test_bootstrap_worker_walks_its_stages_then_completes(tmp_path: Path) -> None:
+    repo = _stage_repo(tmp_path / "backtest.db")
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    engine = worker_module.build_stage_walk_engine(
+        job.id, repo, StrategyJobType.BOOTSTRAP
+    )
+
+    result = engine.run(job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.COMPLETE
+    assert result.current_stage is None
+    assert (
+        result.status_version
+        == claim.job.status_version
+        + len(STAGE_SEQUENCES[StrategyJobType.BOOTSTRAP])
+        + 1
+    )
+
+
+def test_preparation_worker_honours_cancellation_at_a_stage_boundary(
+    tmp_path: Path,
+) -> None:
+    repo = _stage_repo(tmp_path / "backtest.db")
+    job = repo.create_preparation_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    repo.request_strategy_job_cancellation(
+        job.id, expected_version=claim.job.status_version
+    )
+    engine = worker_module.build_stage_walk_engine(
+        job.id, repo, StrategyJobType.PREPARATION
+    )
+
+    result = engine.run(job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.CANCELLED
+    assert result.current_stage is None
+
+
+def test_stage_worker_refuses_a_job_of_another_type(tmp_path: Path) -> None:
+    repo = _stage_repo(tmp_path / "backtest.db")
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    engine = worker_module.StageWalkEngine(repo, StrategyJobType.PREPARATION)
+
+    result = engine.run(job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.FAILED
+    assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
+
+
+def test_stage_worker_writes_are_fenced_by_a_stale_lease_generation(
+    tmp_path: Path,
+) -> None:
+    moment = [datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc)]
+    repo = BacktestRepository(
+        db.make_connect(lambda: tmp_path / "backtest.db"),
+        clock=lambda: date(2026, 8, 21),
+        instant_clock=lambda: moment[0],
+    )
+    repo.ensure_schema()
+    stale = repo.acquire_or_renew_worker_lease("worker-a", ttl_seconds=30)
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job(lease=stale.fence)
+    assert claim is not None
+    moment[0] = moment[0] + timedelta(seconds=120)
+    repo.acquire_or_renew_worker_lease("worker-b", ttl_seconds=30)
+    engine = worker_module.StageWalkEngine(
+        repo, StrategyJobType.BOOTSTRAP, lease=stale.fence
+    )
+
+    result = engine.run(job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.RUNNING
+    assert result.current_stage is None
+    assert result.lease_generation == stale.generation
+
+
+def test_main_dispatches_a_bootstrap_job_to_the_stage_walk_engine(
+    tmp_path: Path,
+) -> None:
+    repo = _stage_repo(tmp_path / "backtest.db")
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    exit_code = main(
+        ["--job-id", job.id, "--claim-token", claim.claim_token],
+        repository_factory=lambda: repo,
+    )
+
+    assert exit_code == 0
+    assert repo.strategy_job(job.id).status is StrategyJobStatus.COMPLETE
+
+
+def test_stage_engine_construction_failure_is_not_mislabeled_interruption(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = Repository(ClaimedJob(job_type=StrategyJobType.BOOTSTRAP))
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("missing bootstrap subtype")
+
+    monkeypatch.setattr(worker_module, "build_stage_walk_engine", broken)
+
+    assert (
+        main(
+            ["--job-id", "job-1", "--claim-token", "claim-1"],
+            repository_factory=lambda: repo,  # type: ignore[arg-type]
+        )
+        == 1
+    )
+    assert repo.failures[0]["failure_code"] is JobFailureCode.INTEGRITY_ERROR

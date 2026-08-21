@@ -20,6 +20,22 @@ _ENTRY_RULE = "weinstein_stage2_breakout_v1"
 _EXIT_RULE = "weinstein_stage_exit_v1"
 
 
+UNIVERSE_PARAMETER = "selected_securities"
+
+
+def _universe(parameters: StrategyParameters) -> tuple[str, ...]:
+    """Return the host-bound selected universe as a canonical ID tuple.
+
+    The host injects an already sorted, deduplicated tuple; re-deriving it
+    here keeps iteration deterministic for any caller and makes a
+    malformed or empty universe fail closed with no signals.
+    """
+    raw = parameters.get(UNIVERSE_PARAMETER)
+    if isinstance(raw, str) or not isinstance(raw, (list, tuple)):
+        return ()
+    return tuple(sorted({value for value in raw if isinstance(value, str) and value}))
+
+
 def _decimal(value: Any) -> Decimal | None:
     try:
         result = Decimal(str(value))
@@ -135,22 +151,42 @@ class WeinsteinStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
-        security_id = str(parameters["security_id"])
+        signals = [
+            self._entry_signal(view, parameters, security_id)
+            for security_id in _universe(parameters)
+        ]
+        return [signal for signal in signals if signal is not None]
+
+    def exit_signals(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+    ) -> list[Signal]:
+        signals = [
+            self._exit_signal(view, portfolio, parameters, security_id)
+            for security_id in _universe(parameters)
+        ]
+        return [signal for signal in signals if signal is not None]
+
+    def _entry_signal(
+        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
+    ) -> Signal | None:
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
         lookback = _plain_int(parameters["breakout_lookback_sessions"])
         if lookback is None:
-            return []
+            return None
         required = max(204, lookback + 1, 51)
         if history is None or scan is None or len(history) < required:
-            return []
+            return None
 
         closes = _decimals(history["close"])
         highs = _decimals(history["high"])
         volumes = _decimals(history["volume"])
         weekly = _weekly_closes(history)
         if closes is None or highs is None or volumes is None or weekly is None:
-            return []
+            return None
         close = closes[-1]
         sma150 = sum(closes[-150:], Decimal(0)) / Decimal(150)
         sma200 = sum(closes[-200:], Decimal(0)) / Decimal(200)
@@ -173,47 +209,43 @@ class WeinsteinStrategy:
             or close <= prior_high
             or volumes[-1] < prior_volume_mean * minimum_volume
         ):
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.BUY,
-                session=view.as_of_session,
-                rule_id=_ENTRY_RULE,
-            )
-        ]
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.BUY,
+            session=view.as_of_session,
+            rule_id=_ENTRY_RULE,
+        )
 
-    def exit_signals(
+    def _exit_signal(
         self,
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> list[Signal]:
-        security_id = str(parameters["security_id"])
+        security_id: str,
+    ) -> Signal | None:
         held = _position(portfolio, security_id)
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
         if held is None or held.quantity <= 0 or history is None or len(history) < 150:
-            return []
+            return None
         closes = _decimals(history["close"].iloc[-150:])
         maximum_loss = _decimal(parameters["maximum_loss_pct"])
         if closes is None or maximum_loss is None:
-            return []
+            return None
         close = closes[-1]
         sma150 = sum(closes, Decimal(0)) / Decimal(150)
         stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
         scan_stage = getattr(getattr(scan, "stage", None), "value", None)
         scan_failure = scan is not None and scan_stage != "Stage 2"
         if not (close <= stop or close < sma150 or scan_failure):
-            return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.SELL,
-                session=view.as_of_session,
-                rule_id=_EXIT_RULE,
-            )
-        ]
+            return None
+        return Signal(
+            security_id=security_id,
+            side=SignalSide.SELL,
+            session=view.as_of_session,
+            rule_id=_EXIT_RULE,
+        )
 
     def position_size(
         self,
