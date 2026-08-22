@@ -470,6 +470,31 @@ class BacktestEnqueueResultV1(_LifecycleModel):
         return self
 
 
+class BootstrapEnqueueResultV1(_LifecycleModel):
+    """One atomic Bootstrap submission outcome.
+
+    A compatible active profile is a verified no-op. Every accepted create
+    or exact replay otherwise carries the durable job and Bootstrap subtype.
+    """
+
+    no_op: bool
+    job: StrategyJobV1 | None = None
+    bootstrap: BootstrapRunV1 | None = None
+
+    @model_validator(mode="after")
+    def _consistent_result(self) -> "BootstrapEnqueueResultV1":
+        if self.no_op:
+            if self.job is not None or self.bootstrap is not None:
+                raise ValueError("no-op bootstrap cannot contain a job")
+        elif (
+            self.job is None
+            or self.bootstrap is None
+            or self.bootstrap.job_id != self.job.id
+        ):
+            raise ValueError("accepted bootstrap requires matching job and subtype")
+        return self
+
+
 class BacktestSubmissionV1(_LifecycleModel):
     """One caller-validated Backtest launch request (Story 2.6 AC 1).
 
@@ -509,6 +534,29 @@ class BacktestSubmissionV1(_LifecycleModel):
         if not self.starting_capital.is_finite() or self.starting_capital <= 0:
             raise ValueError("backtest starting_capital must be positive and finite")
         return self
+
+
+class BootstrapSubmissionV1(_LifecycleModel):
+    """One caller-validated Bootstrap setup submission."""
+
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=200)]
+    parent_job_id: Annotated[str, Field(min_length=1)] | None = None
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _non_blank_key(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("bootstrap idempotency_key must not be blank")
+        return value
+
+    def canonical_content_digest(self) -> str:
+        """Return the versioned request identity, excluding the opaque key."""
+        return manifest_digest(
+            {
+                "schema": "bootstrap-submission-v1",
+                "parent_job_id": self.parent_job_id,
+            }
+        )
 
 
 class InitializationSubmissionV1(_LifecycleModel):
@@ -581,6 +629,7 @@ __all__ = [
     "BacktestEnqueueResultV1",
     "BacktestRunV1",
     "BacktestSubmissionV1",
+    "BootstrapEnqueueResultV1",
     "BootstrapRunV1",
     "BootstrapStage",
     "ClaimedStrategyJobV1",

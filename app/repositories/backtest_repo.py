@@ -42,6 +42,8 @@ from app.services.backtest.strategy_job import (
     BacktestEnqueueResultV1,
     BacktestRunV1,
     BacktestSubmissionV1,
+    BootstrapEnqueueResultV1,
+    BootstrapSubmissionV1,
     BootstrapRunV1,
     ClaimedStrategyJobV1,
     InitializationEnqueueResultV1,
@@ -956,6 +958,35 @@ CREATE TABLE IF NOT EXISTS backtest_enqueue_actions (
     submission_digest TEXT NOT NULL CHECK(length(submission_digest) = 64),
     created_at TEXT NOT NULL
 );
+
+-- Story 4.6.2: durable Bootstrap submission identity.  This binds a caller
+-- key to its canonical request without introducing another job lifecycle.
+CREATE TABLE IF NOT EXISTS bootstrap_enqueue_actions (
+    idempotency_key TEXT PRIMARY KEY CHECK(
+        length(idempotency_key) BETWEEN 1 AND 200
+        AND length(trim(idempotency_key)) > 0
+    ),
+    job_id TEXT NOT NULL UNIQUE REFERENCES strategy_jobs(id),
+    submission_digest TEXT NOT NULL CHECK(length(submission_digest) = 64),
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_enqueue_action_requires_bootstrap_job
+BEFORE INSERT ON bootstrap_enqueue_actions
+WHEN NOT EXISTS (
+    SELECT 1 FROM strategy_jobs job
+    JOIN bootstrap_runs run ON run.job_id = job.id
+    WHERE job.id = NEW.job_id AND job.job_type = 'bootstrap'
+)
+BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action requires bootstrap job'); END;
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_enqueue_action_immutable_update
+BEFORE UPDATE ON bootstrap_enqueue_actions
+BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS bootstrap_enqueue_action_immutable_delete
+BEFORE DELETE ON bootstrap_enqueue_actions
+BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action is immutable'); END;
 """
 
 
@@ -1729,10 +1760,112 @@ class BacktestRepository:
             raise StrategyJobConflict("initialization job creation conflicted") from exc
 
     def create_bootstrap_job(
-        self, *, parent_job_id: str | None = None
+        self,
+        submission: BootstrapSubmissionV1,
+    ) -> BootstrapEnqueueResultV1:
+        """Atomically no-op, create, or durably replay one Bootstrap activity.
+
+        Replay lookup, active-profile no-op, competing-request policy, and the
+        job/subtype/action/outbox writes share one immediate transaction.
+        """
+        now = self._job_now()
+        content_digest = submission.canonical_content_digest()
+        try:
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    """SELECT job_id, submission_digest
+                       FROM bootstrap_enqueue_actions WHERE idempotency_key=?""",
+                    (submission.idempotency_key,),
+                ).fetchone()
+                if existing is not None:
+                    if str(existing[1]) != content_digest:
+                        raise StrategyJobConflict(
+                            "idempotency key was already used for a different bootstrap submission"
+                        )
+                    job = self._load_bootstrap_submission_job(conn, str(existing[0]))
+                    return BootstrapEnqueueResultV1(
+                        no_op=False,
+                        job=job,
+                        bootstrap=self._load_bootstrap(conn, job.id),
+                    )
+                active = conn.execute(
+                    """SELECT 1 FROM active_snapshot_profile
+                       WHERE singleton_id=1 AND profile_hash IS NOT NULL"""
+                ).fetchone()
+                if active is not None:
+                    return BootstrapEnqueueResultV1(no_op=True)
+                competing = conn.execute(
+                    """SELECT 1 FROM strategy_jobs
+                       WHERE job_type='bootstrap' AND status IN ('queued', 'running')
+                         AND deleted_at IS NULL"""
+                ).fetchone()
+                if competing is not None:
+                    raise StrategyJobConflict("a bootstrap job is already queued or running")
+                if (
+                    submission.parent_job_id is not None
+                    and conn.execute(
+                        "SELECT 1 FROM strategy_jobs WHERE id=?",
+                        (submission.parent_job_id,),
+                    ).fetchone()
+                    is None
+                ):
+                    raise StrategyJobConflict("parent strategy job does not exist")
+                sequence_row = conn.execute(
+                    "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
+                ).fetchone()
+                enqueue_seq = int(sequence_row[0]) if sequence_row else 1
+                job_id = self._id_generator()
+                conn.execute(
+                    """INSERT INTO strategy_jobs (
+                           id, job_type, status, parent_job_id, enqueue_seq,
+                           claim_token, current_month, current_stage,
+                           owner_instance_id, lease_generation, status_version,
+                           cancel_requested_at, failure_code, failed_month,
+                           failure_detail, deleted_at, audit_summary,
+                           created_at, updated_at
+                       ) VALUES (?, 'bootstrap', 'queued', ?, ?, NULL, NULL, NULL,
+                                 NULL, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL,
+                                 ?, ?)""",
+                    (job_id, submission.parent_job_id, enqueue_seq, now, now),
+                )
+                conn.execute("INSERT INTO bootstrap_runs (job_id) VALUES (?)", (job_id,))
+                conn.execute(
+                    """INSERT INTO bootstrap_enqueue_actions
+                       (idempotency_key, job_id, submission_digest, created_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (submission.idempotency_key, job_id, content_digest, now),
+                )
+                job = self._load_strategy_job(conn, job_id)
+                bootstrap = self._load_bootstrap(conn, job_id)
+                self._upsert_notification_outbox_on_connection(conn, job)
+            return BootstrapEnqueueResultV1(
+                no_op=False, job=job, bootstrap=bootstrap
+            )
+        except (StrategyJobConflict, StrategyJobNotFound):
+            raise
+        except sqlite3.IntegrityError as exc:
+            raise StrategyJobConflict("bootstrap job creation conflicted") from exc
+
+    def _load_bootstrap_submission_job(
+        self, conn: sqlite3.Connection, job_id: str
     ) -> StrategyJobV1:
-        """Atomically enqueue one ``bootstrap`` activity and its subtype row."""
-        return self._create_stage_job(StrategyJobType.BOOTSTRAP, parent_job_id)
+        try:
+            job = self._load_strategy_job(conn, job_id)
+            if job.deleted_at is not None:
+                raise StrategyJobConflict(
+                    "the original bootstrap activity is no longer available"
+                )
+            if job.job_type is not StrategyJobType.BOOTSTRAP:
+                raise BacktestIntegrityError(
+                    "bootstrap submission references a non-bootstrap job"
+                )
+            self._load_bootstrap(conn, job_id)
+            return job
+        except StrategyJobNotFound as exc:
+            raise BacktestIntegrityError(
+                "stored bootstrap submission is unavailable"
+            ) from exc
 
     def create_preparation_job(
         self, *, parent_job_id: str | None = None

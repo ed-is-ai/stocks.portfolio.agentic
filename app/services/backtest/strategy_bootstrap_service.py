@@ -22,6 +22,7 @@ import requests
 
 from app.repositories.backtest_repo import BacktestIntegrityError
 from app.services.backtest.strategy_job import (
+    BootstrapSubmissionV1,
     JobFailureCode,
     StrategyJobConflict,
     StrategyJobV1,
@@ -110,18 +111,20 @@ class StrategyBootstrapService:
             return False, None
         return True, active.activated_at
 
-    def start_setup(self) -> StrategyJobV1:
+    def start_setup(self, submission: BootstrapSubmissionV1) -> StrategyJobV1:
         """Enqueue one bootstrap job.
 
         If a compatible active profile already exists, this is a no-op
         and raises :class:`StrategyBootstrapAlreadySetUp`.
         """
-        already, _activated_at = self.is_already_set_up()
-        if already:
-            raise StrategyBootstrapAlreadySetUp("Strategy Manager is already set up")
         if self._jobs is None:
             raise RuntimeError("no job service configured")
-        return self._jobs.enqueue_bootstrap()
+        result = self._jobs.enqueue_bootstrap(submission)
+        if result.no_op:
+            raise StrategyBootstrapAlreadySetUp("Strategy Manager is already set up")
+        if result.job is None:
+            raise RuntimeError("accepted Bootstrap submission did not return a job")
+        return result.job
 
     # ------------------------------------------------------------------
     # Stage methods -- called by the worker's StageWalkEngine

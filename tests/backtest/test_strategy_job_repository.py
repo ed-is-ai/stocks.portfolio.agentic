@@ -6,6 +6,7 @@ from decimal import Decimal
 from pathlib import Path
 import json
 import sqlite3
+from threading import Barrier
 
 import pytest
 
@@ -15,6 +16,7 @@ from app.repositories.backtest_repo import QualificationResult
 from app.services.backtest.strategy_job import (
     BacktestEnqueueResultV1,
     BacktestSubmissionV1,
+    BootstrapSubmissionV1,
     BootstrapStage,
     JobFailureCode,
     PreparationStage,
@@ -64,6 +66,21 @@ def _repo(path: Path) -> BacktestRepository:
     repo.ensure_schema()
     _seed_profile(path)
     return repo
+
+
+def _empty_repo(path: Path) -> BacktestRepository:
+    repo = BacktestRepository(
+        db.make_connect(lambda: path),
+        clock=lambda: date(2026, 8, 12),
+        instant_clock=lambda: NOW,
+    )
+    repo.ensure_schema()
+    return repo
+
+
+def _create_bootstrap_stage_job(repo: BacktestRepository):
+    """Create a lifecycle fixture without applying setup/no-op policy."""
+    return repo._create_stage_job(StrategyJobType.BOOTSTRAP, None)
 
 
 def _seed_profile(path: Path) -> None:
@@ -286,6 +303,246 @@ def _enqueue_backtest(
             parent_job_id=parent_job_id,
         )
     )
+
+
+def _bootstrap_submission(
+    key: str, *, parent_job_id: str | None = None
+) -> BootstrapSubmissionV1:
+    return BootstrapSubmissionV1(
+        idempotency_key=key, parent_job_id=parent_job_id
+    )
+
+
+def test_create_bootstrap_job_replays_the_same_persisted_job_at_every_status(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    submission = _bootstrap_submission("bootstrap-replay")
+    first = repo.create_bootstrap_job(submission)
+    assert first.job is not None
+    job = first.job
+
+    assert repo.create_bootstrap_job(submission).job == job
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    assert repo.create_bootstrap_job(submission).job.status is StrategyJobStatus.RUNNING
+    complete = repo.complete_claimed_stage_job(
+        job.id, claim.claim_token, expected_version=claim.job.status_version
+    )
+    assert complete.status is StrategyJobStatus.COMPLETE
+    assert repo.create_bootstrap_job(submission).job == complete
+    assert len(repo.list_strategy_jobs()) == 1
+
+
+def test_create_bootstrap_job_returns_typed_active_profile_no_op(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+
+    result = repo.create_bootstrap_job(_bootstrap_submission("active-no-op"))
+
+    assert result.no_op is True
+    assert result.job is None
+    assert result.bootstrap is None
+    assert repo.list_strategy_jobs() == ()
+
+
+def test_create_bootstrap_job_replays_failed_and_cancelled_jobs(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+
+    failed_submission = _bootstrap_submission("bootstrap-failed")
+    failed_result = repo.create_bootstrap_job(failed_submission)
+    assert failed_result.job is not None
+    failed = failed_result.job
+    failed_claim = repo.claim_next_strategy_job()
+    assert failed_claim is not None
+    failed_terminal = _fail_claimed(
+        repo,
+        failed.id,
+        failed_claim.claim_token,
+        expected_version=failed_claim.job.status_version,
+    )
+    assert failed_terminal.status is StrategyJobStatus.FAILED
+    assert repo.create_bootstrap_job(failed_submission).job == failed_terminal
+
+    cancelled_submission = _bootstrap_submission("bootstrap-cancelled")
+    cancelled_result = repo.create_bootstrap_job(cancelled_submission)
+    assert cancelled_result.job is not None
+    cancelled = cancelled_result.job
+    cancelled_claim = repo.claim_next_strategy_job()
+    assert cancelled_claim is not None
+    requested = repo.request_strategy_job_cancellation(
+        cancelled.id, expected_version=cancelled_claim.job.status_version
+    )
+    cancelled_terminal = repo.cancel_claimed_strategy_job(
+        cancelled.id,
+        cancelled_claim.claim_token,
+        expected_version=requested.status_version,
+    )
+    assert cancelled_terminal.status is StrategyJobStatus.CANCELLED
+    assert repo.create_bootstrap_job(cancelled_submission).job == cancelled_terminal
+
+
+def test_create_bootstrap_job_replays_after_reopen_with_matching_subtype_and_outbox(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    submission = _bootstrap_submission("bootstrap-reopen")
+    first = _empty_repo(path).create_bootstrap_job(submission)
+    assert first.job is not None
+    job = first.job
+
+    replay = _repo(path).create_bootstrap_job(submission)
+
+    assert replay.job == job
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT job_id FROM bootstrap_runs WHERE job_id=?", (job.id,)
+        ).fetchone() == (job.id,)
+        assert conn.execute(
+            "SELECT job_id FROM notification_outbox WHERE job_id=?", (job.id,)
+        ).fetchone() == (job.id,)
+
+
+def test_bootstrap_submission_rejects_whitespace_key_and_database_binding(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="must not be blank"):
+        _bootstrap_submission("   ")
+
+    path = tmp_path / "backtest.db"
+    repo = _empty_repo(path)
+    result = repo.create_bootstrap_job(_bootstrap_submission("bootstrap-check"))
+    assert result.job is not None
+    job = result.job
+    with sqlite3.connect(path) as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """INSERT INTO bootstrap_enqueue_actions
+               (idempotency_key, job_id, submission_digest, created_at)
+               VALUES ('   ', ?, ?, ?)""",
+            (job.id, "a" * 64, NOW.isoformat()),
+        )
+
+
+def test_create_bootstrap_job_rejects_divergent_reuse_without_writes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _empty_repo(path)
+    first_result = repo.create_bootstrap_job(_bootstrap_submission("bootstrap-reuse"))
+    assert first_result.job is not None
+    first = first_result.job
+
+    with pytest.raises(StrategyJobConflict, match="idempotency key"):
+        repo.create_bootstrap_job(
+            _bootstrap_submission("bootstrap-reuse", parent_job_id=first.id)
+        )
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM bootstrap_enqueue_actions").fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (1,)
+
+
+def test_create_bootstrap_job_rejects_a_distinct_active_submission(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    repo.create_bootstrap_job(_bootstrap_submission("bootstrap-first"))
+
+    with pytest.raises(StrategyJobConflict, match="already queued or running"):
+        repo.create_bootstrap_job(_bootstrap_submission("bootstrap-second"))
+
+    assert len(repo.list_strategy_jobs()) == 1
+
+
+def test_create_bootstrap_job_same_key_is_atomic_across_repository_writers(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    _empty_repo(path)
+    submission = _bootstrap_submission("bootstrap-concurrent")
+    barrier = Barrier(2)
+
+    def submit(_index: int):
+        worker_repo = _empty_repo(path)
+        barrier.wait()
+        return worker_repo.create_bootstrap_job(submission)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(submit, range(2)))
+
+    assert results[0].job == results[1].job
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM bootstrap_runs").fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM bootstrap_enqueue_actions").fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (1,)
+    assert _repo(path).create_bootstrap_job(submission).job == results[0].job
+
+
+def test_bootstrap_enqueue_binding_is_immutable(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _empty_repo(path)
+    result = repo.create_bootstrap_job(_bootstrap_submission("immutable-binding"))
+    assert result.job is not None
+
+    with sqlite3.connect(path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute(
+                """UPDATE bootstrap_enqueue_actions
+                   SET submission_digest=? WHERE idempotency_key=?""",
+                ("f" * 64, "immutable-binding"),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute(
+                "DELETE FROM bootstrap_enqueue_actions WHERE idempotency_key=?",
+                ("immutable-binding",),
+            )
+
+
+def test_deleted_bootstrap_submission_replay_fails_safely(tmp_path: Path) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    submission = _bootstrap_submission("deleted-replay")
+    result = repo.create_bootstrap_job(submission)
+    assert result.job is not None
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    failed = _fail_claimed(
+        repo,
+        result.job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+    )
+    repo.delete_strategy_job(result.job.id, expected_version=failed.status_version)
+
+    with pytest.raises(StrategyJobConflict, match="no longer available"):
+        repo.create_bootstrap_job(submission)
+
+
+def test_bootstrap_enqueue_rolls_back_all_records_when_binding_insert_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _empty_repo(path)
+    original = repo._upsert_notification_outbox_on_connection
+
+    def fail_outbox(*args, **kwargs):
+        raise sqlite3.IntegrityError("forced outbox failure")
+
+    monkeypatch.setattr(repo, "_upsert_notification_outbox_on_connection", fail_outbox)
+    with pytest.raises(StrategyJobConflict, match="bootstrap job creation conflicted"):
+        repo.create_bootstrap_job(_bootstrap_submission("bootstrap-rollback"))
+    monkeypatch.setattr(repo, "_upsert_notification_outbox_on_connection", original)
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM bootstrap_runs").fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM bootstrap_enqueue_actions").fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (0,)
 
 
 def test_initialization_and_backtest_placeholders_share_one_fifo(
@@ -1415,7 +1672,7 @@ def test_each_activity_type_enqueues_with_exactly_one_subtype_row(
     path = tmp_path / "backtest.db"
     repo = _repo(path)
 
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     preparation = repo.create_preparation_job()
 
     assert bootstrap.job_type is StrategyJobType.BOOTSTRAP
@@ -1433,7 +1690,7 @@ def test_subtype_rows_cannot_be_duplicated_or_attached_to_another_type(
 ) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
 
     with sqlite3.connect(path) as conn:
         with pytest.raises(sqlite3.IntegrityError):
@@ -1465,7 +1722,7 @@ def test_claim_is_fifo_across_all_four_activity_types(tmp_path: Path) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)
     initialization = _enqueue(repo, "2026-05", "2026-05").job
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     backtest = _enqueue_backtest(repo).job
     preparation = repo.create_preparation_job()
     assert backtest is not None and initialization is not None
@@ -1490,7 +1747,7 @@ def test_claim_carries_only_its_own_subtype_for_each_stage_type(
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path / "backtest.db")
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
 
     claim = repo.claim_next_strategy_job()
 
@@ -1532,7 +1789,7 @@ def test_stage_and_month_progress_mechanisms_never_cross_job_types(
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path / "backtest.db")
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
 
@@ -1627,7 +1884,7 @@ def test_stale_generation_writer_is_rejected_without_mutating_the_job(
     repo = _leased_repo(tmp_path / "backtest.db", clock)
     _seed_profile(tmp_path / "backtest.db")
     first = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job(lease=first.fence)
     assert claim is not None and claim.lease_generation == first.generation
 
@@ -1669,7 +1926,7 @@ def test_current_generation_writer_still_owns_the_job_after_a_takeover_attempt(
     clock = _MovableClock()
     repo = _leased_repo(tmp_path / "backtest.db", clock)
     lease = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job(lease=lease.fence)
     assert claim is not None
 
@@ -1692,7 +1949,7 @@ def test_unfenced_writer_is_rejected_once_a_lease_is_held(tmp_path: Path) -> Non
     clock = _MovableClock()
     repo = _leased_repo(tmp_path / "backtest.db", clock)
     lease = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job(lease=lease.fence)
     assert claim is not None
 
@@ -1710,7 +1967,7 @@ def test_terminal_completion_that_commits_first_wins_the_cancellation_race(
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path / "backtest.db")
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
 
@@ -1729,7 +1986,7 @@ def test_cancellation_requested_before_completion_blocks_the_terminal_write(
     tmp_path: Path,
 ) -> None:
     repo = _repo(tmp_path / "backtest.db")
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     requested = repo.request_strategy_job_cancellation(
@@ -1770,7 +2027,7 @@ def test_deleting_a_stage_job_tombstones_it_and_drops_its_subtype_row(
 ) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     failed = _fail_claimed(

@@ -12,6 +12,7 @@ import pytest
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
+    BootstrapSubmissionV1,
     InitializationSubmissionV1,
     JobFailureCode,
     StrategyJobConflict,
@@ -412,8 +413,8 @@ def test_interrupted_owned_child_is_failed_under_the_current_fence() -> None:
 
 def test_stage_activities_enqueue_through_their_own_repository_writes() -> None:
     class StageRepository(FakeRepository):
-        def create_bootstrap_job(self, *, parent_job_id=None):
-            self.created.append(("bootstrap", parent_job_id))
+        def create_bootstrap_job(self, submission):
+            self.created.append(("bootstrap", submission))
             return "bootstrap-queued"
 
         def create_preparation_job(self, *, parent_job_id=None):
@@ -423,9 +424,13 @@ def test_stage_activities_enqueue_through_their_own_repository_writes() -> None:
     repo = StageRepository(None)
     service = StrategyJobService(repo)
 
-    assert service.enqueue_bootstrap() == "bootstrap-queued"
+    submission = BootstrapSubmissionV1(idempotency_key="bootstrap-submit")
+    assert service.enqueue_bootstrap(submission) == "bootstrap-queued"
     assert service.enqueue_preparation(parent_job_id="job-1") == "preparation-queued"
-    assert repo.created == [("bootstrap", None), ("preparation", "job-1")]
+    assert repo.created == [
+        ("bootstrap", submission),
+        ("preparation", "job-1"),
+    ]
 
 
 def test_startup_against_a_live_foreign_lease_reconciles_nothing() -> None:

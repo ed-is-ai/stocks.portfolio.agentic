@@ -29,6 +29,8 @@
     Leaving or refreshing this page during setup will <strong>not</strong> cancel or duplicate the work. The bootstrap job runs durably in the background.
   </div>
   <form method="post" action="/strategy-manager/setup" hx-post="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML">
+    <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+    {% if error %}<div class="alert alert-warning" role="alert">{{ error }}</div>{% endif %}
     <button class="btn btn-warning" type="submit"><i class="bi bi-gear-wide-connected"></i> Confirm setup</button>
     <a class="btn btn-outline-secondary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Cancel</a>
   </form>

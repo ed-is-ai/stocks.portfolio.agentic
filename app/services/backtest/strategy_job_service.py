@@ -14,6 +14,7 @@ from uuid import uuid4
 from app.core.config import ROOT_DIR
 from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
+    BootstrapSubmissionV1,
     InitializationSubmissionV1,
     JobFailureCode,
     StrategyJobConflict,
@@ -131,8 +132,8 @@ class StrategyJobService:
     def enqueue_backtest(self, submission: BacktestSubmissionV1):
         return self._repository.create_backtest_job(submission)
 
-    def enqueue_bootstrap(self, *, parent_job_id: str | None = None):
-        return self._repository.create_bootstrap_job(parent_job_id=parent_job_id)
+    def enqueue_bootstrap(self, submission: BootstrapSubmissionV1):
+        return self._repository.create_bootstrap_job(submission)
 
     def enqueue_preparation(self, *, parent_job_id: str | None = None):
         return self._repository.create_preparation_job(parent_job_id=parent_job_id)

@@ -17,6 +17,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.datastructures import FormData
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from pydantic import ValidationError
 
 from app.api.dependencies import (
     get_backtest_launch_service,
@@ -57,6 +58,7 @@ from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
 from app.services.backtest.strategy_job import (
+    BootstrapSubmissionV1,
     InitializationSubmissionV1,
     StrategyJobCancellationV1,
     StrategyJobConflict,
@@ -230,6 +232,7 @@ async def strategy_setup(
             "setup_required": setup_required,
             "activated_at": activated_at,
             "is_fixture": bootstrap.is_fixture,
+            "idempotency_key": str(uuid4()),
         },
     )
 
@@ -242,10 +245,39 @@ async def submit_strategy_setup(
     request: Request,
     backtest: BacktestDep,
     bootstrap: BootstrapDep,
+    idempotency_key: Annotated[str | None, Form()] = None,
 ) -> Response:
     """Enqueue one bootstrap job, redirect to activity."""
+    if idempotency_key is None:
+        return templates.TemplateResponse(
+            request,
+            "_strategy_setup.html",
+            {
+                "setup_required": True,
+                "already_set_up": False,
+                "is_fixture": bootstrap.is_fixture,
+                "idempotency_key": str(uuid4()),
+                "error": "Enter a valid setup submission.",
+            },
+            status_code=422,
+        )
     try:
-        job = bootstrap.start_setup()
+        job = bootstrap.start_setup(
+            BootstrapSubmissionV1(idempotency_key=idempotency_key)
+        )
+    except ValidationError:
+        return templates.TemplateResponse(
+            request,
+            "_strategy_setup.html",
+            {
+                "setup_required": True,
+                "already_set_up": False,
+                "is_fixture": bootstrap.is_fixture,
+                "idempotency_key": str(uuid4()),
+                "error": "Enter a valid setup submission.",
+            },
+            status_code=422,
+        )
     except StrategyBootstrapAlreadySetUp:
         return RedirectResponse("/strategy-manager/setup", status_code=303)
     except StrategyJobConflict:
@@ -255,7 +287,9 @@ async def submit_strategy_setup(
             {
                 "setup_required": True,
                 "already_set_up": False,
-                "error": "A setup job is already queued or running.",
+                "is_fixture": bootstrap.is_fixture,
+                "idempotency_key": idempotency_key,
+                "error": "Unable to submit setup. Please try again.",
             },
             status_code=422,
         )

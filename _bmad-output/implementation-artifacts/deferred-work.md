@@ -166,3 +166,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-3-4-4-4-5-bootstrap-readiness-universe-selection.md`
   summary: `_evaluate_coverage` in `StrategyReadinessService` catches all exceptions from `snapshot_coverage()` and returns `INTEGRITY_ERROR`, which could mask transient database errors (e.g., `sqlite3.OperationalError` for a locked database) as permanent integrity failures.
   evidence: The catch-all is intentional per the design decision for robustness, but a transient database lock would be reported as a permanent integrity error, potentially confusing operators. Consider catching only `BacktestIntegrityError` and logging unexpected exceptions so operators can distinguish transient vs. permanent failures.
+
+## Deferred from: code review of 4-6-2-make-bootstrap-submission-idempotent (2026-08-22)
+
+- Bootstrap submission parent validation still inherits the generic stage-job rule that checks only whether `parent_job_id` exists. It does not constrain parent type, require terminal/non-deleted state, or define Bootstrap lineage semantics. No authorized setup-route input supplies a parent today, so this is pre-existing lifecycle hardening rather than a Story 4.6.2 user-path defect; resolve it when Bootstrap restart/lineage behavior is specified.

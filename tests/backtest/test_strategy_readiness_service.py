@@ -23,6 +23,7 @@ from app.services.backtest.strategy_job import (
     JobFailureCode,
     PrerequisiteState,
     RecoveryAction,
+    StrategyJobType,
     WorkerState,
 )
 from app.services.backtest.strategy_readiness_service import (
@@ -59,6 +60,10 @@ def _empty_repo(path: Path) -> BacktestRepository:
     )
     repo.ensure_schema()
     return repo
+
+
+def _create_bootstrap_stage_job(repo: BacktestRepository):
+    return repo._create_stage_job(StrategyJobType.BOOTSTRAP, None)
 
 
 def _full_repo(path: Path) -> BacktestRepository:
@@ -270,7 +275,7 @@ def test_diagnostics_includes_recent_failures(
 ) -> None:
     repo = _empty_repo(tmp_path / "backtest.db")
     # Create and fail a job
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     repo.fail_claimed_strategy_job(

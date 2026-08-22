@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from app.repositories import db
+from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory
 from app.services.backtest.notification_projector import StrategyNotificationProjector
@@ -12,8 +13,8 @@ from app.services.backtest.strategy_job import (
     JobFailureCode,
     StrategyJobConflict,
     StrategyJobStatus,
+    StrategyJobType,
 )
-
 from tests.backtest.test_strategy_job_repository import (
     INSTANCE_A,
     INSTANCE_B,
@@ -24,6 +25,10 @@ from tests.backtest.test_strategy_job_repository import (
     _leased_repo,
     _repo,
 )
+
+
+def _create_bootstrap_stage_job(repo: BacktestRepository):
+    return repo._create_stage_job(StrategyJobType.BOOTSTRAP, None)
 
 
 def _fail(repo, job_id: str):
@@ -349,7 +354,7 @@ def test_lease_takeover_fails_the_claim_its_evicted_owner_abandoned(tmp_path):
     clock = _MovableClock()
     repo = _leased_repo(tmp_path / "backtest.db", clock)
     first = repo.acquire_or_renew_worker_lease(INSTANCE_A, ttl_seconds=LEASE_TTL)
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job(lease=first.fence)
     assert claim is not None
 
@@ -384,7 +389,7 @@ def test_reconciliation_never_touches_a_row_the_current_lease_owns(tmp_path):
 def test_stage_activity_notifications_carry_their_own_title_and_actions(tmp_path):
     path = tmp_path / "backtest.db"
     repo = _repo(path)
-    bootstrap = repo.create_bootstrap_job()
+    bootstrap = _create_bootstrap_stage_job(repo)
     notifications = NotificationsRepository(
         db.make_connect(lambda: tmp_path / "notifications.db"),
         retention_days=36500,

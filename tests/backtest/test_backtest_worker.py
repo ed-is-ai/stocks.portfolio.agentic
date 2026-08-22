@@ -270,6 +270,10 @@ def _repo(path: Path) -> BacktestRepository:
     return repo
 
 
+def _create_bootstrap_stage_job(repo: BacktestRepository):
+    return repo._create_stage_job(StrategyJobType.BOOTSTRAP, None)
+
+
 def _patch_ready(repo: BacktestRepository, digest: str = ORDERED_MONTH_DIGEST) -> None:
     def _readiness(_conn, profile_hash, start_month, end_month):  # noqa: ANN001
         return IntervalReadinessV1(
@@ -795,7 +799,7 @@ def test_bootstrap_worker_walks_its_stages_then_completes(tmp_path: Path) -> Non
     )
 
     repo = _stage_repo(tmp_path / "backtest.db")
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     engine = worker_module.build_stage_walk_engine(
@@ -839,7 +843,7 @@ def test_preparation_worker_honours_cancellation_at_a_stage_boundary(
 
 def test_stage_worker_refuses_a_job_of_another_type(tmp_path: Path) -> None:
     repo = _stage_repo(tmp_path / "backtest.db")
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     engine = worker_module.StageWalkEngine(repo, StrategyJobType.PREPARATION)
@@ -861,7 +865,7 @@ def test_stage_worker_writes_are_fenced_by_a_stale_lease_generation(
     )
     repo.ensure_schema()
     stale = repo.acquire_or_renew_worker_lease("worker-a", ttl_seconds=30)
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job(lease=stale.fence)
     assert claim is not None
     moment[0] = moment[0] + timedelta(seconds=120)
@@ -883,7 +887,7 @@ def test_main_dispatches_a_bootstrap_job_to_the_stage_walk_engine(
 ) -> None:
     monkeypatch.setenv("STRATEGY_FIXTURE", "1")
     repo = _stage_repo(tmp_path / "backtest.db")
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
 

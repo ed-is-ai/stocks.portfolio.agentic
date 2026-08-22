@@ -7,14 +7,16 @@ stage execution, failure handling, and fixture environment labelling.
 from __future__ import annotations
 
 from dataclasses import replace
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
+from threading import Barrier
 
 import pytest
 
 from app.repositories import db
-from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.backtest_repo import BacktestRepository, StrategyJobConflict
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.historical_data_qualification import (
     FIXTURE_CONTRACT_VERSION,
@@ -42,6 +44,7 @@ from app.services.backtest.strategy_bootstrap_service import (
 )
 from app.services.backtest.strategy_job import (
     BootstrapStage,
+    BootstrapSubmissionV1,
     JobFailureCode,
     PrerequisiteState,
     StrategyJobStatus,
@@ -162,6 +165,10 @@ def _empty_repo(path: Path) -> BacktestRepository:
     )
     repo.ensure_schema()
     return repo
+
+
+def _create_bootstrap_stage_job(repo: BacktestRepository):
+    return repo._create_stage_job(StrategyJobType.BOOTSTRAP, None)
 
 
 def _probes() -> dict[str, ProbeDefinition]:
@@ -312,16 +319,68 @@ def test_start_setup_raises_when_already_set_up(tmp_path: Path) -> None:
     jobs = StrategyJobService(repo)
     service = StrategyBootstrapService(repo, jobs=jobs)
     with pytest.raises(StrategyBootstrapAlreadySetUp):
-        service.start_setup()
+        service.start_setup(BootstrapSubmissionV1(idempotency_key="already-set-up"))
 
 
 def test_start_setup_enqueues_bootstrap_job(tmp_path: Path) -> None:
     repo = _empty_repo(tmp_path / "backtest.db")
     jobs = StrategyJobService(repo)
     service = StrategyBootstrapService(repo, jobs=jobs)
-    job = service.start_setup()
+    submission = BootstrapSubmissionV1(idempotency_key="start-setup")
+    job = service.start_setup(submission)
     assert job.job_type is StrategyJobType.BOOTSTRAP
     assert job.status is StrategyJobStatus.QUEUED
+    assert repo.create_bootstrap_job(submission).job == job
+
+
+def test_start_setup_replays_before_active_profile_no_op(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _empty_repo(path)
+    jobs = StrategyJobService(repo)
+    submission = BootstrapSubmissionV1(idempotency_key="completed-setup-retry")
+    original = jobs.enqueue_bootstrap(submission)
+    assert original.job is not None
+    _seed(path)
+    service = StrategyBootstrapService(repo, jobs=jobs)
+
+    assert service.start_setup(submission) == original.job
+
+
+def test_start_setup_same_key_is_atomic_across_service_instances(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    _empty_repo(path)
+    submission = BootstrapSubmissionV1(idempotency_key="service-concurrent")
+    barrier = Barrier(2)
+
+    def submit(_index: int):
+        repo = _empty_repo(path)
+        service = StrategyBootstrapService(repo, jobs=StrategyJobService(repo))
+        barrier.wait()
+        return service.start_setup(submission)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = list(pool.map(submit, range(2)))
+
+    assert jobs[0] == jobs[1]
+
+
+def test_start_setup_rejects_divergent_reuse_through_atomic_repository_path(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    service = StrategyBootstrapService(repo, jobs=StrategyJobService(repo))
+    original = service.start_setup(
+        BootstrapSubmissionV1(idempotency_key="divergent-service")
+    )
+
+    with pytest.raises(StrategyJobConflict, match="idempotency key"):
+        service.start_setup(
+            BootstrapSubmissionV1(
+                idempotency_key="divergent-service", parent_job_id=original.id
+            )
+        )
 
 
 def test_clean_store_production_bundle_qualifies_captures_and_activates(
@@ -329,7 +388,7 @@ def test_clean_store_production_bundle_qualifies_captures_and_activates(
 ) -> None:
     repo = _empty_repo(tmp_path / "backtest.db")
     bundle = _production_bundle(repo)
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
 
@@ -435,7 +494,7 @@ def test_roster_identity_conflict_fails_without_activating_profile(
             clock=lambda: NOW,
         ),
     )
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     result = build_stage_walk_engine(
@@ -465,7 +524,7 @@ def test_profile_validation_failure_leaves_no_partial_active_profile(
         )
         return valid.model_copy(update={"detectors": tuple(detectors)})
 
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     result = build_stage_walk_engine(
@@ -490,7 +549,7 @@ def test_stale_worker_cannot_bind_bootstrap_roster(tmp_path: Path) -> None:
     )
     repo.ensure_schema()
     stale = repo.acquire_or_renew_worker_lease("worker-a", ttl_seconds=30)
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job(lease=stale.fence)
     assert claim is not None
     staged = repo.set_strategy_job_current_stage(
@@ -536,7 +595,7 @@ def test_cancellation_after_roster_is_acknowledged_before_activation(
     monkeypatch.setattr(
         ReconstructionRosterCaptureService, "capture", capture_then_cancel
     )
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     result = build_stage_walk_engine(
@@ -570,7 +629,7 @@ def test_profile_activation_stage_is_non_cancellable(
         "_activate_profile",
         request_cancel_during_activation,
     )
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     result = build_stage_walk_engine(
@@ -590,7 +649,7 @@ def test_terminal_activation_revalidates_latest_qualification(
     service = StrategyBootstrapService(
         repo, jobs=None, providers=_production_bundle(repo)
     )
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     qualification_stage = repo.set_strategy_job_current_stage(
@@ -643,7 +702,7 @@ def test_terminal_activation_requires_profile_activation_stage(
     service = StrategyBootstrapService(
         repo, jobs=None, providers=_production_bundle(repo)
     )
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     qualification_stage = repo.set_strategy_job_current_stage(
@@ -682,7 +741,7 @@ def test_bootstrap_worker_completes_with_seeded_data(
     tmp_path: Path,
 ) -> None:
     repo = _empty_repo(tmp_path / "backtest.db")
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     engine = build_stage_walk_engine(
@@ -700,7 +759,7 @@ def test_bootstrap_worker_fails_without_qualification(
     tmp_path: Path,
 ) -> None:
     repo = _empty_repo(tmp_path / "backtest.db")
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     engine = build_stage_walk_engine(
@@ -736,7 +795,7 @@ def test_bootstrap_worker_requalifies_an_unrelated_stored_contract(
                 NOW.isoformat(),
             ),
         )
-    job = repo.create_bootstrap_job()
+    job = _create_bootstrap_stage_job(repo)
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     engine = build_stage_walk_engine(

@@ -1,5 +1,5 @@
 generated: 2026-08-20
-updated: 2026-08-21
+updated: 2026-08-22
 repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
@@ -83,7 +83,7 @@ stories:
   4-5-select-securities-for-a-backtest: { issue: 270, status: backlog }
   4-6-prepare-the-evidence-needed-for-a-backtest: { issue: 271, status: backlog }
   4-6-1-create-production-bootstrap-evidence: { issue: 279, status: done }
-  4-6-2-make-bootstrap-submission-idempotent: { issue: 280, status: ready-for-dev }
+  4-6-2-make-bootstrap-submission-idempotent: { issue: 280, status: done }
   4-6-3-seal-the-selected-universe-digest: { issue: 281, status: ready-for-dev }
   4-7-run-and-restart-backtests-from-pinned-evidence: { issue: 272, status: backlog }
   4-8-compare-results-using-compatible-evidence-rules: { issue: 273, status: backlog }
