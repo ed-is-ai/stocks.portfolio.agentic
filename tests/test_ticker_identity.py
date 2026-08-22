@@ -2,14 +2,8 @@
 seam used by SIPP import, FIFO replay, average-cost replay, and the
 ticker-identity repository methods (Story 2.1).
 
-Round 7's golden reference fixed two regressions introduced by round 6's
-from-scratch rewrite: a self-mapping alias entry (``{"ABC": "ABC"}``)
-spuriously raising ``AmbiguousTickerAliasError``, and ``matching_raw_tickers``/
-``canonicalize_or_fallback`` only checking their *input* against the reserved
-``"HSFWA"`` literal, never their *resolved output* -- letting an unrelated
-ticker's chain silently merge into the reserved HSBC GLOB identity. Both are
-covered here as explicit regression tests, alongside every edge case from
-prior rounds.
+Every ticker follows the same generic alias rules. Tests cover forward and
+reverse chains, cycles, self-mappings, and malformed configuration.
 """
 
 import json
@@ -20,7 +14,6 @@ import pytest
 
 from app.core import ticker_identity
 from app.core.ticker_identity import (
-    HSFWA_TICKER,
     AmbiguousTickerAliasError,
     canonical_ticker,
     canonicalize_or_fallback,
@@ -83,23 +76,9 @@ def test_matching_raw_tickers_skips_raw_key_whose_own_chain_is_a_cycle() -> None
     assert matching_raw_tickers("ABC", aliases) == {"ABC", "ABC.L"}
 
 
-def test_matching_raw_tickers_hsfwa_short_circuits_as_canonical_input() -> None:
-    assert matching_raw_tickers(HSFWA_TICKER, {"XYZ": HSFWA_TICKER}) == {HSFWA_TICKER}
-
-
-def test_matching_raw_tickers_hsfwa_leak_regression() -> None:
-    """Round 7 regression: some *other* ticker's chain landing on the
-    reserved ``"HSFWA"`` literal must never be discovered as HSFWA's own
-    raw spelling, nor let HSFWA's own alias entry sweep into that other
-    ticker's match set."""
-    assert matching_raw_tickers("XYZ", {"XYZ": HSFWA_TICKER}) == {"XYZ"}
-
-
-def test_matching_raw_tickers_skips_hsfwa_raw_key_during_scan() -> None:
-    """A raw ``"HSFWA"`` entry is never swept into another ticker's match
-    set even if HSFWA's own alias value happens to coincide with it."""
-    aliases = {HSFWA_TICKER: "REAL.L", "OTHER": "REAL.L"}
-    assert matching_raw_tickers("REAL.L", aliases) == {"REAL.L", "OTHER"}
+def test_matching_raw_tickers_includes_all_alias_equivalent_spellings() -> None:
+    aliases = {"LEGACY": "REAL.L", "SEDOL1": "REAL.L"}
+    assert matching_raw_tickers("REAL.L", aliases) == {"REAL.L", "LEGACY", "SEDOL1"}
 
 
 # --- canonicalize_or_fallback ------------------------------------------------
@@ -132,39 +111,11 @@ def test_canonicalize_or_fallback_ambiguous_cycle_degrades_and_logs(
     assert any("my_context" in r.message for r in caplog.records)
 
 
-def test_canonicalize_or_fallback_protects_hsfwa_input_by_default() -> None:
+def test_canonicalize_or_fallback_resolves_legacy_identity() -> None:
     logger = logging.getLogger("test")
-    aliases = {HSFWA_TICKER: "REAL.L"}
+    aliases = {"LEGACY": "REAL.L"}
     assert (
-        canonicalize_or_fallback(HSFWA_TICKER, aliases, logger=logger, context="ctx")
-        == HSFWA_TICKER
-    )
-
-
-def test_canonicalize_or_fallback_hsfwa_leak_regression() -> None:
-    """Round 7 regression: an unrelated ticker whose chain resolves to the
-    reserved ``"HSFWA"`` literal must fall back to the raw input, never
-    silently return ``"HSFWA"``, under the default (protected) mode."""
-    logger = logging.getLogger("test")
-    aliases = {"XYZ": HSFWA_TICKER}
-    assert (
-        canonicalize_or_fallback("XYZ", aliases, logger=logger, context="ctx") == "XYZ"
-    )
-
-
-def test_canonicalize_or_fallback_protect_hsfwa_false_resolves_through_alias() -> None:
-    """Price/currency lookup opts out of HSFWA protection -- its own
-    configured alias exists specifically to redirect its price fetch."""
-    logger = logging.getLogger("test")
-    aliases = {HSFWA_TICKER: "REAL.L"}
-    assert (
-        canonicalize_or_fallback(
-            HSFWA_TICKER,
-            aliases,
-            logger=logger,
-            context="ctx",
-            protect_hsfwa=False,
-        )
+        canonicalize_or_fallback("LEGACY", aliases, logger=logger, context="ctx")
         == "REAL.L"
     )
 

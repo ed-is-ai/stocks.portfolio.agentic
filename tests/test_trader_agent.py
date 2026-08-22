@@ -1593,8 +1593,11 @@ def _sipp_row(
     price: str = "100.00",
     description: str = "Buy",
     debit: str = "1000.00",
+    sedol: str = "B1",
 ) -> str:
-    return f"{date},{symbol},B1,{qty},{price},{description},{ref},{debit},,5000.00\n"
+    return (
+        f"{date},{symbol},{sedol},{qty},{price},{description},{ref},{debit},,5000.00\n"
+    )
 
 
 _SIPP_HEADER = (
@@ -1685,14 +1688,10 @@ def test_sipp_ambiguous_ticker_alias_rejects_whole_plan_including_good_row(
         assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
 
 
-def test_sipp_symbol_resolving_to_hsfwa_rejects_the_row(
+def test_sipp_symbol_resolving_to_alias_target_imports_normally(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Story 2.1, round 7: a genuine broker Symbol whose alias chain lands
-    on the reserved ``"HSFWA"`` literal must be rejected via
-    ``failed_rows``, not silently merged into the reserved HSBC GLOB
-    identity. Neither this branch nor the ambiguous-cycle branch calls
-    ``classify()``."""
+    """No alias target is reserved: any acyclic mapping imports normally."""
     monkeypatch.setattr(
         "app.agents.trader.trader_agent.load_aliases", lambda: {"XYZ": "HSFWA"}
     )
@@ -1703,28 +1702,22 @@ def test_sipp_symbol_resolving_to_hsfwa_rejects_the_row(
 
     result = agent.import_sipp(csv_text.encode("utf-8"))
 
-    assert agent.get_portfolio() == []
-    assert result.status == "rejected"
-    assert len(result.failed_rows) == 1
-    assert "HSFWA" in result.failed_rows[0]
-    assert "ambiguous" not in result.failed_rows[0].lower()
-    assert result.inserted_count == 0
+    assert {position.ticker for position in agent.get_portfolio()} == {"HSFWA"}
+    assert result.status == "ok"
+    assert result.failed_rows == []
+    assert result.inserted_count == 1
     assert result.duplicate_count == 0
-    with sqlite3.connect(agent.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 0
 
 
-def test_sipp_hsbc_glob_row_unaffected_by_configured_hsfwa_alias(
+def test_sipp_uses_sedol_when_symbol_is_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """HSBC GLOB rows keep the fixed literal ``"HSFWA"`` ticker -- never
-    run through canonicalization -- even with an ``"HSFWA"`` alias entry
-    configured."""
+    """A missing Symbol falls back generically to the row's SEDOL."""
     monkeypatch.setattr(
-        "app.agents.trader.trader_agent.load_aliases", lambda: {"HSFWA": "REAL.L"}
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"BMJJJF9": "REAL.L"}
     )
     csv_text = _SIPP_HEADER + _sipp_row(
-        "01/02/2024", "n/a", "REF-A", description="HSBC GLOB fund purchase"
+        "01/02/2024", "n/a", "REF-A", description="Fund purchase", sedol="BMJJJF9"
     )
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
@@ -1734,8 +1727,32 @@ def test_sipp_hsbc_glob_row_unaffected_by_configured_hsfwa_alias(
 
     assert result.status == "ok"
     with sqlite3.connect(agent.db_path) as conn:
-        tickers = [r[0] for r in conn.execute("SELECT ticker FROM trades").fetchall()]
-    assert tickers == ["HSFWA"]
+        trades = conn.execute(
+            "SELECT ticker, shares, price, currency FROM trades"
+        ).fetchall()
+    assert trades == [("REAL.L", 10.0, 100.0, "GBP")]
+
+
+def test_sipp_unconfigured_sedol_imports_as_raw_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an alias, SEDOL remains a usable generic raw identity."""
+    monkeypatch.setattr("app.agents.trader.trader_agent.load_aliases", lambda: {})
+    csv_text = _SIPP_HEADER + _sipp_row(
+        "01/02/2024", "n/a", "REF-A", description="Fund purchase", sedol="BMJJJF9"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode("utf-8"))
+
+    assert result.status == "ok"
+    with sqlite3.connect(agent.db_path) as conn:
+        trades = conn.execute(
+            "SELECT ticker, shares, price, currency FROM trades"
+        ).fetchall()
+    assert trades == [("BMJJJF9", 10.0, 100.0, "GBP")]
 
 
 def test_replay_trades_degrades_to_raw_ticker_on_ambiguous_alias(
@@ -1761,20 +1778,25 @@ def test_replay_trades_degrades_to_raw_ticker_on_ambiguous_alias(
     assert any("ambiguous" in r.message.lower() for r in caplog.records)
 
 
-def test_replay_trades_hsfwa_unaffected_by_configured_alias(
+def test_replay_trades_resolves_legacy_identity_through_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    yahoo_ticker = "0P00013P6I.L"
     monkeypatch.setattr(
-        "app.agents.trader.trader_agent.load_aliases", lambda: {"HSFWA": "REAL.L"}
+        "app.agents.trader.trader_agent.load_aliases",
+        lambda: {"HSFWA": yahoo_ticker},
     )
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent._trades.insert("HSFWA", "BUY", 10.0, 100.0, "2026-01-01")
+    agent._trades.insert("HSFWA", "BUY", 1000.0, 3.40, "2026-01-01")
 
-    portfolio = agent.get_portfolio()
+    portfolio = agent.get_portfolio(current_prices={yahoo_ticker: 4.1137})
 
-    assert {p.ticker for p in portfolio} == {"HSFWA"}
+    assert len(portfolio) == 1
+    assert portfolio[0].ticker == yahoo_ticker
+    assert portfolio[0].current_price == 4.11
+    assert portfolio[0].current_value == 4113.7
 
 
 def test_replay_trades_cross_spelling_merges_into_one_position(

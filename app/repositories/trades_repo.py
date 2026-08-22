@@ -359,8 +359,8 @@ class TradesRepository:
         """Return the set of tickers with a net-positive position in any
         portfolio (used for the watchlist "held" flag, which spans accounts).
 
-        Accumulates net position per canonical ticker (via
-        ``canonicalize_or_fallback``, HSFWA protected) -- the same
+        Accumulates net position per canonical ticker via
+        ``canonicalize_or_fallback`` -- the same
         "canonicalize before it becomes a dict key" shape ``_replay_trades``
         uses -- so the returned set agrees with ``get_portfolio()``'s
         canonicalized identity even when trades for one security are stored

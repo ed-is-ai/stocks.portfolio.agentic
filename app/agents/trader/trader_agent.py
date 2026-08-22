@@ -30,7 +30,6 @@ from app.core.money import (
 )
 from app.core.quantity import QUANTITY_EPSILON, round_quantity
 from app.core.ticker_identity import (
-    HSFWA_TICKER,
     AmbiguousTickerAliasError,
     canonical_ticker,
     canonicalize_or_fallback,
@@ -717,8 +716,8 @@ class TraderAgent(Agent):
     ) -> dict[str, dict[str, Any]]:
         """Replay trade rows to derive per-ticker running state.
 
-        Each row's ticker is canonicalized (via ``canonicalize_or_fallback``,
-        HSFWA protected) before being used as the ``state`` dict key, so
+        Each row's ticker is canonicalized via ``canonicalize_or_fallback``
+        before being used as the ``state`` dict key, so
         cross-spelling trades for one security (e.g. ``ABC.L`` and ``ABC``
         under a configured alias) fold into one running position instead of
         fragmenting -- agreeing with FIFO replay's and ``held_tickers()``'s
@@ -1224,11 +1223,16 @@ class TraderAgent(Agent):
             price_marker = False
 
             if qty and qty != "n/a":
-                # Trade if Symbol is valid or if HSBC GLOB
-                is_trade = symbol and symbol != "n/a"
-                is_hsbc_glob = "HSBC GLOB" in description.upper()
+                raw_identity = next(
+                    (
+                        value.upper()
+                        for value in (symbol, sedol)
+                        if value and value.lower() != "n/a"
+                    ),
+                    None,
+                )
 
-                if is_trade or is_hsbc_glob:
+                if raw_identity is not None:
                     try:
                         shares = float(qty.replace("£", "").replace(",", ""))
                     except ValueError:
@@ -1263,48 +1267,26 @@ class TraderAgent(Agent):
                                 "BUY" if debit > 0 else "SELL" if credit > 0 else None
                             )
                             if action:
-                                # HSBC GLOB keeps the fixed literal ticker
-                                # (not a broker Symbol, never canonicalized).
-                                # A genuine broker Symbol is resolved via
-                                # canonical_ticker directly (not
+                                # The chosen Symbol/SEDOL identity is resolved
+                                # via canonical_ticker directly (not
                                 # canonicalize_or_fallback) so this method
                                 # can catch AmbiguousTickerAliasError itself
                                 # and reject the row via failed_rows instead
                                 # of raising or silently falling back --
                                 # import is the one call site with a
-                                # per-row rejection channel. A resolved
-                                # ticker that collides with the reserved
-                                # HSFWA literal (a genuine broker Symbol's
-                                # chain unexpectedly landing there) is
-                                # rejected the same way. Neither rejection
-                                # branch calls classify() -- matching every
+                                # per-row rejection channel. This rejection
+                                # branch does not call classify() -- matching every
                                 # sibling row-rejection branch in this
                                 # function.
                                 ticker: str | None
-                                if is_trade:
-                                    try:
-                                        ticker = canonical_ticker(
-                                            symbol.upper(), aliases
-                                        )
-                                    except AmbiguousTickerAliasError as exc:
-                                        failed_rows.append(
-                                            f"row {row_label}: ambiguous "
-                                            f"ticker alias for "
-                                            f"{symbol.upper()!r}: {exc}"
-                                        )
-                                        ticker = None
-                                    else:
-                                        if ticker == HSFWA_TICKER:
-                                            failed_rows.append(
-                                                f"row {row_label}: resolved "
-                                                f"identity for "
-                                                f"{symbol.upper()!r} "
-                                                "collides with the reserved "
-                                                "HSFWA ticker"
-                                            )
-                                            ticker = None
-                                else:
-                                    ticker = HSFWA_TICKER
+                                try:
+                                    ticker = canonical_ticker(raw_identity, aliases)
+                                except AmbiguousTickerAliasError as exc:
+                                    failed_rows.append(
+                                        f"row {row_label}: ambiguous ticker alias "
+                                        f"for {raw_identity!r}: {exc}"
+                                    )
+                                    ticker = None
 
                                 if ticker is not None:
                                     planned_trades.append(

@@ -60,15 +60,13 @@ def test_trades_held_tickers_canonicalizes(trades_connect, monkeypatch):
     assert repo.held_tickers() == {"ABC"}
 
 
-def test_trades_held_tickers_hsfwa_unaffected_by_alias(trades_connect, monkeypatch):
-    """HSFWA's identity must never be altered by alias-file contents, even
-    with a configured ``"HSFWA"`` alias entry."""
+def test_trades_held_tickers_resolves_legacy_alias(trades_connect, monkeypatch):
     monkeypatch.setattr(
         "app.repositories.trades_repo.load_aliases", lambda: {"HSFWA": "REAL.L"}
     )
     repo = TradesRepository(trades_connect)
     repo.insert("HSFWA", "BUY", 10, 100.0, "01/02/2024")
-    assert repo.held_tickers() == {"HSFWA"}
+    assert repo.held_tickers() == {"REAL.L"}
 
 
 def test_trades_delete_by_ticker_matches_alias_equivalent_raw_rows(

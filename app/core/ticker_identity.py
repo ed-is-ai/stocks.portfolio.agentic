@@ -25,14 +25,6 @@ from app.core.config import TICKER_ALIASES_JSON
 
 logger = logging.getLogger(__name__)
 
-#: HSBC GLOB's fixed synthetic ticker (not a real broker ``Symbol`` value).
-#: Its *identity* must never be altered by alias-file contents, at every
-#: identity call site -- but its *price/currency lookup* must still follow
-#: a configured alias, since redirecting HSFWA's price fetch to a real
-#: Yahoo symbol is this file's original, documented purpose for exactly
-#: this ticker (see ``openspec/changes/hsfwa-ticker-mapping/``).
-HSFWA_TICKER = "HSFWA"
-
 
 class AmbiguousTickerAliasError(ValueError):
     """Raised when a ticker's alias chain revisits a ticker before reaching
@@ -138,17 +130,7 @@ def matching_raw_tickers(canonical: str, aliases: dict[str, str]) -> set[str]:
     Computed by scanning the small in-memory ``aliases`` dict fresh on
     every call -- no persistent reverse index or cache.
 
-    ``"HSFWA"`` is never treated as a match for a different identity, in
-    either direction: it short-circuits immediately when it's the
-    ``canonical`` argument, is skipped when scanning raw keys, and -- since
-    some *other* ticker's chain could itself resolve to the literal
-    ``"HSFWA"`` -- is also refused as a *resolved* target, falling back to
-    treating the input as its own canonical form instead of merging it
-    into the reserved identity.
     """
-    if canonical == HSFWA_TICKER:
-        return {HSFWA_TICKER}
-
     try:
         resolved = canonical_ticker(canonical, aliases)
     except AmbiguousTickerAliasError as exc:
@@ -160,16 +142,8 @@ def matching_raw_tickers(canonical: str, aliases: dict[str, str]) -> set[str]:
         )
         resolved = canonical
 
-    if resolved == HSFWA_TICKER:
-        # Some other ticker's chain landed on the reserved literal --
-        # never let HSFWA be "discovered" as another identity's canonical
-        # target. Fall back to treating the raw input as its own identity.
-        resolved = canonical
-
     matches = {resolved}
     for raw in aliases:
-        if raw == HSFWA_TICKER:
-            continue
         try:
             if canonical_ticker(raw, aliases) == resolved:
                 matches.add(raw)
@@ -196,14 +170,13 @@ def canonicalize_or_fallback(
     *,
     logger: logging.Logger,
     context: str,
-    protect_hsfwa: bool = True,
 ) -> str:
     """Resolve ``ticker`` for a read-time (non-import) call site.
 
     Shared by every replay/read call site (``TraderAgent._replay_trades``,
     ``RealisedPnlService._replay_fifo``, ``TradesRepository.held_tickers``/
-    ``.history``, and -- with ``protect_hsfwa=False`` --
-    ``PortfolioService.ticker_currency``/``fetch_all_prices``) so the
+    ``.history``, ``PortfolioService.ticker_currency``, and
+    ``PortfolioService.fetch_all_prices``) so the
     "canonicalize, catch-and-degrade" shape lives once. Any ambiguous
     (cyclic) alias chain logs a warning via ``logger`` (naming ``context``
     and the raw ticker) and falls back to the raw ticker rather than
@@ -211,17 +184,9 @@ def canonicalize_or_fallback(
     displayed data with no per-row channel to surface an error to a user,
     unlike SIPP import, which rejects the row instead.
 
-    ``protect_hsfwa`` (the default -- every identity-purpose caller keeps
-    it) means HSFWA's *identity* is never altered by alias-file contents:
-    checked both before resolution (``ticker == "HSFWA"``) and after
-    (``resolved == "HSFWA"``, in case some *other* ticker's chain lands on
-    the reserved literal). ``ticker_currency()``/``fetch_all_prices()``
-    pass ``protect_hsfwa=False``, since HSFWA's own alias entry exists
-    specifically to redirect its *price lookup* to a real Yahoo symbol --
-    the one context where HSFWA must resolve like any other ticker.
+    Every ticker follows the same data-driven alias path; there are no
+    reserved literals or identity-specific exceptions.
     """
-    if protect_hsfwa and ticker == HSFWA_TICKER:
-        return ticker
     try:
         resolved = canonical_ticker(ticker, aliases)
     except AmbiguousTickerAliasError as exc:
@@ -231,7 +196,5 @@ def canonicalize_or_fallback(
             ticker,
             exc,
         )
-        return ticker
-    if protect_hsfwa and resolved == HSFWA_TICKER:
         return ticker
     return resolved

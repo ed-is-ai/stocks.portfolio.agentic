@@ -265,10 +265,7 @@ class PortfolioService:
         ``canonicalize_or_fallback`` walk ``fetch_all_prices``'s
         ``_resolve`` uses (not a one-hop ``aliases.get``), so a canonical
         ticker fed back in (e.g. from ``get_portfolio()``'s output) still
-        resolves correctly. ``protect_hsfwa=False`` -- unlike every
-        identity call site, HSFWA must resolve through its own configured
-        alias here, since that's this alias file's original, documented
-        purpose for exactly this ticker.
+        resolves correctly.
         """
         import yfinance as yf
 
@@ -278,7 +275,6 @@ class PortfolioService:
             aliases,
             logger=logger,
             context="ticker_currency",
-            protect_hsfwa=False,
         )
         try:
             currency = yf.Ticker(yf_sym).fast_info.currency
@@ -348,7 +344,6 @@ class PortfolioService:
                 aliases,
                 logger=logger,
                 context="fetch_all_prices",
-                protect_hsfwa=False,
             )
             result = self._fetch_price_gbp(yf_sym, gbpusd)
             # ``.L``-suffix retry only when canonicalization left `t`

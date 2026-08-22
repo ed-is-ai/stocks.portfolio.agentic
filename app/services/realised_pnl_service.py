@@ -358,8 +358,8 @@ class RealisedPnlService:
         ticker, because the SELL that produced it is never re-examined once
         the loop has moved past it.
 
-        Each trade's ticker is canonicalized (via ``canonicalize_or_fallback``,
-        HSFWA protected) before it keys ``queues`` -- the shared identity
+        Each trade's ticker is canonicalized via ``canonicalize_or_fallback``
+        before it keys ``queues`` -- the shared identity
         every ``RoundTrip``/``UnmatchedSell`` displays -- so cross-spelling
         trades for one security fold into a single FIFO queue instead of
         fragmenting, agreeing with the average-cost replay's identity. A

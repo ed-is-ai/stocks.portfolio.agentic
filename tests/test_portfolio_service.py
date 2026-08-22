@@ -590,10 +590,7 @@ def test_ticker_currency_resolves_canonical_ticker_fed_back(monkeypatch) -> None
     assert calls == ["0PXXXXXXXXX.L"]
 
 
-def test_ticker_currency_resolves_hsfwa_through_configured_alias(monkeypatch) -> None:
-    """Story 2.1: unlike every identity call site, HSFWA's own alias entry
-    must redirect *price/currency lookup* -- ``protect_hsfwa=False`` is
-    actually wired through ``ticker_currency``."""
+def test_ticker_currency_resolves_legacy_identity_through_alias(monkeypatch) -> None:
     svc = PortfolioService(
         cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
     )
@@ -684,9 +681,7 @@ def test_fetch_all_prices_resolves_chained_alias(monkeypatch) -> None:
     assert calls == ["ABC-YAHOO"]
 
 
-def test_fetch_all_prices_resolves_hsfwa_through_configured_alias(monkeypatch) -> None:
-    """Story 2.1: HSFWA's price lookup resolves through its own configured
-    alias, unlike every identity call site (which must leave it untouched)."""
+def test_fetch_all_prices_resolves_legacy_identity_through_alias(monkeypatch) -> None:
     svc = PortfolioService(
         cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
     )
