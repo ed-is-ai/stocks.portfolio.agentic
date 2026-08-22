@@ -17,6 +17,11 @@ from app.services.backtest.run_universe import (
     canonical_run_universe,
     run_universe_digest,
 )
+from app.services.backtest.strategy_job import (
+    PreparationSubmissionV1,
+    RunUniverseSelectionV1,
+)
+from decimal import Decimal
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +101,65 @@ def test_run_universe_digest_changes_with_the_selected_set() -> None:
     )
 
 
+def test_typed_preparation_rejects_runtime_universe_divergence() -> None:
+    profile = "a" * 64
+    selection = RunUniverseSelectionV1(
+        profile_hash=profile,
+        activation_seq=1,
+        universe_parameter="symbols",
+        canonical_security_ids=("sec-a",),
+        run_universe_digest=run_universe_digest(
+            ["sec-a"], parameter="symbols", profile_hash=profile
+        ),
+    )
+    with pytest.raises(ValueError, match="runtime universe"):
+        PreparationSubmissionV1(
+            selection=selection,
+            strategy_id="s",
+            strategy_api_version=1,
+            strategy_source_digest="b" * 64,
+            parameters={"symbols": ["sec-b"]},
+            start_month="2026-01",
+            end_month="2026-01",
+            base_currency="GBP",
+            starting_capital=Decimal("1"),
+            idempotency_key="k",
+        )
+
+
 def test_run_universe_digest_is_versioned() -> None:
     assert RUN_UNIVERSE_VERSION == "run_universe.v1"
+
+
+def test_typed_preparation_rejects_reversed_range_and_hashes_lineage() -> None:
+    profile = "a" * 64
+    selection = RunUniverseSelectionV1(
+        profile_hash=profile,
+        activation_seq=1,
+        universe_parameter="symbols",
+        canonical_security_ids=("sec-a",),
+        run_universe_digest=run_universe_digest(
+            ["sec-a"], parameter="symbols", profile_hash=profile
+        ),
+    )
+    values = dict(
+        selection=selection,
+        strategy_id="s",
+        strategy_api_version=1,
+        strategy_source_digest="b" * 64,
+        parameters={"symbols": ["sec-a"]},
+        start_month="2026-02",
+        end_month="2026-01",
+        base_currency="GBP",
+        starting_capital=Decimal("1"),
+        idempotency_key="k",
+    )
+    with pytest.raises(ValueError):
+        PreparationSubmissionV1.model_validate(values)
+    values.update(start_month="2026-01", end_month="2026-02")
+    initial = PreparationSubmissionV1.model_validate(values)
+    child = initial.model_copy(update={"parent_job_id": "parent-1"})
+    assert initial.content_digest() != child.content_digest()
 
 
 def test_run_universe_digest_rejects_an_empty_selection() -> None:

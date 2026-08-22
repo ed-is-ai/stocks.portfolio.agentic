@@ -48,6 +48,9 @@ from app.services.backtest.snapshot_profile import CoverageSummaryV1, SnapshotPr
 from app.services.backtest.strategy_job import (
     BacktestEnqueueResultV1,
     BacktestSubmissionV1,
+    PreparationSubmissionV1,
+    PreparationEnqueueResultV1,
+    RunUniverseSelectionV1,
     StrategyJobConflict,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
@@ -99,6 +102,8 @@ class _RosterEvidenceError(ValueError):
     """Internal: a roster-evidence resolution problem, always converted to
     a :class:`BacktestLaunchValidationError` before leaving this module."""
 
+    code = "required_data_missing"
+
 
 @dataclass(frozen=True)
 class BacktestConfigurationViewV1:
@@ -130,6 +135,7 @@ class BacktestLaunchCommandV1:
     starting_capital: Decimal
     parameters: Mapping[str, JsonValue]
     idempotency_key: str | None = None
+    universe_selection: RunUniverseSelectionV1 | None = None
 
 
 def _fx_pair(base_currency: str, security_currency: str) -> str | None:
@@ -189,7 +195,9 @@ class BacktestLaunchService:
             profile=profile,
         )
 
-    def launch(self, command: BacktestLaunchCommandV1) -> BacktestEnqueueResultV1:
+    def launch(
+        self, command: BacktestLaunchCommandV1
+    ) -> BacktestEnqueueResultV1 | PreparationEnqueueResultV1:
         """Validate ``command`` end to end and enqueue exactly one attempt.
 
         Raises :class:`BacktestLaunchValidationError` for any correctable
@@ -255,6 +263,35 @@ class BacktestLaunchService:
 
         if errors:
             raise BacktestLaunchValidationError(tuple(errors))
+
+        if command.universe_selection is not None:
+            if command.idempotency_key is None:
+                raise BacktestLaunchValidationError(
+                    (
+                        LaunchFieldError(
+                            "form", "Preparation request identity is missing."
+                        ),
+                    )
+                )
+            try:
+                return self._jobs.enqueue_preparation(
+                    PreparationSubmissionV1(
+                        selection=command.universe_selection,
+                        strategy_id=strategy.strategy_id,
+                        strategy_api_version=strategy.api_version,
+                        strategy_source_digest=strategy.source_digest,
+                        parameters=dict(command.parameters),
+                        start_month=command.start_month,
+                        end_month=command.end_month,
+                        base_currency=command.base_currency,
+                        starting_capital=command.starting_capital,
+                        idempotency_key=command.idempotency_key,
+                    )
+                )
+            except (StrategyJobConflict, ValueError) as exc:
+                raise BacktestLaunchValidationError(
+                    (LaunchFieldError("form", str(exc)),)
+                ) from exc
 
         try:
             securities = self._resolve_roster_evidence(
@@ -359,6 +396,7 @@ class BacktestLaunchService:
         profile_hash: str,
         snapshot_month: str,
         base_currency: Literal["GBP", "USD"],
+        selected_security_ids: tuple[str, ...] | None = None,
     ) -> tuple[PinnedSecurityEvidenceV1, ...]:
         """Pin every active-profile roster member's price/action/FX
         evidence for ``snapshot_month`` -- the chosen period's start month,
@@ -376,6 +414,11 @@ class BacktestLaunchService:
             raise _RosterEvidenceError(
                 "The active profile's roster has no members for the chosen period."
             )
+        if selected_security_ids is not None:
+            selected = set(selected_security_ids)
+            members = tuple(item for item in members if item[0] in selected)
+            if {item[0] for item in members} != selected:
+                raise _RosterEvidenceError("Selected evidence is unavailable.")
         fx_as_of = f"{snapshot_month}-01"
         securities: list[PinnedSecurityEvidenceV1] = []
         # Collect every problem across the whole roster (never just the

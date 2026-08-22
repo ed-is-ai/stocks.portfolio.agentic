@@ -306,10 +306,37 @@ class StrategyReadinessV1(_LifecycleModel):
 class RunUniverseSelectionV1(_LifecycleModel):
     """One canonicalized universe selection for a Backtest Run."""
 
-    profile_hash: str
-    activation_seq: int
+    profile_hash: Digest
+    activation_seq: Annotated[int, Field(gt=0)]
+    universe_schema: Literal["strategy_universe.v1"] = "strategy_universe.v1"
+    universe_mode: Literal["selected-securities"] = "selected-securities"
+    universe_parameter: Annotated[
+        str, Field(min_length=1, pattern=r"^\S(?:.*\S)?$")
+    ] = "security_ids"
     canonical_security_ids: tuple[str, ...]
-    run_universe_digest: str
+    run_universe_digest: Digest
+
+    @model_validator(mode="after")
+    def _identity(self) -> "RunUniverseSelectionV1":
+        from app.services.backtest.run_universe import (
+            canonical_run_universe,
+            run_universe_digest,
+        )
+
+        if (
+            canonical_run_universe(self.canonical_security_ids)
+            != self.canonical_security_ids
+        ):
+            raise ValueError("selected IDs are not canonical")
+        if self.run_universe_digest != run_universe_digest(
+            self.canonical_security_ids,
+            universe_schema=self.universe_schema,
+            mode=self.universe_mode,
+            parameter=self.universe_parameter,
+            profile_hash=self.profile_hash,
+        ):
+            raise ValueError("run universe digest is invalid")
+        return self
 
 
 class PreparationRunV1(_LifecycleModel):
@@ -320,6 +347,48 @@ class PreparationRunV1(_LifecycleModel):
     """
 
     job_id: Annotated[str, Field(min_length=1)]
+    selection: RunUniverseSelectionV1 | None = None
+    strategy_id: str | None = None
+    strategy_api_version: int | None = None
+    strategy_source_digest: Digest | None = None
+    parameters: dict[str, object] = Field(default_factory=dict)
+    start_month: Month | None = None
+    end_month: Month | None = None
+    base_currency: Literal["GBP", "USD"] | None = None
+    starting_capital: Decimal | None = None
+
+
+class PreparationSubmissionV1(_LifecycleModel):
+    selection: RunUniverseSelectionV1
+    strategy_id: Annotated[str, Field(min_length=1)]
+    strategy_api_version: Annotated[int, Field(ge=1)]
+    strategy_source_digest: Digest
+    parameters: dict[str, object]
+    start_month: Month
+    end_month: Month
+    base_currency: Literal["GBP", "USD"]
+    starting_capital: Decimal = Field(gt=Decimal(0))
+    parent_job_id: str | None = None
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=200)]
+
+    @model_validator(mode="after")
+    def _runtime_matches_selection(self) -> "PreparationSubmissionV1":
+        TradingCalendar.months_inclusive(self.start_month, self.end_month)
+        if self.parameters.get(self.selection.universe_parameter) != list(
+            self.selection.canonical_security_ids
+        ):
+            raise ValueError("runtime universe does not match selected universe")
+        return self
+
+    def content_digest(self) -> str:
+        value = self.model_dump(mode="python", exclude={"idempotency_key"})
+        value["starting_capital"] = str(self.starting_capital)
+        return manifest_digest(value)
+
+
+class PreparationEnqueueResultV1(_LifecycleModel):
+    job: StrategyJobV1
+    preparation: PreparationRunV1
 
 
 class InitializationRunV1(_LifecycleModel):
@@ -373,6 +442,32 @@ class BacktestRunV1(_LifecycleModel):
     starting_capital: Decimal
     run_input_manifest_digest: Digest
     execution_contract_digest: Digest
+    manifest_version: Literal["run_input_manifest.v1", "run_input_manifest.v2"] = (
+        "run_input_manifest.v1"
+    )
+    universe_selection: RunUniverseSelectionV1 | None = None
+    source_preparation_job_id: str | None = None
+
+    def model_dump(self, **kwargs):  # preserve legacy V1 typed serialization
+        if self.manifest_version == "run_input_manifest.v1":
+            raw_exclude = kwargs.pop("exclude", None)
+            exclude = set(raw_exclude or ()) | {
+                "manifest_version",
+                "universe_selection",
+                "source_preparation_job_id",
+            }
+            return super().model_dump(exclude=exclude, **kwargs)
+        return super().model_dump(**kwargs)
+
+    def model_dump_json(self, **kwargs) -> str:
+        if self.manifest_version == "run_input_manifest.v1":
+            exclude = set(kwargs.pop("exclude", None) or ()) | {
+                "manifest_version",
+                "universe_selection",
+                "source_preparation_job_id",
+            }
+            return super().model_dump_json(exclude=exclude, **kwargs)
+        return super().model_dump_json(**kwargs)
 
     @field_validator("parameters")
     @classmethod
@@ -385,6 +480,17 @@ class BacktestRunV1(_LifecycleModel):
             raise ValueError("backtest start_month must not be after end_month")
         if not self.starting_capital.is_finite() or self.starting_capital <= 0:
             raise ValueError("backtest starting_capital must be positive and finite")
+        is_v2 = self.manifest_version == "run_input_manifest.v2"
+        if is_v2 != (self.universe_selection is not None):
+            raise ValueError("run version provenance is invalid")
+        selection = self.universe_selection
+        if (
+            is_v2
+            and selection is not None
+            and self.parameters.get(selection.universe_parameter)
+            != list(selection.canonical_security_ids)
+        ):
+            raise ValueError("runtime universe does not match provenance")  # type: ignore[union-attr]
         return self
 
 
@@ -520,6 +626,11 @@ class BacktestSubmissionV1(_LifecycleModel):
     run_input_manifest_digest: Digest
     execution_contract_digest: Digest
     canonical_manifest_json: Annotated[str, Field(min_length=1)]
+    manifest_version: Literal["run_input_manifest.v1", "run_input_manifest.v2"] = (
+        "run_input_manifest.v1"
+    )
+    universe_selection: RunUniverseSelectionV1 | None = None
+    source_preparation_job_id: str | None = None
     parent_job_id: str | None = None
     idempotency_key: Annotated[str, Field(min_length=1, max_length=200)] | None = None
 
@@ -533,6 +644,21 @@ class BacktestSubmissionV1(_LifecycleModel):
         TradingCalendar.months_inclusive(self.start_month, self.end_month)
         if not self.starting_capital.is_finite() or self.starting_capital <= 0:
             raise ValueError("backtest starting_capital must be positive and finite")
+        is_v2 = self.manifest_version == "run_input_manifest.v2"
+        if is_v2 != (self.universe_selection is not None):
+            raise ValueError("manifest version provenance is invalid")
+        if is_v2 and (
+            (self.source_preparation_job_id is None) == (self.parent_job_id is None)
+        ):
+            raise ValueError("V2 submission requires exactly one lineage")
+        selection = self.universe_selection
+        if (
+            is_v2
+            and selection is not None
+            and self.parameters.get(selection.universe_parameter)
+            != list(selection.canonical_security_ids)
+        ):
+            raise ValueError("runtime universe does not match provenance")  # type: ignore[union-attr]
         return self
 
 
@@ -638,6 +764,8 @@ __all__ = [
     "InitializationSubmissionV1",
     "JobFailureCode",
     "PreparationRunV1",
+    "PreparationSubmissionV1",
+    "PreparationEnqueueResultV1",
     "PreparationStage",
     "PrerequisiteItemV1",
     "PrerequisiteState",

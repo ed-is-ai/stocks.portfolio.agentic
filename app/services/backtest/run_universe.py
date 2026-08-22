@@ -68,16 +68,33 @@ def canonical_run_universe(security_ids: Iterable[object]) -> tuple[str, ...]:
     return tuple(sorted(unique))
 
 
-def run_universe_digest(security_ids: Iterable[object]) -> str:
+def run_universe_digest(
+    security_ids: Iterable[object],
+    *,
+    universe_schema: str = "strategy_universe.v1",
+    mode: str = "selected-securities",
+    parameter: str = "security_ids",
+    profile_hash: str = "0" * 64,
+) -> str:
     """Return the SHA-256 digest of ``security_ids``' canonical tuple.
 
     A pure function of :func:`canonical_run_universe`'s output, so
     selection order and duplicates can never change the digest.
     """
+    for value in (universe_schema, mode, parameter, profile_hash):
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise RunUniverseError(
+                RunUniverseErrorCode.INVALID_SECURITY_ID,
+                "universe identity is malformed",
+            )
     return manifest_digest(
         {
             "schema_version": RUN_UNIVERSE_VERSION,
-            "securities": list(canonical_run_universe(security_ids)),
+            "universe_schema": universe_schema,
+            "mode": mode,
+            "parameter": parameter,
+            "profile_hash": profile_hash,
+            "selected_security_ids": list(canonical_run_universe(security_ids)),
         }
     )
 

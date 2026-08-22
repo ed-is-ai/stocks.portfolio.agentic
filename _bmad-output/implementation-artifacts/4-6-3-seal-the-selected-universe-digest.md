@@ -1,6 +1,6 @@
 # Story 4.6.3: Seal the Selected-Universe Digest
 
-Status: ready-for-dev
+Status: done
 
 ## Story
 
@@ -19,26 +19,26 @@ so that preparation, replay, and comparison use exactly the evidence I chose.
 
 ## Tasks / Subtasks
 
-- [ ] Make selection a typed preparation input (AC: 1-4)
-  - [ ] Complete route/launch handoff so it constructs `RunUniverseSelectionV1` after roster/staleness validation; keep host-bound strategy parameter binding separate from run identity.
-  - [ ] Extend preparation submission/run models and the `run_preparations` schema/repository contract with profile hash, activation sequence, universe schema/mapping, canonical IDs JSON and `run_universe_digest`.
-  - [ ] Retain one normalizer: `canonical_run_universe()` and `run_universe_digest()`; do not reimplement sorting, hashing, or a maximum selection size.
+- [x] Make selection a typed preparation input (AC: 1-4)
+  - [x] Complete route/launch handoff so it constructs `RunUniverseSelectionV1` after roster/staleness validation; keep host-bound strategy parameter binding separate from run identity.
+  - [x] Extend preparation submission/run models and the `run_preparations` schema/repository contract with profile hash, activation sequence, universe schema/mapping, canonical IDs JSON and `run_universe_digest`.
+  - [x] Retain one normalizer: `canonical_run_universe()` and `run_universe_digest()`; do not reimplement sorting, hashing, or a maximum selection size.
 
-- [ ] Define V2 manifest/run provenance (AC: 2-5)
-  - [ ] Add `RunInputManifestV2` and version-dispatched readers/builders alongside `RunInputManifestV1`; preserve V1 serialization, digest and execution-contract methods exactly.
-  - [ ] Carry V2 digest into initial Backtest job/run/result fields and eventual comparison predicate. Use nullable/required-by-version constraints, not an ambiguous unversioned optional contract.
-  - [ ] Ensure profile activation sequence is validated and stored where required but is not accidentally added to the AD-30 universe-digest payload.
+- [x] Define V2 manifest/run provenance (AC: 2-5)
+  - [x] Add `RunInputManifestV2` and version-dispatched readers/builders alongside `RunInputManifestV1`; preserve V1 serialization, digest and execution-contract methods exactly.
+  - [x] Carry V2 digest into initial Backtest job/run/result fields and eventual comparison predicate. Use nullable/required-by-version constraints, not an ambiguous unversioned optional contract.
+  - [x] Ensure profile activation sequence is validated and stored where required but is not accidentally added to the AD-30 universe-digest payload.
 
-- [ ] Fail closed at the sealing boundary (AC: 3-4)
-  - [ ] Verify selected IDs against the immutable active-profile roster and declared Strategy universe before dispatch and again in the final seal-and-create transaction.
-  - [ ] Reject a mismatch between canonical IDs, stored JSON, digest, profile/mapping/schema and manifest evidence with stable sanitized integrity reasons.
-  - [ ] Do not fetch evidence, create a Backtest, or mutate a V1 record for invalid selection state.
+- [x] Fail closed at the sealing boundary (AC: 3-4)
+  - [x] Verify selected IDs against the immutable active-profile roster and declared Strategy universe before dispatch and again in the final seal-and-create transaction.
+  - [x] Reject a mismatch between canonical IDs, stored JSON, digest, profile/mapping/schema and manifest evidence with stable sanitized integrity reasons.
+  - [x] Do not fetch evidence, create a Backtest, or mutate a V1 record for invalid selection state.
 
-- [ ] Prove provenance and compatibility (AC: 1-6)
-  - [ ] Add unit tests for typed selection construction and exact digest payload semantics; include reordered/duplicate input and a changed-membership negative case.
-  - [ ] Add repository/manifest/preparation integration tests for durable readback, stale activation, tampered digest/ID mapping, selected-only evidence scope and atomic no-child-on-failure.
-  - [ ] Add V1 fixture/replay/comparison regression tests and version-dispatch/cross-version rejection tests.
-  - [ ] Run focused universe, manifest, preparation, job/run/result/comparison tests plus full Backtest regressions, Ruff, Pyrefly, and `git diff --check`.
+- [x] Prove provenance and compatibility (AC: 1-6)
+  - [x] Add unit tests for typed selection construction and exact digest payload semantics; include reordered/duplicate input and a changed-membership negative case.
+  - [x] Add repository/manifest/preparation integration tests for durable readback, stale activation, tampered digest/ID mapping, selected-only evidence scope and atomic no-child-on-failure.
+  - [x] Add V1 fixture/replay/comparison regression tests and version-dispatch/cross-version rejection tests.
+  - [x] Run focused universe, manifest, preparation, job/run/result/comparison tests plus full Backtest regressions, Ruff, Pyrefly, and `git diff --check`.
 
 ## Dev Notes
 
@@ -73,14 +73,48 @@ so that preparation, replay, and comparison use exactly the evidence I chose.
 
 ### Agent Model Used
 
+GPT-5 Codex
+
 ### Debug Log References
 
 ### Completion Notes List
 
 - Ultimate context engine analysis completed - comprehensive developer guide created.
+- Implemented the complete selected-universe V2 preparation/seal contract and
+  both adversarial review loops, including restart, deletion and navigation edges.
+- Verification: 253 focused and 837 full Backtest tests passed; Ruff,
+  changed-file Pyrefly, and `git diff --check` passed.
+- Review pass 3 tightened closed preparation ranges and lineage-aware
+  idempotency, V2 manifest/version and exactly-one-lineage database integrity,
+  execution-contract sealing, preparation stage/cancellation boundaries,
+  stable missing-evidence taxonomy, V1 typed serialization, and HTMX activity
+  polling/child navigation. Direct regressions cover each localized finding.
+- Review pass 3 verification: 153 focused and 840 full Backtest tests passed;
+  Ruff and `git diff --check` passed. Changed-file Pyrefly still reports nine
+  pre-existing test-fixture narrowing errors outside the pass-3 additions.
 
 ### File List
+
+- `app/api/routes/strategy_manager.py`
+- `app/api/templates/_preparation_activity.html`
+- `app/repositories/backtest_repo.py`
+- `app/services/backtest/backtest_launch_service.py`
+- `app/services/backtest/run_input_manifest.py`
+- `app/services/backtest/run_universe.py`
+- `app/services/backtest/strategy_job.py`
+- `app/services/backtest/strategy_job_service.py`
+- `app/services/backtest/worker.py`
+- `tests/backtest/test_backtest_worker.py`
+- `tests/backtest/test_run_input_manifest.py`
+- `tests/backtest/test_run_universe.py`
+- `tests/backtest/test_strategy_job_repository.py`
+- `tests/backtest/test_universe_selection_routes.py`
+- `_bmad-output/implementation-artifacts/sprint-status.yaml`
 
 ## Change Log
 
 - 2026-08-22: Created implementation-ready selected-universe sealing context for GitHub #281.
+- 2026-08-22: Applied review-pass-3 integrity, lifecycle, compatibility, and
+  supported-route provenance fixes with direct regression coverage.
+- 2026-08-22: Completed three adversarial review passes; all accepted findings
+  are resolved and the full Backtest regression suite is green.

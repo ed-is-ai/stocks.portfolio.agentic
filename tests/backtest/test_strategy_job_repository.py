@@ -20,6 +20,8 @@ from app.services.backtest.strategy_job import (
     BootstrapStage,
     JobFailureCode,
     PreparationStage,
+    PreparationSubmissionV1,
+    RunUniverseSelectionV1,
     STAGE_VALUES,
     StrategyJobConflict,
     StrategyJobNotFound,
@@ -28,6 +30,12 @@ from app.services.backtest.strategy_job import (
     WorkerLeaseFenceV1,
 )
 from app.services.backtest.canonical_manifest import manifest_digest
+from app.services.backtest.run_universe import run_universe_digest
+from app.services.backtest.run_input_manifest import (
+    PinnedSecurityEvidenceV1,
+    build_run_input_manifest_v2,
+)
+from tests.backtest.test_run_input_manifest import _manifest
 from app.services.backtest.historical_data_qualification import (
     FIXTURE_CONTRACT_VERSION,
     REQUEST_CONTRACT_VERSION,
@@ -308,9 +316,316 @@ def _enqueue_backtest(
 def _bootstrap_submission(
     key: str, *, parent_job_id: str | None = None
 ) -> BootstrapSubmissionV1:
-    return BootstrapSubmissionV1(
-        idempotency_key=key, parent_job_id=parent_job_id
+    return BootstrapSubmissionV1(idempotency_key=key, parent_job_id=parent_job_id)
+
+
+def _seed_selected_member(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO security_identities(security_id,mic,provider_symbol,evidence_digest,identity_registry_revision,created_at) VALUES('sec-001','XNAS','TEST',?,?,?)",
+            ("9" * 64, "c" * 64, NOW.isoformat()),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO reconstruction_roster_members(roster_digest,security_id,mic,provider_symbol,currency,source_memberships_json,identity_evidence_json,evidence_digest) VALUES(?,'sec-001','XNAS','TEST','USD','[]','{}',?)",
+            (ROSTER_DIGEST, "8" * 64),
+        )
+
+
+def _prep(key: str) -> PreparationSubmissionV1:
+    s = RunUniverseSelectionV1(
+        profile_hash=PROFILE_HASH,
+        activation_seq=1,
+        universe_parameter="symbols",
+        canonical_security_ids=("sec-001",),
+        run_universe_digest=run_universe_digest(
+            ["sec-001"], parameter="symbols", profile_hash=PROFILE_HASH
+        ),
     )
+    return PreparationSubmissionV1(
+        selection=s,
+        strategy_id="momentum_v1",
+        strategy_api_version=1,
+        strategy_source_digest=BACKTEST_STRATEGY_SOURCE_DIGEST,
+        parameters={"lookback": 20, "symbols": ["sec-001"]},
+        start_month="2026-05",
+        end_month="2026-05",
+        base_currency="USD",
+        starting_capital=Decimal("10000"),
+        idempotency_key=key,
+    )
+
+
+def _claimed_v2(repo: BacktestRepository):
+    accepted = repo.create_preparation_job(_prep("seal"))
+    claim = repo.claim_next_strategy_job()
+    assert claim
+    s = accepted.preparation.selection
+    assert s
+    base = _manifest(
+        strategy_id="momentum_v1",
+        strategy_api_version=1,
+        strategy_source_digest=BACKTEST_STRATEGY_SOURCE_DIGEST,
+        parameters=dict(accepted.preparation.parameters),
+        profile_hash=PROFILE_HASH,
+        start_month="2026-05",
+        end_month="2026-05",
+        ordered_month_digest=BACKTEST_ORDERED_MONTH_DIGEST,
+        base_currency="USD",
+        securities=(
+            PinnedSecurityEvidenceV1(
+                security_id="sec-001", price_revision="7" * 64, action_revision="7" * 64
+            ),
+        ),
+    )
+    m = build_run_input_manifest_v2(
+        base, selection=s, source_preparation_job_id=accepted.job.id
+    )
+    sub = BacktestSubmissionV1(
+        strategy_id=m.strategy_id,
+        strategy_api_version=m.strategy_api_version,
+        strategy_source_digest=m.strategy_source_digest,
+        parameters=dict(m.parameters),
+        profile_hash=m.profile_hash,
+        start_month=m.start_month,
+        end_month=m.end_month,
+        base_currency=m.base_currency,
+        starting_capital=m.starting_capital,
+        run_input_manifest_digest=m.digest(),
+        execution_contract_digest=m.execution_contract_digest(),
+        canonical_manifest_json=m.canonical_json(),
+        manifest_version="run_input_manifest.v2",
+        universe_selection=s,
+        source_preparation_job_id=accepted.job.id,
+    )
+    return accepted, claim, sub
+
+
+def test_preparation_replay_divergence_and_deleted_target(tmp_path: Path) -> None:
+    path = tmp_path / "prep.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    sub = _prep("k")
+    a = repo.create_preparation_job(sub)
+    assert repo.create_preparation_job(sub).job == a.job
+    with pytest.raises(StrategyJobConflict):
+        repo.create_preparation_job(
+            sub.model_copy(update={"starting_capital": Decimal("2")})
+        )
+    claim = repo.claim_next_strategy_job()
+    assert claim
+    repo.request_strategy_job_cancellation(
+        a.job.id, expected_version=claim.job.status_version
+    )
+    requested = repo.strategy_job(a.job.id)
+    cancel = repo.cancel_claimed_strategy_job(
+        a.job.id, claim.claim_token, expected_version=requested.status_version
+    )
+    repo.delete_strategy_job(a.job.id, expected_version=cancel.status_version)
+    recreated = repo.create_preparation_job(sub)
+    assert recreated.job.id != a.job.id
+
+
+def test_legacy_upgrade_preserves_v1_and_creates_v2_index(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.db"
+    repo = _repo(path)
+    v1 = _enqueue_backtest(repo, idempotency_key="v1")
+    assert "manifest_version" not in v1.backtest.model_dump(exclude=None)
+    assert "manifest_version" not in json.loads(v1.backtest.model_dump_json())
+    raw = repo.run_input_manifest_json(v1.backtest.run_input_manifest_digest)
+    with sqlite3.connect(path) as c:
+        c.execute("DROP TRIGGER strategy_run_v2_contract_insert")
+        c.execute("DROP INDEX idx_strategy_runs_source_preparation")
+        for col in (
+            "selection_json",
+            "source_preparation_job_id",
+            "run_universe_digest",
+            "manifest_version",
+        ):
+            c.execute(f"ALTER TABLE strategy_runs DROP COLUMN {col}")
+        c.execute("ALTER TABLE run_input_manifests DROP COLUMN manifest_version")
+    reopened = BacktestRepository(db.make_connect(lambda: path))
+    reopened.ensure_schema()
+    assert (
+        reopened.run_input_manifest_json(v1.backtest.run_input_manifest_digest) == raw
+    )
+    with sqlite3.connect(path) as c:
+        assert c.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='idx_strategy_runs_source_preparation'"
+        ).fetchone()
+
+
+def test_v2_bypass_and_mislabeled_json_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "gate.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    s = _prep("k").selection
+    bad = BacktestSubmissionV1(
+        strategy_id="s",
+        strategy_api_version=1,
+        strategy_source_digest="b" * 64,
+        parameters={"symbols": ["sec-001"]},
+        profile_hash=PROFILE_HASH,
+        start_month="2026-05",
+        end_month="2026-05",
+        base_currency="USD",
+        starting_capital=Decimal("1"),
+        run_input_manifest_digest="c" * 64,
+        execution_contract_digest="d" * 64,
+        canonical_manifest_json="{}",
+        manifest_version="run_input_manifest.v2",
+        universe_selection=s,
+        source_preparation_job_id="p",
+    )
+    with pytest.raises(StrategyJobConflict):
+        repo.create_backtest_job(bad)
+    v2 = _manifest().model_copy(update={"schema_version": "run_input_manifest.v2"})
+    mislabeled = bad.model_copy(
+        update={
+            "manifest_version": "run_input_manifest.v1",
+            "universe_selection": None,
+            "source_preparation_job_id": None,
+            "parent_job_id": None,
+            "canonical_manifest_json": v2.model_dump_json(),
+            "run_input_manifest_digest": manifest_digest(
+                json.loads(v2.model_dump_json())
+            ),
+        }
+    )
+    with pytest.raises(StrategyJobConflict):
+        repo.create_backtest_job(mislabeled)
+
+
+@pytest.mark.parametrize(
+    "field", ("parameters", "source", "period", "selection", "json", "execution")
+)
+def test_seal_mismatch_has_zero_mutation(tmp_path: Path, field: str) -> None:
+    path = tmp_path / f"{field}.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    _patch_ready(repo)
+    a, c, s = _claimed_v2(repo)
+    if field == "parameters":
+        s = s.model_copy(update={"parameters": {"symbols": ["sec-001"]}})
+    elif field == "source":
+        s = s.model_copy(update={"strategy_source_digest": "6" * 64})
+    elif field == "period":
+        s = s.model_copy(update={"end_month": "2026-06"})
+    elif field == "selection":
+        s = s.model_copy(
+            update={
+                "universe_selection": s.universe_selection.model_copy(
+                    update={"activation_seq": 2}
+                )
+            }
+        )  # type: ignore[union-attr]
+    elif field == "execution":
+        s = s.model_copy(update={"execution_contract_digest": "f" * 64})
+    else:
+        s = s.model_copy(update={"canonical_manifest_json": "{}"})
+    with pytest.raises((StrategyJobConflict, ValueError)):
+        repo.seal_preparation_and_create_backtest(
+            a.job.id, c.claim_token, expected_version=c.job.status_version, submission=s
+        )
+    assert (
+        len(repo.list_strategy_jobs()) == 1
+        and repo.run_input_manifest_json(s.run_input_manifest_digest) is None
+    )
+
+
+def test_selected_only_seal_result_restart_and_retry(tmp_path: Path) -> None:
+    path = tmp_path / "success.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    _patch_ready(repo)
+    a, c, s = _claimed_v2(repo)
+    child = repo.seal_preparation_and_create_backtest(
+        a.job.id, c.claim_token, expected_version=c.job.status_version, submission=s
+    )
+    assert (
+        repo.seal_preparation_and_create_backtest(
+            a.job.id, c.claim_token, expected_version=c.job.status_version, submission=s
+        )
+        == child
+    )
+    assert repo.strategy_run(child.job.id).universe_selection == s.universe_selection
+    cancel = repo.request_strategy_job_cancellation(
+        child.job.id, expected_version=child.job.status_version
+    )
+    restart = repo.restart_backtest_job(
+        child.job.id, expected_version=cancel.status_version, idempotency_key="r"
+    )
+    assert (
+        restart.backtest.manifest_version == "run_input_manifest.v2"
+        and restart.backtest.universe_selection == s.universe_selection
+        and restart.backtest.source_preparation_job_id is None
+    )
+
+
+def test_malformed_preparation_and_run_selection_are_wrapped(tmp_path: Path) -> None:
+    path = tmp_path / "bad-store.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    a = repo.create_preparation_job(_prep("k"))
+    with sqlite3.connect(path) as c:
+        c.execute("DROP TRIGGER preparation_run_immutable")
+        c.execute(
+            "UPDATE preparation_runs SET selection_json='{}' WHERE job_id=?",
+            (a.job.id,),
+        )
+    with pytest.raises(BacktestIntegrityError):
+        repo.preparation_run(a.job.id)
+
+
+def test_v2_empty_stored_manifest_cannot_bypass_integrity(tmp_path: Path) -> None:
+    path = tmp_path / "empty-v2.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    _patch_ready(repo)
+    a, c, submission = _claimed_v2(repo)
+    child = repo.seal_preparation_and_create_backtest(
+        a.job.id,
+        c.claim_token,
+        expected_version=c.job.status_version,
+        submission=submission,
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER run_input_manifest_immutable_update")
+        conn.execute(
+            "UPDATE run_input_manifests SET canonical_manifest_json='{}' WHERE digest=?",
+            (child.backtest.run_input_manifest_digest,),
+        )
+    with pytest.raises(BacktestIntegrityError, match="manifest"):
+        repo.strategy_run(child.job.id)
+
+
+def test_v2_result_comparison_and_malformed_run_provenance(tmp_path: Path) -> None:
+    path = tmp_path / "result.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    _patch_ready(repo)
+    a, c, s = _claimed_v2(repo)
+    v2 = repo.seal_preparation_and_create_backtest(
+        a.job.id, c.claim_token, expected_version=c.job.status_version, submission=s
+    )
+    _complete_backtest(repo, v2.job.id)
+    result = repo.backtest_result(v2.job.id)
+    assert (
+        result.universe_selection == s.universe_selection
+        and result.source_preparation_job_id == a.job.id
+    )
+    v1 = _enqueue_backtest(repo, idempotency_key="v1-peer")
+    _complete_backtest(repo, v1.job.id)
+    assert (
+        repo.is_comparable(v2.job.id, v1.job.id).reason.value
+        == "manifest_version_mismatch"
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER strategy_run_immutable_update")
+        conn.execute(
+            "UPDATE strategy_runs SET selection_json='{}' WHERE id=?", (v2.job.id,)
+        )
+    with pytest.raises(BacktestIntegrityError):
+        repo.strategy_run(v2.job.id)
 
 
 def test_create_bootstrap_job_replays_the_same_persisted_job_at_every_status(
@@ -442,8 +757,12 @@ def test_create_bootstrap_job_rejects_divergent_reuse_without_writes(
 
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone() == (1,)
-        assert conn.execute("SELECT COUNT(*) FROM bootstrap_enqueue_actions").fetchone() == (1,)
-        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (1,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM bootstrap_enqueue_actions"
+        ).fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (
+            1,
+        )
 
 
 def test_create_bootstrap_job_rejects_a_distinct_active_submission(
@@ -478,8 +797,12 @@ def test_create_bootstrap_job_same_key_is_atomic_across_repository_writers(
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone() == (1,)
         assert conn.execute("SELECT COUNT(*) FROM bootstrap_runs").fetchone() == (1,)
-        assert conn.execute("SELECT COUNT(*) FROM bootstrap_enqueue_actions").fetchone() == (1,)
-        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (1,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM bootstrap_enqueue_actions"
+        ).fetchone() == (1,)
+        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (
+            1,
+        )
     assert _repo(path).create_bootstrap_job(submission).job == results[0].job
 
 
@@ -541,8 +864,12 @@ def test_bootstrap_enqueue_rolls_back_all_records_when_binding_insert_fails(
     with sqlite3.connect(path) as conn:
         assert conn.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone() == (0,)
         assert conn.execute("SELECT COUNT(*) FROM bootstrap_runs").fetchone() == (0,)
-        assert conn.execute("SELECT COUNT(*) FROM bootstrap_enqueue_actions").fetchone() == (0,)
-        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (0,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM bootstrap_enqueue_actions"
+        ).fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM notification_outbox").fetchone() == (
+            0,
+        )
 
 
 def test_initialization_and_backtest_placeholders_share_one_fifo(

@@ -7,6 +7,7 @@ stale profile rejection, and validation of the universe selector.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,12 +15,14 @@ from app.api.app import app
 from app.api.dependencies import (
     get_backtest_launch_service,
     get_backtest_repository,
+    get_strategy_job_service,
 )
 from app.services.backtest.run_universe import (
     canonical_run_universe,
     run_universe_digest,
 )
 from fastapi.testclient import TestClient
+from app.services.backtest.strategy_job import StrategyJobStatus, StrategyJobType
 
 import tests.test_strategy_manager_routes as routes_helpers
 
@@ -44,19 +47,41 @@ class UniverseFakeRepo(routes_helpers.FakeRepo):
     def roster_member_identities(self, profile_hash):
         return list(self._securities)
 
+    def strategy_job(self, job_id):
+        return SimpleNamespace(
+            id=job_id,
+            job_type=StrategyJobType.PREPARATION,
+            status=StrategyJobStatus.COMPLETE,
+            status_version=2,
+            current_stage=None,
+            failure_detail=None,
+        )
+
+    def preparation_run(self, job_id):
+        return SimpleNamespace(
+            job_id=job_id,
+            selection=SimpleNamespace(canonical_security_ids=("sid_001",)),
+        )
+
+    def preparation_child_backtest_id(self, job_id):
+        return "child-1"
+
 
 @pytest.fixture
 def universe_env(monkeypatch):
     repo = UniverseFakeRepo()
     launch = routes_helpers.FakeLaunchService()
+    jobs = routes_helpers.FakeJobs()
     app.dependency_overrides[get_backtest_repository] = lambda: repo
     app.dependency_overrides[get_backtest_launch_service] = lambda: launch
+    app.dependency_overrides[get_strategy_job_service] = lambda: jobs
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     try:
         yield repo, launch
     finally:
         app.dependency_overrides.pop(get_backtest_repository, None)
         app.dependency_overrides.pop(get_backtest_launch_service, None)
+        app.dependency_overrides.pop(get_strategy_job_service, None)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +176,31 @@ def test_configuration_submit_with_valid_universe(universe_env) -> None:
     )
     assert response.status_code == 303
     assert len(launch.launch_calls) == 1
+
+
+def test_preparation_redirect_and_completed_child_navigation(universe_env) -> None:
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "page",
+            "security_ids": "sid_001",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=True,
+    )
+    assert (
+        response.status_code == 200
+        and "Evidence preparation activity" in response.text
+        and "/strategy-manager/activities/child-1" in response.text
+        and "last_seen_version=" not in response.text
+    )
 
 
 def test_configuration_submit_without_security_ids_fails(

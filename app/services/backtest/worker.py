@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Mapping, Protocol, cast
 
 from app.core import config
 from app.repositories import db
@@ -19,6 +19,8 @@ from app.repositories.historical_price_repo import (
     HistoricalPriceRepository,
     StoredHistoricalEvidence,
 )
+from app.repositories.fx_quote_repo import FxQuoteRepository
+from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.backtest_engine import (
     EquityCurvePointV1,
     EntryFillEventV1,
@@ -38,6 +40,9 @@ from app.services.backtest.reconstruction_roster import CapturedRosterV1
 from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
     RunInputManifestV1,
+    read_run_input_manifest,
+    build_run_input_manifest,
+    build_run_input_manifest_v2,
 )
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
@@ -45,6 +50,7 @@ from app.services.backtest.skill_discovery import (
 )
 from app.services.backtest.strategy_job import (
     BacktestRunV1,
+    BacktestSubmissionV1,
     BootstrapStage,
     JobFailureCode,
     STAGE_SEQUENCES,
@@ -54,7 +60,8 @@ from app.services.backtest.strategy_job import (
     StrategyJobV1,
     WorkerLeaseFenceV1,
 )
-from app.services.backtest.strategy_protocol import StrategyProtocolV1
+from app.services.backtest.strategy_protocol import JsonValue, StrategyProtocolV1
+from app.services.backtest.strategy_job_service import StrategyJobService
 
 if TYPE_CHECKING:
     from app.services.backtest.strategy_bootstrap_service import (
@@ -226,6 +233,151 @@ class StageWalkEngine:
             return self._repository.strategy_job(job.id)
 
 
+class PreparationStageEngine(StageWalkEngine):
+    def __init__(
+        self,
+        repository: BacktestRepository,
+        *,
+        prices: HistoricalPriceRepository,
+        fx: FxQuoteRepository,
+        skills_root: Path = config.SKILLS_DIR,
+        project_root: Path = config.ROOT_DIR,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> None:
+        super().__init__(repository, StrategyJobType.PREPARATION, lease=lease)
+        self._prices = prices
+        self._fx = fx
+        self._skills_root = skills_root
+        self._project_root = project_root
+
+    def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
+        job = self._repository.strategy_job(job_id)
+        prep = self._repository.preparation_run(job_id)
+        if not _owns(job, claim_token) or prep.selection is None:
+            return job
+        if prep.base_currency is None or prep.starting_capital is None:
+            return self._fail(job, claim_token, "Preparation input is incomplete")
+        try:
+            for stage in STAGE_SEQUENCES[StrategyJobType.PREPARATION]:
+                job = self._repository.strategy_job(job_id)
+                if not _owns(job, claim_token):
+                    return job
+                if job.cancel_requested_at is not None:
+                    return self._cancel(job_id, claim_token)
+                try:
+                    job = self._repository.set_strategy_job_current_stage(
+                        job_id,
+                        claim_token,
+                        expected_version=job.status_version,
+                        stage=stage,
+                        lease=self._lease,
+                    )
+                except StrategyJobConflict:
+                    return self._repository.strategy_job(job_id)
+            desc = next(
+                x
+                for x in discover_strategies(self._skills_root).strategies
+                if x.strategy_id == prep.strategy_id
+            )
+            s = prep.selection
+            if (desc.api_version, desc.source_digest) != (
+                prep.strategy_api_version,
+                prep.strategy_source_digest,
+            ) or (
+                desc.universe.schema_version,
+                desc.universe.mode,
+                desc.universe.parameter,
+            ) != (s.universe_schema, s.universe_mode, s.universe_parameter):
+                raise ValueError
+            resolver = BacktestLaunchService(
+                backtest_repo=self._repository,
+                historical_price_repo=self._prices,
+                fx_quote_repo=self._fx,
+                jobs=StrategyJobService(self._repository),
+                skills_root=self._skills_root,
+                project_root=self._project_root,
+            )
+            evidence = resolver._resolve_roster_evidence(
+                profile_hash=s.profile_hash,
+                snapshot_month=str(prep.start_month),
+                base_currency=prep.base_currency,
+                selected_security_ids=s.canonical_security_ids,
+            )
+            generic = dict(prep.parameters)
+            generic.pop(s.universe_parameter, None)
+            base = build_run_input_manifest(
+                project_root=self._project_root,
+                backtest_repo=self._repository,
+                historical_price_repo=self._prices,
+                fx_quote_repo=self._fx,
+                strategy=desc,
+                submitted_parameters=cast(Mapping[str, JsonValue], generic),
+                profile_hash=s.profile_hash,
+                start_month=str(prep.start_month),
+                end_month=str(prep.end_month),
+                base_currency=prep.base_currency,
+                starting_capital=prep.starting_capital,
+                securities=evidence,
+            )
+            base = base.model_copy(update={"parameters": prep.parameters})
+            manifest = build_run_input_manifest_v2(
+                base, selection=s, source_preparation_job_id=job_id
+            )
+            self._repository.seal_preparation_and_create_backtest(
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
+                submission=BacktestSubmissionV1(
+                    strategy_id=desc.strategy_id,
+                    strategy_api_version=desc.api_version,
+                    strategy_source_digest=desc.source_digest,
+                    parameters=dict(manifest.parameters),
+                    profile_hash=s.profile_hash,
+                    start_month=str(prep.start_month),
+                    end_month=str(prep.end_month),
+                    base_currency=prep.base_currency,
+                    starting_capital=prep.starting_capital,
+                    run_input_manifest_digest=manifest.digest(),
+                    execution_contract_digest=manifest.execution_contract_digest(),
+                    canonical_manifest_json=manifest.canonical_json(),
+                    manifest_version="run_input_manifest.v2",
+                    universe_selection=s,
+                    source_preparation_job_id=job_id,
+                ),
+            )
+            return self._repository.strategy_job(job_id)
+        except Exception as exc:
+            current = self._repository.strategy_job(job_id)
+            if not _owns(current, claim_token):
+                return current
+            if current.cancel_requested_at:
+                return self._cancel(job_id, claim_token)
+            code = (
+                JobFailureCode.REQUIRED_DATA_MISSING
+                if getattr(exc, "code", None)
+                in {"required_data_missing", "evidence_missing"}
+                else JobFailureCode.INTEGRITY_ERROR
+            )
+            detail = (
+                "Required selected evidence is unavailable"
+                if code is JobFailureCode.REQUIRED_DATA_MISSING
+                else "Selected evidence could not be sealed"
+            )
+            try:
+                return self._repository.fail_claimed_strategy_job(
+                    job_id,
+                    claim_token,
+                    expected_version=current.status_version,
+                    failure_code=code,
+                    failed_month=None,
+                    detail=detail,
+                    lease=self._lease,
+                )
+            except StrategyJobConflict:
+                return self._repository.strategy_job(job_id)
+
+
 class BootstrapStageEngine:
     """Walk one claimed ``bootstrap`` job's stage sequence with real logic.
 
@@ -291,7 +443,10 @@ class BootstrapStageEngine:
                 )
             except StrategyJobConflict:
                 current = self._repository.strategy_job(job_id)
-                if _owns(current, claim_token) and current.cancel_requested_at is not None:
+                if (
+                    _owns(current, claim_token)
+                    and current.cancel_requested_at is not None
+                ):
                     return self._cancel(job_id, claim_token)
                 return current
             # Run the real stage logic
@@ -383,7 +538,7 @@ def build_stage_walk_engine(
     *,
     lease: WorkerLeaseFenceV1 | None = None,
     bootstrap_providers: "StrategyProviderBundleV1 | None" = None,
-) -> StageWalkEngine | BootstrapStageEngine:
+) -> StageWalkEngine | BootstrapStageEngine | PreparationStageEngine:
     """Build one claimed stage-walking activity's engine.
 
     Loads the job's subtype identity row eagerly so a subtype-inconsistent
@@ -399,8 +554,19 @@ def build_stage_walk_engine(
         return BootstrapStageEngine(
             backtest, lease=lease, providers=bootstrap_providers
         )
-    backtest.preparation_run(job_id)
-    return StageWalkEngine(backtest, job_type, lease=lease)
+    prep = backtest.preparation_run(job_id)
+    if prep.selection is None:
+        return StageWalkEngine(backtest, job_type, lease=lease)
+    prices = HistoricalPriceRepository(
+        db.make_connect(lambda: str(config.HISTORICAL_PRICE_CACHE))
+    )
+    prices.ensure_schema()
+    return PreparationStageEngine(
+        backtest,
+        prices=prices,
+        fx=FxQuoteRepository(db.make_connect(lambda: str(config.TRADES_DB))),
+        lease=lease,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -858,7 +1024,7 @@ class BacktestExecutionEngine:
                 "Pinned run input manifest is unavailable",
             )
         try:
-            manifest = RunInputManifestV1.model_validate_json(manifest_json)
+            manifest = read_run_input_manifest(manifest_json)
         except Exception as exc:
             raise BacktestResolutionError(
                 JobFailureCode.INTEGRITY_ERROR,
@@ -868,6 +1034,14 @@ class BacktestExecutionEngine:
             raise BacktestResolutionError(
                 JobFailureCode.INTEGRITY_ERROR,
                 "Pinned run input manifest does not match its own digest",
+            )
+        if (
+            manifest.schema_version != self._backtest.manifest_version
+            or getattr(manifest, "universe_selection", None)
+            != self._backtest.universe_selection
+        ):
+            raise BacktestResolutionError(
+                JobFailureCode.INTEGRITY_ERROR, "Pinned manifest provenance is invalid"
             )
         if self._repository.snapshot_profile(self._backtest.profile_hash) is None:
             raise BacktestResolutionError(

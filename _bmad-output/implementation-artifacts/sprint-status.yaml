@@ -85,7 +85,7 @@ development_status:
   4-6-prepare-the-evidence-needed-for-a-backtest: backlog
   4-6-1-create-production-bootstrap-evidence: done
   4-6-2-make-bootstrap-submission-idempotent: done
-  4-6-3-seal-the-selected-universe-digest: ready-for-dev
+  4-6-3-seal-the-selected-universe-digest: done
   4-7-run-and-restart-backtests-from-pinned-evidence: backlog
   4-8-compare-results-using-compatible-evidence-rules: backlog
   4-9-complete-the-first-backtest-from-a-clean-checkout: backlog

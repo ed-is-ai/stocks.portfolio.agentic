@@ -64,9 +64,11 @@ from app.services.backtest.strategy_protocol import (
     JsonValue,
     validate_strategy_parameters,
 )
+from app.services.backtest.strategy_job import RunUniverseSelectionV1
 from app.services.backtest.trading_calendar import TradingCalendar
 
 RUN_INPUT_MANIFEST_VERSION = "run_input_manifest.v1"
+RUN_INPUT_MANIFEST_V2_VERSION = "run_input_manifest.v2"
 
 #: Story 2.4 lands the real deterministic Backtest Engine and its
 #: concrete Strategy protocol semantics (fill/ledger/action processing
@@ -302,6 +304,60 @@ class RunInputManifestV1(_RunInputModel):
 
     def execution_contract_digest(self) -> str:
         return manifest_digest(self.execution_contract_payload())
+
+
+class RunInputManifestV2(RunInputManifestV1):
+    schema_version: Literal["run_input_manifest.v2"]  # pyrefly: ignore [bad-override]
+    universe_selection: RunUniverseSelectionV1
+    source_preparation_job_id: NonEmpty
+
+    @model_validator(mode="after")
+    def _v2_consistency(self) -> "RunInputManifestV2":
+        selection = self.universe_selection
+        if (
+            tuple(sorted(x.security_id for x in self.securities))
+            != selection.canonical_security_ids
+            or self.profile_hash != selection.profile_hash
+        ):
+            raise ValueError("manifest evidence does not match selected universe")
+        if self.parameters.get(selection.universe_parameter) != list(
+            selection.canonical_security_ids
+        ):
+            raise ValueError("runtime universe does not match selected universe")
+        return self
+
+
+def read_run_input_manifest(raw: str) -> RunInputManifestV1 | RunInputManifestV2:
+    import json
+
+    try:
+        payload = json.loads(raw)
+        schema = payload.get("schema_version") if isinstance(payload, dict) else None
+    except (TypeError, ValueError) as exc:
+        raise RunInputManifestError(
+            "invalid_manifest", "run input manifest is invalid"
+        ) from exc
+    if schema == RUN_INPUT_MANIFEST_VERSION:
+        return RunInputManifestV1.model_validate_json(raw)
+    if schema == RUN_INPUT_MANIFEST_V2_VERSION:
+        return RunInputManifestV2.model_validate_json(raw)
+    raise RunInputManifestError(
+        "unsupported_manifest_version", "run input manifest version is unsupported"
+    )
+
+
+def build_run_input_manifest_v2(
+    base: RunInputManifestV1,
+    *,
+    selection: RunUniverseSelectionV1,
+    source_preparation_job_id: str,
+) -> RunInputManifestV2:
+    return RunInputManifestV2(
+        **base.model_dump(mode="python", exclude={"schema_version"}),
+        schema_version=RUN_INPUT_MANIFEST_V2_VERSION,
+        universe_selection=selection,
+        source_preparation_job_id=source_preparation_job_id,
+    )
 
 
 def _installed_version(package: str) -> str:
@@ -570,7 +626,11 @@ __all__ = [
     "PROTOCOL_SCHEMA_VERSION",
     "PinnedSecurityEvidenceV1",
     "RUN_INPUT_MANIFEST_VERSION",
+    "RUN_INPUT_MANIFEST_V2_VERSION",
     "RunInputManifestError",
     "RunInputManifestV1",
+    "RunInputManifestV2",
+    "read_run_input_manifest",
+    "build_run_input_manifest_v2",
     "build_run_input_manifest",
 ]

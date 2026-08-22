@@ -45,6 +45,11 @@ from app.services.backtest.strategy_job import (
 from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.worker import main
 import app.services.backtest.worker as worker_module
+from tests.backtest.test_strategy_job_repository import (
+    _prep,
+    _repo as _job_repo,
+    _seed_selected_member,
+)
 
 
 @dataclass
@@ -918,3 +923,91 @@ def test_stage_engine_construction_failure_is_not_mislabeled_interruption(
         == 1
     )
     assert repo.failures[0]["failure_code"] is JobFailureCode.INTEGRITY_ERROR
+
+
+def _typed_claim(tmp_path: Path, key: str):
+    path = tmp_path / f"{key}.db"
+    repo = _job_repo(path)
+    _seed_selected_member(path)
+    accepted = repo.create_preparation_job(_prep(key))
+    claim = repo.claim_next_strategy_job()
+    assert claim
+    return repo, accepted, claim
+
+
+def test_preparation_strategy_drift_and_cancellation_are_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, a, c = _typed_claim(tmp_path, "drift")
+    drift = _fake_descriptor().model_copy(
+        update={
+            "strategy_id": "momentum_v1",
+            "source_digest": "0" * 64,
+            "universe": StrategyUniverseContractV1(
+                schema_version="strategy_universe.v1",
+                mode="selected-securities",
+                parameter="symbols",
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "discover_strategies",
+        lambda _root: type("D", (), {"strategies": (drift,)})(),
+    )
+    engine = worker_module.PreparationStageEngine(repo, prices=object(), fx=object())  # type: ignore[arg-type]
+    assert (
+        engine.run(a.job.id, c.claim_token).failure_code
+        is JobFailureCode.INTEGRITY_ERROR
+    )
+    repo2, a2, c2 = _typed_claim(tmp_path, "cancel")
+    repo2.request_strategy_job_cancellation(
+        a2.job.id, expected_version=c2.job.status_version
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "discover_strategies",
+        lambda _root: (_ for _ in ()).throw(RuntimeError()),
+    )
+    assert (
+        worker_module.PreparationStageEngine(repo2, prices=object(), fx=object())
+        .run(a2.job.id, c2.claim_token)
+        .status
+        is StrategyJobStatus.CANCELLED
+    )  # type: ignore[arg-type]
+
+
+def test_preparation_missing_evidence_uses_required_data_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, a, c = _typed_claim(tmp_path, "missing")
+    desc = _fake_descriptor().model_copy(
+        update={
+            "strategy_id": "momentum_v1",
+            "source_digest": _prep("x").strategy_source_digest,
+            "universe": StrategyUniverseContractV1(
+                schema_version="strategy_universe.v1",
+                mode="selected-securities",
+                parameter="symbols",
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "discover_strategies",
+        lambda _root: type("D", (), {"strategies": (desc,)})(),
+    )
+
+    class Missing(ValueError):
+        code = "required_data_missing"
+
+    monkeypatch.setattr(
+        worker_module.BacktestLaunchService,
+        "_resolve_roster_evidence",
+        lambda *_a, **_k: (_ for _ in ()).throw(Missing()),
+    )
+    result = worker_module.PreparationStageEngine(
+        repo, prices=object(), fx=object()
+    ).run(a.job.id, c.claim_token)  # type: ignore[arg-type]
+    assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
+    assert result.failure_detail == "Required selected evidence is unavailable"

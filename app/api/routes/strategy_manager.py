@@ -50,6 +50,7 @@ from app.services.backtest.result_presenter import (
 from app.services.backtest.run_universe import (
     RunUniverseError,
     canonical_run_universe,
+    run_universe_digest,
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.snapshot_profile import SnapshotProfileV1
@@ -68,6 +69,7 @@ from app.services.backtest.strategy_job import (
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
+    RunUniverseSelectionV1,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1
@@ -850,7 +852,24 @@ async def submit_strategy_configuration(
         universe_binding = strategy.bind_universe(canonical)
         merged_params = dict(command.parameters)
         merged_params.update(universe_binding)
-        command = replace(command, parameters=merged_params)
+        selection = RunUniverseSelectionV1(
+            profile_hash=submitted_profile_hash,
+            activation_seq=submitted_activation_seq,
+            universe_schema=strategy.universe.schema_version,
+            universe_mode=strategy.universe.mode,
+            universe_parameter=strategy.universe.parameter,
+            canonical_security_ids=canonical,
+            run_universe_digest=run_universe_digest(
+                canonical,
+                universe_schema=strategy.universe.schema_version,
+                mode=strategy.universe.mode,
+                parameter=strategy.universe.parameter,
+                profile_hash=submitted_profile_hash,
+            ),
+        )
+        command = replace(
+            command, parameters=merged_params, universe_selection=selection
+        )
     try:
         result = launch.launch(command)
     except BacktestLaunchValidationError as exc:
@@ -879,6 +898,7 @@ async def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLRes
 #: a backtest view, and vice versa) -- Stories 2.8/2.9 own list/polling/
 #: Result presentation.
 _ACTIVITY_TEMPLATES: dict[StrategyJobType, str] = {
+    StrategyJobType.PREPARATION: "_preparation_activity.html",
     StrategyJobType.INITIALIZATION: "_initialization_activity.html",
     StrategyJobType.BACKTEST: "_backtest_activity.html",
 }
@@ -892,6 +912,8 @@ def _activity_context(
         run: object = repo.initialization_run(job_id)
     elif job.job_type is StrategyJobType.BACKTEST:
         run = repo.strategy_run(job_id)
+    elif job.job_type is StrategyJobType.PREPARATION:
+        run = repo.preparation_run(job_id)
     else:
         raise StrategyJobNotFound("activity not found")
     #: Story 2.8 AC 3 / Story 2.9: a completed Backtest exposes a named
@@ -904,12 +926,18 @@ def _activity_context(
         and job.status is StrategyJobStatus.COMPLETE
         else None
     )
+    child_id = (
+        repo.preparation_child_backtest_id(job_id)
+        if job.job_type is StrategyJobType.PREPARATION
+        else None
+    )
     return {
         "job": job,
         "run": run,
         "actions": service.legal_actions(job_id).legal_actions,
         "terminal": job.status in _TERMINAL,
         "review_url": review_url,
+        "child_url": f"/strategy-manager/activities/{child_id}" if child_id else None,
     }
 
 

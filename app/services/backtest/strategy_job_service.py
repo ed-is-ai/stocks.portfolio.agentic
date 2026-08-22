@@ -135,8 +135,12 @@ class StrategyJobService:
     def enqueue_bootstrap(self, submission: BootstrapSubmissionV1):
         return self._repository.create_bootstrap_job(submission)
 
-    def enqueue_preparation(self, *, parent_job_id: str | None = None):
-        return self._repository.create_preparation_job(parent_job_id=parent_job_id)
+    def enqueue_preparation(self, submission=None, *, parent_job_id: str | None = None):
+        if submission is None:
+            return self._repository.create_preparation_job(parent_job_id=parent_job_id)
+        return self._repository.create_preparation_job(
+            submission, parent_job_id=parent_job_id
+        )
 
     def request_cancellation(self, request: StrategyJobCancellationV1):
         return self._repository.request_strategy_job_cancellation(

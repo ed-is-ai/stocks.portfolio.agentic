@@ -34,7 +34,11 @@ from app.services.backtest.run_input_manifest import (
     RunInputManifestError,
     RunInputManifestV1,
     build_run_input_manifest,
+    build_run_input_manifest_v2,
+    read_run_input_manifest,
 )
+from app.services.backtest.run_universe import run_universe_digest
+from app.services.backtest.strategy_job import RunUniverseSelectionV1
 from app.services.backtest.skill_discovery import discover_strategies
 from app.services.backtest.snapshot_profile import (
     MonthlySnapshotCommitV1,
@@ -145,6 +149,32 @@ def test_digest_is_stable_across_repeated_calls() -> None:
     manifest = _manifest()
     assert manifest.digest() == manifest.digest()
     assert manifest.canonical_json() == manifest.canonical_json()
+
+
+def test_v2_manifest_dispatch_and_runtime_selection_equality() -> None:
+    s = RunUniverseSelectionV1(
+        profile_hash=DIGEST_A,
+        activation_seq=1,
+        universe_parameter="symbols",
+        canonical_security_ids=("sec-000",),
+        run_universe_digest=run_universe_digest(
+            ["sec-000"], parameter="symbols", profile_hash=DIGEST_A
+        ),
+    )
+    base = _manifest(parameters={"symbols": ["sec-000"]})
+    v2 = build_run_input_manifest_v2(
+        base, selection=s, source_preparation_job_id="prep"
+    )
+    assert (
+        read_run_input_manifest(v2.canonical_json()).canonical_json()
+        == v2.canonical_json()
+    )
+    with pytest.raises(ValueError, match="runtime universe"):
+        build_run_input_manifest_v2(
+            _manifest(parameters={"symbols": ["other"]}),
+            selection=s,
+            source_preparation_job_id="prep",
+        )
 
 
 def test_digest_changes_when_a_pinned_evidence_revision_changes() -> None:

@@ -12,7 +12,7 @@ import html
 import json
 import logging
 import sqlite3
-from typing import Callable, Mapping, Protocol, TYPE_CHECKING
+from typing import Callable, Literal, Mapping, Protocol, TYPE_CHECKING, cast, overload
 from uuid import uuid4
 
 from app.repositories.db import Connect, session
@@ -50,6 +50,9 @@ from app.services.backtest.strategy_job import (
     InitializationRunV1,
     JobFailureCode,
     PreparationRunV1,
+    PreparationSubmissionV1,
+    PreparationEnqueueResultV1,
+    RunUniverseSelectionV1,
     RecoveryAction,
     RecentJobFailureV1,
     STAGE_SEQUENCES,
@@ -742,6 +745,7 @@ BEGIN SELECT RAISE(ABORT, 'bootstrap run is immutable'); END;
 CREATE TABLE IF NOT EXISTS preparation_runs (
     job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id)
 );
+CREATE TABLE IF NOT EXISTS preparation_enqueue_actions(idempotency_key TEXT PRIMARY KEY,submission_digest TEXT NOT NULL,job_id TEXT NOT NULL UNIQUE REFERENCES preparation_runs(job_id),created_at TEXT NOT NULL);
 
 CREATE TRIGGER IF NOT EXISTS preparation_subtype_matches_job
 BEFORE INSERT ON preparation_runs
@@ -1067,6 +1071,9 @@ class _StrategyRunRow:
     starting_capital: Decimal
     run_input_manifest_digest: str
     execution_contract_digest: str
+    manifest_version: str
+    universe_selection: RunUniverseSelectionV1 | None
+    source_preparation_job_id: str | None
 
 
 @dataclass(frozen=True)
@@ -1114,6 +1121,9 @@ class BacktestResultV1:
     completed_at: datetime
     note: str | None
     note_version: int
+    manifest_version: str = "run_input_manifest.v1"
+    universe_selection: RunUniverseSelectionV1 | None = None
+    source_preparation_job_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1150,6 +1160,7 @@ class ComparisonIneligibleReason(StrEnum):
     EVIDENCE_DIGEST_MISMATCH = "evidence_digest_mismatch"
     CURRENCY_MISMATCH = "currency_mismatch"
     EXECUTION_CONTRACT_MISMATCH = "execution_contract_mismatch"
+    MANIFEST_VERSION_MISMATCH = "manifest_version_mismatch"
 
 
 @dataclass(frozen=True)
@@ -1385,6 +1396,46 @@ class BacktestRepository:
                     )
                 except sqlite3.OperationalError:
                     raise
+            prep_cols = {
+                str(x[1]) for x in conn.execute("PRAGMA table_info(preparation_runs)")
+            }
+            for definition in (
+                "selection_json TEXT",
+                "strategy_id TEXT",
+                "strategy_api_version INTEGER",
+                "strategy_source_digest TEXT",
+                "parameters_json TEXT",
+                "start_month TEXT",
+                "end_month TEXT",
+                "base_currency TEXT",
+                "starting_capital TEXT",
+            ):
+                if definition.split()[0] not in prep_cols:
+                    conn.execute(
+                        f"ALTER TABLE preparation_runs ADD COLUMN {definition}"
+                    )
+            manifest_cols = {
+                str(x[1])
+                for x in conn.execute("PRAGMA table_info(run_input_manifests)")
+            }
+            if "manifest_version" not in manifest_cols:
+                conn.execute(
+                    "ALTER TABLE run_input_manifests ADD COLUMN manifest_version TEXT NOT NULL DEFAULT 'run_input_manifest.v1'"
+                )
+            run_cols = {
+                str(x[1]) for x in conn.execute("PRAGMA table_info(strategy_runs)")
+            }
+            for definition in (
+                "manifest_version TEXT NOT NULL DEFAULT 'run_input_manifest.v1'",
+                "run_universe_digest TEXT",
+                "source_preparation_job_id TEXT",
+                "selection_json TEXT",
+            ):
+                if definition.split()[0] not in run_cols:
+                    conn.execute(f"ALTER TABLE strategy_runs ADD COLUMN {definition}")
+            conn.executescript("""CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_runs_source_preparation ON strategy_runs(source_preparation_job_id) WHERE source_preparation_job_id IS NOT NULL;
+            DROP TRIGGER IF EXISTS strategy_run_v2_contract_insert;
+            CREATE TRIGGER strategy_run_v2_contract_insert BEFORE INSERT ON strategy_runs WHEN NOT EXISTS(SELECT 1 FROM run_input_manifests m WHERE m.digest=NEW.run_input_manifest_digest AND m.manifest_version=NEW.manifest_version) OR NOT ((NEW.manifest_version='run_input_manifest.v1' AND NEW.run_universe_digest IS NULL AND NEW.source_preparation_job_id IS NULL AND NEW.selection_json IS NULL) OR (NEW.manifest_version='run_input_manifest.v2' AND length(NEW.run_universe_digest)=64 AND NEW.selection_json IS NOT NULL AND EXISTS(SELECT 1 FROM strategy_jobs j WHERE j.id=NEW.id AND ((NEW.source_preparation_job_id IS NOT NULL AND j.parent_job_id IS NULL) OR (NEW.source_preparation_job_id IS NULL AND j.parent_job_id IS NOT NULL))))) BEGIN SELECT RAISE(ABORT,'strategy run version provenance mismatch'); END;""")
             existing = conn.execute(
                 """SELECT id FROM strategy_jobs
                    WHERE id NOT IN (SELECT job_id FROM notification_outbox)
@@ -1801,7 +1852,9 @@ class BacktestRepository:
                          AND deleted_at IS NULL"""
                 ).fetchone()
                 if competing is not None:
-                    raise StrategyJobConflict("a bootstrap job is already queued or running")
+                    raise StrategyJobConflict(
+                        "a bootstrap job is already queued or running"
+                    )
                 if (
                     submission.parent_job_id is not None
                     and conn.execute(
@@ -1829,7 +1882,9 @@ class BacktestRepository:
                                  ?, ?)""",
                     (job_id, submission.parent_job_id, enqueue_seq, now, now),
                 )
-                conn.execute("INSERT INTO bootstrap_runs (job_id) VALUES (?)", (job_id,))
+                conn.execute(
+                    "INSERT INTO bootstrap_runs (job_id) VALUES (?)", (job_id,)
+                )
                 conn.execute(
                     """INSERT INTO bootstrap_enqueue_actions
                        (idempotency_key, job_id, submission_digest, created_at)
@@ -1839,9 +1894,7 @@ class BacktestRepository:
                 job = self._load_strategy_job(conn, job_id)
                 bootstrap = self._load_bootstrap(conn, job_id)
                 self._upsert_notification_outbox_on_connection(conn, job)
-            return BootstrapEnqueueResultV1(
-                no_op=False, job=job, bootstrap=bootstrap
-            )
+            return BootstrapEnqueueResultV1(no_op=False, job=job, bootstrap=bootstrap)
         except (StrategyJobConflict, StrategyJobNotFound):
             raise
         except sqlite3.IntegrityError as exc:
@@ -1867,11 +1920,106 @@ class BacktestRepository:
                 "stored bootstrap submission is unavailable"
             ) from exc
 
+    @overload
     def create_preparation_job(
-        self, *, parent_job_id: str | None = None
-    ) -> StrategyJobV1:
-        """Atomically enqueue one ``preparation`` activity and its subtype row."""
-        return self._create_stage_job(StrategyJobType.PREPARATION, parent_job_id)
+        self, submission: None = None, *, parent_job_id: str | None = None
+    ) -> StrategyJobV1: ...
+    @overload
+    def create_preparation_job(
+        self, submission: PreparationSubmissionV1, *, parent_job_id: str | None = None
+    ) -> PreparationEnqueueResultV1: ...
+    def create_preparation_job(
+        self,
+        submission: PreparationSubmissionV1 | None = None,
+        *,
+        parent_job_id: str | None = None,
+    ) -> StrategyJobV1 | PreparationEnqueueResultV1:
+        if submission is None:
+            return self._create_stage_job(StrategyJobType.PREPARATION, parent_job_id)
+        if parent_job_id is not None and parent_job_id != submission.parent_job_id:
+            raise StrategyJobConflict("preparation parent lineage mismatch")
+        parent_job_id = submission.parent_job_id
+        now = self._job_now()
+        digest = submission.content_digest()
+        try:
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                replay = conn.execute(
+                    "SELECT submission_digest,job_id FROM preparation_enqueue_actions WHERE idempotency_key=?",
+                    (submission.idempotency_key,),
+                ).fetchone()
+                if replay:
+                    if str(replay[0]) != digest:
+                        raise StrategyJobConflict(
+                            "idempotency key was used for a different preparation"
+                        )
+                    job = self._load_strategy_job(conn, str(replay[1]))
+                    if job.deleted_at is not None:
+                        raise StrategyJobConflict(
+                            "preparation replay target is unavailable"
+                        )
+                    return PreparationEnqueueResultV1(
+                        job=job, preparation=self._load_preparation(conn, job.id)
+                    )
+                active = conn.execute(
+                    "SELECT profile_hash,activation_seq FROM active_snapshot_profile WHERE singleton_id=1"
+                ).fetchone()
+                if active is None or (str(active[0]), int(active[1])) != (
+                    submission.selection.profile_hash,
+                    submission.selection.activation_seq,
+                ):
+                    raise StrategyJobConflict("selected universe is stale")
+                roster = {
+                    str(x[0])
+                    for x in conn.execute(
+                        """SELECT m.security_id FROM snapshot_profiles p JOIN reconstruction_roster_members m ON m.roster_digest=p.roster_digest WHERE p.profile_hash=?""",
+                        (submission.selection.profile_hash,),
+                    )
+                }
+                if not set(submission.selection.canonical_security_ids) <= roster:
+                    raise StrategyJobConflict(
+                        "selected universe is not in active roster"
+                    )
+                seq = int(
+                    conn.execute(
+                        "SELECT COALESCE(MAX(enqueue_seq),0)+1 FROM strategy_jobs"
+                    ).fetchone()[0]
+                )
+                job_id = self._id_generator()
+                conn.execute(
+                    """INSERT INTO strategy_jobs(id,job_type,status,parent_job_id,enqueue_seq,claim_token,current_month,current_stage,owner_instance_id,lease_generation,status_version,cancel_requested_at,failure_code,failed_month,failure_detail,deleted_at,audit_summary,created_at,updated_at) VALUES(?,'preparation','queued',?,?,NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,NULL,NULL,NULL,?,?)""",
+                    (job_id, parent_job_id, seq, now, now),
+                )
+                conn.execute(
+                    """INSERT INTO preparation_runs(job_id,selection_json,strategy_id,strategy_api_version,strategy_source_digest,parameters_json,start_month,end_month,base_currency,starting_capital) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        job_id,
+                        submission.selection.model_dump_json(),
+                        submission.strategy_id,
+                        submission.strategy_api_version,
+                        submission.strategy_source_digest,
+                        json.dumps(
+                            dict(submission.parameters),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        submission.start_month,
+                        submission.end_month,
+                        submission.base_currency,
+                        str(submission.starting_capital),
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO preparation_enqueue_actions VALUES(?,?,?,?)",
+                    (submission.idempotency_key, digest, job_id, now),
+                )
+                job = self._load_strategy_job(conn, job_id)
+                self._upsert_notification_outbox_on_connection(conn, job)
+                return PreparationEnqueueResultV1(
+                    job=job, preparation=self._load_preparation(conn, job_id)
+                )
+        except sqlite3.IntegrityError as exc:
+            raise StrategyJobConflict("preparation job creation conflicted") from exc
 
     def _create_stage_job(
         self, job_type: StrategyJobType, parent_job_id: str | None
@@ -1951,6 +2099,24 @@ class BacktestRepository:
         was first committed with is rejected rather than silently
         returning the stale attempt.
         """
+        from app.services.backtest.run_input_manifest import (
+            RunInputManifestV1,
+            read_run_input_manifest,
+        )
+
+        if submission.manifest_version != "run_input_manifest.v1":
+            raise StrategyJobConflict("V2 backtests require preparation seal")
+        if submission.canonical_manifest_json != "{}":
+            try:
+                parsed = read_run_input_manifest(submission.canonical_manifest_json)
+            except Exception as exc:
+                raise StrategyJobConflict("run input manifest is invalid") from exc
+            if (
+                not isinstance(parsed, RunInputManifestV1)
+                or parsed.schema_version != "run_input_manifest.v1"
+                or parsed.digest() != submission.run_input_manifest_digest
+            ):
+                raise StrategyJobConflict("run input manifest version is invalid")
         now = self._job_now()
         content_digest = self._backtest_submission_content_digest(submission)
         try:
@@ -2042,13 +2208,14 @@ class BacktestRepository:
                 conn.execute(
                     """INSERT OR IGNORE INTO run_input_manifests (
                            digest, execution_contract_digest,
-                           canonical_manifest_json, created_at
-                       ) VALUES (?, ?, ?, ?)""",
+                           canonical_manifest_json, created_at, manifest_version
+                       ) VALUES (?, ?, ?, ?, ?)""",
                     (
                         submission.run_input_manifest_digest,
                         submission.execution_contract_digest,
                         submission.canonical_manifest_json,
                         now,
+                        submission.manifest_version,
                     ),
                 )
                 conn.execute(
@@ -2058,8 +2225,8 @@ class BacktestRepository:
                            start_month, end_month, ordered_month_digest,
                            base_currency, starting_capital,
                            run_input_manifest_digest, execution_contract_digest,
-                           created_at
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           manifest_version,run_universe_digest,source_preparation_job_id,selection_json,created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         job_id,
                         submission.strategy_id,
@@ -2078,6 +2245,10 @@ class BacktestRepository:
                         str(submission.starting_capital),
                         submission.run_input_manifest_digest,
                         submission.execution_contract_digest,
+                        submission.manifest_version,
+                        None,
+                        None,
+                        None,
                         now,
                     ),
                 )
@@ -2096,6 +2267,169 @@ class BacktestRepository:
             raise
         except sqlite3.IntegrityError as exc:
             raise StrategyJobConflict("backtest job creation conflicted") from exc
+
+    def seal_preparation_and_create_backtest(
+        self,
+        prep_id: str,
+        token: str,
+        *,
+        expected_version: int,
+        submission: BacktestSubmissionV1,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> BacktestEnqueueResultV1:
+        from app.services.backtest.run_input_manifest import (
+            RunInputManifestV2,
+            read_run_input_manifest,
+        )
+
+        if (
+            submission.manifest_version != "run_input_manifest.v2"
+            or submission.source_preparation_job_id != prep_id
+        ):
+            raise StrategyJobConflict("invalid V2 seal")
+        now = self._job_now()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job = self._load_strategy_job(conn, prep_id)
+            prep = self._load_preparation(conn, prep_id)
+            existing = conn.execute(
+                "SELECT id FROM strategy_runs WHERE source_preparation_job_id=?",
+                (prep_id,),
+            ).fetchone()
+            if existing and job.status is StrategyJobStatus.COMPLETE:
+                cid = str(existing[0])
+                return BacktestEnqueueResultV1(
+                    job=self._load_strategy_job(conn, cid),
+                    backtest=self._load_strategy_run(conn, cid),
+                )
+            if (
+                job.status is not StrategyJobStatus.RUNNING
+                or job.claim_token != token
+                or job.status_version != expected_version
+                or job.cancel_requested_at
+                or prep.selection is None
+            ):
+                raise StrategyJobConflict("preparation ownership is stale")
+            try:
+                manifest = read_run_input_manifest(submission.canonical_manifest_json)
+            except Exception as exc:
+                raise StrategyJobConflict("sealed manifest is invalid") from exc
+            s = prep.selection
+            ok = (
+                isinstance(manifest, RunInputManifestV2)
+                and submission.strategy_id == prep.strategy_id == manifest.strategy_id
+                and submission.strategy_api_version
+                == prep.strategy_api_version
+                == manifest.strategy_api_version
+                and submission.strategy_source_digest
+                == prep.strategy_source_digest
+                == manifest.strategy_source_digest
+                and dict(submission.parameters)
+                == dict(prep.parameters)
+                == dict(manifest.parameters)
+                and submission.profile_hash == s.profile_hash == manifest.profile_hash
+                and submission.start_month == prep.start_month == manifest.start_month
+                and submission.end_month == prep.end_month == manifest.end_month
+                and submission.base_currency
+                == prep.base_currency
+                == manifest.base_currency
+                and submission.starting_capital
+                == prep.starting_capital
+                == manifest.starting_capital
+                and submission.universe_selection == s == manifest.universe_selection
+                and manifest.source_preparation_job_id == prep_id
+                and manifest.digest() == submission.run_input_manifest_digest
+                and submission.execution_contract_digest
+                == manifest.execution_contract_digest()
+            )
+            if not ok:
+                raise StrategyJobConflict("preparation seal identity mismatch")
+            active = conn.execute(
+                "SELECT profile_hash,activation_seq FROM active_snapshot_profile WHERE singleton_id=1"
+            ).fetchone()
+            roster = {
+                str(x[0])
+                for x in conn.execute(
+                    "SELECT m.security_id FROM snapshot_profiles p JOIN reconstruction_roster_members m ON m.roster_digest=p.roster_digest WHERE p.profile_hash=?",
+                    (s.profile_hash,),
+                )
+            }
+            if (
+                active is None
+                or (str(active[0]), int(active[1]))
+                != (s.profile_hash, s.activation_seq)
+                or not set(s.canonical_security_ids) <= roster
+                or tuple(sorted(x.security_id for x in manifest.securities))
+                != s.canonical_security_ids
+            ):
+                raise StrategyJobConflict("selected universe is stale")
+            ready = self._interval_readiness_on_connection(
+                conn, s.profile_hash, manifest.start_month, manifest.end_month
+            )
+            if (
+                not ready.ready
+                or ready.ordered_month_digest != manifest.ordered_month_digest
+            ):
+                raise StrategyJobConflict("selected evidence is stale")
+            cid = self._id_generator()
+            seq = int(
+                conn.execute(
+                    "SELECT COALESCE(MAX(enqueue_seq),0)+1 FROM strategy_jobs"
+                ).fetchone()[0]
+            )
+            conn.execute(
+                "INSERT INTO strategy_jobs(id,job_type,status,parent_job_id,enqueue_seq,claim_token,current_month,current_stage,owner_instance_id,lease_generation,status_version,cancel_requested_at,failure_code,failed_month,failure_detail,deleted_at,audit_summary,created_at,updated_at) VALUES(?,'backtest','queued',NULL,?,NULL,NULL,NULL,NULL,NULL,1,NULL,NULL,NULL,NULL,NULL,NULL,?,?)",
+                (cid, seq, now, now),
+            )
+            conn.execute(
+                "INSERT INTO run_input_manifests(digest,execution_contract_digest,canonical_manifest_json,created_at,manifest_version) VALUES(?,?,?,?,?)",
+                (
+                    manifest.digest(),
+                    manifest.execution_contract_digest(),
+                    manifest.canonical_json(),
+                    now,
+                    "run_input_manifest.v2",
+                ),
+            )
+            conn.execute(
+                "INSERT INTO strategy_runs(id,strategy_id,strategy_api_version,strategy_source_digest,parameters_json,profile_hash,start_month,end_month,ordered_month_digest,base_currency,starting_capital,run_input_manifest_digest,execution_contract_digest,manifest_version,run_universe_digest,source_preparation_job_id,selection_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    cid,
+                    manifest.strategy_id,
+                    manifest.strategy_api_version,
+                    manifest.strategy_source_digest,
+                    json.dumps(
+                        dict(manifest.parameters), sort_keys=True, separators=(",", ":")
+                    ),
+                    manifest.profile_hash,
+                    manifest.start_month,
+                    manifest.end_month,
+                    manifest.ordered_month_digest,
+                    manifest.base_currency,
+                    str(manifest.starting_capital),
+                    manifest.digest(),
+                    manifest.execution_contract_digest(),
+                    "run_input_manifest.v2",
+                    s.run_universe_digest,
+                    prep_id,
+                    s.model_dump_json(),
+                    now,
+                ),
+            )
+            fence = _lease_fence_params(lease)
+            cursor = conn.execute(
+                f"UPDATE strategy_jobs SET status='complete',claim_token=NULL,current_stage=NULL,owner_instance_id=NULL,lease_generation=NULL,status_version=status_version+1,updated_at=? WHERE id=? AND claim_token=? AND status_version=? {_LEASE_FENCE_SQL}",
+                (now, prep_id, token, expected_version, *fence),
+            )
+            if cursor.rowcount != 1:
+                raise StrategyJobConflict("preparation ownership is stale")
+            done = self._load_strategy_job(conn, prep_id)
+            child = self._load_strategy_job(conn, cid)
+            self._upsert_notification_outbox_on_connection(conn, done)
+            self._upsert_notification_outbox_on_connection(conn, child)
+            return BacktestEnqueueResultV1(
+                job=child, backtest=self._load_strategy_run(conn, cid)
+            )
 
     def strategy_job(self, job_id: str) -> StrategyJobV1:
         with session(self._connect) as conn:
@@ -2118,6 +2452,14 @@ class BacktestRepository:
             job = self._load_strategy_job(conn, job_id)
             self._require_own_subtype(conn, job, StrategyJobType.PREPARATION)
             return self._load_preparation(conn, job_id)
+
+    def preparation_child_backtest_id(self, job_id: str) -> str | None:
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT id FROM strategy_runs WHERE source_preparation_job_id=?",
+                (job_id,),
+            ).fetchone()
+            return None if row is None else str(row[0])
 
     def strategy_run(self, job_id: str) -> BacktestRunV1:
         with session(self._connect) as conn:
@@ -2268,6 +2610,26 @@ class BacktestRepository:
 
         left_result = self.backtest_result(left)
         right_result = self.backtest_result(right)
+        if left_result.manifest_version != right_result.manifest_version:
+            return ComparisonEligibilityV1(
+                False,
+                ComparisonIneligibleReason.MANIFEST_VERSION_MISMATCH,
+                "Backtests use different manifest versions",
+            )
+        left_selection = left_result.universe_selection
+        right_selection = right_result.universe_selection
+        if (
+            left_result.manifest_version == "run_input_manifest.v2"
+            and left_selection is not None
+            and right_selection is not None
+            and left_selection.run_universe_digest
+            != right_selection.run_universe_digest
+        ):
+            return ComparisonEligibilityV1(
+                False,
+                ComparisonIneligibleReason.EVIDENCE_DIGEST_MISMATCH,
+                "Backtests use different selected universes",
+            )  # type: ignore[union-attr]
         return self._compare_eligible_results(left_result, right_result)
 
     def _comparison_job_reason(self, run_id: str) -> ComparisonIneligibleReason | None:
@@ -2705,11 +3067,16 @@ class BacktestRepository:
     ) -> StrategyJobV1:
         """Atomically seal Bootstrap's profile activation and terminal job state."""
         try:
-            canonical = SnapshotProfileV1.from_canonical_json(profile.canonical_json_bytes())
+            canonical = SnapshotProfileV1.from_canonical_json(
+                profile.canonical_json_bytes()
+            )
             self._validate_profile_authority(canonical)
             with session(self._connect) as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                if self._require_job_type(conn, job_id) is not StrategyJobType.BOOTSTRAP:
+                if (
+                    self._require_job_type(conn, job_id)
+                    is not StrategyJobType.BOOTSTRAP
+                ):
                     raise StrategyJobConflict("only bootstrap jobs activate profiles")
                 fence = _lease_fence_params(lease)
                 owned = conn.execute(
@@ -2746,7 +3113,12 @@ class BacktestRepository:
                     activation_seq = int(current[1]) + 1
                     conn.execute(
                         "UPDATE active_snapshot_profile SET profile_hash=?, activation_seq=?, activated_at=? WHERE singleton_id=1 AND activation_seq=?",
-                        (canonical.profile_hash, activation_seq, self._job_now(), int(current[1])),
+                        (
+                            canonical.profile_hash,
+                            activation_seq,
+                            self._job_now(),
+                            int(current[1]),
+                        ),
                     )
                 cursor = conn.execute(
                     f"""UPDATE strategy_jobs SET status='complete', claim_token=NULL,
@@ -3305,6 +3677,9 @@ class BacktestRepository:
             completed_at=completed_at,
             note=None if row[3] is None else str(row[3]),
             note_version=int(row[4]),
+            manifest_version=strategy_run.manifest_version,
+            universe_selection=strategy_run.universe_selection,
+            source_preparation_job_id=strategy_run.source_preparation_job_id,
         )
 
     @staticmethod
@@ -3337,6 +3712,7 @@ class BacktestRepository:
                       parameters_json, profile_hash, start_month, end_month,
                       ordered_month_digest, base_currency, starting_capital,
                       run_input_manifest_digest, execution_contract_digest
+                      ,manifest_version,selection_json,source_preparation_job_id
                FROM strategy_runs WHERE id=?""",
             (run_id,),
         ).fetchone()
@@ -3354,6 +3730,44 @@ class BacktestRepository:
             InvalidOperation,
         ) as exc:
             raise BacktestIntegrityError("stored strategy run is invalid") from exc
+        try:
+            selection = (
+                None
+                if row[14] is None
+                else RunUniverseSelectionV1.model_validate_json(str(row[14]))
+            )
+        except Exception as exc:
+            raise BacktestIntegrityError(
+                "stored strategy run provenance is invalid"
+            ) from exc
+        manifest_row = conn.execute(
+            "SELECT manifest_version,canonical_manifest_json FROM run_input_manifests WHERE digest=?",
+            (str(row[11]),),
+        ).fetchone()
+        if manifest_row is None or str(manifest_row[0]) != str(row[13]):
+            raise BacktestIntegrityError("manifest and run versions disagree")
+        if str(manifest_row[1]) == "{}" and str(row[13]) != "run_input_manifest.v1":
+            raise BacktestIntegrityError("stored run input manifest is invalid")
+        if str(manifest_row[1]) != "{}":
+            try:
+                from app.services.backtest.run_input_manifest import (
+                    read_run_input_manifest,
+                )
+
+                parsed = read_run_input_manifest(str(manifest_row[1]))
+                if parsed.schema_version != str(row[13]) or parsed.digest() != str(
+                    row[11]
+                ):
+                    raise ValueError
+                if (
+                    str(row[13]) == "run_input_manifest.v2"
+                    and getattr(parsed, "universe_selection", None) != selection
+                ):
+                    raise ValueError
+            except Exception as exc:
+                raise BacktestIntegrityError(
+                    "stored run input manifest is invalid"
+                ) from exc
         return _StrategyRunRow(
             id=str(row[0]),
             strategy_id=str(row[1]),
@@ -3368,6 +3782,9 @@ class BacktestRepository:
             starting_capital=starting_capital,
             run_input_manifest_digest=str(row[11]),
             execution_contract_digest=str(row[12]),
+            manifest_version=str(row[13]),
+            universe_selection=selection,
+            source_preparation_job_id=None if row[15] is None else str(row[15]),
         )
 
     @staticmethod
@@ -3391,6 +3808,12 @@ class BacktestRepository:
             starting_capital=row.starting_capital,
             run_input_manifest_digest=row.run_input_manifest_digest,
             execution_contract_digest=row.execution_contract_digest,
+            manifest_version=cast(
+                Literal["run_input_manifest.v1", "run_input_manifest.v2"],
+                row.manifest_version,
+            ),
+            universe_selection=row.universe_selection,
+            source_preparation_job_id=row.source_preparation_job_id,
         )
 
     @classmethod
@@ -3450,8 +3873,31 @@ class BacktestRepository:
     def _load_preparation(
         self, conn: sqlite3.Connection, job_id: str
     ) -> PreparationRunV1:
-        self._require_stage_subtype_row(conn, job_id, StrategyJobType.PREPARATION)
-        return PreparationRunV1(job_id=job_id)
+        row = conn.execute(
+            "SELECT selection_json,strategy_id,strategy_api_version,strategy_source_digest,parameters_json,start_month,end_month,base_currency,starting_capital FROM preparation_runs WHERE job_id=?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise StrategyJobNotFound(f"preparation run not found: {job_id}")
+        if row[0] is None:
+            return PreparationRunV1(job_id=job_id)
+        try:
+            return PreparationRunV1(
+                job_id=job_id,
+                selection=RunUniverseSelectionV1.model_validate_json(str(row[0])),
+                strategy_id=str(row[1]),
+                strategy_api_version=int(row[2]),
+                strategy_source_digest=str(row[3]),
+                parameters=json.loads(str(row[4])),
+                start_month=str(row[5]),
+                end_month=str(row[6]),
+                base_currency=cast(Literal["GBP", "USD"], str(row[7])),
+                starting_capital=Decimal(str(row[8])),
+            )
+        except Exception as exc:
+            raise BacktestIntegrityError(
+                "stored preparation identity is invalid"
+            ) from exc
 
     @staticmethod
     def _require_job_type(conn: sqlite3.Connection, job_id: str) -> StrategyJobType:
@@ -3869,8 +4315,9 @@ class BacktestRepository:
                      id, strategy_id, strategy_api_version, strategy_source_digest,
                      parameters_json, profile_hash, start_month, end_month,
                      ordered_month_digest, base_currency, starting_capital,
-                     run_input_manifest_digest, execution_contract_digest, created_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     run_input_manifest_digest, execution_contract_digest,
+                     manifest_version,run_universe_digest,source_preparation_job_id,selection_json,created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     child_id,
                     backtest.strategy_id,
@@ -3889,6 +4336,14 @@ class BacktestRepository:
                     str(backtest.starting_capital),
                     backtest.run_input_manifest_digest,
                     backtest.execution_contract_digest,
+                    backtest.manifest_version,
+                    None
+                    if backtest.universe_selection is None
+                    else backtest.universe_selection.run_universe_digest,
+                    None,
+                    None
+                    if backtest.universe_selection is None
+                    else backtest.universe_selection.model_dump_json(),
                     now,
                 ),
             )
@@ -3954,6 +4409,11 @@ class BacktestRepository:
             self._upsert_notification_outbox_on_connection(conn, tombstone)
             if job.job_type in STAGE_SEQUENCES:
                 table, _ = _SUBTYPE_TABLES[job.job_type]
+                if job.job_type is StrategyJobType.PREPARATION:
+                    conn.execute(
+                        "DELETE FROM preparation_enqueue_actions WHERE job_id=?",
+                        (job_id,),
+                    )
                 conn.execute(f"DELETE FROM {table} WHERE job_id=?", (job_id,))
             elif job.job_type is StrategyJobType.INITIALIZATION:
                 conn.execute(
