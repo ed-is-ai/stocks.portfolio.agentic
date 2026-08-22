@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-08-21 (Epic 3 reconciled done post-merge #264/#265; Epic 4 backlog resynced to the finalized 9-story epics.md shape post canonical-artifact reconciliation)"
+last_updated: "2026-08-22 (Story 4.6.1 done after code review; Epic 4 in progress)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -76,16 +76,16 @@ development_status:
   3-2-choose-an-eligible-result-through-the-compare-picker: done
   3-3-review-two-results-side-by-side: done
   epic-3-retrospective: optional
-  epic-4: backlog
+  epic-4: in-progress
   4-1-establish-the-four-activity-schema-and-fenced-lifecycle: backlog
   4-2-publish-independent-strategies-with-declared-run-universes: backlog
   4-3-set-up-strategy-manager-on-first-run: backlog
   4-4-understand-readiness-and-recover-through-diagnostics: backlog
   4-5-select-securities-for-a-backtest: backlog
   4-6-prepare-the-evidence-needed-for-a-backtest: backlog
-  4-6-1-create-production-bootstrap-evidence: backlog
-  4-6-2-make-bootstrap-submission-idempotent: backlog
-  4-6-3-seal-the-selected-universe-digest: backlog
+  4-6-1-create-production-bootstrap-evidence: done
+  4-6-2-make-bootstrap-submission-idempotent: ready-for-dev
+  4-6-3-seal-the-selected-universe-digest: ready-for-dev
   4-7-run-and-restart-backtests-from-pinned-evidence: backlog
   4-8-compare-results-using-compatible-evidence-rules: backlog
   4-9-complete-the-first-backtest-from-a-clean-checkout: backlog

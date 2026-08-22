@@ -6,7 +6,8 @@ stage execution, failure handling, and fixture environment labelling.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import sqlite3
 
@@ -17,20 +18,38 @@ from app.repositories.backtest_repo import BacktestRepository
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.historical_data_qualification import (
     FIXTURE_CONTRACT_VERSION,
+    HistoricalQualificationPayload,
+    MANDATORY_PROBE_IDS,
+    ProbeDefinition,
+    QualificationRunner,
     REQUEST_CONTRACT_VERSION,
     current_source_versions_json,
 )
+from app.services.backtest.reconstruction_roster import (
+    MarketIdentityEvidence,
+    ReconstructionRosterCaptureService,
+    RosterSource,
+    RosterSourcePayloadV1,
+)
+from app.services.backtest.security_identity import SecurityAliasManifestV1
 from app.services.backtest.strategy_bootstrap_service import (
     BootstrapStageFailure,
     StrategyBootstrapAlreadySetUp,
     StrategyBootstrapService,
+    StrategyProviderBundleV1,
+    _fetch_datahub_sp500,
+    _production_probes,
 )
 from app.services.backtest.strategy_job import (
+    BootstrapStage,
     JobFailureCode,
+    PrerequisiteState,
     StrategyJobStatus,
     StrategyJobType,
 )
+from app.services.backtest.snapshot_profile import ProfileDetectorV1
 from app.services.backtest.strategy_job_service import StrategyJobService
+from app.services.backtest.strategy_readiness_service import StrategyReadinessService
 from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.worker import build_stage_walk_engine
 import json
@@ -40,6 +59,7 @@ PROFILE_HASH = "a" * 64
 ROSTER_DIGEST = "b" * 64
 FIXTURE_DIGEST = "1" * 64
 PROBE_DEFINITION_DIGEST = "2" * 64
+QUALIFICATION_FIXTURE = Path(__file__).parent / "fixtures" / "market_mechanics_v1.json"
 
 
 def _qualification_digest() -> str:
@@ -144,6 +164,105 @@ def _empty_repo(path: Path) -> BacktestRepository:
     return repo
 
 
+def _probes() -> dict[str, ProbeDefinition]:
+    definitions = {
+        "us_active": ("AAPL", "USD", "USD", "America/New_York"),
+        "lse_active": ("ULVR.L", "GBP", "GBp", "Europe/London"),
+        "gbpusd": ("GBPUSD=X", "USD", "USD", "UTC"),
+    }
+    return {
+        name: ProbeDefinition(
+            symbol=definitions[name][0],
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 4),
+            expected_currency=definitions[name][1],
+            expected_quote_unit=definitions[name][2],
+            expected_timezone=definitions[name][3],
+            expected_sessions=(date(2024, 1, 2), date(2024, 1, 3)),
+            allowed_observed_symbols=(definitions[name][0],),
+        )
+        for name in MANDATORY_PROBE_IDS
+    }
+
+
+class _FakeQualificationAdapter:
+    def fetch(self, definition: ProbeDefinition) -> HistoricalQualificationPayload:
+        return HistoricalQualificationPayload(
+            requested_symbol=definition.symbol,
+            observed_symbol=definition.symbol,
+            currency=definition.expected_currency,
+            quote_unit=definition.expected_quote_unit,
+            quote_unit_scale=(
+                "0.01" if definition.expected_quote_unit == "GBp" else "1"
+            ),
+            exchange_timezone=definition.expected_timezone,
+            request_contract={},
+            rows=(),
+            response_metadata_digest="m" * 64,
+            content_digest=(definition.symbol.encode().hex() + "0" * 64)[:64],
+            acquired_at=NOW.isoformat(),
+        )
+
+
+class _UnavailableQualificationAdapter:
+    def fetch(self, definition: ProbeDefinition) -> HistoricalQualificationPayload:
+        raise ConnectionError(f"fixture provider unavailable for {definition.symbol}")
+
+
+def _payload(source: RosterSource, rows: list[dict[str, object]]) -> RosterSourcePayloadV1:
+    return RosterSourcePayloadV1.build(
+        source=source, rows=rows, retrieved_at=NOW, source_version="test-v1",
+        package_version="test", config_version="ReconstructionRosterPolicyV1",
+    )
+
+
+def _production_bundle(repo: BacktestRepository) -> StrategyProviderBundleV1:
+    payloads = (
+        _payload(
+            RosterSource.DATAHUB_SP500,
+            [{"symbol": "AAPL", "name": "Apple", "sector": "Technology"}],
+        ),
+        _payload(RosterSource.TRADINGVIEW_US, [{"symbol": "NASDAQ:AAPL", "exchange": "NASDAQ", "currency": "USD"}]),
+        _payload(RosterSource.TRADINGVIEW_UK, [{"symbol": "LSE:ULVR", "exchange": "LSE", "currency": "GBp"}]),
+    )
+    def datahub() -> RosterSourcePayloadV1:
+        return payloads[0]
+
+    def tradingview_us() -> RosterSourcePayloadV1:
+        return payloads[1]
+
+    def tradingview_uk() -> RosterSourcePayloadV1:
+        return payloads[2]
+
+    captures = ReconstructionRosterCaptureService(
+        repo,
+        (datahub, tradingview_us, tradingview_uk),
+        lambda _symbol, _row: MarketIdentityEvidence("XNAS", "USD", "USD", "test", "i" * 64),
+        clock=lambda: NOW,
+    )
+    production = StrategyProviderBundleV1.production(repo)
+    return StrategyProviderBundleV1(
+        QualificationRunner(repo, QUALIFICATION_FIXTURE, _probes(), live_adapter=_FakeQualificationAdapter(), clock=lambda: NOW),
+        captures, SecurityAliasManifestV1.build((), created_at=NOW), production.snapshot_profile,
+    )
+
+
+def _unavailable_bundle(repo: BacktestRepository) -> StrategyProviderBundleV1:
+    bundle = _production_bundle(repo)
+    return StrategyProviderBundleV1(
+        QualificationRunner(
+            repo,
+            QUALIFICATION_FIXTURE,
+            _probes(),
+            live_adapter=_UnavailableQualificationAdapter(),
+            clock=lambda: NOW,
+        ),
+        bundle.roster_capture,
+        bundle.alias_manifest,
+        bundle.snapshot_profile,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Setup detection
 # ---------------------------------------------------------------------------
@@ -205,6 +324,355 @@ def test_start_setup_enqueues_bootstrap_job(tmp_path: Path) -> None:
     assert job.status is StrategyJobStatus.QUEUED
 
 
+def test_clean_store_production_bundle_qualifies_captures_and_activates(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    bundle = _production_bundle(repo)
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    engine = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=bundle,
+    )
+    complete = engine.run(job.id, claim.claim_token)
+
+    assert complete.status is StrategyJobStatus.COMPLETE
+    active = repo.active_snapshot_profile()
+    assert active is not None
+    assert repo.snapshot_profile(active.profile_hash) is not None
+    assert repo.current_qualification_contract_digest() is not None
+    readiness = StrategyReadinessService(repo, clock=NOW).evaluate()
+    assert readiness.qualification.state is PrerequisiteState.READY
+    assert readiness.roster.state is PrerequisiteState.READY
+    assert readiness.active_profile.state is PrerequisiteState.READY
+    with sqlite3.connect(str(tmp_path / "backtest.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM snapshot_profiles").fetchone() == (1,)
+        aliases = conn.execute(
+            "SELECT COUNT(*) FROM security_alias_entries WHERE provider='yfinance'"
+        ).fetchone()
+        members = conn.execute(
+            "SELECT COUNT(*) FROM reconstruction_roster_members"
+        ).fetchone()
+        assert aliases == members
+
+
+def test_production_contract_uses_exchange_native_probe_metadata() -> None:
+    probes = _production_probes()
+    assert (
+        probes["us_active"].expected_currency,
+        probes["us_active"].expected_quote_unit,
+        probes["us_active"].expected_timezone,
+    ) == ("USD", "USD", "America/New_York")
+    assert (
+        probes["lse_active"].expected_currency,
+        probes["lse_active"].expected_quote_unit,
+        probes["lse_active"].expected_timezone,
+    ) == ("GBP", "GBp", "Europe/London")
+
+
+def test_datahub_csv_headers_are_normalized_for_strict_roster_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        text = "Symbol,Name,Sector\nAAPL,Apple Inc.,Technology\n"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    monkeypatch.setattr("requests.get", lambda *_args, **_kwargs: Response())
+    assert _fetch_datahub_sp500() == [
+        {"symbol": "AAPL", "name": "Apple Inc.", "sector": "Technology"}
+    ]
+
+
+def test_fixture_bundle_is_explicit_and_uses_pinned_evidence(tmp_path: Path) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    bundle = StrategyProviderBundleV1.fixture(repo)
+    service = StrategyBootstrapService(repo, jobs=None, providers=bundle)
+    assert bundle.mode == "fixture"
+    assert service.is_fixture is True
+    assert bundle.qualification_runner.run().contract_digest
+
+
+def test_roster_identity_conflict_fails_without_activating_profile(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    bundle = _production_bundle(repo)
+    conflicting = _payload(
+        RosterSource.TRADINGVIEW_US,
+        [{"symbol": "NASDAQ:AAPL", "exchange": "NASDAQ", "currency": "GBP"}],
+    )
+
+    def datahub() -> RosterSourcePayloadV1:
+        return _payload(
+            RosterSource.DATAHUB_SP500,
+            [{"symbol": "AAPL", "name": "Apple", "sector": "Technology"}],
+        )
+
+    def us() -> RosterSourcePayloadV1:
+        return conflicting
+
+    def uk() -> RosterSourcePayloadV1:
+        return _payload(
+            RosterSource.TRADINGVIEW_UK,
+            [{"symbol": "LSE:ULVR", "exchange": "LSE", "currency": "GBp"}],
+        )
+
+    conflicting_bundle = replace(
+        bundle,
+        roster_capture=ReconstructionRosterCaptureService(
+            repo,
+            (datahub, us, uk),
+            lambda _symbol, _row: MarketIdentityEvidence(
+                "XNAS", "USD", "USD", "test", "i" * 64
+            ),
+            clock=lambda: NOW,
+        ),
+    )
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    result = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=conflicting_bundle,
+    ).run(job.id, claim.claim_token)
+    assert result.status is StrategyJobStatus.FAILED
+    assert result.failure_code is JobFailureCode.PROVIDER_CONTRACT_ERROR
+    assert repo.active_snapshot_profile() is None
+
+
+def test_profile_validation_failure_leaves_no_partial_active_profile(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    bundle = _production_bundle(repo)
+
+    def invalid_profile(roster_digest: str):
+        valid = bundle.snapshot_profile(roster_digest)
+        detectors = list(valid.detectors)
+        detectors[0] = ProfileDetectorV1(
+            detector_id=detectors[0].detector_id,
+            detector_api_version=detectors[0].detector_api_version,
+            detector_version="0" * 64,
+        )
+        return valid.model_copy(update={"detectors": tuple(detectors)})
+
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    result = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=replace(bundle, snapshot_profile=invalid_profile),
+    ).run(job.id, claim.claim_token)
+    assert result.status is StrategyJobStatus.FAILED
+    assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
+    assert repo.active_snapshot_profile() is None
+    with sqlite3.connect(str(tmp_path / "backtest.db")) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM snapshot_profiles").fetchone() == (0,)
+
+
+def test_stale_worker_cannot_bind_bootstrap_roster(tmp_path: Path) -> None:
+    moment = [NOW]
+    repo = BacktestRepository(
+        db.make_connect(lambda: str(tmp_path / "backtest.db")),
+        clock=lambda: moment[0].date(),
+        instant_clock=lambda: moment[0],
+    )
+    repo.ensure_schema()
+    stale = repo.acquire_or_renew_worker_lease("worker-a", ttl_seconds=30)
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job(lease=stale.fence)
+    assert claim is not None
+    staged = repo.set_strategy_job_current_stage(
+        job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        stage=BootstrapStage.ROSTER_CAPTURE.value,
+        lease=stale.fence,
+    )
+    moment[0] += timedelta(seconds=120)
+    repo.acquire_or_renew_worker_lease("worker-b", ttl_seconds=30)
+    service = StrategyBootstrapService(
+        repo, jobs=None, providers=_production_bundle(repo)
+    )
+    with pytest.raises(Exception, match="stale"):
+        service._capture_roster(
+            job.id,
+            claim.claim_token,
+            expected_version=staged.status_version,
+            lease=stale.fence,
+        )
+    assert repo.roster_digest_for_lineage(job.id) is None
+    assert repo.active_snapshot_profile() is None
+
+
+def test_cancellation_after_roster_is_acknowledged_before_activation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    bundle = _production_bundle(repo)
+    original = ReconstructionRosterCaptureService.capture
+
+    def capture_then_cancel(service, *args, **kwargs):
+        captured = original(service, *args, **kwargs)
+        job_claim = kwargs["job_claim"]
+        assert job_claim is not None
+        repo.request_strategy_job_cancellation(
+            job_claim[0], expected_version=job_claim[2]
+        )
+        return captured
+
+    monkeypatch.setattr(
+        ReconstructionRosterCaptureService, "capture", capture_then_cancel
+    )
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    result = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=bundle,
+    ).run(job.id, claim.claim_token)
+    assert result.status is StrategyJobStatus.CANCELLED
+    assert repo.active_snapshot_profile() is None
+
+
+def test_profile_activation_stage_is_non_cancellable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    bundle = _production_bundle(repo)
+    original = StrategyBootstrapService._activate_profile
+
+    def request_cancel_during_activation(service, job_id, claim_token, **kwargs):
+        current = repo.strategy_job(job_id)
+        unchanged = repo.request_strategy_job_cancellation(
+            job_id, expected_version=current.status_version
+        )
+        assert unchanged.cancel_requested_at is None
+        return original(service, job_id, claim_token, **kwargs)
+
+    monkeypatch.setattr(
+        StrategyBootstrapService,
+        "_activate_profile",
+        request_cancel_during_activation,
+    )
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    result = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=bundle,
+    ).run(job.id, claim.claim_token)
+    assert result.status is StrategyJobStatus.COMPLETE
+    assert repo.active_snapshot_profile() is not None
+
+
+def test_terminal_activation_revalidates_latest_qualification(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    service = StrategyBootstrapService(
+        repo, jobs=None, providers=_production_bundle(repo)
+    )
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    qualification_stage = repo.set_strategy_job_current_stage(
+        job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        stage=BootstrapStage.QUALIFICATION.value,
+    )
+    service._run_qualification()
+    roster_stage = repo.set_strategy_job_current_stage(
+        job.id,
+        claim.claim_token,
+        expected_version=qualification_stage.status_version,
+        stage=BootstrapStage.ROSTER_CAPTURE.value,
+    )
+    service._capture_roster(
+        job.id,
+        claim.claim_token,
+        expected_version=roster_stage.status_version,
+    )
+    profile_stage = repo.set_strategy_job_current_stage(
+        job.id,
+        claim.claim_token,
+        expected_version=roster_stage.status_version,
+        stage=BootstrapStage.PROFILE_ACTIVATION.value,
+    )
+    latest = repo.latest_recorded_qualification()
+    assert latest is not None
+    repo.record_qualification(
+        replace(
+            latest,
+            passed=False,
+            failure_code=JobFailureCode.PROVIDER_UNAVAILABLE.value,
+            failure_reason="Historical source unavailable",
+        )
+    )
+    with pytest.raises(BootstrapStageFailure):
+        service._activate_profile(
+            job.id,
+            claim.claim_token,
+            expected_version=profile_stage.status_version,
+        )
+    assert repo.active_snapshot_profile() is None
+
+
+def test_terminal_activation_requires_profile_activation_stage(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    service = StrategyBootstrapService(
+        repo, jobs=None, providers=_production_bundle(repo)
+    )
+    job = repo.create_bootstrap_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    qualification_stage = repo.set_strategy_job_current_stage(
+        job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        stage=BootstrapStage.QUALIFICATION.value,
+    )
+    service._run_qualification()
+    roster_stage = repo.set_strategy_job_current_stage(
+        job.id,
+        claim.claim_token,
+        expected_version=qualification_stage.status_version,
+        stage=BootstrapStage.ROSTER_CAPTURE.value,
+    )
+    service._capture_roster(
+        job.id,
+        claim.claim_token,
+        expected_version=roster_stage.status_version,
+    )
+    with pytest.raises(BootstrapStageFailure):
+        service._activate_profile(
+            job.id,
+            claim.claim_token,
+            expected_version=roster_stage.status_version,
+        )
+    assert repo.active_snapshot_profile() is None
+
+
 # ---------------------------------------------------------------------------
 # Stage execution
 # ---------------------------------------------------------------------------
@@ -213,11 +681,16 @@ def test_start_setup_enqueues_bootstrap_job(tmp_path: Path) -> None:
 def test_bootstrap_worker_completes_with_seeded_data(
     tmp_path: Path,
 ) -> None:
-    repo = _repo(tmp_path / "backtest.db")
+    repo = _empty_repo(tmp_path / "backtest.db")
     job = repo.create_bootstrap_job()
     claim = repo.claim_next_strategy_job()
     assert claim is not None
-    engine = build_stage_walk_engine(job.id, repo, StrategyJobType.BOOTSTRAP)
+    engine = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=_production_bundle(repo),
+    )
     result = engine.run(job.id, claim.claim_token)
     assert result.status is StrategyJobStatus.COMPLETE
     assert result.current_stage is None
@@ -230,14 +703,21 @@ def test_bootstrap_worker_fails_without_qualification(
     job = repo.create_bootstrap_job()
     claim = repo.claim_next_strategy_job()
     assert claim is not None
-    engine = build_stage_walk_engine(job.id, repo, StrategyJobType.BOOTSTRAP)
+    engine = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=_unavailable_bundle(repo),
+    )
     result = engine.run(job.id, claim.claim_token)
     assert result.status is StrategyJobStatus.FAILED
     assert result.failure_code is JobFailureCode.PROVIDER_UNAVAILABLE
 
 
-def test_bootstrap_worker_fails_without_roster(tmp_path: Path) -> None:
-    """Qualification exists but no roster/identities."""
+def test_bootstrap_worker_requalifies_an_unrelated_stored_contract(
+    tmp_path: Path,
+) -> None:
+    """A manually seeded, out-of-contract qualification cannot enable capture."""
     repo = _empty_repo(tmp_path / "backtest.db")
     # Seed only qualification, no roster or identities
     with sqlite3.connect(str(tmp_path / "backtest.db")) as conn:
@@ -259,10 +739,15 @@ def test_bootstrap_worker_fails_without_roster(tmp_path: Path) -> None:
     job = repo.create_bootstrap_job()
     claim = repo.claim_next_strategy_job()
     assert claim is not None
-    engine = build_stage_walk_engine(job.id, repo, StrategyJobType.BOOTSTRAP)
+    engine = build_stage_walk_engine(
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=_production_bundle(repo),
+    )
     result = engine.run(job.id, claim.claim_token)
-    assert result.status is StrategyJobStatus.FAILED
-    assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
+    assert result.status is StrategyJobStatus.COMPLETE
+    assert repo.active_snapshot_profile() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +766,8 @@ def test_bootstrap_stage_failure_carries_code_and_detail() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_is_fixture_returns_true_in_test(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test::test_func")
+def test_is_fixture_requires_explicit_fixture_mode(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("STRATEGY_FIXTURE", "1")
     repo = _empty_repo(tmp_path / "backtest.db")
     service = StrategyBootstrapService(repo, jobs=None)  # type: ignore[arg-type]
     assert service.is_fixture is True

@@ -9,7 +9,7 @@ from datetime import date
 from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from app.core import config
 from app.repositories import db
@@ -55,6 +55,11 @@ from app.services.backtest.strategy_job import (
     WorkerLeaseFenceV1,
 )
 from app.services.backtest.strategy_protocol import StrategyProtocolV1
+
+if TYPE_CHECKING:
+    from app.services.backtest.strategy_bootstrap_service import (
+        StrategyProviderBundleV1,
+    )
 
 
 class WorkerResult(Protocol):
@@ -235,9 +240,11 @@ class BootstrapStageEngine:
         repository: BacktestRepository,
         *,
         lease: WorkerLeaseFenceV1 | None = None,
+        providers: "StrategyProviderBundleV1 | None" = None,
     ) -> None:
         self._repository = repository
         self._lease = lease
+        self._providers = providers
 
     def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
         from app.services.backtest.strategy_bootstrap_service import (
@@ -248,6 +255,7 @@ class BootstrapStageEngine:
         service = StrategyBootstrapService(
             self._repository,
             jobs=None,
+            providers=self._providers,
         )
         job = self._repository.strategy_job(job_id)
         if not _owns(job, claim_token):
@@ -256,8 +264,12 @@ class BootstrapStageEngine:
             return self._fail(job, claim_token, "Worker job type does not match")
         stage_methods = {
             BootstrapStage.QUALIFICATION: service._run_qualification,
-            BootstrapStage.ROSTER_CAPTURE: service._capture_roster,
-            BootstrapStage.PROFILE_ACTIVATION: service._activate_profile,
+            BootstrapStage.ROSTER_CAPTURE: lambda: service._capture_roster(
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
+            ),
         }
         for stage in STAGE_SEQUENCES[StrategyJobType.BOOTSTRAP]:
             job = self._repository.strategy_job(job_id)
@@ -278,28 +290,38 @@ class BootstrapStageEngine:
                     lease=self._lease,
                 )
             except StrategyJobConflict:
-                return self._repository.strategy_job(job_id)
+                current = self._repository.strategy_job(job_id)
+                if _owns(current, claim_token) and current.cancel_requested_at is not None:
+                    return self._cancel(job_id, claim_token)
+                return current
             # Run the real stage logic
+            if stage == BootstrapStage.PROFILE_ACTIVATION.value:
+                try:
+                    return service._activate_profile(
+                        job_id,
+                        claim_token,
+                        expected_version=job.status_version,
+                        lease=self._lease,
+                    )
+                except BootstrapStageFailure as exc:
+                    return self._fail_with_code(job, claim_token, exc.code, exc.detail)
+                except StrategyJobConflict:
+                    current = self._repository.strategy_job(job_id)
+                    if (
+                        _owns(current, claim_token)
+                        and current.cancel_requested_at is not None
+                    ):
+                        return self._cancel(job_id, claim_token)
+                    return current
             method = stage_methods.get(BootstrapStage(stage))
             if method is not None:
                 try:
                     method()
                 except BootstrapStageFailure as exc:
                     return self._fail_with_code(job, claim_token, exc.code, exc.detail)
-        try:
-            return self._repository.complete_claimed_stage_job(
-                job_id,
-                claim_token,
-                expected_version=job.status_version,
-                lease=self._lease,
-            )
-        except StrategyJobConflict:
-            current = self._repository.strategy_job(job_id)
-            if current.status is StrategyJobStatus.COMPLETE:
-                return current
-            if _owns(current, claim_token) and current.cancel_requested_at is not None:
-                return self._cancel(job_id, claim_token)
-            return current
+                except StrategyJobConflict:
+                    return self._repository.strategy_job(job_id)
+        return self._repository.strategy_job(job_id)
 
     def _cancel(self, job_id: str, claim_token: str) -> StrategyJobV1:
         current = self._repository.strategy_job(job_id)
@@ -360,6 +382,7 @@ def build_stage_walk_engine(
     job_type: StrategyJobType,
     *,
     lease: WorkerLeaseFenceV1 | None = None,
+    bootstrap_providers: "StrategyProviderBundleV1 | None" = None,
 ) -> StageWalkEngine | BootstrapStageEngine:
     """Build one claimed stage-walking activity's engine.
 
@@ -373,7 +396,9 @@ def build_stage_walk_engine(
     """
     if job_type is StrategyJobType.BOOTSTRAP:
         backtest.bootstrap_run(job_id)
-        return BootstrapStageEngine(backtest, lease=lease)
+        return BootstrapStageEngine(
+            backtest, lease=lease, providers=bootstrap_providers
+        )
     backtest.preparation_run(job_id)
     return StageWalkEngine(backtest, job_type, lease=lease)
 

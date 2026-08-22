@@ -1,0 +1,94 @@
+{
+  "fixture_version": "HistoricalSourceQualificationFixturesV1",
+  "provider_cases": [
+    {
+      "id": "us_active", "requested_symbol": "AAPL", "start": "2024-01-01", "end": "2024-01-04",
+      "expected_currency": "USD", "expected_quote_unit": "USD", "expected_timezone": "America/New_York",
+      "expected_sessions": ["2024-01-02", "2024-01-03"], "allowed_observed_symbols": ["AAPL"],
+      "metadata": {"symbol": "AAPL", "currency": "USD", "exchangeTimezoneName": "America/New_York", "instrumentType": "EQUITY"},
+      "index": ["2024-01-02T00:00:00-05:00", "2024-01-03T00:00:00-05:00"],
+      "rows": [
+        {"Open": 100, "High": 102, "Low": 99, "Close": 101, "Adj Close": 100.5, "Volume": 1000, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 101, "High": 103, "Low": 100, "Close": 102, "Adj Close": 101.5, "Volume": 1200, "Dividends": 0, "Stock Splits": 0}
+      ],
+      "expected_content_digest": "49e433650f243099ce5a793392a71c1df6640789b3fdb48420477e648bf6ea76"
+    },
+    {
+      "id": "lse_gbpence", "requested_symbol": "ULVR.L", "start": "2024-01-01", "end": "2024-01-04",
+      "expected_currency": "GBP", "expected_quote_unit": "GBp", "expected_timezone": "Europe/London",
+      "expected_sessions": ["2024-01-02", "2024-01-03"], "allowed_observed_symbols": ["ULVR.L"],
+      "metadata": {"symbol": "ULVR.L", "currency": "GBp", "exchangeTimezoneName": "Europe/London", "instrumentType": "EQUITY"},
+      "index": ["2024-01-02T00:00:00+00:00", "2024-01-03T00:00:00+00:00"],
+      "rows": [
+        {"Open": 4100, "High": 4150, "Low": 4080, "Close": 4120, "Adj Close": 4100, "Volume": 900, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 4120, "High": 4180, "Low": 4110, "Close": 4170, "Adj Close": 4150, "Volume": 950, "Dividends": 0, "Stock Splits": 0}
+      ],
+      "expected_content_digest": "f00db0f13090e2ac6f371b1d65e7b281021a3e47a7678fe5ae4dcaec75782938"
+    },
+    {
+      "id": "renamed_alias", "requested_symbol": "FB", "start": "2024-01-01", "end": "2024-01-04",
+      "expected_currency": "USD", "expected_quote_unit": "USD", "expected_timezone": "America/New_York",
+      "expected_sessions": ["2024-01-02", "2024-01-03"], "allowed_observed_symbols": ["FB", "META"],
+      "metadata": {"symbol": "META", "currency": "USD", "exchangeTimezoneName": "America/New_York", "instrumentType": "EQUITY"},
+      "index": ["2024-01-02T00:00:00-05:00", "2024-01-03T00:00:00-05:00"],
+      "rows": [
+        {"Open": 350, "High": 355, "Low": 348, "Close": 354, "Adj Close": 354, "Volume": 500, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 354, "High": 360, "Low": 352, "Close": 358, "Adj Close": 358, "Volume": 550, "Dividends": 0, "Stock Splits": 0}
+      ],
+      "expected_content_digest": "0fe46ffbbb2d5c82692992012d3f240ab1aefe86a2d086e59541ce1c1839cf90"
+    },
+    {
+      "id": "ordinary_split", "requested_symbol": "SPLT", "start": "2024-01-01", "end": "2024-01-04",
+      "expected_currency": "USD", "expected_quote_unit": "USD", "expected_timezone": "America/New_York",
+      "expected_sessions": ["2024-01-02", "2024-01-03"], "allowed_observed_symbols": ["SPLT"],
+      "metadata": {"symbol": "SPLT", "currency": "USD", "exchangeTimezoneName": "America/New_York", "instrumentType": "EQUITY"},
+      "index": ["2024-01-02T00:00:00-05:00", "2024-01-03T00:00:00-05:00"],
+      "rows": [
+        {"Open": 25, "High": 26, "Low": 24.75, "Close": 25, "Adj Close": 25, "Volume": 1000, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 25, "High": 27, "Low": 24, "Close": 25, "Adj Close": 25, "Volume": 4000, "Dividends": 0, "Stock Splits": 4}
+      ],
+      "expected_content_digest": "f471a2d252969bf567e4396710692b52dc1b28dd971ba563a5cafdab02e4fb2d"
+    },
+    {
+      "id": "reverse_split", "requested_symbol": "RSPLT", "start": "2024-01-01", "end": "2024-01-04",
+      "expected_currency": "USD", "expected_quote_unit": "USD", "expected_timezone": "America/New_York",
+      "expected_sessions": ["2024-01-02", "2024-01-03"], "allowed_observed_symbols": ["RSPLT"],
+      "metadata": {"symbol": "RSPLT", "currency": "USD", "exchangeTimezoneName": "America/New_York", "instrumentType": "EQUITY"},
+      "index": ["2024-01-02T00:00:00-05:00", "2024-01-03T00:00:00-05:00"],
+      "rows": [
+        {"Open": 100, "High": 110, "Low": 90, "Close": 100, "Adj Close": 100, "Volume": 1000, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 100, "High": 105, "Low": 98, "Close": 100, "Adj Close": 100, "Volume": 100, "Dividends": 0, "Stock Splits": 0.1}
+      ],
+      "expected_content_digest": "5cbd977710dcbceb60d409b71a9a894df72e80fc973521861d87ed2b7a9f0445"
+    },
+    {
+      "id": "dividend", "requested_symbol": "DIV", "start": "2024-01-01", "end": "2024-01-04",
+      "expected_currency": "USD", "expected_quote_unit": "USD", "expected_timezone": "America/New_York",
+      "expected_sessions": ["2024-01-02", "2024-01-03"], "allowed_observed_symbols": ["DIV"],
+      "metadata": {"symbol": "DIV", "currency": "USD", "exchangeTimezoneName": "America/New_York", "instrumentType": "EQUITY"},
+      "index": ["2024-01-02T00:00:00-05:00", "2024-01-03T00:00:00-05:00"],
+      "rows": [
+        {"Open": 50, "High": 52, "Low": 49, "Close": 51, "Adj Close": 50.75, "Volume": 1000, "Dividends": 0.25, "Stock Splits": 0},
+        {"Open": 51, "High": 53, "Low": 50, "Close": 52, "Adj Close": 52, "Volume": 1100, "Dividends": 0, "Stock Splits": 0}
+      ],
+      "expected_content_digest": "aafe1f2ea5e9c433d1b10556edd3753f0955f09cf40fb5518a756878b4dd99b4"
+    },
+    {
+      "id": "gbpusd_orientation", "requested_symbol": "GBPUSD=X", "start": "2024-01-01", "end": "2024-01-04",
+      "expected_currency": "USD", "expected_quote_unit": "USD", "expected_timezone": "UTC",
+      "expected_sessions": ["2024-01-02", "2024-01-03"], "allowed_observed_symbols": ["GBPUSD=X"],
+      "metadata": {"symbol": "GBPUSD=X", "currency": "USD", "exchangeTimezoneName": "UTC", "instrumentType": "CURRENCY"},
+      "index": ["2024-01-02T00:00:00+00:00", "2024-01-03T00:00:00+00:00"],
+      "rows": [
+        {"Open": 1.25, "High": 1.26, "Low": 1.24, "Close": 1.25, "Adj Close": 1.25, "Volume": 0, "Dividends": 0, "Stock Splits": 0},
+        {"Open": 1.25, "High": 1.27, "Low": 1.24, "Close": 1.26, "Adj Close": 1.26, "Volume": 0, "Dividends": 0, "Stock Splits": 0}
+      ],
+      "expected_content_digest": "d903dd402ff69cee80991bf945c83252ea7b5259816f478ca54f0dfe062d13d7"
+    }
+  ],
+  "boundary_cases": [
+    {"requested": "2010-01-01", "first_observation": "2010-01-02", "outcome": "before_first_provider_observation"},
+    {"requested": "2010-01-02", "first_observation": "2010-01-02", "outcome": "required_data_missing"},
+    {"fx_age_days": 5, "fresh": true}, {"fx_age_days": 6, "fresh": false}
+  ]
+}

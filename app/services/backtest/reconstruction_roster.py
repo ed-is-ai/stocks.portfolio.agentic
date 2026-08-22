@@ -21,12 +21,14 @@ from app.integrations.tv_screener import (
 )
 from app.services.backtest.canonical_manifest import canonical_json, manifest_digest
 from app.services.backtest.security_identity import (
+    AliasEntryV1,
     SecurityAliasManifestV1,
     SecurityAliasResolver,
     SecurityIdentityRegistryV1,
     SecurityIdentityV1,
     normalize_symbol,
 )
+from app.services.backtest.strategy_job import WorkerLeaseFenceV1
 from app.services.backtest.trading_calendar import TradingCalendar
 
 ROSTER_POLICY_VERSION = "ReconstructionRosterPolicyV1"
@@ -544,7 +546,7 @@ def _capture_content_digest(manifest: Mapping[str, object]) -> str:
     return manifest_digest(
         {
             "policy_version": manifest.get("policy_version"),
-            "alias_revision": manifest.get("alias_revision"),
+            "input_alias_revision": manifest.get("input_alias_revision"),
             "sources": sources,
             "members": members,
         }
@@ -572,7 +574,12 @@ class ReconstructionRosterCaptureService:
         self._policy = policy or ReconstructionRosterPolicyV1()
 
     def capture(
-        self, lineage_id: str, alias_manifest: SecurityAliasManifestV1
+        self,
+        lineage_id: str,
+        alias_manifest: SecurityAliasManifestV1,
+        *,
+        job_claim: tuple[str, str, int] | None = None,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> CapturedRosterV1:
         if not lineage_id.strip():
             raise ValueError("lineage_id is required")
@@ -649,6 +656,38 @@ class ReconstructionRosterCaptureService:
                 )
             )
 
+        direct_aliases = {
+            (entry.provider, entry.mic, entry.observed_symbol): entry
+            for entry in alias_manifest.entries
+        }
+        augmented_entries = list(alias_manifest.entries)
+        for identity in identities:
+            key = ("yfinance", identity.mic, identity.provider_symbol)
+            existing_alias = direct_aliases.get(key)
+            if existing_alias is not None:
+                if existing_alias.security_id != identity.security_id:
+                    raise RosterCaptureError(
+                        "provider alias conflicts with captured identity",
+                        code="identity_ambiguous",
+                    )
+                continue
+            augmented_entries.append(
+                AliasEntryV1(
+                    security_id=identity.security_id,
+                    provider="yfinance",
+                    mic=identity.mic,
+                    observed_symbol=identity.provider_symbol,
+                    effective_from=None,
+                    effective_to=None,
+                    evidence_source="captured_market_identity",
+                    evidence_digest=identity.evidence_digest,
+                    provenance="provider_evidence",
+                )
+            )
+        committed_alias_manifest = SecurityAliasManifestV1.build(
+            tuple(augmented_entries), created_at=captured_at
+        )
+
         registry = SecurityIdentityRegistryV1.build(
             tuple(identities), created_at=captured_at
         )
@@ -658,7 +697,8 @@ class ReconstructionRosterCaptureService:
             "policy_version": ROSTER_POLICY_VERSION,
             "captured_at": captured_at,
             "identity_registry_revision": registry.revision,
-            "alias_revision": alias_manifest.revision,
+            "alias_revision": committed_alias_manifest.revision,
+            "input_alias_revision": alias_manifest.revision,
             "expected_count": len(captured_members),
             "sources": [
                 {
@@ -692,16 +732,16 @@ class ReconstructionRosterCaptureService:
                 }
             ),
             identity_evidence_digest=registry.evidence_digest,
-            alias_revision=alias_manifest.revision,
+            alias_revision=committed_alias_manifest.revision,
             alias_manifest_json=canonical_json(
                 {
-                    "schema_version": alias_manifest.schema_version,
-                    "revision": alias_manifest.revision,
-                    "evidence_digest": alias_manifest.evidence_digest,
-                    "entries": alias_manifest.entries,
+                    "schema_version": committed_alias_manifest.schema_version,
+                    "revision": committed_alias_manifest.revision,
+                    "evidence_digest": committed_alias_manifest.evidence_digest,
+                    "entries": committed_alias_manifest.entries,
                 }
             ),
-            alias_evidence_digest=alias_manifest.evidence_digest,
+            alias_evidence_digest=committed_alias_manifest.evidence_digest,
             captured_at=captured_at.astimezone(timezone.utc).isoformat(),
             identities=tuple(
                 (
@@ -728,7 +768,7 @@ class ReconstructionRosterCaptureService:
                     entry.evidence_digest,
                     entry.provenance,
                 )
-                for entry in alias_manifest.entries
+                for entry in committed_alias_manifest.entries
             ),
             sources=tuple(
                 (
@@ -753,7 +793,9 @@ class ReconstructionRosterCaptureService:
             ),
         )
         try:
-            self._repository.commit_roster_capture(commit)
+            self._repository.commit_roster_capture(
+                commit, job_claim=job_claim, lease=lease
+            )
         except sqlite3.IntegrityError as exc:
             winner_digest = self._repository.roster_digest_for_lineage(lineage_id)
             winner_json = (

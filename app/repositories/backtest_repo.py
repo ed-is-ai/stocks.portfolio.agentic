@@ -2560,6 +2560,79 @@ class BacktestRepository:
             self._upsert_notification_outbox_on_connection(conn, job)
             return job
 
+    def activate_bootstrap_profile_and_complete(
+        self,
+        profile: SnapshotProfileV1,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        qualification_contract_digest: str,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> StrategyJobV1:
+        """Atomically seal Bootstrap's profile activation and terminal job state."""
+        try:
+            canonical = SnapshotProfileV1.from_canonical_json(profile.canonical_json_bytes())
+            self._validate_profile_authority(canonical)
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if self._require_job_type(conn, job_id) is not StrategyJobType.BOOTSTRAP:
+                    raise StrategyJobConflict("only bootstrap jobs activate profiles")
+                fence = _lease_fence_params(lease)
+                owned = conn.execute(
+                    f"""SELECT 1 FROM strategy_jobs WHERE id=? AND status='running'
+                        AND claim_token=? AND status_version=? AND cancel_requested_at IS NULL
+                        AND current_stage='profile_activation'
+                        {_LEASE_FENCE_SQL}""",
+                    (job_id, claim_token, expected_version, *fence),
+                ).fetchone()
+                if owned is None:
+                    raise StrategyJobConflict("worker completion ownership is stale")
+                self._require_qualification_on_connection(
+                    conn, qualification_contract_digest
+                )
+                lineage = conn.execute(
+                    "SELECT roster_digest FROM reconstruction_roster_lineages WHERE lineage_id=?",
+                    (job_id,),
+                ).fetchone()
+                if lineage is None or str(lineage[0]) != canonical.roster_digest:
+                    raise StrategyJobConflict(
+                        "bootstrap roster evidence does not match the claimed job"
+                    )
+                self._insert_profile_on_connection(conn, canonical)
+                current = conn.execute(
+                    "SELECT profile_hash, activation_seq FROM active_snapshot_profile WHERE singleton_id=1"
+                ).fetchone()
+                if current is None:
+                    activation_seq = 1
+                    conn.execute(
+                        "INSERT INTO active_snapshot_profile (singleton_id, profile_hash, activation_seq, activated_at) VALUES (1, ?, ?, ?)",
+                        (canonical.profile_hash, activation_seq, self._job_now()),
+                    )
+                elif str(current[0]) != canonical.profile_hash:
+                    activation_seq = int(current[1]) + 1
+                    conn.execute(
+                        "UPDATE active_snapshot_profile SET profile_hash=?, activation_seq=?, activated_at=? WHERE singleton_id=1 AND activation_seq=?",
+                        (canonical.profile_hash, activation_seq, self._job_now(), int(current[1])),
+                    )
+                cursor = conn.execute(
+                    f"""UPDATE strategy_jobs SET status='complete', claim_token=NULL,
+                        current_stage=NULL, owner_instance_id=NULL, lease_generation=NULL,
+                        status_version=status_version+1, updated_at=?
+                        WHERE id=? AND status='running' AND claim_token=? AND status_version=?
+                          AND cancel_requested_at IS NULL {_LEASE_FENCE_SQL}""",
+                    (self._job_now(), job_id, claim_token, expected_version, *fence),
+                )
+                if cursor.rowcount != 1:
+                    raise StrategyJobConflict("worker completion ownership is stale")
+                job = self._load_strategy_job(conn, job_id)
+                self._upsert_notification_outbox_on_connection(conn, job)
+                return job
+        except (BacktestIntegrityError, StrategyJobConflict):
+            raise
+        except Exception as exc:
+            raise BacktestIntegrityError("bootstrap profile activation failed") from exc
+
     def request_strategy_job_cancellation(
         self, job_id: str, *, expected_version: int
     ) -> StrategyJobV1:
@@ -2570,6 +2643,12 @@ class BacktestRepository:
             if job.status_version != expected_version:
                 raise StrategyJobConflict("cancellation request is stale")
             if job.status.terminal or job.cancel_requested_at is not None:
+                return job
+            if (
+                job.job_type is StrategyJobType.BOOTSTRAP
+                and job.status is StrategyJobStatus.RUNNING
+                and job.current_stage == "profile_activation"
+            ):
                 return job
             if job.status is StrategyJobStatus.QUEUED:
                 cursor = conn.execute(
@@ -5295,10 +5374,31 @@ class BacktestRepository:
         cls._verify_fragment_key(key, envelope)
         return envelope
 
-    def commit_roster_capture(self, commit: RosterCaptureCommit) -> str:
+    def commit_roster_capture(
+        self,
+        commit: RosterCaptureCommit,
+        *,
+        job_claim: tuple[str, str, int] | None = None,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> str:
         """Atomically compare-and-insert a complete roster capture."""
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if job_claim is not None:
+                job_id, claim_token, expected_version = job_claim
+                fence = _lease_fence_params(lease)
+                owned = conn.execute(
+                    f"""SELECT 1 FROM strategy_jobs
+                        WHERE id=? AND job_type='bootstrap' AND status='running'
+                          AND claim_token=? AND status_version=?
+                          AND current_stage='roster_capture'
+                          AND cancel_requested_at IS NULL {_LEASE_FENCE_SQL}""",
+                    (job_id, claim_token, expected_version, *fence),
+                ).fetchone()
+                if owned is None or commit.lineage_id != job_id:
+                    raise StrategyJobConflict(
+                        "bootstrap roster capture ownership is stale"
+                    )
             existing = conn.execute(
                 "SELECT roster_digest FROM reconstruction_roster_lineages WHERE lineage_id=?",
                 (commit.lineage_id,),

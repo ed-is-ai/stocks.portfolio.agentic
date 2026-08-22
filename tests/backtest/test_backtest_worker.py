@@ -4,7 +4,6 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-import json
 import sqlite3
 
 import pandas as pd
@@ -787,120 +786,23 @@ def _stage_repo(path: Path) -> BacktestRepository:
         instant_clock=lambda: datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc),
     )
     repo.ensure_schema()
-    _seed_bootstrap_prerequisites(path)
     return repo
 
 
-_STAGE_NOW = datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc)
-_STAGE_PROFILE_HASH = "a" * 64
-_STAGE_ROSTER_DIGEST = "b" * 64
-_STAGE_FIXTURE_DIGEST = "1" * 64
-_STAGE_PROBE_DEFINITION_DIGEST = "2" * 64
-
-
-def _stage_qualification_digest() -> str:
-    from app.services.backtest.canonical_manifest import manifest_digest
-    from app.services.backtest.historical_data_qualification import (
-        FIXTURE_CONTRACT_VERSION,
-        REQUEST_CONTRACT_VERSION,
-        current_source_versions_json,
-    )
-
-    return manifest_digest(
-        {
-            "sources": json.loads(current_source_versions_json()),
-            "calendar_digest": TradingCalendar().session_table_digest(),
-            "request_contract": REQUEST_CONTRACT_VERSION,
-            "fixture_contract": FIXTURE_CONTRACT_VERSION,
-            "fixture_digest": _STAGE_FIXTURE_DIGEST,
-            "probe_definition_digest": _STAGE_PROBE_DEFINITION_DIGEST,
-        }
-    )
-
-
-def _seed_bootstrap_prerequisites(path: Path) -> None:
-    """Seed qualification, roster, identities, and active profile."""
-    from app.services.backtest.historical_data_qualification import (
-        current_source_versions_json,
-    )
-
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute(
-            """INSERT OR IGNORE INTO security_identity_registry_revisions
-               (revision_digest, canonical_manifest_json, evidence_digest, created_at)
-               VALUES (?, '{}', ?, ?)""",
-            ("c" * 64, "d" * 64, _STAGE_NOW.isoformat()),
-        )
-        conn.execute(
-            """INSERT OR IGNORE INTO security_alias_manifests
-               (alias_revision, canonical_manifest_json, evidence_digest, created_at)
-               VALUES (?, '{}', ?, ?)""",
-            ("e" * 64, "f" * 64, _STAGE_NOW.isoformat()),
-        )
-        conn.execute(
-            """INSERT OR IGNORE INTO reconstruction_rosters
-               (roster_digest, policy_version, canonical_manifest_json,
-                identity_registry_revision, alias_revision, captured_at)
-               VALUES (?, 'ReconstructionRosterPolicyV1', '{}', ?, ?, ?)""",
-            (
-                _STAGE_ROSTER_DIGEST,
-                "c" * 64,
-                "e" * 64,
-                _STAGE_NOW.isoformat(),
-            ),
-        )
-        conn.execute(
-            """INSERT OR IGNORE INTO security_identities
-               (security_id, mic, provider_symbol, evidence_digest,
-                identity_registry_revision, created_at)
-               VALUES (?, 'XNYS', 'TEST', ?, ?, ?)""",
-            ("sid_test_001", "g" * 64, "c" * 64, _STAGE_NOW.isoformat()),
-        )
-        conn.execute(
-            """INSERT OR IGNORE INTO snapshot_profiles
-               (profile_hash, canonical_profile_json, display_version, roster_digest,
-                scanner_schema_version, calendar_dataset_version,
-                calendar_dataset_digest, cadence)
-               VALUES (?, '{}', 'Scanner data v1', ?, 'historical_scan_record.v1',
-                       'exchange-calendars-v1', ?, 'per-exchange month_end')""",
-            (
-                _STAGE_PROFILE_HASH,
-                _STAGE_ROSTER_DIGEST,
-                TradingCalendar().session_table_digest(),
-            ),
-        )
-        conn.execute(
-            """INSERT OR IGNORE INTO active_snapshot_profile
-               (singleton_id, profile_hash, activation_seq, activated_at)
-               VALUES (1, ?, 1, ?)""",
-            (_STAGE_PROFILE_HASH, _STAGE_NOW.isoformat()),
-        )
-        digest = _stage_qualification_digest()
-        conn.execute(
-            """INSERT OR IGNORE INTO historical_source_qualifications (
-                   contract_digest, source_versions_json, fixture_digest,
-                   probe_definition_digest, probe_digest, qualified_at, passed,
-                   failure_code, failure_reason
-               ) VALUES (?, ?, ?, ?, ?, ?, 1, NULL, NULL)""",
-            (
-                digest,
-                current_source_versions_json(),
-                _STAGE_FIXTURE_DIGEST,
-                _STAGE_PROBE_DEFINITION_DIGEST,
-                "3" * 64,
-                _STAGE_NOW.isoformat(),
-            ),
-        )
-
-
 def test_bootstrap_worker_walks_its_stages_then_completes(tmp_path: Path) -> None:
+    from app.services.backtest.strategy_bootstrap_service import (
+        StrategyProviderBundleV1,
+    )
+
     repo = _stage_repo(tmp_path / "backtest.db")
     job = repo.create_bootstrap_job()
     claim = repo.claim_next_strategy_job()
     assert claim is not None
     engine = worker_module.build_stage_walk_engine(
-        job.id, repo, StrategyJobType.BOOTSTRAP
+        job.id,
+        repo,
+        StrategyJobType.BOOTSTRAP,
+        bootstrap_providers=StrategyProviderBundleV1.fixture(repo),
     )
 
     result = engine.run(job.id, claim.claim_token)
@@ -976,8 +878,10 @@ def test_stage_worker_writes_are_fenced_by_a_stale_lease_generation(
 
 
 def test_main_dispatches_a_bootstrap_job_to_the_stage_walk_engine(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    monkeypatch.setenv("STRATEGY_FIXTURE", "1")
     repo = _stage_repo(tmp_path / "backtest.db")
     job = repo.create_bootstrap_job()
     claim = repo.claim_next_strategy_job()
