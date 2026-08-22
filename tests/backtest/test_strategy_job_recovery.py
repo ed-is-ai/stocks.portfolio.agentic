@@ -70,7 +70,7 @@ def test_projector_is_idempotent_and_preserves_notification_read_state(tmp_path)
     job = _enqueue(repo, "2026-05", "2026-05").job
     assert job is not None
     notification_repo = NotificationsRepository(
-        db.make_connect(lambda: notifications_path)
+        db.make_connect(lambda: notifications_path), retention_days=36500
     )
     notification_repo.ensure_schema()
     projector = StrategyNotificationProjector(repo, notification_repo)
@@ -148,7 +148,9 @@ def test_tombstone_projection_removes_actions_and_target(tmp_path):
     assert source is not None
     failed = _fail(repo, source.id)
     repo.delete_strategy_job(source.id, expected_version=failed.status_version)
-    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: notifications_path), retention_days=36500
+    )
     notifications.ensure_schema()
     projector = StrategyNotificationProjector(repo, notifications)
     assert projector.project_pending() == 1
@@ -168,7 +170,9 @@ def test_queued_initialization_projects_activity_deep_link(tmp_path):
     repo = _repo(path)
     job = _enqueue(repo, "2026-05", "2026-05").job
     assert job is not None
-    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: notifications_path), retention_days=36500
+    )
     notifications.ensure_schema()
     projector = StrategyNotificationProjector(repo, notifications)
 
@@ -184,7 +188,9 @@ def test_notification_projection_rejects_lower_version(tmp_path):
     from app.schemas.notification import NotificationCategory, NotificationSeverity
 
     notifications_path = tmp_path / "notifications.db"
-    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: notifications_path), retention_days=36500
+    )
     notifications.ensure_schema()
     common = dict(
         job_id="job-1",
@@ -221,7 +227,8 @@ def test_projection_ignores_malformed_row_and_keeps_polling(tmp_path):
             ("{not-json",),
         )
     notifications = NotificationsRepository(
-        db.make_connect(lambda: tmp_path / "notifications.db")
+        db.make_connect(lambda: tmp_path / "notifications.db"),
+        retention_days=36500,
     )
     notifications.ensure_schema()
     assert StrategyNotificationProjector(repo, notifications).project_pending() == 0
@@ -276,7 +283,9 @@ def test_queued_backtest_projects_working_activity_deep_link_and_category(tmp_pa
     notifications_path = tmp_path / "notifications.db"
     repo = _repo(path)
     enqueued = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
-    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: notifications_path), retention_days=36500
+    )
     notifications.ensure_schema()
     projector = StrategyNotificationProjector(repo, notifications)
 
@@ -295,7 +304,9 @@ def test_failed_backtest_projects_strategy_identity_title_and_detail(tmp_path):
     repo = _repo(path)
     enqueued = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
     failed = _fail_backtest(repo, enqueued.job.id)
-    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: notifications_path), retention_days=36500
+    )
     notifications.ensure_schema()
     projector = StrategyNotificationProjector(repo, notifications)
 
@@ -315,7 +326,9 @@ def test_backtest_tombstone_projection_removes_actions_and_target(tmp_path):
     enqueued = _enqueue_backtest(repo, start_month="2026-05", end_month="2026-05")
     failed = _fail_backtest(repo, enqueued.job.id)
     repo.delete_strategy_job(enqueued.job.id, expected_version=failed.status_version)
-    notifications = NotificationsRepository(db.make_connect(lambda: notifications_path))
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: notifications_path), retention_days=36500
+    )
     notifications.ensure_schema()
     projector = StrategyNotificationProjector(repo, notifications)
 
@@ -373,7 +386,8 @@ def test_stage_activity_notifications_carry_their_own_title_and_actions(tmp_path
     repo = _repo(path)
     bootstrap = repo.create_bootstrap_job()
     notifications = NotificationsRepository(
-        db.make_connect(lambda: tmp_path / "notifications.db")
+        db.make_connect(lambda: tmp_path / "notifications.db"),
+        retention_days=36500,
     )
     notifications.ensure_schema()
     projector = StrategyNotificationProjector(repo, notifications)
@@ -401,7 +415,8 @@ def test_failed_preparation_offers_delete_only(tmp_path):
         detail="Worker interrupted before completion",
     )
     notifications = NotificationsRepository(
-        db.make_connect(lambda: tmp_path / "notifications.db")
+        db.make_connect(lambda: tmp_path / "notifications.db"),
+        retention_days=36500,
     )
     notifications.ensure_schema()
     projector = StrategyNotificationProjector(repo, notifications)

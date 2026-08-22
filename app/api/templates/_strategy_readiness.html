@@ -1,0 +1,77 @@
+{#- Strategy Manager readiness & diagnostics (Story 4.4). Read-only:
+    this page never creates, repairs, acquires, activates, or queues
+    anything. -#}
+<section aria-labelledby="strategy-readiness-heading">
+  <h1 id="strategy-readiness-heading" tabindex="-1" class="h3">
+    {% if diagnostics_view %}Diagnostics{% else %}Readiness{% endif %}
+  </h1>
+
+  {% if readiness.is_fixture %}
+  <div class="alert alert-secondary" role="alert">
+    <strong>Fixture — not production readiness.</strong> This environment is running in test/fixture mode.
+  </div>
+  {% endif %}
+
+  <div role="status" aria-live="polite" id="readiness-status" class="mb-3">
+    {% set ready_count = namespace(count=0) %}
+    {% for item in [readiness.qualification, readiness.roster, readiness.active_profile, readiness.coverage, readiness.discovery] %}
+      {% if item.state == 'ready' %}{% set ready_count.count = ready_count.count + 1 %}{% endif %}
+    {% endfor %}
+    <p class="text-muted mb-0">{{ ready_count.count }} of 5 prerequisites ready. Worker: {{ readiness.worker.state.value }}.</p>
+  </div>
+
+  <table class="table table-sm align-middle" aria-describedby="strategy-readiness-heading">
+    <thead><tr><th scope="col">Prerequisite</th><th scope="col">State</th><th scope="col">Reason</th><th scope="col">Recovery</th></tr></thead>
+    <tbody>
+      {% for item in [readiness.qualification, readiness.roster, readiness.active_profile, readiness.coverage, readiness.discovery] %}
+      <tr>
+        <th scope="row">{{ item.name|replace('_', ' ')|title }}</th>
+        <td>
+          {% set state_class = {'ready': 'success', 'missing': 'warning', 'running': 'info', 'stale_incompatible': 'warning', 'failed': 'danger', 'integrity_error': 'danger'} %}
+          <span class="badge text-bg-{{ state_class.get(item.state.value, 'secondary') }}">{{ item.state.value }}</span>
+        </td>
+        <td>{{ item.reason }}</td>
+        <td>{% if item.recovery_action.value != 'none' %}<span class="badge text-bg-light">{{ item.recovery_action.value|replace('_', ' ')|title }}</span>{% else %}—{% endif %}</td>
+      </tr>
+      {% endfor %}
+      <tr>
+        <th scope="row">Worker</th>
+        <td>
+          {% set worker_class = {'ready': 'success', 'disabled': 'secondary', 'unavailable_interrupted': 'danger', 'busy': 'info'} %}
+          <span class="badge text-bg-{{ worker_class.get(readiness.worker.state.value, 'secondary') }}">{{ readiness.worker.state.value }}</span>
+        </td>
+        <td>{{ readiness.worker.reason }}</td>
+        <td>{% if readiness.worker.recovery_action.value != 'none' %}<span class="badge text-bg-light">{{ readiness.worker.recovery_action.value|replace('_', ' ')|title }}</span>{% else %}—{% endif %}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  {% if diagnostics_view and readiness.recent_failures %}
+  <h2 class="h5 mt-4">Recent failures</h2>
+  <table class="table table-sm align-middle">
+    <thead><tr><th scope="col">Job</th><th scope="col">Type</th><th scope="col">Code</th><th scope="col">Stage/Month</th><th scope="col">Recovery</th></tr></thead>
+    <tbody>
+      {% for failure in readiness.recent_failures %}
+      <tr>
+        <td><code>{{ failure.job_id[:8] }}</code></td>
+        <td>{{ failure.job_type.value }}</td>
+        <td>{{ failure.failure_code.value }}</td>
+        <td>{{ failure.stage_or_month or '—' }}</td>
+        <td><span class="badge text-bg-light">{{ failure.recovery_action.value|replace('_', ' ')|title }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% elif diagnostics_view %}
+  <p class="text-muted mt-3">No recent failures.</p>
+  {% endif %}
+
+  {% if not diagnostics_view %}
+  <div class="d-flex gap-2 mt-3">
+    <a class="btn btn-outline-secondary" href="/strategy-manager/diagnostics" hx-get="/strategy-manager/diagnostics" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-activity"></i> View diagnostics</a>
+    <a class="btn btn-outline-primary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
+  </div>
+  {% else %}
+  <a class="btn btn-outline-primary mt-3" href="/strategy-manager/readiness" hx-get="/strategy-manager/readiness" hx-target="#tab-content" hx-swap="innerHTML">Back to readiness</a>
+  {% endif %}
+</section>

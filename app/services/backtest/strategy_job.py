@@ -86,6 +86,37 @@ class JobFailureCode(StrEnum):
     WORKER_INTERRUPTED = "worker_interrupted"
 
 
+class PrerequisiteState(StrEnum):
+    """Closed vocabulary for one readiness prerequisite's state."""
+
+    MISSING = "missing"
+    RUNNING = "running"
+    READY = "ready"
+    STALE_INCOMPATIBLE = "stale_incompatible"
+    FAILED = "failed"
+    INTEGRITY_ERROR = "integrity_error"
+
+
+class WorkerState(StrEnum):
+    """Closed vocabulary for the persisted worker lease state."""
+
+    DISABLED = "disabled"
+    UNAVAILABLE_INTERRUPTED = "unavailable_interrupted"
+    BUSY = "busy"
+    READY = "ready"
+
+
+class RecoveryAction(StrEnum):
+    """Closed vocabulary for the one recovery action per prerequisite."""
+
+    SET_UP = "set_up"
+    INITIALIZE = "initialize"
+    CONFIGURE = "configure"
+    RECONCILE_WORKER = "reconcile_worker"
+    RETRY = "retry"
+    NONE = "none"
+
+
 class StrategyJobError(RuntimeError):
     """Base typed lifecycle error with a stable machine code."""
 
@@ -227,6 +258,58 @@ class BootstrapRunV1(_LifecycleModel):
     """
 
     job_id: Annotated[str, Field(min_length=1)]
+
+
+class PrerequisiteItemV1(_LifecycleModel):
+    """One readiness prerequisite's typed state projection."""
+
+    name: str
+    state: PrerequisiteState
+    reason: str
+    last_verified_at: datetime | None
+    recovery_action: RecoveryAction
+
+
+class WorkerReadinessV1(_LifecycleModel):
+    """The worker lease readiness projection."""
+
+    state: WorkerState
+    reason: str
+    last_heartbeat_at: datetime | None
+    recovery_action: RecoveryAction
+
+
+class RecentJobFailureV1(_LifecycleModel):
+    """One bounded recent job failure entry for diagnostics."""
+
+    job_id: str
+    job_type: StrategyJobType
+    failure_code: JobFailureCode
+    stage_or_month: str | None
+    failed_at: datetime
+    recovery_action: RecoveryAction
+
+
+class StrategyReadinessV1(_LifecycleModel):
+    """Six independent prerequisites + worker state + recent failures."""
+
+    qualification: PrerequisiteItemV1
+    roster: PrerequisiteItemV1
+    active_profile: PrerequisiteItemV1
+    coverage: PrerequisiteItemV1
+    worker: WorkerReadinessV1
+    discovery: PrerequisiteItemV1
+    recent_failures: tuple[RecentJobFailureV1, ...]
+    is_fixture: bool
+
+
+class RunUniverseSelectionV1(_LifecycleModel):
+    """One canonicalized universe selection for a Backtest Run."""
+
+    profile_hash: str
+    activation_seq: int
+    canonical_security_ids: tuple[str, ...]
+    run_universe_digest: str
 
 
 class PreparationRunV1(_LifecycleModel):
@@ -507,6 +590,11 @@ __all__ = [
     "JobFailureCode",
     "PreparationRunV1",
     "PreparationStage",
+    "PrerequisiteItemV1",
+    "PrerequisiteState",
+    "RecentJobFailureV1",
+    "RecoveryAction",
+    "RunUniverseSelectionV1",
     "STAGE_JOB_TYPES",
     "STAGE_SEQUENCES",
     "STAGE_VALUES",
@@ -522,7 +610,10 @@ __all__ = [
     "StrategyJobDeletionV1",
     "StrategyJobType",
     "StrategyJobV1",
+    "StrategyReadinessV1",
     "WorkerLeaseFenceV1",
     "WorkerLeaseV1",
+    "WorkerReadinessV1",
+    "WorkerState",
     "requested_month_digest",
 ]

@@ -22,7 +22,11 @@ def generate_json_report(results: list[dict], metadata: dict, output_file: str):
         metadata: Screening metadata (date, parameters, etc.)
         output_file: Output file path
     """
-    report = {"metadata": metadata, "results": results, "summary": generate_summary_stats(results)}
+    report = {
+        "metadata": metadata,
+        "results": results,
+        "summary": generate_summary_stats(results),
+    }
 
     with open(output_file, "w") as f:
         json.dump(report, f, indent=2)
@@ -93,17 +97,25 @@ def generate_markdown_report(results: list[dict], metadata: dict, output_file: s
     lines.append("")
     lines.append("## Methodology")
     lines.append("")
-    lines.append("This Phase 3 implementation includes all 7 CANSLIM components (100% coverage):")
+    lines.append(
+        "This Phase 3 implementation includes all 7 CANSLIM components (100% coverage):"
+    )
     lines.append("")
     lines.append("- **C** (Current Earnings) - 15% weight: Quarterly EPS growth YoY")
     lines.append("- **A** (Annual Growth) - 20% weight: 3-year EPS CAGR")
     lines.append("- **N** (Newness) - 15% weight: Price position vs 52-week high")
-    lines.append("- **S** (Supply/Demand) - 15% weight: Volume accumulation/distribution")
-    lines.append("- **L** (Leadership) - 20% weight: Relative Strength vs S&P 500 (52-week)")
+    lines.append(
+        "- **S** (Supply/Demand) - 15% weight: Volume accumulation/distribution"
+    )
+    lines.append(
+        "- **L** (Leadership) - 20% weight: Relative Strength vs S&P 500 (52-week)"
+    )
     lines.append("- **I** (Institutional) - 10% weight: Institutional holder analysis")
     lines.append("- **M** (Market Direction) - 5% weight: S&P 500 trend")
     lines.append("")
-    lines.append("Component weights follow William O'Neil's original CANSLIM methodology,")
+    lines.append(
+        "Component weights follow William O'Neil's original CANSLIM methodology,"
+    )
     lines.append(
         "with L (Leadership/RS Rank) as the most weighted component alongside A (Annual Growth)."
     )
@@ -143,7 +155,9 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
 
     # Header with rank and rating emoji
     rating_emoji = get_rating_emoji(stock["composite_score"])
-    lines.append(f"### {rank}. {stock['symbol']} - {stock['company_name']} {rating_emoji}")
+    lines.append(
+        f"### {rank}. {stock['symbol']} - {stock['company_name']} {rating_emoji}"
+    )
 
     # Basic info
     lines.append(
@@ -153,7 +167,9 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
     )
 
     # Composite score
-    lines.append(f"**Composite Score:** {stock['composite_score']:.1f}/100 ({stock['rating']})")
+    lines.append(
+        f"**Composite Score:** {stock['composite_score']:.1f}/100 ({stock['rating']})"
+    )
     lines.append("")
 
     # Component breakdown table
@@ -169,7 +185,9 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
     c_rev = c_details.get("latest_qtr_revenue_growth", "N/A")
     c_eps_str = f"{c_eps:+.1f}%" if isinstance(c_eps, (int, float)) else str(c_eps)
     c_rev_str = f"{c_rev:+.1f}%" if isinstance(c_rev, (int, float)) else str(c_rev)
-    lines.append(f"| 🅲 Current Earnings | {c_score}/100 | EPS: {c_eps_str}, Revenue: {c_rev_str} |")
+    lines.append(
+        f"| 🅲 Current Earnings | {c_score}/100 | EPS: {c_eps_str}, Revenue: {c_rev_str} |"
+    )
 
     # A component
     a_details = stock.get("a_component", {})
@@ -177,7 +195,9 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
     a_cagr = a_details.get("eps_cagr_3yr", "N/A")
     a_stability = a_details.get("stability", "unknown")
     a_cagr_str = f"{a_cagr:.1f}%" if isinstance(a_cagr, (int, float)) else str(a_cagr)
-    lines.append(f"| 🅰 Annual Growth | {a_score}/100 | 3yr CAGR: {a_cagr_str}, {a_stability} |")
+    lines.append(
+        f"| 🅰 Annual Growth | {a_score}/100 | 3yr CAGR: {a_cagr_str}, {a_stability} |"
+    )
 
     # N component
     n_details = stock.get("n_component", {})
@@ -185,16 +205,22 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
     n_distance = n_details.get("distance_from_high_pct", "N/A")
     n_breakout = "✓ Breakout" if n_details.get("breakout_detected") else ""
     n_distance_str = (
-        f"{n_distance:+.1f}%" if isinstance(n_distance, (int, float)) else str(n_distance)
+        f"{n_distance:+.1f}%"
+        if isinstance(n_distance, (int, float))
+        else str(n_distance)
     )
-    lines.append(f"| 🅽 Newness | {n_score}/100 | {n_distance_str} from 52wk high {n_breakout} |")
+    lines.append(
+        f"| 🅽 Newness | {n_score}/100 | {n_distance_str} from 52wk high {n_breakout} |"
+    )
 
     # S component
     s_details = stock.get("s_component", {})
     s_score = s_details.get("score", 0)
     s_ratio = s_details.get("up_down_ratio", "N/A")
     s_accumulation = "✓ Accumulation" if s_details.get("accumulation_detected") else ""
-    s_ratio_str = f"{s_ratio:.2f}" if isinstance(s_ratio, (int, float)) else str(s_ratio)
+    s_ratio_str = (
+        f"{s_ratio:.2f}" if isinstance(s_ratio, (int, float)) else str(s_ratio)
+    )
     lines.append(
         f"| 🅂 Supply/Demand | {s_score}/100 | "
         f"Up/Down Volume Ratio: {s_ratio_str} {s_accumulation} |"
@@ -207,10 +233,14 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
     l_relative = l_details.get("relative_performance", "N/A")
     l_rs_rank = l_details.get("rs_rank_estimate", "N/A")
     l_stock_perf_str = (
-        f"{l_stock_perf:+.1f}%" if isinstance(l_stock_perf, (int, float)) else str(l_stock_perf)
+        f"{l_stock_perf:+.1f}%"
+        if isinstance(l_stock_perf, (int, float))
+        else str(l_stock_perf)
     )
     l_relative_str = (
-        f"{l_relative:+.1f}% vs S&P" if isinstance(l_relative, (int, float)) else str(l_relative)
+        f"{l_relative:+.1f}% vs S&P"
+        if isinstance(l_relative, (int, float))
+        else str(l_relative)
     )
     l_rs_str = f"RS: {l_rs_rank}" if isinstance(l_rs_rank, (int, float)) else ""
     lines.append(
@@ -223,9 +253,13 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
     i_holders = i_details.get("num_holders", "N/A")
     i_ownership = i_details.get("ownership_pct", "N/A")
     i_ownership_str = (
-        f"{i_ownership:.1f}%" if isinstance(i_ownership, (int, float)) else str(i_ownership)
+        f"{i_ownership:.1f}%"
+        if isinstance(i_ownership, (int, float))
+        else str(i_ownership)
     )
-    i_superinvestor = "⭐ Superinvestor" if i_details.get("superinvestor_present") else ""
+    i_superinvestor = (
+        "⭐ Superinvestor" if i_details.get("superinvestor_present") else ""
+    )
     lines.append(
         f"| 🅸 Institutional | {i_score}/100 | "
         f"{i_holders} holders, {i_ownership_str} ownership {i_superinvestor} |"
@@ -235,7 +269,9 @@ def format_stock_entry(rank: int, stock: dict) -> list[str]:
     m_details = stock.get("m_component", {})
     m_score = m_details.get("score", 0)
     m_trend = m_details.get("trend", "unknown")
-    lines.append(f"| 🅼 Market Direction | {m_score}/100 | {m_trend.replace('_', ' ').title()} |")
+    lines.append(
+        f"| 🅼 Market Direction | {m_score}/100 | {m_trend.replace('_', ' ').title()} |"
+    )
 
     lines.append("")
 
@@ -345,7 +381,11 @@ if __name__ == "__main__":
                 "latest_qtr_revenue_growth": 101,
             },
             "a_component": {"score": 95, "eps_cagr_3yr": 76, "stability": "stable"},
-            "n_component": {"score": 98, "distance_from_high_pct": -0.5, "breakout_detected": True},
+            "n_component": {
+                "score": 98,
+                "distance_from_high_pct": -0.5,
+                "breakout_detected": True,
+            },
             "m_component": {"score": 100, "trend": "strong_uptrend"},
         },
         {

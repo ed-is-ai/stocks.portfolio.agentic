@@ -75,7 +75,9 @@ def calculate_newness(quote: dict, historical_prices: Optional[dict] = None) -> 
     score = score_newness(distance_from_high_pct, breakout_detected)
 
     # Generate interpretation
-    interpretation = interpret_newness_score(score, distance_from_high_pct, breakout_detected)
+    interpretation = interpret_newness_score(
+        score, distance_from_high_pct, breakout_detected
+    )
 
     return {
         "score": score,

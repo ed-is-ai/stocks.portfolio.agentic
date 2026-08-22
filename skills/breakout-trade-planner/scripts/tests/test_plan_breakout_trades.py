@@ -61,8 +61,18 @@ def _make_vcp_result(
         "vcp_pattern": {
             "pivot_price": pivot,
             "contractions": [
-                {"label": "T1", "high_price": 105.0, "low_price": 92.0, "depth_pct": 12.4},
-                {"label": "T2", "high_price": pivot, "low_price": last_low, "depth_pct": 5.0},
+                {
+                    "label": "T1",
+                    "high_price": 105.0,
+                    "low_price": 92.0,
+                    "depth_pct": 12.4,
+                },
+                {
+                    "label": "T2",
+                    "high_price": pivot,
+                    "low_price": last_low,
+                    "depth_pct": 5.0,
+                },
             ],
             "atr_value": 2.5,
         },

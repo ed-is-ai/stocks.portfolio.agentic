@@ -16,7 +16,9 @@ from typing import Optional
 
 import requests
 
-DEFAULT_DETAIL_URL = "https://tradermonty.github.io/market-breadth-analysis/market_breadth_data.csv"
+DEFAULT_DETAIL_URL = (
+    "https://tradermonty.github.io/market-breadth-analysis/market_breadth_data.csv"
+)
 
 TIMEOUT = 30
 

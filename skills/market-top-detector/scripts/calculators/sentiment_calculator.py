@@ -90,7 +90,11 @@ def calculate_sentiment(
             "interpretation": _interpret_put_call(put_call_ratio),
         }
     else:
-        details["put_call_ratio"] = {"value": None, "points": 0, "interpretation": "No data"}
+        details["put_call_ratio"] = {
+            "value": None,
+            "points": 0,
+            "interpretation": "No data",
+        }
 
     total_points += pc_points
 
@@ -134,7 +138,11 @@ def calculate_sentiment(
             "interpretation": _interpret_vix_term(vix_term_structure),
         }
     else:
-        details["vix_term_structure"] = {"value": None, "points": 0, "interpretation": "No data"}
+        details["vix_term_structure"] = {
+            "value": None,
+            "points": 0,
+            "interpretation": "No data",
+        }
 
     total_points += vts_points
 

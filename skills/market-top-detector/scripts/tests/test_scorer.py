@@ -159,7 +159,10 @@ class TestDataQuality:
         result_partial = calculate_composite_score(scores_all_80, avail)
 
         # With redistribution, score should be similar (both driven by 80s)
-        assert abs(result_full["composite_score"] - result_partial["composite_score"]) <= 3.0
+        assert (
+            abs(result_full["composite_score"] - result_partial["composite_score"])
+            <= 3.0
+        )
 
     def test_weight_redistribution_excludes_unavailable(self):
         """Unavailable component with score 0 should not drag composite down."""
@@ -231,7 +234,9 @@ class TestFollowThroughDay:
 
     def test_no_swing_low(self):
         """Flat market → no swing low found."""
-        history = [{"close": 100, "volume": 1000000, "date": f"day-{i}"} for i in range(30)]
+        history = [
+            {"close": 100, "volume": 1000000, "date": f"day-{i}"} for i in range(30)
+        ]
         result = detect_follow_through_day(history, 50.0)
         assert result["ftd_detected"] is False
 
@@ -251,12 +256,16 @@ class TestFollowThroughDay:
         # Build chronologically, then reverse
         # Days 0-9: uptrend
         for i in range(10):
-            bars.append({"close": 100 + i, "volume": 1000000, "date": f"2026-01-{i + 1:02d}"})
+            bars.append(
+                {"close": 100 + i, "volume": 1000000, "date": f"2026-01-{i + 1:02d}"}
+            )
 
         # Days 10-14: decline (5 down days from 109)
         decline_prices = [107, 105, 103, 101, 100]
         for i, p in enumerate(decline_prices):
-            bars.append({"close": p, "volume": 1100000, "date": f"2026-01-{11 + i:02d}"})
+            bars.append(
+                {"close": p, "volume": 1100000, "date": f"2026-01-{11 + i:02d}"}
+            )
 
         # Day 15: swing low
         bars.append({"close": 99.5, "volume": 1200000, "date": "2026-01-16"})
@@ -387,7 +396,9 @@ class TestFollowThroughDay:
         bars.append({"close": 95, "volume": 1200000, "date": "d-15"})
         # Next bar: close=95 (same as swing low, NOT an up day), but upper half range
         # high=98, low=92, close=95 → range_position = (95-92)/(98-92) = 0.5
-        bars.append({"close": 95, "high": 98, "low": 92, "volume": 1000000, "date": "d-16"})
+        bars.append(
+            {"close": 95, "high": 98, "low": 92, "volume": 1000000, "date": "d-16"}
+        )
         # Day 2, 3
         bars.append({"close": 97, "volume": 1000000, "date": "d-17"})
         bars.append({"close": 98, "volume": 1000000, "date": "d-18"})

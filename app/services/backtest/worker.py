@@ -45,6 +45,7 @@ from app.services.backtest.skill_discovery import (
 )
 from app.services.backtest.strategy_job import (
     BacktestRunV1,
+    BootstrapStage,
     JobFailureCode,
     STAGE_SEQUENCES,
     StrategyJobConflict,
@@ -220,6 +221,135 @@ class StageWalkEngine:
             return self._repository.strategy_job(job.id)
 
 
+class BootstrapStageEngine:
+    """Walk one claimed ``bootstrap`` job's stage sequence with real logic.
+
+    Each stage boundary calls the corresponding
+    :class:`StrategyBootstrapService` method. The final stage
+    (``PROFILE_ACTIVATION``) is non-cancellable: cancellation is
+    honored only at the preceding boundaries.
+    """
+
+    def __init__(
+        self,
+        repository: BacktestRepository,
+        *,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> None:
+        self._repository = repository
+        self._lease = lease
+
+    def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
+        from app.services.backtest.strategy_bootstrap_service import (
+            BootstrapStageFailure,
+            StrategyBootstrapService,
+        )
+
+        service = StrategyBootstrapService(
+            self._repository,
+            jobs=None,
+        )
+        job = self._repository.strategy_job(job_id)
+        if not _owns(job, claim_token):
+            return job
+        if job.job_type is not StrategyJobType.BOOTSTRAP:
+            return self._fail(job, claim_token, "Worker job type does not match")
+        stage_methods = {
+            BootstrapStage.QUALIFICATION: service._run_qualification,
+            BootstrapStage.ROSTER_CAPTURE: service._capture_roster,
+            BootstrapStage.PROFILE_ACTIVATION: service._activate_profile,
+        }
+        for stage in STAGE_SEQUENCES[StrategyJobType.BOOTSTRAP]:
+            job = self._repository.strategy_job(job_id)
+            if not _owns(job, claim_token):
+                return job
+            # PROFILE_ACTIVATION is non-cancellable
+            if (
+                stage != BootstrapStage.PROFILE_ACTIVATION.value
+                and job.cancel_requested_at is not None
+            ):
+                return self._cancel(job_id, claim_token)
+            try:
+                job = self._repository.set_strategy_job_current_stage(
+                    job_id,
+                    claim_token,
+                    expected_version=job.status_version,
+                    stage=stage,
+                    lease=self._lease,
+                )
+            except StrategyJobConflict:
+                return self._repository.strategy_job(job_id)
+            # Run the real stage logic
+            method = stage_methods.get(BootstrapStage(stage))
+            if method is not None:
+                try:
+                    method()
+                except BootstrapStageFailure as exc:
+                    return self._fail_with_code(job, claim_token, exc.code, exc.detail)
+        try:
+            return self._repository.complete_claimed_stage_job(
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
+            )
+        except StrategyJobConflict:
+            current = self._repository.strategy_job(job_id)
+            if current.status is StrategyJobStatus.COMPLETE:
+                return current
+            if _owns(current, claim_token) and current.cancel_requested_at is not None:
+                return self._cancel(job_id, claim_token)
+            return current
+
+    def _cancel(self, job_id: str, claim_token: str) -> StrategyJobV1:
+        current = self._repository.strategy_job(job_id)
+        if not _owns(current, claim_token):
+            return current
+        try:
+            return self._repository.cancel_claimed_strategy_job(
+                job_id,
+                claim_token,
+                expected_version=current.status_version,
+                lease=self._lease,
+            )
+        except StrategyJobConflict:
+            return self._repository.strategy_job(job_id)
+
+    def _fail(self, job: StrategyJobV1, claim_token: str, detail: str) -> StrategyJobV1:
+        try:
+            return self._repository.fail_claimed_strategy_job(
+                job.id,
+                claim_token,
+                expected_version=job.status_version,
+                failure_code=JobFailureCode.INTEGRITY_ERROR,
+                failed_month=None,
+                detail=detail,
+                lease=self._lease,
+            )
+        except StrategyJobConflict:
+            return self._repository.strategy_job(job.id)
+
+    def _fail_with_code(
+        self,
+        job: StrategyJobV1,
+        claim_token: str,
+        code: JobFailureCode,
+        detail: str,
+    ) -> StrategyJobV1:
+        try:
+            return self._repository.fail_claimed_strategy_job(
+                job.id,
+                claim_token,
+                expected_version=job.status_version,
+                failure_code=code,
+                failed_month=None,
+                detail=detail,
+                lease=self._lease,
+            )
+        except StrategyJobConflict:
+            return self._repository.strategy_job(job.id)
+
+
 def _owns(job: StrategyJobV1, claim_token: str) -> bool:
     return job.status is StrategyJobStatus.RUNNING and job.claim_token == claim_token
 
@@ -230,17 +360,21 @@ def build_stage_walk_engine(
     job_type: StrategyJobType,
     *,
     lease: WorkerLeaseFenceV1 | None = None,
-) -> StageWalkEngine:
+) -> StageWalkEngine | BootstrapStageEngine:
     """Build one claimed stage-walking activity's engine.
 
     Loads the job's subtype identity row eagerly so a subtype-inconsistent
     job fails through ``main``'s construction guard with the stable
     ``integrity_error`` code rather than stage-walking against nothing.
+
+    Bootstrap jobs use :class:`BootstrapStageEngine` (Story 4.3) with
+    real stage logic; Preparation jobs keep the stub
+    :class:`StageWalkEngine` (Story 4.6's scope).
     """
     if job_type is StrategyJobType.BOOTSTRAP:
         backtest.bootstrap_run(job_id)
-    else:
-        backtest.preparation_run(job_id)
+        return BootstrapStageEngine(backtest, lease=lease)
+    backtest.preparation_run(job_id)
     return StageWalkEngine(backtest, job_type, lease=lease)
 
 

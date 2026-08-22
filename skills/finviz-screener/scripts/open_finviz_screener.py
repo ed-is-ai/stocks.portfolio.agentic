@@ -136,7 +136,9 @@ def validate_filters(raw_filters: str) -> list[str]:
     """
     tokens: list[str] = [t.strip() for t in raw_filters.split(",") if t.strip()]
     if not tokens:
-        print("Error: --filters must contain at least one filter code.", file=sys.stderr)
+        print(
+            "Error: --filters must contain at least one filter code.", file=sys.stderr
+        )
         sys.exit(1)
 
     validated: list[str] = []
@@ -161,7 +163,10 @@ def validate_filters(raw_filters: str) -> list[str]:
         # Warn on unknown prefix (not an error)
         prefix = token.split("_", 1)[0] + "_" if "_" in token else ""
         if prefix and prefix not in KNOWN_PREFIXES:
-            print(f"Warning: Unknown filter prefix '{prefix}' in '{token}'.", file=sys.stderr)
+            print(
+                f"Warning: Unknown filter prefix '{prefix}' in '{token}'.",
+                file=sys.stderr,
+            )
 
         validated.append(token)
 
@@ -349,7 +354,12 @@ def main(argv: list[str] | None = None) -> None:
     order = validate_order(args.order) if args.order else None
     elite = detect_elite(args)
     url = build_url(
-        filters, elite=elite, view=args.view, order=order, themes=themes, subthemes=subthemes
+        filters,
+        elite=elite,
+        view=args.view,
+        order=order,
+        themes=themes,
+        subthemes=subthemes,
     )
 
     mode = "Elite" if elite else "Public"

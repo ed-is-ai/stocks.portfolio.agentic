@@ -43,7 +43,9 @@ class TestValidateGroupedSlugs:
         assert result == ["aicloud"]
 
     def test_mixed_prefix_no_prefix(self):
-        result = validate_grouped_slugs("theme_artificialintelligence,cybersecurity", "theme")
+        result = validate_grouped_slugs(
+            "theme_artificialintelligence,cybersecurity", "theme"
+        )
         assert result == ["artificialintelligence", "cybersecurity"]
 
     def test_duplicate_removal(self):
@@ -65,7 +67,9 @@ class TestValidateGroupedSlugs:
             validate_grouped_slugs("ArtificialIntelligence", "theme")
 
     def test_whitespace_trimming(self):
-        result = validate_grouped_slugs("  artificialintelligence , cybersecurity  ", "theme")
+        result = validate_grouped_slugs(
+            "  artificialintelligence , cybersecurity  ", "theme"
+        )
         assert result == ["artificialintelligence", "cybersecurity"]
 
 
@@ -80,7 +84,9 @@ class TestBuildFilterParts:
         assert result == ["theme_artificialintelligence"]
 
     def test_multi_theme_pipe(self):
-        result = build_filter_parts([], ["artificialintelligence", "cybersecurity"], None)
+        result = build_filter_parts(
+            [], ["artificialintelligence", "cybersecurity"], None
+        )
         assert result == ["theme_artificialintelligence|cybersecurity"]
 
     def test_subtheme_only(self):
@@ -442,7 +448,12 @@ class TestOpenBrowser:
         mock_run.return_value = mock.MagicMock(returncode=0)
         open_browser("https://finviz.com/screener.ashx?v=111&f=cap_small")
         mock_run.assert_called_once_with(
-            ["open", "-a", "Google Chrome", "https://finviz.com/screener.ashx?v=111&f=cap_small"],
+            [
+                "open",
+                "-a",
+                "Google Chrome",
+                "https://finviz.com/screener.ashx?v=111&f=cap_small",
+            ],
             check=True,
             capture_output=True,
         )
@@ -541,7 +552,15 @@ class TestMainIntegration:
         from open_finviz_screener import main
 
         with mock.patch.dict("os.environ", {}, clear=True):
-            main(["--themes", "artificialintelligence", "--filters", "cap_midover", "--url-only"])
+            main(
+                [
+                    "--themes",
+                    "artificialintelligence",
+                    "--filters",
+                    "cap_midover",
+                    "--url-only",
+                ]
+            )
         captured = capsys.readouterr()
         assert "theme_artificialintelligence" in captured.out
         assert "cap_midover" in captured.out

@@ -74,7 +74,9 @@ class TestMComponentEMA:
         # 60 days of constant price = 100 -> EMA should be ~100
         prices = [100.0] * 60
         ema = calculate_ema(prices, period=50)
-        assert abs(ema - 100.0) < 0.01, f"EMA of constant prices should be ~100, got {ema}"
+        assert abs(ema - 100.0) < 0.01, (
+            f"EMA of constant prices should be ~100, got {ema}"
+        )
 
     def test_bear_market_detection_with_historical_data(self):
         """When S&P 500 is well below its 50-EMA, M score should be 0-20."""
@@ -196,7 +198,9 @@ class TestIComponentConditionOrdering:
             superinvestor_present=False,
             quality_warning=None,
         )
-        assert score == 40, f"Suboptimal high ownership (85%) should score 40, got {score}"
+        assert score == 40, (
+            f"Suboptimal high ownership (85%) should score 40, got {score}"
+        )
 
     def test_boundary_10pct_is_extreme(self):
         """ownership_pct=9.99 should score 20 (extreme: < 10)."""
@@ -358,7 +362,11 @@ class TestReportGeneratorTopParameter:
             # Check that the header says "Top 30" not "Top 20"
             assert "Top 30" in content, (
                 "Report header should say 'Top 30', found: "
-                + [line for line in content.split("\n") if "Top" in line and "CANSLIM" in line][0]
+                + [
+                    line
+                    for line in content.split("\n")
+                    if "Top" in line and "CANSLIM" in line
+                ][0]
             )
 
             # Check that SYM30 (the 30th stock) appears in the report
@@ -402,7 +410,9 @@ class TestReportGeneratorTopParameter:
             import re
 
             stock_entries = re.findall(r"^### \d+\.", content, re.MULTILINE)
-            assert len(stock_entries) == 5, f"Expected 5 stock entries, found {len(stock_entries)}"
+            assert len(stock_entries) == 5, (
+                f"Expected 5 stock entries, found {len(stock_entries)}"
+            )
         finally:
             os.unlink(output_file)
 

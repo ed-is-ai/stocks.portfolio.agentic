@@ -49,7 +49,9 @@ class TestCalculateDefensiveRotation:
         for sym in ["XLU", "XLP", "XLV", "VNQ"]:
             historical[sym] = [{"close": 50, "volume": 500000} for _ in range(55)]
         for sym in ["XLK", "XLC", "XLY", "QQQ"]:
-            historical[sym] = [{"close": 105 - i * 0.25, "volume": 2000000} for i in range(55)]
+            historical[sym] = [
+                {"close": 105 - i * 0.25, "volume": 2000000} for i in range(55)
+            ]
         result = calculate_defensive_rotation(historical)
         assert result["score"] <= 20
 
@@ -61,7 +63,9 @@ class TestFetchSuccessRate:
         """All 8 ETFs with data -> fetch_success_rate = 1.0."""
         historical = {}
         for sym in ["XLU", "XLP", "XLV", "VNQ", "XLK", "XLC", "XLY", "QQQ"]:
-            historical[sym] = [{"close": 100 + i * 0.1, "volume": 500000} for i in range(55)]
+            historical[sym] = [
+                {"close": 100 + i * 0.1, "volume": 500000} for i in range(55)
+            ]
         result = calculate_defensive_rotation(historical)
         assert result["fetch_success_rate"] == 1.0
         assert result["data_available"] is True
@@ -84,10 +88,14 @@ class TestMultiPeriodConfirmation:
         historical = {}
         # Defensive ETFs going up
         for sym in ["XLU", "XLP", "XLV", "VNQ"]:
-            historical[sym] = [{"close": 110 - i * 0.2, "volume": 500000} for i in range(55)]
+            historical[sym] = [
+                {"close": 110 - i * 0.2, "volume": 500000} for i in range(55)
+            ]
         # Offensive ETFs going down
         for sym in ["XLK", "XLC", "XLY", "QQQ"]:
-            historical[sym] = [{"close": 90 + i * 0.5, "volume": 2000000} for i in range(55)]
+            historical[sym] = [
+                {"close": 90 + i * 0.5, "volume": 2000000} for i in range(55)
+            ]
         result = calculate_defensive_rotation(historical)
         assert result["confirmation"] == "confirmed"
         assert "multi_period" in result
@@ -114,7 +122,9 @@ class TestMultiPeriodConfirmation:
         """Result should include multi_period dict with period details."""
         historical = {}
         for sym in ["XLU", "XLP", "XLV", "VNQ", "XLK", "XLC", "XLY", "QQQ"]:
-            historical[sym] = [{"close": 100 + i * 0.1, "volume": 500000} for i in range(55)]
+            historical[sym] = [
+                {"close": 100 + i * 0.1, "volume": 500000} for i in range(55)
+            ]
         result = calculate_defensive_rotation(historical)
         assert "multi_period" in result
         # Should have at least 10d and 20d periods (40d needs 41+ days)

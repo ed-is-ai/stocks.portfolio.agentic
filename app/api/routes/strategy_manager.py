@@ -7,6 +7,7 @@ GET routes only render repository state.  All lifecycle changes stay behind
 from __future__ import annotations
 
 from datetime import date, timedelta
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Annotated, Literal, cast
@@ -20,6 +21,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from app.api.dependencies import (
     get_backtest_launch_service,
     get_backtest_repository,
+    get_bootstrap_service,
+    get_readiness_service,
     get_strategy_job_service,
 )
 from app.api.templating import templates
@@ -43,8 +46,16 @@ from app.services.backtest.result_presenter import (
     provenance_view,
     trade_log_view,
 )
+from app.services.backtest.run_universe import (
+    RunUniverseError,
+    canonical_run_universe,
+)
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.snapshot_profile import SnapshotProfileV1
+from app.services.backtest.strategy_bootstrap_service import (
+    StrategyBootstrapAlreadySetUp,
+    StrategyBootstrapService,
+)
 from app.services.backtest.strategy_job import (
     InitializationSubmissionV1,
     StrategyJobCancellationV1,
@@ -58,12 +69,17 @@ from app.services.backtest.strategy_job import (
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1
+from app.services.backtest.strategy_readiness_service import (
+    StrategyReadinessService,
+)
 from app.services.backtest.trading_calendar import TradingCalendar
 
 router = APIRouter()
 BacktestDep = Annotated[BacktestRepository, Depends(get_backtest_repository)]
 JobsDep = Annotated[StrategyJobService, Depends(get_strategy_job_service)]
 LaunchDep = Annotated[BacktestLaunchService, Depends(get_backtest_launch_service)]
+BootstrapDep = Annotated[StrategyBootstrapService, Depends(get_bootstrap_service)]
+ReadinessDep = Annotated[StrategyReadinessService, Depends(get_readiness_service)]
 
 _TERMINAL = {
     StrategyJobStatus.COMPLETE,
@@ -148,10 +164,12 @@ def _strategy_manager_context(repo: BacktestRepository) -> dict[str, object]:
     or ``list_backtest_activities()``'s verified-complete Metrics rebuild
     for the unrelated Historical Initialization sub-view/submit handler,
     which render neither."""
+    active = repo.active_snapshot_profile()
     return {
         **_coverage_context(repo),
         **_profile_context(repo),
         **_backtest_activities_context(repo),
+        "setup_required": active is None,
     }
 
 
@@ -187,6 +205,136 @@ def _validate_months(start_month: str, end_month: str) -> dict[str, str]:
 async def strategy_manager(request: Request, backtest: BacktestDep) -> HTMLResponse:
     return templates.TemplateResponse(
         request, "_strategy_manager.html", _strategy_manager_context(backtest)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Story 4.3: Bootstrap setup
+# ---------------------------------------------------------------------------
+
+
+@router.get("/strategy-manager/setup", response_class=HTMLResponse)
+async def strategy_setup(
+    request: Request,
+    backtest: BacktestDep,
+    bootstrap: BootstrapDep,
+) -> HTMLResponse:
+    """Show setup confirmation form or 'already set up' message."""
+    already, activated_at = bootstrap.is_already_set_up()
+    setup_required = bootstrap.is_setup_required()
+    return templates.TemplateResponse(
+        request,
+        "_strategy_setup.html",
+        {
+            "already_set_up": already,
+            "setup_required": setup_required,
+            "activated_at": activated_at,
+            "is_fixture": bootstrap.is_fixture,
+        },
+    )
+
+
+@router.post(
+    "/strategy-manager/setup",
+    dependencies=[Depends(require_local_or_token)],
+)
+async def submit_strategy_setup(
+    request: Request,
+    backtest: BacktestDep,
+    bootstrap: BootstrapDep,
+) -> Response:
+    """Enqueue one bootstrap job, redirect to activity."""
+    try:
+        job = bootstrap.start_setup()
+    except StrategyBootstrapAlreadySetUp:
+        return RedirectResponse("/strategy-manager/setup", status_code=303)
+    except StrategyJobConflict:
+        return templates.TemplateResponse(
+            request,
+            "_strategy_setup.html",
+            {
+                "setup_required": True,
+                "already_set_up": False,
+                "error": "A setup job is already queued or running.",
+            },
+            status_code=422,
+        )
+    return RedirectResponse(f"/strategy-manager/activities/{job.id}", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Story 4.4: Readiness & diagnostics
+# ---------------------------------------------------------------------------
+
+
+@router.get("/strategy-manager/readiness", response_class=HTMLResponse)
+async def strategy_readiness(
+    request: Request,
+    backtest: BacktestDep,
+    readiness: ReadinessDep,
+) -> HTMLResponse:
+    """Show readiness prerequisite rows (read-only)."""
+    result = readiness.evaluate()
+    return templates.TemplateResponse(
+        request,
+        "_strategy_readiness.html",
+        {
+            "readiness": result,
+            "diagnostics_view": False,
+        },
+    )
+
+
+@router.get("/strategy-manager/diagnostics", response_class=HTMLResponse)
+async def strategy_diagnostics(
+    request: Request,
+    backtest: BacktestDep,
+    readiness: ReadinessDep,
+) -> HTMLResponse:
+    """Show bounded diagnostics (read-only)."""
+    result = readiness.evaluate()
+    diagnostics = readiness.diagnostics(readiness=result)
+    return templates.TemplateResponse(
+        request,
+        "_strategy_readiness.html",
+        {
+            "readiness": result,
+            "diagnostics": diagnostics,
+            "diagnostics_view": True,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Story 4.5: Universe selection
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/strategy-manager/configuration/universe",
+    response_class=HTMLResponse,
+)
+async def universe_selector(
+    request: Request,
+    backtest: BacktestDep,
+    q: str = "",
+    security_ids: list[str] | None = None,
+) -> HTMLResponse:
+    """Return universe selector partial with roster securities."""
+    active = backtest.active_snapshot_profile()
+    securities: list[tuple[str, str, str, str]] = []
+    if active is not None:
+        securities = backtest.roster_member_identities(active.profile_hash)
+    return templates.TemplateResponse(
+        request,
+        "_universe_selector.html",
+        {
+            "securities": securities,
+            "search_query": q,
+            "selected_security_ids": frozenset(security_ids or ()),
+            "profile_hash": (active.profile_hash if active is not None else ""),
+            "activation_seq": (active.activation_seq if active is not None else 0),
+        },
     )
 
 
@@ -282,17 +430,21 @@ _FIXED_FORM_FIELDS = frozenset(
     {
         "strategy_id",
         "profile_hash",
+        "activation_seq",
         "start_month",
         "end_month",
         "base_currency",
         "starting_capital",
         "idempotency_key",
+        "security_ids",
     }
 )
 
 
 def _configuration_context(
-    launch: BacktestLaunchService, **extra: object
+    launch: BacktestLaunchService,
+    backtest_repo: BacktestRepository,
+    **extra: object,
 ) -> dict[str, object]:
     view = launch.configuration()
     selected_id = cast(str | None, extra.get("selected_strategy_id"))
@@ -326,6 +478,11 @@ def _configuration_context(
             )
             for interval in view.coverage.intervals
         )
+    # Story 4.5: universe selector data
+    active = backtest_repo.active_snapshot_profile()
+    securities: list[tuple[str, str, str, str]] = []
+    if active is not None:
+        securities = backtest_repo.roster_member_identities(active.profile_hash)
     return {
         "strategies": view.strategies,
         "warnings": view.warnings,
@@ -336,6 +493,8 @@ def _configuration_context(
         "period_options": period_options,
         "enum_options": enum_options,
         "enum_default_tokens": enum_default_tokens,
+        "securities": securities,
+        "active_profile": active,
         "values": {
             "start_month": "",
             "end_month": "",
@@ -415,7 +574,7 @@ def _decode_launch_form(
         counts[key] = counts.get(key, 0) + 1
     form_problems: list[str] = []
     for key, count in counts.items():
-        if count > 1:
+        if count > 1 and key != "security_ids":
             form_problems.append(f"{key!r} was submitted more than once.")
         if key not in expected:
             form_problems.append(f"Unknown field submitted: {key!r}.")
@@ -501,11 +660,14 @@ def _decode_launch_form(
 
 @router.get("/strategy-manager/configuration", response_class=HTMLResponse)
 async def strategy_configuration(
-    request: Request, launch: LaunchDep, strategy_id: str | None = None
+    request: Request,
+    launch: LaunchDep,
+    backtest: BacktestDep,
+    strategy_id: str | None = None,
 ) -> HTMLResponse:
     """Render the launch form: one fresh discovery + coverage projection
     (Story 2.7 AC 1)."""
-    context = _configuration_context(launch, selected_strategy_id=strategy_id)
+    context = _configuration_context(launch, backtest, selected_strategy_id=strategy_id)
     return templates.TemplateResponse(request, "_strategy_configuration.html", context)
 
 
@@ -513,6 +675,7 @@ async def strategy_configuration(
 async def strategy_configuration_fields(
     request: Request,
     launch: LaunchDep,
+    backtest: BacktestDep,
     strategy_id: str | None = None,
     start_month: str = "",
     end_month: str = "",
@@ -530,6 +693,7 @@ async def strategy_configuration_fields(
     """
     context = _configuration_context(
         launch,
+        backtest,
         selected_strategy_id=strategy_id,
         values={
             "start_month": start_month,
@@ -549,7 +713,7 @@ async def strategy_configuration_fields(
     dependencies=[Depends(require_local_or_token)],
 )
 async def submit_strategy_configuration(
-    request: Request, launch: LaunchDep
+    request: Request, launch: LaunchDep, backtest: BacktestDep
 ) -> Response:
     """Validate and launch a Backtest (Story 2.7 AC 6-8).
 
@@ -573,6 +737,7 @@ async def submit_strategy_configuration(
     command, raw_values, parameter_raw, errors = _decode_launch_form(form, strategy)
     context = _configuration_context(
         launch,
+        backtest,
         selected_strategy_id=submitted_strategy_id
         if isinstance(submitted_strategy_id, str)
         else None,
@@ -580,6 +745,55 @@ async def submit_strategy_configuration(
         parameter_values=parameter_raw,
         idempotency_key=form.get("idempotency_key") or str(uuid4()),
     )
+    # Story 4.5: validate universe selection
+    raw_security_ids: list[str] = [
+        v if isinstance(v, str) else v.filename or ""
+        for v in form.getlist("security_ids")
+    ]
+    submitted_profile_hash_raw = form.get("profile_hash")
+    submitted_profile_hash = (
+        submitted_profile_hash_raw
+        if isinstance(submitted_profile_hash_raw, str)
+        else ""
+    )
+    submitted_activation_seq_raw = form.get("activation_seq")
+    try:
+        submitted_activation_seq = int(
+            submitted_activation_seq_raw
+            if isinstance(submitted_activation_seq_raw, str)
+            else "0"
+        )
+    except ValueError:
+        submitted_activation_seq = 0
+    active = backtest.active_snapshot_profile()
+    if active is None:
+        errors.setdefault("security_ids", "No active profile is configured.")
+    else:
+        # Stale profile detection
+        if (
+            active.profile_hash != submitted_profile_hash
+            or active.activation_seq != submitted_activation_seq
+        ):
+            errors.setdefault(
+                "security_ids",
+                "The active profile has changed. Please reselect securities.",
+            )
+        elif raw_security_ids:
+            # Validate all submitted IDs are in the roster
+            roster_ids = {
+                sid
+                for sid, _ps, _mic, _cur in (
+                    backtest.roster_member_identities(active.profile_hash)
+                )
+            }
+            unknown = [sid for sid in raw_security_ids if sid not in roster_ids]
+            if unknown:
+                errors.setdefault(
+                    "security_ids",
+                    f"Unknown securities: {', '.join(unknown[:5])}",
+                )
+    if not raw_security_ids and "security_ids" not in errors:
+        errors.setdefault("security_ids", "Select at least one security.")
     if errors or command is None:
         return templates.TemplateResponse(
             request,
@@ -587,6 +801,22 @@ async def submit_strategy_configuration(
             {**context, "errors": errors},
             status_code=422,
         )
+    # Canonicalize the universe
+    try:
+        canonical = canonical_run_universe(raw_security_ids)
+    except RunUniverseError as exc:
+        return templates.TemplateResponse(
+            request,
+            "_strategy_configuration.html",
+            {**context, "errors": {"security_ids": str(exc)}},
+            status_code=422,
+        )
+    # Bind the universe into the strategy's host-bound parameter
+    if strategy is not None and command is not None:
+        universe_binding = strategy.bind_universe(canonical)
+        merged_params = dict(command.parameters)
+        merged_params.update(universe_binding)
+        command = replace(command, parameters=merged_params)
     try:
         result = launch.launch(command)
     except BacktestLaunchValidationError as exc:

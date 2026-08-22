@@ -2,10 +2,20 @@
   <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
     <div><h1 id="strategy-manager-heading" tabindex="-1" class="h3 mb-1">Strategy Manager</h1><p class="text-muted mb-0">Historical scanner coverage for the active data version.</p></div>
     <div class="d-flex gap-2">
+      <a class="btn btn-outline-info" href="/strategy-manager/readiness" hx-get="/strategy-manager/readiness" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-clipboard-check"></i> Readiness</a>
+      <a class="btn btn-outline-secondary" href="/strategy-manager/diagnostics" hx-get="/strategy-manager/diagnostics" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-activity"></i> Diagnostics</a>
       <button class="btn btn-outline-primary" hx-get="/strategy-manager/initialization" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-clock-history"></i> Historical initialization</button>
       <button class="btn btn-primary" hx-get="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-play-circle"></i> Configure a Backtest</button>
     </div>
   </div>
+  {% if setup_required %}
+  <div class="alert alert-warning" role="alert">
+    <div class="d-flex align-items-center gap-3">
+      <div><strong>Strategy Manager needs setup.</strong> No active scanner-data profile is configured. Run setup to qualify historical data, capture the securities roster, and activate a profile.</div>
+      <button class="btn btn-warning btn-sm ms-auto" hx-get="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-gear-wide-connected"></i> Set up Strategy Manager</button>
+    </div>
+  </div>
+  {% endif %}
   {% if coverage_error %}<div class="alert alert-danger" role="alert">Coverage evidence needs attention: {{ coverage_error }}</div>
   {% elif not coverage or not coverage.snapshot_count %}<div class="alert alert-info">Historical monthly snapshots must be initialized before a backtest can run.</div>
   {% else %}

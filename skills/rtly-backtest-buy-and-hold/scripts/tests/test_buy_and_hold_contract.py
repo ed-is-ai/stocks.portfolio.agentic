@@ -207,9 +207,7 @@ def test_empty_or_malformed_universe_emits_nothing() -> None:
 
     assert strategy.entry_signals(view, {**PARAMETERS, "selected_securities": []}) == []
     assert (
-        strategy.entry_signals(
-            view, {**PARAMETERS, "selected_securities": "sec-aapl"}
-        )
+        strategy.entry_signals(view, {**PARAMETERS, "selected_securities": "sec-aapl"})
         == []
     )
     assert strategy.entry_signals(view, without_universe) == []

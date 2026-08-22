@@ -26,7 +26,8 @@
   <div class="alert alert-info">No valid Strategy Skills are currently discoverable. Add a <code>kind: backtest-strategy</code> Skill to the <code>skills/</code> directory to configure a Backtest.</div>
   {% else %}
   <form method="post" action="/strategy-manager/configuration" hx-post="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML" id="strategy-configuration-form">
-    <input type="hidden" name="profile_hash" value="{{ profile.profile_hash if profile else '' }}">
+    <input type="hidden" name="profile_hash" value="{{ active_profile.profile_hash if active_profile else '' }}">
+    <input type="hidden" name="activation_seq" value="{{ active_profile.activation_seq if active_profile else 0 }}">
     <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
 
     <fieldset class="card sm-card"><div class="card-body">
@@ -41,6 +42,14 @@
         </label>
       </div>
       {% endfor %}
+    </div></fieldset>
+
+    {% if errors.get('security_ids') %}
+    <div class="alert alert-danger mt-2" role="alert">{{ errors.security_ids }}</div>
+    {% endif %}
+    <fieldset class="card sm-card mt-2"><div class="card-body">
+      <legend class="h5">Universe</legend>
+      {% include "_universe_selector.html" %}
     </div></fieldset>
 
     {% include "_strategy_configuration_fields.html" %}

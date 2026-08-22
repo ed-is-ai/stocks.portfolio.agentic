@@ -20,7 +20,9 @@ from typing import Optional
 
 
 def calculate_market_direction(
-    sp500_quote: dict, sp500_prices: Optional[list[dict]] = None, vix_quote: Optional[dict] = None
+    sp500_quote: dict,
+    sp500_prices: Optional[list[dict]] = None,
+    vix_quote: Optional[dict] = None,
 ) -> dict:
     """
     Calculate M component score based on S&P 500 trend and VIX
@@ -72,7 +74,9 @@ def calculate_market_direction(
         sp500_ema_50 = sp500_price * 0.98  # Conservative estimate
 
     # Calculate distance from EMA
-    distance_from_ema_pct = ((sp500_price / sp500_ema_50) - 1) * 100 if sp500_ema_50 else 0
+    distance_from_ema_pct = (
+        ((sp500_price / sp500_ema_50) - 1) * 100 if sp500_ema_50 else 0
+    )
 
     # Get VIX level
     vix_level = None
@@ -95,7 +99,9 @@ def calculate_market_direction(
     score = score_market_direction(trend, vix_level)
 
     # Generate interpretation
-    interpretation = interpret_market_score(score, trend, distance_from_ema_pct, vix_level)
+    interpretation = interpret_market_score(
+        score, trend, distance_from_ema_pct, vix_level
+    )
 
     # Warning for bear market
     warning = None
@@ -182,7 +188,9 @@ def score_market_direction(trend: str, vix_level: Optional[float]) -> int:
     return min(max(base_score, 0), 100)
 
 
-def interpret_market_score(score: int, trend: str, distance: float, vix: Optional[float]) -> str:
+def interpret_market_score(
+    score: int, trend: str, distance: float, vix: Optional[float]
+) -> str:
     """
     Generate human-readable market interpretation
 

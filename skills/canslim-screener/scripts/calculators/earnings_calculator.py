@@ -60,9 +60,13 @@ def calculate_quarterly_growth(income_statements: list[dict]) -> dict:
     year_ago = income_statements[4]
 
     # Extract EPS (try multiple field names for compatibility)
-    latest_eps = latest.get("eps") or latest.get("epsdiluted") or latest.get("netIncomePerShare")
+    latest_eps = (
+        latest.get("eps") or latest.get("epsdiluted") or latest.get("netIncomePerShare")
+    )
     year_ago_eps = (
-        year_ago.get("eps") or year_ago.get("epsdiluted") or year_ago.get("netIncomePerShare")
+        year_ago.get("eps")
+        or year_ago.get("epsdiluted")
+        or year_ago.get("netIncomePerShare")
     )
 
     # Extract revenue
@@ -178,7 +182,9 @@ def score_current_earnings(eps_growth: float, revenue_growth: float) -> int:
     return 0
 
 
-def interpret_earnings_score(score: int, eps_growth: float, revenue_growth: float) -> str:
+def interpret_earnings_score(
+    score: int, eps_growth: float, revenue_growth: float
+) -> str:
     """
     Generate human-readable interpretation of C component score
 
@@ -268,17 +274,13 @@ def detect_earnings_acceleration(income_statements: list[dict]) -> dict:
     # Determine trend
     if recent_growth > prior_growth + 5:  # 5% threshold for significance
         trend = "accelerating"
-        interpretation = (
-            f"Earnings accelerating ({recent_growth:.1f}% vs {prior_growth:.1f}% prior quarter)"
-        )
+        interpretation = f"Earnings accelerating ({recent_growth:.1f}% vs {prior_growth:.1f}% prior quarter)"
     elif recent_growth < prior_growth - 5:
         trend = "decelerating"
         interpretation = f"Earnings decelerating ({recent_growth:.1f}% vs {prior_growth:.1f}% prior quarter) - Warning sign"
     else:
         trend = "stable"
-        interpretation = (
-            f"Earnings stable ({recent_growth:.1f}% vs {prior_growth:.1f}% prior quarter)"
-        )
+        interpretation = f"Earnings stable ({recent_growth:.1f}% vs {prior_growth:.1f}% prior quarter)"
 
     return {
         "trend": trend,
@@ -298,7 +300,11 @@ if __name__ == "__main__":
         {"date": "2023-03-31", "eps": 1.09, "revenue": 7192000000},
         {"date": "2022-12-31", "eps": 0.88, "revenue": 6051000000},
         {"date": "2022-09-30", "eps": 0.58, "revenue": 5931000000},
-        {"date": "2022-06-30", "eps": 0.51, "revenue": 6704000000},  # Q2 2022 (year-ago)
+        {
+            "date": "2022-06-30",
+            "eps": 0.51,
+            "revenue": 6704000000,
+        },  # Q2 2022 (year-ago)
     ]
 
     result1 = calculate_quarterly_growth(test_data_exceptional)
@@ -314,7 +320,11 @@ if __name__ == "__main__":
         {"date": "2023-03-31", "eps": 1.15, "revenue": 10200000000},
         {"date": "2022-12-31", "eps": 1.10, "revenue": 10000000000},
         {"date": "2022-09-30", "eps": 1.05, "revenue": 9800000000},
-        {"date": "2022-06-30", "eps": 1.00, "revenue": 9500000000},  # +20% EPS, +10.5% revenue
+        {
+            "date": "2022-06-30",
+            "eps": 1.00,
+            "revenue": 9500000000,
+        },  # +20% EPS, +10.5% revenue
     ]
 
     result2 = calculate_quarterly_growth(test_data_minimum)
@@ -330,7 +340,11 @@ if __name__ == "__main__":
         {"date": "2023-03-31", "eps": 1.08, "revenue": 10100000000},
         {"date": "2022-12-31", "eps": 1.05, "revenue": 10000000000},
         {"date": "2022-09-30", "eps": 1.02, "revenue": 9900000000},
-        {"date": "2022-06-30", "eps": 1.00, "revenue": 9800000000},  # +12% EPS, +4% revenue
+        {
+            "date": "2022-06-30",
+            "eps": 1.00,
+            "revenue": 9800000000,
+        },  # +12% EPS, +4% revenue
     ]
 
     result3 = calculate_quarterly_growth(test_data_weak)
@@ -346,7 +360,11 @@ if __name__ == "__main__":
         {"date": "2023-03-31", "eps": 0.20, "revenue": 9500000000},
         {"date": "2022-12-31", "eps": -0.10, "revenue": 9000000000},
         {"date": "2022-09-30", "eps": -0.30, "revenue": 8500000000},
-        {"date": "2022-06-30", "eps": -0.40, "revenue": 8000000000},  # Turnaround situation
+        {
+            "date": "2022-06-30",
+            "eps": -0.40,
+            "revenue": 8000000000,
+        },  # Turnaround situation
     ]
 
     result4 = calculate_quarterly_growth(test_data_turnaround)

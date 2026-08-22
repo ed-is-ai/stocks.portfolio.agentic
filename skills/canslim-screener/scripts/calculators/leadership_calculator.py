@@ -124,7 +124,9 @@ def calculate_leadership(
     elif sp500_historical and len(sp500_historical) >= 50:
         # Calculate from provided S&P 500 data
         try:
-            if sp500_historical[0].get("date", "") < sp500_historical[-1].get("date", ""):
+            if sp500_historical[0].get("date", "") < sp500_historical[-1].get(
+                "date", ""
+            ):
                 sp500_start = sp500_historical[0].get("close", 0)
                 sp500_end = sp500_historical[-1].get("close", 0)
             else:
@@ -145,10 +147,14 @@ def calculate_leadership(
         # Fallback: use absolute performance with penalty
         relative_performance = stock_performance
         if quality_warning is None:
-            quality_warning = "Using absolute performance (S&P 500 comparison unavailable)"
+            quality_warning = (
+                "Using absolute performance (S&P 500 comparison unavailable)"
+            )
 
     # Score based on relative performance
-    score, rs_rank_estimate = score_leadership(relative_performance, sp500_perf is not None)
+    score, rs_rank_estimate = score_leadership(
+        relative_performance, sp500_perf is not None
+    )
 
     # Generate interpretation
     interpretation = interpret_leadership(
@@ -158,7 +164,9 @@ def calculate_leadership(
     return {
         "score": score,
         "stock_52w_performance": round(stock_performance, 2),
-        "sp500_52w_performance": round(sp500_perf, 2) if sp500_perf is not None else None,
+        "sp500_52w_performance": round(sp500_perf, 2)
+        if sp500_perf is not None
+        else None,
         "relative_performance": round(relative_performance, 2),
         "rs_rank_estimate": rs_rank_estimate,
         "days_analyzed": days_analyzed,

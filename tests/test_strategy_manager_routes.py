@@ -73,6 +73,12 @@ class FakeProfile:
     calendar_dataset_version: str = "exchange-calendars-v1"
 
 
+class FakeActiveProfile:
+    profile_hash: str = "a" * 64
+    activation_seq: int = 1
+    activated_at: datetime = datetime(2026, 8, 21, tzinfo=timezone.utc)
+
+
 class FakeRepo:
     def __init__(self, *, qualified: bool = True, coverage_error: str | None = None):
         self.qualified = qualified
@@ -102,6 +108,18 @@ class FakeRepo:
         self.eligibility_error: Exception | None = None
         self.last_is_comparable_call: tuple[str, str] | None = None
         self.strategy_job_error: Exception | None = None
+
+    def roster_member_identities(self, profile_hash):
+        return [("sid_001", "AAPL", "XNYS", "USD")]
+
+    def recent_job_failures(self, limit: int = 5):
+        return ()
+
+    def identity_rows(self):
+        return [("sid_001", "XNYS", "TEST", "g" * 64)]
+
+    def read_worker_lease(self):
+        return None
 
     def snapshot_coverage(self, profile_hash=None):
         if self.coverage_error:
@@ -172,7 +190,7 @@ class FakeRepo:
         return self.result
 
     def active_snapshot_profile(self):
-        return SimpleNamespace(profile_hash=self.profile.profile_hash)
+        return FakeActiveProfile()
 
     def snapshot_profile(self, _hash):
         return self.profile
@@ -633,12 +651,15 @@ class FakeLaunchService:
 @pytest.fixture
 def launch(monkeypatch):
     fake = FakeLaunchService()
+    repo = FakeRepo()
     app.dependency_overrides[get_backtest_launch_service] = lambda: fake
+    app.dependency_overrides[get_backtest_repository] = lambda: repo
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     try:
         yield fake
     finally:
         app.dependency_overrides.pop(get_backtest_launch_service, None)
+        app.dependency_overrides.pop(get_backtest_repository, None)
 
 
 def test_configuration_zero_strategies_explains_state(launch):
@@ -687,11 +708,13 @@ def _base_form(**overrides: str) -> dict[str, str]:
     form = {
         "strategy_id": "alpha",
         "profile_hash": "a" * 64,
+        "activation_seq": "1",
         "start_month": "2024-01",
         "end_month": "2024-02",
         "base_currency": "GBP",
         "starting_capital": "10000",
         "idempotency_key": "idem-1",
+        "security_ids": "sid_001",
         "param__lookback": "20",
         "param__threshold": "1.5",
         "param__enabled": "true",

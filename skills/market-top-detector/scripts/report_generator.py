@@ -69,7 +69,9 @@ def generate_markdown_report(analysis: dict, output_file: str):
     weakest_label = weakest.get("label", "N/A") or "N/A"
     strongest_score = strongest.get("score", 0) or 0
     weakest_score = weakest.get("score", 0) or 0
-    lines.append(f"| **Strongest Warning** | {strongest_label} ({strongest_score}/100) |")
+    lines.append(
+        f"| **Strongest Warning** | {strongest_label} ({strongest_score}/100) |"
+    )
     lines.append(f"| **Weakest Warning** | {weakest_label} ({weakest_score}/100) |")
     dq = composite.get("data_quality", {})
     if dq:
@@ -140,7 +142,9 @@ def generate_markdown_report(analysis: dict, output_file: str):
         prev_composite = delta.get("previous_composite", 0)
         comp_delta = delta.get("composite_delta", 0)
         comp_dir = delta.get("composite_direction", "stable")
-        dir_arrow = "↑" if comp_dir == "worsening" else "↓" if comp_dir == "improving" else "→"
+        dir_arrow = (
+            "↑" if comp_dir == "worsening" else "↓" if comp_dir == "improving" else "→"
+        )
         lines.append(
             f"**vs. Previous Run ({prev_date}):** Score {prev_composite} → "
             f"{score} ({comp_delta:+.1f} {dir_arrow})"
@@ -211,11 +215,17 @@ def generate_markdown_report(analysis: dict, output_file: str):
             lines.append("| ETF | Score | Distance from High | Flags |")
             lines.append("|-----|-------|--------------------|-------|")
             for sym, det in sorted(
-                etf_details.items(), key=lambda x: x[1].get("deterioration_score", 0), reverse=True
+                etf_details.items(),
+                key=lambda x: x[1].get("deterioration_score", 0),
+                reverse=True,
             ):
                 flags = det.get("flags", [])
                 flags_joined = "; ".join(flags)
-                flags_str = flags_joined if len(flags_joined) <= 80 else flags_joined[:77] + "..."
+                flags_str = (
+                    flags_joined
+                    if len(flags_joined) <= 80
+                    else flags_joined[:77] + "..."
+                )
                 lines.append(
                     f"| {sym} | {det.get('deterioration_score', 0)} | "
                     f"{det.get('distance_from_high_pct', 0):+.1f}% | {flags_str} |"
@@ -232,8 +242,12 @@ def generate_markdown_report(analysis: dict, output_file: str):
             f"{defr.get('relative_performance', 0):+.2f}% "
             f"(over {defr.get('lookback_days', 20)} days)"
         )
-        lines.append(f"- **Defensive Avg Return:** {defr.get('defensive_avg_return', 0):+.2f}%")
-        lines.append(f"- **Offensive Avg Return:** {defr.get('offensive_avg_return', 0):+.2f}%")
+        lines.append(
+            f"- **Defensive Avg Return:** {defr.get('defensive_avg_return', 0):+.2f}%"
+        )
+        lines.append(
+            f"- **Offensive Avg Return:** {defr.get('offensive_avg_return', 0):+.2f}%"
+        )
 
         def_det = defr.get("defensive_details", {})
         off_det = defr.get("offensive_details", {})
@@ -263,7 +277,9 @@ def generate_markdown_report(analysis: dict, output_file: str):
             source_label = f"auto (TraderMonty CSV, {auto_date})"
         else:
             source_label = "manual (CLI input)"
-        lines.append(f"- **200DMA Breadth:** {brd.get('breadth_200dma', 'N/A')}% — {source_label}")
+        lines.append(
+            f"- **200DMA Breadth:** {brd.get('breadth_200dma', 'N/A')}% — {source_label}"
+        )
         lines.append(f"- **50DMA Breadth:** {brd.get('breadth_50dma', 'N/A')}%")
         lines.append(
             f"- **Index Near Highs:** {'Yes' if brd.get('index_near_highs') else 'No'} "
@@ -404,7 +420,9 @@ def generate_markdown_report(analysis: dict, output_file: str):
     lines.append("")
     lines.append("## Methodology")
     lines.append("")
-    lines.append("This analysis integrates three complementary market top detection approaches:")
+    lines.append(
+        "This analysis integrates three complementary market top detection approaches:"
+    )
     lines.append("")
     lines.append(
         "1. **O'Neil (Distribution Days):** Institutional selling pressure via volume-confirmed declines"
@@ -419,9 +437,13 @@ def generate_markdown_report(analysis: dict, output_file: str):
     lines.append(
         "Additional components (Breadth, Technical, Sentiment) provide confirmation signals."
     )
-    lines.append("Composite score is a weighted average of all 6 components (0-100 scale).")
+    lines.append(
+        "Composite score is a weighted average of all 6 components (0-100 scale)."
+    )
     lines.append("")
-    lines.append("For detailed methodology, see `references/market_top_methodology.md`.")
+    lines.append(
+        "For detailed methodology, see `references/market_top_methodology.md`."
+    )
     lines.append("")
 
     # Disclaimer

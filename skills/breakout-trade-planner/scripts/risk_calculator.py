@@ -44,7 +44,9 @@ def derive_trade_prices(
     if pivot <= 0:
         raise ValueError(f"pivot must be positive, got {pivot}")
     if last_contraction_low <= 0:
-        raise ValueError(f"last_contraction_low must be positive, got {last_contraction_low}")
+        raise ValueError(
+            f"last_contraction_low must be positive, got {last_contraction_low}"
+        )
     if pivot_buffer_pct > max_chase_pct:
         raise ValueError(
             f"pivot_buffer_pct ({pivot_buffer_pct}) must be <= max_chase_pct ({max_chase_pct})"
@@ -55,7 +57,9 @@ def derive_trade_prices(
     stop_loss = round_price(last_contraction_low * (1 - stop_buffer_pct / 100))
 
     if stop_loss >= signal_entry:
-        raise ValueError(f"stop_loss ({stop_loss}) must be below signal_entry ({signal_entry})")
+        raise ValueError(
+            f"stop_loss ({stop_loss}) must be below signal_entry ({signal_entry})"
+        )
 
     return signal_entry, worst_entry, stop_loss
 

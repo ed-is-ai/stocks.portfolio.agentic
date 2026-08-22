@@ -26,7 +26,9 @@ def check_institutional_endpoint():
         print("Please set it with: export FMP_API_KEY=your_key")
         return False
 
-    print(f"Testing institutional-holder endpoint with API key (length: {len(api_key)})...")
+    print(
+        f"Testing institutional-holder endpoint with API key (length: {len(api_key)})..."
+    )
     print()
 
     # Test institutional-holder endpoint
@@ -50,7 +52,9 @@ def check_institutional_endpoint():
                 print(f"   Error: {data['Error Message']}")
                 print()
                 print("DECISION: Use Fallback Implementation (Step 3B)")
-                print("  - I component will use Profile API institutionalOwnership field only")
+                print(
+                    "  - I component will use Profile API institutionalOwnership field only"
+                )
                 print("  - Score capped at 70/100")
                 print("  - Quality warning will be added to all results")
                 return False
@@ -68,7 +72,9 @@ def check_institutional_endpoint():
                     )
                 print()
                 print("DECISION: Use Full Implementation (Step 3A)")
-                print("  - Full institutional analysis with holder count and ownership %")
+                print(
+                    "  - Full institutional analysis with holder count and ownership %"
+                )
                 print("  - Superinvestor detection")
                 print("  - Score range: 0-100")
                 return True

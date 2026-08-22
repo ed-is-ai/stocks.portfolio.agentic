@@ -92,7 +92,9 @@ def main():
     print(f"CIK: {args.cik}")
     print()
     print("For detailed portfolio tracking, please use:")
-    print(f"1. WhaleWisdom: https://whalewisdom.com/filer/{args.name.lower().replace(' ', '-')}")
+    print(
+        f"1. WhaleWisdom: https://whalewisdom.com/filer/{args.name.lower().replace(' ', '-')}"
+    )
     print(
         f"2. SEC EDGAR: https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={args.cik}&type=13F"
     )

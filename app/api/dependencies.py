@@ -22,8 +22,14 @@ from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
+from app.services.backtest.strategy_bootstrap_service import (
+    StrategyBootstrapService,
+)
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.notification_projector import StrategyNotificationProjector
+from app.services.backtest.strategy_readiness_service import (
+    StrategyReadinessService,
+)
 
 
 @lru_cache
@@ -136,3 +142,17 @@ def get_pipeline_service() -> PipelineService:
 def get_integration_config_service() -> IntegrationConfigService:
     """Return the shared ``IntegrationConfigService`` instance."""
     return IntegrationConfigService()
+
+
+@lru_cache
+def get_bootstrap_service() -> StrategyBootstrapService:
+    """Return the shared Bootstrap orchestration service (Story 4.3)."""
+    return StrategyBootstrapService(
+        get_backtest_repository(), get_strategy_job_service()
+    )
+
+
+@lru_cache
+def get_readiness_service() -> StrategyReadinessService:
+    """Return the shared readiness/diagnostics service (Story 4.4)."""
+    return StrategyReadinessService(get_backtest_repository())

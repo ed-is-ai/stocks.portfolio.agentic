@@ -152,8 +152,7 @@ class MovingAverageStrategy:
                 rule_id="moving_average_bearish_crossover_v1",
             )
             for security_id in _universe(parameters)
-            if security_id in held
-            and _crossover(view, parameters, security_id) == -1
+            if security_id in held and _crossover(view, parameters, security_id) == -1
         ]
 
     def position_size(

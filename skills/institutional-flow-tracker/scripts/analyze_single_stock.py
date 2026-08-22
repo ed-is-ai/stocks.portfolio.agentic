@@ -112,7 +112,9 @@ class SingleStockAnalyzer:
         sorted_quarters = sorted(quarters_data.keys(), reverse=True)[:quarters]
 
         if len(sorted_quarters) < 2:
-            print(f"Insufficient data (need at least 2 quarters, found {len(sorted_quarters)})")
+            print(
+                f"Insufficient data (need at least 2 quarters, found {len(sorted_quarters)})"
+            )
             return {}
 
         # Calculate quarterly metrics using correct FMP v3 field names
@@ -138,12 +140,16 @@ class SingleStockAnalyzer:
         # Data quality assessment for most recent quarter
         current_all = all_holders_by_quarter[sorted_quarters[0]]
         previous_all = (
-            all_holders_by_quarter[sorted_quarters[1]] if len(sorted_quarters) >= 2 else []
+            all_holders_by_quarter[sorted_quarters[1]]
+            if len(sorted_quarters) >= 2
+            else []
         )
         filtered_metrics = calculate_filtered_metrics(current_all)
         total_holder_count = len(current_all)
         genuine_ratio = (
-            filtered_metrics["genuine_count"] / total_holder_count if total_holder_count > 0 else 0
+            filtered_metrics["genuine_count"] / total_holder_count
+            if total_holder_count > 0
+            else 0
         )
         coverage_ratio = calculate_coverage_ratio(current_all, previous_all)
         match_ratio = calculate_match_ratio(current_all, previous_all)
@@ -207,7 +213,11 @@ class SingleStockAnalyzer:
                 elif classification == "genuine":
                     if change > 0:
                         previous_shares = shares - change
-                        pct_change = (change / previous_shares * 100) if previous_shares > 0 else 0
+                        pct_change = (
+                            (change / previous_shares * 100)
+                            if previous_shares > 0
+                            else 0
+                        )
                         increased_positions.append(
                             {
                                 "name": name,
@@ -218,7 +228,11 @@ class SingleStockAnalyzer:
                         )
                     elif change < 0:
                         previous_shares = shares - change
-                        pct_change = (change / previous_shares * 100) if previous_shares > 0 else 0
+                        pct_change = (
+                            (change / previous_shares * 100)
+                            if previous_shares > 0
+                            else 0
+                        )
                         decreased_positions.append(
                             {
                                 "name": name,
@@ -247,7 +261,10 @@ class SingleStockAnalyzer:
         }
 
     def generate_report(
-        self, analysis: dict, output_file: Optional[str] = None, output_dir: Optional[str] = None
+        self,
+        analysis: dict,
+        output_file: Optional[str] = None,
+        output_dir: Optional[str] = None,
     ):
         """Generate detailed markdown report"""
 
@@ -300,23 +317,23 @@ Use metrics as reference only, with additional verification.
         else:
             if shares_trend > 15 and holders_trend > 5:
                 signal = "**STRONG ACCUMULATION**"
-                interpretation = (
-                    "Strong institutional buying with increasing participation. Positive signal."
-                )
+                interpretation = "Strong institutional buying with increasing participation. Positive signal."
             elif shares_trend > 7 and holders_trend > 0:
                 signal = "**MODERATE ACCUMULATION**"
-                interpretation = "Steady institutional buying. Moderately positive signal."
+                interpretation = (
+                    "Steady institutional buying. Moderately positive signal."
+                )
             elif shares_trend < -15 or holders_trend < -5:
                 signal = "**STRONG DISTRIBUTION**"
-                interpretation = (
-                    "Significant institutional selling. Warning sign - investigate further."
-                )
+                interpretation = "Significant institutional selling. Warning sign - investigate further."
             elif shares_trend < -7:
                 signal = "**MODERATE DISTRIBUTION**"
                 interpretation = "Institutional selling detected. Monitor closely."
             else:
                 signal = "**NEUTRAL**"
-                interpretation = "No significant institutional flow changes. Stable ownership."
+                interpretation = (
+                    "No significant institutional flow changes. Stable ownership."
+                )
             trend_str = f"{shares_trend:+.2f}%"
 
         report += f"""**Signal:** {signal}
@@ -357,9 +374,7 @@ Use metrics as reference only, with additional verification.
             else:
                 qoq_str = "N/A"
 
-            report += (
-                f"| {q['quarter']} | {q['total_shares']:,} | {q['num_holders']} | {qoq_str} |\n"
-            )
+            report += f"| {q['quarter']} | {q['total_shares']:,} | {q['num_holders']} | {qoq_str} |\n"
 
         # Recent changes
         report += f"""
@@ -397,22 +412,32 @@ Use metrics as reference only, with additional verification.
             report += "No significant position decreases detected.\n"
 
         # Top current holders
-        report += f"\n## Top 20 Current Institutional Holders ({metrics[0]['quarter']})\n\n"
+        report += (
+            f"\n## Top 20 Current Institutional Holders ({metrics[0]['quarter']})\n\n"
+        )
         report += "| Rank | Institution | Shares Held | % of Institutional | Latest Change |\n"
-        report += "|------|-------------|-------------|-------------------|---------------|\n"
+        report += (
+            "|------|-------------|-------------|-------------------|---------------|\n"
+        )
 
         total_inst_shares = metrics[0]["total_shares"]
         for i, holder in enumerate(metrics[0]["top_holders"], 1):
             shares = holder.get("shares", 0)
-            pct_of_inst = (shares / total_inst_shares * 100) if total_inst_shares > 0 else 0
+            pct_of_inst = (
+                (shares / total_inst_shares * 100) if total_inst_shares > 0 else 0
+            )
             change = holder.get("change", 0)
             report += f"| {i} | {holder.get('holder', 'Unknown')} | {shares:,} | {pct_of_inst:.2f}% | {change:+,} |\n"
 
         # Concentration analysis
         if len(metrics[0]["top_holders"]) >= 10:
-            top_10_shares = sum(h.get("shares", 0) for h in metrics[0]["top_holders"][:10])
+            top_10_shares = sum(
+                h.get("shares", 0) for h in metrics[0]["top_holders"][:10]
+            )
             concentration = (
-                (top_10_shares / total_inst_shares * 100) if total_inst_shares > 0 else 0
+                (top_10_shares / total_inst_shares * 100)
+                if total_inst_shares > 0
+                else 0
             )
 
             report += f"""
@@ -427,11 +452,15 @@ Use metrics as reference only, with additional verification.
                 report += "- **Risk:** Significant price impact if top holders sell\n"
                 report += "- **Opportunity:** May indicate high conviction by quality investors\n"
             elif concentration > 40:
-                report += "- **Moderate Concentration** - Balanced institutional ownership\n"
+                report += (
+                    "- **Moderate Concentration** - Balanced institutional ownership\n"
+                )
                 report += "- **Risk:** Moderate concentration risk\n"
             else:
                 report += "- **Low Concentration** - Widely distributed institutional ownership\n"
-                report += "- **Risk:** Lower concentration risk, more stable ownership\n"
+                report += (
+                    "- **Risk:** Lower concentration risk, more stable ownership\n"
+                )
 
         report += """
 ## Methodology Note
@@ -464,7 +493,9 @@ inflated metrics from asymmetric holder counts across quarters.
 
         # Determine output path
         if output_file:
-            output_path = output_file if output_file.endswith(".md") else f"{output_file}.md"
+            output_path = (
+                output_file if output_file.endswith(".md") else f"{output_file}.md"
+            )
         else:
             filename = f"institutional_analysis_{symbol}_{datetime.now().strftime('%Y%m%d')}.md"
             if output_dir:
@@ -510,7 +541,9 @@ Examples:
         default=8,
         help="Number of quarters to analyze (default: 8, i.e., 2 years)",
     )
-    parser.add_argument("--output", type=str, help="Output file path for markdown report")
+    parser.add_argument(
+        "--output", type=str, help="Output file path for markdown report"
+    )
     parser.add_argument(
         "--output-dir",
         type=str,
@@ -518,7 +551,9 @@ Examples:
         help="Output directory for reports (default: reports/)",
     )
     parser.add_argument(
-        "--compare-to", type=str, help="Compare to another stock (optional, future feature)"
+        "--compare-to",
+        type=str,
+        help="Compare to another stock (optional, future feature)",
     )
 
     args = parser.parse_args()
@@ -541,7 +576,9 @@ Examples:
         sys.exit(1)
 
     # Generate report
-    analyzer.generate_report(analysis, output_file=args.output, output_dir=args.output_dir)
+    analyzer.generate_report(
+        analysis, output_file=args.output, output_dir=args.output_dir
+    )
 
     # Print summary
     dq = analysis.get("data_quality", {})

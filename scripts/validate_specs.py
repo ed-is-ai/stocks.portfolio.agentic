@@ -41,9 +41,9 @@ def validate_spec_file(spec_path: Path) -> tuple[bool, list[str]]:
 
     # Check for requirement sections
     has_requirements = (
-        "## ADDED Requirements" in content or
-        "## MODIFIED Requirements" in content or
-        "## REMOVED Requirements" in content
+        "## ADDED Requirements" in content
+        or "## MODIFIED Requirements" in content
+        or "## REMOVED Requirements" in content
     )
     if not has_requirements:
         errors.append(f"No requirement sections found in {spec_path}")
@@ -97,10 +97,8 @@ def validate_spec_file(spec_path: Path) -> tuple[bool, list[str]]:
 
         if re.match(r"^- \*\*WHEN\*\*", line):
             # Scenario is using bullets; check format
-            if "- **THEN**" not in content[lines.index(line):lines.index(line) + 10]:
-                errors.append(
-                    f"Line {i}: Scenario missing '- **THEN**' clause"
-                )
+            if "- **THEN**" not in content[lines.index(line) : lines.index(line) + 10]:
+                errors.append(f"Line {i}: Scenario missing '- **THEN**' clause")
 
     return len(errors) == 0, errors
 

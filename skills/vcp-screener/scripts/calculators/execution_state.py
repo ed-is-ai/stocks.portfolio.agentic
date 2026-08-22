@@ -62,7 +62,9 @@ def compute_execution_state(
     # Rule 1: Invalid - not in Stage 2 (price below both moving averages)
     if sma50 is not None and sma200 is not None:
         if price < sma50 and sma50 < sma200:
-            reasons.append(f"Price ${price:.2f} < SMA50 ${sma50:.2f} < SMA200 ${sma200:.2f}")
+            reasons.append(
+                f"Price ${price:.2f} < SMA50 ${sma50:.2f} < SMA200 ${sma200:.2f}"
+            )
             return {"state": "Invalid", "reasons": reasons}
 
     # Rule 2: Damaged - stop level violated
@@ -108,10 +110,14 @@ def compute_execution_state(
     # Rules 8-9: Within 3% of pivot (or below)
     if distance_from_pivot_pct >= 0.0:
         if breakout_volume:
-            reasons.append(f"+{distance_from_pivot_pct:.1f}% above pivot with volume confirmation")
+            reasons.append(
+                f"+{distance_from_pivot_pct:.1f}% above pivot with volume confirmation"
+            )
             return {"state": "Breakout", "reasons": reasons}
         else:
-            reasons.append(f"+{distance_from_pivot_pct:.1f}% above pivot (volume unconfirmed)")
+            reasons.append(
+                f"+{distance_from_pivot_pct:.1f}% above pivot (volume unconfirmed)"
+            )
             return {"state": "Early-post-breakout", "reasons": reasons}
 
     # Rule 10: Below pivot

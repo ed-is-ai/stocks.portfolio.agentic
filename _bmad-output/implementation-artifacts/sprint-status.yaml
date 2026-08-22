@@ -83,6 +83,9 @@ development_status:
   4-4-understand-readiness-and-recover-through-diagnostics: backlog
   4-5-select-securities-for-a-backtest: backlog
   4-6-prepare-the-evidence-needed-for-a-backtest: backlog
+  4-6-1-create-production-bootstrap-evidence: backlog
+  4-6-2-make-bootstrap-submission-idempotent: backlog
+  4-6-3-seal-the-selected-universe-digest: backlog
   4-7-run-and-restart-backtests-from-pinned-evidence: backlog
   4-8-compare-results-using-compatible-evidence-rules: backlog
   4-9-complete-the-first-backtest-from-a-clean-checkout: backlog

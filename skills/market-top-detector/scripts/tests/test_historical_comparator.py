@@ -64,7 +64,9 @@ class TestCompareToHistorical:
         scores = {k: 0 for k in COMPONENT_KEYS}
         scores["distribution_days"] = 100  # Very different from any top
         result = compare_to_historical(scores)
-        assert "Distribution Days" in result["narrative"] or "lower" in result["narrative"]
+        assert (
+            "Distribution Days" in result["narrative"] or "lower" in result["narrative"]
+        )
 
     def test_narrative_close_match(self):
         """Scores close to a pattern should produce 'closely matches' text."""

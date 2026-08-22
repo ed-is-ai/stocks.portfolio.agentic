@@ -48,6 +48,8 @@ from app.services.backtest.strategy_job import (
     InitializationRunV1,
     JobFailureCode,
     PreparationRunV1,
+    RecoveryAction,
+    RecentJobFailureV1,
     STAGE_SEQUENCES,
     StrategyJobConflict,
     StrategyJobNotFound,
@@ -1511,6 +1513,84 @@ class BacktestRepository:
                    FROM security_identities ORDER BY security_id"""
             ).fetchall()
         return [tuple(str(value) for value in row) for row in rows]  # type: ignore[return-value]
+
+    def roster_member_identities(
+        self, profile_hash: str
+    ) -> list[tuple[str, str, str, str]]:
+        """Return roster member identities for one profile's universe.
+
+        Joins ``snapshot_profiles`` → ``reconstruction_roster_members``
+        → ``security_identities`` to return
+        ``(security_id, provider_symbol, mic, quote_currency)`` tuples
+        sorted by ``(provider_symbol, mic)`` for deterministic display.
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT member.security_id, member.provider_symbol,
+                          member.mic, member.currency
+                   FROM reconstruction_roster_members member
+                   JOIN snapshot_profiles profile
+                     ON profile.roster_digest = member.roster_digest
+                  WHERE profile.profile_hash = ?
+                  ORDER BY member.provider_symbol, member.mic""",
+                (profile_hash,),
+            ).fetchall()
+        return [(str(row[0]), str(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+    def recent_job_failures(self, limit: int = 5) -> tuple[RecentJobFailureV1, ...]:
+        """Return bounded recent failed/cancelled jobs for diagnostics.
+
+        Queries ``strategy_jobs`` for ``status IN ('failed', 'cancelled')``
+        ordered by ``updated_at DESC``, limited to ``limit`` entries.
+        Maps each to :class:`RecentJobFailureV1` with a recovery action
+        based on job type.
+        """
+        _RECOVERY_BY_TYPE: dict[StrategyJobType, RecoveryAction] = {
+            StrategyJobType.BOOTSTRAP: RecoveryAction.SET_UP,
+            StrategyJobType.INITIALIZATION: RecoveryAction.INITIALIZE,
+            StrategyJobType.PREPARATION: RecoveryAction.CONFIGURE,
+            StrategyJobType.BACKTEST: RecoveryAction.RETRY,
+        }
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT id, job_type, status, current_stage,
+                           current_month, failure_code, updated_at
+                    FROM strategy_jobs
+                    WHERE status IN ('failed', 'cancelled')
+                      AND deleted_at IS NULL
+                    ORDER BY updated_at DESC
+                    LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        results: list[RecentJobFailureV1] = []
+        for row in rows:
+            job_type = StrategyJobType(str(row[1]))
+            status = StrategyJobStatus(str(row[2]))
+            stage_or_month = (
+                str(row[3])
+                if row[3] is not None
+                else (str(row[4]) if row[4] is not None else None)
+            )
+            if status is StrategyJobStatus.FAILED:
+                try:
+                    failure_code = JobFailureCode(str(row[5]))
+                except ValueError:
+                    failure_code = JobFailureCode.INTEGRITY_ERROR
+                recovery = _RECOVERY_BY_TYPE.get(job_type, RecoveryAction.RETRY)
+            else:
+                failure_code = JobFailureCode.WORKER_INTERRUPTED
+                recovery = RecoveryAction.RECONCILE_WORKER
+            results.append(
+                RecentJobFailureV1(
+                    job_id=str(row[0]),
+                    job_type=job_type,
+                    failure_code=failure_code,
+                    stage_or_month=stage_or_month,
+                    failed_at=datetime.fromisoformat(str(row[6])),
+                    recovery_action=recovery,
+                )
+            )
+        return tuple(results)
 
     def effective_alias_bounds(
         self,

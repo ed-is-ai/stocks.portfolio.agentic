@@ -106,7 +106,8 @@ def calculate_annual_growth(income_statements: list[dict]) -> dict:
 
     # Check growth stability (no down years)
     stable = all(
-        eps_values_chrono[i] >= eps_values_chrono[i - 1] for i in range(1, len(eps_values_chrono))
+        eps_values_chrono[i] >= eps_values_chrono[i - 1]
+        for i in range(1, len(eps_values_chrono))
     )
 
     # Calculate score
@@ -263,7 +264,9 @@ def check_consistency(income_statements: list[dict]) -> dict:
         else:
             consecutive = 0
 
-    interpretation = f"{max_consecutive} consecutive years of growth, {down_years} down years"
+    interpretation = (
+        f"{max_consecutive} consecutive years of growth, {down_years} down years"
+    )
 
     return {
         "down_years": down_years,

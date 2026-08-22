@@ -40,7 +40,9 @@ class TestCalculateLeadingStockHealth:
         historical = {}
         for sym in ["ARKK", "WCLD", "IGV"]:
             quotes[sym] = {"price": 100, "yearHigh": 102, "yearLow": 80}
-            historical[sym] = [{"close": 100 - i * 0.05, "volume": 1000000} for i in range(60)]
+            historical[sym] = [
+                {"close": 100 - i * 0.05, "volume": 1000000} for i in range(60)
+            ]
         result = calculate_leading_stock_health(quotes, historical)
         assert result["score"] <= 30  # Healthy
         assert result["data_available"] is True
@@ -52,7 +54,8 @@ class TestCalculateLeadingStockHealth:
         for sym in ["ARKK", "WCLD", "IGV", "XBI", "SOXX", "SMH", "KWEB", "TAN"]:
             quotes[sym] = {"price": 70, "yearHigh": 100, "yearLow": 60}
             historical[sym] = [
-                {"close": 70 + i * 0.5, "high": 72 + i * 0.5, "volume": 1000000} for i in range(60)
+                {"close": 70 + i * 0.5, "high": 72 + i * 0.5, "volume": 1000000}
+                for i in range(60)
             ]
         result = calculate_leading_stock_health(quotes, historical)
         assert result["amplified"] is True
@@ -163,10 +166,14 @@ class TestPartialDataTracking:
         historical = {}
         for s in symbols[:6]:
             # Full history (50+ bars)
-            historical[s] = [{"close": 100 - i * 0.1, "volume": 1000000} for i in range(60)]
+            historical[s] = [
+                {"close": 100 - i * 0.1, "volume": 1000000} for i in range(60)
+            ]
         for s in symbols[6:]:
             # Partial history (< 50 bars)
-            historical[s] = [{"close": 100 - i * 0.1, "volume": 1000000} for i in range(20)]
+            historical[s] = [
+                {"close": 100 - i * 0.1, "volume": 1000000} for i in range(20)
+            ]
         result = calculate_leading_stock_health(quotes, historical, etf_list=symbols)
         assert result["data_available"] is True  # 6/8 = 0.75
         assert result["partial_data_count"] == 2
@@ -178,9 +185,13 @@ class TestPartialDataTracking:
         quotes = {s: {"price": 100, "yearHigh": 102, "yearLow": 80} for s in symbols}
         historical = {}
         for s in symbols[:5]:
-            historical[s] = [{"close": 100 - i * 0.1, "volume": 1000000} for i in range(60)]
+            historical[s] = [
+                {"close": 100 - i * 0.1, "volume": 1000000} for i in range(60)
+            ]
         for s in symbols[5:]:
-            historical[s] = [{"close": 100 - i * 0.1, "volume": 1000000} for i in range(20)]
+            historical[s] = [
+                {"close": 100 - i * 0.1, "volume": 1000000} for i in range(20)
+            ]
         result = calculate_leading_stock_health(quotes, historical, etf_list=symbols)
         assert result["data_available"] is False  # 5/8 = 0.625 < 0.75
         assert result["partial_data_count"] == 3

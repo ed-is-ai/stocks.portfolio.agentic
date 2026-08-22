@@ -1,7 +1,9 @@
 """Importable test helpers for Market Top Detector tests"""
 
 
-def make_daily_bar(close, volume=1000000, date="2026-01-15", open_=None, high=None, low=None):
+def make_daily_bar(
+    close, volume=1000000, date="2026-01-15", open_=None, high=None, low=None
+):
     """Helper to create a daily OHLCV bar dict."""
     if open_ is None:
         open_ = close

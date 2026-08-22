@@ -46,7 +46,9 @@ class FinvizStockClient:
         self.session = requests.Session()
         # Use a realistic user agent to avoid blocking
         self.session.headers.update(
-            {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+            {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+            }
         )
 
     def _rate_limited_fetch(self, symbol: str) -> Optional[dict]:
@@ -79,7 +81,10 @@ class FinvizStockClient:
                 return None
 
         except Exception as e:
-            print(f"WARNING: Failed to fetch Finviz data for {symbol}: {e}", file=sys.stderr)
+            print(
+                f"WARNING: Failed to fetch Finviz data for {symbol}: {e}",
+                file=sys.stderr,
+            )
             self.last_request_time = time.time()
             return None
 
@@ -159,7 +164,11 @@ class FinvizStockClient:
         inst_own_pct = self._parse_percentage(inst_own_str)
         inst_trans_pct = self._parse_percentage(inst_trans_str)
 
-        result = {"inst_own_pct": inst_own_pct, "inst_trans_pct": inst_trans_pct, "error": None}
+        result = {
+            "inst_own_pct": inst_own_pct,
+            "inst_trans_pct": inst_trans_pct,
+            "error": None,
+        }
 
         # Cache result
         self.cache[cache_key] = result
@@ -210,7 +219,9 @@ class FinvizStockClient:
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Test Finviz institutional ownership fetcher")
+    parser = argparse.ArgumentParser(
+        description="Test Finviz institutional ownership fetcher"
+    )
     parser.add_argument("symbol", help="Stock ticker symbol")
     args = parser.parse_args()
 

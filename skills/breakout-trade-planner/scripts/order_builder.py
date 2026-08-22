@@ -67,7 +67,9 @@ def build_post_confirm_template(
             f"stop_loss ({stop_loss}) must be >= $0.01 below worst_entry ({worst_entry})"
         )
     if take_profit <= worst_entry:
-        raise ValueError(f"take_profit ({take_profit}) must be above worst_entry ({worst_entry})")
+        raise ValueError(
+            f"take_profit ({take_profit}) must be above worst_entry ({worst_entry})"
+        )
 
     return {
         "execution_mode": "post_confirm",
@@ -139,4 +141,6 @@ def _validate_order_params(
             f"stop_loss ({stop_loss}) must be >= $0.01 below signal_entry ({signal_entry})"
         )
     if take_profit <= worst_entry:
-        raise ValueError(f"take_profit ({take_profit}) must be above worst_entry ({worst_entry})")
+        raise ValueError(
+            f"take_profit ({take_profit}) must be above worst_entry ({worst_entry})"
+        )

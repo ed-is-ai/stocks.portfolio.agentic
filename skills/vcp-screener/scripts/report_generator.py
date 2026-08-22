@@ -14,7 +14,10 @@ from typing import Optional
 
 
 def generate_json_report(
-    results: list[dict], metadata: dict, output_file: str, all_results: Optional[list[dict]] = None
+    results: list[dict],
+    metadata: dict,
+    output_file: str,
+    all_results: Optional[list[dict]] = None,
 ):
     """Generate JSON report with screening results.
 
@@ -45,7 +48,10 @@ def generate_json_report(
 
 
 def generate_markdown_report(
-    results: list[dict], metadata: dict, output_file: str, all_results: Optional[list[dict]] = None
+    results: list[dict],
+    metadata: dict,
+    output_file: str,
+    all_results: Optional[list[dict]] = None,
 ):
     """Generate Markdown report with VCP screening results.
 
@@ -73,7 +79,9 @@ def generate_markdown_report(
     lines.append("|-------|-------|")
     lines.append(f"| Universe | {funnel.get('universe', 'N/A')} |")
     lines.append(f"| Pre-filter passed | {funnel.get('pre_filter_passed', 'N/A')} |")
-    lines.append(f"| Trend Template passed | {funnel.get('trend_template_passed', 'N/A')} |")
+    lines.append(
+        f"| Trend Template passed | {funnel.get('trend_template_passed', 'N/A')} |"
+    )
     lines.append(f"| VCP candidates | {funnel.get('vcp_candidates', len(results))} |")
     lines.append("")
 
@@ -185,7 +193,9 @@ def generate_markdown_report(
     lines.append("")
     lines.append("## Methodology")
     lines.append("")
-    lines.append("This screener implements Mark Minervini's Volatility Contraction Pattern (VCP):")
+    lines.append(
+        "This screener implements Mark Minervini's Volatility Contraction Pattern (VCP):"
+    )
     lines.append("")
     lines.append("1. **Trend Template** (25%) - 7-point Stage 2 uptrend filter")
     lines.append(
@@ -242,7 +252,9 @@ def _format_stock_entry(rank: int, stock: dict) -> list[str]:
     price = stock.get("price", 0) or 0
     mcap = stock.get("market_cap", 0) or 0
     mcap_str = (
-        f"${mcap / 1e9:.1f}B" if mcap >= 1e9 else (f"${mcap / 1e6:.0f}M" if mcap > 0 else "N/A")
+        f"${mcap / 1e9:.1f}B"
+        if mcap >= 1e9
+        else (f"${mcap / 1e6:.0f}M" if mcap > 0 else "N/A")
     )
     lines.append(
         f"**Price:** ${price:.2f} | **Market Cap:** {mcap_str} | "
@@ -269,8 +281,12 @@ def _format_stock_entry(rank: int, stock: dict) -> list[str]:
     vcp_score = vcp.get("score", 0)
     num_c = vcp.get("num_contractions", 0)
     contractions = vcp.get("contractions", [])
-    depths = ", ".join([f"{c['label']}={c['depth_pct']:.1f}%" for c in contractions[:4]])
-    lines.append(f"| Contraction Quality | {vcp_score:.0f}/100 | {num_c} contractions: {depths} |")
+    depths = ", ".join(
+        [f"{c['label']}={c['depth_pct']:.1f}%" for c in contractions[:4]]
+    )
+    lines.append(
+        f"| Contraction Quality | {vcp_score:.0f}/100 | {num_c} contractions: {depths} |"
+    )
 
     # Volume Pattern
     vol = stock.get("volume_pattern", {})
@@ -315,8 +331,12 @@ def _format_stock_entry(rank: int, stock: dict) -> list[str]:
     if trade_status == "BELOW STOP LEVEL":
         # Stop violated: setup is invalidated
         lines.append(f"- Pivot: ${pivot_price:.2f}" if pivot_price else "- Pivot: N/A")
-        lines.append(f"- Stop-loss: ${stop_loss:.2f}" if stop_loss else "- Stop-loss: N/A")
-        lines.append("- **STOP VIOLATED:** Price is below stop-loss level — setup invalidated.")
+        lines.append(
+            f"- Stop-loss: ${stop_loss:.2f}" if stop_loss else "- Stop-loss: N/A"
+        )
+        lines.append(
+            "- **STOP VIOLATED:** Price is below stop-loss level — setup invalidated."
+        )
         lines.append("- Action: Do not enter. Wait for a new base to form.")
     elif dist is not None and dist > 10:
         # Overextended: trade missed
@@ -336,9 +356,13 @@ def _format_stock_entry(rank: int, stock: dict) -> list[str]:
     elif dist is not None and 5 < dist <= 10:
         # Chase warning zone
         lines.append(f"- Pivot: ${pivot_price:.2f}" if pivot_price else "- Pivot: N/A")
-        lines.append(f"- Stop-loss: ${stop_loss:.2f}" if stop_loss else "- Stop-loss: N/A")
         lines.append(
-            f"- Risk from current price: {risk_pct:.1f}%" if risk_pct is not None else "- Risk: N/A"
+            f"- Stop-loss: ${stop_loss:.2f}" if stop_loss else "- Stop-loss: N/A"
+        )
+        lines.append(
+            f"- Risk from current price: {risk_pct:.1f}%"
+            if risk_pct is not None
+            else "- Risk: N/A"
         )
         lines.append(
             f"- WARNING: +{dist:.1f}% above pivot — consider waiting for pullback to pivot."
@@ -346,8 +370,12 @@ def _format_stock_entry(rank: int, stock: dict) -> list[str]:
     else:
         # Normal range (-8% to +5%) or below
         lines.append(f"- Pivot: ${pivot_price:.2f}" if pivot_price else "- Pivot: N/A")
-        lines.append(f"- Stop-loss: ${stop_loss:.2f}" if stop_loss else "- Stop-loss: N/A")
-        lines.append(f"- Risk: {risk_pct:.1f}%" if risk_pct is not None else "- Risk: N/A")
+        lines.append(
+            f"- Stop-loss: ${stop_loss:.2f}" if stop_loss else "- Stop-loss: N/A"
+        )
+        lines.append(
+            f"- Risk: {risk_pct:.1f}%" if risk_pct is not None else "- Risk: N/A"
+        )
 
     guidance = stock.get("guidance", "N/A")
 

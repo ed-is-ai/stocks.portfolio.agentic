@@ -26,7 +26,9 @@ class TestGenerateScenarios:
         scores = {k: 30 for k in COMPONENT_WEIGHTS}
         scores["breadth_divergence"] = 10
         scenarios = generate_scenarios(scores)
-        breadth_scenario = next(s for s in scenarios if s["name"] == "Breadth Deterioration")
+        breadth_scenario = next(
+            s for s in scenarios if s["name"] == "Breadth Deterioration"
+        )
         assert breadth_scenario["delta"] >= 0
 
     def test_recovery_lowers_score(self):

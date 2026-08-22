@@ -6,7 +6,9 @@ from app.schemas import ExitSignal, Position, StockRecord
 class ExitEvaluator:
     """Evaluate the signal for a held position."""
 
-    def evaluate(self, position: Position, stock: StockRecord | None) -> ExitSignal | None:
+    def evaluate(
+        self, position: Position, stock: StockRecord | None
+    ) -> ExitSignal | None:
         """Return EXIT, ADD, or None (blank)."""
         price = position.current_price
         stop = position.stop_loss
@@ -22,7 +24,9 @@ class ExitEvaluator:
             ep = analysis.entry_price
             return ExitSignal(
                 action="ADD",
-                reason=f"New pivot breakout — entry ${ep:.2f}" if ep else "New pivot breakout",
+                reason=f"New pivot breakout — entry ${ep:.2f}"
+                if ep
+                else "New pivot breakout",
             )
 
         return None

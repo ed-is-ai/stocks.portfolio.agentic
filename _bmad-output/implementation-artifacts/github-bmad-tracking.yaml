@@ -28,8 +28,8 @@ sprint_planning:
   source: sprint-change-proposal-2026-08-20.md
   readiness: READY
   epics: 4
-  stories: 31
-  epic_4_stories: ["4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "4.7", "4.8", "4.9"]
+  stories: 34
+  epic_4_stories: ["4.1", "4.2", "4.3", "4.4", "4.5", "4.6", "4.6.1", "4.6.2", "4.6.3", "4.7", "4.8", "4.9"]
 create_story:
   latest_story: 3-3-review-two-results-side-by-side
   issue: 205
@@ -51,7 +51,7 @@ epics:
   epic-4:
     issue: 254
     status: backlog
-    sub_issues: [275, 267, 268, 269, 270, 271, 272, 273, 274]
+    sub_issues: [275, 267, 268, 269, 270, 271, 279, 280, 281, 272, 273, 274]
     superseded_sub_issues: [255, 256, 257, 258, 259, 260, 261]
 stories:
   1-1-qualify-the-free-historical-data-contract: { issue: 184, status: done }
@@ -82,6 +82,9 @@ stories:
   4-4-understand-readiness-and-recover-through-diagnostics: { issue: 269, status: backlog }
   4-5-select-securities-for-a-backtest: { issue: 270, status: backlog }
   4-6-prepare-the-evidence-needed-for-a-backtest: { issue: 271, status: backlog }
+  4-6-1-create-production-bootstrap-evidence: { issue: 279, status: backlog }
+  4-6-2-make-bootstrap-submission-idempotent: { issue: 280, status: backlog }
+  4-6-3-seal-the-selected-universe-digest: { issue: 281, status: backlog }
   4-7-run-and-restart-backtests-from-pinned-evidence: { issue: 272, status: backlog }
   4-8-compare-results-using-compatible-evidence-rules: { issue: 273, status: backlog }
   4-9-complete-the-first-backtest-from-a-clean-checkout: { issue: 274, status: backlog }

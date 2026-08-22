@@ -53,7 +53,9 @@ def classify_holder(holder: dict) -> str:
     return "genuine"
 
 
-def calculate_coverage_ratio(current_holders: list[dict], previous_holders: list[dict]) -> float:
+def calculate_coverage_ratio(
+    current_holders: list[dict], previous_holders: list[dict]
+) -> float:
     """Calculate ratio of current to previous holder counts.
 
     A high ratio (e.g., 27x) indicates highly asymmetric data where
@@ -71,7 +73,9 @@ def calculate_coverage_ratio(current_holders: list[dict], previous_holders: list
     return current_count / previous_count
 
 
-def calculate_match_ratio(current_holders: list[dict], previous_holders: list[dict]) -> float:
+def calculate_match_ratio(
+    current_holders: list[dict], previous_holders: list[dict]
+) -> float:
     """Calculate fraction of current holders that also appear in previous quarter.
 
     Uses the 'holder' field (institution name) for matching.
@@ -129,7 +133,9 @@ def calculate_filtered_metrics(holders: list[dict]) -> dict:
     }
 
 
-def reliability_grade(coverage_ratio: float, match_ratio: float, genuine_ratio: float) -> str:
+def reliability_grade(
+    coverage_ratio: float, match_ratio: float, genuine_ratio: float
+) -> str:
     """Determine data reliability grade based on quality metrics.
 
     Grades:

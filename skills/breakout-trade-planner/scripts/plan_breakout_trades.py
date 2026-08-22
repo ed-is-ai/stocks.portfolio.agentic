@@ -69,7 +69,14 @@ def load_exposure(path: str | None) -> dict:
     return {"sector_exposure": {}, "open_risk_pct": 0.0}
 
 
-REQUIRED_FIELDS = ["symbol", "sector", "price", "composite_score", "execution_state", "valid_vcp"]
+REQUIRED_FIELDS = [
+    "symbol",
+    "sector",
+    "price",
+    "composite_score",
+    "execution_state",
+    "valid_vcp",
+]
 BREAKOUT_EXTRA_FIELDS = [
     "volume_pattern.breakout_volume_detected",
     "pivot_proximity.distance_from_pivot_pct",
@@ -153,10 +160,14 @@ def process_candidate(
     except ValueError as e:
         return _reject(symbol, f"Trade price derivation failed: {e}")
 
-    risk_pct_signal, risk_pct_worst = calculate_risks(signal_entry, worst_entry, stop_loss)
+    risk_pct_signal, risk_pct_worst = calculate_risks(
+        signal_entry, worst_entry, stop_loss
+    )
 
     # Take profit (worst-entry based)
-    tp_worst = round_price(worst_entry + args.target_r_multiple * (worst_entry - stop_loss))
+    tp_worst = round_price(
+        worst_entry + args.target_r_multiple * (worst_entry - stop_loss)
+    )
 
     base_output = {
         "symbol": symbol,
@@ -205,7 +216,9 @@ def process_candidate(
 
     # --- Breakout path ---
     if execution_state == "Breakout":
-        breakout_volume = _get_nested(result, "volume_pattern.breakout_volume_detected") or False
+        breakout_volume = (
+            _get_nested(result, "volume_pattern.breakout_volume_detected") or False
+        )
         distance = _get_nested(result, "pivot_proximity.distance_from_pivot_pct")
         if distance is None:
             return _reject(symbol, "missing distance_from_pivot_pct for Breakout")
@@ -220,7 +233,9 @@ def process_candidate(
         )
 
         if plan_eligible:
-            advisory = build_revalidation_advisory(symbol, pivot, current_price, worst_entry)
+            advisory = build_revalidation_advisory(
+                symbol, pivot, current_price, worst_entry
+            )
             advisory.update(base_output)
             advisory["decision_code"] = "REVALIDATION_BREAKOUT"
             advisory["risk_pct_worst"] = risk_pct_worst
@@ -369,7 +384,11 @@ def _build_actionable(
         },
     }
 
-    return {"classification": "actionable", "data": result, "risk_pct": risk_pct_of_account}
+    return {
+        "classification": "actionable",
+        "data": result,
+        "risk_pct": risk_pct_of_account,
+    }
 
 
 def _watchlist(base: dict, pivot: float, stop_loss: float) -> dict:
@@ -398,7 +417,9 @@ def generate_plans(data: dict, args: argparse.Namespace) -> dict:
     results = data["results"]
 
     # Sort by composite_score descending (highest priority first)
-    results_sorted = sorted(results, key=lambda r: r.get("composite_score", 0), reverse=True)
+    results_sorted = sorted(
+        results, key=lambda r: r.get("composite_score", 0), reverse=True
+    )
 
     actionable = []
     revalidation = []
@@ -416,18 +437,28 @@ def generate_plans(data: dict, args: argparse.Namespace) -> dict:
         if not is_valid:
             symbol = result.get("symbol", "UNKNOWN")
             for w in warns:
-                warnings.append({"symbol": symbol, "code": "MISSING_FIELD", "message": w})
-            rejected.append({"symbol": symbol, "reason": f"validation: {'; '.join(warns)}"})
+                warnings.append(
+                    {"symbol": symbol, "code": "MISSING_FIELD", "message": w}
+                )
+            rejected.append(
+                {"symbol": symbol, "reason": f"validation: {'; '.join(warns)}"}
+            )
             continue
 
-        classified = process_candidate(result, args, cumulative_risk_pct, sector_tracker, exposure)
+        classified = process_candidate(
+            result, args, cumulative_risk_pct, sector_tracker, exposure
+        )
         cls = classified["classification"]
 
         if cls == "actionable":
             actionable.append(classified["data"])
             cumulative_risk_pct += classified["risk_pct"]
             sector = classified["data"]["sector"]
-            pos_pct = classified["data"]["trade_plan"]["position_value"] / args.account_size * 100
+            pos_pct = (
+                classified["data"]["trade_plan"]["position_value"]
+                / args.account_size
+                * 100
+            )
             sector_tracker[sector] = sector_tracker.get(sector, 0.0) + pos_pct
         elif cls == "revalidation":
             revalidation.append(classified["data"])
@@ -441,7 +472,9 @@ def generate_plans(data: dict, args: argparse.Namespace) -> dict:
             rejected.append(classified["data"])
 
     total_risk_dollars = sum(a["trade_plan"]["risk_dollars"] for a in actionable)
-    total_risk_pct = total_risk_dollars / args.account_size * 100 if args.account_size > 0 else 0
+    total_risk_pct = (
+        total_risk_dollars / args.account_size * 100 if args.account_size > 0 else 0
+    )
     total_position = sum(a["trade_plan"]["position_value"] for a in actionable)
 
     return {
@@ -556,8 +589,12 @@ def main():
         description="Generate breakout trade plans from VCP screener output"
     )
     parser.add_argument("--input", required=True, help="VCP screener JSON path")
-    parser.add_argument("--account-size", type=float, required=True, help="Account equity ($)")
-    parser.add_argument("--risk-pct", type=float, default=0.5, help="Base risk %% per trade")
+    parser.add_argument(
+        "--account-size", type=float, required=True, help="Account equity ($)"
+    )
+    parser.add_argument(
+        "--risk-pct", type=float, default=0.5, help="Base risk %% per trade"
+    )
     parser.add_argument("--max-position-pct", type=float, default=10.0)
     parser.add_argument("--max-sector-pct", type=float, default=30.0)
     parser.add_argument("--max-portfolio-heat-pct", type=float, default=6.0)
