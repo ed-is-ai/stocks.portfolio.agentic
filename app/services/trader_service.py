@@ -103,9 +103,11 @@ class TraderService:
         """Return (prices, fetched_at, display_info) from the price cache."""
         return self._agent.load_price_cache()
 
-    def get_cached_fx_rates(self, dates: list[str]) -> dict[str, float]:
-        """Return every cached ``{date: gbpusd_rate}`` row for ``dates``."""
-        return self._agent.get_cached_fx_rates(dates)
+    def get_cached_fx_rates(
+        self, dates: list[str], pair: str = "GBPUSD=X"
+    ) -> dict[str, float]:
+        """Return cached ``{date: rate}`` rows for one FX pair."""
+        return self._agent.get_cached_fx_rates(dates, pair)
 
     # --- writes -----------------------------------------------------------
 
@@ -117,9 +119,9 @@ class TraderService:
         """Persist fetched prices (and optional display info) to the cache."""
         self._agent.save_price_cache(prices, currencies)
 
-    def save_fx_rates(self, rates: dict[str, float]) -> None:
-        """Persist resolved ``{date: gbpusd_rate}`` rows to the FX cache."""
-        self._agent.save_fx_rates(rates)
+    def save_fx_rates(self, rates: dict[str, float], pair: str = "GBPUSD=X") -> None:
+        """Persist resolved ``{date: rate}`` rows for one FX pair."""
+        self._agent.save_fx_rates(rates, pair)
 
     def refresh_portfolio_prices(
         self,

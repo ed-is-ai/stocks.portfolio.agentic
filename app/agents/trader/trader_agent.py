@@ -1637,13 +1637,15 @@ class TraderAgent(Agent):
         }
         return prices, fetched_at, display_info
 
-    def get_cached_fx_rates(self, dates: list[str]) -> dict[str, float]:
-        """Return every cached ``{date: gbpusd_rate}`` row for ``dates``."""
-        return self._fx_rates.get_many(dates)
+    def get_cached_fx_rates(
+        self, dates: list[str], pair: str = "GBPUSD=X"
+    ) -> dict[str, float]:
+        """Return cached ``{date: rate}`` rows for one FX pair."""
+        return self._fx_rates.get_many(dates, pair)
 
-    def save_fx_rates(self, rates: dict[str, float]) -> None:
-        """Persist resolved ``{date: gbpusd_rate}`` rows to the cache."""
-        self._fx_rates.upsert_many(rates)
+    def save_fx_rates(self, rates: dict[str, float], pair: str = "GBPUSD=X") -> None:
+        """Persist resolved ``{date: rate}`` rows for one FX pair."""
+        self._fx_rates.upsert_many(rates, pair)
 
     def set_cash_balance(self, amount: float, portfolio_id: int | None = None) -> None:
         """Persist a portfolio's cash balance (Running Balance) to account_state."""

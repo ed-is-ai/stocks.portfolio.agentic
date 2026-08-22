@@ -64,6 +64,12 @@ def test_get_and_save_cached_fx_rates_round_trip(tmp_path: Path) -> None:
     result = agent.get_cached_fx_rates(["2026-01-01", "2026-01-02", "2026-01-03"])
     assert result == {"2026-01-01": 1.35, "2026-01-02": 1.36}
 
+    agent.save_fx_rates({"2026-01-01": 10.25}, pair="GBPHKD=X")
+    assert agent.get_cached_fx_rates(["2026-01-01"], pair="GBPHKD=X") == {
+        "2026-01-01": 10.25
+    }
+    assert agent.get_cached_fx_rates(["2026-01-01"]) == {"2026-01-01": 1.35}
+
 
 def test_correct_latest_trade(tmp_path: Path) -> None:
     db_path = tmp_path / "trades.db"

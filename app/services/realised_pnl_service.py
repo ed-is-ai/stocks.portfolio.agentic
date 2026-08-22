@@ -505,25 +505,37 @@ class RealisedPnlService:
 
         Resolves each distinct ticker's currency exactly once via
         ``PortfolioService.ticker_currency`` (the sole currency seam,
-        AD-5), then batch-fetches every distinct trade date belonging to a
-        USD-currency leg in a single ``PortfolioService.
-        historical_gbpusd_rates`` call — never once per leg or per
-        Round-trip. A GBP-currency ticker never needs a rate lookup at all.
+        AD-5), then batch-fetches every distinct trade date once per
+        supported foreign currency. A GBP-currency ticker never needs a
+        rate lookup at all.
         """
         currencies: dict[str, str] = {}
         for raw in raw_round_trips:
             if raw.ticker not in currencies:
                 currencies[raw.ticker] = self._portfolio.ticker_currency(raw.ticker)
 
-        usd_dates: set[str] = set()
+        dates_by_currency: dict[str, set[str]] = {"USD": set(), "HKD": set()}
         for raw in raw_round_trips:
-            if currencies[raw.ticker] == "USD":
-                usd_dates.add(raw.entry_date)
-                usd_dates.add(raw.exit_date)
-        rates = self._portfolio.historical_gbpusd_rates(sorted(usd_dates))
+            dates = dates_by_currency.get(currencies[raw.ticker])
+            if dates is not None:
+                dates.add(raw.entry_date)
+                dates.add(raw.exit_date)
+        rates_by_currency = {
+            "USD": self._portfolio.historical_gbpusd_rates(
+                sorted(dates_by_currency["USD"])
+            )
+        }
+        if dates_by_currency["HKD"]:
+            rates_by_currency["HKD"] = self._portfolio.historical_fx_rates(
+                "HKD", sorted(dates_by_currency["HKD"])
+            )
 
         return [
-            self._convert_round_trip(raw, currencies[raw.ticker], rates)
+            self._convert_round_trip(
+                raw,
+                currencies[raw.ticker],
+                rates_by_currency.get(currencies[raw.ticker], {}),
+            )
             for raw in raw_round_trips
         ]
 
@@ -535,10 +547,9 @@ class RealisedPnlService:
         the GBP amounts (Story 1.2 AC1/AC5/AC7/AC8).
 
         A GBP-currency ticker's legs use rate = 1 (no lookup, no
-        conversion — used as-is). A USD-currency ticker's BUY/SELL legs
-        each convert independently at their own trade date's rate. Any
-        other currency (this feature only resolves the GBP/USD pair, per
-        PRD FR-3/Glossary) is immediately ``fx_unavailable`` -- it must
+        conversion — used as-is). A supported foreign-currency ticker's
+        BUY/SELL legs each convert independently at their own trade date's
+        rate. Any other currency is immediately ``fx_unavailable`` -- it must
         never fall through to a ``rates.get(...)`` lookup, which would
         silently apply an unrelated USD-leg's rate to a same-date
         third-currency trade. If either leg's rate is missing or fails the
@@ -551,13 +562,13 @@ class RealisedPnlService:
         if currency == "GBP":
             entry_rate: float | None = 1.0
             exit_rate: float | None = 1.0
-        elif currency == "USD":
+        elif currency in {"USD", "HKD"}:
             entry_rate = rates.get(raw.entry_date)
             exit_rate = rates.get(raw.exit_date)
         else:
             logger.warning(
-                "Realised P&L: unsupported currency %r for %s (only GBP/USD "
-                "resolved) -- flagging fx_unavailable",
+                "Realised P&L: unsupported currency %r for %s -- flagging "
+                "fx_unavailable",
                 currency,
                 raw.ticker,
             )

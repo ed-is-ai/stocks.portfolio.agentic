@@ -29,6 +29,11 @@ from app.services.trader_service import TraderService
 logger = logging.getLogger(__name__)
 
 _DEFAULT_GBPUSD = 1.35
+_HISTORICAL_FX_PAIR: dict[str, str] = {
+    "USD": "GBPUSD=X",
+    "HKD": "GBPHKD=X",
+}
+_YFINANCE_SYMBOL_OVERRIDES: dict[str, str] = {"9988": "9988.HK"}
 
 
 class PortfolioService:
@@ -126,18 +131,18 @@ class PortfolioService:
         A cached or freshly-fetched rate of ``0``, negative, or ``None`` is
         always treated as unavailable, never fed into a conversion (AC7).
         """
-        return rate is not None and rate > 0
+        return rate is not None and math.isfinite(rate) and rate > 0
 
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
-        """Return ``{date: gbpusd_rate}`` for the requested trade dates.
+        """Compatibility wrapper for historical GBP/USD rates."""
+        return self.historical_fx_rates("USD", dates)
 
-        The sole seam (AD-5) for resolving trade-date GBP/USD rates — a
-        sibling to the live-rate ``gbpusd_rate()``, never a replacement for
-        it. Checks ``FxRateCacheRepository`` (via ``TraderService``) for
-        every date first; any cache miss is batch-fetched from ``yfinance``
-        in a single call (never once per date) with a 7-calendar-day
-        nearest-prior-day fallback. Newly-resolved valid rates are persisted
-        back to the cache so a later call never re-fetches the same date.
+    def historical_fx_rates(self, currency: str, dates: list[str]) -> dict[str, float]:
+        """Return trade-date rates for a supported currency against GBP.
+
+        Rates use the ``GBP<currency>=X`` orientation: units of the foreign
+        currency per GBP. Cache identity includes both pair and date so
+        same-date rates for USD and HKD can never collide.
 
         A date absent from the returned dict means the rate could not be
         resolved — never a ``0.0``/negative sentinel. A cached row holding
@@ -145,10 +150,13 @@ class PortfolioService:
         unavailable and excluded, but is *not* retried against ``yfinance``
         (the cache is authoritative for a date already attempted).
         """
+        pair = _HISTORICAL_FX_PAIR.get(currency.upper())
+        if pair is None:
+            return {}
         unique_dates = sorted(set(dates))
         if not unique_dates:
             return {}
-        cached = self._trader.get_cached_fx_rates(unique_dates)
+        cached = self._trader.get_cached_fx_rates(unique_dates, pair)
         result: dict[str, float] = {}
         missing: list[str] = []
         for d in unique_dates:
@@ -159,7 +167,11 @@ class PortfolioService:
             if self._is_valid_rate(rate):
                 result[d] = round(rate, 4)
         if missing:
-            fetched = self._fetch_historical_gbpusd(missing)
+            fetched = (
+                self._fetch_historical_gbpusd(missing)
+                if pair == "GBPUSD=X"
+                else self._fetch_historical_fx(pair, missing)
+            )
             valid_fetched = {
                 d: round(rate, 4)
                 for d, rate in fetched.items()
@@ -175,13 +187,18 @@ class PortfolioService:
             unresolved = {d: -1.0 for d in missing if d not in valid_fetched}
             to_persist = {**valid_fetched, **unresolved}
             if to_persist:
-                self._trader.save_fx_rates(to_persist)
+                self._trader.save_fx_rates(to_persist, pair)
             result.update(valid_fetched)
         return result
 
     @staticmethod
     def _fetch_historical_gbpusd(dates: list[str]) -> dict[str, float]:
-        """Batch-fetch GBP/USD rates for ``dates`` via one ranged download.
+        """Compatibility wrapper for the GBP/USD historical fetch seam."""
+        return PortfolioService._fetch_historical_fx("GBPUSD=X", dates)
+
+    @staticmethod
+    def _fetch_historical_fx(pair: str, dates: list[str]) -> dict[str, float]:
+        """Batch-fetch one GBP/foreign FX pair via one ranged download.
 
         One ``yfinance`` call covers the full date range (plus a 7-day
         lookback margin), reusing ``_fetch_price_gbp``'s MultiIndex-safe
@@ -201,7 +218,7 @@ class PortfolioService:
         end = parsed[-1] + timedelta(days=1)
         try:
             data = yf.download(
-                "GBPUSD=X", start=start, end=end, progress=False, auto_adjust=True
+                pair, start=start, end=end, progress=False, auto_adjust=True
             )
         except Exception:
             # yfinance is an unofficial, unsupported scraping library --
@@ -210,7 +227,7 @@ class PortfolioService:
             # matching `_fetch_gbpusd_rate()`'s existing same-style
             # try/except, never crash the whole Account's computation.
             logger.warning(
-                "historical GBP/USD fetch failed for %s", dates, exc_info=True
+                "historical FX fetch failed for %s on %s", pair, dates, exc_info=True
             )
             return {}
         if data.empty:
@@ -255,7 +272,7 @@ class PortfolioService:
         """
         import yfinance as yf
 
-        aliases = self.load_ticker_aliases()
+        aliases = {**self.load_ticker_aliases(), **_YFINANCE_SYMBOL_OVERRIDES}
         yf_sym = canonicalize_or_fallback(
             ticker,
             aliases,
@@ -264,11 +281,18 @@ class PortfolioService:
             protect_hsfwa=False,
         )
         try:
-            currency = yf.Ticker(yf_sym).fast_info.currency or "GBP"
-            if currency == "GBp":
-                currency = "GBP"
-            return cast(str, currency)
+            currency = yf.Ticker(yf_sym).fast_info.currency
+            if not currency and yf_sym.upper().endswith(".HK"):
+                currency = "HKD"
+            return str(currency or "GBP").strip().upper()
         except Exception:
+            if yf_sym.upper().endswith(".HK"):
+                logger.warning(
+                    "Could not determine currency for %s; inferring HKD from %s",
+                    ticker,
+                    yf_sym,
+                )
+                return "HKD"
             logger.warning(
                 "Could not determine currency for %s; defaulting to GBP", ticker
             )

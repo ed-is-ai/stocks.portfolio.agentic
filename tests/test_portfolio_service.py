@@ -284,15 +284,27 @@ class _FakeFxTrader:
     standing in for a real ``FxRateCacheRepository``-backed service."""
 
     def __init__(self, cached: dict[str, float | None] | None = None) -> None:
-        self._cache: dict[str, float | None] = dict(cached or {})
+        self._cache: dict[tuple[str, str], float | None] = {
+            ("GBPUSD=X", date): rate for date, rate in (cached or {}).items()
+        }
         self.saved: dict[str, float] = {}
 
-    def get_cached_fx_rates(self, dates: list[str]) -> dict[str, float]:
-        return {d: self._cache[d] for d in dates if d in self._cache}  # type: ignore[misc]
+    def get_cached_fx_rates(
+        self, dates: list[str], pair: str = "GBPUSD=X"
+    ) -> dict[str, float]:
+        return cast(
+            dict[str, float],
+            {
+                date: self._cache[(pair, date)]
+                for date in dates
+                if (pair, date) in self._cache
+            },
+        )
 
-    def save_fx_rates(self, rates: dict[str, float]) -> None:
-        self.saved.update(rates)
-        self._cache.update(rates)
+    def save_fx_rates(self, rates: dict[str, float], pair: str = "GBPUSD=X") -> None:
+        if pair == "GBPUSD=X":
+            self.saved.update(rates)
+        self._cache.update({(pair, date): rate for date, rate in rates.items()})
 
 
 def _make_fx_service(trader: _FakeFxTrader) -> PortfolioService:
@@ -320,6 +332,28 @@ def test_historical_gbpusd_rates_batches_fetch_for_multiple_dates(
 
     assert len(calls) == 1
     assert result == {"2026-01-05": 1.3, "2026-01-10": 1.3, "2026-01-15": 1.3}
+
+
+def test_historical_hkd_rates_use_gbphkd_pair_and_pair_aware_cache(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    def fake_download(symbol, **kwargs):
+        calls.append(symbol)
+        idx = pd.to_datetime(["2026-01-05"])
+        value = 10.25 if symbol == "GBPHKD=X" else 1.25
+        return pd.DataFrame({"Close": [value]}, index=idx)
+
+    monkeypatch.setattr("yfinance.download", fake_download)
+    trader = _FakeFxTrader()
+    svc = _make_fx_service(trader)
+
+    assert svc.historical_fx_rates("HKD", ["2026-01-05"]) == {"2026-01-05": 10.25}
+    assert svc.historical_gbpusd_rates(["2026-01-05"]) == {"2026-01-05": 1.25}
+    assert calls == ["GBPHKD=X", "GBPUSD=X"]
+    assert trader._cache[("GBPHKD=X", "2026-01-05")] == 10.25
+    assert trader._cache[("GBPUSD=X", "2026-01-05")] == 1.25
 
 
 def test_historical_gbpusd_rates_uses_nearest_prior_day_within_7_days(
@@ -405,6 +439,18 @@ def test_historical_gbpusd_rates_treats_zero_negative_none_rate_as_unavailable(
     result = svc.historical_gbpusd_rates(["2026-01-01", "2026-01-02", "2026-01-03"])
 
     assert result == {}
+
+
+def test_historical_fx_rates_treats_infinity_as_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "yfinance.download",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("cached invalid rates must not be refetched")
+        ),
+    )
+    trader = _FakeFxTrader(cached={"2026-01-01": float("inf")})
+
+    assert _make_fx_service(trader).historical_gbpusd_rates(["2026-01-01"]) == {}
 
 
 def test_historical_gbpusd_rates_yfinance_exception_degrades_gracefully(
@@ -562,6 +608,58 @@ def test_ticker_currency_resolves_hsfwa_through_configured_alias(monkeypatch) ->
 
     assert svc.ticker_currency("HSFWA") == "GBP"
     assert calls == ["REAL.L"]
+
+
+def test_ticker_currency_resolves_9988_as_hkd_through_hkex_alias(
+    monkeypatch,
+) -> None:
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    monkeypatch.setattr(svc, "load_ticker_aliases", lambda: {})
+    calls: list[str] = []
+
+    def fake_ticker(symbol: str):
+        calls.append(symbol)
+        return _FakeTicker("HKD")
+
+    monkeypatch.setattr("yfinance.Ticker", fake_ticker)
+
+    assert svc.ticker_currency("9988") == "HKD"
+    assert calls == ["9988.HK"]
+
+
+def test_ticker_currency_uses_hkex_suffix_when_yahoo_lookup_fails(
+    monkeypatch,
+) -> None:
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    monkeypatch.setattr(svc, "load_ticker_aliases", lambda: {})
+    monkeypatch.setattr(
+        "yfinance.Ticker", lambda _symbol: (_ for _ in ()).throw(RuntimeError())
+    )
+
+    assert svc.ticker_currency("9988") == "HKD"
+
+
+def test_ticker_currency_mandatory_9988_override_wins_over_local_alias(
+    monkeypatch,
+) -> None:
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    monkeypatch.setattr(svc, "load_ticker_aliases", lambda: {"9988": "WRONG.L"})
+    calls: list[str] = []
+
+    def fake_ticker(symbol: str):
+        calls.append(symbol)
+        return _FakeTicker(" hkd ")
+
+    monkeypatch.setattr("yfinance.Ticker", fake_ticker)
+
+    assert svc.ticker_currency("9988") == "HKD"
+    assert calls == ["9988.HK"]
 
 
 def test_fetch_all_prices_resolves_chained_alias(monkeypatch) -> None:

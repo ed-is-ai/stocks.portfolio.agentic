@@ -36,6 +36,9 @@ class _StubPortfolioService:
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         return {}
 
+    def historical_fx_rates(self, currency: str, dates: list[str]) -> dict[str, float]:
+        return {}
+
     def load_ticker_aliases(self) -> dict[str, str]:
         return {}
 
@@ -511,12 +514,17 @@ class _FakePortfolioService:
         self._rates = rates
         self._aliases = aliases or {}
         self.rate_lookup_calls: list[list[str]] = []
+        self.currency_rate_lookup_calls: list[tuple[str, list[str]]] = []
 
     def ticker_currency(self, ticker: str) -> str:
         return self._currencies.get(ticker, "GBP")
 
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         self.rate_lookup_calls.append(list(dates))
+        return {d: self._rates[d] for d in dates if d in self._rates}
+
+    def historical_fx_rates(self, currency: str, dates: list[str]) -> dict[str, float]:
+        self.currency_rate_lookup_calls.append((currency, list(dates)))
         return {d: self._rates[d] for d in dates if d in self._rates}
 
     def load_ticker_aliases(self) -> dict[str, str]:
@@ -613,6 +621,44 @@ def test_leg_fx_unavailable_when_rate_missing_and_excluded_from_total(
     assert usd_rt.realised_pnl_pct == 0.0
     # Only the normal GBP Round-trip's 100.0 counts toward the total.
     assert summary.total_realised_pnl_gbp == 100.0
+
+
+def test_hkd_round_trip_uses_trade_date_gbphkd_rates(tmp_path: Path) -> None:
+    portfolio = _FakePortfolioService(
+        currencies={"9988": "HKD"},
+        rates={"2026-01-01": 10.0, "2026-02-01": 12.0},
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("9988", 100, 80.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("9988", 100, 108.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    rt = summary.round_trips["9988"][0]
+    assert rt.fx_unavailable is False
+    # HK$8,000 / 10 = £800 cost; HK$10,800 / 12 = £900 proceeds.
+    assert rt.realised_pnl_gbp == 100.0
+    assert rt.realised_pnl_pct == 12.5
+    assert portfolio.currency_rate_lookup_calls == [
+        ("HKD", ["2026-01-01", "2026-02-01"])
+    ]
+
+
+def test_hkd_round_trip_is_unavailable_when_one_rate_is_missing(
+    tmp_path: Path,
+) -> None:
+    portfolio = _FakePortfolioService(
+        currencies={"9988": "HKD"}, rates={"2026-01-01": 10.0}
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("9988", 100, 80.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("9988", 100, 96.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    rt = service.compute_summary(PORTFOLIO_ID).round_trips["9988"][0]
+
+    assert rt.fx_unavailable is True
+    assert rt.realised_pnl_gbp == 0.0
+    assert rt.realised_pnl_pct == 0.0
 
 
 def test_third_currency_ticker_is_fx_unavailable_without_wrong_pair_lookup(

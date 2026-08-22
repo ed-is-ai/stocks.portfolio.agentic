@@ -85,8 +85,10 @@ CREATE TABLE IF NOT EXISTS account_state (
     updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS fx_rate_cache (
-    date        TEXT PRIMARY KEY,
-    gbpusd_rate REAL
+    pair TEXT NOT NULL,
+    date TEXT NOT NULL,
+    rate REAL,
+    PRIMARY KEY (pair, date)
 );
 CREATE TABLE IF NOT EXISTS cash_balances (
     portfolio_id INTEGER,
@@ -215,9 +217,59 @@ def _migrate_default_portfolio(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_fx_rate_cache(conn: sqlite3.Connection) -> None:
+    """Atomically upgrade the legacy date-only cache to pair-aware rows."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        info = conn.execute("PRAGMA table_info(fx_rate_cache)").fetchall()
+        columns = {row[1] for row in info}
+        primary_key = [(row[1], row[5]) for row in info if row[5]]
+        current_columns = {"pair", "date", "rate"}
+        if current_columns.issubset(columns) and primary_key == [
+            ("pair", 1),
+            ("date", 2),
+        ]:
+            conn.commit()
+            return
+
+        if current_columns.issubset(columns):
+            select_sql = "SELECT pair, date, rate FROM fx_rate_cache"
+        elif {"date", "gbpusd_rate"}.issubset(columns):
+            select_sql = (
+                "SELECT 'GBPUSD=X' AS pair, date, gbpusd_rate AS rate "
+                "FROM fx_rate_cache"
+            )
+        else:
+            raise sqlite3.OperationalError(
+                "unsupported fx_rate_cache schema; expected legacy or pair-aware"
+            )
+
+        conn.execute("DROP TABLE IF EXISTS fx_rate_cache_new")
+        conn.execute(
+            """
+            CREATE TABLE fx_rate_cache_new (
+                pair TEXT NOT NULL,
+                date TEXT NOT NULL,
+                rate REAL,
+                PRIMARY KEY (pair, date)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO fx_rate_cache_new (pair, date, rate) " + select_sql
+        )
+        conn.execute("DROP TABLE fx_rate_cache")
+        conn.execute("ALTER TABLE fx_rate_cache_new RENAME TO fx_rate_cache")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def init_trades_db(conn: sqlite3.Connection) -> None:
     """Create the ``trades.db`` schema and apply additive migrations."""
     conn.executescript(_SCHEMA)
+    _migrate_fx_rate_cache(conn)
     for col_def in (
         "stop_loss REAL",
         "entry_price REAL",

@@ -707,6 +707,44 @@ def test_fx_rate_cache_upsert_and_get_many_round_trip(trades_connect):
     assert repo.get_many([]) == {}
 
 
+def test_fx_rate_cache_keeps_pairs_independent_for_same_date(trades_connect):
+    repo = FxRateCacheRepository(trades_connect)
+    repo.upsert_many({"2026-01-01": 1.25}, pair="GBPUSD=X")
+    repo.upsert_many({"2026-01-01": 10.25}, pair="GBPHKD=X")
+
+    assert repo.get_many(["2026-01-01"], pair="GBPUSD=X") == {"2026-01-01": 1.25}
+    assert repo.get_many(["2026-01-01"], pair="GBPHKD=X") == {"2026-01-01": 10.25}
+
+
+def test_fx_rate_cache_migrates_legacy_gbpusd_rows(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE fx_rate_cache (date TEXT PRIMARY KEY, gbpusd_rate REAL)")
+    conn.execute("INSERT INTO fx_rate_cache VALUES ('2026-01-01', 1.25)")
+    conn.commit()
+
+    db.init_trades_db(conn)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fx_rate_cache)")}
+    primary_key = [
+        (row[1], row[5])
+        for row in conn.execute("PRAGMA table_info(fx_rate_cache)")
+        if row[5]
+    ]
+    rows = conn.execute("SELECT pair, date, rate FROM fx_rate_cache").fetchall()
+    db.init_trades_db(conn)
+    rows_after_second_init = conn.execute(
+        "SELECT pair, date, rate FROM fx_rate_cache"
+    ).fetchall()
+    conn.close()
+
+    assert columns == {"pair", "date", "rate"}
+    assert primary_key == [("pair", 1), ("date", 2)]
+    assert rows == [("GBPUSD=X", "2026-01-01", 1.25)]
+    assert rows_after_second_init == rows
+
+
 # --- AccountStateRepository ------------------------------------------------
 
 
