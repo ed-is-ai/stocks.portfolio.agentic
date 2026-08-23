@@ -8,7 +8,7 @@
   <h1 id="result-heading" tabindex="-1" class="h3 mb-3">Backtest result</h1>
 
   {% if integrity_error %}
-  <div class="alert alert-danger" role="alert">
+  <div class="sm-alert sm-alert-danger" role="alert">
     Result evidence needs attention: {{ integrity_error }}
   </div>
   {% else %}
@@ -190,7 +190,7 @@
   {% include "_backtest_note.html" %}
 
   <p class="mt-4">
-    <a class="btn btn-outline-secondary" href="/strategy-manager/compare?run_id={{ result.run_id }}"
+    <a class="sm-btn sm-btn-secondary" href="/strategy-manager/compare?run_id={{ result.run_id }}"
        hx-get="/strategy-manager/compare?run_id={{ result.run_id }}" hx-target="#tab-content" hx-swap="innerHTML">Compare</a>
   </p>
 

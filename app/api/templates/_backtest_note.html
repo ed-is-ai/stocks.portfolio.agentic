@@ -10,7 +10,7 @@
   <p class="text-success mb-2" role="status">Saved.</p>
   {% endif %}
   {% if note_error %}
-  <div id="note-error-{{ run_id }}" class="alert {% if note_conflict %}alert-warning{% else %}alert-danger{% endif %}" role="alert" tabindex="-1">
+  <div id="note-error-{{ run_id }}" class="sm-alert {% if note_conflict %}sm-alert-warning{% else %}sm-alert-danger{% endif %}" role="alert" tabindex="-1">
     {{ note_error }}
   </div>
   {% endif %}

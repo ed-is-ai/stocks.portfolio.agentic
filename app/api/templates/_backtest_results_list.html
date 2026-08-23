@@ -5,12 +5,12 @@
 <section id="backtest-results-list" aria-labelledby="backtest-results-heading" class="mt-4">
   <h2 id="backtest-results-heading" tabindex="-1" class="h5">Backtest results</h2>
   {% if backtest_activities_error %}
-  <div class="alert alert-danger" role="alert">
+  <div class="sm-alert sm-alert-danger" role="alert">
     Backtest results could not be loaded: {{ backtest_activities_error }}
-    <button type="button" class="btn btn-sm btn-outline-danger ms-2" hx-get="/strategy-manager/backtests" hx-target="#backtest-results-list" hx-swap="outerHTML">Reload</button>
+    <button type="button" class="sm-btn sm-btn-danger ms-2" hx-get="/strategy-manager/backtests" hx-target="#backtest-results-list" hx-swap="outerHTML">Reload</button>
   </div>
   {% elif not backtest_activities %}
-  <div class="alert alert-info">
+  <div class="sm-alert sm-alert-info">
     No backtests yet.
     <a href="/strategy-manager/configuration" hx-get="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML">Configure a Backtest</a>
   </div>

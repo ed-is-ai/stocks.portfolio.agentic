@@ -28,7 +28,7 @@
 
   <div id="selected-securities" class="d-flex flex-wrap gap-1 mb-2" aria-label="Selected securities">
     {% for security_id, provider_symbol, mic, currency in securities if security_id in selected_security_ids %}
-    <span class="badge text-bg-secondary" data-selected-security="{{ security_id }}">{{ provider_symbol }} · {{ mic }}
+    <span class="badge-status sm-muted-badge" data-selected-security="{{ security_id }}">{{ provider_symbol }} · {{ mic }}
       <button type="button" class="btn-close btn-close-white ms-1" aria-label="Remove {{ provider_symbol }}" data-remove-security="{{ security_id }}"></button>
     </span>
     {% endfor %}

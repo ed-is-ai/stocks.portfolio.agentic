@@ -5,38 +5,38 @@
   <h1 id="strategy-setup-heading" tabindex="-1" class="h3">Set up Strategy Manager</h1>
 
   {% if is_fixture %}
-  <div class="alert alert-secondary" role="alert">
+  <div class="sm-alert sm-alert-neutral" role="alert">
     <strong>Fixture — not production readiness.</strong> This environment is running in test/fixture mode.
   </div>
   {% endif %}
 
   {% if already_set_up %}
-  <div class="alert alert-success" role="alert">
+  <div class="sm-alert sm-alert-success" role="alert">
     <strong>Strategy Manager is already set up.</strong>
     {% if activated_at %}Verified at {{ activated_at.strftime('%Y-%m-%d %H:%M UTC') }}.{% endif %}
     No recapture or new profile is needed.
   </div>
-  <a class="btn btn-primary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
+  <a class="sm-btn sm-btn-primary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
 
   {% elif setup_required %}
   <p class="text-muted">Setup runs three stages:</p>
-  <ol class="list-group list-group-numbered mb-3">
-    <li class="list-group-item"><strong>Verifying historical data</strong> — checks that providers have passed certification.</li>
-    <li class="list-group-item"><strong>Capturing securities</strong> — builds the reconstruction roster from DataHub and TradingView sources.</li>
-    <li class="list-group-item"><strong>Activating setup</strong> — seals and activates the scanner-data profile. This stage is non-cancellable.</li>
+  <ol class="sm-stage-list">
+    <li class="sm-stage"><span><strong>Verifying historical data</strong> — checks that providers have passed certification.</span></li>
+    <li class="sm-stage"><span><strong>Capturing securities</strong> — builds the reconstruction roster from DataHub and TradingView sources.</span></li>
+    <li class="sm-stage"><span><strong>Activating setup</strong> — seals and activates the scanner-data profile. This stage is non-cancellable.</span></li>
   </ol>
-  <div class="alert alert-info" role="alert">
+  <div class="sm-alert sm-alert-info" role="alert">
     Leaving or refreshing this page during setup will <strong>not</strong> cancel or duplicate the work. The bootstrap job runs durably in the background.
   </div>
   <form method="post" action="/strategy-manager/setup" hx-post="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML">
     <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
-    {% if error %}<div class="alert alert-warning" role="alert">{{ error }}</div>{% endif %}
-    <button class="btn btn-warning" type="submit"><i class="bi bi-gear-wide-connected"></i> Confirm setup</button>
-    <a class="btn btn-outline-secondary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Cancel</a>
+    {% if error %}<div class="sm-alert sm-alert-warning" role="alert">{{ error }}</div>{% endif %}
+    <button class="sm-btn sm-btn-warning" type="submit"><i class="bi bi-gear-wide-connected"></i> Confirm setup</button>
+    <a class="sm-btn sm-btn-secondary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Cancel</a>
   </form>
 
   {% else %}
-  <div class="alert alert-info" role="alert">Setup is not currently required.</div>
-  <a class="btn btn-primary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
+  <div class="sm-alert sm-alert-info" role="alert">Setup is not currently required.</div>
+  <a class="sm-btn sm-btn-primary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
   {% endif %}
 </section>

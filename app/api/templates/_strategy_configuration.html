@@ -7,7 +7,7 @@
   <p class="text-muted">Select a Strategy, review or edit its parameters, then choose a Ready period and starting capital.</p>
 
   {% if errors %}
-  <div id="configuration-errors" class="alert alert-danger" role="alert" tabindex="-1">
+  <div id="configuration-errors" class="sm-alert sm-alert-danger" role="alert" tabindex="-1">
     <strong>Correct the following:</strong>
     <ul class="mb-0">
       {% for field, error in errors.items() %}<li>{% if field != 'form' %}<a href="#{{ field }}">{{ error }}</a>{% else %}{{ error }}{% endif %}</li>{% endfor %}
@@ -16,14 +16,14 @@
   {% endif %}
 
   {% if warnings %}
-  <div class="alert alert-warning" role="alert">
+  <div class="sm-alert sm-alert-warning" role="alert">
     <strong>Some Skills were not discoverable as Strategies:</strong>
     <ul class="mb-0">{% for warning in warnings %}<li>{{ warning.folder }}: {{ warning.message }}</li>{% endfor %}</ul>
   </div>
   {% endif %}
 
   {% if not strategies %}
-  <div class="alert alert-info">No valid Strategy Skills are currently discoverable. Add a <code>kind: backtest-strategy</code> Skill to the <code>skills/</code> directory to configure a Backtest.</div>
+  <div class="sm-alert sm-alert-info">No valid Strategy Skills are currently discoverable. Add a <code>kind: backtest-strategy</code> Skill to the <code>skills/</code> directory to configure a Backtest.</div>
   {% else %}
   <form method="post" action="/strategy-manager/configuration" hx-post="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML" id="strategy-configuration-form">
     <input type="hidden" name="profile_hash" value="{{ active_profile.profile_hash if active_profile else '' }}">
@@ -45,7 +45,7 @@
     </div></fieldset>
 
     {% if errors.get('security_ids') %}
-    <div class="alert alert-danger mt-2" role="alert">{{ errors.security_ids }}</div>
+    <div class="sm-alert sm-alert-danger mt-2" role="alert">{{ errors.security_ids }}</div>
     {% endif %}
     <fieldset class="card sm-card mt-2"><div class="card-body">
       <legend class="h5">Universe</legend>
@@ -55,7 +55,7 @@
     {% include "_strategy_configuration_fields.html" %}
 
     {% if not coverage or not coverage.snapshot_count or coverage_error %}
-    <p class="alert alert-warning mt-3 mb-0">{{ coverage_error or 'Historical monthly snapshots must be initialized before a backtest can run.' }}</p>
+    <p class="sm-alert sm-alert-warning mt-3 mb-0">{{ coverage_error or 'Historical monthly snapshots must be initialized before a backtest can run.' }}</p>
     {% endif %}
     <button class="btn btn-primary mt-3" type="submit" {% if not coverage or not coverage.snapshot_count or coverage_error %}disabled aria-disabled="true"{% endif %}>Run Backtest</button>
   </form>
