@@ -383,7 +383,7 @@ def _production_probes() -> dict[str, ProbeDefinition]:
     definitions = {
         "us_active": ("AAPL", "USD", "USD", "America/New_York"),
         "lse_active": ("ULVR.L", "GBP", "GBp", "Europe/London"),
-        "gbpusd": ("GBPUSD=X", "USD", "USD", "UTC"),
+        "gbpusd": ("GBPUSD=X", "USD", "USD", "Europe/London"),
     }
     return {
         name: ProbeDefinition(
@@ -393,7 +393,11 @@ def _production_probes() -> dict[str, ProbeDefinition]:
             expected_currency=definitions[name][1],
             expected_quote_unit=definitions[name][2],
             expected_timezone=definitions[name][3],
-            expected_sessions=(date(2024, 1, 2), date(2024, 1, 3)),
+            expected_sessions=(
+                (date(2024, 1, 1), date(2024, 1, 2), date(2024, 1, 3))
+                if name == "gbpusd"
+                else (date(2024, 1, 2), date(2024, 1, 3))
+            ),
             allowed_observed_symbols=(definitions[name][0],),
         )
         for name in MANDATORY_PROBE_IDS

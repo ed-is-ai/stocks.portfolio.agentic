@@ -139,6 +139,27 @@ def test_content_identity_excludes_acquisition_time_but_binds_security_and_rows(
     assert other_security.data_revision != first.data_revision
 
 
+def test_adapter_canonicalizes_yfinance_dataframe_metadata() -> None:
+    metadata = {
+        "symbol": "AAPL",
+        "currency": "USD",
+        "exchangeTimezoneName": "America/New_York",
+        "tradingPeriods": pd.DataFrame(
+            {"regular_start": [pd.Timestamp("2024-01-02T09:30:00-05:00")]}
+        ),
+    }
+
+    first = YFinanceHistoricalEvidenceAdapter(
+        lambda _: FakeTicker(_frame(), metadata)
+    ).fetch(_request())
+    second = YFinanceHistoricalEvidenceAdapter(
+        lambda _: FakeTicker(_frame(), metadata)
+    ).fetch(_request())
+
+    assert len(first.response_metadata_digest) == 64
+    assert first.response_metadata_digest == second.response_metadata_digest
+
+
 @pytest.mark.parametrize("mutation", ["nonfinite", "partial", "naive", "duplicate"])
 def test_malformed_or_partial_success_fails_closed(mutation: str) -> None:
     frame = _frame()

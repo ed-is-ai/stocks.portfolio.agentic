@@ -64,6 +64,7 @@ final_revision: '7ea6a1a9'
 - [x] [Review][Patch] Honour a cancellation that wins the stage-transition version race; the Preparation worker currently returns a still-running claimed job when `set_strategy_job_current_stage()` conflicts, so the dispatcher can classify the worker exit as interrupted rather than terminally cancelling it [app/services/backtest/worker.py:294] — fixed and regression-tested
 - [x] [Review][Patch] Move actual conditional FX acquisition/pinning into `fx_pinning`; `_resolve_roster_evidence()` currently resolves FX while `evidence_selection` is displayed, leaving the user-visible FX stage as a no-op and violating the stage contract [app/services/backtest/worker.py:305] — fixed and regression-tested
 - [x] [Review][Patch] Provide a supported Bootstrap qualification-failure recovery and retain a safe failure reason; the reported “Historical data qualification is not available” screen offered only deletion, while `_run_qualification()` discarded the recorded provider reason [app/services/backtest/strategy_bootstrap_service.py:152] — resolved in follow-up
+- [x] [Follow-up][Patch] Restore live Bootstrap qualification after yfinance began returning DataFrame-valued history metadata and changed the GBP/USD probe timezone/session contract [app/services/backtest/historical_price_evidence.py; app/services/backtest/strategy_bootstrap_service.py] — resolved and live-verified
 
 ## Design Notes
 
@@ -79,6 +80,8 @@ The worker must not mark all stages complete before performing their work. Evide
 - `git diff --check` -- clean.
 
 ## Spec Change Log
+
+- 2026-08-24: Normalized yfinance DataFrame metadata for deterministic response digests and aligned the GBP/USD production probe with the provider's current London timezone and New Year's Day session.
 
 ## Review Triage Log
 

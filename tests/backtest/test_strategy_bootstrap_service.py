@@ -458,6 +458,17 @@ def test_fixture_bundle_is_explicit_and_uses_pinned_evidence(tmp_path: Path) -> 
     assert bundle.qualification_runner.run().contract_digest
 
 
+def test_production_fx_probe_matches_current_provider_calendar_contract() -> None:
+    definition = _production_probes()["gbpusd"]
+
+    assert definition.expected_timezone == "Europe/London"
+    assert definition.expected_sessions == (
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+    )
+
+
 def test_roster_identity_conflict_fails_without_activating_profile(
     tmp_path: Path,
 ) -> None:

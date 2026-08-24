@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -138,6 +139,36 @@ def request_contract(request: HistoricalEvidenceRequest) -> dict[str, object]:
     return contract
 
 
+def _metadata_for_digest(metadata: Mapping[str, Any]) -> Mapping[str, object]:
+    """Convert provider metadata to the canonical JSON domain.
+
+    yfinance 1.0 includes a ``tradingPeriods`` DataFrame in its otherwise
+    mapping-shaped history metadata. It is response metadata, not price
+    evidence, but it remains part of the deterministic response digest.
+    """
+
+    def convert(value: Any) -> object:
+        if isinstance(value, pd.DataFrame):
+            return {
+                "kind": "dataframe",
+                "value": json.loads(
+                    value.to_json(orient="split", date_format="iso", date_unit="ns")
+                ),
+            }
+        if isinstance(value, pd.Series):
+            return {
+                "kind": "series",
+                "value": json.loads(value.to_json(date_format="iso", date_unit="ns")),
+            }
+        if isinstance(value, Mapping):
+            return {str(key): convert(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [convert(item) for item in value]
+        return _jsonable(value)
+
+    return {str(key): convert(value) for key, value in metadata.items()}
+
+
 def normalize_historical_response(
     *,
     definition: HistoricalEvidenceRequest,
@@ -268,7 +299,7 @@ def normalize_historical_response(
                     }
                 )
 
-        normalized_metadata = _jsonable(metadata)
+        normalized_metadata = _metadata_for_digest(metadata)
         identity: dict[str, object] = {
             "canonicalizer_version": CANONICALIZER_VERSION,
             "request_contract_version": REQUEST_CONTRACT_VERSION,
