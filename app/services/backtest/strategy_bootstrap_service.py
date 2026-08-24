@@ -16,10 +16,12 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import sqlite3
 from typing import TYPE_CHECKING, Callable, Literal
 
 import requests
 
+from app.core.ticker_identity import load_provider_symbol_aliases
 from app.repositories.backtest_repo import BacktestIntegrityError
 from app.services.backtest.strategy_job import (
     BootstrapSubmissionV1,
@@ -31,6 +33,7 @@ from app.services.backtest.strategy_job import (
 from app.services.backtest.detectors import DETECTOR_REGISTRY
 from app.services.backtest.historical_data_qualification import (
     MANDATORY_PROBE_IDS,
+    ProviderFailure,
     HistoricalQualificationPayload,
     ProbeDefinition,
     QualificationAvailabilityService,
@@ -38,13 +41,16 @@ from app.services.backtest.historical_data_qualification import (
 )
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
 from app.services.backtest.reconstruction_roster import (
+    DATAHUB_SP500_SOURCE_URL,
     DataHubRosterSourceAdapter,
     MarketIdentityEvidence,
     ReconstructionRosterCaptureService,
+    ReconstructionRosterPolicyV1,
+    RosterCaptureError,
     RosterSource,
     RosterSourcePayloadV1,
     TradingViewRosterSourceAdapter,
-    YFinanceMarketIdentityResolver,
+    TradingViewBatchMarketIdentityResolver,
 )
 from app.services.backtest.security_identity import SecurityAliasManifestV1
 from app.services.backtest.snapshot_profile import ProfileDetectorV1, SnapshotProfileV1
@@ -135,7 +141,11 @@ class StrategyBootstrapService:
         try:
             contract = self._providers.qualification_runner.contract()
         except Exception as exc:
-            raise _bootstrap_failure(exc, JobFailureCode.PROVIDER_CONTRACT_ERROR) from exc
+            raise _bootstrap_failure(
+                exc,
+                JobFailureCode.PROVIDER_CONTRACT_ERROR,
+                stage="Historical qualification",
+            ) from exc
         available = QualificationAvailabilityService(self._repository).availability(
             contract
         )
@@ -148,7 +158,11 @@ class StrategyBootstrapService:
                 contract
             )
         except Exception as exc:
-            raise _bootstrap_failure(exc, JobFailureCode.PROVIDER_CONTRACT_ERROR) from exc
+            raise _bootstrap_failure(
+                exc,
+                JobFailureCode.PROVIDER_CONTRACT_ERROR,
+                stage="Historical qualification",
+            ) from exc
         if not available.available:
             latest = self._repository.latest_qualification(contract.contract_digest)
             code = (
@@ -193,7 +207,11 @@ class StrategyBootstrapService:
         except StrategyJobConflict:
             raise
         except Exception as exc:
-            raise _bootstrap_failure(exc, JobFailureCode.REQUIRED_DATA_MISSING) from exc
+            raise _bootstrap_failure(
+                exc,
+                JobFailureCode.REQUIRED_DATA_MISSING,
+                stage="Roster capture",
+            ) from exc
         self._captured_roster_digest = captured.roster_digest
 
     def _activate_profile(
@@ -213,7 +231,11 @@ class StrategyBootstrapService:
                     raise BacktestIntegrityError("active snapshot profile is missing")
                 self._repository.validate_bau_profile_authority(active_profile)
             except Exception as exc:
-                raise _bootstrap_failure(exc, JobFailureCode.INTEGRITY_ERROR) from exc
+                raise _bootstrap_failure(
+                    exc,
+                    JobFailureCode.INTEGRITY_ERROR,
+                    stage="Profile activation",
+                ) from exc
             if (
                 self._captured_roster_digest is not None
                 and active_profile.roster_digest != self._captured_roster_digest
@@ -239,7 +261,11 @@ class StrategyBootstrapService:
             try:
                 profile = self._providers.snapshot_profile(self._captured_roster_digest)
             except Exception as exc:
-                raise _bootstrap_failure(exc, JobFailureCode.INTEGRITY_ERROR) from exc
+                raise _bootstrap_failure(
+                    exc,
+                    JobFailureCode.INTEGRITY_ERROR,
+                    stage="Profile activation",
+                ) from exc
         try:
             return self._repository.activate_bootstrap_profile_and_complete(
                 profile,
@@ -250,7 +276,11 @@ class StrategyBootstrapService:
                 lease=lease,
             )
         except (BacktestIntegrityError, StrategyJobConflict) as exc:
-            raise _bootstrap_failure(exc, JobFailureCode.INTEGRITY_ERROR) from exc
+            raise _bootstrap_failure(
+                exc,
+                JobFailureCode.INTEGRITY_ERROR,
+                stage="Profile activation",
+            ) from exc
 
     @property
     def is_fixture(self) -> bool:
@@ -282,6 +312,7 @@ class StrategyProviderBundleV1:
         calendar = TradingCalendar()
         fixture_path = _qualification_fixture_path()
         probes = _production_probes()
+        provider_symbol_aliases = load_provider_symbol_aliases()
         runner = QualificationRunner(repository, fixture_path, probes, calendar=calendar)
         roster = ReconstructionRosterCaptureService(
             repository,
@@ -290,8 +321,13 @@ class StrategyProviderBundleV1:
                 TradingViewRosterSourceAdapter("US"),
                 TradingViewRosterSourceAdapter("UK"),
             ),
-            YFinanceMarketIdentityResolver(),
-            policy=None,
+            TradingViewBatchMarketIdentityResolver(
+                provider_symbol_aliases=provider_symbol_aliases
+            ),
+            policy=ReconstructionRosterPolicyV1(
+                calendar=calendar,
+                provider_symbol_aliases=provider_symbol_aliases,
+            ),
         )
         aliases = SecurityAliasManifestV1.build((), created_at=now)
 
@@ -405,26 +441,54 @@ def _production_probes() -> dict[str, ProbeDefinition]:
 
 
 def _fetch_datahub_sp500() -> list[dict[str, object]] | None:
-    response = requests.get("https://datahub.io/core/s-and-p-500-companies-financials/r/constituents-financials.csv", timeout=15)
+    response = requests.get(DATAHUB_SP500_SOURCE_URL, timeout=15)
     response.raise_for_status()
     return [
         {
             "symbol": row.get("Symbol", row.get("symbol", "")),
-            "name": row.get("Name", row.get("name", "")),
-            "sector": row.get("Sector", row.get("sector", "")),
+            "name": row.get("Security", row.get("Name", row.get("name", ""))),
+            "sector": row.get(
+                "GICS Sector", row.get("Sector", row.get("sector", ""))
+            ),
         }
         for row in csv.DictReader(StringIO(response.text))
     ]
 
 
-def _bootstrap_failure(exc: Exception, fallback: JobFailureCode) -> BootstrapStageFailure:
+def _bootstrap_failure(
+    exc: Exception, fallback: JobFailureCode, *, stage: str
+) -> BootstrapStageFailure:
+    """Project an internal failure into a safe, actionable activity message."""
     if isinstance(exc, requests.RequestException):
+        response = exc.response
+        suffix = (
+            f" (HTTP {response.status_code})" if response is not None else ""
+        )
         return BootstrapStageFailure(
-            JobFailureCode.PROVIDER_UNAVAILABLE, "Bootstrap evidence stage failed"
+            JobFailureCode.PROVIDER_UNAVAILABLE,
+            f"{stage} failed: required provider request was unavailable{suffix}",
         )
     code = getattr(exc, "code", fallback)
     job_code = _job_failure_code(code, fallback)
-    return BootstrapStageFailure(job_code, "Bootstrap evidence stage failed")
+    if isinstance(exc, (ProviderFailure, RosterCaptureError, BacktestIntegrityError)):
+        reason = str(exc)
+    elif isinstance(exc, sqlite3.IntegrityError):
+        lowered = str(exc).lower()
+        if "check constraint failed" in lowered and "mic" in lowered:
+            reason = "roster evidence contains an unsupported market identifier"
+        elif "foreign key constraint failed" in lowered:
+            reason = "roster evidence references missing persisted evidence"
+        elif "canonical identity conflicts" in lowered:
+            reason = "roster identity evidence conflicts with an existing security"
+        elif "unique constraint failed" in lowered:
+            reason = "roster evidence contains a duplicate persisted identity"
+        else:
+            reason = "database integrity validation rejected the evidence"
+    elif isinstance(exc, StrategyJobConflict):
+        reason = "setup ownership changed while this stage was running; try again"
+    else:
+        reason = f"unexpected {type(exc).__name__}; check the server log for details"
+    return BootstrapStageFailure(job_code, f"{stage} failed: {reason}")
 
 
 def _job_failure_code(code: object, fallback: JobFailureCode) -> JobFailureCode:

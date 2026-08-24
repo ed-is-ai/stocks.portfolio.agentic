@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 
-from app.core.config import TICKER_ALIASES_JSON
+from app.core.config import PROVIDER_SYMBOL_ALIASES_JSON, TICKER_ALIASES_JSON
 
 logger = logging.getLogger(__name__)
 
@@ -61,18 +62,27 @@ def load_aliases() -> dict[str, str]:
     warning (not silent) whenever it falls back to ``{}``, except for the
     ordinary "file doesn't exist yet" case.
     """
+    return _load_alias_map(TICKER_ALIASES_JSON)
+
+
+def load_provider_symbol_aliases() -> dict[str, str]:
+    """Load the versioned source-to-provider symbol spelling map."""
+    return _load_alias_map(PROVIDER_SYMBOL_ALIASES_JSON)
+
+
+def _load_alias_map(path: Path) -> dict[str, str]:
     try:
-        raw_text = TICKER_ALIASES_JSON.read_text(encoding="utf-8")
+        raw_text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return {}
     except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("Could not read %s: %s", TICKER_ALIASES_JSON, exc)
+        logger.warning("Could not read %s: %s", path, exc)
         return {}
 
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        logger.warning("Invalid JSON in %s: %s", TICKER_ALIASES_JSON, exc)
+        logger.warning("Invalid JSON in %s: %s", path, exc)
         return {}
 
     if not isinstance(data, dict) or not all(
@@ -80,7 +90,7 @@ def load_aliases() -> dict[str, str]:
     ):
         logger.warning(
             "%s is not a dict[str, str] with non-empty keys/values -- ignoring",
-            TICKER_ALIASES_JSON,
+            path,
         )
         return {}
 

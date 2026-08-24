@@ -33,6 +33,7 @@ def test_last_completed_session_uses_exchange_month_end(
 
 
 def test_closed_mic_mapping(calendars: TradingCalendar) -> None:
+    assert calendars.calendar_name("BATS") == "XNYS"
     assert calendars.calendar_name("XNAS") == "XNYS"
     assert calendars.calendar_name("XNYS") == "XNYS"
     assert calendars.calendar_name("XLON") == "XLON"

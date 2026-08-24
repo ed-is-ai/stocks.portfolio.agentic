@@ -148,7 +148,7 @@ CREATE TABLE IF NOT EXISTS security_identity_registry_revisions (
 );
 CREATE TABLE IF NOT EXISTS security_identities (
     security_id TEXT PRIMARY KEY,
-    mic TEXT NOT NULL CHECK(mic IN ('XNAS', 'XNYS', 'XLON')),
+    mic TEXT NOT NULL CHECK(mic IN ('BATS', 'XNAS', 'XNYS', 'XLON')),
     provider_symbol TEXT NOT NULL,
     evidence_digest TEXT NOT NULL,
     identity_registry_revision TEXT NOT NULL REFERENCES security_identity_registry_revisions(revision_digest),
@@ -165,7 +165,7 @@ CREATE TABLE IF NOT EXISTS security_alias_entries (
     alias_revision TEXT NOT NULL REFERENCES security_alias_manifests(alias_revision),
     security_id TEXT NOT NULL REFERENCES security_identities(security_id),
     provider TEXT NOT NULL,
-    mic TEXT NOT NULL CHECK(mic IN ('XNAS', 'XNYS', 'XLON')),
+    mic TEXT NOT NULL CHECK(mic IN ('BATS', 'XNAS', 'XNYS', 'XLON')),
     observed_symbol TEXT NOT NULL,
     effective_from TEXT,
     effective_to TEXT,
@@ -309,7 +309,7 @@ CREATE TABLE IF NOT EXISTS snapshot_members (
     security_id TEXT NOT NULL,
     canonical_member_json TEXT NOT NULL,
     observed_symbol TEXT NOT NULL,
-    mic TEXT NOT NULL CHECK(mic IN ('XNAS', 'XNYS', 'XLON')),
+    mic TEXT NOT NULL CHECK(mic IN ('BATS', 'XNAS', 'XNYS', 'XLON')),
     as_of_session_date TEXT NOT NULL,
     resolution TEXT NOT NULL CHECK(resolution IN ('valid_scan', 'legitimate_exclusion')),
     source_cutoff TEXT NOT NULL,
@@ -1353,6 +1353,90 @@ def _row_to_initialization(
     )
 
 
+def _migrate_bats_mic_constraints(conn: sqlite3.Connection) -> None:
+    """Expand legacy closed-MIC CHECK constraints without losing evidence."""
+    legacy_constraint = "('XNAS', 'XNYS', 'XLON')"
+    expanded_constraint = "('BATS', 'XNAS', 'XNYS', 'XLON')"
+    tables = (
+        "snapshot_members",
+        "security_alias_entries",
+        "security_identities",
+    )
+    pending: list[tuple[str, str]] = []
+    stale_replacements: list[str] = []
+    for table in tables:
+        replacement = f"{table}__bats_migration"
+        if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (replacement,),
+        ).fetchone() is not None:
+            stale_replacements.append(replacement)
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        if row is not None and legacy_constraint in str(row[0]):
+            pending.append((table, str(row[0])))
+    if not pending and not stale_replacements:
+        return
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        for replacement in stale_replacements:
+            conn.execute(f'DROP TABLE "{replacement}"')
+        for table, table_sql in pending:
+            replacement = f"{table}__bats_migration"
+            triggers = tuple(
+                (str(row[0]), str(row[1]))
+                for row in conn.execute(
+                    """SELECT name, sql FROM sqlite_master
+                       WHERE type='trigger' AND sql IS NOT NULL
+                         AND (tbl_name=? OR instr(sql, ?) > 0)""",
+                    (table, table),
+                ).fetchall()
+            )
+            columns = tuple(
+                str(row[1])
+                for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            )
+            if f"CREATE TABLE IF NOT EXISTS {table}" in table_sql:
+                create_sql = table_sql.replace(
+                    f"CREATE TABLE IF NOT EXISTS {table}",
+                    f"CREATE TABLE {replacement}",
+                    1,
+                )
+            else:
+                create_sql = table_sql.replace(
+                    f"CREATE TABLE {table}", f"CREATE TABLE {replacement}", 1
+                )
+            create_sql = create_sql.replace(
+                legacy_constraint, expanded_constraint
+            )
+            conn.execute(create_sql)
+            rendered_columns = ", ".join(f'"{column}"' for column in columns)
+            conn.execute(
+                f'INSERT INTO "{replacement}" ({rendered_columns}) '
+                f'SELECT {rendered_columns} FROM "{table}"'
+            )
+            for trigger_name, _trigger_sql in triggers:
+                conn.execute(f'DROP TRIGGER "{trigger_name}"')
+            conn.execute(f'DROP TABLE "{table}"')
+            conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
+            for _trigger_name, trigger_sql in triggers:
+                conn.execute(trigger_sql)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise sqlite3.IntegrityError("BATS MIC migration violated foreign keys")
+
+
 class BacktestRepository:
     """Repository seed that later stories extend with jobs and results."""
 
@@ -1382,6 +1466,7 @@ class BacktestRepository:
                 + _STRATEGY_JOB_SCHEMA
                 + _BACKTEST_RESULT_SCHEMA
             )
+            _migrate_bats_mic_constraints(conn)
             columns = {
                 str(row[1])
                 for row in conn.execute(
@@ -6049,25 +6134,27 @@ class BacktestRepository:
                 ),
             )
             for security_id, mic, symbol, evidence_digest in commit.identities:
-                conn.execute(
-                    """INSERT OR IGNORE INTO security_identities
-                       (security_id, mic, provider_symbol, evidence_digest,
-                        identity_registry_revision, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        security_id,
-                        mic,
-                        symbol,
-                        evidence_digest,
-                        commit.identity_registry_revision,
-                        commit.captured_at,
-                    ),
-                )
                 row = conn.execute(
                     """SELECT security_id, evidence_digest FROM security_identities
                        WHERE mic=? AND provider_symbol=?""",
                     (mic, symbol),
                 ).fetchone()
+                if row is None:
+                    conn.execute(
+                        """INSERT INTO security_identities
+                       (security_id, mic, provider_symbol, evidence_digest,
+                        identity_registry_revision, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                        (
+                            security_id,
+                            mic,
+                            symbol,
+                            evidence_digest,
+                            commit.identity_registry_revision,
+                            commit.captured_at,
+                        ),
+                    )
+                    row = (security_id, evidence_digest)
                 if row != (security_id, evidence_digest):
                     raise sqlite3.IntegrityError(
                         "canonical identity conflicts with existing security"

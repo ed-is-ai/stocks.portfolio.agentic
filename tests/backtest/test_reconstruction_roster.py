@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 
 import pytest
+import pandas as pd
 
 from app.services.backtest.reconstruction_roster import (
     DataHubRosterSourceAdapter,
@@ -17,6 +18,7 @@ from app.services.backtest.reconstruction_roster import (
     RosterSource,
     RosterSourcePayloadV1,
     TradingViewRosterSourceAdapter,
+    TradingViewBatchMarketIdentityResolver,
     YFinanceMarketIdentityResolver,
 )
 from app.repositories import db
@@ -83,6 +85,36 @@ def test_policy_requires_fixed_sources_and_normalizes_union() -> None:
     aapl = next(member for member in members if member.provider_symbol == "AAPL")
     assert aapl.source_memberships == ("datahub_sp500", "tradingview_us")
     assert aapl.calendar == "XNYS"
+
+
+def test_policy_uses_explicit_datahub_class_share_provider_symbols() -> None:
+    resolved: list[str] = []
+
+    def resolver(symbol: str, _row: dict[str, object]) -> MarketIdentityEvidence:
+        resolved.append(symbol)
+        return MarketIdentityEvidence("XNYS", "USD", "USD", "test", "e" * 64)
+
+    payloads = (
+        _payload(
+            RosterSource.DATAHUB_SP500,
+            [{"symbol": "BRK.B"}, {"symbol": "BF.B"}],
+        ),
+        _payload(
+            RosterSource.TRADINGVIEW_US,
+            [{"symbol": "NYSE:IBM", "exchange": "NYSE", "currency": "USD"}],
+        ),
+        _payload(
+            RosterSource.TRADINGVIEW_UK,
+            [{"symbol": "LSE:ULVR", "exchange": "LSE", "currency": "GBp"}],
+        ),
+    )
+
+    members = ReconstructionRosterPolicyV1(
+        provider_symbol_aliases={"BRK.B": "BRK-B", "BF.B": "BF-B"}
+    ).normalize(payloads, resolver)
+
+    assert resolved == ["BRK-B", "BF-B"]
+    assert {member.provider_symbol for member in members} >= {"BRK-B", "BF-B"}
 
 
 def test_policy_fails_on_wrong_order_empty_payload_or_identity_conflict() -> None:
@@ -280,11 +312,53 @@ def test_datahub_market_identity_resolver_requires_explicit_exchange_and_currenc
     identity = resolver("AAPL", {})
     assert (identity.mic, identity.currency) == ("XNAS", "USD")
 
+    dataframe_metadata = YFinanceMarketIdentityResolver(
+        lambda _symbol: Ticker(
+            {
+                "exchangeName": "NMS",
+                "currency": "USD",
+                "tradingPeriods": pd.DataFrame(
+                    {
+                        "regular_start": [
+                            pd.Timestamp("2024-01-02T09:30:00-05:00")
+                        ]
+                    }
+                ),
+            }
+        )
+    )
+    repeated = dataframe_metadata("AAPL", {})
+    assert repeated.evidence_digest == dataframe_metadata("AAPL", {}).evidence_digest
+
     ambiguous = YFinanceMarketIdentityResolver(
         lambda _symbol: Ticker({"exchangeName": "unknown", "currency": "USD"})
     )
     with pytest.raises(RosterCaptureError, match="unsupported"):
         ambiguous("AAPL", {})
+
+
+def test_tradingview_batch_identity_resolver_is_bounded_and_supports_bats() -> None:
+    calls = 0
+
+    def fetch() -> tuple[dict[str, str], ...]:
+        nonlocal calls
+        calls += 1
+        return (
+            {"symbol": "AAPL", "exchange": "NASDAQ", "currency": "USD"},
+            {"symbol": "BRK.B", "exchange": "NYSE", "currency": "USD"},
+            {"symbol": "CBOE", "exchange": "CBOE", "currency": "USD"},
+        )
+
+    resolver = TradingViewBatchMarketIdentityResolver(
+        fetch, provider_symbol_aliases={"BRK.B": "BRK-B"}
+    )
+
+    assert resolver("AAPL", {}).mic == "XNAS"
+    assert resolver("BRK-B", {}).mic == "XNYS"
+    assert resolver("CBOE", {}).mic == "BATS"
+    assert calls == 1
+    with pytest.raises(RosterCaptureError, match="unavailable"):
+        resolver("MISSING", {})
 
 
 def test_concurrent_identical_capture_returns_one_lineage_winner(tmp_path) -> None:

@@ -139,7 +139,7 @@ def request_contract(request: HistoricalEvidenceRequest) -> dict[str, object]:
     return contract
 
 
-def _metadata_for_digest(metadata: Mapping[str, Any]) -> Mapping[str, object]:
+def canonical_provider_metadata(metadata: Mapping[str, Any]) -> Mapping[str, object]:
     """Convert provider metadata to the canonical JSON domain.
 
     yfinance 1.0 includes a ``tradingPeriods`` DataFrame in its otherwise
@@ -299,7 +299,7 @@ def normalize_historical_response(
                     }
                 )
 
-        normalized_metadata = _metadata_for_digest(metadata)
+        normalized_metadata = canonical_provider_metadata(metadata)
         identity: dict[str, object] = {
             "canonicalizer_version": CANONICALIZER_VERSION,
             "request_contract_version": REQUEST_CONTRACT_VERSION,

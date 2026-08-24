@@ -35,7 +35,8 @@ class TestMapSector:
 def test_roster_rows_retain_exchange_qualified_symbol_and_currency() -> None:
     frame = pd.DataFrame(
         {
-            "name": ["NASDAQ:AAPL", "NYSE:IBM"],
+            "ticker": ["NASDAQ:AAPL", "NYSE:IBM"],
+            "name": ["AAPL", "IBM"],
             "exchange": ["NASDAQ", "NYSE"],
             "currency": ["USD", "USD"],
             "sector": ["Technology Services", "Technology Services"],
@@ -58,9 +59,10 @@ def test_roster_rows_retain_exchange_qualified_symbol_and_currency() -> None:
 
     uk = pd.DataFrame(
         {
-            "name": ["LSE:ULVR"],
+            "ticker": ["LSE:ULVR"],
+            "name": ["ULVR"],
             "exchange": ["LSE"],
-            "currency": ["GBp"],
+            "currency": ["GBX"],
             "sector": ["Consumer Non-Durables"],
         }
     )
@@ -72,3 +74,6 @@ def test_roster_rows_retain_exchange_qualified_symbol_and_currency() -> None:
             "quote_unit": "GBp",
         },
     )
+
+    non_gbp = uk.assign(currency="USD")
+    assert _extract_roster_rows(non_gbp, is_uk=True) == ()

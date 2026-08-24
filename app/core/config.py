@@ -95,6 +95,7 @@ ALERT_TEMPLATES_DIR = ROOT_DIR / "app" / "agents" / "alert" / "templates"
 
 # --- Reference data --------------------------------------------------------
 TICKER_ALIASES_JSON = ROOT_DIR / "config" / "ticker_aliases.json"
+PROVIDER_SYMBOL_ALIASES_JSON = ROOT_DIR / "config" / "provider_symbol_aliases.json"
 STOCKTWITS_WATCHLIST_JSON = ROOT_DIR / "config" / "stocktwits_watchlist.json"
 
 # --- Claude Code skill packages (used by scanner/analyst subprocesses) -----

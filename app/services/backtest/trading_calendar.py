@@ -11,7 +11,12 @@ import re
 import exchange_calendars as xcals
 import pandas as pd
 
-_MIC_TO_CALENDAR = {"XNAS": "XNYS", "XNYS": "XNYS", "XLON": "XLON"}
+_MIC_TO_CALENDAR = {
+    "BATS": "XNYS",
+    "XNAS": "XNYS",
+    "XNYS": "XNYS",
+    "XLON": "XLON",
+}
 _DIGEST_START = "1970-01-01"
 _DIGEST_END = "2100-12-31"
 _MONTH_RE = re.compile(r"^([0-9]{4})-(0[1-9]|1[0-2])$")

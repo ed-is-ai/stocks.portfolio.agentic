@@ -96,8 +96,9 @@ def _extract_roster_rows(df, *, is_uk: bool) -> tuple[dict[str, str], ...]:
     if not required.issubset(df.columns):
         return ()
     rows: list[dict[str, str]] = []
+    symbols = df["ticker"] if "ticker" in df.columns else df["name"]
     for name, exchange, currency in zip(
-        df["name"], df["exchange"], df["currency"], strict=True
+        symbols, df["exchange"], df["currency"], strict=True
     ):
         if not all(
             isinstance(value, str) and value.strip()
@@ -109,13 +110,18 @@ def _extract_roster_rows(df, *, is_uk: bool) -> tuple[dict[str, str], ...]:
             not is_uk and expected not in _US_EXCHANGES
         ):
             return ()
+        if is_uk and currency.strip() not in {"GBP", "GBX", "GBp"}:
+            return ()
+        source_symbol = name.strip()
+        if ":" not in source_symbol:
+            source_symbol = f"{expected}:{source_symbol}"
         rows.append(
             {
-                "symbol": name.strip(),
+                "symbol": source_symbol,
                 "exchange": exchange.strip().upper(),
                 "currency": (
                     "GBP"
-                    if is_uk and currency.strip() in {"GBP", "GBp"}
+                    if is_uk and currency.strip() in {"GBP", "GBX", "GBp"}
                     else currency.strip()
                 ),
                 "quote_unit": "GBp" if is_uk else currency.strip(),
@@ -184,6 +190,17 @@ def _fetch_evidence(
         # only scans US listings, so an LSE filter would match nothing.
         if is_uk:
             query = query.set_markets("uk")
+        conditions = [
+            col("exchange").isin(exchanges),
+            col("type") == "stock",
+            col("market_cap_basic") > min_market_cap,
+            col("average_volume_30d_calc") > min_avg_vol,
+            col("close") > min_price,
+            col("close") > col("SMA200"),
+            col("SMA50") > col("SMA150"),
+        ]
+        if is_uk:
+            conditions.append(col("currency").isin(["GBP", "GBX", "GBp"]))
         count, df = (
             query.select(
                 "name",
@@ -198,15 +215,7 @@ def _fetch_evidence(
                 "market_cap_basic",
                 "sector",
             )
-            .where(
-                col("exchange").isin(exchanges),
-                col("type") == "stock",
-                col("market_cap_basic") > min_market_cap,
-                col("average_volume_30d_calc") > min_avg_vol,
-                col("close") > min_price,
-                col("close") > col("SMA200"),
-                col("SMA50") > col("SMA150"),
-            )
+            .where(*conditions)
             .order_by("market_cap_basic", ascending=False)
             .limit(max_rows)
             .get_scanner_data()

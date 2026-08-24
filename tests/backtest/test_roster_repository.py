@@ -72,6 +72,99 @@ def test_roster_commit_is_atomic_immutable_and_reused_by_lineage(tmp_path) -> No
         conn.close()
 
 
+def test_roster_commit_accepts_cboe_bzx_mic(tmp_path) -> None:
+    repo = BacktestRepository(db.make_connect(lambda: tmp_path / "backtest.db"))
+    repo.ensure_schema()
+    commit = _commit()
+    security_id = commit.identities[0][0]
+    bats_commit = replace(
+        commit,
+        identities=((security_id, "BATS", "CBOE", "d" * 64),),
+        members=(
+            (
+                security_id,
+                "BATS",
+                "CBOE",
+                "USD",
+                '["datahub_sp500"]',
+                '[{"mic":"BATS"}]',
+                "m" * 64,
+            ),
+        ),
+    )
+
+    assert repo.commit_roster_capture(bats_commit) == commit.roster_digest
+
+
+def test_ensure_schema_expands_legacy_mic_constraints(tmp_path) -> None:
+    path = tmp_path / "backtest.db"
+    conn = db.connect(path)
+    try:
+        conn.executescript(
+            """
+            CREATE TABLE security_identity_registry_revisions (
+                revision_digest TEXT PRIMARY KEY,
+                canonical_manifest_json TEXT NOT NULL,
+                evidence_digest TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE security_identities (
+                security_id TEXT PRIMARY KEY,
+                mic TEXT NOT NULL CHECK(mic IN ('XNAS', 'XNYS', 'XLON')),
+                provider_symbol TEXT NOT NULL,
+                evidence_digest TEXT NOT NULL,
+                identity_registry_revision TEXT NOT NULL
+                    REFERENCES security_identity_registry_revisions(revision_digest),
+                created_at TEXT NOT NULL,
+                UNIQUE(mic, provider_symbol)
+            );
+            INSERT INTO security_identity_registry_revisions
+                VALUES ('revision', '{}', 'evidence', '2026-08-10T12:00:00+00:00');
+            INSERT INTO security_identities VALUES
+                ('security', 'XNAS', 'AAPL', 'digest', 'revision',
+                 '2026-08-10T12:00:00+00:00');
+            CREATE TABLE identity_audit (security_id TEXT NOT NULL);
+            CREATE TRIGGER identity_audit_requires_security
+            BEFORE INSERT ON identity_audit
+            WHEN NOT EXISTS (
+                SELECT 1 FROM security_identities
+                WHERE security_id = NEW.security_id
+            )
+            BEGIN SELECT RAISE(ABORT, 'security is missing'); END;
+            CREATE TABLE security_identities__bats_migration AS
+                SELECT * FROM security_identities WHERE 0;
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    repo = BacktestRepository(db.make_connect(lambda: path))
+    repo.ensure_schema()
+    conn = db.connect(path)
+    try:
+        schema = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='security_identities'"
+            ).fetchone()[0]
+        )
+        assert "'BATS'" in schema
+        assert conn.execute(
+            "SELECT security_id, mic, provider_symbol FROM security_identities"
+        ).fetchall() == [("security", "XNAS", "AAPL")]
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='trigger' "
+            "AND name='identity_audit_requires_security'"
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name LIKE '%bats_migration%'"
+        ).fetchone() is None
+        conn.execute("INSERT INTO identity_audit VALUES ('security')")
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+
+
 def test_backtest_connections_enforce_foreign_keys(tmp_path) -> None:
     repo = BacktestRepository(db.make_connect(lambda: tmp_path / "backtest.db"))
     repo.ensure_schema()

@@ -371,7 +371,7 @@ class HistoricalScanRecordV1(CanonicalModel):
     schema_version: Literal["historical_scan_record.v1"]
     security_id: NonEmpty
     observed_symbol: NonEmpty
-    mic: Literal["XNAS", "XNYS", "XLON"]
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"]
     snapshot_month: Annotated[str, Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")]
     as_of_session_date: date
     currency: Literal["USD", "GBP"]
@@ -387,7 +387,9 @@ class HistoricalScanRecordV1(CanonicalModel):
     def _apply_reconstructability_policy(self) -> "HistoricalScanRecordV1":
         if self.snapshot_month != self.as_of_session_date.strftime("%Y-%m"):
             raise ValueError("snapshot month must contain the as-of session")
-        expected_currency = "USD" if self.mic in {"XNAS", "XNYS"} else "GBP"
+        expected_currency = (
+            "USD" if self.mic in {"BATS", "XNAS", "XNYS"} else "GBP"
+        )
         expected_units = {"USD"} if expected_currency == "USD" else {"GBP", "GBp"}
         if self.currency != expected_currency or self.quote_unit not in expected_units:
             raise ValueError("MIC, currency, and quote unit are inconsistent")

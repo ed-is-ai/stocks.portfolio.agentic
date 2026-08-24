@@ -20,6 +20,7 @@ from app.integrations.tv_screener import (
     fetch_tv_screener_roster_evidence,
 )
 from app.services.backtest.canonical_manifest import canonical_json, manifest_digest
+from app.services.backtest.historical_price_evidence import canonical_provider_metadata
 from app.services.backtest.security_identity import (
     AliasEntryV1,
     SecurityAliasManifestV1,
@@ -33,6 +34,10 @@ from app.services.backtest.trading_calendar import TradingCalendar
 
 ROSTER_POLICY_VERSION = "ReconstructionRosterPolicyV1"
 ROSTER_MANIFEST_VERSION = "ReconstructionRosterManifestV1"
+DATAHUB_SP500_SOURCE_URL = (
+    "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/"
+    "main/data/constituents.csv"
+)
 SURVIVORSHIP_WARNING = (
     "Survivorship-biased reconstruction; not a point-in-time market universe."
 )
@@ -141,8 +146,13 @@ class ReconstructionRosterPolicyV1:
 
     version = ROSTER_POLICY_VERSION
 
-    def __init__(self, calendar: TradingCalendar | None = None) -> None:
+    def __init__(
+        self,
+        calendar: TradingCalendar | None = None,
+        provider_symbol_aliases: Mapping[str, str] | None = None,
+    ) -> None:
         self._calendar = calendar or TradingCalendar()
+        self._provider_symbol_aliases = dict(provider_symbol_aliases or {})
 
     def normalize(
         self,
@@ -174,7 +184,9 @@ class ReconstructionRosterPolicyV1:
                     raise RosterCaptureError(f"{payload.source} row has no symbol")
                 normalized_source = normalize_symbol(source_symbol)
                 if payload.source is RosterSource.DATAHUB_SP500:
-                    provider_symbol = normalized_source
+                    provider_symbol = self._provider_symbol_aliases.get(
+                        normalized_source, normalized_source
+                    )
                     identity = datahub_identity_resolver(provider_symbol, row)
                 else:
                     provider_symbol, identity = self._tradingview_identity(
@@ -288,7 +300,9 @@ class ReconstructionRosterPolicyV1:
             self._calendar.calendar_name(identity.mic)
         except ValueError as exc:
             raise RosterCaptureError(str(exc), code="calendar_error") from exc
-        expected_currency = "USD" if identity.mic in {"XNAS", "XNYS"} else "GBP"
+        expected_currency = (
+            "USD" if identity.mic in {"BATS", "XNAS", "XNYS"} else "GBP"
+        )
         expected_units = {"USD"} if expected_currency == "USD" else {"GBP", "GBp"}
         if (
             identity.currency != expected_currency
@@ -318,10 +332,7 @@ class DataHubRosterSourceAdapter:
         fetch_live: Callable[[], list[dict[str, object]] | None],
         *,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-        source_version: str = (
-            "https://datahub.io/core/s-and-p-500-companies-financials/"
-            "data/constituents-financials.csv"
-        ),
+        source_version: str = DATAHUB_SP500_SOURCE_URL,
     ) -> None:
         self._fetch_live = fetch_live
         self._clock = clock
@@ -425,7 +436,15 @@ class YFinanceMarketIdentityResolver:
     def __call__(
         self, symbol: str, _source_row: dict[str, object]
     ) -> MarketIdentityEvidence:
-        metadata = dict(self._ticker_factory(symbol).get_history_metadata(repair=False))
+        try:
+            metadata = dict(
+                self._ticker_factory(symbol).get_history_metadata(repair=False)
+            )
+        except Exception as exc:
+            raise RosterCaptureError(
+                f"market identity metadata unavailable for {symbol}",
+                code="provider_unavailable",
+            ) from exc
         exchange = metadata.get("exchangeName") or metadata.get("exchange")
         provider_unit = metadata.get("currency")
         if not isinstance(exchange, str) or not isinstance(provider_unit, str):
@@ -444,8 +463,111 @@ class YFinanceMarketIdentityResolver:
             currency="USD",
             quote_unit="USD",
             evidence_source="yfinance_current_metadata",
-            evidence_digest=manifest_digest(metadata),
+            evidence_digest=manifest_digest(canonical_provider_metadata(metadata)),
         )
+
+
+def _fetch_tradingview_us_identity_rows() -> tuple[dict[str, object], ...]:
+    """Fetch one bounded current US identity batch from TradingView."""
+    from tradingview_screener import Query, col  # type: ignore[import]
+
+    _count, frame = (
+        Query()
+        .select("name", "exchange", "currency", "market_cap_basic")
+        .where(col("type") == "stock", col("market_cap_basic") > 500_000_000)
+        .order_by("market_cap_basic", ascending=False)
+        .limit(10_000)
+        .get_scanner_data()
+    )
+    return tuple(
+        {
+            "symbol": symbol,
+            "exchange": exchange,
+            "currency": currency,
+        }
+        for symbol, exchange, currency in zip(
+            frame["name"], frame["exchange"], frame["currency"], strict=True
+        )
+    )
+
+
+class TradingViewBatchMarketIdentityResolver:
+    """Resolve DataHub identities from one explicit TradingView batch."""
+
+    _EXCHANGE_TO_MIC = {
+        "NASDAQ": "XNAS",
+        "NYSE": "XNYS",
+        "CBOE": "BATS",
+    }
+
+    def __init__(
+        self,
+        fetch: Callable[[], Sequence[Mapping[str, object]]] = (
+            _fetch_tradingview_us_identity_rows
+        ),
+        provider_symbol_aliases: Mapping[str, str] | None = None,
+    ) -> None:
+        self._fetch = fetch
+        self._provider_symbol_aliases = dict(provider_symbol_aliases or {})
+        self._identities: dict[str, MarketIdentityEvidence] | None = None
+
+    def __call__(
+        self, symbol: str, _source_row: dict[str, object]
+    ) -> MarketIdentityEvidence:
+        if self._identities is None:
+            self._identities = self._load()
+        identity = self._identities.get(symbol)
+        if identity is None:
+            raise RosterCaptureError(
+                f"market identity metadata unavailable for {symbol}",
+                code="identity_ambiguous",
+            )
+        return identity
+
+    def _load(self) -> dict[str, MarketIdentityEvidence]:
+        identities: dict[str, MarketIdentityEvidence] = {}
+        for raw in self._fetch():
+            source_symbol = raw.get("symbol")
+            exchange = raw.get("exchange")
+            currency = raw.get("currency")
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (source_symbol, exchange, currency)
+            ):
+                continue
+            assert isinstance(source_symbol, str)
+            assert isinstance(exchange, str)
+            assert isinstance(currency, str)
+            provider_symbol = normalize_symbol(source_symbol)
+            provider_symbol = self._provider_symbol_aliases.get(
+                provider_symbol, provider_symbol
+            )
+            mic = self._EXCHANGE_TO_MIC.get(exchange.strip().upper())
+            if mic is None or currency.strip().upper() != "USD":
+                continue
+            identity = MarketIdentityEvidence(
+                mic=mic,
+                currency="USD",
+                quote_unit="USD",
+                evidence_source="tradingview_current_metadata",
+                evidence_digest=manifest_digest(
+                    {
+                        "provider": "tradingview-screener",
+                        "query": "DataHubIdentityBatchV1",
+                        "symbol": provider_symbol,
+                        "exchange": exchange.strip().upper(),
+                        "currency": currency.strip().upper(),
+                    }
+                ),
+            )
+            existing = identities.get(provider_symbol)
+            if existing is not None and existing != identity:
+                raise RosterCaptureError(
+                    f"conflicting market identity metadata for {provider_symbol}",
+                    code="identity_ambiguous",
+                )
+            identities[provider_symbol] = identity
+        return identities
 
 
 @dataclass(frozen=True)

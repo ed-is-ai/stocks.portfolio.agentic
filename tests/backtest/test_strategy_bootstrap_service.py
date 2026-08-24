@@ -14,15 +14,18 @@ import sqlite3
 from threading import Barrier
 
 import pytest
+import requests
 
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository, StrategyJobConflict
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.historical_data_qualification import (
     FIXTURE_CONTRACT_VERSION,
+    FailureCode,
     HistoricalQualificationPayload,
     MANDATORY_PROBE_IDS,
     ProbeDefinition,
+    ProviderFailure,
     QualificationRunner,
     REQUEST_CONTRACT_VERSION,
     current_source_versions_json,
@@ -30,6 +33,7 @@ from app.services.backtest.historical_data_qualification import (
 from app.services.backtest.reconstruction_roster import (
     MarketIdentityEvidence,
     ReconstructionRosterCaptureService,
+    RosterCaptureError,
     RosterSource,
     RosterSourcePayloadV1,
 )
@@ -40,6 +44,7 @@ from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
     StrategyProviderBundleV1,
     _fetch_datahub_sp500,
+    _bootstrap_failure,
     _production_probes,
 )
 from app.services.backtest.strategy_job import (
@@ -438,7 +443,7 @@ def test_datahub_csv_headers_are_normalized_for_strict_roster_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class Response:
-        text = "Symbol,Name,Sector\nAAPL,Apple Inc.,Technology\n"
+        text = "Symbol,Security,GICS Sector\nAAPL,Apple Inc.,Technology\n"
 
         def raise_for_status(self) -> None:
             return None
@@ -447,6 +452,57 @@ def test_datahub_csv_headers_are_normalized_for_strict_roster_adapter(
     assert _fetch_datahub_sp500() == [
         {"symbol": "AAPL", "name": "Apple Inc.", "sector": "Technology"}
     ]
+
+
+def test_bootstrap_failure_projects_actionable_safe_activity_detail() -> None:
+    roster = _bootstrap_failure(
+        RosterCaptureError("market identity metadata unavailable for CBOE"),
+        JobFailureCode.REQUIRED_DATA_MISSING,
+        stage="Roster capture",
+    )
+    assert roster.detail == (
+        "Roster capture failed: market identity metadata unavailable for CBOE"
+    )
+
+    provider = _bootstrap_failure(
+        ProviderFailure(FailureCode.PROVIDER_THROTTLED, "provider rate limited"),
+        JobFailureCode.PROVIDER_CONTRACT_ERROR,
+        stage="Historical qualification",
+    )
+    assert provider.detail == "Historical qualification failed: provider rate limited"
+
+    database = _bootstrap_failure(
+        sqlite3.IntegrityError("CHECK constraint failed: mic IN (...)"),
+        JobFailureCode.INTEGRITY_ERROR,
+        stage="Roster capture",
+    )
+    assert database.detail == (
+        "Roster capture failed: roster evidence contains an unsupported market "
+        "identifier"
+    )
+
+    response = requests.Response()
+    response.status_code = 503
+    request = _bootstrap_failure(
+        requests.HTTPError("secret provider URL", response=response),
+        JobFailureCode.PROVIDER_CONTRACT_ERROR,
+        stage="Historical qualification",
+    )
+    assert request.detail == (
+        "Historical qualification failed: required provider request was unavailable "
+        "(HTTP 503)"
+    )
+
+    unexpected = _bootstrap_failure(
+        RuntimeError("secret=/private/token"),
+        JobFailureCode.INTEGRITY_ERROR,
+        stage="Profile activation",
+    )
+    assert unexpected.detail == (
+        "Profile activation failed: unexpected RuntimeError; check the server log "
+        "for details"
+    )
+    assert "secret" not in unexpected.detail
 
 
 def test_fixture_bundle_is_explicit_and_uses_pinned_evidence(tmp_path: Path) -> None:
@@ -516,6 +572,8 @@ def test_roster_identity_conflict_fails_without_activating_profile(
     ).run(job.id, claim.claim_token)
     assert result.status is StrategyJobStatus.FAILED
     assert result.failure_code is JobFailureCode.PROVIDER_CONTRACT_ERROR
+    assert result.failure_detail is not None
+    assert result.failure_detail.startswith("Roster capture failed:")
     assert repo.active_snapshot_profile() is None
 
 

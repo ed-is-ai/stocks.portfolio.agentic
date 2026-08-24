@@ -124,7 +124,7 @@ class BauCaptureSession:
         )
         capture = BauCaptureMemberV1(
             security_id=member.security_id,
-            mic=cast(Literal["XNAS", "XNYS", "XLON"], member.mic),
+            mic=cast(Literal["BATS", "XNAS", "XNYS", "XLON"], member.mic),
             canonical_session=session,
             source_cutoff=session,
             alias_revision=self._alias_revision,

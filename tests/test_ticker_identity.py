@@ -18,6 +18,7 @@ from app.core.ticker_identity import (
     canonical_ticker,
     canonicalize_or_fallback,
     load_aliases,
+    load_provider_symbol_aliases,
     matching_raw_tickers,
 )
 
@@ -139,6 +140,15 @@ def test_load_aliases_valid_file(
     path.write_text(json.dumps({"ABC.L": "ABC"}), encoding="utf-8")
     monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", path)
     assert load_aliases() == {"ABC.L": "ABC"}
+
+
+def test_load_provider_symbol_aliases_uses_versioned_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "provider_symbol_aliases.json"
+    path.write_text(json.dumps({"BRK.B": "BRK-B"}), encoding="utf-8")
+    monkeypatch.setattr(ticker_identity, "PROVIDER_SYMBOL_ALIASES_JSON", path)
+    assert load_provider_symbol_aliases() == {"BRK.B": "BRK-B"}
 
 
 def test_load_aliases_invalid_json_returns_empty_and_warns(

@@ -163,7 +163,7 @@ class LegitimateExclusionProofV1(CanonicalModel):
     alias_effective_from: date | None
     alias_effective_to: date | None
     snapshot_month: SnapshotMonth
-    mic: Literal["XNAS", "XNYS", "XLON"]
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"]
     target_session: date
     calendar_dataset_version: Literal["exchange-calendars-v1"]
     calendar_dataset_digest: Digest
@@ -222,7 +222,7 @@ class SnapshotMemberV1(CanonicalModel):
     schema_version: Literal["snapshot_member.v1"] = "snapshot_member.v1"
     security_id: NonEmpty
     observed_symbol: NonEmpty
-    mic: Literal["XNAS", "XNYS", "XLON"]
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"]
     as_of_session_date: date
     resolution: MemberResolution
     source_cutoff: date
@@ -784,7 +784,7 @@ def verified_evidence_manifest(
 def _validated_observation_sessions(
     evidence: HistoricalEvidenceV1,
     *,
-    mic: Literal["XNAS", "XNYS", "XLON"],
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"],
 ) -> tuple[date, ...]:
     calendar = TradingCalendar()
     expected_keys = {
@@ -852,7 +852,7 @@ def build_before_first_provider_observation(
     evidence: HistoricalEvidenceV1,
     snapshot_month: str,
     target_session: date,
-    mic: Literal["XNAS", "XNYS", "XLON"],
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"],
     alias_revision: str,
     alias_effective_from: date | None,
     alias_effective_to: date | None,
@@ -871,7 +871,7 @@ def build_before_first_provider_observation(
         raise SnapshotContractError("target session does not match canonical month")
     if evidence.alias_revision != alias_revision:
         raise SnapshotContractError("alias revision does not match evidence")
-    expected_currency = "USD" if mic in {"XNAS", "XNYS"} else "GBP"
+    expected_currency = "USD" if mic in {"BATS", "XNAS", "XNYS"} else "GBP"
     expected_units = {"USD"} if expected_currency == "USD" else {"GBP", "GBp"}
     if (
         evidence.currency != expected_currency

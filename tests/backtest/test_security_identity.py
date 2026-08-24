@@ -54,6 +54,12 @@ def test_registry_revision_is_stable_and_security_ids_are_not_symbol_derived() -
     assert left.identities == right.identities
     assert "AAPL" not in first.security_id
     assert left.evidence_digest != ""
+    assert SecurityIdentityV1(
+        security_id="1b4ee6bb-c697-4a9c-b909-8d55fae47640",
+        mic="BATS",
+        provider_symbol="CBOE",
+        evidence_digest="b" * 64,
+    ).mic == "BATS"
 
 
 def test_alias_resolution_uses_provider_mic_symbol_and_half_open_date() -> None:

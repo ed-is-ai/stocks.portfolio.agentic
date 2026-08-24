@@ -11,7 +11,7 @@ from app.services.backtest.canonical_manifest import manifest_digest
 
 IDENTITY_REGISTRY_VERSION = "SecurityIdentityRegistryV1"
 ALIAS_MANIFEST_VERSION = "SecurityAliasManifestV1"
-_SUPPORTED_MICS = {"XNAS", "XNYS", "XLON"}
+_SUPPORTED_MICS = {"BATS", "XNAS", "XNYS", "XLON"}
 
 
 class IdentityAmbiguousError(ValueError):

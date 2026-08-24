@@ -141,7 +141,7 @@ class BauCaptureMemberV1(CanonicalModel):
 
     schema_version: Literal["bau_capture_member.v1"] = "bau_capture_member.v1"
     security_id: str = Field(min_length=1)
-    mic: Literal["XNAS", "XNYS", "XLON"]
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"]
     canonical_session: date
     source_cutoff: date
     alias_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
