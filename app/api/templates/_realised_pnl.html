@@ -34,6 +34,14 @@
     <div class="sval">{{ summary.round_trip_count }}</div>
   </div>
   <div class="stat-card">
+    <div class="slbl"><i class="bi bi-bar-chart-line me-1"></i>Win / Loss</div>
+    <div class="sval">
+      <span class="{% if summary.winning_round_trip_count > 0 %}pos{% endif %}">{{ summary.winning_round_trip_count }} Win{% if summary.winning_round_trip_count != 1 %}s{% endif %}</span>
+      /
+      <span class="{% if summary.losing_round_trip_count > 0 %}neg{% endif %}">{{ summary.losing_round_trip_count }} Loss{% if summary.losing_round_trip_count != 1 %}es{% endif %}</span>
+    </div>
+  </div>
+  <div class="stat-card">
     <div class="slbl"><i class="bi bi-exclamation-triangle me-1"></i>Unmatched Sells</div>
     <div class="sval">{{ summary.unmatched_count }}</div>
   </div>
@@ -66,34 +74,8 @@
       </tr>
       {% else %}
       {% for ticker, round_trips in summary.round_trips.items() %}
-      {% for rt in round_trips %}
-      <tr>
-        <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ rt.ticker }}</span></td>
-        <td>{{ rt.entry_date }}</td>
-        <td>{{ "%.2f"|format(rt.entry_price) }}</td>
-        <td>{{ rt.exit_date }}</td>
-        <td>{{ "%.2f"|format(rt.exit_price) }}</td>
-        <td>{{ rt.shares }}</td>
-        <td>{{ rt.holding_period_days }}</td>
-        {% if rt.fx_unavailable %}
-        <td colspan="2">
-          <span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span>
-        </td>
-        {% else %}
-        <td>
-          <span class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
-            {{ "+" if rt.realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(rt.realised_pnl_gbp) }}
-          </span>
-        </td>
-        <td>
-          <span class="{% if rt.realised_pnl_pct >= 0 %}pos{% else %}neg{% endif %}">
-            {{ "+" if rt.realised_pnl_pct >= 0 }}{{ "%.1f"|format(rt.realised_pnl_pct) }}%
-          </span>
-        </td>
-        {% endif %}
-      </tr>
-      {% endfor %}
-      {% set ticker_subtotal = round_trips | selectattr("fx_unavailable", "equalto", false) | sum(attribute="realised_pnl_gbp") %}
+      {% set resolved_round_trips = round_trips | selectattr("fx_unavailable", "equalto", false) | list %}
+      {% set ticker_subtotal = resolved_round_trips | sum(attribute="realised_pnl_gbp") %}
       <tr class="table-subtotal-row">
         <td>{{ ticker }} subtotal</td>
         <td>&mdash;</td>
@@ -103,11 +85,66 @@
         <td>&mdash;</td>
         <td>&mdash;</td>
         <td>
+          {% if resolved_round_trips %}
           <span class="{% if ticker_subtotal >= 0 %}pos{% else %}neg{% endif %}">
             {{ "+" if ticker_subtotal >= 0 }}£{{ "%.2f"|format(ticker_subtotal) }}
           </span>
+          {% else %}
+          <span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span>
+          {% endif %}
         </td>
         <td>&mdash;</td>
+      </tr>
+      <tr class="ticker-detail-row">
+        <td colspan="9" class="p-0">
+          <details class="ticker-detail">
+            <summary class="px-4 py-2 bg-light border-top">{{ round_trips|length }} round-trip{% if round_trips|length != 1 %}s{% endif %}</summary>
+            <table class="table table-hover align-middle mb-0" aria-label="{{ ticker }} round-trip details">
+              <thead>
+                <tr>
+                  <th>Ticker</th>
+                  <th>Entry Date</th>
+                  <th>Entry Price</th>
+                  <th>Exit Date</th>
+                  <th>Exit Price</th>
+                  <th>Shares</th>
+                  <th>Holding (days)</th>
+                  <th>Realised P&amp;L</th>
+                  <th>P&amp;L %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for rt in round_trips %}
+                <tr>
+                  <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ rt.ticker }}</span></td>
+                  <td>{{ rt.entry_date }}</td>
+                  <td>{{ "%.2f"|format(rt.entry_price) }}</td>
+                  <td>{{ rt.exit_date }}</td>
+                  <td>{{ "%.2f"|format(rt.exit_price) }}</td>
+                  <td>{{ rt.shares }}</td>
+                  <td>{{ rt.holding_period_days }}</td>
+                  {% if rt.fx_unavailable %}
+                  <td colspan="2">
+                    <span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span>
+                  </td>
+                  {% else %}
+                  <td>
+                    <span class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+                      {{ "+" if rt.realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(rt.realised_pnl_gbp) }}
+                    </span>
+                  </td>
+                  <td>
+                    <span class="{% if rt.realised_pnl_pct >= 0 %}pos{% else %}neg{% endif %}">
+                      {{ "+" if rt.realised_pnl_pct >= 0 }}{{ "%.1f"|format(rt.realised_pnl_pct) }}%
+                    </span>
+                  </td>
+                  {% endif %}
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </details>
+        </td>
       </tr>
       {% endfor %}
       {% endif %}

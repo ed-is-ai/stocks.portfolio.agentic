@@ -175,3 +175,9 @@
 - source_spec: `spec-gh-288-289-strategy-manager-activity-and-migration.md`
   summary: Shared activity polling has no out-of-order-response guard, and stale lifecycle action versions return generic 409 text.
   evidence: These behaviors predate Bootstrap activity rendering and affect the existing initialization/backtest activity routes as well.
+
+## Deferred from: code review of spec-gh-291-realised-pnl-collapse-summary (2026-08-24)
+
+- source_spec: `spec-gh-291-realised-pnl-collapse-summary.md`
+  summary: A resolved GBP P&L that rounds to negative zero can render as `+£-0.00`, producing contradictory sign, colour, and win classification.
+  evidence: `_round2` preserves a float negative-zero sign, while the pre-existing realised-P&L template uses `>= 0` for both positive styling and explicit `+` rendering. The issue predates this story's win/loss count and needs a shared money-display/normalisation decision rather than a narrow review patch.

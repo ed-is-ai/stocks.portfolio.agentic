@@ -623,6 +623,29 @@ def test_leg_fx_unavailable_when_rate_missing_and_excluded_from_total(
     assert summary.total_realised_pnl_gbp == 100.0
 
 
+def test_summary_counts_resolved_wins_losses_and_excludes_unavailable_fx(
+    tmp_path: Path,
+) -> None:
+    """Positive and break-even resolved rows win; unavailable FX is neither."""
+    portfolio = _FakePortfolioService(currencies={"USDX": "USD"}, rates={})
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("WIN", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("WIN", 1, 110.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("LOSS", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("LOSS", 1, 90.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("EVEN", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("EVEN", 1, 100.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("USDX", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("USDX", 1, 110.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.winning_round_trip_count == 2
+    assert summary.losing_round_trip_count == 1
+    assert summary.round_trips["USDX"][0].fx_unavailable is True
+    assert summary.total_realised_pnl_gbp == 0.0
+
+
 def test_hkd_round_trip_uses_trade_date_gbphkd_rates(tmp_path: Path) -> None:
     portfolio = _FakePortfolioService(
         currencies={"9988": "HKD"},

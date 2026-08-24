@@ -157,6 +157,8 @@ class RealisedPnlSummary(BaseModel):
     round_trips: dict[str, list[RoundTrip]] = {}
     total_realised_pnl_gbp: float
     round_trip_count: int
+    winning_round_trip_count: int = 0
+    losing_round_trip_count: int = 0
     unmatched_count: int = 0
     unmatched_sells: list[UnmatchedSell] = []
     mismatched_tickers: list[str] = []

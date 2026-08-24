@@ -6,6 +6,7 @@ Regression-guards AC2 against the #147/#169 empty-string ``portfolio_id``
 
 from __future__ import annotations
 
+import re
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.api.app import app
 from app.api.dependencies import get_realised_pnl_service, get_trader_service
-from app.schemas import Portfolio, RealisedPnlSummary, UnmatchedSell
+from app.schemas import Portfolio, RealisedPnlSummary, RoundTrip, UnmatchedSell
 
 client = TestClient(app)
 _AUTH = {"X-Auth-Token": "s3cret"}
@@ -76,6 +77,72 @@ def test_zero_round_trips_shows_empty_state_copy(mocked):
     resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     assert "No Round-trips yet for this account." in resp.text
+    assert "0 Wins" in resp.text
+    assert "0 Losses" in resp.text
+
+
+def _round_trip(
+    ticker: str,
+    pnl: float,
+    *,
+    exit_date: str = "2026-02-01",
+    fx_unavailable: bool = False,
+) -> RoundTrip:
+    return RoundTrip(
+        ticker=ticker,
+        portfolio_id=1,
+        entry_date="2026-01-01",
+        entry_price=100.0,
+        exit_date=exit_date,
+        exit_price=110.0,
+        shares=1.0,
+        holding_period_days=31,
+        realised_pnl_gbp=pnl,
+        realised_pnl_pct=pnl,
+        fx_unavailable=fx_unavailable,
+    )
+
+
+def test_round_trip_details_are_collapsed_and_retain_all_row_content(mocked):
+    _, mock_realised_pnl = mocked
+    mock_realised_pnl.compute_summary.return_value = RealisedPnlSummary(
+        portfolio_id=1,
+        round_trips={
+            "WIN": [
+                _round_trip("WIN", 10.0, exit_date="2026-02-02"),
+                _round_trip("WIN", 0.0, exit_date="2026-02-01"),
+            ],
+            "LOSS": [_round_trip("LOSS", -5.0)],
+            "USDX": [_round_trip("USDX", 0.0, fx_unavailable=True)],
+        },
+        total_realised_pnl_gbp=5.0,
+        round_trip_count=4,
+        winning_round_trip_count=2,
+        losing_round_trip_count=1,
+    )
+
+    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+
+    assert resp.status_code == 200
+    assert "2 Wins" in resp.text
+    assert "1 Loss" in resp.text
+    assert "WIN subtotal" in resp.text
+    assert "LOSS subtotal" in resp.text
+    assert "USDX subtotal" in resp.text
+    details_tags = re.findall(r"<details\b[^>]*\bticker-detail\b[^>]*>", resp.text)
+    assert len(details_tags) == 3
+    assert all("open" not in tag.split() for tag in details_tags)
+    assert "2 round-trips" in resp.text
+    assert "FX rate unavailable" in resp.text
+    assert "+£5.00" in resp.text
+    assert "2026-01-01" in resp.text
+    assert "100.00" in resp.text
+    assert resp.text.index("2026-02-02") < resp.text.index("2026-02-01")
+    assert "110.00" in resp.text
+    assert "+£10.00" in resp.text
+    assert "+0.0%" in resp.text
+    assert resp.text.index("WIN subtotal") < resp.text.index("LOSS subtotal")
+    assert resp.text.index("LOSS subtotal") < resp.text.index("USDX subtotal")
 
 
 # --- Story 1.5: POST /trades/{trade_id}/ack --------------------------------
