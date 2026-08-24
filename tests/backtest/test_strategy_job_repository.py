@@ -468,10 +468,12 @@ def test_legacy_upgrade_preserves_v1_and_creates_v2_index(tmp_path: Path) -> Non
         assert [str(row[2]) for row in index_columns] == [
             "source_preparation_job_id"
         ]
-        assert c.execute(
+        index_sql = c.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type='index' AND name='idx_strategy_runs_source_preparation'"
-        ).fetchone()[0].upper().startswith("CREATE UNIQUE INDEX")
+        ).fetchone()[0].upper()
+        assert index_sql.startswith("CREATE UNIQUE INDEX")
+        assert "WHERE SOURCE_PREPARATION_JOB_ID IS NOT NULL" in index_sql
         assert c.execute(
             "SELECT 1 FROM sqlite_master "
             "WHERE type='trigger' AND name='strategy_run_v2_contract_insert'"
@@ -2372,6 +2374,24 @@ def test_stage_job_terminal_states_offer_delete_but_never_restart(
 
     assert failed.failure_code is JobFailureCode.WORKER_INTERRUPTED
     assert repo.legal_strategy_job_actions(preparation.id) == ("delete",)
+
+
+def test_profile_activation_does_not_offer_bootstrap_cancellation(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    bootstrap = _create_bootstrap_stage_job(repo)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    active = repo.set_strategy_job_current_stage(
+        bootstrap.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        stage=BootstrapStage.PROFILE_ACTIVATION.value,
+    )
+
+    assert active.status is StrategyJobStatus.RUNNING
+    assert repo.legal_strategy_job_actions(bootstrap.id) == ()
 
 
 def test_deleting_a_stage_job_tombstones_it_and_drops_its_subtype_row(

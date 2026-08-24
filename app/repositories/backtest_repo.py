@@ -4132,6 +4132,12 @@ class BacktestRepository:
             if job.deleted_at is not None:
                 return ()
             if job.status in {StrategyJobStatus.QUEUED, StrategyJobStatus.RUNNING}:
+                if (
+                    job.job_type is StrategyJobType.BOOTSTRAP
+                    and job.status is StrategyJobStatus.RUNNING
+                    and job.current_stage == "profile_activation"
+                ):
+                    return ()
                 return ("cancel",)
             if job.status in {StrategyJobStatus.FAILED, StrategyJobStatus.CANCELLED}:
                 if job.job_type in STAGE_SEQUENCES:

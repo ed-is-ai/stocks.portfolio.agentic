@@ -61,6 +61,15 @@ warnings: [multiple-goals]
 - Given a failed Bootstrap job, when its Activity is rendered, then the failure detail and supported legal recovery action are visible.
 - Given an Activity status request with a version equal to or newer than the job version, when it is received, then the route returns 204 with an empty body.
 
+### Review Findings
+
+- [x] [Review][Patch] Do not advertise cancellation during Bootstrap profile activation [app/repositories/backtest_repo.py:4129]
+- [x] [Review][Patch] Confirm Bootstrap cancellation/deletion and provide a setup recovery destination after deletion [app/api/templates/_bootstrap_activity.html:9]
+- [x] [Review][Patch] Cover Bootstrap cancel and delete endpoints, including their guarded success responses [tests/test_strategy_manager_routes.py:464]
+- [x] [Review][Patch] Assert the legacy migration recreates the required partial unique index predicate [tests/backtest/test_strategy_job_repository.py:462]
+- [x] [Review][Patch] Correct the contradictory targeted-test count in the verification record [_bmad-output/implementation-artifacts/spec-gh-288-289-strategy-manager-activity-and-migration.md:101]
+- [x] [Review][Defer] Shared activity polling may display an older response after a newer request and stale-version responses use generic 409 text [app/api/routes/strategy_manager.py:989] — deferred, pre-existing
+
 ## Spec Change Log
 
 - 2026-08-24: Implemented legacy schema regression coverage and Bootstrap activity rendering/context, including terminal polling behavior and legal actions.
@@ -88,9 +97,9 @@ Bootstrap uses `current_stage` rather than `current_month`, and `BootstrapRunV1`
 ## Verification
 
 **Commands:**
-- `uv run pytest -q tests/backtest/test_strategy_job_repository.py tests/test_strategy_manager_routes.py` -- passed: 169 tests.
-- `uv run pytest -q` -- passed: 1,928 tests.
+- `uv run pytest -q tests/backtest/test_strategy_job_repository.py tests/test_strategy_manager_routes.py` -- passed: 172 tests after review patches.
+- `uv run pytest -q` -- passed: 1,931 tests after review patches.
 - `uv run ruff check app tests` -- passed.
 - `git diff --check` -- passed.
 
-Results: `uv run pytest -q tests/backtest/test_strategy_job_repository.py tests/test_strategy_manager_routes.py` passed (168 tests); `uv run ruff check app tests` passed; `git diff --check` passed.
+Results: `uv run pytest -q tests/backtest/test_strategy_job_repository.py tests/test_strategy_manager_routes.py` passed (172 tests); `uv run pytest -q` passed (1,931 tests); `uv run ruff check app tests` passed; `git diff --check` passed.

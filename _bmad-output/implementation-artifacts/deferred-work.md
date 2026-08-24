@@ -170,3 +170,8 @@
 ## Deferred from: code review of 4-6-2-make-bootstrap-submission-idempotent (2026-08-22)
 
 - Bootstrap submission parent validation still inherits the generic stage-job rule that checks only whether `parent_job_id` exists. It does not constrain parent type, require terminal/non-deleted state, or define Bootstrap lineage semantics. No authorized setup-route input supplies a parent today, so this is pre-existing lifecycle hardening rather than a Story 4.6.2 user-path defect; resolve it when Bootstrap restart/lineage behavior is specified.
+# Deferred from: code review of spec-gh-288-289-strategy-manager-activity-and-migration (2026-08-24)
+
+- source_spec: `spec-gh-288-289-strategy-manager-activity-and-migration.md`
+  summary: Shared activity polling has no out-of-order-response guard, and stale lifecycle action versions return generic 409 text.
+  evidence: These behaviors predate Bootstrap activity rendering and affect the existing initialization/backtest activity routes as well.

@@ -265,6 +265,9 @@ class FakeJobs:
     def request_cancellation(self, request):
         self.cancel_request = request
 
+    def delete_job(self, request):
+        self.delete_request = request
+
     def restart_backtest(self, request):
         self.restart_request = request
         return SimpleNamespace(job=SimpleNamespace(id="job-2"))
@@ -509,7 +512,55 @@ def test_failed_bootstrap_activity_shows_failure_and_legal_action(services):
     assert response.status_code == 200
     assert "Historical provider certification failed" in response.text
     assert "Delete setup attempt" in response.text
+    assert 'data-bs-target="#delete-confirmation-job-1"' in response.text
     assert "hx-get=" not in response.text
+
+
+def test_bootstrap_activity_cancel_uses_the_guarded_lifecycle_command(services):
+    repo, jobs = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BOOTSTRAP,
+        status=StrategyJobStatus.RUNNING,
+        status_version=7,
+        current_month=None,
+        current_stage="qualification",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    response = client.post(
+        "/strategy-manager/activities/job-1/cancel",
+        data={"expected_version": "7"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 200
+    assert jobs.cancel_request.expected_version == 7
+    assert "Cancel setup?" in response.text
+
+
+def test_bootstrap_activity_delete_returns_setup_recovery(services):
+    repo, jobs = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BOOTSTRAP,
+        status=StrategyJobStatus.FAILED,
+        status_version=8,
+        current_month=None,
+        current_stage=None,
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail="Bootstrap failed",
+    )
+    response = client.post(
+        "/strategy-manager/activities/job-1/delete",
+        data={"expected_version": "8"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 200
+    assert jobs.delete_request.expected_version == 8
+    assert "Setup history" in response.text
+    assert 'href="/strategy-manager/setup"' in response.text
 
 
 def test_bootstrap_activity_poll_returns_empty_for_same_or_newer_version(services):

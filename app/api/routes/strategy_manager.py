@@ -1059,7 +1059,7 @@ async def delete_initialization(
         return HTMLResponse(str(exc), status_code=409)
     if job_type is StrategyJobType.BOOTSTRAP:
         return HTMLResponse(
-            '<h2 id="setup-history" tabindex="-1">Setup history</h2><p>Activity deleted.</p>'
+            '<h2 id="setup-history" tabindex="-1">Setup history</h2><p>Activity deleted.</p><a href="/strategy-manager/setup" hx-get="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML">Set up Strategy Manager</a>'
         )
     return HTMLResponse(
         '<h2 id="initialization-history" tabindex="-1">Initialization history</h2><p>Activity deleted.</p>'
