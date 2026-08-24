@@ -96,3 +96,8 @@ backtest_strategy_skills:
   rtly-backtest-buy-and-hold: { issue: 246, status: done }
   rtly-backtest-turtle-trend: { issue: 250, status: done }
   rtly-backtest-moving-average: { issue: 248, status: done }
+standalone_issues:
+  realised-pnl-average-win-loss-pct:
+    issue: 301
+    status: done
+    spec: spec-gh-301-realised-pnl-average-win-loss.md

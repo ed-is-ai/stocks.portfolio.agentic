@@ -144,16 +144,30 @@ class RealisedPnlService:
             sum(rt.realised_pnl_gbp for rt in round_trips if not rt.fx_unavailable)
         )
         resolved_round_trips = [rt for rt in round_trips if not rt.fx_unavailable]
+        winning_round_trips = [
+            rt for rt in resolved_round_trips if rt.realised_pnl_gbp >= 0
+        ]
+        losing_round_trips = [
+            rt for rt in resolved_round_trips if rt.realised_pnl_gbp < 0
+        ]
         return RealisedPnlSummary(
             portfolio_id=portfolio_id,
             round_trips=grouped,
             total_realised_pnl_gbp=total_pnl,
             round_trip_count=len(round_trips),
-            winning_round_trip_count=sum(
-                rt.realised_pnl_gbp >= 0 for rt in resolved_round_trips
+            winning_round_trip_count=len(winning_round_trips),
+            losing_round_trip_count=len(losing_round_trips),
+            average_win_pct=(
+                sum(rt.realised_pnl_pct for rt in winning_round_trips)
+                / len(winning_round_trips)
+                if winning_round_trips
+                else None
             ),
-            losing_round_trip_count=sum(
-                rt.realised_pnl_gbp < 0 for rt in resolved_round_trips
+            average_loss_pct=(
+                sum(rt.realised_pnl_pct for rt in losing_round_trips)
+                / len(losing_round_trips)
+                if losing_round_trips
+                else None
             ),
             unmatched_count=len(unmatched_sells),
             unmatched_sells=unmatched_sells,

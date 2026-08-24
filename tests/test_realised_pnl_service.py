@@ -166,6 +166,55 @@ def test_unsold_buy_never_becomes_round_trip(tmp_path: Path) -> None:
     assert summary.round_trip_count == 0
     assert summary.round_trips == {}
     assert summary.total_realised_pnl_gbp == 0.0
+    assert summary.average_win_pct is None
+    assert summary.average_loss_pct is None
+
+
+def test_summary_average_percentages_for_wins_only(tmp_path: Path) -> None:
+    """Positive and exact break-even resolved rows share the win bucket."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("WIN10", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("WIN10", 1, 110.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("WIN20", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("WIN20", 1, 120.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("EVEN", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("EVEN", 1, 100.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.average_win_pct == 10.0
+    assert summary.average_loss_pct is None
+
+
+def test_summary_average_percentages_for_losses_only(tmp_path: Path) -> None:
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("LOSS10", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("LOSS10", 1, 90.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("LOSS20", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("LOSS20", 1, 80.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.average_win_pct is None
+    assert summary.average_loss_pct == -15.0
+
+
+def test_summary_average_percentages_for_mixed_values(tmp_path: Path) -> None:
+    """Each result is a simple per-round-trip mean, not size weighted."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("WIN", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("WIN", 1, 110.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("EVEN", 100, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("EVEN", 100, 100.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("LOSS10", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("LOSS10", 1, 90.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("LOSS20", 50, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("LOSS20", 50, 80.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+
+    assert summary.average_win_pct == 5.0
+    assert summary.average_loss_pct == -15.0
 
 
 def test_same_date_tie_break_follows_ascending_id(tmp_path: Path) -> None:
@@ -642,6 +691,8 @@ def test_summary_counts_resolved_wins_losses_and_excludes_unavailable_fx(
 
     assert summary.winning_round_trip_count == 2
     assert summary.losing_round_trip_count == 1
+    assert summary.average_win_pct == 5.0
+    assert summary.average_loss_pct == -10.0
     assert summary.round_trips["USDX"][0].fx_unavailable is True
     assert summary.total_realised_pnl_gbp == 0.0
 

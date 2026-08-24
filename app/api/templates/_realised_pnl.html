@@ -42,6 +42,14 @@
     </div>
   </div>
   <div class="stat-card">
+    <div class="slbl"><i class="bi bi-percent me-1"></i>Avg Win % / Avg Loss %</div>
+    <div class="sval">
+      {% if summary.average_win_pct is not none %}<span class="pos">+{{ "%.1f"|format(summary.average_win_pct) }}%</span>{% else %}<span>&mdash;</span>{% endif %}
+      /
+      {% if summary.average_loss_pct is not none %}<span class="neg">{{ "%.1f"|format(summary.average_loss_pct) }}%</span>{% else %}<span>&mdash;</span>{% endif %}
+    </div>
+  </div>
+  <div class="stat-card">
     <div class="slbl"><i class="bi bi-exclamation-triangle me-1"></i>Unmatched Sells</div>
     <div class="sval">{{ summary.unmatched_count }}</div>
   </div>

@@ -20,6 +20,17 @@ client = TestClient(app)
 _AUTH = {"X-Auth-Token": "s3cret"}
 
 
+def _stat_card(html: str, label: str) -> str:
+    match = re.search(
+        rf'<div class="stat-card">\s*<div class="slbl">.*?{re.escape(label)}</div>'
+        r'\s*<div class="sval">(.*?)</div>\s*</div>',
+        html,
+        re.DOTALL,
+    )
+    assert match is not None
+    return match.group(1)
+
+
 @pytest.fixture
 def mocked():
     mock_trader = MagicMock()
@@ -79,6 +90,11 @@ def test_zero_round_trips_shows_empty_state_copy(mocked):
     assert "No Round-trips yet for this account." in resp.text
     assert "0 Wins" in resp.text
     assert "0 Losses" in resp.text
+    assert "Avg Win % / Avg Loss %" in resp.text
+    average_card = _stat_card(resp.text, "Avg Win % / Avg Loss %")
+    assert average_card.count("&mdash;") == 2
+    assert 'class="pos"' not in average_card
+    assert 'class="neg"' not in average_card
 
 
 def _round_trip(
@@ -119,6 +135,8 @@ def test_round_trip_details_are_collapsed_and_retain_all_row_content(mocked):
         round_trip_count=4,
         winning_round_trip_count=2,
         losing_round_trip_count=1,
+        average_win_pct=5.0,
+        average_loss_pct=-5.0,
     )
 
     resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
@@ -126,6 +144,15 @@ def test_round_trip_details_are_collapsed_and_retain_all_row_content(mocked):
     assert resp.status_code == 200
     assert "2 Wins" in resp.text
     assert "1 Loss" in resp.text
+    assert "+5.0%" in resp.text
+    assert "-5.0%" in resp.text
+    average_card = _stat_card(resp.text, "Avg Win % / Avg Loss %")
+    assert 'class="pos">+5.0%</span>' in average_card
+    assert 'class="neg">-5.0%</span>' in average_card
+    assert resp.text.index("Win / Loss") < resp.text.index("Avg Win % / Avg Loss %")
+    assert resp.text.index("Avg Win % / Avg Loss %") < resp.text.index(
+        "Unmatched Sells"
+    )
     assert "WIN subtotal" in resp.text
     assert "LOSS subtotal" in resp.text
     assert "USDX subtotal" in resp.text

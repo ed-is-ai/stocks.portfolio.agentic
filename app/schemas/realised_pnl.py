@@ -159,6 +159,10 @@ class RealisedPnlSummary(BaseModel):
     round_trip_count: int
     winning_round_trip_count: int = 0
     losing_round_trip_count: int = 0
+    average_win_pct: float | None = None
+    """Simple mean for the resolved GBP win bucket; ``None`` when empty."""
+    average_loss_pct: float | None = None
+    """Simple mean for the resolved GBP loss bucket; ``None`` when empty."""
     unmatched_count: int = 0
     unmatched_sells: list[UnmatchedSell] = []
     mismatched_tickers: list[str] = []
