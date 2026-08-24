@@ -1,6 +1,6 @@
 {#- Strategy Manager readiness & diagnostics (Story 4.4). Read-only:
     this page never creates, repairs, acquires, activates, or queues
-    anything. -#}
+    anything. Recovery links navigate to the corresponding workflow. -#}
 <section aria-labelledby="strategy-readiness-heading">
   <h1 id="strategy-readiness-heading" tabindex="-1" class="h3">
     {% if diagnostics_view %}Diagnostics{% else %}Readiness{% endif %}
@@ -31,7 +31,10 @@
           <span class="badge-status {{ state_class.get(item.state.value, 'sm-muted-badge') }}">{{ item.state.value }}</span>
         </td>
         <td>{{ item.reason }}</td>
-        <td>{% if item.recovery_action.value != 'none' %}<span class="badge-status sm-muted-badge">{{ item.recovery_action.value|replace('_', ' ')|title }}</span>{% else %}—{% endif %}</td>
+        <td>
+          {% set recovery_url = {'set_up': '/strategy-manager/setup', 'initialize': '/strategy-manager/initialization', 'configure': '/strategy-manager'}.get(item.recovery_action.value) %}
+          {% if recovery_url %}<a class="sm-btn sm-btn-secondary" href="{{ recovery_url }}" hx-get="{{ recovery_url }}" hx-target="#tab-content" hx-swap="innerHTML">{{ item.recovery_action.value|replace('_', ' ')|title }}</a>{% elif item.recovery_action.value != 'none' %}<span class="badge-status sm-muted-badge">{{ item.recovery_action.value|replace('_', ' ')|title }}</span>{% else %}—{% endif %}
+        </td>
       </tr>
       {% endfor %}
       <tr>

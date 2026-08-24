@@ -204,6 +204,11 @@ def _validate_months(start_month: str, end_month: str) -> dict[str, str]:
     return errors
 
 
+def _form_error_status(request: Request) -> int:
+    """Let HTMX swap validation fragments while preserving HTTP semantics."""
+    return 200 if request.headers.get("HX-Request", "").lower() == "true" else 422
+
+
 @router.get("/partials/strategy-manager", response_class=HTMLResponse)
 @router.get("/strategy-manager", response_class=HTMLResponse)
 async def strategy_manager(request: Request, backtest: BacktestDep) -> HTMLResponse:
@@ -409,7 +414,7 @@ async def submit_initialization(
             request,
             "_historical_initialization.html",
             {**context, "errors": errors},
-            status_code=422,
+            status_code=_form_error_status(request),
         )
     try:
         active_profile = cast(SnapshotProfileV1, profile)
@@ -438,7 +443,7 @@ async def submit_initialization(
             request,
             "_historical_initialization.html",
             {**context, "errors": {"form": str(exc)}},
-            status_code=422,
+            status_code=_form_error_status(request),
         )
     if result.no_op:
         return templates.TemplateResponse(

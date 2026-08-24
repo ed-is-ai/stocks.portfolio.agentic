@@ -20,7 +20,11 @@ from app.services.backtest.reconstruction_roster import (
     CapturedRosterMemberV1,
     CapturedRosterV1,
 )
-from app.services.backtest.strategy_job import JobFailureCode, StrategyJobStatus
+from app.services.backtest.strategy_job import (
+    JobFailureCode,
+    StrategyJobStatus,
+    WorkerLeaseFenceV1,
+)
 from app.services.backtest.strategy_job import StrategyJobConflict
 from app.services.backtest.trading_calendar import CalendarContractError
 
@@ -61,6 +65,7 @@ class FakeRepository:
         self.failed: list[dict[str, object]] = []
         self.cancelled = False
         self.completed = False
+        self.leases: list[WorkerLeaseFenceV1 | None] = []
 
     def strategy_job(self, _job_id):
         return self.job
@@ -76,8 +81,9 @@ class FakeRepository:
         return Ready(start in self.ready)
 
     def set_strategy_job_current_month(
-        self, _job_id, _token, *, expected_version, month
+        self, _job_id, _token, *, expected_version, month, lease=None
     ):
+        self.leases.append(lease)
         assert expected_version == self.job.status_version
         self.progress.append(month)
         self.job = replace(self.job, status_version=expected_version + 1)
@@ -88,12 +94,18 @@ class FakeRepository:
         self.job = replace(self.job, status=StrategyJobStatus.FAILED)
         return self.job
 
-    def cancel_claimed_strategy_job(self, _job_id, _token, *, expected_version):
+    def cancel_claimed_strategy_job(
+        self, _job_id, _token, *, expected_version, lease=None
+    ):
+        self.leases.append(lease)
         self.cancelled = True
         self.job = replace(self.job, status=StrategyJobStatus.CANCELLED)
         return self.job
 
-    def complete_claimed_initialization_job(self, _job_id, _token, *, expected_version):
+    def complete_claimed_initialization_job(
+        self, _job_id, _token, *, expected_version, lease=None
+    ):
+        self.leases.append(lease)
         assert expected_version == self.job.status_version
         self.completed = True
         self.job = replace(self.job, status=StrategyJobStatus.COMPLETE)
@@ -112,6 +124,24 @@ def test_engine_processes_months_ascending_and_reuses_ready_months() -> None:
     assert repo.progress == ["2026-05", "2026-06", "2026-07"]
     assert processed == ["2026-06", "2026-07"]
     assert result.status is StrategyJobStatus.COMPLETE
+
+
+def test_engine_propagates_worker_lease_to_lifecycle_writes() -> None:
+    repo = FakeRepository(ready=set(Initialization().requested_months))
+    lease = WorkerLeaseFenceV1(instance_id="worker-1", generation=7)
+
+    result = HistoricalInitializationEngine(
+        cast(InitializationRepository, repo),
+        lambda _month: None,
+        lease=lease,
+    ).run("job-1", "claim-1")
+
+    assert result.status is StrategyJobStatus.COMPLETE
+    assert repo.leases == [lease, lease, lease, lease]
+
+
+def test_bats_uses_new_york_exchange_timezone() -> None:
+    assert CanonicalSnapshotMonthProcessor._TIMEZONES["BATS"] == "America/New_York"
 
 
 def test_first_failure_stops_later_months_and_records_safe_failure() -> None:
@@ -141,6 +171,7 @@ def test_first_failure_stops_later_months_and_records_safe_failure() -> None:
             "failure_code": JobFailureCode.REQUIRED_DATA_MISSING,
             "failed_month": "2026-06",
             "detail": "Required historical data is unavailable",
+            "lease": None,
         }
     ]
 

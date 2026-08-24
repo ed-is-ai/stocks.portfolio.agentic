@@ -41,6 +41,7 @@ from app.services.backtest.strategy_job import (
     STAGE_SEQUENCES,
     StrategyJobStatus,
     StrategyJobType,
+    WorkerLeaseFenceV1,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.worker import main
@@ -137,6 +138,38 @@ def test_engine_construction_failure_is_not_mislabeled_interruption(
         == 1
     )
     assert repo.failures[0]["failure_code"] is JobFailureCode.INTEGRITY_ERROR
+
+
+def test_initialization_dispatch_propagates_worker_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = Repository(ClaimedJob(job_type=StrategyJobType.INITIALIZATION))
+    engine = Engine(StrategyJobStatus.COMPLETE)
+    captured: list[WorkerLeaseFenceV1 | None] = []
+
+    def build(_job_id, _claim_token, _repository, *, lease=None):
+        captured.append(lease)
+        return engine
+
+    monkeypatch.setattr(worker_module, "build_initialization_engine", build)
+
+    assert (
+        main(
+            [
+                "--job-id",
+                "job-1",
+                "--claim-token",
+                "claim-1",
+                "--owner-instance-id",
+                "worker-1",
+                "--lease-generation",
+                "7",
+            ],
+            repository_factory=lambda: repo,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+    assert captured == [WorkerLeaseFenceV1(instance_id="worker-1", generation=7)]
 
 
 def test_backtest_engine_construction_failure_is_not_mislabeled_interruption(

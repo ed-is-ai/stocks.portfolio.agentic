@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import html
+from pathlib import Path
 import re
 from types import SimpleNamespace
 from typing import cast
@@ -317,6 +318,39 @@ def test_invalid_range_has_linked_errors_and_no_aria_invalid_when_clean(services
     assert 'aria-invalid="true"' in response.text
     assert 'aria-describedby="end-month-help end-month-error"' in response.text
     assert 'aria-describedby="start-month-help"' in response.text
+
+
+def test_invalid_initialization_htmx_submission_swaps_linked_errors(services):
+    response = client.post(
+        "/strategy-manager/initialization",
+        data={"start_month": "2026-02", "end_month": "28"},
+        headers={"X-Auth-Token": "s3cret", "HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert 'id="initialization-errors"' in response.text
+    assert "Use a fully closed month in YYYY-MM format." in response.text
+    assert 'value="28"' in response.text
+
+
+def test_strategy_manager_js_swaps_expected_form_error_responses() -> None:
+    root = Path(__file__).resolve().parents[1]
+    javascript = (
+        root / "app" / "api" / "static" / "js" / "strategy-manager.js"
+    ).read_text(encoding="utf-8")
+
+    assert "status === 409 || status === 422" in javascript
+    assert "target.id === 'tab-content'" in javascript
+    assert "detail.shouldSwap = true" in javascript
+    assert "detail.isError = false" in javascript
+
+
+def test_strategy_manager_script_url_is_cache_versioned(services) -> None:
+    response = client.get("/")
+
+    assert (
+        'src="/static/js/strategy-manager.js?v=20260824-1"' in response.text
+    )
 
 
 def test_valid_submission_enqueues_once_and_redirects(services):

@@ -58,6 +58,7 @@ from app.services.backtest.strategy_job import (
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
+    WorkerLeaseFenceV1,
 )
 
 
@@ -80,6 +81,7 @@ class CanonicalSnapshotMonthProcessor:
     """Compose existing evidence/reconstruction APIs into one Ready month."""
 
     _TIMEZONES = {
+        "BATS": "America/New_York",
         "XNAS": "America/New_York",
         "XNYS": "America/New_York",
         "XLON": "Europe/London",
@@ -99,6 +101,7 @@ class CanonicalSnapshotMonthProcessor:
         calendar: TradingCalendar | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         project_root: Path | None = None,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> None:
         if profile.roster_digest != roster.roster_digest:
             raise ValueError("snapshot profile and reconstruction roster differ")
@@ -115,6 +118,7 @@ class CanonicalSnapshotMonthProcessor:
         self._calendar = calendar or TradingCalendar()
         self._clock = clock
         self._project_root = project_root or Path(__file__).resolve().parents[3]
+        self._lease = lease
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
@@ -160,6 +164,7 @@ class CanonicalSnapshotMonthProcessor:
                 commit,
                 self._price_repository,
                 job_claim=(self._job_id, self._claim_token),
+                lease=self._lease,
             )
         except InitializationMonthError:
             raise
@@ -363,6 +368,7 @@ class InitializationRepository(Protocol):
         *,
         expected_version: int,
         month: str,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1: ...
 
     def fail_claimed_strategy_job(
@@ -374,14 +380,25 @@ class InitializationRepository(Protocol):
         failure_code: JobFailureCode,
         failed_month: str | None,
         detail: str,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1: ...
 
     def cancel_claimed_strategy_job(
-        self, job_id: str, claim_token: str, *, expected_version: int
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1: ...
 
     def complete_claimed_initialization_job(
-        self, job_id: str, claim_token: str, *, expected_version: int
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        expected_version: int,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1: ...
 
 
@@ -400,11 +417,13 @@ class HistoricalInitializationEngine:
         *,
         qualification_check: Callable[[], bool] = lambda: True,
         profile_check: Callable[[str], bool] = lambda _profile_hash: True,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> None:
         self._repository = repository
         self._month_processor = month_processor
         self._qualification_check = qualification_check
         self._profile_check = profile_check
+        self._lease = lease
 
     def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
         job = self._repository.strategy_job(job_id)
@@ -442,7 +461,10 @@ class HistoricalInitializationEngine:
                 return job
             if job.cancel_requested_at is not None:
                 return self._repository.cancel_claimed_strategy_job(
-                    job_id, claim_token, expected_version=job.status_version
+                    job_id,
+                    claim_token,
+                    expected_version=job.status_version,
+                    lease=self._lease,
                 )
             try:
                 job = self._repository.set_strategy_job_current_month(
@@ -450,6 +472,7 @@ class HistoricalInitializationEngine:
                     claim_token,
                     expected_version=job.status_version,
                     month=month,
+                    lease=self._lease,
                 )
             except StrategyJobConflict:
                 current = self._repository.strategy_job(job_id)
@@ -460,6 +483,7 @@ class HistoricalInitializationEngine:
                         job_id,
                         claim_token,
                         expected_version=current.status_version,
+                        lease=self._lease,
                     )
                 return current
             try:
@@ -492,7 +516,10 @@ class HistoricalInitializationEngine:
                 return job
             if job.cancel_requested_at is not None:
                 return self._repository.cancel_claimed_strategy_job(
-                    job_id, claim_token, expected_version=job.status_version
+                    job_id,
+                    claim_token,
+                    expected_version=job.status_version,
+                    lease=self._lease,
                 )
 
         job = self._repository.strategy_job(job_id)
@@ -500,11 +527,17 @@ class HistoricalInitializationEngine:
             return job
         if job.cancel_requested_at is not None:
             return self._repository.cancel_claimed_strategy_job(
-                job_id, claim_token, expected_version=job.status_version
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
             )
         try:
             return self._repository.complete_claimed_initialization_job(
-                job_id, claim_token, expected_version=job.status_version
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
             )
         except StrategyJobConflict:
             return self._repository.strategy_job(job_id)
@@ -524,6 +557,7 @@ class HistoricalInitializationEngine:
             failure_code=code,
             failed_month=failed_month,
             detail=detail,
+            lease=self._lease,
         )
 
     def _fail_or_cancel(
@@ -537,7 +571,10 @@ class HistoricalInitializationEngine:
         try:
             if job.cancel_requested_at is not None:
                 return self._repository.cancel_claimed_strategy_job(
-                    job.id, claim_token, expected_version=job.status_version
+                    job.id,
+                    claim_token,
+                    expected_version=job.status_version,
+                    lease=self._lease,
                 )
             return self._fail(job, claim_token, code, failed_month, detail)
         except StrategyJobConflict:
@@ -550,6 +587,7 @@ class HistoricalInitializationEngine:
                     current.id,
                     claim_token,
                     expected_version=current.status_version,
+                    lease=self._lease,
                 )
             return current
 

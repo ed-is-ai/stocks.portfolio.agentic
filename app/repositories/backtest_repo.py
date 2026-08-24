@@ -5253,6 +5253,7 @@ class BacktestRepository:
         *,
         job_claim: tuple[str, str] | None = None,
         require_active_profile: bool = False,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> SnapshotMonthManifestV1:
         """Atomically compare-and-insert one complete Ready snapshot month."""
         try:
@@ -5272,10 +5273,12 @@ class BacktestRepository:
             with session(self._connect) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 if job_claim is not None:
+                    fence = _lease_fence_params(lease)
                     owned = conn.execute(
-                        """SELECT 1 FROM strategy_jobs
-                           WHERE id=? AND status='running' AND claim_token=?""",
-                        job_claim,
+                        f"""SELECT 1 FROM strategy_jobs
+                           WHERE id=? AND status='running' AND claim_token=?
+                           {_LEASE_FENCE_SQL}""",
+                        (*job_claim, *fence),
                     ).fetchone()
                     if owned is None:
                         raise StrategyJobConflict(

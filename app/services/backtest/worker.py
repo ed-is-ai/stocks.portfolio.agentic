@@ -85,7 +85,11 @@ def build_worker_repository() -> BacktestRepository:
 
 
 def build_initialization_engine(
-    job_id: str, claim_token: str, backtest: BacktestRepository
+    job_id: str,
+    claim_token: str,
+    backtest: BacktestRepository,
+    *,
+    lease: WorkerLeaseFenceV1 | None = None,
 ) -> HistoricalInitializationEngine:
     """Build independent schema-ready repositories for one claimed child."""
     prices = HistoricalPriceRepository(
@@ -107,6 +111,7 @@ def build_initialization_engine(
         roster=roster,
         backtest_repository=backtest,
         price_repository=prices,
+        lease=lease,
     )
 
     def qualified() -> bool:
@@ -131,6 +136,7 @@ def build_initialization_engine(
         processor,
         qualification_check=qualified,
         profile_check=profile_is_current,
+        lease=lease,
     )
 
 
@@ -1236,7 +1242,7 @@ def main(
     try:
         if job.job_type is StrategyJobType.INITIALIZATION:
             engine: WorkerEngine = build_initialization_engine(
-                args.job_id, args.claim_token, repository
+                args.job_id, args.claim_token, repository, lease=lease
             )
         elif job.job_type is StrategyJobType.BACKTEST:
             engine = build_backtest_engine(args.job_id, args.claim_token, repository)

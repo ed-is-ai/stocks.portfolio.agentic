@@ -281,6 +281,22 @@ def test_readiness_page_shows_missing_prerequisites(
     assert "missing" in response.text.lower()
 
 
+def test_readiness_coverage_initialize_is_an_action_link(
+    setup_env_with_profile,
+) -> None:
+    repo, _jobs, _bootstrap = setup_env_with_profile
+    repo.result_coverage = type(
+        "EmptyCoverage", (), {"snapshot_count": 0}
+    )()
+
+    response = client.get("/strategy-manager/readiness")
+
+    assert response.status_code == 200
+    assert 'href="/strategy-manager/initialization"' in response.text
+    assert 'hx-get="/strategy-manager/initialization"' in response.text
+    assert "Initialize</a>" in response.text
+
+
 # ---------------------------------------------------------------------------
 # Diagnostics page
 # ---------------------------------------------------------------------------

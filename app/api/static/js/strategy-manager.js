@@ -44,6 +44,23 @@
     return (/\/status(?:\?|$)/).test(path);
   }
 
+  // Expected validation/conflict responses contain a complete, safe form
+  // fragment with linked errors. HTMX does not swap 4xx responses by
+  // default, so opt in only for Strategy Manager's form targets.
+  document.body.addEventListener('htmx:beforeSwap', function (event) {
+    var detail = event.detail;
+    var target = detail.target;
+    var status = detail.xhr && detail.xhr.status;
+    var isFormTarget = target && (
+      target.id === 'tab-content' ||
+      (target.id && target.id.indexOf('backtest-note-') === 0)
+    );
+    if (isFormTarget && (status === 409 || status === 422)) {
+      detail.shouldSwap = true;
+      detail.isError = false;
+    }
+  });
+
   // ── Monotonic version gate (Story 2.8 AC4): an out-of-order older
   // response must never clobber an already-rendered newer one. ──────────
   document.body.addEventListener('htmx:beforeSwap', function (event) {

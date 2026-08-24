@@ -68,6 +68,10 @@ final_revision: '7ea6a1a9'
 - [x] [Follow-up][Patch] Restore live Bootstrap roster capture against the maintained DataHub constituents schema, resolve DataHub identities in one bounded TradingView batch, apply provider-symbol differences through the versioned `config/provider_symbol_aliases.json` mapping, support Cboe BZX (`BATS`), and accept TradingView's `GBX` code while preserving the economic GBP/GBp contract [app/services/backtest/reconstruction_roster.py; app/integrations/tv_screener.py; config/provider_symbol_aliases.json] — resolved and live-verified
 - [x] [Follow-up][Patch] Expand persisted MIC constraints and migrate existing immutable identity/alias/snapshot tables for Cboe BZX (`BATS`); fail directly on new identity constraint violations instead of masking them as canonical-identity conflicts [app/repositories/backtest_repo.py] — resolved and live-verified
 - [x] [Follow-up][Patch] Persist and render safe stage-specific Bootstrap failure details for controlled provider, roster, persistence, and activation errors while reducing unexpected exceptions to their type plus a server-log instruction [app/services/backtest/strategy_bootstrap_service.py; app/api/templates/_bootstrap_activity.html] — resolved and regression-tested
+- [x] [Follow-up][Patch] Render actionable readiness recoveries as links to their existing workflows; Coverage `Initialize` was a non-interactive badge despite the initialization route already existing [app/api/templates/_strategy_readiness.html] — resolved and regression-tested
+- [x] [Follow-up][Patch] Swap expected Strategy Manager `422` validation and `409` conflict responses into their form targets; initialization correctly returned linked errors for invalid months, but HTMX's default 4xx handling discarded the fragment and made submit appear inert [app/api/static/js/strategy-manager.js] — resolved and regression-tested
+- [x] [Follow-up][Patch] Make initialization validation independently robust to stale client assets by returning its error fragment as `200` for HTMX requests while retaining `422` for ordinary HTTP, and cache-version the Strategy Manager script URL [app/api/routes/strategy_manager.py; app/api/templates/index.html] — resolved and regression-tested
+- [x] [Follow-up][Patch] Propagate the dispatcher's worker lease through historical initialization progress, month publication, failure/cancellation, and completion writes; without the fence every initialization exited on its first month and was mislabeled `worker_interrupted`. Add the missing BATS exchange timezone used by the live roster [app/services/backtest/worker.py; app/services/backtest/historical_initialization_engine.py; app/repositories/backtest_repo.py] — resolved and regression-tested
 
 ## Design Notes
 
@@ -81,6 +85,10 @@ The worker must not mark all stages complete before performing their work. Evide
 - `UV_CACHE_DIR=/tmp/agents-stocks-uv-cache uv run ruff check app/services/backtest/worker.py app/repositories/backtest_repo.py tests/backtest/test_backtest_worker.py tests/backtest/test_strategy_job_repository.py` -- clean.
 - `UV_CACHE_DIR=/tmp/agents-stocks-uv-cache uv run pyrefly check app/services/backtest/worker.py app/repositories/backtest_repo.py` -- 0 errors.
 - `git diff --check` -- clean.
+- `UV_CACHE_DIR=/private/tmp/agents-stocks-uv-cache uv run pytest tests/backtest/test_historical_initialization_engine.py tests/backtest/test_backtest_worker.py tests/backtest/test_snapshot_coverage_repository.py -q` -- 57 passed.
+- `UV_CACHE_DIR=/private/tmp/agents-stocks-uv-cache uv run pytest tests/backtest -q` -- 856 passed, 2 warnings.
+- `UV_CACHE_DIR=/private/tmp/agents-stocks-uv-cache uv run ruff check app/services/backtest/historical_initialization_engine.py app/services/backtest/worker.py app/repositories/backtest_repo.py tests/backtest/test_historical_initialization_engine.py tests/backtest/test_backtest_worker.py` -- clean.
+- `UV_CACHE_DIR=/private/tmp/agents-stocks-uv-cache uv run pyrefly check app/services/backtest/historical_initialization_engine.py app/services/backtest/worker.py app/repositories/backtest_repo.py` -- 0 errors.
 
 ## Spec Change Log
 
@@ -88,6 +96,10 @@ The worker must not mark all stages complete before performing their work. Evide
 - 2026-08-24: Updated Bootstrap roster evidence for the maintained DataHub schema, batched TradingView identity evidence, config-backed class-share aliases, BATS listings, and TradingView GBX normalization; live capture normalized 876 members from all three required sources.
 - 2026-08-24: Added the missing SQLite BATS constraint migration after a production-equivalent roster commit exposed the later persistence boundary; live qualification, 876-identity commit, and profile construction now complete against a fresh database.
 - 2026-08-24: Replaced generic Bootstrap evidence failures with safe stage-specific activity details, including provider HTTP status and actionable database-integrity categories without exposing arbitrary exception text.
+- 2026-08-24: Made readiness recovery actions navigable, including Coverage `Initialize` linking to the historical initialization form.
+- 2026-08-24: Enabled scoped HTMX swaps for expected Strategy Manager form validation/conflict responses so invalid initialization months show their server-rendered errors instead of appearing to do nothing.
+- 2026-08-24: Added server-side HTMX validation response handling and a Strategy Manager JavaScript cache version so initialization errors remain visible even when a browser cached the pre-fix script.
+- 2026-08-24: Fenced the historical-initialization lifecycle and atomic month publication with the dispatcher's worker lease, and added BATS to the initialization exchange-timezone contract.
 
 ## Review Triage Log
 
