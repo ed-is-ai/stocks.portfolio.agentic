@@ -898,6 +898,7 @@ async def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLRes
 #: a backtest view, and vice versa) -- Stories 2.8/2.9 own list/polling/
 #: Result presentation.
 _ACTIVITY_TEMPLATES: dict[StrategyJobType, str] = {
+    StrategyJobType.BOOTSTRAP: "_bootstrap_activity.html",
     StrategyJobType.PREPARATION: "_preparation_activity.html",
     StrategyJobType.INITIALIZATION: "_initialization_activity.html",
     StrategyJobType.BACKTEST: "_backtest_activity.html",
@@ -910,6 +911,8 @@ def _activity_context(
     job = repo.strategy_job(job_id)
     if job.job_type is StrategyJobType.INITIALIZATION:
         run: object = repo.initialization_run(job_id)
+    elif job.job_type is StrategyJobType.BOOTSTRAP:
+        run = repo.bootstrap_run(job_id)
     elif job.job_type is StrategyJobType.BACKTEST:
         run = repo.strategy_run(job_id)
     elif job.job_type is StrategyJobType.PREPARATION:
@@ -1043,15 +1046,21 @@ async def restart_strategy_job(
 async def delete_initialization(
     request: Request,
     job_id: str,
+    backtest: BacktestDep,
     jobs: JobsDep,
     expected_version: Annotated[int, Form()],
 ) -> HTMLResponse:
     try:
+        job_type = backtest.strategy_job(job_id).job_type
         jobs.delete_job(
             StrategyJobDeletionV1(job_id=job_id, expected_version=expected_version)
         )
     except (StrategyJobConflict, StrategyJobNotFound, ValueError) as exc:
         return HTMLResponse(str(exc), status_code=409)
+    if job_type is StrategyJobType.BOOTSTRAP:
+        return HTMLResponse(
+            '<h2 id="setup-history" tabindex="-1">Setup history</h2><p>Activity deleted.</p>'
+        )
     return HTMLResponse(
         '<h2 id="initialization-history" tabindex="-1">Initialization history</h2><p>Activity deleted.</p>'
     )

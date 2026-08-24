@@ -443,6 +443,16 @@ def test_legacy_upgrade_preserves_v1_and_creates_v2_index(tmp_path: Path) -> Non
         ):
             c.execute(f"ALTER TABLE strategy_runs DROP COLUMN {col}")
         c.execute("ALTER TABLE run_input_manifests DROP COLUMN manifest_version")
+        assert {
+            str(row[1]) for row in c.execute("PRAGMA table_info(strategy_runs)")
+        }.isdisjoint(
+            {
+                "selection_json",
+                "source_preparation_job_id",
+                "run_universe_digest",
+                "manifest_version",
+            }
+        )
     reopened = BacktestRepository(db.make_connect(lambda: path))
     reopened.ensure_schema()
     assert (
@@ -452,6 +462,21 @@ def test_legacy_upgrade_preserves_v1_and_creates_v2_index(tmp_path: Path) -> Non
         assert c.execute(
             "SELECT 1 FROM sqlite_master WHERE name='idx_strategy_runs_source_preparation'"
         ).fetchone()
+        index_columns = c.execute(
+            "PRAGMA index_info(idx_strategy_runs_source_preparation)"
+        ).fetchall()
+        assert [str(row[2]) for row in index_columns] == [
+            "source_preparation_job_id"
+        ]
+        assert c.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='index' AND name='idx_strategy_runs_source_preparation'"
+        ).fetchone()[0].upper().startswith("CREATE UNIQUE INDEX")
+        assert c.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='trigger' AND name='strategy_run_v2_contract_insert'"
+        ).fetchone()
+    assert reopened.strategy_run(v1.job.id).job_id == v1.job.id
 
 
 def test_v2_bypass_and_mislabeled_json_rejected(tmp_path: Path) -> None:

@@ -108,6 +108,8 @@ class FakeRepo:
         self.eligibility_error: Exception | None = None
         self.last_is_comparable_call: tuple[str, str] | None = None
         self.strategy_job_error: Exception | None = None
+        self.bootstrap = SimpleNamespace(job_id="job-1")
+        self.bootstrap_run_calls = 0
 
     def roster_member_identities(self, profile_hash):
         return [("sid_001", "AAPL", "XNYS", "USD")]
@@ -216,6 +218,10 @@ class FakeRepo:
     def initialization_run(self, _job_id):
         return SimpleNamespace(requested_start="2024-01", requested_end="2024-03")
 
+    def bootstrap_run(self, _job_id):
+        self.bootstrap_run_calls += 1
+        return self.bootstrap
+
     def strategy_run(self, _job_id):
         return SimpleNamespace(
             strategy_id="momentum_v1", start_month="2024-01", end_month="2024-03"
@@ -247,13 +253,14 @@ class FakeRepo:
 class FakeJobs:
     def __init__(self):
         self.submissions = []
+        self.actions = ("cancel",)
 
     def enqueue_initialization(self, submission):
         self.submissions.append(submission)
         return SimpleNamespace(no_op=False, job=SimpleNamespace(id="job-1"))
 
     def legal_actions(self, job_id):
-        return SimpleNamespace(job_id=job_id, legal_actions=("cancel",))
+        return SimpleNamespace(job_id=job_id, legal_actions=self.actions)
 
     def request_cancellation(self, request):
         self.cancel_request = request
@@ -445,6 +452,106 @@ def test_backtest_activity_status_poll_uses_the_backtest_template(services):
     )
     assert response.status_code == 200
     assert "Backtest activity" in response.text
+
+
+@pytest.mark.parametrize(
+    ("status", "current_stage", "failure_detail", "actions", "polls"),
+    [
+        (StrategyJobStatus.QUEUED, None, None, ("cancel",), True),
+        (StrategyJobStatus.RUNNING, "roster_capture", None, ("cancel",), True),
+        (StrategyJobStatus.COMPLETE, None, None, (), False),
+        (StrategyJobStatus.CANCELLED, None, None, (), False),
+    ],
+)
+def test_bootstrap_activity_renders_status_stage_and_terminal_polling(
+    services, status, current_stage, failure_detail, actions, polls
+):
+    repo, jobs = services
+    jobs.actions = actions
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BOOTSTRAP,
+        status=status,
+        status_version=7,
+        current_month=None,
+        current_stage=current_stage,
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=failure_detail,
+    )
+    response = client.get("/strategy-manager/activities/job-1")
+    assert response.status_code == 200
+    assert "Strategy Manager setup activity" in response.text
+    assert repo.bootstrap_run_calls == 1
+    if current_stage:
+        assert "Roster Capture" in response.text
+    assert ("hx-get=" in response.text) is polls
+    if not polls:
+        assert "hx-get=" not in response.text
+        assert "hx-trigger=" not in response.text
+
+
+def test_failed_bootstrap_activity_shows_failure_and_legal_action(services):
+    repo, jobs = services
+    jobs.actions = ("delete",)
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BOOTSTRAP,
+        status=StrategyJobStatus.FAILED,
+        status_version=8,
+        current_month=None,
+        current_stage=None,
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail="Historical provider certification failed",
+    )
+    response = client.get("/strategy-manager/activities/job-1")
+    assert response.status_code == 200
+    assert "Historical provider certification failed" in response.text
+    assert "Delete setup attempt" in response.text
+    assert "hx-get=" not in response.text
+
+
+def test_bootstrap_activity_poll_returns_empty_for_same_or_newer_version(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BOOTSTRAP,
+        status=StrategyJobStatus.RUNNING,
+        status_version=7,
+        current_month=None,
+        current_stage="qualification",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    for version in (7, 8):
+        response = client.get(
+            f"/strategy-manager/activities/job-1/status?last_seen_version={version}"
+        )
+        assert response.status_code == 204
+        assert response.text == ""
+
+
+def test_bootstrap_activity_poll_renders_newer_version(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BOOTSTRAP,
+        status=StrategyJobStatus.RUNNING,
+        status_version=8,
+        current_month=None,
+        current_stage="profile_activation",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+    response = client.get(
+        "/strategy-manager/activities/job-1/status?last_seen_version=7"
+    )
+    assert response.status_code == 200
+    assert "Profile Activation" in response.text
+    assert 'data-status-version="8"' in response.text
 
 
 def test_backtest_cancel_reuses_the_generic_lifecycle_command(services):

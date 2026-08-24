@@ -1,0 +1,11 @@
+<section id="bootstrap-activity-{{ job.id }}" aria-labelledby="activity-heading" data-status-version="{{ job.status_version }}"{% if not terminal %} hx-get="/strategy-manager/activities/{{ job.id }}/status?last_seen_version={{ job.status_version }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
+ <h1 id="activity-heading" tabindex="-1" class="h3">Strategy Manager setup activity</h1>
+ <div class="card sm-card"><div class="card-body">
+  <p><strong>Status:</strong> {{ job.status.value|title }}{% if job.status.value == 'running' and job.cancel_requested_at %} — Cancellation requested{% endif %}</p>
+  {% if job.current_stage %}<p><strong>Current stage:</strong> <span class="mono-num">{{ job.current_stage|replace('_', ' ')|title }}</span></p>{% endif %}
+  {% if job.status.value == 'failed' %}<p class="text-danger"><strong>Setup failed:</strong> {{ job.failure_detail or 'Setup failed for an unknown reason.' }}</p>{% endif %}
+  <div role="status" aria-live="polite" aria-atomic="true" class="visually-hidden">{{ job.status.value|title }}{% if job.current_stage %}, {{ job.current_stage|replace('_', ' ')|title }}{% endif %}</div>
+ </div></div>
+ {% if 'cancel' in actions and not job.cancel_requested_at %}<form class="mt-3" method="post" action="/strategy-manager/activities/{{ job.id }}/cancel" hx-post="/strategy-manager/activities/{{ job.id }}/cancel" hx-target="#bootstrap-activity-{{ job.id }}" hx-swap="outerHTML"><input type="hidden" name="expected_version" value="{{ job.status_version }}"><button class="sm-btn sm-btn-warning">Cancel setup</button></form>{% endif %}
+ {% if 'delete' in actions %}<form class="mt-3" method="post" action="/strategy-manager/activities/{{ job.id }}/delete" hx-post="/strategy-manager/activities/{{ job.id }}/delete" hx-target="#tab-content" hx-swap="innerHTML"><input type="hidden" name="expected_version" value="{{ job.status_version }}"><button class="sm-btn sm-btn-danger">Delete setup attempt</button></form>{% endif %}
+</section>
