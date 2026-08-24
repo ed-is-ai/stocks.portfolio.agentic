@@ -170,6 +170,13 @@
 ## Deferred from: code review of 4-6-2-make-bootstrap-submission-idempotent (2026-08-22)
 
 - Bootstrap submission parent validation still inherits the generic stage-job rule that checks only whether `parent_job_id` exists. It does not constrain parent type, require terminal/non-deleted state, or define Bootstrap lineage semantics. No authorized setup-route input supplies a parent today, so this is pre-existing lifecycle hardening rather than a Story 4.6.2 user-path defect; resolve it when Bootstrap restart/lineage behavior is specified.
+
+## Deferred from: code review of spec-4-6-prepare-the-evidence-needed-for-a-backtest.md (2026-08-24)
+
+- source_spec: `spec-4-6-prepare-the-evidence-needed-for-a-backtest.md`
+  status: resolved-2026-08-24
+  summary: Bootstrap qualification failure now provides a direct fresh setup submission and exposes the safe recorded provider reason.
+  evidence: `StrategyBootstrapService._run_qualification()` retains `latest.failure_reason`; the failed Bootstrap Activity renders “Try setup again” with a new idempotency key.
 # Deferred from: code review of spec-gh-288-289-strategy-manager-activity-and-migration (2026-08-24)
 
 - source_spec: `spec-gh-288-289-strategy-manager-activity-and-migration.md`

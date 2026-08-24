@@ -2394,6 +2394,30 @@ def test_profile_activation_does_not_offer_bootstrap_cancellation(
     assert repo.legal_strategy_job_actions(bootstrap.id) == ()
 
 
+def test_manifest_sealing_does_not_offer_preparation_cancellation(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    preparation = repo.create_preparation_job()
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    sealing = repo.set_strategy_job_current_stage(
+        preparation.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        stage=PreparationStage.MANIFEST_SEALING.value,
+    )
+
+    assert sealing.status is StrategyJobStatus.RUNNING
+    assert repo.legal_strategy_job_actions(preparation.id) == ()
+    assert (
+        repo.request_strategy_job_cancellation(
+            preparation.id, expected_version=sealing.status_version
+        )
+        == sealing
+    )
+
+
 def test_deleting_a_stage_job_tombstones_it_and_drops_its_subtype_row(
     tmp_path: Path,
 ) -> None:

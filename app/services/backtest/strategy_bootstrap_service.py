@@ -158,8 +158,13 @@ class StrategyBootstrapService:
                     latest.failure_code, JobFailureCode.PROVIDER_UNAVAILABLE
                 )
             )
+            detail = (
+                "Historical data qualification is not available"
+                if latest is None or not latest.failure_reason
+                else latest.failure_reason
+            )
             raise BootstrapStageFailure(
-                code, "Historical data qualification is not available"
+                code, detail
             )
         self._qualification_contract_digest = contract.contract_digest
 

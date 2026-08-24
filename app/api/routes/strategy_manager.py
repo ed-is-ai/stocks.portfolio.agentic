@@ -939,6 +939,12 @@ def _activity_context(
         "run": run,
         "actions": service.legal_actions(job_id).legal_actions,
         "terminal": job.status in _TERMINAL,
+        "retry_setup_idempotency_key": (
+            str(uuid4())
+            if job.job_type is StrategyJobType.BOOTSTRAP
+            and job.status is StrategyJobStatus.FAILED
+            else None
+        ),
         "review_url": review_url,
         "child_url": f"/strategy-manager/activities/{child_id}" if child_id else None,
     }

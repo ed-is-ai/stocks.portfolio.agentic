@@ -511,6 +511,9 @@ def test_failed_bootstrap_activity_shows_failure_and_legal_action(services):
     response = client.get("/strategy-manager/activities/job-1")
     assert response.status_code == 200
     assert "Historical provider certification failed" in response.text
+    assert "Try setup again" in response.text
+    assert 'action="/strategy-manager/setup"' in response.text
+    assert 'name="idempotency_key"' in response.text
     assert "Delete setup attempt" in response.text
     assert 'data-bs-target="#delete-confirmation-job-1"' in response.text
     assert "hx-get=" not in response.text

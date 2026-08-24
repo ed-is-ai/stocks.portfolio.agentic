@@ -258,22 +258,6 @@ class PreparationStageEngine(StageWalkEngine):
         if prep.base_currency is None or prep.starting_capital is None:
             return self._fail(job, claim_token, "Preparation input is incomplete")
         try:
-            for stage in STAGE_SEQUENCES[StrategyJobType.PREPARATION]:
-                job = self._repository.strategy_job(job_id)
-                if not _owns(job, claim_token):
-                    return job
-                if job.cancel_requested_at is not None:
-                    return self._cancel(job_id, claim_token)
-                try:
-                    job = self._repository.set_strategy_job_current_stage(
-                        job_id,
-                        claim_token,
-                        expected_version=job.status_version,
-                        stage=stage,
-                        lease=self._lease,
-                    )
-                except StrategyJobConflict:
-                    return self._repository.strategy_job(job_id)
             desc = next(
                 x
                 for x in discover_strategies(self._skills_root).strategies
@@ -297,12 +281,57 @@ class PreparationStageEngine(StageWalkEngine):
                 skills_root=self._skills_root,
                 project_root=self._project_root,
             )
-            evidence = resolver._resolve_roster_evidence(
-                profile_hash=s.profile_hash,
-                snapshot_month=str(prep.start_month),
-                base_currency=prep.base_currency,
-                selected_security_ids=s.canonical_security_ids,
-            )
+            evidence: tuple[PinnedSecurityEvidenceV1, ...] | None = None
+            for stage in STAGE_SEQUENCES[StrategyJobType.PREPARATION]:
+                job = self._repository.strategy_job(job_id)
+                if not _owns(job, claim_token):
+                    return job
+                if (
+                    job.cancel_requested_at is not None
+                    and stage != "manifest_sealing"
+                ):
+                    return self._cancel(job_id, claim_token)
+                try:
+                    job = self._repository.set_strategy_job_current_stage(
+                        job_id,
+                        claim_token,
+                        expected_version=job.status_version,
+                        stage=stage,
+                        lease=self._lease,
+                    )
+                except StrategyJobConflict:
+                    current = self._repository.strategy_job(job_id)
+                    if _owns(current, claim_token) and current.cancel_requested_at:
+                        return self._cancel(job_id, claim_token)
+                    return current
+                if stage == "evidence_selection":
+                    evidence = resolver._resolve_roster_evidence(
+                        profile_hash=prep.selection.profile_hash,
+                        snapshot_month=str(prep.start_month),
+                        base_currency=prep.base_currency,
+                        selected_security_ids=prep.selection.canonical_security_ids,
+                        pin_fx=False,
+                    )
+                elif stage == "fx_pinning":
+                    # Price/action revisions are already pinned; add only
+                    # the conditional FX revisions at the matching visible
+                    # stage so progress accurately reflects the work.
+                    if evidence is None:
+                        raise ValueError("selected evidence was not resolved")
+                    evidence = resolver._resolve_roster_evidence(
+                        profile_hash=s.profile_hash,
+                        snapshot_month=str(prep.start_month),
+                        base_currency=prep.base_currency,
+                        selected_security_ids=s.canonical_security_ids,
+                    )
+                else:
+                    # Once this stage is persisted, cancellation requests are
+                    # rejected by the repository and the atomic seal owns the
+                    # final outcome.
+                    if evidence is None:
+                        raise ValueError("selected evidence was not resolved")
+            if evidence is None:
+                raise ValueError("selected evidence was not resolved")
             generic = dict(prep.parameters)
             generic.pop(s.universe_parameter, None)
             base = build_run_input_manifest(

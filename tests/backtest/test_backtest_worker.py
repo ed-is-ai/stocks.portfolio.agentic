@@ -997,6 +997,15 @@ def test_preparation_missing_evidence_uses_required_data_code(
         "discover_strategies",
         lambda _root: type("D", (), {"strategies": (desc,)})(),
     )
+    stages: list[str] = []
+    original_set_stage = repo.set_strategy_job_current_stage
+
+    def record_stage(*args, **kwargs):
+        result = original_set_stage(*args, **kwargs)
+        stages.append(result.current_stage or "")
+        return result
+
+    monkeypatch.setattr(repo, "set_strategy_job_current_stage", record_stage)
 
     class Missing(ValueError):
         code = "required_data_missing"
@@ -1011,3 +1020,114 @@ def test_preparation_missing_evidence_uses_required_data_code(
     ).run(a.job.id, c.claim_token)  # type: ignore[arg-type]
     assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
     assert result.failure_detail == "Required selected evidence is unavailable"
+    assert stages == ["evidence_selection"]
+
+
+def test_preparation_cancels_when_cancellation_wins_a_stage_version_race(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, accepted, claim = _typed_claim(tmp_path, "cancel-race")
+    desc = _fake_descriptor().model_copy(
+        update={
+            "strategy_id": "momentum_v1",
+            "source_digest": accepted.preparation.strategy_source_digest,
+            "universe": StrategyUniverseContractV1(
+                schema_version="strategy_universe.v1",
+                mode="selected-securities",
+                parameter="symbols",
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "discover_strategies",
+        lambda _root: type("D", (), {"strategies": (desc,)})(),
+    )
+    monkeypatch.setattr(
+        worker_module.BacktestLaunchService,
+        "_resolve_roster_evidence",
+        lambda *_args, **_kwargs: (
+            PinnedSecurityEvidenceV1(
+                security_id="sec-001",
+                price_revision="1" * 64,
+                action_revision="1" * 64,
+            ),
+        ),
+    )
+    original_set_stage = repo.set_strategy_job_current_stage
+
+    def cancel_before_fx(*args, **kwargs):
+        if kwargs["stage"] == "fx_pinning":
+            current = repo.strategy_job(accepted.job.id)
+            repo.request_strategy_job_cancellation(
+                accepted.job.id, expected_version=current.status_version
+            )
+        return original_set_stage(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "set_strategy_job_current_stage", cancel_before_fx)
+
+    result = worker_module.PreparationStageEngine(
+        repo, prices=object(), fx=object()
+    ).run(accepted.job.id, claim.claim_token)  # type: ignore[arg-type]
+
+    assert result.status is StrategyJobStatus.CANCELLED
+
+
+def test_preparation_pins_fx_at_the_fx_stage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    repo, accepted, claim = _typed_claim(tmp_path, "fx-stage")
+    desc = _fake_descriptor().model_copy(
+        update={
+            "strategy_id": "momentum_v1",
+            "source_digest": accepted.preparation.strategy_source_digest,
+            "universe": StrategyUniverseContractV1(
+                schema_version="strategy_universe.v1",
+                mode="selected-securities",
+                parameter="symbols",
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "discover_strategies",
+        lambda _root: type("D", (), {"strategies": (desc,)})(),
+    )
+    pin_fx_values: list[bool] = []
+
+    def resolve(*_args, pin_fx=True, **_kwargs):
+        pin_fx_values.append(pin_fx)
+        return (
+            PinnedSecurityEvidenceV1(
+                security_id="sec-001",
+                price_revision="1" * 64,
+                action_revision="1" * 64,
+                fx_revision="2" * 64 if pin_fx else None,
+            ),
+        )
+
+    monkeypatch.setattr(
+        worker_module.BacktestLaunchService, "_resolve_roster_evidence", resolve
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "build_run_input_manifest",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("stop after stages")),
+    )
+    stages: list[str] = []
+    original_set_stage = repo.set_strategy_job_current_stage
+
+    def record_stage(*args, **kwargs):
+        result = original_set_stage(*args, **kwargs)
+        stages.append(result.current_stage or "")
+        return result
+
+    monkeypatch.setattr(repo, "set_strategy_job_current_stage", record_stage)
+
+    result = worker_module.PreparationStageEngine(
+        repo, prices=object(), fx=object()
+    ).run(accepted.job.id, claim.claim_token)  # type: ignore[arg-type]
+
+    assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
+    assert pin_fx_values == [False, True]
+    assert stages == ["evidence_selection", "fx_pinning", "manifest_sealing"]

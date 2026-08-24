@@ -1,5 +1,5 @@
 generated: 2026-08-20
-updated: 2026-08-22
+updated: 2026-08-24
 repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
@@ -33,7 +33,7 @@ sprint_planning:
 create_story:
   latest_story: 4-6-3-seal-the-selected-universe-digest
   issue: 281
-  status: ready-for-dev
+  status: done
   created_at: 2026-08-22
 epics:
   epic-1:
@@ -81,10 +81,10 @@ stories:
   4-3-set-up-strategy-manager-on-first-run: { issue: 268, status: backlog }
   4-4-understand-readiness-and-recover-through-diagnostics: { issue: 269, status: backlog }
   4-5-select-securities-for-a-backtest: { issue: 270, status: backlog }
-  4-6-prepare-the-evidence-needed-for-a-backtest: { issue: 271, status: backlog }
+  4-6-prepare-the-evidence-needed-for-a-backtest: { issue: 271, status: done }
   4-6-1-create-production-bootstrap-evidence: { issue: 279, status: done }
   4-6-2-make-bootstrap-submission-idempotent: { issue: 280, status: done }
-  4-6-3-seal-the-selected-universe-digest: { issue: 281, status: ready-for-dev }
+  4-6-3-seal-the-selected-universe-digest: { issue: 281, status: done }
   4-7-run-and-restart-backtests-from-pinned-evidence: { issue: 272, status: backlog }
   4-8-compare-results-using-compatible-evidence-rules: { issue: 273, status: backlog }
   4-9-complete-the-first-backtest-from-a-clean-checkout: { issue: 274, status: backlog }

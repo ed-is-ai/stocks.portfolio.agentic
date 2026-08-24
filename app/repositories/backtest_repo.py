@@ -3153,6 +3153,10 @@ class BacktestRepository:
                 job.job_type is StrategyJobType.BOOTSTRAP
                 and job.status is StrategyJobStatus.RUNNING
                 and job.current_stage == "profile_activation"
+            ) or (
+                job.job_type is StrategyJobType.PREPARATION
+                and job.status is StrategyJobStatus.RUNNING
+                and job.current_stage == "manifest_sealing"
             ):
                 return job
             if job.status is StrategyJobStatus.QUEUED:
@@ -4136,6 +4140,10 @@ class BacktestRepository:
                     job.job_type is StrategyJobType.BOOTSTRAP
                     and job.status is StrategyJobStatus.RUNNING
                     and job.current_stage == "profile_activation"
+                ) or (
+                    job.job_type is StrategyJobType.PREPARATION
+                    and job.status is StrategyJobStatus.RUNNING
+                    and job.current_stage == "manifest_sealing"
                 ):
                     return ()
                 return ("cancel",)

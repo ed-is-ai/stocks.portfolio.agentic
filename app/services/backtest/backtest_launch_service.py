@@ -397,6 +397,7 @@ class BacktestLaunchService:
         snapshot_month: str,
         base_currency: Literal["GBP", "USD"],
         selected_security_ids: tuple[str, ...] | None = None,
+        pin_fx: bool = True,
     ) -> tuple[PinnedSecurityEvidenceV1, ...]:
         """Pin every active-profile roster member's price/action/FX
         evidence for ``snapshot_month`` -- the chosen period's start month,
@@ -436,7 +437,7 @@ class BacktestLaunchService:
                 )
                 continue
             fx_revision: str | None = None
-            if evidence.currency != base_currency:
+            if pin_fx and evidence.currency != base_currency:
                 pair = _fx_pair(base_currency, evidence.currency)
                 if pair is None:
                     problems.append(

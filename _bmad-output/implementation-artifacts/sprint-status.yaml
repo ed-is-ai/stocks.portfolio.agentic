@@ -1,5 +1,5 @@
 # generated: 2026-08-10
-# last_updated: 2026-08-14
+# last_updated: 2026-08-24
 # project: Agents.stocks
 # project_key: NOKEY
 # tracking_system: file-system
@@ -82,7 +82,7 @@ development_status:
   4-3-set-up-strategy-manager-on-first-run: backlog
   4-4-understand-readiness-and-recover-through-diagnostics: backlog
   4-5-select-securities-for-a-backtest: backlog
-  4-6-prepare-the-evidence-needed-for-a-backtest: backlog
+  4-6-prepare-the-evidence-needed-for-a-backtest: done
   4-6-1-create-production-bootstrap-evidence: done
   4-6-2-make-bootstrap-submission-idempotent: done
   4-6-3-seal-the-selected-universe-digest: done

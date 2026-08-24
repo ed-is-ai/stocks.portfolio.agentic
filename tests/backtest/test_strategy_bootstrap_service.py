@@ -695,6 +695,21 @@ def test_terminal_activation_revalidates_latest_qualification(
     assert repo.active_snapshot_profile() is None
 
 
+def test_qualification_failure_retains_the_safe_recorded_reason(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    service = StrategyBootstrapService(
+        repo, jobs=None, providers=_unavailable_bundle(repo)
+    )
+
+    with pytest.raises(BootstrapStageFailure) as exc_info:
+        service._run_qualification()
+
+    assert exc_info.value.code is JobFailureCode.PROVIDER_UNAVAILABLE
+    assert exc_info.value.detail == "Historical source unavailable"
+
+
 def test_terminal_activation_requires_profile_activation_stage(
     tmp_path: Path,
 ) -> None:
