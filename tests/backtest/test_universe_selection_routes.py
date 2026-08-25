@@ -268,6 +268,166 @@ def test_configuration_submit_with_stale_profile_fails(
     assert "active profile has changed" in response.text
 
 
+# ---------------------------------------------------------------------------
+# Whole-universe selection (GH #305)
+# ---------------------------------------------------------------------------
+
+
+def test_universe_selector_fresh_load_defaults_whole_universe_on(
+    universe_env,
+) -> None:
+    response = client.get("/strategy-manager/configuration")
+    assert response.status_code == 200
+    assert 'name="whole_universe"' in response.text
+    checkbox_pos = response.text.index('name="whole_universe"')
+    # The checkbox must render checked on a genuinely fresh render.
+    surrounding = response.text[checkbox_pos - 200 : checkbox_pos + 200]
+    assert "checked" in surrounding
+
+
+def test_universe_selector_partial_reflects_explicit_whole_universe_false(
+    universe_env,
+) -> None:
+    response = client.get(
+        "/strategy-manager/configuration/universe", params={"whole_universe": ""}
+    )
+    assert response.status_code == 200
+    checkbox_pos = response.text.index('name="whole_universe"')
+    surrounding = response.text[checkbox_pos - 200 : checkbox_pos + 200]
+    assert "checked" not in surrounding
+
+
+def test_universe_selector_partial_treats_literal_false_string_as_off(
+    universe_env,
+) -> None:
+    # bool("false") is True in Python -- a literal "false" string must
+    # not be misread as truthy just because it is a non-empty string.
+    response = client.get(
+        "/strategy-manager/configuration/universe",
+        params={"whole_universe": "false"},
+    )
+    assert response.status_code == 200
+    checkbox_pos = response.text.index('name="whole_universe"')
+    surrounding = response.text[checkbox_pos - 200 : checkbox_pos + 200]
+    assert "checked" not in surrounding
+
+
+def test_universe_selector_partial_reflects_explicit_whole_universe_true(
+    universe_env,
+) -> None:
+    response = client.get(
+        "/strategy-manager/configuration/universe",
+        params={"whole_universe": "true"},
+    )
+    assert response.status_code == 200
+    checkbox_pos = response.text.index('name="whole_universe"')
+    surrounding = response.text[checkbox_pos - 200 : checkbox_pos + 200]
+    assert "checked" in surrounding
+
+
+def test_configuration_submit_whole_universe_resolves_full_roster(
+    universe_env,
+) -> None:
+    repo, launch = universe_env
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "idem-1",
+            "whole_universe": "true",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert len(launch.launch_calls) == 1
+    command = launch.launch_calls[0]
+    assert command.universe_selection is not None
+    assert command.universe_selection.canonical_security_ids == (
+        "sid_001",
+        "sid_002",
+        "sid_003",
+    )
+
+
+def test_configuration_submit_whole_universe_empty_roster_fails(
+    universe_env,
+) -> None:
+    repo, launch = universe_env
+    repo._securities = []
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "idem-1",
+            "whole_universe": "true",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    assert "The active roster has no securities to select" in response.text
+
+
+def test_configuration_submit_toggle_off_falls_back_to_manual_ids(
+    universe_env,
+) -> None:
+    repo, launch = universe_env
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "idem-1",
+            "security_ids": "sid_001",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    command = launch.launch_calls[0]
+    assert command.universe_selection is not None
+    assert command.universe_selection.canonical_security_ids == ("sid_001",)
+
+
+def test_configuration_submit_whole_universe_stale_profile_fails(
+    universe_env,
+) -> None:
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": "different_hash",
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "idem-1",
+            "whole_universe": "true",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    assert "active profile has changed" in response.text
+
+
 def test_configuration_submit_with_multiple_securities(
     universe_env,
 ) -> None:

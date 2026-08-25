@@ -188,3 +188,9 @@
 - source_spec: `spec-gh-291-realised-pnl-collapse-summary.md`
   summary: A resolved GBP P&L that rounds to negative zero can render as `+£-0.00`, producing contradictory sign, colour, and win classification.
   evidence: `_round2` preserves a float negative-zero sign, while the pre-existing realised-P&L template uses `>= 0` for both positive styling and explicit `+` rendering. The issue predates this story's win/loss count and needs a shared money-display/normalisation decision rather than a narrow review patch.
+
+## Deferred from: code review of spec-gh-305-whole-universe-selection (2026-08-25)
+
+- source_spec: `spec-gh-305-whole-universe-selection.md`
+  summary: `_configuration_context()` never sets `selected_security_ids` in its returned template context (only the standalone `universe_selector` GET route does), so any POST validation-error 422 re-render of `_strategy_configuration.html` silently blanks the manual security picker -- no checkbox stays checked, no chips render, "0 selected" is shown -- even though the user's actual submitted `security_ids` are still known server-side.
+  evidence: `grep -n "selected_security_ids" app/api/routes/strategy_manager.py` shows exactly one assignment, inside `universe_selector` (the htmx search-partial route), never inside `_configuration_context`. This predates the whole-universe toggle work (Story 4.5's original manual-only picker had the same gap) and is out of that story's stated scope; surfaced incidentally by an adversarial review of the whole-universe diff.

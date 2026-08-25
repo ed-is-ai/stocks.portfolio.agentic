@@ -360,8 +360,14 @@ async def universe_selector(
     backtest: BacktestDep,
     q: str = "",
     security_ids: list[str] | None = None,
+    whole_universe: str | None = None,
 ) -> HTMLResponse:
-    """Return universe selector partial with roster securities."""
+    """Return universe selector partial with roster securities.
+
+    ``whole_universe`` reflects the caller's *current* toggle state so
+    search-as-you-type re-renders preserve it rather than resetting to
+    the fresh-load default.
+    """
     active = backtest.active_snapshot_profile()
     securities: list[tuple[str, str, str, str]] = []
     if active is not None:
@@ -373,6 +379,7 @@ async def universe_selector(
             "securities": securities,
             "search_query": q,
             "selected_security_ids": frozenset(security_ids or ()),
+            "whole_universe": _is_truthy_flag(whole_universe),
             "profile_hash": (active.profile_hash if active is not None else ""),
             "activation_seq": (active.activation_seq if active is not None else 0),
         },
@@ -467,6 +474,19 @@ _PARAM_FIELD_PREFIX = "param__"
 _INTEGER_RE = re.compile(r"-?[0-9]+")
 _NUMBER_RE = re.compile(r"-?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)")
 _INDEX_RE = re.compile(r"[0-9]+")
+_FALSY_FLAG_VALUES = frozenset({"false", "0", "off", "no"})
+
+
+def _is_truthy_flag(raw: str | None) -> bool:
+    """Parse a submitted boolean-flag string, not just its presence.
+
+    A checked HTML checkbox only ever sends its ``value`` (never a
+    literal ``"false"``), but ``bool(raw)`` is still wrong for any raw
+    string input -- ``bool("false")`` is ``True`` in Python. Treat a
+    present-but-falsy-looking value as off so hand-built query strings
+    or a future hidden-fallback-input pattern behave correctly.
+    """
+    return raw is not None and raw.strip().lower() not in _FALSY_FLAG_VALUES | {""}
 _FIXED_FORM_FIELDS = frozenset(
     {
         "strategy_id",
@@ -478,6 +498,7 @@ _FIXED_FORM_FIELDS = frozenset(
         "starting_capital",
         "idempotency_key",
         "security_ids",
+        "whole_universe",
     }
 )
 
@@ -495,6 +516,10 @@ def _configuration_context(
         (item for item in view.strategies if item.strategy_id == selected_id), None
     )
     extra.setdefault("idempotency_key", str(uuid4()))
+    # Default the "whole universe" toggle to on for a genuinely fresh
+    # render; the POST-error re-render path passes the submitted state
+    # explicitly via ``extra`` so it round-trips instead of resetting.
+    extra.setdefault("whole_universe", True)
     enum_options: dict[str, tuple[tuple[str, str], ...]] = {}
     enum_default_tokens: dict[str, str] = {}
     if selected is not None:
@@ -776,6 +801,14 @@ async def submit_strategy_configuration(
             None,
         )
     command, raw_values, parameter_raw, errors = _decode_launch_form(form, strategy)
+    # "whole universe" toggle -- rendered back on every response
+    # (success or error) so it round-trips through htmx partial swaps.
+    submitted_whole_universe = form.get("whole_universe")
+    whole_universe = _is_truthy_flag(
+        submitted_whole_universe
+        if isinstance(submitted_whole_universe, str)
+        else None
+    )
     context = _configuration_context(
         launch,
         backtest,
@@ -785,6 +818,7 @@ async def submit_strategy_configuration(
         values=raw_values,
         parameter_values=parameter_raw,
         idempotency_key=form.get("idempotency_key") or str(uuid4()),
+        whole_universe=whole_universe,
     )
     # Story 4.5: validate universe selection
     raw_security_ids: list[str] = [
@@ -819,6 +853,24 @@ async def submit_strategy_configuration(
                 "security_ids",
                 "The active profile has changed. Please reselect securities.",
             )
+        elif whole_universe:
+            # Never trust a client-submitted list of security IDs for
+            # whole-universe mode -- resolve fresh from the roster
+            # already fetched into ``context["securities"]`` for this
+            # same active profile. The resolved set is definitionally
+            # in-roster, so the "unknown securities" check below is
+            # skipped for this branch.
+            raw_security_ids = [
+                sid
+                for sid, _ps, _mic, _cur in cast(
+                    list[tuple[str, str, str, str]], context["securities"]
+                )
+            ]
+            if not raw_security_ids:
+                errors.setdefault(
+                    "security_ids",
+                    "The active roster has no securities to select.",
+                )
         elif raw_security_ids:
             # Validate all submitted IDs are in the roster
             roster_ids = {
