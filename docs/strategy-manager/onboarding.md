@@ -1,49 +1,51 @@
 # Strategy Manager onboarding
 
 This guide explains how to get from a local checkout to a completed Strategy
-Manager backtest, how to identify the gate that is stopping you, and which
-parts of the current setup are not yet self-service.
+Manager backtest using only supported routes and UI actions -- no manual
+SQLite edits, no guessed or copied security IDs, and no bypassing readiness.
 
-> [!IMPORTANT]
-> Strategy Manager is not currently bootstrappable from a clean checkout.
-> The web UI can initialize historical months and run backtests only after an
-> operator has provisioned a qualified historical-data contract, an immutable
-> reconstruction roster, and an active snapshot profile. There is no supported
-> CLI or UI workflow that creates those three prerequisites yet.
+Strategy Manager is bootstrappable from a clean checkout. `StrategyBootstrapService`
+(`app/services/backtest/strategy_bootstrap_service.py`) qualifies the historical
+provider contract, captures an immutable reconstruction roster and identity
+evidence, validates a compatible scanner-data profile, and activates it --- all
+through one guarded **Set up Strategy Manager** action. Nothing in this guide
+requires opening a SQLite client, hand-provisioning a database, or inventing a
+placeholder `security_id`.
 
-Do not edit the Strategy Manager SQLite tables by hand. Much of the evidence is
-content-addressed or append-only, and a plausible-looking manual row can make
-the database internally inconsistent.
-
-## What must exist first
-
-Strategy Manager has four gates. A later gate cannot compensate for a missing
-earlier one.
+## The supported journey
 
 ```text
-Historical provider qualification
-              |
-              v
-Reconstruction roster + active snapshot profile
-              |
-              v
-Ready monthly snapshot coverage
-              |
-              v
-Backtest launch -> worker -> result
+Readiness (read-only)
+        |
+        v
+Bootstrap (Setup)  --  qualification -> roster/identity capture -> profile activation
+        |
+        v
+Historical initialization  --  ready monthly scanner-data coverage
+        |
+        v
+Universe selection  --  choose which active-profile securities a Run trades
+        |
+        v
+Strategy configuration + launch  --  evidence preparation -> Backtest
+        |
+        v
+Result
 ```
 
-1. **Historical provider qualification** proves that the installed yfinance,
-   pandas, calendar, fixture, and live-probe contract still matches the
-   version the application expects.
-2. **Roster and active profile** pin the securities, aliases, detector source
-   versions, calendar version, and reconstruction policy used by a run.
-3. **Monthly coverage** stores complete, immutable scanner snapshots for every
-   month in a Ready interval.
-4. **Backtest execution** discovers a Strategy Skill, validates its parameters,
-   pins price/action/FX revisions, and runs it in a child worker process.
+Every stage above is a real, guarded route. Reads, page loads, readiness
+checks, and diagnostics never create, repair, activate, or queue anything --
+only the guarded POST routes below do.
 
-The first two gates are provisioning concerns. The web UI owns gates 3 and 4.
+| Stage | Read route | Mutating route |
+| --- | --- | --- |
+| Readiness | `GET /strategy-manager/readiness` | -- |
+| Diagnostics | `GET /strategy-manager/diagnostics` | -- |
+| Setup (Bootstrap) | `GET /strategy-manager/setup` | `POST /strategy-manager/setup` |
+| Historical initialization | `GET /strategy-manager/initialization` | `POST /strategy-manager/initialization` |
+| Universe selection | `GET /strategy-manager/configuration/universe` | (submitted as part of launch) |
+| Strategy configuration + launch | `GET /strategy-manager/configuration` | `POST /strategy-manager/configuration` |
+| Result | `GET /strategy-manager/results/{run_id}` | -- |
 
 ## Install and start the application
 
@@ -68,12 +70,10 @@ that should execute jobs:
 STRATEGY_MANAGER_WORKER_ENABLED=true
 ```
 
-Set it to `false` only for additional web processes that must not own the local
-dispatcher. If the worker is disabled everywhere, jobs remain Queued.
+Set it to `false` only for additional web processes that must not own the
+local dispatcher. If the worker is disabled everywhere, jobs remain Queued.
 
-## Run the preflight
-
-### 1. Confirm that Strategy Skills are discoverable
+## Confirm that Strategy Skills are discoverable
 
 Run this from the repository root:
 
@@ -104,185 +104,151 @@ The current repository should discover these six Strategy IDs:
 A warning applies only to the folder it names. Fix its `SKILL.md` metadata or
 `scripts/strategy.py` entry point before trying to select that Strategy.
 
-### 2. Inspect the durable setup state
+## Check readiness
 
-Start the application once before running this check so it can create the
-database schema. The query is read-only.
+Open **Strategy Manager** -> **Readiness**, or fetch `GET
+/strategy-manager/readiness` directly. This is a pure read: it never creates,
+repairs, activates, or queues anything.
 
-```bash
-uv run python - <<'PY'
-import sqlite3
-from app.core.config import BACKTEST_DB
-from app.repositories import db
-from app.repositories.backtest_repo import BacktestRepository
+Readiness reports six independent prerequisites plus worker health:
 
-with sqlite3.connect(f"file:{BACKTEST_DB}?mode=ro", uri=True) as connection:
-    checks = {
-        "qualification attempts": "SELECT COUNT(*) FROM historical_source_qualifications",
-        "passed qualifications": "SELECT COUNT(*) FROM historical_source_qualifications WHERE passed = 1",
-        "reconstruction rosters": "SELECT COUNT(*) FROM reconstruction_rosters",
-        "snapshot profiles": "SELECT COUNT(*) FROM snapshot_profiles",
-        "active profiles": "SELECT COUNT(*) FROM active_snapshot_profile",
-        "ready snapshot months": "SELECT COUNT(*) FROM snapshot_months",
-        "jobs": "SELECT COUNT(*) FROM strategy_jobs",
-    }
-    for label, statement in checks.items():
-        print(f"{label}: {connection.execute(statement).fetchone()[0]}")
+| Prerequisite | Meaning when not Ready |
+| --- | --- |
+| Qualification | The installed provider/calendar/fixture/probe contract has not passed certification. |
+| Roster | No immutable reconstruction roster has been captured yet. |
+| Active profile | No scanner-data version is activated. |
+| Coverage | No Ready monthly snapshot coverage exists yet for the active profile. |
+| Worker | The local dispatcher is disabled, unavailable, or busy. |
+| Strategy discovery | No Strategy Skill was discovered, or discovery reported a warning. |
 
-repository = BacktestRepository(db.make_connect(lambda: str(BACKTEST_DB)))
-current = repository.current_qualification_contract_digest()
-print(f"current compatible qualification: {'yes' if current else 'no'}")
-PY
-```
+Each row shows a state, an explanation, and (where applicable) one supported
+recovery action -- generally a link to Setup or Historical initialization.
+`GET /strategy-manager/diagnostics` adds bounded recent-failure detail for the
+same prerequisites without exposing secrets, raw provider payloads, local
+paths, or stack traces.
 
-Interpret the output in order:
+On a genuinely clean checkout, Qualification, Roster, and Active profile all
+start out not-Ready. That is expected -- Setup (below) is what makes them
+Ready, not a manual step.
 
-| Result | Meaning | Next action |
-| --- | --- | --- |
-| `current compatible qualification: no` | The latest attempt did not pass, or its installed package/calendar/fixture/probe contract differs from the current one. An older passed row is not sufficient. | Provision or rerun the exact qualification workflow. The UI cannot do this. |
-| `reconstruction rosters: 0` | No immutable market universe has been captured. | Provision a roster from the required DataHub S&P 500, TradingView US, and TradingView UK sources. The UI cannot do this. |
-| `active profiles: 0` | Strategy Manager has no scanner-data version to use. | Build, persist, and activate a profile bound to the roster. The UI cannot do this. |
-| `ready snapshot months: 0` | Provisioning exists, but no historical month has completed. | Use **Historical initialization** in the UI. |
-| `jobs: 0` | Nothing has been submitted yet. | Initialize coverage first, then configure a backtest. |
+## Set up Strategy Manager (Bootstrap)
 
-On a clean checkout, the first three counts are expected to be zero. That is a
-known onboarding gap, not an error in your installation command.
+Open **Strategy Manager** -> **Setup**, or fetch `GET /strategy-manager/setup`.
+The page shows either "already set up" (with the activation time) or a
+one-button confirmation form.
 
-## Provisioning boundary
+Selecting **Set up Strategy Manager** submits `POST /strategy-manager/setup`
+(local access, or a shared auth token, required -- see Troubleshooting). This
+enqueues one Bootstrap activity that a worker then advances through three
+closed stages, shown on the Activity page:
 
-There is currently no supported end-user command that safely composes the
-following application APIs:
+1. **Qualification** -- verifies the installed yfinance/pandas/calendar
+   provider contract still matches a qualified fixture-and-probe result.
+2. **Roster and identity capture** -- captures an immutable reconstruction
+   roster from the required DataHub S&P 500, TradingView US, and TradingView
+   UK sources, and resolves each member's market identity.
+3. **Profile validation and activation** -- validates a scanner-data profile
+   bound to that roster and, only after every prior stage has succeeded,
+   activates it.
 
-- `QualificationRunner` in
-  `app/services/backtest/historical_data_qualification.py`;
-- `ReconstructionRosterCaptureService` in
-  `app/services/backtest/reconstruction_roster.py`;
-- `SnapshotProfileV1`,
-  `BacktestRepository.compare_and_insert_snapshot_profile()`, and
-  `BacktestRepository.activate_snapshot_profile()`.
+Submitting Setup again after Bootstrap has already produced a compatible
+active profile is a verified no-op: it returns the existing activity rather
+than starting another one or reporting a conflict.
 
-Until a bootstrap command is added, use one of these options:
-
-1. Run against a database set provisioned by the application maintainer for
-   the **same Git commit and locked dependency versions**.
-2. Add a reviewed bootstrap command that composes the APIs above and records
-   failures without bypassing qualification or integrity validation.
-
-A provisioned environment may need all of the following together:
-
-- `data/backtest.db` — qualification, roster, profile, coverage, jobs, and
-  results;
-- `data/historical_price_cache.db` — immutable provider-native price/action
-  evidence referenced by the backtest database;
-- `app/agents/trader/trades.db` — content-addressed `GBPUSD=X` quotes when the
-  roster currency differs from the selected base currency.
-
-Copying only `backtest.db` can leave dangling evidence digests. Never use an
-untrusted database bundle.
+If a stage fails, the Activity page shows a stable failure code and a safe,
+actionable reason (never a raw provider payload, secret, or stack trace).
+Fix the named cause and use **Retry setup**.
 
 ## Initialize historical coverage
 
-Once the preflight reports a passed qualification and one active profile:
+Once Setup is complete (Readiness shows Qualification, Roster, and Active
+profile all Ready):
 
-1. Start the application with its Strategy Manager worker enabled.
-2. Open **Strategy Manager** -> **Historical initialization**.
-3. Choose fully completed months in `YYYY-MM` format. The current month is not
-   eligible.
-4. For an initial smoke test, request one month. A large roster and a long
+1. Open **Strategy Manager** -> **Historical initialization**, or fetch `GET
+   /strategy-manager/initialization`.
+2. Choose fully completed months in `YYYY-MM` format. The current month is
+   not eligible.
+3. For an initial smoke test, request one month. A large roster and a long
    range can require substantial network work.
-5. Select **Initialize** and leave the server running.
-6. Watch the Activity page until it reaches Complete. The page polls every
+4. Select **Initialize** (`POST /strategy-manager/initialization`) and leave
+   the server running.
+5. Watch the Activity page until it reaches Complete. The page polls every
    three seconds.
-7. Return to Strategy Manager and confirm the month appears in a Ready
+6. Return to Strategy Manager and confirm the month appears in a Ready
    interval.
 
-Initialization reconstructs every member of the active profile. One failed or
+Initialization reconstructs every member of the active profile. A month
+already covered is a no-op (the route reports "Coverage is already Ready for
+the requested period" and does not enqueue another attempt). One failed or
 partial member prevents the month from being presented as Ready. Restarting a
 failed attempt reuses committed shared evidence but replays the attempt from
 the beginning.
 
-## Find a usable security ID
+## Select a universe and launch a Backtest
 
-Every bundled Strategy currently trades one configured `security_id`. The UI
-does not yet display the active roster's internal IDs, and the sample default
-`sec-aapl` is a test-friendly placeholder that may not exist in a live roster.
+Open **Strategy Manager** -> **Configure a Backtest** (`GET
+/strategy-manager/configuration`).
 
-Use this read-only query to select an ID from the active profile:
+1. Choose a Strategy. Start with **Buy and Hold Backtest** -- it has the
+   fewest signal gates.
+2. Choose the securities the Run trades. The universe selector (`GET
+   /strategy-manager/configuration/universe`) lists every active-profile
+   roster member with its provider symbol, MIC, and currency -- no manual
+   lookup or hand-typed ID is needed. Search narrows the list; "select the
+   whole active roster" is on by default and can be turned off to hand-pick a
+   subset. The selector rejects a stale profile, an unknown ID, or an empty
+   selection rather than silently accepting it; a duplicate ID is collapsed
+   into one entry rather than rejected.
+3. Keep `fixed_shares` small, for example `10`.
+4. Set `entry_on_or_after` to a date on or before the selected Ready period.
+5. Select a start and end month inside one Ready interval.
+6. Enter a positive starting capital, for example `10000.00`.
+7. Select the base currency and choose **Run Backtest**
+   (`POST /strategy-manager/configuration`).
+8. Keep the server running while the Activity page is Queued or Running.
+9. When it reaches Complete, choose **Review this Backtest**
+   (`GET /strategy-manager/results/{run_id}`).
 
-```bash
-uv run python - <<'PY'
-import sqlite3
-from app.core.config import BACKTEST_DB
-
-statement = """
-SELECT member.security_id, member.provider_symbol, member.mic, member.currency
-FROM active_snapshot_profile AS active
-JOIN snapshot_profiles AS profile
-  ON profile.profile_hash = active.profile_hash
-JOIN reconstruction_roster_members AS member
-  ON member.roster_digest = profile.roster_digest
-ORDER BY member.mic, member.provider_symbol
-"""
-with sqlite3.connect(f"file:{BACKTEST_DB}?mode=ro", uri=True) as connection:
-    for row in connection.execute(statement):
-        print("\t".join(row))
-PY
-```
-
-Copy the first-column value for the symbol you intend to test and paste it
-into the Strategy's `security_id` field.
-
-## Run a smoke-test backtest
-
-Start with **Buy and Hold Backtest** because it has the fewest signal gates.
-
-1. Open **Strategy Manager** -> **Configure a Backtest**.
-2. Select **Buy and Hold Backtest**.
-3. Replace `sec-aapl` with a real active-profile security ID from the query
-   above.
-4. Keep `fixed_shares` small, for example `10`.
-5. Set `entry_on_or_after` to a date on or before the selected Ready period.
-6. Select a start and end month inside one Ready interval.
-7. Enter a positive starting capital, for example `10000.00`.
-8. Select the base currency and choose **Run Backtest**.
-9. Keep the server running while the Activity page is Queued or Running.
-10. When it reaches Complete, choose **Review this Backtest**.
-
-Signals are evaluated after a session close and accepted orders fill at the
-next exchange session's open. The v1 engine is long-only, does not pyramid,
-and permits only full-position exits.
+Launch first runs an evidence-preparation activity that seals exactly the
+selected universe's price/action (and, where needed, FX) evidence into an
+immutable Run-input manifest; the Backtest itself then replays only that
+pinned evidence. Signals are evaluated after a session close and accepted
+orders fill at the next exchange session's open. The v1 engine is long-only,
+does not pyramid, and permits only full-position exits.
 
 ### FX requirement
 
-Launch pins evidence for the **entire active roster**, even though a bundled
-Strategy trades one security. If any roster member's currency differs from the
-selected base currency, Strategy Manager requires a content-addressed
-`GBPUSD=X` quote in `trades.db` for the first calendar day of the start month.
-
-If that quote is absent, launch fails with:
+If any selected security's currency differs from the chosen base currency,
+launch requires a content-addressed FX quote (for example `GBPUSD=X`) for the
+first calendar day of the start month. If that quote is unavailable, launch
+fails with:
 
 ```text
 Pinned historical FX evidence is unavailable for '<security-id>' as of YYYY-MM-01.
 ```
 
-Changing GBP to USD usually does not solve this for a mixed US/UK roster; it
-only changes which members need conversion. Historical FX backfill is not
-currently part of the Strategy Manager UI.
+Historical FX backfill is not currently part of the Strategy Manager UI.
+Selecting a single-currency universe (or a universe that already matches the
+chosen base currency) avoids this requirement entirely -- note that "select
+the whole active roster" is on by default, so a mixed-currency roster will
+hit this requirement out of the box unless you narrow the selection or
+provision the matching FX quote.
 
 ## Troubleshooting
 
 | Symptom | Cause | What to do |
 | --- | --- | --- |
-| **Initialize** is disabled: “No active scanner-data version is configured.” | No active snapshot profile exists. | Complete provisioning; the UI cannot create the profile. |
-| **Initialize** is disabled: “Historical data providers have not passed certification.” | No compatible passed qualification exists. | Rerun the exact live qualification workflow; check internet access and provider throttling. |
-| **Run Backtest** is disabled. | No Ready monthly coverage exists, or coverage integrity validation failed. | Complete Historical initialization and resolve any red coverage alert. |
-| No Strategies appear. | Discovery rejected the Skill metadata or runtime. | Run the discovery preflight and fix the named folder warning. |
-| A run completes with no trades. | The `security_id` is not in the active roster, the entry date is after the period, there is insufficient warm-up, or the Strategy's signal gates never passed. | Use a roster ID, then smoke-test Buy and Hold before a signal-heavy Strategy. |
-| Launch reports missing pinned historical evidence. | `backtest.db` references a price/action revision absent from `historical_price_cache.db`. | Restore the matching provisioned cache or rerun supported initialization; do not patch the digest. |
-| Launch reports missing pinned historical FX evidence. | The mixed-currency roster lacks a quote for the start month's first day. | Provision the matching historical `GBPUSD=X` quote. |
+| **Setup** shows "already set up" but you expected fresh provisioning. | A compatible active profile already exists; Setup is a verified no-op by design. | Check `GET /strategy-manager/readiness` to confirm what is active. |
+| **Initialize** is disabled: "No active scanner-data version is configured." | No active snapshot profile exists yet. | Complete **Setup** first. |
+| **Initialize** is disabled: "Historical data providers have not passed certification." | No compatible passed qualification exists. | Retry **Setup**; check internet access and provider throttling. |
+| **Run Backtest** is disabled. | No Ready monthly coverage exists, or coverage integrity validation failed. | Complete **Historical initialization** and resolve any red coverage alert. |
+| No Strategies appear. | Discovery rejected the Skill metadata or runtime. | Run the discovery preflight above and fix the named folder warning. |
+| A run completes with no trades. | The entry date is after the selected period, there is insufficient warm-up, or the Strategy's signal gates never passed. | Smoke-test Buy and Hold on a Ready period before a signal-heavy Strategy. |
+| Launch reports missing pinned historical evidence. | `backtest.db` references a price/action revision absent from `historical_price_cache.db`. | Rerun **Historical initialization** for the affected period; do not patch the digest by hand. |
+| Launch reports missing pinned historical FX evidence. | The selected universe's currencies do not all match the base currency, and no matching FX quote is pinned for the start month. | Choose a single-currency universe or base currency, or provision the matching FX quote. |
 | Activity remains Queued. | No running process owns the dispatcher. | Start one app process with `STRATEGY_MANAGER_WORKER_ENABLED=true`. |
-| Activity becomes Failed with “Worker process could not be started.” | The child interpreter or repository working directory is unavailable. | Start from the repository root with the installed `uv` environment and inspect the server log. |
-| Activity fails at a particular month. | Qualification/profile drift, missing provider evidence, or reconstruction/integrity validation stopped the month. | Read the Activity failure detail; correct the named gate, then use Restart. |
+| Activity becomes Failed with "Worker process could not be started." | The child interpreter or repository working directory is unavailable. | Start from the repository root with the installed `uv` environment and inspect the server log. |
+| Activity fails at a particular stage or month. | Qualification/profile drift, missing provider evidence, or reconstruction/integrity validation stopped the stage or month. | Read the Activity failure detail; correct the named gate, then use Restart/Retry. |
 | The page does not update while the server log shows progress. | htmx/JavaScript assets did not load or a proxy cached partial responses. | Reload without cache and confirm `/static/js/strategy-manager.js` returns HTTP 200. |
 | Remote POST requests return 403. | Mutating routes require localhost or the shared auth token. | Use localhost, or configure `APP_AUTH_TOKEN` and send it through the application's supported auth mechanism. |
 
@@ -295,26 +261,14 @@ uv run pytest tests/backtest/test_skill_discovery.py \
   tests/backtest/test_strategy_manager_lifespan.py \
   tests/test_strategy_manager_routes.py -q
 
+uv run pytest tests/backtest/test_strategy_manager_clean_checkout_journey.py -q
+
 uv run pytest skills/rtly-backtest-buy-and-hold/scripts/tests -q
 ```
 
-Passing tests prove the discovery, route, worker-lifecycle, and Strategy
-contracts against controlled fixtures. They do not provision your local
-databases or prove that today's live providers will pass qualification.
-
-## Current onboarding gaps
-
-The following should be treated as product gaps, not operator mistakes:
-
-1. No supported command or UI provisions qualification, roster, and active
-   profile state on a clean install.
-2. The configuration UI requests a `security_id` but does not expose a safe
-   active-roster picker.
-3. A one-security Strategy still pins the full roster, making mixed-currency
-   historical FX evidence a launch-wide requirement.
-4. There is no Strategy Manager historical FX backfill workflow.
-
-Until those gaps are closed, the earliest reliable success criterion is not
-“the server starts”; it is “the preflight shows a compatible qualification,
-one roster, one active profile, at least one Ready month, a real roster
-security ID, and any required FX evidence.”
+Passing tests prove the discovery, route, worker-lifecycle, Bootstrap,
+initialization, preparation, and Backtest contracts against controlled
+fixtures. They do not provision your local databases with live data, and they
+do not prove that today's live providers will pass qualification -- the
+Fixture path used in tests is visibly distinguished from Production and is
+never a substitute for running **Setup** for real.
