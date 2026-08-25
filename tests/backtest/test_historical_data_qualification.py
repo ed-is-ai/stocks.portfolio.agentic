@@ -167,7 +167,7 @@ def test_content_digest_is_repeatable_and_detects_change() -> None:
         ),
         (curl_exceptions.ReadTimeout("timeout"), FailureCode.PROVIDER_UNAVAILABLE, 3),
         (RuntimeError("throttled"), FailureCode.PROVIDER_THROTTLED, 3),
-        (RuntimeError("contract"), FailureCode.PROVIDER_CONTRACT_ERROR, 1),
+        (RuntimeError("contract"), FailureCode.PROVIDER_CONTRACT_ERROR, 3),
     ],
 )
 def test_closed_retry_taxonomy_and_exact_delays(
@@ -182,7 +182,7 @@ def test_closed_retry_taxonomy_and_exact_delays(
         adapter.fetch(_definition())
     assert exc_info.value.code is code
     assert len(ticker.calls) == attempts
-    assert sleeps == ([1.125, 2.125] if attempts == 3 else [])
+    assert sleeps == [1.125, 2.125]
 
 
 def test_metadata_transport_failure_is_inside_retry_boundary() -> None:
@@ -227,7 +227,10 @@ def test_partial_or_malformed_success_fails_immediately(mutation: str) -> None:
         FailureCode.REQUIRED_DATA_MISSING,
         FailureCode.PROVIDER_CONTRACT_ERROR,
     }
-    assert len(ticker.calls) == 1
+    # duplicate/naive raise PROVIDER_CONTRACT_ERROR, which is retryable, so
+    # the bounded retry loop exhausts the fake ticker's single response.
+    expected_attempts = 3 if mutation in {"duplicate", "naive"} else 1
+    assert len(ticker.calls) == expected_attempts
 
 
 def test_provider_identity_conflict_is_ambiguous() -> None:

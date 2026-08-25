@@ -16,7 +16,11 @@ from app.repositories.backtest_repo import (
     DetectorCacheKey,
 )
 from app.repositories.historical_price_repo import StoredHistoricalEvidence
-from app.services.backtest.canonical_manifest import canonical_json, manifest_digest
+from app.services.backtest.canonical_manifest import (
+    canonical_json,
+    canonical_json_digest,
+    manifest_digest,
+)
 from app.services.backtest.detectors import (
     DETECTOR_REGISTRY,
     DetectorContext,
@@ -334,8 +338,8 @@ class HistoricalScanReconstructor:
                 request, "integrity_error", "provider evidence manifest is invalid"
             ) from exc
         if (
-            canonical_json(evidence_manifest) != evidence.canonical_manifest_json
-            or manifest_digest(evidence_manifest) != evidence.data_revision
+            canonical_json_digest(evidence.canonical_manifest_json)
+            != evidence.data_revision
             or evidence_manifest.get("rows") != list(evidence.rows)
             or evidence_manifest.get("actions") != list(evidence.actions)
             or evidence_manifest.get("security_id") != evidence.security_id

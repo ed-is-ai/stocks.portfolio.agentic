@@ -15,6 +15,10 @@ from app.services.backtest.historical_initialization_engine import (
     InitializationMonthError,
     InitializationRepository,
 )
+from app.services.backtest.historical_data_qualification import (
+    FailureCode,
+    ProviderFailure,
+)
 from app.services.backtest.historical_price_evidence import HistoricalEvidenceRequest
 from app.services.backtest.reconstruction_roster import (
     CapturedRosterMemberV1,
@@ -296,6 +300,7 @@ def test_cached_evidence_is_reused_without_provider_access() -> None:
     setattr(processor, "_price_repository", Prices())
     setattr(processor, "_evidence_adapter", Provider())
     setattr(processor, "_alias_revision", "b" * 64)
+    setattr(processor, "_evidence_cache", {})
     roster_member = SimpleNamespace(security_id="security-1", provider_symbol="AAPL")
     request = HistoricalEvidenceRequest(
         security_id="security-1",
@@ -312,6 +317,103 @@ def test_cached_evidence_is_reused_without_provider_access() -> None:
     )
 
     assert processor._evidence_for(roster_member, request) is cached
+
+
+def test_verified_evidence_is_reused_across_month_processor_calls() -> None:
+    cached = SimpleNamespace(
+        security_id="security-1",
+        alias_revision="b" * 64,
+        requested_symbol="AAPL",
+        observed_symbol="AAPL",
+        currency="USD",
+        quote_unit="USD",
+        exchange_timezone="America/New_York",
+        rows=({"session": "2026-07-31"},),
+    )
+
+    class Prices:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def find_request(self, **_kwargs):
+            self.calls += 1
+            return cached
+
+    prices = Prices()
+    processor = object.__new__(CanonicalSnapshotMonthProcessor)
+    setattr(processor, "_price_repository", prices)
+    setattr(processor, "_evidence_adapter", SimpleNamespace())
+    setattr(processor, "_alias_revision", "b" * 64)
+    setattr(processor, "_evidence_cache", {})
+    roster_member = SimpleNamespace(security_id="security-1", provider_symbol="AAPL")
+    request = HistoricalEvidenceRequest(
+        security_id="security-1",
+        alias_revision="b" * 64,
+        symbol="AAPL",
+        start=date(1970, 1, 1),
+        end=date(2026, 8, 1),
+        expected_currency="USD",
+        expected_quote_unit="USD",
+        expected_timezone="America/New_York",
+        expected_sessions=(date(2026, 7, 31),),
+        allowed_observed_symbols=("AAPL",),
+        allow_missing_prefix=True,
+    )
+
+    assert processor._evidence_for(roster_member, request) is cached
+    assert processor._evidence_for(roster_member, request) is cached
+    assert prices.calls == 1
+
+
+def test_provider_failure_names_the_blocking_roster_symbol() -> None:
+    class Prices:
+        def find_request(self, **_kwargs):
+            return None
+
+        def find_compatible_request(self, **_kwargs):
+            return None
+
+    class Provider:
+        def fetch(self, _request):
+            raise ProviderFailure(
+                FailureCode.PROVIDER_CONTRACT_ERROR,
+                "Historical source contract mismatch",
+            )
+
+    processor = object.__new__(CanonicalSnapshotMonthProcessor)
+    setattr(processor, "_price_repository", Prices())
+    setattr(processor, "_evidence_adapter", Provider())
+    setattr(processor, "_alias_revision", "b" * 64)
+    setattr(processor, "_evidence_cache", {})
+    setattr(
+        processor,
+        "_calendar",
+        SimpleNamespace(
+            sessions_in_range=lambda *_args: (date(2016, 7, 29),)
+        ),
+    )
+    member = CapturedRosterMemberV1(
+        security_id="security-1",
+        mic="XNAS",
+        calendar="XNYS",
+        provider_symbol="UHAL.B",
+        currency="USD",
+        quote_unit="USD",
+        source_memberships=(),
+        identity_evidence=(),
+        evidence_digest="a" * 64,
+    )
+
+    with pytest.raises(InitializationMonthError) as error:
+        processor._resolve_member(
+            member,
+            "2016-07",
+            date(2016, 7, 29),
+            datetime(2026, 8, 24, tzinfo=timezone.utc),
+        )
+
+    assert error.value.code is JobFailureCode.PROVIDER_CONTRACT_ERROR
+    assert error.value.detail == "Historical source contract mismatch for UHAL.B"
 
 
 def test_calendar_contract_failure_keeps_calendar_failure_code() -> None:

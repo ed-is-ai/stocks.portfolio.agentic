@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import json
 from typing import Any
 
 import pandas as pd
 import pytest
 
+from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.historical_data_qualification import (
     FailureCode,
     ProviderFailure,
@@ -13,6 +15,7 @@ from app.services.backtest.historical_data_qualification import (
 from app.services.backtest.historical_price_evidence import (
     HistoricalEvidenceRequest,
     YFinanceHistoricalEvidenceAdapter,
+    rebind_historical_evidence_alias,
 )
 
 
@@ -47,6 +50,44 @@ def _request(**overrides: Any) -> HistoricalEvidenceRequest:
     }
     values.update(overrides)
     return HistoricalEvidenceRequest(**values)
+
+
+def test_canonical_exchange_policy_filters_non_session_rows_and_allows_old_gaps(
+) -> None:
+    frame = _frame()
+    frame.index = pd.DatetimeIndex(
+        ["2024-01-01", "2024-01-03"], tz="America/New_York"
+    )
+    request = _request(
+        expected_sessions=(
+            date(2023, 12, 29),
+            date(2024, 1, 2),
+            date(2024, 1, 3),
+        ),
+        allow_missing_prefix=True,
+        canonical_exchange_sessions=True,
+    )
+
+    payload = YFinanceHistoricalEvidenceAdapter(
+        lambda _: FakeTicker(frame), provider_version="test"
+    ).fetch(request)
+
+    assert tuple(row["session"] for row in payload.rows) == ("2024-01-03",)
+    assert (
+        payload.request_contract["observation_policy"]
+        == "canonical_exchange_sessions_v2"
+    )
+
+
+def test_canonical_exchange_policy_omits_invalid_old_ohlc_rows() -> None:
+    frame = _frame()
+    frame.loc[frame.index[0], "High"] = 99.0
+
+    payload = YFinanceHistoricalEvidenceAdapter(
+        lambda _: FakeTicker(frame), provider_version="test"
+    ).fetch(_request(canonical_exchange_sessions=True))
+
+    assert tuple(row["session"] for row in payload.rows) == ("2024-01-03",)
 
 
 class FakeTicker:
@@ -113,6 +154,22 @@ def test_adapter_binds_request_and_builds_provider_native_revision() -> None:
     assert len(payload.data_revision) == 64
 
 
+def test_adapter_retries_a_transient_contract_mismatch() -> None:
+    tickers = [
+        FakeTicker(_frame(), {"symbol": "WRONG"}),
+        FakeTicker(_frame()),
+    ]
+    sleeps: list[float] = []
+    payload = YFinanceHistoricalEvidenceAdapter(
+        lambda _: tickers.pop(0),
+        sleeper=sleeps.append,
+        jitter=lambda *_: 0,
+    ).fetch(_request())
+
+    assert payload.observed_symbol == "AAPL"
+    assert sleeps == [1.0]
+
+
 def test_content_identity_excludes_acquisition_time_but_binds_security_and_rows() -> (
     None
 ):
@@ -137,6 +194,26 @@ def test_content_identity_excludes_acquisition_time_but_binds_security_and_rows(
     assert first.acquired_at != later.acquired_at
     assert changed.data_revision != first.data_revision
     assert other_security.data_revision != first.data_revision
+
+
+def test_verified_evidence_can_be_resealed_for_a_new_alias_revision() -> None:
+    original = YFinanceHistoricalEvidenceAdapter(
+        lambda _: FakeTicker(_frame()), provider_version="test"
+    ).fetch(_request(alias_revision="a" * 64))
+
+    rebound = rebind_historical_evidence_alias(
+        original,
+        alias_revision="b" * 64,
+        acquired_at=original.acquired_at,
+    )
+
+    assert rebound.alias_revision == "b" * 64
+    assert rebound.rows == original.rows
+    assert rebound.actions == original.actions
+    assert rebound.data_revision != original.data_revision
+    assert manifest_digest(json.loads(rebound.canonical_manifest_json)) == (
+        rebound.data_revision
+    )
 
 
 def test_adapter_canonicalizes_yfinance_dataframe_metadata() -> None:

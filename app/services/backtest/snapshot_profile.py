@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import math
 from typing import Annotated, Literal, Protocol, cast
 
 from pydantic import Field, field_validator, model_validator
 
-from app.services.backtest.canonical_manifest import canonical_json, manifest_digest
+from app.services.backtest.canonical_manifest import (
+    canonical_json_digest,
+    manifest_digest,
+)
 from app.services.backtest.historical_scan_record import (
     CanonicalModel,
     HistoricalScanRecordV1,
@@ -154,8 +157,16 @@ class SnapshotProfileV1(CanonicalModel):
 
 
 class LegitimateExclusionProofV1(CanonicalModel):
-    schema_version: Literal["before_first_provider_observation.v1"]
-    exclusion_reason: Literal["before_first_provider_observation"]
+    schema_version: Literal[
+        "before_first_provider_observation.v1",
+        "insufficient_detector_history.v1",
+        "incomplete_detector_history.v1",
+    ]
+    exclusion_reason: Literal[
+        "before_first_provider_observation",
+        "insufficient_detector_history",
+        "incomplete_detector_history",
+    ]
     security_id: NonEmpty
     requested_symbol: NonEmpty
     observed_symbol: NonEmpty
@@ -180,6 +191,9 @@ class LegitimateExclusionProofV1(CanonicalModel):
     acquired_at: datetime
     provider_observed_lifetime_only: Literal[True]
     verified_listing_date: Literal[False]
+    required_history_sessions: Literal[252] | None = None
+    available_history_sessions: int | None = None
+    missing_session_digest: Digest | None = None
 
     @field_validator("acquired_at")
     @classmethod
@@ -194,8 +208,37 @@ class LegitimateExclusionProofV1(CanonicalModel):
             raise ValueError("target session is outside snapshot month")
         if self.full_history_start != FULL_HISTORY_START:
             raise ValueError("full-history request has the wrong start")
-        if self.target_session >= self.first_observed_session:
-            raise ValueError("target session must precede first observation")
+        if self.exclusion_reason == "before_first_provider_observation":
+            if (
+                self.schema_version != "before_first_provider_observation.v1"
+                or self.target_session >= self.first_observed_session
+                or self.required_history_sessions is not None
+                or self.available_history_sessions is not None
+                or self.missing_session_digest is not None
+            ):
+                raise ValueError("before-first exclusion boundary is invalid")
+        elif self.exclusion_reason == "insufficient_detector_history":
+            if (
+                self.schema_version != "insufficient_detector_history.v1"
+                or self.target_session < self.first_observed_session
+                or self.required_history_sessions != 252
+                or self.available_history_sessions is None
+                or not 0 < self.available_history_sessions < 252
+                or self.missing_session_digest is not None
+            ):
+                raise ValueError("insufficient-history exclusion boundary is invalid")
+        elif self.exclusion_reason == "incomplete_detector_history":
+            if (
+                self.schema_version != "incomplete_detector_history.v1"
+                or self.target_session < self.first_observed_session
+                or self.required_history_sessions != 252
+                or self.available_history_sessions is None
+                or not 0 <= self.available_history_sessions < 252
+                or self.missing_session_digest is None
+            ):
+                raise ValueError("incomplete-history exclusion boundary is invalid")
+        else:
+            raise ValueError("unsupported exclusion reason")
         if self.full_history_end_exclusive <= self.first_observed_session:
             raise ValueError("full-history request does not include first observation")
         if self.evidence_revision != self.evidence_manifest_digest:
@@ -232,7 +275,11 @@ class SnapshotMemberV1(CanonicalModel):
     provider_evidence_manifest_digest: Digest
     alias_revision: Digest
     record_digest: Digest | None
-    exclusion_reason: Literal["before_first_provider_observation"] | None
+    exclusion_reason: Literal[
+        "before_first_provider_observation",
+        "insufficient_detector_history",
+        "incomplete_detector_history",
+    ] | None
     exclusion_evidence: LegitimateExclusionProofV1 | None
     provenance_digest: Digest
 
@@ -251,7 +298,12 @@ class SnapshotMemberV1(CanonicalModel):
                 raise ValueError("valid member source cutoff is not the target session")
         elif (
             self.record_digest is not None
-            or self.exclusion_reason != "before_first_provider_observation"
+            or self.exclusion_reason
+            not in {
+                "before_first_provider_observation",
+                "insufficient_detector_history",
+                "incomplete_detector_history",
+            }
             or self.exclusion_evidence is None
         ):
             raise ValueError("excluded member evidence is malformed")
@@ -338,7 +390,7 @@ class SnapshotMemberV1(CanonicalModel):
             "provider_evidence_manifest_digest": proof.evidence_manifest_digest,
             "alias_revision": proof.alias_revision,
             "record_digest": None,
-            "exclusion_reason": "before_first_provider_observation",
+            "exclusion_reason": proof.exclusion_reason,
             "exclusion_evidence": proof,
         }
         identity_values: dict[str, object] = dict(values)
@@ -760,8 +812,8 @@ def verified_evidence_manifest(
     if not isinstance(payload, dict):
         raise SnapshotContractError("provider evidence manifest is invalid")
     if (
-        canonical_json(payload) != evidence.canonical_manifest_json
-        or manifest_digest(payload) != evidence.data_revision
+        canonical_json_digest(evidence.canonical_manifest_json)
+        != evidence.data_revision
         or payload.get("provider") != evidence.provider
         or payload.get("provider_version") != evidence.provider_version
         or payload.get("request_contract_version") != evidence.request_contract_version
@@ -942,6 +994,209 @@ def build_before_first_provider_observation(
         raise SnapshotContractError("before-first exclusion proof is invalid") from exc
 
 
+def build_insufficient_detector_history(
+    *,
+    evidence: HistoricalEvidenceV1,
+    snapshot_month: str,
+    target_session: date,
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"],
+    alias_revision: str,
+    alias_effective_from: date | None,
+    alias_effective_to: date | None,
+    calendar_dataset_version: str,
+    calendar_dataset_digest: str,
+    acquired_at: datetime,
+) -> LegitimateExclusionProofV1:
+    """Prove that a listed member has not accumulated 252 usable sessions yet."""
+    verified_evidence_manifest(evidence)
+    calendar = TradingCalendar()
+    if calendar_dataset_version != "exchange-calendars-v1" or (
+        calendar_dataset_digest != calendar.session_table_digest()
+    ):
+        raise SnapshotContractError("calendar evidence does not match authority")
+    if target_session != calendar.last_session_of_month(mic, snapshot_month):
+        raise SnapshotContractError("target session does not match canonical month")
+    if evidence.alias_revision != alias_revision:
+        raise SnapshotContractError("alias revision does not match evidence")
+    expected_currency = "USD" if mic in {"BATS", "XNAS", "XNYS"} else "GBP"
+    expected_units = {"USD"} if expected_currency == "USD" else {"GBP", "GBp"}
+    if (
+        evidence.currency != expected_currency
+        or evidence.quote_unit not in expected_units
+    ):
+        raise SnapshotContractError("currency/unit does not match MIC")
+    try:
+        start = date.fromisoformat(evidence.start)
+        end = date.fromisoformat(evidence.end)
+    except ValueError as exc:
+        raise SnapshotContractError("full-history bounds are malformed") from exc
+    if start != FULL_HISTORY_START:
+        raise SnapshotContractError(
+            "insufficient-history exclusion requires a full-history request",
+            code="required_data_missing",
+        )
+    if evidence.request_contract.get("start") != evidence.start or (
+        evidence.request_contract.get("end") != evidence.end
+    ):
+        raise SnapshotContractError("full-history request contract is inconsistent")
+    observed = tuple(
+        session
+        for session in _validated_observation_sessions(evidence, mic=mic)
+        if session <= target_session
+    )
+    if not observed or observed[-1] != target_session or len(observed) >= 252:
+        raise SnapshotContractError(
+            "target does not have bounded insufficient history",
+            code="required_data_missing",
+        )
+    expected = calendar.sessions_in_range(
+        mic, observed[0], target_session + timedelta(days=1)
+    )
+    if observed != expected:
+        raise SnapshotContractError(
+            "available detector history contains a source gap",
+            code="required_data_missing",
+        )
+    try:
+        return LegitimateExclusionProofV1(
+            schema_version="insufficient_detector_history.v1",
+            exclusion_reason="insufficient_detector_history",
+            security_id=evidence.security_id,
+            requested_symbol=evidence.requested_symbol,
+            observed_symbol=evidence.observed_symbol,
+            alias_revision=alias_revision,
+            alias_effective_from=alias_effective_from,
+            alias_effective_to=alias_effective_to,
+            snapshot_month=snapshot_month,
+            mic=mic,
+            target_session=target_session,
+            calendar_dataset_version="exchange-calendars-v1",
+            calendar_dataset_digest=calendar_dataset_digest,
+            provider="yfinance",
+            provider_version=evidence.provider_version,
+            request_contract_version="YFinanceDailyProviderNativeV1",
+            full_history_start=start,
+            full_history_end_exclusive=end,
+            evidence_revision=evidence.data_revision,
+            evidence_manifest_digest=evidence.data_revision,
+            first_observed_session=observed[0],
+            currency=cast(Literal["USD", "GBP"], evidence.currency),
+            quote_unit=cast(Literal["USD", "GBP", "GBp"], evidence.quote_unit),
+            acquired_at=acquired_at,
+            provider_observed_lifetime_only=True,
+            verified_listing_date=False,
+            required_history_sessions=252,
+            available_history_sessions=len(observed),
+        )
+    except Exception as exc:
+        raise SnapshotContractError(
+            "insufficient-history exclusion proof is invalid"
+        ) from exc
+
+
+def build_incomplete_detector_history(
+    *,
+    evidence: HistoricalEvidenceV1,
+    snapshot_month: str,
+    target_session: date,
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"],
+    alias_revision: str,
+    alias_effective_from: date | None,
+    alias_effective_to: date | None,
+    calendar_dataset_version: str,
+    calendar_dataset_digest: str,
+    acquired_at: datetime,
+) -> LegitimateExclusionProofV1:
+    """Prove a source gap inside the detector's required 252-session window."""
+    verified_evidence_manifest(evidence)
+    calendar = TradingCalendar()
+    if calendar_dataset_version != "exchange-calendars-v1" or (
+        calendar_dataset_digest != calendar.session_table_digest()
+    ):
+        raise SnapshotContractError("calendar evidence does not match authority")
+    if target_session != calendar.last_session_of_month(mic, snapshot_month):
+        raise SnapshotContractError("target session does not match canonical month")
+    if evidence.alias_revision != alias_revision:
+        raise SnapshotContractError("alias revision does not match evidence")
+    expected_currency = "USD" if mic in {"BATS", "XNAS", "XNYS"} else "GBP"
+    expected_units = {"USD"} if expected_currency == "USD" else {"GBP", "GBp"}
+    if (
+        evidence.currency != expected_currency
+        or evidence.quote_unit not in expected_units
+    ):
+        raise SnapshotContractError("currency/unit does not match MIC")
+    try:
+        start = date.fromisoformat(evidence.start)
+        end = date.fromisoformat(evidence.end)
+    except ValueError as exc:
+        raise SnapshotContractError("full-history bounds are malformed") from exc
+    if start != FULL_HISTORY_START:
+        raise SnapshotContractError(
+            "incomplete-history exclusion requires a full-history request",
+            code="required_data_missing",
+        )
+    if evidence.request_contract.get("start") != evidence.start or (
+        evidence.request_contract.get("end") != evidence.end
+    ):
+        raise SnapshotContractError("full-history request contract is inconsistent")
+    observed = _validated_observation_sessions(evidence, mic=mic)
+    if not observed or observed[0] > target_session:
+        raise SnapshotContractError(
+            "incomplete-history exclusion requires an earlier observation",
+            code="required_data_missing",
+        )
+    expected_window = calendar.sessions_in_range(
+        mic, FULL_HISTORY_START, target_session + timedelta(days=1)
+    )[-252:]
+    observed_set = set(observed)
+    missing = tuple(session for session in expected_window if session not in observed_set)
+    if not missing:
+        raise SnapshotContractError("detector window is not incomplete")
+    available = len(expected_window) - len(missing)
+    missing_digest = manifest_digest(
+        {
+            "schema_version": "missing_detector_sessions.v1",
+            "sessions": tuple(session.isoformat() for session in missing),
+        }
+    )
+    try:
+        return LegitimateExclusionProofV1(
+            schema_version="incomplete_detector_history.v1",
+            exclusion_reason="incomplete_detector_history",
+            security_id=evidence.security_id,
+            requested_symbol=evidence.requested_symbol,
+            observed_symbol=evidence.observed_symbol,
+            alias_revision=alias_revision,
+            alias_effective_from=alias_effective_from,
+            alias_effective_to=alias_effective_to,
+            snapshot_month=snapshot_month,
+            mic=mic,
+            target_session=target_session,
+            calendar_dataset_version="exchange-calendars-v1",
+            calendar_dataset_digest=calendar_dataset_digest,
+            provider="yfinance",
+            provider_version=evidence.provider_version,
+            request_contract_version="YFinanceDailyProviderNativeV1",
+            full_history_start=start,
+            full_history_end_exclusive=end,
+            evidence_revision=evidence.data_revision,
+            evidence_manifest_digest=evidence.data_revision,
+            first_observed_session=observed[0],
+            currency=cast(Literal["USD", "GBP"], evidence.currency),
+            quote_unit=cast(Literal["USD", "GBP", "GBp"], evidence.quote_unit),
+            acquired_at=acquired_at,
+            provider_observed_lifetime_only=True,
+            verified_listing_date=False,
+            required_history_sessions=252,
+            available_history_sessions=available,
+            missing_session_digest=missing_digest,
+        )
+    except Exception as exc:
+        raise SnapshotContractError(
+            "incomplete-history exclusion proof is invalid"
+        ) from exc
+
+
 __all__ = [
     "ActiveSnapshotProfileV1",
     "CoverageIntervalV1",
@@ -957,5 +1212,7 @@ __all__ = [
     "SnapshotMonthManifestV1",
     "SnapshotProfileV1",
     "build_before_first_provider_observation",
+    "build_insufficient_detector_history",
+    "build_incomplete_detector_history",
     "verified_evidence_manifest",
 ]

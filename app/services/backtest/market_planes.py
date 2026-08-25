@@ -19,6 +19,9 @@ from app.repositories.historical_price_repo import StoredHistoricalEvidence
 from app.services.backtest.historical_data_qualification import (
     REQUEST_CONTRACT_VERSION,
 )
+from app.services.backtest.historical_price_evidence import (
+    CANONICAL_EXCHANGE_SESSIONS_POLICY,
+)
 
 EIGHT_PLACES = Decimal("0.00000001")
 DECIMAL_PRECISION = 50
@@ -102,9 +105,12 @@ def validate_provider_native_request_contract(
         "timeout": 15,
         "raise_errors": True,
     }
+    actual = dict(evidence.request_contract)
+    observation_policy = actual.pop("observation_policy", None)
     if (
         evidence.request_contract_version != REQUEST_CONTRACT_VERSION
-        or dict(evidence.request_contract) != expected
+        or actual != expected
+        or observation_policy not in {None, CANONICAL_EXCHANGE_SESSIONS_POLICY}
     ):
         raise MarketDataPolicyError(
             "integrity_error", "Evidence request contract is incompatible."

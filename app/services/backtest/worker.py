@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import gc
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
@@ -62,6 +64,9 @@ from app.services.backtest.strategy_job import (
 )
 from app.services.backtest.strategy_protocol import JsonValue, StrategyProtocolV1
 from app.services.backtest.strategy_job_service import StrategyJobService
+
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.services.backtest.strategy_bootstrap_service import (
@@ -1252,7 +1257,8 @@ def main(
             )
         else:
             raise RuntimeError("Unsupported Strategy job type")
-    except Exception:
+    except Exception as exc:
+        logger.exception("Strategy worker construction failed for %s", args.job_id)
         current = repository.strategy_job(args.job_id)
         if (
             current.status is StrategyJobStatus.RUNNING
@@ -1272,11 +1278,24 @@ def main(
                     expected_version=current.status_version,
                     failure_code=JobFailureCode.INTEGRITY_ERROR,
                     failed_month=None,
-                    detail="Strategy worker configuration is invalid",
+                    detail=(
+                        "Strategy worker configuration is invalid: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
                     lease=lease,
                 )
         return 1
-    result = engine.run(args.job_id, args.claim_token)
+    gc_was_enabled = gc.isenabled()
+    if job.job_type is StrategyJobType.INITIALIZATION:
+        # A historical run retains verified full-history evidence for reuse.
+        # Those large, acyclic JSON-derived graphs otherwise trigger repeated
+        # whole-heap cyclic-GC traversals and can dominate the worker's CPU.
+        gc.disable()
+    try:
+        result = engine.run(args.job_id, args.claim_token)
+    finally:
+        if job.job_type is StrategyJobType.INITIALIZATION and gc_was_enabled:
+            gc.enable()
     return (
         0
         if result.status

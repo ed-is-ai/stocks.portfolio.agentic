@@ -294,6 +294,28 @@ def test_is_setup_required_false_when_active_profile_exists(
     assert service.is_setup_required() is False
 
 
+def test_is_setup_required_when_active_provider_symbol_has_new_mapping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute(
+            """INSERT INTO reconstruction_roster_members
+               (roster_digest, security_id, mic, provider_symbol, currency,
+                source_memberships_json, identity_evidence_json, evidence_digest)
+               VALUES (?, 'sid_test_001', 'XNYS', 'TEST', 'USD', '[]', '{}', ?)""",
+            (ROSTER_DIGEST, "h" * 64),
+        )
+    monkeypatch.setattr(
+        "app.services.backtest.strategy_bootstrap_service.load_provider_symbol_aliases",
+        lambda: {"TEST": "TEST-A"},
+    )
+    service = StrategyBootstrapService(repo, jobs=None)  # type: ignore[arg-type]
+
+    assert service.is_setup_required() is True
+
+
 def test_is_already_set_up_returns_true_with_timestamp(
     tmp_path: Path,
 ) -> None:

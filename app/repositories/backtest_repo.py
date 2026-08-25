@@ -35,6 +35,8 @@ from app.services.backtest.snapshot_profile import (
     SnapshotProfileV1,
     SnapshotContractError,
     build_before_first_provider_observation,
+    build_incomplete_detector_history,
+    build_insufficient_detector_history,
     verified_evidence_manifest,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
@@ -319,7 +321,11 @@ CREATE TABLE IF NOT EXISTS snapshot_members (
     provider_evidence_manifest_digest TEXT NOT NULL CHECK(length(provider_evidence_manifest_digest) = 64),
     alias_revision TEXT NOT NULL CHECK(length(alias_revision) = 64),
     record_digest TEXT CHECK(record_digest IS NULL OR length(record_digest) = 64),
-    exclusion_reason TEXT CHECK(exclusion_reason IS NULL OR exclusion_reason = 'before_first_provider_observation'),
+    exclusion_reason TEXT CHECK(exclusion_reason IS NULL OR exclusion_reason IN (
+        'before_first_provider_observation',
+        'insufficient_detector_history',
+        'incomplete_detector_history'
+    )),
     exclusion_evidence_json TEXT,
     provenance_digest TEXT NOT NULL CHECK(length(provenance_digest) = 64),
     PRIMARY KEY(profile_hash, snapshot_month, security_id),
@@ -331,7 +337,11 @@ CREATE TABLE IF NOT EXISTS snapshot_members (
          AND exclusion_reason IS NULL AND exclusion_evidence_json IS NULL)
         OR
         (resolution = 'legitimate_exclusion' AND record_digest IS NULL
-         AND exclusion_reason = 'before_first_provider_observation'
+         AND exclusion_reason IN (
+             'before_first_provider_observation',
+             'insufficient_detector_history',
+             'incomplete_detector_history'
+         )
          AND exclusion_evidence_json IS NOT NULL)
     )
 );
@@ -1437,6 +1447,85 @@ def _migrate_bats_mic_constraints(conn: sqlite3.Connection) -> None:
         raise sqlite3.IntegrityError("BATS MIC migration violated foreign keys")
 
 
+def _migrate_snapshot_exclusion_constraints(conn: sqlite3.Connection) -> None:
+    """Expand the closed legitimate-exclusion vocabulary without data loss."""
+    table = "snapshot_members"
+    replacement = f"{table}__exclusion_migration"
+    legacy_column = (
+        "exclusion_reason TEXT CHECK(exclusion_reason IS NULL OR "
+        "exclusion_reason = 'before_first_provider_observation')"
+    )
+    expanded_values = (
+        "'before_first_provider_observation', "
+        "'insufficient_detector_history', "
+        "'incomplete_detector_history'"
+    )
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    stale = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (replacement,)
+    ).fetchone()
+    if (row is None or legacy_column not in str(row[0])) and stale is None:
+        return
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if stale is not None:
+            conn.execute(f'DROP TABLE "{replacement}"')
+        if row is not None and legacy_column in str(row[0]):
+            table_sql = str(row[0])
+            triggers = tuple(
+                (str(item[0]), str(item[1]))
+                for item in conn.execute(
+                    """SELECT name, sql FROM sqlite_master
+                       WHERE type='trigger' AND sql IS NOT NULL
+                         AND (tbl_name=? OR instr(sql, ?) > 0)""",
+                    (table, table),
+                ).fetchall()
+            )
+            columns = tuple(
+                str(item[1])
+                for item in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            )
+            create_sql = table_sql.replace(
+                f'CREATE TABLE "{table}"', f'CREATE TABLE "{replacement}"', 1
+            ).replace(f"CREATE TABLE {table}", f"CREATE TABLE {replacement}", 1)
+            create_sql = create_sql.replace(
+                legacy_column,
+                "exclusion_reason TEXT CHECK(exclusion_reason IS NULL OR "
+                f"exclusion_reason IN ({expanded_values}))",
+            ).replace(
+                "exclusion_reason = 'before_first_provider_observation'",
+                f"exclusion_reason IN ({expanded_values})",
+            )
+            conn.execute(create_sql)
+            rendered = ", ".join(f'"{column}"' for column in columns)
+            conn.execute(
+                f'INSERT INTO "{replacement}" ({rendered}) '
+                f'SELECT {rendered} FROM "{table}"'
+            )
+            for trigger_name, _trigger_sql in triggers:
+                conn.execute(f'DROP TRIGGER "{trigger_name}"')
+            conn.execute(f'DROP TABLE "{table}"')
+            conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
+            for _trigger_name, trigger_sql in triggers:
+                conn.execute(trigger_sql)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    if conn.execute("PRAGMA foreign_key_check").fetchall():
+        raise sqlite3.IntegrityError(
+            "snapshot exclusion migration violated foreign keys"
+        )
+
+
 class BacktestRepository:
     """Repository seed that later stories extend with jobs and results."""
 
@@ -1467,6 +1556,7 @@ class BacktestRepository:
                 + _BACKTEST_RESULT_SCHEMA
             )
             _migrate_bats_mic_constraints(conn)
+            _migrate_snapshot_exclusion_constraints(conn)
             columns = {
                 str(row[1])
                 for row in conn.execute(
@@ -1898,6 +1988,8 @@ class BacktestRepository:
     def create_bootstrap_job(
         self,
         submission: BootstrapSubmissionV1,
+        *,
+        allow_active_refresh: bool = False,
     ) -> BootstrapEnqueueResultV1:
         """Atomically no-op, create, or durably replay one Bootstrap activity.
 
@@ -1929,7 +2021,7 @@ class BacktestRepository:
                     """SELECT 1 FROM active_snapshot_profile
                        WHERE singleton_id=1 AND profile_hash IS NOT NULL"""
                 ).fetchone()
-                if active is not None:
+                if active is not None and not allow_active_refresh:
                     return BootstrapEnqueueResultV1(no_op=True)
                 competing = conn.execute(
                     """SELECT 1 FROM strategy_jobs
@@ -4760,6 +4852,13 @@ class BacktestRepository:
             raise BacktestIntegrityError("snapshot profile commit failed") from exc
 
     def snapshot_profile(self, profile_hash: str) -> SnapshotProfileV1 | None:
+        profile = self.stored_snapshot_profile(profile_hash)
+        if profile is not None:
+            self._validate_profile_authority(profile)
+        return profile
+
+    def stored_snapshot_profile(self, profile_hash: str) -> SnapshotProfileV1 | None:
+        """Load persisted profile identity without applying runtime authority."""
         with session(self._connect) as conn:
             row = conn.execute(
                 """SELECT canonical_profile_json, display_version, roster_digest,
@@ -4770,9 +4869,7 @@ class BacktestRepository:
             ).fetchone()
         if row is None:
             return None
-        profile = self._validated_profile_row(profile_hash, row)
-        self._validate_profile_authority(profile)
-        return profile
+        return self._validated_profile_row(profile_hash, row)
 
     def claim_bau_capture_attempt(
         self,
@@ -5459,7 +5556,16 @@ class BacktestRepository:
                     raise BacktestIntegrityError(
                         "snapshot provider evidence does not match exclusion proof"
                     )
-                rebuilt = build_before_first_provider_observation(
+                proof_builder = {
+                    "before_first_provider_observation": (
+                        build_before_first_provider_observation
+                    ),
+                    "insufficient_detector_history": (
+                        build_insufficient_detector_history
+                    ),
+                    "incomplete_detector_history": build_incomplete_detector_history,
+                }[proof.exclusion_reason]
+                rebuilt = proof_builder(
                     evidence=evidence,
                     snapshot_month=proof.snapshot_month,
                     target_session=proof.target_session,

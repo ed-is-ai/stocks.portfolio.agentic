@@ -8,7 +8,10 @@ import sqlite3
 from typing import Mapping
 
 from app.repositories.db import Connect, session
-from app.services.backtest.canonical_manifest import manifest_digest
+from app.services.backtest.canonical_manifest import (
+    canonical_json_digest,
+    manifest_digest,
+)
 from app.services.backtest.historical_price_evidence import HistoricalEvidencePayload
 
 _SCHEMA = """
@@ -273,6 +276,7 @@ class HistoricalPriceRepository:
         start: str,
         end: str,
         request_contract_version: str,
+        observation_policy: str | None = None,
     ) -> StoredHistoricalEvidence | None:
         """Return the earliest immutable revision for one exact request identity."""
         with session(self._connect) as conn:
@@ -281,6 +285,7 @@ class HistoricalPriceRepository:
                    WHERE security_id=? AND requested_symbol=?
                      AND alias_revision IS ? AND start_date=? AND end_date=?
                      AND request_contract_version=?
+                     AND json_extract(request_contract_json, '$.observation_policy') IS ?
                    ORDER BY first_acquired_at, data_revision LIMIT 1""",
                 (
                     security_id,
@@ -289,6 +294,39 @@ class HistoricalPriceRepository:
                     start,
                     end,
                     request_contract_version,
+                    observation_policy,
+                ),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._verify_on_connection(conn, str(row[0]))
+
+    def find_compatible_request(
+        self,
+        *,
+        security_id: str,
+        requested_symbol: str,
+        start: str,
+        end: str,
+        request_contract_version: str,
+        observation_policy: str | None = None,
+    ) -> StoredHistoricalEvidence | None:
+        """Return verified evidence whose only identity drift may be aliases."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT data_revision FROM historical_price_revisions
+                   WHERE security_id=? AND requested_symbol=?
+                     AND start_date=? AND end_date=?
+                     AND request_contract_version=?
+                     AND json_extract(request_contract_json, '$.observation_policy') IS ?
+                   ORDER BY first_acquired_at, data_revision LIMIT 1""",
+                (
+                    security_id,
+                    requested_symbol,
+                    start,
+                    end,
+                    request_contract_version,
+                    observation_policy,
                 ),
             ).fetchone()
             if row is None:
@@ -343,7 +381,7 @@ class HistoricalPriceRepository:
             canonical = json.loads(evidence.canonical_manifest_json)
         except json.JSONDecodeError as exc:
             raise HistoricalEvidenceIntegrityError("invalid stored manifest") from exc
-        if manifest_digest(canonical) != data_revision:
+        if canonical_json_digest(evidence.canonical_manifest_json) != data_revision:
             raise HistoricalEvidenceIntegrityError("stored revision digest mismatch")
         if canonical.get("rows") != list(evidence.rows):
             raise HistoricalEvidenceIntegrityError("stored observation mismatch")

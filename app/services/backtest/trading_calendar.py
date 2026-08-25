@@ -116,9 +116,14 @@ class TradingCalendar:
         """Return canonical sessions in one inclusive/exclusive date interval."""
         if start >= end_exclusive:
             raise CalendarContractError("calendar interval must be non-empty")
-        sessions = self._calendar(mic).sessions_in_range(
-            pd.Timestamp(start), pd.Timestamp(end_exclusive - timedelta(days=1))
+        calendar = self._calendar(mic)
+        bounded_start = max(pd.Timestamp(start), calendar.first_session)
+        bounded_end = min(
+            pd.Timestamp(end_exclusive - timedelta(days=1)), calendar.last_session
         )
+        if bounded_start > bounded_end:
+            return ()
+        sessions = calendar.sessions_in_range(bounded_start, bounded_end)
         return tuple(timestamp.date() for timestamp in sessions)
 
     @staticmethod

@@ -103,8 +103,11 @@ class StrategyBootstrapService:
         return datetime.now(timezone.utc)
 
     def is_setup_required(self) -> bool:
-        """Return True when no active profile exists."""
-        return self._repository.active_snapshot_profile() is None
+        """Return True when no active profile exists or its provider map is stale."""
+        return (
+            self._repository.active_snapshot_profile() is None
+            or self._active_profile_needs_refresh()
+        )
 
     def is_already_set_up(self) -> tuple[bool, datetime | None]:
         """Return ``(True, activated_at)`` if a compatible profile exists.
@@ -113,7 +116,7 @@ class StrategyBootstrapService:
         without enqueuing a new bootstrap job.
         """
         active = self._repository.active_snapshot_profile()
-        if active is None:
+        if active is None or self._active_profile_needs_refresh():
             return False, None
         return True, active.activated_at
 
@@ -125,7 +128,12 @@ class StrategyBootstrapService:
         """
         if self._jobs is None:
             raise RuntimeError("no job service configured")
-        result = self._jobs.enqueue_bootstrap(submission)
+        refresh = self._active_profile_needs_refresh()
+        result = (
+            self._jobs.enqueue_bootstrap(submission, allow_active_refresh=True)
+            if refresh
+            else self._jobs.enqueue_bootstrap(submission)
+        )
         if result.no_op:
             raise StrategyBootstrapAlreadySetUp("Strategy Manager is already set up")
         if result.job is None:
@@ -191,7 +199,10 @@ class StrategyBootstrapService:
         lease: WorkerLeaseFenceV1 | None = None,
     ) -> None:
         """Stage 2: capture the complete required-source roster evidence."""
-        if self._repository.active_snapshot_profile() is not None:
+        if (
+            self._repository.active_snapshot_profile() is not None
+            and not self._active_profile_needs_refresh()
+        ):
             return
         try:
             captured = self._providers.roster_capture.capture(
@@ -224,7 +235,7 @@ class StrategyBootstrapService:
     ) -> StrategyJobV1:
         """Stage 3: atomically persist/activate the real profile and complete."""
         active = self._repository.active_snapshot_profile()
-        if active is not None:
+        if active is not None and self._captured_roster_digest is None:
             try:
                 active_profile = self._repository.snapshot_profile(active.profile_hash)
                 if active_profile is None:
@@ -236,14 +247,6 @@ class StrategyBootstrapService:
                     JobFailureCode.INTEGRITY_ERROR,
                     stage="Profile activation",
                 ) from exc
-            if (
-                self._captured_roster_digest is not None
-                and active_profile.roster_digest != self._captured_roster_digest
-            ):
-                raise BootstrapStageFailure(
-                    JobFailureCode.INTEGRITY_ERROR,
-                    "Active profile does not match captured Bootstrap evidence",
-                )
             return self._repository.complete_claimed_stage_job(
                 job_id, claim_token, expected_version=expected_version, lease=lease
             )
@@ -281,6 +284,32 @@ class StrategyBootstrapService:
                 JobFailureCode.INTEGRITY_ERROR,
                 stage="Profile activation",
             ) from exc
+
+    def _active_profile_needs_refresh(self) -> bool:
+        active = self._repository.active_snapshot_profile()
+        if active is None:
+            return False
+        try:
+            profile = self._repository.stored_snapshot_profile(active.profile_hash)
+        except BacktestIntegrityError:
+            profile = None
+        if profile is not None:
+            current = self._providers.snapshot_profile(profile.roster_digest)
+            if current.profile_hash != profile.profile_hash:
+                return True
+        aliases = load_provider_symbol_aliases()
+        for _security_id, provider_symbol, mic, _currency in (
+            self._repository.roster_member_identities(active.profile_hash)
+        ):
+            direct_mapping = aliases.get(provider_symbol)
+            if direct_mapping is not None and direct_mapping != provider_symbol:
+                return True
+            if mic == "XLON" and provider_symbol.endswith(".L"):
+                source_symbol = provider_symbol[:-2]
+                mapped = aliases.get(source_symbol)
+                if mapped is not None and mapped != provider_symbol:
+                    return True
+        return False
 
     @property
     def is_fixture(self) -> bool:

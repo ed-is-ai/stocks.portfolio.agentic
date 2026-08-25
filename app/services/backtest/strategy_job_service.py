@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import os
 import subprocess
 import sys
 import threading
@@ -28,6 +29,23 @@ from app.services.backtest.strategy_job import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _worker_python_executable() -> str:
+    """Return an interpreter that can import the running app's dependencies.
+
+    ``uv run`` can expose a real interpreter path through ``sys.executable``
+    while the virtualenv's site-packages are selected through the venv
+    symlink.  Child workers must retain that symlink path; invoking the real
+    interpreter path directly loses the environment and exits before the
+    worker can record a useful failure.
+    """
+    virtual_env = os.environ.get("VIRTUAL_ENV")
+    if virtual_env:
+        candidate = Path(virtual_env) / "bin" / "python"
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
 
 #: How long an acquired worker lease stays valid without a heartbeat.
 #: Deliberately several dispatcher poll intervals wide so an ordinary
@@ -132,7 +150,16 @@ class StrategyJobService:
     def enqueue_backtest(self, submission: BacktestSubmissionV1):
         return self._repository.create_backtest_job(submission)
 
-    def enqueue_bootstrap(self, submission: BootstrapSubmissionV1):
+    def enqueue_bootstrap(
+        self,
+        submission: BootstrapSubmissionV1,
+        *,
+        allow_active_refresh: bool = False,
+    ):
+        if allow_active_refresh:
+            return self._repository.create_bootstrap_job(
+                submission, allow_active_refresh=True
+            )
         return self._repository.create_bootstrap_job(submission)
 
     def enqueue_preparation(self, submission=None, *, parent_job_id: str | None = None):
@@ -211,7 +238,7 @@ class StrategyJobService:
             if claim is None:
                 return False
             argv = [
-                sys.executable,
+                _worker_python_executable(),
                 "-m",
                 "app.services.backtest.worker",
                 "--job-id",

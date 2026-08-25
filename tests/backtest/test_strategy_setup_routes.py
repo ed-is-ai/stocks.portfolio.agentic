@@ -54,6 +54,9 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
             return None
         return routes_helpers.FakeActiveProfile()
 
+    def stored_snapshot_profile(self, profile_hash):
+        return None
+
     def create_bootstrap_job(self, submission):
         from app.services.backtest.strategy_job import StrategyJobV1
 

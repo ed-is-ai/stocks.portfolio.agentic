@@ -284,6 +284,9 @@ class ReconstructionRosterPolicyV1:
         if raw_currency != accepted_currency or raw_unit != expected[2]:
             raise RosterCaptureError(f"conflicting currency for {source_symbol}")
         provider_symbol = normalize_symbol(bare_symbol)
+        provider_symbol = self._provider_symbol_aliases.get(
+            provider_symbol, provider_symbol
+        )
         if exchange == "LSE" and not provider_symbol.endswith(".L"):
             provider_symbol = f"{provider_symbol}.L"
         identity = MarketIdentityEvidence(

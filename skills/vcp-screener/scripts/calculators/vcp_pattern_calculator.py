@@ -381,6 +381,23 @@ def _identify_contractions(
             break
 
         low_idx, low_val = next_low
+        # A later local low can still be above the preceding swing high in a
+        # rising sequence.  That is not a price contraction: emitting it
+        # yields a negative depth and breaks the typed VCP contract.  Advance
+        # to the next high and keep looking for a genuine pullback.
+        if low_val >= current_high_val:
+            next_high = next(
+                (
+                    (idx, val)
+                    for idx, val in swing_highs
+                    if idx > low_idx
+                ),
+                None,
+            )
+            if next_high is None:
+                break
+            current_high_idx, current_high_val = next_high
+            continue
         depth_pct = (
             (current_high_val - low_val) / current_high_val * 100
             if current_high_val > 0
@@ -455,6 +472,23 @@ def _build_contractions_from(
 
         low_idx, low_val = next_low
         duration = low_idx - current_high_idx
+
+        # A local low above its prior swing high is a continuation, not a
+        # contraction.  Skip it rather than exposing a negative-depth Tn to
+        # the canonical detector adapter.
+        if low_val >= current_high_val:
+            next_high = next(
+                (
+                    (idx, val)
+                    for idx, val in swing_highs
+                    if idx > low_idx
+                ),
+                None,
+            )
+            if next_high is None:
+                break
+            current_high_idx, current_high_val = next_high
+            continue
 
         # Skip contractions that are too short
         if duration < min_contraction_days:

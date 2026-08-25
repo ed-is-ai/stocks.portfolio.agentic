@@ -97,6 +97,14 @@ def test_calendar_authority_uses_fixed_bounds_not_rolling_today_window(
     assert schedule.index.max().year == 2100
 
 
+def test_session_range_clamps_contract_start_to_first_supported_session(
+    calendars: TradingCalendar,
+) -> None:
+    assert calendars.sessions_in_range(
+        "XNYS", date(1970, 1, 1), date(1970, 1, 6)
+    ) == (date(1970, 1, 2), date(1970, 1, 5))
+
+
 @pytest.mark.parametrize(
     "month", ["2024-1", "24-01", "2024-00", "2024-13", "٢٠٢٤-01", "x"]
 )

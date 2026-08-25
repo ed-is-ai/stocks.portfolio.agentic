@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
+import logging
 from pathlib import Path
 from typing import Protocol
 
@@ -17,8 +18,10 @@ from app.services.backtest.historical_data_qualification import (
     ProviderFailure,
 )
 from app.services.backtest.historical_price_evidence import (
+    CANONICAL_EXCHANGE_SESSIONS_POLICY,
     HistoricalEvidenceRequest,
     YFinanceHistoricalEvidenceAdapter,
+    rebind_historical_evidence_alias,
 )
 from app.services.backtest.historical_scan_reconstruction import (
     CALENDAR_DATASET_VERSION,
@@ -41,6 +44,8 @@ from app.services.backtest.snapshot_profile import (
     SnapshotMemberV1,
     SnapshotProfileV1,
     build_before_first_provider_observation,
+    build_incomplete_detector_history,
+    build_insufficient_detector_history,
 )
 from app.services.backtest.source_manifest import (
     DetectorInputIdentityV1,
@@ -60,6 +65,8 @@ from app.services.backtest.strategy_job import (
     StrategyJobV1,
     WorkerLeaseFenceV1,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class InitializationMonthError(RuntimeError):
@@ -119,6 +126,12 @@ class CanonicalSnapshotMonthProcessor:
         self._clock = clock
         self._project_root = project_root or Path(__file__).resolve().parents[3]
         self._lease = lease
+        # Every month in one initialization run asks for the same immutable
+        # full-history evidence window. Re-validating and deserializing that
+        # payload for each security/month pair dominates long reruns, while
+        # keeping it in this process-local cache preserves the repository's
+        # verification on the first read and does not alter persisted output.
+        self._evidence_cache: dict[tuple[str, str, str, str, str], object] = {}
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
@@ -182,6 +195,11 @@ class CanonicalSnapshotMonthProcessor:
                 "Historical calendar could not resolve the requested month",
             ) from exc
         except (BacktestIntegrityError, SnapshotContractError) as exc:
+            logger.exception(
+                "Historical initialization month %s failed at commit: %s",
+                snapshot_month,
+                exc,
+            )
             code = getattr(exc, "code", "integrity_error")
             try:
                 failure_code = JobFailureCode(str(code))
@@ -191,9 +209,13 @@ class CanonicalSnapshotMonthProcessor:
                 failure_code, "Historical month could not be committed"
             ) from exc
         except Exception as exc:
+            logger.exception(
+                "Historical initialization month %s failed unexpectedly",
+                snapshot_month,
+            )
             raise InitializationMonthError(
                 JobFailureCode.INTEGRITY_ERROR,
-                "Historical month failed integrity validation",
+                f"Historical month failed ({type(exc).__name__}); see server logs",
             ) from exc
 
     def _resolve_member(
@@ -219,11 +241,30 @@ class CanonicalSnapshotMonthProcessor:
             expected_sessions=expected_sessions,
             allowed_observed_symbols=(member.provider_symbol,),
             allow_missing_prefix=True,
+            canonical_exchange_sessions=True,
         )
-        evidence = self._evidence_for(member, request)
+        try:
+            evidence = self._evidence_for(member, request)
+        except ProviderFailure as exc:
+            raise InitializationMonthError(
+                JobFailureCode(exc.code.value),
+                f"{str(exc)} for {member.provider_symbol}",
+            ) from exc
         first_observed = date.fromisoformat(str(evidence.rows[0]["session"]))
+        observed_to_target = tuple(
+            date.fromisoformat(str(row["session"]))
+            for row in evidence.rows
+            if date.fromisoformat(str(row["session"])) <= target_session
+        )
+        required_window = self._calendar.sessions_in_range(
+            member.mic, FULL_HISTORY_START, target_session + timedelta(days=1)
+        )[-252:]
 
-        if target_session < first_observed:
+        if (
+            target_session < first_observed
+            or tuple(session for session in observed_to_target if session in required_window)
+            != required_window
+        ):
             alias_from, alias_to = self._backtest_repository.effective_alias_bounds(
                 alias_revision=self._alias_revision,
                 security_id=member.security_id,
@@ -237,7 +278,19 @@ class CanonicalSnapshotMonthProcessor:
                     JobFailureCode.INTEGRITY_ERROR,
                     "Historical evidence acquisition audit is missing",
                 )
-            proof = build_before_first_provider_observation(
+            if target_session < first_observed:
+                proof_builder = build_before_first_provider_observation
+            else:
+                observed_lifetime = self._calendar.sessions_in_range(
+                    member.mic, first_observed, target_session + timedelta(days=1)
+                )
+                proof_builder = (
+                    build_insufficient_detector_history
+                    if observed_to_target == observed_lifetime
+                    and len(observed_to_target) < 252
+                    else build_incomplete_detector_history
+                )
+            proof = proof_builder(
                 evidence=evidence,
                 snapshot_month=snapshot_month,
                 target_session=target_session,
@@ -276,6 +329,17 @@ class CanonicalSnapshotMonthProcessor:
         )
 
     def _evidence_for(self, member, request: HistoricalEvidenceRequest):
+        cache_key = (
+            member.security_id,
+            member.provider_symbol,
+            request.alias_revision,
+            request.start.isoformat(),
+            request.end.isoformat(),
+        )
+        cached = self._evidence_cache.get(cache_key)
+        if cached is not None:
+            self._validate_cached_evidence(cached, request)
+            return cached
         evidence = self._price_repository.find_request(
             security_id=member.security_id,
             requested_symbol=member.provider_symbol,
@@ -283,12 +347,37 @@ class CanonicalSnapshotMonthProcessor:
             start=FULL_HISTORY_START.isoformat(),
             end=request.end.isoformat(),
             request_contract_version=REQUEST_CONTRACT_VERSION,
+            observation_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
         )
         if evidence is None:
-            payload = self._evidence_adapter.fetch(request)
+            compatible = self._price_repository.find_compatible_request(
+                security_id=member.security_id,
+                requested_symbol=member.provider_symbol,
+                start=FULL_HISTORY_START.isoformat(),
+                end=request.end.isoformat(),
+                request_contract_version=REQUEST_CONTRACT_VERSION,
+                observation_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
+            )
+            if compatible is None:
+                payload = self._evidence_adapter.fetch(request)
+            else:
+                acquired = self._price_repository.acquisition_times(
+                    compatible.data_revision
+                )
+                if not acquired:
+                    raise InitializationMonthError(
+                        JobFailureCode.INTEGRITY_ERROR,
+                        "Historical evidence acquisition audit is missing",
+                    )
+                payload = rebind_historical_evidence_alias(
+                    compatible,
+                    alias_revision=self._alias_revision,
+                    acquired_at=acquired[0],
+                )
             revision = self._price_repository.commit(payload)
             evidence = self._price_repository.verify(revision)
         self._validate_cached_evidence(evidence, request)
+        self._evidence_cache[cache_key] = evidence
         return evidence
 
     @staticmethod
@@ -310,7 +399,12 @@ class CanonicalSnapshotMonthProcessor:
             date.fromisoformat(str(row["session"])) for row in evidence.rows
         )
         expected = request.expected_sessions
-        if not sessions or sessions != expected[-len(sessions) :]:
+        sessions_match = bool(sessions) and (
+            set(sessions).issubset(expected)
+            if request.canonical_exchange_sessions
+            else sessions == expected[-len(sessions) :]
+        )
+        if not sessions_match:
             raise InitializationMonthError(
                 JobFailureCode.REQUIRED_DATA_MISSING,
                 "Required historical data is unavailable",

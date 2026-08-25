@@ -38,6 +38,7 @@ _REQUIRED_COLUMNS = (
     "Stock Splits",
 )
 _REQUIRED_VALUE_COLUMNS = ("Open", "High", "Low", "Close", "Adj Close", "Volume")
+CANONICAL_EXCHANGE_SESSIONS_POLICY = "canonical_exchange_sessions_v2"
 
 
 class TickerLike(Protocol):
@@ -61,6 +62,7 @@ class HistoricalEvidenceRequest:
     expected_sessions: tuple[date, ...]
     allowed_observed_symbols: tuple[str, ...]
     allow_missing_prefix: bool = False
+    canonical_exchange_sessions: bool = False
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,51 @@ class HistoricalEvidencePayload:
     data_revision: str
     canonical_manifest_json: str
     acquired_at: str
+
+
+def rebind_historical_evidence_alias(
+    evidence: Any, *, alias_revision: str, acquired_at: str
+) -> HistoricalEvidencePayload:
+    """Reseal verified evidence when only its global alias revision changed."""
+    identity: dict[str, object] = {
+        "canonicalizer_version": CANONICALIZER_VERSION,
+        "request_contract_version": evidence.request_contract_version,
+        "request": dict(evidence.request_contract),
+        "requested_symbol": evidence.requested_symbol,
+        "observed_symbol": evidence.observed_symbol,
+        "currency": evidence.currency,
+        "quote_unit": evidence.quote_unit,
+        "quote_unit_scale": evidence.quote_unit_scale,
+        "exchange_timezone": evidence.exchange_timezone,
+        "rows": list(evidence.rows),
+        "provider": evidence.provider,
+        "provider_version": evidence.provider_version,
+        "security_id": evidence.security_id,
+        "alias_revision": alias_revision,
+        "actions": list(evidence.actions),
+    }
+    return HistoricalEvidencePayload(
+        security_id=evidence.security_id,
+        alias_revision=alias_revision,
+        provider=evidence.provider,
+        provider_version=evidence.provider_version,
+        request_contract_version=evidence.request_contract_version,
+        requested_symbol=evidence.requested_symbol,
+        observed_symbol=evidence.observed_symbol,
+        currency=evidence.currency,
+        quote_unit=evidence.quote_unit,
+        quote_unit_scale=evidence.quote_unit_scale,
+        exchange_timezone=evidence.exchange_timezone,
+        start=evidence.start,
+        end=evidence.end,
+        request_contract=dict(evidence.request_contract),
+        rows=evidence.rows,
+        actions=evidence.actions,
+        response_metadata_digest=evidence.response_metadata_digest,
+        data_revision=manifest_digest(identity),
+        canonical_manifest_json=canonical_json(identity),
+        acquired_at=acquired_at,
+    )
 
 
 def _number(value: Any, *, nullable: bool = False) -> str | None:
@@ -234,11 +281,19 @@ def normalize_historical_response(
         localized = frame.copy()
         localized.index = frame.index.tz_convert(exchange_timezone)
         localized = localized.sort_index()
-        sessions = tuple(timestamp.date() for timestamp in localized.index)
         expected_sessions = tuple(definition.expected_sessions)
-        sessions_match = sessions == expected_sessions
-        if definition.allow_missing_prefix and sessions:
-            sessions_match = sessions == expected_sessions[-len(sessions) :]
+        if definition.canonical_exchange_sessions:
+            expected_set = set(expected_sessions)
+            localized = localized[
+                [timestamp.date() in expected_set for timestamp in localized.index]
+            ]
+        sessions = tuple(timestamp.date() for timestamp in localized.index)
+        if definition.canonical_exchange_sessions:
+            sessions_match = bool(sessions)
+        else:
+            sessions_match = sessions == expected_sessions
+            if definition.allow_missing_prefix and sessions:
+                sessions_match = sessions == expected_sessions[-len(sessions) :]
         if not sessions_match or any(
             session < definition.start or session >= definition.end
             for session in sessions
@@ -248,19 +303,43 @@ def normalize_historical_response(
                 _safe_reason(FailureCode.REQUIRED_DATA_MISSING),
             )
         if localized[list(_REQUIRED_VALUE_COLUMNS)].isna().any(axis=None):
-            raise ProviderFailure(
-                FailureCode.REQUIRED_DATA_MISSING,
-                _safe_reason(FailureCode.REQUIRED_DATA_MISSING),
-            )
+            if definition.canonical_exchange_sessions:
+                localized = localized.dropna(subset=list(_REQUIRED_VALUE_COLUMNS))
+            else:
+                raise ProviderFailure(
+                    FailureCode.REQUIRED_DATA_MISSING,
+                    _safe_reason(FailureCode.REQUIRED_DATA_MISSING),
+                )
 
         rows: list[Mapping[str, object]] = []
         actions: list[Mapping[str, object]] = []
         for timestamp, row in localized.iterrows():
             session = pd.Timestamp(str(timestamp)).date().isoformat()
-            volume = float(row["Volume"])
-            dividend = float(row["Dividends"])
-            split = float(row["Stock Splits"])
-            if not all(math.isfinite(value) for value in (volume, dividend, split)):
+            numeric = tuple(
+                float(row[column])
+                for column in (
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Volume",
+                    "Dividends",
+                    "Stock Splits",
+                )
+            )
+            open_value, high, low, close, volume, dividend, split = numeric
+            valid_observation = (
+                all(math.isfinite(value) for value in numeric)
+                and min(open_value, high, low, close) > 0
+                and low <= min(open_value, close)
+                and high >= max(open_value, close)
+                and volume >= 0
+                and dividend >= 0
+                and split >= 0
+            )
+            if definition.canonical_exchange_sessions and not valid_observation:
+                continue
+            if not all(math.isfinite(value) for value in numeric):
                 raise ProviderFailure(
                     FailureCode.PROVIDER_CONTRACT_ERROR,
                     _safe_reason(FailureCode.PROVIDER_CONTRACT_ERROR),
@@ -300,10 +379,20 @@ def normalize_historical_response(
                 )
 
         normalized_metadata = canonical_provider_metadata(metadata)
+        canonical_request = dict(request)
+        if definition.canonical_exchange_sessions:
+            canonical_request["observation_policy"] = (
+                CANONICAL_EXCHANGE_SESSIONS_POLICY
+            )
+        if not rows:
+            raise ProviderFailure(
+                FailureCode.REQUIRED_DATA_MISSING,
+                _safe_reason(FailureCode.REQUIRED_DATA_MISSING),
+            )
         identity: dict[str, object] = {
             "canonicalizer_version": CANONICALIZER_VERSION,
             "request_contract_version": REQUEST_CONTRACT_VERSION,
-            "request": request,
+            "request": canonical_request,
             "requested_symbol": definition.symbol,
             "observed_symbol": observed_symbol,
             "currency": currency,
@@ -340,7 +429,7 @@ def normalize_historical_response(
             exchange_timezone=exchange_timezone,
             start=definition.start.isoformat(),
             end=definition.end.isoformat(),
-            request_contract=request,
+            request_contract=canonical_request,
             rows=tuple(rows),
             actions=tuple(actions),
             response_metadata_digest=_digest(normalized_metadata),
@@ -404,7 +493,10 @@ class YFinanceHistoricalEvidenceAdapter:
                 )
             except Exception as exc:
                 failure = _classify_exception(exc)
-                if not failure.retryable or attempt == 2:
+                retryable = failure.retryable or (
+                    failure.code is FailureCode.PROVIDER_CONTRACT_ERROR
+                )
+                if not retryable or attempt == 2:
                     raise failure from exc
                 base = 1.0 if attempt == 0 else 2.0
                 self._sleeper(min(2.25, base + self._jitter(request_key, attempt)))

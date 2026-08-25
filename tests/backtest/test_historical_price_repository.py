@@ -158,6 +158,23 @@ def test_find_cached_request_reuses_earliest_verified_revision(tmp_path) -> None
     assert cached.data_revision == first.data_revision
 
 
+def test_find_compatible_request_can_cross_alias_revisions(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit(payload)
+
+    cached = repo.find_compatible_request(
+        security_id="security-1",
+        requested_symbol="AAPL",
+        start="2024-01-01",
+        end="2024-02-01",
+        request_contract_version=payload.request_contract_version,
+    )
+
+    assert cached is not None
+    assert cached.alias_revision == "alias-v1"
+
+
 def test_evidence_is_sql_immutable_and_foreign_keys_are_enforced(tmp_path) -> None:
     repo = _repo(tmp_path)
     payload = _payload()

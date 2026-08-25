@@ -195,7 +195,9 @@ def test_backtest_engine_construction_failure_is_not_mislabeled_interruption(
         == 1
     )
     assert repo.failures[0]["failure_code"] is JobFailureCode.INTEGRITY_ERROR
-    assert repo.failures[0]["detail"] == "Strategy worker configuration is invalid"
+    assert repo.failures[0]["detail"] == (
+        "Strategy worker configuration is invalid: RuntimeError: corrupt strategy run"
+    )
 
 
 # ---------------------------------------------------------------------------

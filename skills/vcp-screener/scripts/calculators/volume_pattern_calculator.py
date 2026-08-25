@@ -122,6 +122,11 @@ def _calculate_volume_pattern(
         return {
             "score": 0,
             "dry_up_ratio": None,
+            # This is a valid, determinate no-volume outcome rather than a
+            # malformed calculator response.  Downstream consumers require
+            # both fields for every complete result and must not infer a
+            # breakout from an untradeable window.
+            "breakout_volume_detected": False,
             "error": "No volume data available",
         }
 

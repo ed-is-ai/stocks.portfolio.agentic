@@ -398,6 +398,17 @@ def test_incompatible_provider_request_contract_fails_closed() -> None:
     assert exc_info.value.code == "integrity_error"
 
 
+def test_canonical_exchange_session_observation_policy_is_supported() -> None:
+    contract = dict(_evidence((_row("2024-01-02", 25, 100),), ()).request_contract)
+    contract["observation_policy"] = "canonical_exchange_sessions_v2"
+
+    planes = HistoricalMarketPlanes.from_evidence(
+        _evidence((_row("2024-01-02", 25, 100),), (), request_contract=contract)
+    )
+
+    assert planes.provider_native()[0].session == date(2024, 1, 2)
+
+
 @pytest.mark.parametrize(
     "row",
     [

@@ -51,3 +51,8 @@ def canonical_json(value: object) -> str:
 
 def manifest_digest(value: object) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def canonical_json_digest(value: str) -> str:
+    """Hash canonical JSON already rendered and persisted as UTF-8 text."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
