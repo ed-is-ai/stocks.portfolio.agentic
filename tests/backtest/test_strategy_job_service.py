@@ -132,20 +132,21 @@ def test_dispatch_spawns_exact_module_worker_without_shell_or_pipes() -> None:
     service = StrategyJobService(repo, popen=popen, project_root=Path("/project"))
 
     assert service.dispatch_once() is True
-    assert calls == [
-        (
-            [
-                sys.executable,
-                "-m",
-                "app.services.backtest.worker",
-                "--job-id",
-                "job-1",
-                "--claim-token",
-                "claim-1",
-            ],
-            {"cwd": "/project"},
-        )
+    assert len(calls) == 1
+    argv, kwargs = calls[0]
+    # Compare resolved paths, not literal strings: a venv's "python" and
+    # "python3" aliases both resolve to the same interpreter binary, and
+    # which alias sys.executable reports can vary by launch mechanism.
+    assert Path(argv[0]).resolve() == Path(sys.executable).resolve()
+    assert argv[1:] == [
+        "-m",
+        "app.services.backtest.worker",
+        "--job-id",
+        "job-1",
+        "--claim-token",
+        "claim-1",
     ]
+    assert kwargs == {"cwd": "/project"}
     assert service.dispatch_once() is False
 
 

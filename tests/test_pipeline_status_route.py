@@ -4,7 +4,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.api.app import app
-import app.api.watchlist_context as watchlist_context_module
+import app.api.stock_scanner_context as stock_scanner_context_module
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
@@ -82,10 +82,10 @@ def test_pipeline_status_shows_unknown_freshness_when_no_artifact_exists(
 ) -> None:
     """No analysis artifact on disk at all -> freshness unknown (#71)."""
     monkeypatch.setattr(
-        watchlist_context_module, "ANALYSIS_JSON", tmp_path / "missing.json"
+        stock_scanner_context_module, "ANALYSIS_JSON", tmp_path / "missing.json"
     )
     repo = PipelineStatusRepository(tmp_path / "status.json")
-    monkeypatch.setattr(watchlist_context_module, "_status_repository", repo)
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
 
     response = client.get("/pipeline-status")
@@ -105,7 +105,7 @@ def test_pipeline_status_shows_freshness_and_toast_for_owning_run(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(watchlist_context_module, "ANALYSIS_JSON", analysis_path)
+    monkeypatch.setattr(stock_scanner_context_module, "ANALYSIS_JSON", analysis_path)
 
     repo = PipelineStatusRepository(tmp_path / "status.json")
     repo.start(run_id="run-a")
@@ -128,7 +128,7 @@ def test_pipeline_status_shows_freshness_and_toast_for_owning_run(
         expected_run_id="run-a",
     )
     repo.finish(PipelineState.PARTIAL, expected_run_id="run-a", artifact_produced=True)
-    monkeypatch.setattr(watchlist_context_module, "_status_repository", repo)
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
 
     response = client.get("/pipeline-status")
@@ -155,7 +155,7 @@ def test_pipeline_status_cached_source_labelled_cached_not_skipped(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(watchlist_context_module, "ANALYSIS_JSON", analysis_path)
+    monkeypatch.setattr(stock_scanner_context_module, "ANALYSIS_JSON", analysis_path)
 
     repo = PipelineStatusRepository(tmp_path / "status.json")
     repo.start(run_id="run-c")
@@ -179,7 +179,7 @@ def test_pipeline_status_cached_source_labelled_cached_not_skipped(
         expected_run_id="run-c",
     )
     repo.finish(PipelineState.PARTIAL, expected_run_id="run-c", artifact_produced=True)
-    monkeypatch.setattr(watchlist_context_module, "_status_repository", repo)
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
 
     markup = client.get("/pipeline-status").text
@@ -208,7 +208,7 @@ def test_pipeline_status_failed_attempt_keeps_prior_refresh_and_shows_toast(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(watchlist_context_module, "ANALYSIS_JSON", analysis_path)
+    monkeypatch.setattr(stock_scanner_context_module, "ANALYSIS_JSON", analysis_path)
 
     repo = PipelineStatusRepository(tmp_path / "status.json")
     repo.start(run_id="usable")
@@ -221,7 +221,7 @@ def test_pipeline_status_failed_attempt_keeps_prior_refresh_and_shows_toast(
         expected_run_id="failed",
         error_summary="Latest provider request failed.",
     )
-    monkeypatch.setattr(watchlist_context_module, "_status_repository", repo)
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
 
     response = client.get("/pipeline-status")
@@ -243,7 +243,7 @@ def test_pipeline_status_no_toast_when_coverage_fully_ok(monkeypatch, tmp_path) 
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(watchlist_context_module, "ANALYSIS_JSON", analysis_path)
+    monkeypatch.setattr(stock_scanner_context_module, "ANALYSIS_JSON", analysis_path)
 
     repo = PipelineStatusRepository(tmp_path / "status.json")
     repo.start(run_id="run-ok")
@@ -261,7 +261,7 @@ def test_pipeline_status_no_toast_when_coverage_fully_ok(monkeypatch, tmp_path) 
     repo.finish(
         PipelineState.COMPLETE, expected_run_id="run-ok", artifact_produced=True
     )
-    monkeypatch.setattr(watchlist_context_module, "_status_repository", repo)
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
 
     response = client.get("/pipeline-status")
@@ -284,7 +284,7 @@ def test_pipeline_status_no_toast_while_running(monkeypatch, tmp_path) -> None:
         },
         expected_run_id="running",
     )
-    monkeypatch.setattr(watchlist_context_module, "_status_repository", repo)
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
     monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
 
     response = client.get("/pipeline-status")

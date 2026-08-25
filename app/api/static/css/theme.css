@@ -48,6 +48,13 @@
   --fs-md: 1rem;
   --fs-lg: 1.15rem;
   --fs-xl: 1.4rem;
+  /* Heading steps — extend the same scale upward so page headings share
+   * one system with badges/labels instead of falling back to Bootstrap's
+   * disconnected h1-h6 defaults (which run up to ~40px and don't relate
+   * to any of the sizes above). Deliberately restrained, not marketing-
+   * page-sized — matches the studied DNA's dense, weight-only hierarchy. */
+  --fs-2xl: 1.75rem;
+  --fs-display: 2.25rem;
 
   /* Weights */
   --fw-normal: 400;
@@ -77,6 +84,24 @@ body {
   font-optical-sizing: auto;
 }
 
+/* ── Headings — one coherent scale, not Bootstrap's disconnected
+ * defaults (h1-h6 normally run 16px-40px via calc()+vw and share no
+ * relationship with the badge/label scale above). Weight-only hierarchy
+ * throughout — bold Inter carries every level, no size is decorative-huge.
+ * Applies to both semantic tags and Bootstrap's .h1-.h6 utility classes. ── */
+h1, .h1 { font-size: var(--fs-display); font-weight: var(--fw-bold); line-height: var(--lh-tight); letter-spacing: var(--tracking-tight); }
+h2, .h2 { font-size: var(--fs-2xl);     font-weight: var(--fw-bold); line-height: var(--lh-tight); letter-spacing: var(--tracking-tight); }
+h3, .h3 { font-size: var(--fs-xl);      font-weight: var(--fw-bold); line-height: var(--lh-tight); }
+h4, .h4 { font-size: var(--fs-lg);      font-weight: var(--fw-semibold); line-height: var(--lh-tight); }
+h5, .h5 { font-size: var(--fs-md);      font-weight: var(--fw-semibold); line-height: var(--lh-tight); }
+h6, .h6 {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  line-height: var(--lh-tight);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 /* Tabular, lining figures so numeric columns align cleanly. */
 table,
 .sval,
@@ -91,14 +116,14 @@ table,
 
 /* Strategy Manager components reuse the application palette instead of
  * Bootstrap's stock contextual colours. */
-.sm-card { border: 1px solid var(--border); border-radius: .5rem; box-shadow: 0 1px 3px rgba(15,39,68,.05); }
+.sm-card { border: 1px solid var(--border); border-radius: 0; box-shadow: none; }
 .sm-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: .35rem;
   border: 1px solid transparent;
-  border-radius: .35rem;
+  border-radius: var(--radius-sm, 4px);
   padding: .375rem .75rem;
   font-size: var(--fs-sm);
   font-weight: var(--fw-semibold);
@@ -121,7 +146,7 @@ table,
 .sm-alert {
   border: 1px solid var(--border);
   border-left-width: 3px;
-  border-radius: .45rem;
+  border-radius: 0;
   padding: .75rem 1rem;
   color: #334155;
   background: #fff;
@@ -139,7 +164,7 @@ table,
   gap: .7rem;
   padding: .7rem .85rem;
   border: 1px solid var(--border);
-  border-radius: .4rem;
+  border-radius: 0;
   background: #fff;
 }
 .sm-stage + .sm-stage { margin-top: .5rem; }
@@ -159,8 +184,8 @@ table,
 .sm-muted-badge { background: #f1f5f9; color: var(--muted); }
 .status-info { background: var(--blue-bg); color: var(--blue); }
 /* Strategy Manager: progress remains textual when motion is disabled. */
-.month-progress { border-left: 3px solid #10b981; padding-left: .65rem; animation: sm-month-pulse 1.5s ease-in-out infinite; }
-@keyframes sm-month-pulse { 50% { border-left-color: #22d3ee; } }
+.month-progress { border-left: 3px solid var(--primary); padding-left: .65rem; animation: sm-month-pulse 1.5s ease-in-out infinite; }
+@keyframes sm-month-pulse { 50% { border-left-color: var(--accent-2); } }
 @media (prefers-reduced-motion: reduce) { .month-progress { animation: none; } }
 
 /* ── Notification centre (#80) ───────────────────────────── */
@@ -170,7 +195,7 @@ table,
   background: rgba(255, 255, 255, 0.12);
   color: #fff;
   border: none;
-  border-radius: 0.4rem;
+  border-radius: var(--radius-sm, 4px);
   padding: 0.28rem 0.55rem;
   line-height: 1;
 }
@@ -183,8 +208,8 @@ table,
   min-width: 1.05rem;
   height: 1.05rem;
   padding: 0 0.28rem;
-  border-radius: 999px;
-  background: #dc2626;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--red);
   color: #fff;
   font-size: 0.66rem;
   font-weight: 700;
@@ -200,7 +225,7 @@ table,
   overflow-y: auto;
   border: 1px solid var(--border, #e2e8f0);
   box-shadow: 0 12px 40px rgba(8, 17, 32, 0.22);
-  border-radius: 0.6rem;
+  border-radius: 0;
 }
 .notif-head {
   display: flex;
@@ -219,7 +244,7 @@ table,
 .notif-mark-all {
   border: none;
   background: none;
-  color: #1d4ed8;
+  color: var(--blue);
   font-size: 0.74rem;
   font-weight: 600;
   cursor: pointer;
@@ -235,7 +260,7 @@ table,
   color: var(--muted, #64748b);
   font-size: 0.82rem;
 }
-.notif-empty .bi { font-size: 1.4rem; color: #16a34a; }
+.notif-empty .bi { font-size: 1.4rem; color: var(--green); }
 .notif-list { list-style: none; margin: 0; padding: 0; }
 .notif-item {
   display: flex;
@@ -249,9 +274,9 @@ table,
 .notif-item.unread { background: #eff6ff; }
 .notif-item.unread:hover { background: #dbeafe; }
 .notif-icon { font-size: 1rem; margin-top: 0.1rem; }
-.notif-info .notif-icon { color: #1d4ed8; }
-.notif-warning .notif-icon { color: #b45309; }
-.notif-error .notif-icon { color: #dc2626; }
+.notif-info .notif-icon { color: var(--blue); }
+.notif-warning .notif-icon { color: var(--amber); }
+.notif-error .notif-icon { color: var(--red); }
 .notif-body { flex: 1; min-width: 0; }
 .notif-title {
   font-size: 0.8rem;
@@ -264,9 +289,9 @@ table,
 .notif-ticker {
   font-size: 0.68rem;
   font-weight: 700;
-  color: #0f2744;
-  background: #e2e8f0;
-  border-radius: 0.25rem;
+  color: var(--primary);
+  background: var(--border);
+  border-radius: var(--radius-sm, 4px);
   padding: 0.02rem 0.32rem;
 }
 .notif-text { font-size: 0.74rem; color: var(--muted, #64748b); margin-top: 0.1rem; }
@@ -280,7 +305,7 @@ table,
   line-height: 1;
   font-size: 0.95rem;
 }
-.notif-dismiss:hover { color: #dc2626; }
+.notif-dismiss:hover { color: var(--red); }
 .notif-actions {
   display: flex;
   align-items: center;
@@ -308,4 +333,4 @@ table,
   font-size: inherit;
   text-decoration: underline;
 }
-.notif-mark-read-inline:hover { color: #1d4ed8; }
+.notif-mark-read-inline:hover { color: var(--blue); }

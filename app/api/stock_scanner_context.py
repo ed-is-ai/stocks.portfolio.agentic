@@ -1,4 +1,4 @@
-"""Shared template context for the canonical watchlist partial."""
+"""Shared template context for the canonical stock scanner partial."""
 
 from __future__ import annotations
 
@@ -59,13 +59,13 @@ def build_freshness_context() -> dict[str, Any]:
     }
 
 
-def build_watchlist_context(
+def build_stock_scanner_context(
     trader: TraderService,
     portfolio: PortfolioService,
     alerts: AlertsRepository,
     **updates: Any,
 ) -> dict[str, Any]:
-    """Build the common context used by every watchlist render path.
+    """Build the common context used by every stock scanner render path.
 
     Records are sorted actionable-first (then by score) so the most tradable
     setups surface at the top regardless of the order persisted on disk.

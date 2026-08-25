@@ -1,14 +1,14 @@
 """Shared alert-eligibility rules for email and on-screen alerts (#58).
 
-Single source of truth for "what counts as an alert" so the watchlist UI
+Single source of truth for "what counts as an alert" so the stock scanner UI
 and ``AlertAgent``'s email pipeline can never silently diverge again. Both
-the web layer (via ``app.api.watchlist_context``) and ``AlertAgent`` import
-``classify_alert`` instead of re-deriving these thresholds.
+the web layer (via ``app.api.stock_scanner_context``) and ``AlertAgent``
+import ``classify_alert`` instead of re-deriving these thresholds.
 
 Product decision (#58): "Stay Alert" candidates (Stage 2, approaching entry,
 score >= ``STAY_ALERT_SCORE_MIN``) are now emailable, not just shown on
-screen — a user who added a ticker to their watchlist because it flashed
-"Stay Alert" every day but never got an email had no way to know the system
+screen — a user who added a ticker to their scanner watchlist because it
+flashed "Stay Alert" every day but never got an email had no way to know the system
 considered that intentional. They are emailed at lower priority: they share
 the same BUY/BREAKOUT section ordering by conviction, but use a much longer
 cooldown than a genuine breakout, since a Stage 2 pullback can sit in

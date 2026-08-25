@@ -122,7 +122,7 @@
   <!-- Equity Curve: one shared aligned timeline, two datasets -->
   <h2 class="h5">Equity Curve</h2>
   {% if comparison_equity_payload %}
-  <div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1rem 1.25rem;margin-bottom:1rem">
+  <div style="background:white;border:1px solid var(--border);border-radius:0;padding:1rem 1.25rem;margin-bottom:1rem">
     <canvas id="comparison-equity-chart" role="img"
             aria-label="Equity curves for Result A ({{ a.result.strategy_id }} v{{ a.result.strategy_api_version }}, run {{ a.result.run_id }}) and Result B ({{ b.result.strategy_id }} v{{ b.result.strategy_api_version }}, run {{ b.result.run_id }})"
             style="max-height:280px">Chart unavailable — see the equity data table below for exact values.</canvas>

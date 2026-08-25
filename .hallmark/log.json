@@ -1,0 +1,12 @@
+[
+  {
+    "date": "2026-08-25",
+    "macrostructure": "Index-First",
+    "theme": "studied-DNA",
+    "theme_axes": "light / grotesk-sans (weight-only) / neutral-decorative + functional dual-tone data color",
+    "enrichment": "none",
+    "scope": "app",
+    "status": "all 7 tabs converted (shell, Watchlist, Portfolio, Trade History, Realised P&L, Run Log, Strategy Manager, Settings); Bootstrap CSS+JS still loaded, CDN removal is future work",
+    "brief": "Agents.stocks — retokenize app-wide :root + Bootstrap radius vars onto Bloomberg-studied DNA; Bootstrap CSS kept loaded, Bootstrap JS kept permanently (modals/dropdowns)"
+  }
+]

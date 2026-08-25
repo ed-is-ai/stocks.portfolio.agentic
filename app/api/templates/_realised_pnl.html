@@ -124,7 +124,7 @@
               <tbody>
                 {% for rt in round_trips %}
                 <tr>
-                  <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ rt.ticker }}</span></td>
+                  <td><span class="fw-bold" style="color:var(--primary); font-size:0.85rem">{{ rt.ticker }}</span></td>
                   <td>{{ rt.entry_date }}</td>
                   <td>{{ "%.2f"|format(rt.entry_price) }}</td>
                   <td>{{ rt.exit_date }}</td>

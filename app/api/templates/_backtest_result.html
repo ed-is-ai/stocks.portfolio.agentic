@@ -60,7 +60,7 @@
   <!-- Equity Curve -->
   <h2 class="h5">Equity Curve</h2>
   {% if equity_curve_payload %}
-  <div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1rem 1.25rem;margin-bottom:1rem">
+  <div style="background:white;border:1px solid var(--border);border-radius:0;padding:1rem 1.25rem;margin-bottom:1rem">
     <canvas id="equity-curve-chart" role="img"
             aria-label="Equity curve for {{ result.strategy_id }} v{{ result.strategy_api_version }}, {{ result.start_month }} to {{ result.end_month }}, in {{ result.base_currency }}"
             style="max-height:280px">Chart unavailable — see the equity data table below for exact values.</canvas>

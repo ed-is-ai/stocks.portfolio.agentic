@@ -42,7 +42,7 @@ a.ticker:hover {
 .stage {
   display: inline-block;
   padding: 0.12rem 0.45rem;
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 4px);
   font-size: var(--fs-2xs);
   font-weight: var(--fw-semibold);
   white-space: nowrap;
@@ -72,7 +72,7 @@ a.ticker:hover {
 .rec {
   display: inline-block;
   padding: 0.18rem 0.52rem;
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 4px);
   font-size: var(--fs-2xs);
   font-weight: var(--fw-bold);
   letter-spacing: 0.03em;
@@ -112,7 +112,7 @@ a.ticker:hover {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
   padding: 0.2rem 0.6rem;
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 4px);
   cursor: pointer;
   transition: background .15s, color .15s, border-color .15s;
   white-space: nowrap;
@@ -142,7 +142,7 @@ a.ticker:hover {
   align-items: center;
   gap: 0.35rem;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 4px);
   padding: 0.1rem 0.7rem;
   background: white;
   color: var(--muted);
@@ -191,7 +191,7 @@ a.ticker:hover {
   overflow-y: auto;
   background: white;
   border: 1px solid var(--border);
-  border-radius: 0.5rem;
+  border-radius: 0;
   box-shadow: 0 10px 30px rgba(15,39,68,0.15);
   padding: 0.7rem;
 }
@@ -295,7 +295,7 @@ a.ticker:hover {
   align-items: center;
   gap: 0.25rem;
   padding: 0.2rem 0.45rem;
-  border-radius: 999px;
+  border-radius: var(--radius-sm, 4px);
   background: var(--bg-subtle, rgba(148, 163, 184, 0.15));
 }
 .source-ok { color: var(--green); background: var(--green-bg); }

@@ -15,7 +15,7 @@ from app.api.dependencies import (
 )
 from app.api.params import optional_int
 from app.api.templating import templates
-from app.api.watchlist_context import build_watchlist_context
+from app.api.stock_scanner_context import build_stock_scanner_context
 from app.core.config import PIPELINE_RUNS_CSV
 from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
@@ -37,14 +37,14 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "index.html")
 
 
-@router.get("/partials/watchlist", response_class=HTMLResponse)
-async def partial_watchlist(
+@router.get("/partials/stock-scanner", response_class=HTMLResponse)
+async def partial_stock_scanner(
     request: Request, trader: TraderDep, portfolio: PortfolioDep, alerts: AlertsDep
 ) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
-        "_watchlist.html",
-        context=build_watchlist_context(trader, portfolio, alerts),
+        "_stock_scanner.html",
+        context=build_stock_scanner_context(trader, portfolio, alerts),
     )
 
 

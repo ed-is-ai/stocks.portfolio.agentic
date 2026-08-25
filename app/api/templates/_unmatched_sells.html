@@ -27,7 +27,7 @@
       <tbody>
         {% for us in unmatched_sells %}
         <tr class="{% if us.acknowledged_at %}acked-row{% endif %}">
-          <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ us.ticker }}</span></td>
+          <td><span class="fw-bold" style="color:var(--primary); font-size:0.85rem">{{ us.ticker }}</span></td>
           <td class="text-muted" style="font-size:0.76rem">{{ us.date }}</td>
           <td>{{ us.shares }}</td>
           <td>£{{ "%.2f"|format(us.price) }}</td>

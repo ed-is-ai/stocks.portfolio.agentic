@@ -3,91 +3,62 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Stock Trader</title>
+  <title>Stock Manager</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+  <link rel="stylesheet" href="/static/css/tokens.css">
   <link rel="stylesheet" href="/static/css/theme.css">
   <link rel="stylesheet" href="/static/css/watchlist.css">
   <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <style>
-    /* ── Design tokens ─────────────────────────────── */
-    :root {
-      --primary:     #0f2744;
-      --primary-2:   #123a63;
-      --surface:     #f1f5f9;
-      --border:      #e2e8f0;
-      --muted:       #64748b;
-      /* Brand accent — emerald→cyan "growth" gradient */
-      --accent:      #10b981;
-      --accent-2:    #22d3ee;
-      --brand-grad:  linear-gradient(120deg, var(--accent) 0%, var(--accent-2) 100%);
-      --navbar-grad: linear-gradient(115deg, #0b1f38 0%, var(--primary) 45%, var(--primary-2) 100%);
-      --green:       #16a34a;
-      --green-bg:    #dcfce7;
-      --amber:       #b45309;
-      --amber-bg:    #fef3c7;
-      --red:         #dc2626;
-      --red-bg:      #fee2e2;
-      --blue:        #1d4ed8;
-      --blue-bg:     #dbeafe;
-      --purple:      #7c3aed;
-      --purple-bg:   #ede9fe;
-      --orange:      #c2410c;
-      --orange-bg:   #fff7ed;
-    }
-
     /* ── Base ──────────────────────────────────────── */
-    /* Font family, size, and numeric treatment come from theme.css tokens. */
+    /* Design tokens come from tokens.css; font family/size/numeric
+       treatment come from theme.css. */
     body {
-      background:
-        radial-gradient(1200px 400px at 100% -5%, #e6fbf4 0%, rgba(230,251,244,0) 60%),
-        var(--surface);
-      color: #1e293b;
+      background: var(--surface);
+      color: var(--primary);
     }
 
-    /* ── Navbar ────────────────────────────────────── */
+    /* ── Navbar — flat masthead, not a gradient banner ────────────── */
     .navbar {
       background: var(--navbar-grad) !important;
-      box-shadow: 0 2px 14px rgba(8,17,32,0.28);
-      padding: 0.55rem 1.25rem;
-      border-bottom: 2px solid transparent;
-      border-image: var(--brand-grad) 1;
+      padding: 0.6rem 1.25rem;
+      border-bottom: 1px solid var(--border);
     }
     .navbar-brand {
       font-weight: var(--fw-bold);
-      font-size: var(--fs-md);
+      font-size: var(--fs-lg);
       letter-spacing: -0.01em;
       color: white !important;
       display: flex;
       align-items: center;
       gap: 0.55rem;
     }
-    /* Logo mark: icon in a rounded gradient badge */
+    /* Logo mark: flat ink square, no gradient badge */
     .brand-mark {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      width: 1.7rem;
-      height: 1.7rem;
-      border-radius: 0.5rem;
-      background: var(--brand-grad);
-      box-shadow: 0 2px 8px rgba(16,185,129,0.35);
+      width: 1.6rem;
+      height: 1.6rem;
+      border-radius: var(--radius-sm);
+      background: rgba(255,255,255,0.12);
     }
-    .brand-mark .bi { color: #06231b; font-size: 1.05rem; }
+    .brand-mark .bi { color: #fff; font-size: 1rem; }
     .brand-name { color: #fff; }
-    .brand-name em { font-style: normal; color: var(--accent-2); }
+    .brand-name em { font-style: normal; color: rgba(255,255,255,0.6); }
     .navbar-tag {
-      font-size: var(--fs-xs);
+      font-size: var(--fs-sm);
       color: rgba(255,255,255,0.55);
       padding-left: 0.7rem;
       border-left: 1px solid rgba(255,255,255,0.16);
     }
 
-    /* ── Tab bar ───────────────────────────────────── */
+    /* ── Tab bar — hairline underline, no active-tab gradient ──────── */
     .tab-bar {
       background: white;
-      border-bottom: 2px solid var(--border);
+      border-bottom: 1px solid var(--border);
       padding: 0 0.5rem;
       display: flex;
       align-items: flex-end;
@@ -95,41 +66,39 @@
     }
     .nav-tabs { border: none; flex-wrap: nowrap; }
     .nav-tabs .nav-link { white-space: nowrap; }
-    .nav-tabs .nav-item { margin-bottom: -2px; }
+    .nav-tabs .nav-item { margin-bottom: -1px; }
     .nav-tabs .nav-link {
       border: none;
       border-bottom: 2px solid transparent;
       border-radius: 0;
       color: var(--muted);
-      font-size: var(--fs-sm);
+      font-size: var(--fs-md);
       font-weight: var(--fw-medium);
-      padding: 0.6rem 1rem;
+      padding: 0.65rem 1rem;
       transition: color .15s, border-color .15s;
     }
     .nav-tabs .nav-link:hover { color: var(--primary); background: none; border-bottom-color: var(--border); }
     .nav-tabs .nav-link.active {
       color: var(--primary);
       font-weight: var(--fw-semibold);
-      border-image: var(--brand-grad) 1;
-      border-bottom: 2px solid;
+      border-bottom: 2px solid var(--primary);
       background: none;
     }
-    .nav-tabs .nav-link.active .bi { color: var(--accent); }
+    .nav-tabs .nav-link.active .bi { color: var(--primary); }
     .nav-tabs .nav-link .bi { margin-right: 0.3rem; font-size: 0.82rem; }
 
-    /* ── Content panel ─────────────────────────────── */
+    /* ── Content panel — flat, hairline border, no shadow/rounding ─── */
     #tab-content {
       background: white;
       border: 1px solid var(--border);
       border-top: none;
-      border-radius: 0 0 0.5rem 0.5rem;
+      border-radius: 0;
       padding: 1.25rem 1.5rem;
       min-height: 420px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.04);
     }
 
-    /* ── Tables ────────────────────────────────────── */
-    .tbl-wrap { overflow-y: auto; max-height: 72vh; border-radius: 0.4rem; border: 1px solid var(--border); }
+    /* ── Tables — hairline rules, flat header, no rounding ────────── */
+    .tbl-wrap { overflow-y: auto; max-height: 72vh; border-radius: 0; border: 1px solid var(--border); }
     /* Short viewports (e.g. landscape phones): leave enough room
        above the fixed pipeline status bar that its own horizontal
        scrollbar never lands under it. Scoped to the watchlist wrap
@@ -174,15 +143,14 @@
     .pos { color: var(--green); font-weight: 600; }
     .neg { color: var(--red);   font-weight: 600; }
 
-    /* ── Stat cards (portfolio summary) ────────────── */
+    /* ── Stat cards (portfolio summary) — flat, hairline, no shadow ── */
     .stat-card {
       background: white;
       border: 1px solid var(--border);
-      border-top: 2px solid var(--accent);
-      border-radius: 0.5rem;
+      border-top: 2px solid var(--primary);
+      border-radius: 0;
       padding: 0.65rem 1.1rem;
       min-width: 150px;
-      box-shadow: 0 1px 3px rgba(15,39,68,0.05);
     }
     .stat-card .slbl {
       font-size: var(--fs-2xs);
@@ -198,7 +166,7 @@
     .exit-badge {
       display: inline-block;
       padding: 0.18rem 0.5rem;
-      border-radius: 0.35rem;
+      border-radius: var(--radius-sm);
       font-size: 0.68rem;
       font-weight: 700;
       text-transform: uppercase;
@@ -212,7 +180,7 @@
     .flag-badge {
       display: inline-block;
       padding: 0.18rem 0.5rem;
-      border-radius: 0.35rem;
+      border-radius: var(--radius-sm);
       font-size: 0.68rem;
       font-weight: 700;
       text-transform: uppercase;
@@ -225,7 +193,7 @@
     .unmatched-panel {
       background: #fffdf6;
       border: 1px solid var(--amber-bg);
-      border-radius: 0.5rem;
+      border-radius: 0;
       padding: 0.75rem 1rem;
     }
     .unmatched-panel > summary {
@@ -239,7 +207,7 @@
     .ack-toggle {
       display: inline-block;
       padding: 0.2rem 0.6rem;
-      border-radius: 999px;
+      border-radius: var(--radius-sm);
       font-size: 0.72rem;
       font-weight: 600;
       background: white;
@@ -269,13 +237,13 @@
     tr.row-exit td { background: #fff8f8 !important; }
     tr.row-exit:hover td { background: #fee2e2 !important; }
 
-    /* ── Action buttons ────────────────────────────── */
+    /* ── Action buttons — flat, no rounding ────────── */
     .btn-buy-sm, .btn-sell-sm, .btn-adjust-sm {
       border: none;
       font-weight: 600;
       font-size: 0.72rem;
       padding: 0.22rem 0.62rem;
-      border-radius: 0.3rem;
+      border-radius: var(--radius-sm);
       cursor: pointer;
       transition: background .15s;
       display: inline-flex;
@@ -293,7 +261,7 @@
     .badge-status {
       display: inline-block;
       padding: 0.15rem 0.45rem;
-      border-radius: 999px;
+      border-radius: var(--radius-sm);
       font-size: 0.68rem;
       font-weight: 700;
       letter-spacing: 0.04em;
@@ -332,7 +300,7 @@
     .spin { animation: spin 1s linear infinite; }
 
     /* ── Modals ────────────────────────────────────── */
-    .modal-content { border: none; border-radius: 0.5rem; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
+    .modal-content { border: 1px solid var(--border); border-radius: 0; box-shadow: 0 20px 60px rgba(0,0,0,0.15); }
     .modal-header { padding: 0.85rem 1.25rem; border-radius: calc(0.5rem - 1px) calc(0.5rem - 1px) 0 0; border-bottom: 1px solid rgba(255,255,255,0.15); }
     .modal-header .btn-close { filter: invert(1) opacity(0.7); }
     .modal-title { font-weight: var(--fw-semibold); font-size: var(--fs-base); }
@@ -380,9 +348,8 @@
   <div class="d-flex align-items-center gap-3">
     <span class="navbar-brand">
       <span class="brand-mark"><i class="bi bi-graph-up-arrow"></i></span>
-      <span class="brand-name">Stock<em>Trader</em></span>
+      <span class="brand-name">Stock<em>Manager</em></span>
     </span>
-    <span class="navbar-tag">Portfolio Manager</span>
   </div>
   <div class="d-flex align-items-center gap-2">
     <!-- Notification centre (#80) -->
@@ -429,9 +396,9 @@
   <div class="tab-bar">
     <ul class="nav nav-tabs" id="mainTabs">
       <li class="nav-item">
-        <a class="nav-link active" id="tab-watchlist"
-           hx-get="/partials/watchlist" hx-target="#tab-content" hx-trigger="click, load" hx-indicator="#spinner">
-          <i class="bi bi-eye"></i>Watchlist
+        <a class="nav-link active" id="tab-stock-scanner"
+           hx-get="/partials/stock-scanner" hx-target="#tab-content" hx-trigger="click, load" hx-indicator="#spinner">
+          <i class="bi bi-eye"></i>Stock Scanner
         </a>
       </li>
       <li class="nav-item">

@@ -1,4 +1,4 @@
-"""Regression tests for the canonical watchlist UI and refresh flow."""
+"""Regression tests for the canonical stock scanner UI and refresh flow."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from app.api.dependencies import (
     get_trader_service,
 )
 from app.api.routes.pipeline import refresh_data
-from app.api.routes.views import partial_runlog, partial_watchlist
+from app.api.routes.views import partial_runlog, partial_stock_scanner
 from app.api.templating import templates
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.analysis_artifact import build_analysis_payload
@@ -96,7 +96,7 @@ def _sample_records() -> list[StockRecord]:
     return [with_analysis, without_analysis]
 
 
-def _render_watchlist(*, market_narrative=None) -> str:
+def _render_stock_scanner(*, market_narrative=None) -> str:
     from app.core.alerting import build_alert_ui_state
     from app.core.recommendation import classify_recommendation
     from app.services.freshness_service import calculate_freshness
@@ -115,7 +115,7 @@ def _render_watchlist(*, market_narrative=None) -> str:
         )
         for record in records
     }
-    return templates.get_template("_watchlist.html").render(
+    return templates.get_template("_stock_scanner.html").render(
         records=records,
         portfolio_tickers=portfolio_tickers,
         recommendations=recommendations,
@@ -148,8 +148,8 @@ SORTABLE_COLUMNS = (
 )
 
 
-def test_watchlist_splits_score_entry_stop_into_sortable_columns() -> None:
-    html = _render_watchlist()
+def test_stock_scanner_splits_score_entry_stop_into_sortable_columns() -> None:
+    html = _render_stock_scanner()
     # Each split-out metric now owns a header cell with a stable data-col key.
     for col in (*SORTABLE_COLUMNS, "buy"):
         assert f'data-col="{col}"' in html, f"missing column {col}"
@@ -158,8 +158,8 @@ def test_watchlist_splits_score_entry_stop_into_sortable_columns() -> None:
         assert f'class="wl-sort" data-col="{col}"' in html, f"no sort button for {col}"
 
 
-def test_watchlist_cells_carry_canonical_numeric_data_values() -> None:
-    html = _render_watchlist()
+def test_stock_scanner_cells_carry_canonical_numeric_data_values() -> None:
+    html = _render_stock_scanner()
     # Sorting/filtering read these data-val attributes, never the rendered text.
     assert 'data-col="score" data-val="8"' in html
     assert 'data-col="canslim" data-val="12"' in html
@@ -171,7 +171,7 @@ def test_watchlist_cells_carry_canonical_numeric_data_values() -> None:
     assert 'data-col="rec" data-val="5"' in html
 
 
-def test_watchlist_prices_use_currency_symbol() -> None:
+def test_stock_scanner_prices_use_currency_symbol() -> None:
     """UK (GBP) rows render £, US (USD) rows render $ (#123)."""
     from app.core.alerting import build_alert_ui_state
     from app.core.recommendation import classify_recommendation
@@ -193,7 +193,7 @@ def test_watchlist_prices_use_currency_symbol() -> None:
         )
 
     records = [_row("ULVR.L", "GBP", 45.0), _row("AAPL", "USD", 100.0)]
-    html = templates.get_template("_watchlist.html").render(
+    html = templates.get_template("_stock_scanner.html").render(
         records=records,
         portfolio_tickers=set(),
         recommendations={
@@ -213,43 +213,43 @@ def test_watchlist_prices_use_currency_symbol() -> None:
     assert "$100.00" in html
 
 
-def test_watchlist_missing_values_render_empty_data_val() -> None:
-    html = _render_watchlist()
+def test_stock_scanner_missing_values_render_empty_data_val() -> None:
+    html = _render_stock_scanner()
     # The analysis-less TSLA row must leave numeric data-val empty so those
     # cells sort last and are excluded from active range filters.
     assert 'data-col="score" data-val=""' in html
     assert 'data-col="canslim" data-val=""' in html
 
 
-def test_watchlist_congress_column_renders_net_and_tooltip() -> None:
-    html = _render_watchlist()
+def test_stock_scanner_congress_column_renders_net_and_tooltip() -> None:
+    html = _render_stock_scanner()
     # Net = combined buys − sells (3 − 13 = -10); Senate counts appear in the tip.
     assert 'data-col="congress" data-val="-10"' in html
     assert "Congress: 3 buys / 13 sells" in html
     assert "Senate: 1 buys / 4 sells" in html
 
 
-def test_watchlist_congress_empty_when_no_data() -> None:
-    html = _render_watchlist()
+def test_stock_scanner_congress_empty_when_no_data() -> None:
+    html = _render_stock_scanner()
     # The analysis-less TSLA row has no congressional data → empty, sorts last.
     assert 'data-col="congress" data-val=""' in html
 
 
-def test_watchlist_toolbar_exposes_search_and_control_mount() -> None:
-    html = _render_watchlist()
+def test_stock_scanner_toolbar_exposes_search_and_control_mount() -> None:
+    html = _render_stock_scanner()
     assert 'id="wl-search"' in html
     assert 'id="wl-adv"' in html
     assert 'id="wl-match-count"' in html
 
 
-def test_watchlist_columns_carry_semantic_classes_not_nth_child() -> None:
+def test_stock_scanner_columns_carry_semantic_classes_not_nth_child() -> None:
     """Every header and data cell gets a stable wl-col-<name> class.
 
     Sticky positioning (and any other column-specific styling) keys off
     these semantic classes instead of nth-child, so it survives column
     hiding/reordering. Regression test for issue #43.
     """
-    html = _render_watchlist()
+    html = _render_stock_scanner()
     for col in (*SORTABLE_COLUMNS, "buy"):
         assert f'class="wl-col wl-col-{col}' in html, (
             f"missing semantic class for {col}"
@@ -257,14 +257,14 @@ def test_watchlist_columns_carry_semantic_classes_not_nth_child() -> None:
     assert "nth-child" not in html
 
 
-def test_watchlist_table_wrap_and_ticker_buy_columns_are_sticky() -> None:
+def test_stock_scanner_table_wrap_and_ticker_buy_columns_are_sticky() -> None:
     """The table wrapper scrolls both axes; Ticker/Buy stay pinned.
 
     One table at every breakpoint (per issue #43): the wrapper scrolls
     horizontally on narrow screens, Ticker stays pinned on the left and
     the Buy action stays pinned on the right.
     """
-    html = _render_watchlist()
+    html = _render_stock_scanner()
     assert 'class="tbl-wrap wl-tbl-wrap"' in html
     assert "wl-table" in html
     assert 'class="wl-col wl-col-ticker" data-col="ticker"' in html
@@ -281,7 +281,7 @@ def test_watchlist_table_wrap_and_ticker_buy_columns_are_sticky() -> None:
     assert "nth-child" not in css
 
 
-def test_watchlist_css_has_focus_visible_and_touch_target_rules() -> None:
+def test_stock_scanner_css_has_focus_visible_and_touch_target_rules() -> None:
     """Keyboard focus rings and 44px phone touch targets are present."""
     css = (ROOT / "app" / "api" / "static" / "css" / "watchlist.css").read_text(
         encoding="utf-8"
@@ -292,7 +292,7 @@ def test_watchlist_css_has_focus_visible_and_touch_target_rules() -> None:
     assert "min-height: 44px" in css
 
 
-def test_watchlist_js_persists_state_and_seeds_presets() -> None:
+def test_stock_scanner_js_persists_state_and_seeds_presets() -> None:
     js = (ROOT / "app" / "api" / "static" / "js" / "watchlist.js").read_text(
         encoding="utf-8"
     )
@@ -309,7 +309,7 @@ def test_watchlist_js_persists_state_and_seeds_presets() -> None:
 def test_market_narrative_renders_accessible_collapsible_details() -> None:
     from app.schemas.market_narrative import MarketNarrative, MarketNarrativeSource
 
-    html = _render_watchlist(
+    html = _render_stock_scanner(
         market_narrative=MarketNarrative(
             headline="Breadth is improving",
             bullets=["Technology leads the current scan."],
@@ -333,7 +333,7 @@ def test_market_narrative_renders_accessible_collapsible_details() -> None:
 
 
 def test_market_narrative_toggle_is_absent_without_narrative() -> None:
-    html = _render_watchlist(market_narrative=None)
+    html = _render_stock_scanner(market_narrative=None)
 
     assert 'id="market-narrative"' not in html
     assert 'id="market-narrative-toggle"' not in html
@@ -354,7 +354,11 @@ def _request(path: str, method: str = "GET") -> Request:
 def test_legacy_scanner_ui_artifacts_are_removed() -> None:
     assert not (TEMPLATES / "_scanner.html").exists()
 
-    forbidden = ("_scanner.html", "/partials/scanner", "python orchestrator.py")
+    # Quoted-literal form, not a bare substring: "_stock_scanner.html" (the
+    # current template) legitimately contains "_scanner.html" as a
+    # substring, but never as its own quoted string literal — only the
+    # removed legacy filename does.
+    forbidden = ('"_scanner.html"', "/partials/scanner", "python orchestrator.py")
     source_paths = [
         *sorted((ROOT / "app" / "api").rglob("*.py")),
         *sorted(TEMPLATES.rglob("*.html")),
@@ -398,7 +402,9 @@ def test_removed_scanner_partial_returns_not_found() -> None:
 
 
 @pytest.mark.asyncio
-async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() -> None:
+async def test_initial_and_completed_refresh_use_equivalent_stock_scanner_context() -> (
+    None
+):
     records = []
     trader = MagicMock()
     trader.get_portfolio.return_value = [SimpleNamespace(ticker="AAPL")]
@@ -412,8 +418,8 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    initial = await partial_watchlist(
-        _request("/partials/watchlist"), trader, portfolio, alerts
+    initial = await partial_stock_scanner(
+        _request("/partials/stock-scanner"), trader, portfolio, alerts
     )
     refreshed = await refresh_data(
         _request("/refresh-data", method="POST"),
@@ -429,7 +435,7 @@ async def test_initial_and_completed_refresh_use_equivalent_watchlist_context() 
     assert (
         initial_response.template.name
         == refreshed_response.template.name
-        == "_watchlist.html"
+        == "_stock_scanner.html"
     )
     # Records are sorted actionable-first, so both paths return an equivalent
     # (equal) list rather than the same object as load_analysis returned.
@@ -485,7 +491,7 @@ def test_refresh_completion_banner_removed() -> None:
     from app.services.freshness_service import calculate_freshness
 
     records = _sample_records()
-    html = templates.get_template("_watchlist.html").render(
+    html = templates.get_template("_stock_scanner.html").render(
         records=records,
         portfolio_tickers=set(),
         recommendations={
@@ -525,7 +531,7 @@ def test_dashboard_has_institutional_refresh_control() -> None:
     assert markup.count('id="refresh-institutional-button"') == 1
 
 
-def test_watchlist_frontend_assets_are_served() -> None:
+def test_stock_scanner_frontend_assets_are_served() -> None:
     client = TestClient(app)
     for path in (
         "/static/css/watchlist.css",
@@ -544,7 +550,7 @@ def test_dashboard_cache_busts_watchlist_controller() -> None:
     assert 'src="/static/js/watchlist.js"' not in markup
 
 
-def test_watchlist_and_refresh_http_paths_render_canonical_partial(
+def test_stock_scanner_and_refresh_http_paths_render_canonical_partial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     trader = MagicMock()
@@ -565,7 +571,7 @@ def test_watchlist_and_refresh_http_paths_render_canonical_partial(
 
     try:
         client = TestClient(app)
-        initial = client.get("/partials/watchlist")
+        initial = client.get("/partials/stock-scanner")
         refreshed = client.post(
             "/refresh-data",
             data={"confirm_missing": "true"},
@@ -580,11 +586,11 @@ def test_watchlist_and_refresh_http_paths_render_canonical_partial(
         assert 'id="refresh-data-button"' not in response.text
 
 
-def test_watchlist_no_longer_renders_freshness_or_source_badges(
+def test_stock_scanner_no_longer_renders_freshness_or_source_badges(
     tmp_path, monkeypatch
 ) -> None:
     """Freshness/source coverage moved to the bottom status bar (#71)."""
-    import app.api.watchlist_context as context_module
+    import app.api.stock_scanner_context as context_module
 
     analysis_path = tmp_path / "analysis_results.json"
     generated_at = datetime.now(timezone.utc) - timedelta(hours=1)
@@ -621,7 +627,9 @@ def test_watchlist_no_longer_renders_freshness_or_source_badges(
     alerts.last_alerted_at.return_value = None
 
     response = __import__("asyncio").run(
-        partial_watchlist(_request("/partials/watchlist"), trader, portfolio, alerts)
+        partial_stock_scanner(
+            _request("/partials/stock-scanner"), trader, portfolio, alerts
+        )
     )
     markup = response.body.decode()
 

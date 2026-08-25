@@ -13,9 +13,9 @@ from app.api.dependencies import (
     get_trader_service,
 )
 from app.api.templating import templates
-from app.api.watchlist_context import (
+from app.api.stock_scanner_context import (
     build_freshness_context,
-    build_watchlist_context,
+    build_stock_scanner_context,
     load_source_health,
 )
 from app.core.security import require_local_or_token
@@ -80,6 +80,6 @@ async def refresh_data(
     await asyncio.to_thread(pipeline.run_once, extract)
     return templates.TemplateResponse(
         request,
-        "_watchlist.html",
-        context=build_watchlist_context(trader, portfolio, alerts),
+        "_stock_scanner.html",
+        context=build_stock_scanner_context(trader, portfolio, alerts),
     )

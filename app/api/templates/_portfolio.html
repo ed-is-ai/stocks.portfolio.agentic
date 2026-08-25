@@ -227,14 +227,14 @@
 {% if not positions and cash_balance is none %}
 <div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-info-circle-fill fs-5"></i>
-  <span>No open positions yet. Use <strong>Add holding</strong> above — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Watchlist</strong> and click <strong>Buy</strong>.</span>
+  <span>No open positions yet. Use <strong>Add holding</strong> above — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Stock Scanner</strong> and click <strong>Buy</strong>.</span>
 </div>
 {% endif %}
 {% if positions or cash_balance is not none %}
 
 <!-- Portfolio value chart -->
 {% if chart_points >= 2 %}
-<div style="background:white;border:1px solid var(--border);border-radius:0.5rem;padding:1rem 1.25rem;margin-bottom:1.25rem">
+<div style="background:white;border:1px solid var(--border);border-radius:0;padding:1rem 1.25rem;margin-bottom:1.25rem">
   <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);margin-bottom:0.5rem">
     <i class="bi bi-graph-up me-1"></i>Portfolio Value History
   </div>
@@ -413,7 +413,7 @@
       {% set sym = '$' if p.price_currency == 'USD' else '£' %}
       <tr class="{% if p.exit_signal and p.exit_signal.action == 'EXIT' %}row-exit{% endif %}">
         <td>
-          <span class="fw-bold" style="color:#0f2744; font-size:0.85rem">{{ p.ticker }}</span>
+          <span class="fw-bold" style="color:var(--primary); font-size:0.85rem">{{ p.ticker }}</span>
           {% if opening_lot_tickers and p.ticker in opening_lot_tickers %}
           <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1"
                 style="font-size:0.6rem" title="Includes a manually-entered Opening Lot">
@@ -500,7 +500,7 @@
       {% endfor %}
       {% if cash_balance is not none %}
       <tr>
-        <td><span class="fw-bold" style="color:#0f2744; font-size:0.85rem">CASH</span></td>
+        <td><span class="fw-bold" style="color:var(--primary); font-size:0.85rem">CASH</span></td>
         <td>—</td>
         <td>—</td>
         <td><strong>£1.00</strong></td>
