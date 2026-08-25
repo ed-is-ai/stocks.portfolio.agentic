@@ -178,6 +178,56 @@ def test_configuration_submit_with_valid_universe(universe_env) -> None:
     assert len(launch.launch_calls) == 1
 
 
+def test_configuration_submit_accepts_selector_search_state(universe_env) -> None:
+    _repo, launch = universe_env
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "search-state",
+            "security_ids": "sid_001",
+            "q": "AAPL",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert len(launch.launch_calls) == 1
+
+
+def test_successful_submit_does_not_rebuild_full_configuration(universe_env) -> None:
+    _repo, launch = universe_env
+
+    def unexpected_configuration() -> None:
+        raise AssertionError("successful submit rebuilt full snapshot coverage")
+
+    launch.configuration = unexpected_configuration
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "no-rebuild",
+            "whole_universe": "true",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert len(launch.launch_calls) == 1
+
+
 def test_preparation_redirect_and_completed_child_navigation(universe_env) -> None:
     response = client.post(
         "/strategy-manager/configuration",

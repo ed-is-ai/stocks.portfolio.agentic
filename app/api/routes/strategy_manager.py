@@ -487,6 +487,8 @@ def _is_truthy_flag(raw: str | None) -> bool:
     or a future hidden-fallback-input pattern behave correctly.
     """
     return raw is not None and raw.strip().lower() not in _FALSY_FLAG_VALUES | {""}
+
+
 _FIXED_FORM_FIELDS = frozenset(
     {
         "strategy_id",
@@ -499,6 +501,10 @@ _FIXED_FORM_FIELDS = frozenset(
         "idempotency_key",
         "security_ids",
         "whole_universe",
+        # Search-only UI state from the universe selector. It is submitted
+        # because the selector lives inside the launch form, but it is not
+        # part of the durable backtest command.
+        "q",
     }
 )
 
@@ -805,21 +811,28 @@ async def submit_strategy_configuration(
     # (success or error) so it round-trips through htmx partial swaps.
     submitted_whole_universe = form.get("whole_universe")
     whole_universe = _is_truthy_flag(
-        submitted_whole_universe
-        if isinstance(submitted_whole_universe, str)
-        else None
+        submitted_whole_universe if isinstance(submitted_whole_universe, str) else None
     )
-    context = _configuration_context(
-        launch,
-        backtest,
-        selected_strategy_id=submitted_strategy_id
-        if isinstance(submitted_strategy_id, str)
-        else None,
-        values=raw_values,
-        parameter_values=parameter_raw,
-        idempotency_key=form.get("idempotency_key") or str(uuid4()),
-        whole_universe=whole_universe,
-    )
+
+    def submitted_context() -> dict[str, object]:
+        """Build the expensive full coverage view only for a re-render.
+
+        A successful submit does not need the configuration page again. In
+        particular, it must not verify every historical snapshot once here
+        and then verify the requested interval again in ``launch``.
+        """
+        return _configuration_context(
+            launch,
+            backtest,
+            selected_strategy_id=submitted_strategy_id
+            if isinstance(submitted_strategy_id, str)
+            else None,
+            values=raw_values,
+            parameter_values=parameter_raw,
+            idempotency_key=form.get("idempotency_key") or str(uuid4()),
+            whole_universe=whole_universe,
+        )
+
     # Story 4.5: validate universe selection
     raw_security_ids: list[str] = [
         v if isinstance(v, str) else v.filename or ""
@@ -856,14 +869,13 @@ async def submit_strategy_configuration(
         elif whole_universe:
             # Never trust a client-submitted list of security IDs for
             # whole-universe mode -- resolve fresh from the roster
-            # already fetched into ``context["securities"]`` for this
-            # same active profile. The resolved set is definitionally
+            # from the current active roster. The resolved set is definitionally
             # in-roster, so the "unknown securities" check below is
             # skipped for this branch.
             raw_security_ids = [
                 sid
-                for sid, _ps, _mic, _cur in cast(
-                    list[tuple[str, str, str, str]], context["securities"]
+                for sid, _ps, _mic, _cur in backtest.roster_member_identities(
+                    active.profile_hash
                 )
             ]
             if not raw_security_ids:
@@ -891,7 +903,7 @@ async def submit_strategy_configuration(
         return templates.TemplateResponse(
             request,
             "_strategy_configuration.html",
-            {**context, "errors": errors},
+            {**submitted_context(), "errors": errors},
             status_code=422,
         )
     # Canonicalize the universe
@@ -901,7 +913,7 @@ async def submit_strategy_configuration(
         return templates.TemplateResponse(
             request,
             "_strategy_configuration.html",
-            {**context, "errors": {"security_ids": str(exc)}},
+            {**submitted_context(), "errors": {"security_ids": str(exc)}},
             status_code=422,
         )
     # Bind the universe into the strategy's host-bound parameter
@@ -934,7 +946,7 @@ async def submit_strategy_configuration(
         return templates.TemplateResponse(
             request,
             "_strategy_configuration.html",
-            {**context, "errors": field_errors},
+            {**submitted_context(), "errors": field_errors},
             status_code=422,
         )
     return RedirectResponse(

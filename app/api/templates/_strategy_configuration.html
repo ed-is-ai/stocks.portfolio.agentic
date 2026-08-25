@@ -25,7 +25,7 @@
   {% if not strategies %}
   <div class="sm-alert sm-alert-info">No valid Strategy Skills are currently discoverable. Add a <code>kind: backtest-strategy</code> Skill to the <code>skills/</code> directory to configure a Backtest.</div>
   {% else %}
-  <form method="post" action="/strategy-manager/configuration" hx-post="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML" id="strategy-configuration-form">
+  <form method="post" action="/strategy-manager/configuration" hx-post="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner" hx-disabled-elt="find button[type='submit']" id="strategy-configuration-form">
     <input type="hidden" name="profile_hash" value="{{ active_profile.profile_hash if active_profile else '' }}">
     <input type="hidden" name="activation_seq" value="{{ active_profile.activation_seq if active_profile else 0 }}">
     <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">

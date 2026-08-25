@@ -4,7 +4,10 @@ from datetime import date
 
 import re
 
+import pandas as pd
 import pytest
+
+import app.services.backtest.trading_calendar as trading_calendar
 
 from app.services.backtest.trading_calendar import (
     CalendarContractError,
@@ -30,6 +33,33 @@ def test_last_completed_session_uses_exchange_month_end(
     calendars: TradingCalendar, mic: str, month: str, expected: str
 ) -> None:
     assert calendars.last_session_of_month(mic, month).isoformat() == expected
+
+
+def test_month_end_lookup_is_shared_by_mics_on_the_same_calendar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class FakeCalendar:
+        @staticmethod
+        def sessions_in_range(_start: object, _end: object) -> pd.DatetimeIndex:
+            return pd.DatetimeIndex(["2026-07-30", "2026-07-31"])
+
+    def fake_get_calendar(*_args: object, **_kwargs: object) -> FakeCalendar:
+        nonlocal calls
+        calls += 1
+        return FakeCalendar()
+
+    trading_calendar._last_session_of_calendar_month.cache_clear()
+    monkeypatch.setattr(trading_calendar.xcals, "get_calendar", fake_get_calendar)
+    calendar = TradingCalendar()
+
+    assert calendar.last_session_of_month("XNAS", "2026-07") == date(2026, 7, 31)
+    assert calendar.last_session_of_month("XNYS", "2026-07") == date(2026, 7, 31)
+    assert calendar.last_session_of_month("BATS", "2026-07") == date(2026, 7, 31)
+    assert calls == 1
+
+    trading_calendar._last_session_of_calendar_month.cache_clear()
 
 
 def test_closed_mic_mapping(calendars: TradingCalendar) -> None:
@@ -100,9 +130,10 @@ def test_calendar_authority_uses_fixed_bounds_not_rolling_today_window(
 def test_session_range_clamps_contract_start_to_first_supported_session(
     calendars: TradingCalendar,
 ) -> None:
-    assert calendars.sessions_in_range(
-        "XNYS", date(1970, 1, 1), date(1970, 1, 6)
-    ) == (date(1970, 1, 2), date(1970, 1, 5))
+    assert calendars.sessions_in_range("XNYS", date(1970, 1, 1), date(1970, 1, 6)) == (
+        date(1970, 1, 2),
+        date(1970, 1, 5),
+    )
 
 
 @pytest.mark.parametrize(

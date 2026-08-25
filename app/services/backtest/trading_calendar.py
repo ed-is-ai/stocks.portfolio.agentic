@@ -73,6 +73,26 @@ def _next_month(month: str) -> str:
     return f"{year:04d}-{number:02d}"
 
 
+@lru_cache(maxsize=512)
+def _last_session_of_calendar_month(calendar_name: str, month: str) -> date:
+    """Return a month end once per canonical calendar/month pair.
+
+    Snapshot integrity validation asks this question for every member.  A
+    committed month can contain thousands of members, but only one or two
+    canonical calendars, so rebuilding the same session range for each member
+    needlessly makes configuration submission appear to hang.
+    """
+    _month_parts(month)
+    period = pd.Period(month, freq="M")
+    calendar = xcals.get_calendar(calendar_name, start=_DIGEST_START, end=_DIGEST_END)
+    sessions = calendar.sessions_in_range(
+        period.start_time.normalize(), period.end_time.normalize()
+    )
+    if len(sessions) == 0:
+        raise ValueError(f"No sessions for {calendar_name} in {month}")
+    return sessions[-1].date()
+
+
 class TradingCalendar:
     """Expose the closed MIC mapping and canonical XNYS/XLON sessions."""
 
@@ -101,14 +121,7 @@ class TradingCalendar:
         return self._calendar(mic).session_close(pd.Timestamp(session))
 
     def last_session_of_month(self, mic: str, month: str) -> date:
-        _month_parts(month)
-        period = pd.Period(month, freq="M")
-        sessions = self._calendar(mic).sessions_in_range(
-            period.start_time.normalize(), period.end_time.normalize()
-        )
-        if len(sessions) == 0:
-            raise ValueError(f"No sessions for {mic} in {month}")
-        return sessions[-1].date()
+        return _last_session_of_calendar_month(self.calendar_name(mic), month)
 
     def sessions_in_range(
         self, mic: str, start: date, end_exclusive: date
