@@ -206,3 +206,9 @@
 - source_spec: `spec-4-9-complete-the-first-backtest-from-a-clean-checkout.md`
   summary: The doc's "Set up Strategy Manager" section describes Setup's repeat-submission no-op only for "already produced a compatible active profile," without saying what happens if the active profile has since become incompatible (e.g., roster drift) between an initial Setup and a repeat submission.
   evidence: `StrategyBootstrapService.start_setup()` docstring says "if a compatible active profile already exists, this is a no-op," implying an incompatible active profile takes a different path, but this diff's doc prose doesn't disambiguate the two cases. Pre-existing ambiguity in the source docstring, not introduced by this story's rewrite.
+
+## Deferred from: code review of spec-gh-312-canslim-tile-breakdown (2026-08-25)
+
+- source_spec: `spec-gh-312-canslim-tile-breakdown.md`
+  summary: `AlertAgent.check_positions`'s `stock_map = {s.ticker: s for s in stocks}` (and the pre-existing, structurally identical `stock_map` param on `check_portfolio_stops`) silently keeps whichever `StockRecord` comes last when a run's `stocks` list contains two entries for the same ticker, with no warning or dedup guard.
+  evidence: This dict-comprehension pattern already existed as `price_map = {s.ticker: s.price for s in stocks}` before this story (same last-write-wins collision behavior on a duplicate ticker); this story only widened what gets silently kept per ticker from a bare price to the full `StockRecord` (including its `CANSLIMScore`), raising the practical stakes of a collision without introducing the collision risk itself. No current caller produces duplicate tickers within one run's scan output. Revisit if a future data-source change can plausibly emit duplicate ticker rows in a single run.

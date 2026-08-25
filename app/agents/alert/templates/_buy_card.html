@@ -1,4 +1,5 @@
-{% macro buy_card(stock, trigger, url, score_color, entry, stop, risk_str, n, verdict_bg, verdict_border, congress, congress_net_color, svg_chart) %}
+{% import "_macros.html" as m %}
+{% macro buy_card(stock, trigger, url, score_color, entry, stop, risk_str, n, verdict_bg, verdict_border, congress, congress_net_color, svg_chart, canslim) %}
 <div style="border:1px solid #c3e6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#f8fff9">
   <div style="font-weight:700;font-size:1em;color:#1e3a5f;margin-bottom:4px">
     &#9889; <a href="{{ url }}" style="color:#1e3a5f;text-decoration:none;font-weight:800" target="_blank">{{ stock.ticker }}</a>
@@ -41,6 +42,7 @@
               border-left:3px solid {{ verdict_border }};font-weight:700;font-size:0.85em">
     {{ n.verdict }}
   </div>
+  {{ m.canslim_block(canslim) }}
   {{ svg_chart | safe }}
 </div>
 {% endmacro %}

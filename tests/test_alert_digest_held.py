@@ -12,6 +12,7 @@ from app.agents.alert.alert_agent import AlertAgent
 from app.core.alerting import classify_alert
 from app.repositories.notifications_repo import build_notifications_repository
 from app.schemas import (
+    CANSLIMScore,
     EmailConfig,
     MarketNarrative,
     Position,
@@ -131,12 +132,13 @@ def test_check_positions_never_emails(tmp_path) -> None:
         "AMD", 8, "Stage 2", "setup", entry_price=200.0, stop_loss=180.0
     )
 
+    nvda, amd = _stock("NVDA", 105.0), _stock("AMD", 175.0)
     with patch.object(AlertAgent, "send_email") as spy:
-        agent.check_positions([_stock("NVDA", 105.0), _stock("AMD", 175.0)])
+        agent.check_positions([nvda, amd])
 
     spy.assert_not_called()
-    assert agent._entry_triggered == [("NVDA", 105.0, 100.0)]
-    assert agent._watched_stops == [("AMD", 175.0, 180.0)]
+    assert agent._entry_triggered == [("NVDA", 105.0, 100.0, nvda)]
+    assert agent._watched_stops == [("AMD", 175.0, 180.0, amd)]
 
 
 @patch("smtplib.SMTP")
@@ -170,6 +172,126 @@ def test_watched_signals_appear_in_digest(mock_smtp, tmp_path) -> None:
 
     events = {i.event_type for i in build_notifications_repository().recent()}
     assert events == {"entry_triggered", "stop_loss_hit"}
+
+
+@patch("smtplib.SMTP")
+def test_tracked_signals_reuse_current_run_analysis(mock_smtp, tmp_path) -> None:
+    """A tracked entry/stop ticker present in the current run's stocks with
+    a CANSLIM score renders that real breakdown instead of the unavailable
+    state (#312) — analysis is retained, not discarded.
+    """
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    agent._alerts.record(
+        "NVDA", 8, "Stage 2", "setup", entry_price=100.0, stop_loss=90.0
+    )
+    nvda = _buy_record("NVDA", breakout=False).model_copy(update={"price": 105.0})
+    assert nvda.analysis is not None
+    nvda = nvda.model_copy(
+        update={
+            "analysis": nvda.analysis.model_copy(
+                update={"canslim": CANSLIMScore(C=2, A=2, N=1, S=1, L=2, I=0, M=2)}
+            )
+        }
+    )
+    agent.check_positions([nvda])
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email()
+
+    assert "CANSLIM 10/14" in captured["html"]
+    assert ">unavailable</td>" not in captured["html"]
+    assert "CANSLIM 10/14: C=2 A=2 N=1 S=1 L=2 I=0 M=2" in captured["text"]
+
+
+@patch("smtplib.SMTP")
+def test_tracked_signal_without_analysis_shows_unavailable(mock_smtp, tmp_path) -> None:
+    """A tracked entry/stop ticker absent from the current run's stocks (or
+    lacking CANSLIM) renders the explicit unavailable state (#312).
+    """
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    agent._alerts.record(
+        "NVDA", 8, "Stage 2", "setup", entry_price=100.0, stop_loss=90.0
+    )
+    agent.check_positions([_stock("NVDA", 105.0)])
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email()
+
+    assert captured["html"].count(">unavailable</td>") == 7
+    assert "CANSLIM: unavailable" in captured["text"]
+
+
+@patch("smtplib.SMTP")
+def test_sell_card_canslim_present(mock_smtp, tmp_path) -> None:
+    """A held stop-loss tile shows the full CANSLIM breakdown when the
+    matched StockRecord has one (#312).
+    """
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    pos = _position("TSLA", 89.0, stop_loss=90.0, entry_price=100.0)
+    tsla = _buy_record("TSLA", breakout=False)
+    assert tsla.analysis is not None
+    tsla = tsla.model_copy(
+        update={
+            "analysis": tsla.analysis.model_copy(
+                update={"canslim": CANSLIMScore(C=0, A=0, N=1, S=1, L=0, I=1, M=1)}
+            )
+        }
+    )
+    agent.check_portfolio_stops([pos], {"TSLA": tsla})
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[pos])
+
+    assert "CANSLIM 4/14" in captured["html"]
+    assert "CANSLIM 4/14: C=0 A=0 N=1 S=1 L=0 I=1 M=1" in captured["text"]
+
+
+@patch("smtplib.SMTP")
+def test_sell_card_canslim_absent(mock_smtp, tmp_path) -> None:
+    """A held stop-loss tile with no matched StockRecord renders the
+    explicit unavailable state, not an omitted section (#312).
+    """
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    pos = _position("TSLA", 89.0, stop_loss=90.0, entry_price=100.0)
+    agent.check_portfolio_stops([pos], {})
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[pos])
+
+    assert captured["html"].count(">unavailable</td>") == 7
+    assert "CANSLIM: unavailable" in captured["text"]
 
 
 @patch("smtplib.SMTP")
@@ -223,8 +345,9 @@ def test_non_held_watched_stop_is_suppressed(mock_smtp, tmp_path) -> None:
     agent._alerts.record(
         "AMD", 8, "Stage 2", "setup", entry_price=200.0, stop_loss=180.0
     )
-    agent.check_positions([_stock("NVDA", 105.0), _stock("AMD", 175.0)])
-    assert agent._watched_stops == [("AMD", 175.0, 180.0)]
+    nvda, amd = _stock("NVDA", 105.0), _stock("AMD", 175.0)
+    agent.check_positions([nvda, amd])
+    assert agent._watched_stops == [("AMD", 175.0, 180.0, amd)]
 
     captured: dict[str, str] = {}
 
@@ -249,6 +372,35 @@ def test_non_held_watched_stop_is_suppressed(mock_smtp, tmp_path) -> None:
 
 
 # ── CTA + section layout (#168) ─────────────────────────────────────────────
+
+
+@patch("smtplib.SMTP")
+def test_narrative_snapshot_columns_stack_on_mobile(mock_smtp, tmp_path) -> None:
+    """The narrative/snapshot two-column layout must collapse to one column
+    under a mobile viewport width, not stay side-by-side.
+    """
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    pos = _position("TSLA", 89.0, stop_loss=90.0, entry_price=100.0)
+    narrative = MarketNarrative(
+        headline="Breadth improving", bullets=["Small-caps leading"]
+    )
+
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(positions=[pos], market_narrative=narrative)
+
+    html = captured["html"]
+    assert '<meta name="viewport"' in html
+    assert "@media only screen and (max-width: 600px)" in html
+    assert "stack-col" in html
+    assert html.count('class="stack-col"') == 2
 
 
 @patch("smtplib.SMTP")
@@ -640,8 +792,9 @@ def test_held_and_watched_same_ticker_dedups(mock_smtp, tmp_path) -> None:
     agent._alerts.record(
         "NVDA", 8, "Stage 2", "setup", entry_price=100.0, stop_loss=90.0
     )
-    agent.check_positions([_stock("NVDA", 88.0)])
-    assert agent._watched_stops == [("NVDA", 88.0, 90.0)]
+    nvda = _stock("NVDA", 88.0)
+    agent.check_positions([nvda])
+    assert agent._watched_stops == [("NVDA", 88.0, 90.0, nvda)]
 
     held = _position("NVDA", 88.0, stop_loss=90.0, entry_price=100.0)
 

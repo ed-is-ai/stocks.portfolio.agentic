@@ -7,7 +7,7 @@ import os
 from unittest.mock import patch, MagicMock
 
 from app.agents.alert.alert_agent import AlertAgent
-from app.schemas import EmailConfig, StockRecord, StockScan, StockAnalysis
+from app.schemas import CANSLIMScore, EmailConfig, StockRecord, StockScan, StockAnalysis
 
 
 class TestAlertAgent:
@@ -254,6 +254,66 @@ class TestAlertAgent:
         assert "Congress:" not in agent.format_alert_text(stock)
         assert "Congress" not in agent.format_alert_html(stock)
         assert "Congress" not in agent._buy_card_html(stock, "Breakout")
+
+    def test_canslim_present_renders_breakdown(self, sample_high_score_stocks):
+        """A ticker with a CANSLIM score renders total + all 7 components
+        on every buy-tile format (#312).
+        """
+        agent = AlertAgent()
+        stock = sample_high_score_stocks[0].model_copy(
+            update={
+                "analysis": sample_high_score_stocks[0].analysis.model_copy(
+                    update={"canslim": CANSLIMScore(C=2, A=1, N=2, S=0, L=2, I=1, M=2)}
+                )
+            }
+        )
+
+        for label in ("C", "A", "N", "S", "L", "I", "M"):
+            assert f"{label} &mdash;" in agent.format_alert_html(stock)
+            assert f"{label} &mdash;" in agent._buy_card_html(stock, "Breakout")
+        assert "CANSLIM 10/14" in agent.format_alert_html(stock)
+        assert "CANSLIM 10/14" in agent._buy_card_html(stock, "Breakout")
+        assert ">unavailable</td>" not in agent.format_alert_html(stock)
+        assert "CANSLIM 10/14: C=2 A=1 N=2 S=0 L=2 I=1 M=2" in agent.format_alert_text(
+            stock
+        )
+
+    def test_canslim_absent_renders_unavailable(self, sample_high_score_stocks):
+        """No current CANSLIM analysis shows an explicit unavailable state
+        for every component rather than omitting the section (#312).
+        """
+        agent = AlertAgent()
+        stock = sample_high_score_stocks[0]  # analysis.canslim defaults to None
+
+        html = agent.format_alert_html(stock)
+        card_html = agent._buy_card_html(stock, "Breakout")
+        assert html.count(">unavailable</td>") == 7
+        assert card_html.count(">unavailable</td>") == 7
+        assert "CANSLIM —/14" in html
+        assert "CANSLIM: unavailable" in agent.format_alert_text(stock)
+
+    def test_canslim_all_zero_is_real_data_not_unavailable(
+        self, sample_high_score_stocks
+    ):
+        """An all-zero CANSLIM score is present data (0/14), distinct from
+        no analysis at all (#312) — a real weak score must not collapse
+        into the unavailable state.
+        """
+        agent = AlertAgent()
+        stock = sample_high_score_stocks[0].model_copy(
+            update={
+                "analysis": sample_high_score_stocks[0].analysis.model_copy(
+                    update={"canslim": CANSLIMScore(C=0, A=0, N=0, S=0, L=0, I=0, M=0)}
+                )
+            }
+        )
+
+        html = agent.format_alert_html(stock)
+        assert "CANSLIM 0/14" in html
+        assert ">unavailable</td>" not in html
+        assert "CANSLIM 0/14: C=0 A=0 N=0 S=0 L=0 I=0 M=0" in agent.format_alert_text(
+            stock
+        )
 
     def test_run_method_no_alerts(self, sample_low_score_stocks):
         """Test run method with no alerts triggered."""

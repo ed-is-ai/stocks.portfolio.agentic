@@ -4,15 +4,23 @@
 {% import "_watched_row.html" as wr %}
 {% import "_sell_card.html" as sc %}
 {% import "_buy_card.html" as bc %}
-<html><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">
+<html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+  @media only screen and (max-width: 600px) {
+    .stack-col { display: block !important; width: 100% !important; box-sizing: border-box; padding: 0 !important; }
+    .stack-col + .stack-col { margin-top: 16px; }
+  }
+</style>
+</head><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">
 <h2 style="color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px">
   &#128200; Stock Scanner Summary &mdash; {{ today }}</h2>
 
 {% if narrative and snapshot %}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border-collapse:collapse">
   <tr>
-    <td valign="top" style="width:50%;padding-right:8px">{{ mn.market_narrative_card(narrative, margin="margin:0;") }}</td>
-    <td valign="top" style="width:50%;padding-left:8px">{{ snap.snapshot_card(snapshot.rows, snapshot.total_value, snapshot.total_cost, snapshot.total_pnl, snapshot.pnl_pct, snapshot.pnl_color, margin="margin:0;") }}</td>
+    <td valign="top" class="stack-col" style="width:50%;padding-right:8px">{{ mn.market_narrative_card(narrative, margin="margin:0;") }}</td>
+    <td valign="top" class="stack-col" style="width:50%;padding-left:8px">{{ snap.snapshot_card(snapshot.rows, snapshot.total_value, snapshot.total_cost, snapshot.total_pnl, snapshot.pnl_pct, snapshot.pnl_color, margin="margin:0;") }}</td>
   </tr>
 </table>
 {% else %}

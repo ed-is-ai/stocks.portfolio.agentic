@@ -9,3 +9,36 @@
 <tr><td style="padding:5px 8px;background:#f8f8f8;font-weight:600;width:90px;font-size:0.82em;color:#555;vertical-align:top">{{ label }}</td>
     <td style="padding:5px 8px;color:{{ color }};font-size:0.84em">{{ text }}</td></tr>
 {%- endmacro %}
+
+{# Shared CANSLIM breakdown: total/14 + all 7 components, or an explicit
+   unavailable state when `canslim` is falsy (#312) — single source of
+   truth so buy/sell/watched tiles can't drift from each other. #}
+{% macro canslim_block(canslim) %}
+<table style="width:100%;border-collapse:collapse;font-size:0.82em;margin-top:8px">
+  <tr>
+    <td colspan="2" style="padding:4px 6px;background:#eee;font-weight:700">
+      CANSLIM {{ canslim.total if canslim else "—" }}/14
+    </td>
+  </tr>
+  {% for letter, label in [
+    ("C", "Current Earnings"),
+    ("A", "Annual Earnings"),
+    ("N", "New High/Low"),
+    ("S", "Supply & Demand"),
+    ("L", "Leader/Laggard"),
+    ("I", "Institutional Sponsorship"),
+    ("M", "Market Direction"),
+  ] %}
+  <tr title="{{ label }}">
+    <td style="padding:3px 6px;background:#f8f8f8;width:60%">{{ letter }} &mdash; {{ label }}</td>
+    <td style="padding:3px 6px">
+      {%- if canslim -%}
+      {{ canslim_bar(canslim|attr(letter)) }} {{ canslim|attr(letter) }}/2
+      {%- else -%}
+      unavailable
+      {%- endif -%}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% endmacro %}

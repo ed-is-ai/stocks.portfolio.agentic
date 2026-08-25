@@ -21,6 +21,7 @@ from app.core import config
 from app.core.config import ALERTS_DB, ANALYSIS_JSON
 from app.schemas import (
     AlertSummary,
+    CANSLIMScore,
     EmailConfig,
     MarketNarrative,
     Position,
@@ -122,9 +123,16 @@ class AlertAgent(Agent):
         default_factory=list
     )
     # Watched-setup signals folded into the per-run digest (#81), not emailed
-    # individually. Each tuple is (ticker, current_price, level).
-    _entry_triggered: list[tuple[str, float, float]] = PrivateAttr(default_factory=list)
-    _watched_stops: list[tuple[str, float, float]] = PrivateAttr(default_factory=list)
+    # individually. Each tuple is (ticker, current_price, level, stock) —
+    # ``stock`` is the current run's analysed StockRecord when the ticker was
+    # present in that run's scan, else None (#312: retain analysis instead of
+    # discarding it so tracked tiles can render real CANSLIM data).
+    _entry_triggered: list[tuple[str, float, float, StockRecord | None]] = PrivateAttr(
+        default_factory=list
+    )
+    _watched_stops: list[tuple[str, float, float, StockRecord | None]] = PrivateAttr(
+        default_factory=list
+    )
     _alerts: AlertsRepository = PrivateAttr()
     _notifications: NotificationsRepository = PrivateAttr()
     _position_state: PositionStateRepository = PrivateAttr()
@@ -174,9 +182,10 @@ class AlertAgent(Agent):
         rows = self._alerts.watching()
         if not rows:
             return
-        price_map = {s.ticker: s.price for s in stocks}
+        stock_map = {s.ticker: s for s in stocks}
         for rowid, ticker, entry_price, stop_loss in rows:
-            current = price_map.get(ticker)
+            stock = stock_map.get(ticker)
+            current = stock.price if stock else None
             if current is None:
                 continue
             if entry_price is not None and current >= entry_price:
@@ -184,14 +193,14 @@ class AlertAgent(Agent):
                     f"\nENTRY TRIGGERED: {ticker} @ ${current:.2f} "
                     f"(entry was ${entry_price:.2f})"
                 )
-                self._entry_triggered.append((ticker, current, entry_price))
+                self._entry_triggered.append((ticker, current, entry_price, stock))
                 self._alerts.set_status(rowid, "entered")
             elif stop_loss is not None and current <= stop_loss:
                 print(
                     f"\nSTOP LOSS HIT: {ticker} @ ${current:.2f} "
                     f"(stop was ${stop_loss:.2f})"
                 )
-                self._watched_stops.append((ticker, current, stop_loss))
+                self._watched_stops.append((ticker, current, stop_loss, stock))
                 self._alerts.set_status(rowid, "stopped")
 
     def run(self, payload: Iterable[StockRecord]) -> AlertSummary:
@@ -390,6 +399,21 @@ class AlertAgent(Agent):
         return True
 
     @staticmethod
+    def _canslim_text(canslim: CANSLIMScore | None) -> str:
+        """Plain-text CANSLIM line: total + all 7 components, or unavailable.
+
+        Single source of truth shared by every plain-text tile (#312) so text
+        can't drift from the HTML ``canslim_block`` macro.
+        """
+        if canslim is None:
+            return "CANSLIM: unavailable"
+        return (
+            f"CANSLIM {canslim.total}/14: "
+            f"C={canslim.C} A={canslim.A} N={canslim.N} S={canslim.S} "
+            f"L={canslim.L} I={canslim.I} M={canslim.M}"
+        )
+
+    @staticmethod
     def _congress_summary(stock: StockRecord) -> str | None:
         """Net congressional trades + Senate breakdown, or None when uncovered.
 
@@ -423,13 +447,7 @@ class AlertAgent(Agent):
         else:
             risk_str = "—"
 
-        canslim_str = ""
-        if analysis.canslim:
-            cs = analysis.canslim
-            canslim_str = (
-                f"\nCANSLIM {cs.total}/14: "
-                f"C={cs.C} A={cs.A} N={cs.N} S={cs.S} L={cs.L} I={cs.I} M={cs.M}"
-            )
+        canslim_str = f"\n{self._canslim_text(analysis.canslim)}"
 
         n = self._breakout_narrative(stock)
         trigger_line = f"** {trigger} **\n\n" if trigger else ""
@@ -736,6 +754,7 @@ class AlertAgent(Agent):
         pnl_str = f"${pnl:+.2f}" if pnl is not None else "--"
         pnl_pct = pos.unrealised_pnl_pct
         pnl_pct_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "--"
+        canslim = stock.analysis.canslim if stock and stock.analysis else None
         return (
             f"** STOP LOSS HIT: {pos.ticker} **\n\n"
             f"{pos.ticker}  |  {pos.shares} shares  |  Avg cost ${pos.avg_cost:.2f}\n"
@@ -748,7 +767,8 @@ class AlertAgent(Agent):
             f"Trend:    {n['trend']}\n"
             f"CANSLIM:  {n['canslim']}\n"
             f"\n>>> {n['verdict']}\n"
-            f"\n{date.today().isoformat()}"
+            f"\n{self._canslim_text(canslim)}"
+            f"\n\n{date.today().isoformat()}"
         )
 
     def _format_stop_loss_html(
@@ -783,6 +803,7 @@ class AlertAgent(Agent):
             else "#27ae60"
         )
 
+        canslim = stock.analysis.canslim if stock and stock.analysis else None
         return email_templates.get_template("stop_loss.html").render(
             pos=pos,
             price_str=f"{price:.2f}",
@@ -796,6 +817,7 @@ class AlertAgent(Agent):
             verdict_bg=verdict_bg,
             verdict_border=verdict_border,
             n=n,
+            canslim=canslim,
             today=date.today().isoformat(),
         )
 
@@ -1120,14 +1142,24 @@ class AlertAgent(Agent):
 
         if watched_stops:
             text_parts.append("\n\n*** TRACKED SETUP — STOPPED OUT ***\n")
-            for ticker, current, stop in watched_stops:
-                text_parts.append(f"  {ticker}: ${current:.2f} hit stop ${stop:.2f}")
+            for ticker, current, stop, wstock in watched_stops:
+                canslim = (
+                    wstock.analysis.canslim if wstock and wstock.analysis else None
+                )
+                text_parts.append(
+                    f"  {ticker}: ${current:.2f} hit stop ${stop:.2f}\n"
+                    f"  {self._canslim_text(canslim)}"
+                )
 
         if entry_triggered or breaking_out:
             text_parts.append("\n\n*** BUY ***\n")
-            for ticker, current, entry in entry_triggered:
+            for ticker, current, entry, wstock in entry_triggered:
+                canslim = (
+                    wstock.analysis.canslim if wstock and wstock.analysis else None
+                )
                 text_parts.append(
-                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}"
+                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}\n"
+                    f"  {self._canslim_text(canslim)}"
                 )
             for stock, trigger in breaking_out:
                 text_parts.append(self.format_alert_text(stock, trigger))
@@ -1194,11 +1226,12 @@ class AlertAgent(Agent):
             for pos, stock in self._sell_alerts
         ]
         watched_stop_rows = [
-            self._watched_row_ctx(t, c, lvl, stop=True) for t, c, lvl in watched_stops
+            self._watched_row_ctx(t, c, lvl, stock=wstock, stop=True)
+            for t, c, lvl, wstock in watched_stops
         ]
         entry_triggered_rows = [
-            self._watched_row_ctx(t, c, lvl, stop=False)
-            for t, c, lvl in entry_triggered
+            self._watched_row_ctx(t, c, lvl, stock=wstock, stop=False)
+            for t, c, lvl, wstock in entry_triggered
         ]
         breaking_out_cards = [
             self._buy_card_context(stock, trigger) for stock, trigger in breaking_out
@@ -1232,14 +1265,14 @@ class AlertAgent(Agent):
         # into the notification centre (#80/#81). Held critical events are
         # already recorded unconditionally in check_portfolio_stops, so they are
         # not re-notified here.
-        for ticker, current, entry in entry_triggered:
+        for ticker, current, entry, _wstock in entry_triggered:
             self._notify(
                 "entry_triggered",
                 f"Entry triggered — {ticker}",
                 body=f"{ticker} @ ${current:.2f} crossed entry ${entry:.2f}.",
                 ticker=ticker,
             )
-        for ticker, current, stop in watched_stops:
+        for ticker, current, stop, _wstock in watched_stops:
             self._notify(
                 "stop_loss_hit",
                 f"Stop loss hit — {ticker}",
@@ -1260,14 +1293,27 @@ class AlertAgent(Agent):
         return f"https://finance.yahoo.com/quote/{ticker.replace('.', '-')}"
 
     def _watched_row_ctx(
-        self, ticker: str, current: float, level: float, stop: bool
+        self,
+        ticker: str,
+        current: float,
+        level: float,
+        *,
+        stock: StockRecord | None,
+        stop: bool,
     ) -> dict[str, Any]:
-        """Render context for one watched-setup entry/stop signal row (#81)."""
+        """Render context for one watched-setup entry/stop signal row (#81).
+
+        ``stock`` is the current run's analysed StockRecord (#312) — its
+        CANSLIM score renders when available, else the tile shows the
+        explicit unavailable state.
+        """
+        canslim = stock.analysis.canslim if stock and stock.analysis else None
         return {
             "ticker": ticker,
             "current_str": f"{current:.2f}",
             "level_str": f"{level:.2f}",
             "url": self._yahoo_url(ticker),
+            "canslim": canslim,
             "stop": stop,
         }
 
@@ -1284,6 +1330,7 @@ class AlertAgent(Agent):
         pnl_color = "#c0392b" if (pnl or 0) < 0 else "#27ae60"
         verdict_bg = "#f8d7da" if "NOW" in n["verdict"] else "#fff3cd"
         verdict_border = "#e74c3c" if "NOW" in n["verdict"] else "#f39c12"
+        canslim = stock.analysis.canslim if stock and stock.analysis else None
         return {
             "pos": pos,
             "url": self._yahoo_url(pos.ticker),
@@ -1295,6 +1342,7 @@ class AlertAgent(Agent):
             "verdict_bg": verdict_bg,
             "verdict_border": verdict_border,
             "n": n,
+            "canslim": canslim,
         }
 
     def _buy_card_context(self, stock: StockRecord, trigger: str) -> dict[str, Any]:
@@ -1346,6 +1394,7 @@ class AlertAgent(Agent):
             "congress": congress,
             "congress_net_color": congress_net_color,
             "svg_chart": self._svg_chart(stock.price_history, score_color),
+            "canslim": a.canslim,
         }
 
     def _buy_card_html(self, stock: StockRecord, trigger: str) -> str:

@@ -49,27 +49,7 @@
     {% for item in risks %}<li>&#9888; {{ item }}</li>{% endfor %}
   </ul>
   {% endif %}
-  {% if analysis.canslim %}
-  <table style="width:100%;border-collapse:collapse;margin:16px 0;font-size:0.85em">
-    <tr><td colspan="3" style="padding:4px 6px;background:#eee;font-weight:bold">
-      CANSLIM Score: {{ analysis.canslim.total }}/14
-    </td></tr>
-    <tr><td style="padding:3px 6px;background:#f8f8f8;width:30%">C &mdash; Momentum</td>
-        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.C) }}</td><td style="padding:3px 6px">{{ analysis.canslim.C }}/2</td></tr>
-    <tr><td style="padding:3px 6px;background:#f8f8f8">A &mdash; Annual Strength</td>
-        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.A) }}</td><td style="padding:3px 6px">{{ analysis.canslim.A }}/2</td></tr>
-    <tr><td style="padding:3px 6px;background:#f8f8f8">N &mdash; Near New High</td>
-        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.N) }}</td><td style="padding:3px 6px">{{ analysis.canslim.N }}/2</td></tr>
-    <tr><td style="padding:3px 6px;background:#f8f8f8">S &mdash; Volume</td>
-        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.S) }}</td><td style="padding:3px 6px">{{ analysis.canslim.S }}/2</td></tr>
-    <tr><td style="padding:3px 6px;background:#f8f8f8">L &mdash; Leader (RSI)</td>
-        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.L) }}</td><td style="padding:3px 6px">{{ analysis.canslim.L }}/2</td></tr>
-    <tr><td style="padding:3px 6px;background:#f8f8f8">I &mdash; Stage Structure</td>
-        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.I) }}</td><td style="padding:3px 6px">{{ analysis.canslim.I }}/2</td></tr>
-    <tr><td style="padding:3px 6px;background:#f8f8f8">M &mdash; SMA Alignment</td>
-        <td style="padding:3px 6px">{{ m.canslim_bar(analysis.canslim.M) }}</td><td style="padding:3px 6px">{{ analysis.canslim.M }}/2</td></tr>
-  </table>
-  {% endif %}
+  {{ m.canslim_block(analysis.canslim) }}
   {{ svg_chart | safe }}
   <p style="color:#aaa;font-size:0.8em;margin-top:24px">{{ today }} &mdash; Momentum Scanner</p>
 </body></html>
