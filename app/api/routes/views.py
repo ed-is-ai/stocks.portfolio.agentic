@@ -60,7 +60,7 @@ async def partial_portfolio(
 
 
 @router.get("/partials/realised-pnl", response_class=HTMLResponse)
-async def partial_realised_pnl(
+def partial_realised_pnl(
     request: Request,
     trader: TraderDep,
     realised_pnl: RealisedPnlDep,

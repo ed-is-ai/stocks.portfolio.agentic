@@ -7,6 +7,7 @@ Regression-guards AC2 against the #147/#169 empty-string ``portfolio_id``
 from __future__ import annotations
 
 import re
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
@@ -18,6 +19,12 @@ from app.schemas import Portfolio, RealisedPnlSummary, RoundTrip, UnmatchedSell
 
 client = TestClient(app)
 _AUTH = {"X-Auth-Token": "s3cret"}
+
+
+def test_realised_pnl_route_runs_blocking_work_in_fastapi_threadpool() -> None:
+    from app.api.routes.views import partial_realised_pnl
+
+    assert not inspect.iscoroutinefunction(partial_realised_pnl)
 
 
 def _stat_card(html: str, label: str) -> str:

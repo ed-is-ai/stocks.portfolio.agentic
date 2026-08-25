@@ -112,11 +112,13 @@ class RealisedPnlService:
     method on ``TraderAgent`` (it stays untouched).
 
     Currency and FX resolution go exclusively through ``PortfolioService``
-    (``ticker_currency``/``historical_gbpusd_rates``, AD-5) — this service
-    never fetches market data or the live rate itself.
+    (``ticker_currencies``/``historical_gbpusd_rates``, AD-5) — this service
+    never fetches market data or the live rate itself. The portfolio boundary
+    may reuse immutable currency classifications; FIFO and summary data are
+    always recomputed from the current trade ledger.
 
-    No persistence or caching of any kind: every ``compute_summary`` call
-    recomputes fresh from live trade data.
+    No persistence or caching of FIFO/summary results: every
+    ``compute_summary`` call recomputes fresh from live trade data.
     """
 
     def __init__(
@@ -524,16 +526,14 @@ class RealisedPnlService:
         """Convert every raw Round-trip's legs to GBP at their own
         trade-date FX rate (Story 1.2, AC1/AC5/AC6).
 
-        Resolves each distinct ticker's currency exactly once via
-        ``PortfolioService.ticker_currency`` (the sole currency seam,
-        AD-5), then batch-fetches every distinct trade date once per
-        supported foreign currency. A GBP-currency ticker never needs a
-        rate lookup at all.
+        Resolves distinct ticker currencies in one cache-first batch via
+        ``PortfolioService.ticker_currencies`` (the sole currency seam,
+        AD-5), then batch-fetches every distinct trade date once per supported
+        foreign currency. A GBP-currency ticker never needs a rate lookup.
         """
-        currencies: dict[str, str] = {}
-        for raw in raw_round_trips:
-            if raw.ticker not in currencies:
-                currencies[raw.ticker] = self._portfolio.ticker_currency(raw.ticker)
+        currencies = self._portfolio.ticker_currencies(
+            list(dict.fromkeys(raw.ticker for raw in raw_round_trips))
+        )
 
         dates_by_currency: dict[str, set[str]] = {"USD": set(), "HKD": set()}
         for raw in raw_round_trips:

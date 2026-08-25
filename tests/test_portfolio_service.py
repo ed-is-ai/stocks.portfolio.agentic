@@ -568,6 +568,51 @@ def test_ticker_currency_resolves_usd_and_gbp_and_defaults_on_failure(
     assert svc.ticker_currency("BROKEN") == "GBP"
 
 
+def test_ticker_currency_is_reused_during_process_lifetime(monkeypatch) -> None:
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    monkeypatch.setattr(svc, "load_ticker_aliases", lambda: {})
+    calls: list[str] = []
+
+    def fake_ticker(symbol: str):
+        calls.append(symbol)
+        return _FakeTicker("USD")
+
+    monkeypatch.setattr("yfinance.Ticker", fake_ticker)
+
+    assert svc.ticker_currency("AAPL") == "USD"
+    assert svc.ticker_currency("AAPL") == "USD"
+    assert calls == ["AAPL"]
+
+
+def test_ticker_currencies_prefers_price_cache_and_only_resolves_misses(
+    monkeypatch,
+) -> None:
+    trader = _StubTrader()
+    trader.load_price_cache = lambda: (  # type: ignore[attr-defined]
+        {"AAPL": 100.0},
+        "2026-08-25T10:00:00+00:00",
+        {"AAPL": (130.0, "USD")},
+    )
+    svc = PortfolioService(
+        cast(TraderService, trader), cast(ExitEvaluator, _StubEvaluator())
+    )
+    misses: list[str] = []
+
+    def resolve_miss(ticker: str) -> str:
+        misses.append(ticker)
+        return "GBP"
+
+    monkeypatch.setattr(svc, "ticker_currency", resolve_miss)
+
+    assert svc.ticker_currencies(["AAPL", "VOD.L", "AAPL"]) == {
+        "AAPL": "USD",
+        "VOD.L": "GBP",
+    }
+    assert misses == ["VOD.L"]
+
+
 def test_ticker_currency_resolves_canonical_ticker_fed_back(monkeypatch) -> None:
     """Story 2.1: a canonical ticker (as ``get_portfolio()`` now returns --
     here, an alias's chain terminal value) must resolve to the correct

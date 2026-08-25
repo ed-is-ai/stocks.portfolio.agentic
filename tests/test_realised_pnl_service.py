@@ -33,6 +33,9 @@ class _StubPortfolioService:
     def ticker_currency(self, ticker: str) -> str:
         return "GBP"
 
+    def ticker_currencies(self, tickers: list[str]) -> dict[str, str]:
+        return {ticker: self.ticker_currency(ticker) for ticker in tickers}
+
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         return {}
 
@@ -567,6 +570,9 @@ class _FakePortfolioService:
 
     def ticker_currency(self, ticker: str) -> str:
         return self._currencies.get(ticker, "GBP")
+
+    def ticker_currencies(self, tickers: list[str]) -> dict[str, str]:
+        return {ticker: self.ticker_currency(ticker) for ticker in tickers}
 
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         self.rate_lookup_calls.append(list(dates))

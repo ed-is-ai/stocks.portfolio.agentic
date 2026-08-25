@@ -12,6 +12,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from typing import Any, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
@@ -254,6 +255,7 @@ class PortfolioService:
                     break
         return result
 
+    @lru_cache(maxsize=1024)
     def ticker_currency(self, ticker: str) -> str:
         """Return a ticker's trading currency (e.g. ``"GBP"``, ``"USD"``).
 
@@ -293,6 +295,33 @@ class PortfolioService:
                 "Could not determine currency for %s; defaulting to GBP", ticker
             )
             return "GBP"
+
+    def ticker_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Resolve currencies in bulk, preferring persisted price metadata.
+
+        Realised P&L can contain many historical tickers. Resolving each one
+        serially through Yahoo on every render made the tab's latency scale
+        with the size of the account instead of the local FIFO calculation.
+        """
+        unique = tuple(dict.fromkeys(tickers))
+        if not unique:
+            return {}
+
+        _prices, _fetched_at, display_info = self._trader.load_price_cache()
+        resolved = {
+            ticker: str(display_info[ticker][1]).strip().upper()
+            for ticker in unique
+            if ticker in display_info and display_info[ticker][1]
+        }
+        missing = [ticker for ticker in unique if ticker not in resolved]
+        if not missing:
+            return resolved
+
+        worker_count = min(8, len(missing))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            currencies = executor.map(self.ticker_currency, missing)
+            resolved.update(zip(missing, currencies, strict=True))
+        return resolved
 
     # --- live price fetching ---------------------------------------------
 
