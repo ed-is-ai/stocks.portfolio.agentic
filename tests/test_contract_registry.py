@@ -32,6 +32,8 @@ _II_HEADER = [
     "Running Balance",
 ]
 
+_IG_HEADER = ["TextDate", "MarketName", "Reference", "PL Amount", "Period"]
+
 
 def _write_contract(path: Path, **overrides: object) -> Path:
     data: dict[str, object] = {
@@ -56,6 +58,35 @@ def test_shipped_interactive_investor_contract_loads() -> None:
     contract = registry.detect(_II_HEADER)
     assert contract.contract_id == "interactive_investor"
     assert contract.version == "1"
+
+
+@pytest.mark.parametrize(
+    ("header", "expected_contract_id"),
+    [
+        pytest.param(_II_HEADER, "interactive_investor", id="interactive_investor"),
+        pytest.param(_IG_HEADER, "ig", id="ig"),
+    ],
+)
+def test_shipped_contract_detects_from_its_real_header(
+    header: list[str], expected_contract_id: str
+) -> None:
+    """Story 3.4: II and IG both auto-detect from their own real header --
+    proves the registry treats them identically, with no provider-specific
+    detection logic (AC4)."""
+    registry = get_contract_registry()
+    contract = registry.detect(header)
+    assert contract.contract_id == expected_contract_id
+    assert contract.version == "1"
+
+
+def test_shipped_ig_contract_declares_its_three_capabilities() -> None:
+    """Sanity check that the shipped IG contract actually uses all three
+    Story 3.4 capabilities -- the whole point of adding IG."""
+    registry = get_contract_registry()
+    contract = registry.detect(_IG_HEADER)
+    assert contract.text_extraction is not None
+    assert contract.signed_amount_column is not None
+    assert contract.reject_unless_column_equals is not None
 
 
 def test_load_rejects_malformed_contract_file_naming_it(tmp_path: Path) -> None:
@@ -111,11 +142,29 @@ def test_detect_finds_interactive_investor_from_real_header() -> None:
 
 
 def test_detect_raises_on_zero_match_header() -> None:
+    """Story 3.4: with IG also loaded, the "best partial match" reported
+    is whichever contract has the fewest missing columns -- so this
+    header (all of II's required columns but one) must remain closer to
+    II than to IG's five entirely-different required columns, to keep
+    testing II's own missing-column error text specifically (rather than
+    accidentally asserting on IG's)."""
     registry = get_contract_registry()
     with pytest.raises(ContractRegistryError) as exc:
-        registry.detect(["Date", "Symbol"])
+        registry.detect(
+            [
+                "Date",
+                "Symbol",
+                "Sedol",
+                "Quantity",
+                "Price",
+                "Description",
+                "Reference",
+                "Debit",
+                "Credit",
+            ]
+        )
     assert "missing required columns" in str(exc.value)
-    assert "Quantity" in str(exc.value)
+    assert "Running Balance" in str(exc.value)
 
 
 def test_detect_raises_no_contract_matches_on_empty_registry() -> None:
@@ -163,6 +212,152 @@ def test_load_rejects_field_mapping_collision(tmp_path: Path) -> None:
 
     with pytest.raises(ContractRegistryError):
         ContractRegistry.load(tmp_path)
+
+
+# --- Story 3.4: fail-closed capability validation --------------------------
+
+
+def test_load_rejects_text_extraction_source_column_not_declared(
+    tmp_path: Path,
+) -> None:
+    """A ``text_extraction.source_column`` typo'd/missing from
+    ``required_columns``/``optional_columns`` must fail contract loading
+    outright, not silently never fire at import time."""
+    _write_contract(
+        tmp_path,
+        required_columns=["Date", "Amount"],
+        field_mapping={"Date": "date", "Amount": "debit"},
+        text_extraction={
+            "source_column": "NotAColumn",
+            "pattern": r"^(?P<security_symbol>.+)$",
+        },
+    )
+
+    with pytest.raises(ContractRegistryError):
+        ContractRegistry.load(tmp_path)
+
+
+def test_load_rejects_signed_amount_column_source_not_declared(
+    tmp_path: Path,
+) -> None:
+    _write_contract(
+        tmp_path,
+        required_columns=["Date"],
+        field_mapping={"Date": "date"},
+        signed_amount_column={"source_column": "NotAColumn"},
+    )
+
+    with pytest.raises(ContractRegistryError):
+        ContractRegistry.load(tmp_path)
+
+
+def test_load_rejects_reject_unless_column_equals_source_not_declared(
+    tmp_path: Path,
+) -> None:
+    _write_contract(
+        tmp_path,
+        required_columns=["Date"],
+        field_mapping={"Date": "date"},
+        reject_unless_column_equals={
+            "source_column": "NotAColumn",
+            "allowed_value": "-",
+        },
+    )
+
+    with pytest.raises(ContractRegistryError):
+        ContractRegistry.load(tmp_path)
+
+
+def test_load_rejects_text_extraction_group_colliding_with_field_mapping(
+    tmp_path: Path,
+) -> None:
+    """A ``text_extraction`` named group that collides with a canonical
+    field already produced by ``field_mapping`` must fail contract
+    loading -- one capability silently overwriting another's value would
+    otherwise fail only at import time (or not at all, just losing
+    data)."""
+    _write_contract(
+        tmp_path,
+        required_columns=["Date", "Symbol", "Text"],
+        optional_columns=["Text"],
+        field_mapping={
+            "Date": "date",
+            "Symbol": "security_symbol",
+        },
+        text_extraction={
+            "source_column": "Text",
+            "pattern": r"^(?P<security_symbol>.+)$",
+        },
+    )
+
+    with pytest.raises(ContractRegistryError):
+        ContractRegistry.load(tmp_path)
+
+
+def test_load_rejects_signed_amount_column_colliding_with_field_mapping(
+    tmp_path: Path,
+) -> None:
+    _write_contract(
+        tmp_path,
+        required_columns=["Date", "Debit", "Amount"],
+        field_mapping={"Date": "date", "Debit": "debit"},
+        signed_amount_column={"source_column": "Amount"},
+    )
+
+    with pytest.raises(ContractRegistryError):
+        ContractRegistry.load(tmp_path)
+
+
+def test_load_rejects_text_extraction_group_colliding_with_signed_amount_column(
+    tmp_path: Path,
+) -> None:
+    """Cross-capability collision (review pass 2 correction): a
+    ``text_extraction`` named group targeting ``credit`` collides with
+    ``signed_amount_column``'s own implicit ``debit``/``credit`` output --
+    neither capability maps through ``field_mapping``, so the original
+    collision check (which only compared against ``field_mapping``) would
+    have missed this and let one capability silently clobber the other's
+    value at runtime."""
+    _write_contract(
+        tmp_path,
+        required_columns=["Date", "Text", "Amount", "Marker"],
+        field_mapping={"Date": "date"},
+        text_extraction={
+            "source_column": "Text",
+            "pattern": r"^(?P<credit>[0-9.]+)$",
+        },
+        signed_amount_column={"source_column": "Amount"},
+    )
+
+    with pytest.raises(ContractRegistryError):
+        ContractRegistry.load(tmp_path)
+
+
+def test_load_accepts_valid_capability_columns(tmp_path: Path) -> None:
+    """The positive case: a well-formed capability set with declared
+    columns and no collisions loads cleanly."""
+    _write_contract(
+        tmp_path,
+        required_columns=["Date", "Text", "Amount", "Marker"],
+        field_mapping={"Date": "date"},
+        text_extraction={
+            "source_column": "Text",
+            "pattern": r"^(?P<security_symbol>.+?) CONS "
+            r"(?P<quantity>[0-9.]+)@(?P<price>[0-9.]+)",
+            "required_marker": "CONS",
+        },
+        signed_amount_column={"source_column": "Amount"},
+        reject_unless_column_equals={
+            "source_column": "Marker",
+            "allowed_value": "-",
+        },
+    )
+
+    registry = ContractRegistry.load(tmp_path)
+    contract = registry.detect(["Date", "Text", "Amount", "Marker"])
+    assert contract.text_extraction is not None
+    assert contract.signed_amount_column is not None
+    assert contract.reject_unless_column_equals is not None
 
 
 def test_contract_mappings_are_immutable() -> None:

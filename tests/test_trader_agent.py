@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -720,6 +721,15 @@ def test_to_iso_date_converts_known_formats() -> None:
     assert _to_iso_date("  2024-03-15  ") == "2024-03-15"
 
 
+def test_to_iso_date_converts_2_digit_year() -> None:
+    """Story 3.4: IG's export uses a 2-digit-year ``DD/MM/YY`` date, tried
+    only after both 4-digit formats so a genuine 4-digit-year value is
+    never misread as a 2-digit one."""
+    assert _to_iso_date("01/02/24") == "2024-02-01"
+    # A 4-digit-year value must still win over any 2-digit-year reading.
+    assert _to_iso_date("01/02/2024") == "2024-02-01"
+
+
 def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
     import sqlite3
 
@@ -1032,8 +1042,16 @@ def test_sipp_malformed_quantity_rejects_the_whole_plan_including_good_rows(
 
 
 def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:
-    # No Quantity / Running Balance columns -> reject before any DB write (#152).
-    csv_text = "Date,Symbol,Price,Description\n01/02/2024,AAPL,100,Buy AAPL\n"
+    # No Quantity / Running Balance columns -> reject before any DB write
+    # (#152). Otherwise carries every other II required column (Story 3.4:
+    # with IG also loaded, the "best partial match" is whichever contract
+    # has fewer missing columns -- this header must stay closer to II than
+    # to IG's five entirely-different required columns, to keep testing
+    # II's own missing-column error text specifically).
+    csv_text = (
+        "Date,Symbol,Sedol,Price,Description,Reference,Debit,Credit\n"
+        "01/02/2024,AAPL,B123,100,Buy AAPL,REF-1,1000,\n"
+    )
     csv_path = tmp_path / "sipp.csv"
     csv_path.write_text(csv_text, encoding="utf-8")
     agent = TraderAgent(name="TraderAgent")
@@ -2715,3 +2733,308 @@ def test_receipt_records_callers_validated_account_type_not_contracts_full_set(
     finally:
         conn.close()
     assert account_type_id == "sipp"
+
+
+# --- Story 3.4: IG, a contract-only provider (text extraction, signed-amount
+# splitting, and the additive cash-balance fallback) --------------------------
+
+_IG_FIXTURES_DIR = Path(__file__).parent / "fixtures" / "ig"
+
+
+def _ig_fixture(name: str) -> bytes:
+    return (_IG_FIXTURES_DIR / name).read_bytes()
+
+
+def test_import_sipp_ig_valid_mixed_file_produces_correct_counts(
+    tmp_path: Path,
+) -> None:
+    """A fabricated, IG-shaped CSV (trades, commission, a fee row, cash
+    in/out, an inter-account transfer) imports through the exact same
+    generic ``import_sipp`` path as II -- no IG-specific business-logic
+    branch is involved (AC1).
+
+    Imported into an explicit portfolio (never the legacy no-``portfolio_
+    id`` path) so this test's cash balance is isolated in this test's own
+    ``portfolio_snapshots``/``account_state`` rows, never the real,
+    process-shared ``data/portfolio_value.csv`` the legacy path reads/
+    writes -- every new Story 3.4 test below does the same, for the same
+    reason.
+    """
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("IG Test")
+
+    result = agent.import_sipp(
+        _ig_fixture("valid_mixed.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    assert result.status == "ok"
+    assert result.provider_id == "ig"
+    assert result.provider_name == "IG"
+    assert result.contract_version == "1"
+    assert result.buy_count == 1
+    assert result.sell_count == 1
+    # Commission, Section 31 fee, Cash In, Cash Out, inter-account transfer.
+    assert result.cash_flow_count == 5
+    assert result.failed_rows == []
+    history = agent.get_trade_history(portfolio_id=pf.id)
+    assert {t.ticker for t in history} == {"NIMBUS ROBOTICS", "VANTAGE CEREAL"}
+    # Net delta: credits (960 + 500 + 300) - debits (910 + 8.50 + 2 + 150).
+    assert result.cash_balance == pytest.approx(689.50)
+    assert agent.get_cash_balance(pf.id) == pytest.approx(689.50)
+
+
+def test_import_sipp_ig_malformed_cons_text_rejects_naming_the_text(
+    tmp_path: Path,
+) -> None:
+    """``required_marker`` (review pass 2's corrected behavior): a
+    ``MarketName`` that contains "CONS" but doesn't match the full
+    extraction pattern (missing ``@price``) rejects the whole plan,
+    naming the unparseable text -- never silently reclassified as a cash
+    flow. The row's ``PL Amount`` is otherwise perfectly valid, so the
+    rejection is unambiguously attributable to the ``required_marker``
+    path, not a coincidental amount-parse failure."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("IG Test")
+
+    result = agent.import_sipp(
+        _ig_fixture("malformed_cons.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    assert "Fictional Widgets CONS ten shares" in result.failed_rows[0]
+    assert agent.get_trade_history(portfolio_id=pf.id) == []
+    assert agent.get_cash_balance(pf.id) is None
+
+
+def test_import_sipp_ig_cfd_row_rejects_whole_plan(tmp_path: Path) -> None:
+    """A ``Period`` value other than the share-dealing placeholder ``"-"``
+    (CFD/spread-bet activity) rejects the whole plan -- this app's
+    canonical portfolio domain does not model CFDs."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("IG Test")
+
+    result = agent.import_sipp(
+        _ig_fixture("cfd_row.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    assert "Period" in result.failed_rows[0]
+    assert agent.get_trade_history(portfolio_id=pf.id) == []
+
+
+def test_import_sipp_ig_duplicate_overlap_is_idempotent(tmp_path: Path) -> None:
+    """Re-importing an overlapping IG file reports every repeated row as
+    ``duplicate`` and never double-counts the cash-balance delta -- the
+    additive-fallback analogue of II's Running Balance dedup guarantee."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("IG Test")
+
+    first = agent.import_sipp(
+        _ig_fixture("valid_mixed.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+    assert first.status == "ok"
+    balance_after_first = agent.get_cash_balance(pf.id)
+    assert balance_after_first is not None
+
+    second = agent.import_sipp(
+        _ig_fixture("duplicate_overlap.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    assert second.status == "ok"
+    assert second.duplicate_count == 7
+    assert second.inserted_count == 1
+    # Only the one new row (Orbital Foods, -180.00 debit) is added on top.
+    assert agent.get_cash_balance(pf.id) == pytest.approx(balance_after_first - 180.0)
+
+    # Re-importing the exact same file again must change nothing further.
+    third = agent.import_sipp(
+        _ig_fixture("valid_mixed.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+    assert third.status == "ok"
+    assert third.inserted_count == 0
+    assert agent.get_cash_balance(pf.id) == pytest.approx(balance_after_first - 180.0)
+
+
+def test_import_sipp_ig_balance_is_order_independent(tmp_path: Path) -> None:
+    """Two non-overlapping IG files import to the same final balance
+    regardless of order -- the additive delta-sum is commutative."""
+    ab_dir = tmp_path / "ab"
+    ab_dir.mkdir()
+    ba_dir = tmp_path / "ba"
+    ba_dir.mkdir()
+
+    agent_ab = _make_agent(ab_dir)
+    pf_ab = agent_ab.create_portfolio("AB")
+    agent_ab.import_sipp(
+        _ig_fixture("balance_order_a.csv"),
+        pf_ab.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+    agent_ab.import_sipp(
+        _ig_fixture("balance_order_b.csv"),
+        pf_ab.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    agent_ba = _make_agent(ba_dir)
+    pf_ba = agent_ba.create_portfolio("BA")
+    agent_ba.import_sipp(
+        _ig_fixture("balance_order_b.csv"),
+        pf_ba.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+    agent_ba.import_sipp(
+        _ig_fixture("balance_order_a.csv"),
+        pf_ba.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    assert agent_ab.get_cash_balance(pf_ab.id) == agent_ba.get_cash_balance(pf_ba.id)
+
+
+def test_import_sipp_ig_2_digit_year_date_persists_correctly(tmp_path: Path) -> None:
+    """The IG fixtures' ``DD/MM/YY`` dates (e.g. ``01/03/24``) resolve to
+    the correct ISO date on the persisted trade."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("IG Test")
+
+    agent.import_sipp(
+        _ig_fixture("valid_mixed.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    history = {t.ticker: t for t in agent.get_trade_history(portfolio_id=pf.id)}
+    assert history["NIMBUS ROBOTICS"].date == "2024-03-01"
+
+
+def test_import_sipp_mixed_provider_ig_delta_applied_after_dated_ii_import(
+    tmp_path: Path,
+) -> None:
+    """The regression test for review pass 1's bug: once a dated (running-
+    balance) II import has ever set a stored as-of date for a portfolio,
+    a subsequent undated IG delta must still be applied -- never silently
+    frozen at the II snapshot forever.
+
+    Before the fix, routing the IG delta through ``_apply_import_cash_
+    balance``'s ``#160`` stale-date guard (with ``as_of=None``) meant the
+    guard's ``stored_date is None or as_of >= stored_date`` condition was
+    permanently false once ``stored_date`` was set by the II import, so
+    every subsequent IG delta was silently dropped with no error.
+    """
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Mixed Provider")
+
+    ii_result = agent.import_sipp(
+        _ig_fixture("dated_ii_small.csv"),
+        pf.id,
+        provider_id="interactive_investor",
+        account_type_id="sipp",
+    )
+    assert ii_result.status == "ok"
+    balance_after_ii = agent.get_cash_balance(pf.id)
+    assert balance_after_ii == 9000.0
+    assert balance_after_ii is not None
+
+    ig_result = agent.import_sipp(
+        _ig_fixture("mixed_provider_ig.csv"),
+        pf.id,
+        provider_id="ig",
+        account_type_id="share_dealing",
+    )
+
+    assert ig_result.status == "ok"
+    balance_after_ig = agent.get_cash_balance(pf.id)
+    # The bug this story fixes: before the fix, balance_after_ig would
+    # equal balance_after_ii unchanged (the delta silently dropped). The
+    # fixture's one IG row is a -100.00 debit (a CONS buy).
+    assert balance_after_ig == pytest.approx(balance_after_ii - 100.0)
+    assert balance_after_ig != balance_after_ii
+
+
+def test_import_sipp_ig_non_gbp_fallback_delta_rejects_whole_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cash-balance fallback writes to the legacy GBP-only single-
+    value slot -- a contributing row resolving to a non-GBP currency must
+    reject the whole plan (naming the row and its currency), never be
+    silently excluded from the sum (money must not silently vanish from a
+    reported balance).
+
+    Constructed via a small synthetic contract (registered alongside the
+    real shipped contracts for the duration of this test) rather than the
+    real IG contract, since ``signed_amount_column`` always emits a plain
+    numeric string with no currency marker by design -- this scenario
+    only arises for a hypothetical contract using plain ``field_mapping``
+    debit/credit columns (like II) with no ``running_balance`` mapping.
+    """
+    from app.services.portfolio_import.contract_registry import ContractRegistry
+
+    contract_dir = tmp_path / "contracts"
+    contract_dir.mkdir()
+    contract_json = {
+        "contract_id": "test_no_running_balance",
+        "version": "1",
+        "provider_id": "test_no_running_balance",
+        "provider_name": "Test No Running Balance",
+        "encoding": "utf-8-sig",
+        "delimiter": ",",
+        "required_columns": ["Date", "Description", "Reference", "Debit", "Credit"],
+        "field_mapping": {
+            "Date": "date",
+            "Description": "description",
+            "Reference": "reference",
+            "Debit": "debit",
+            "Credit": "credit",
+        },
+    }
+    (contract_dir / "test_no_running_balance_1.json").write_text(
+        json.dumps(contract_json), encoding="utf-8"
+    )
+    custom_registry = ContractRegistry.load(contract_dir)
+
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("IG Test")
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.get_contract_registry",
+        lambda: custom_registry,
+    )
+    csv_text = (
+        "Date,Description,Reference,Debit,Credit\n"
+        "01/02/2024,Fictional dividend,REF-USD-1,,$100.00\n"
+    )
+    result = agent.import_sipp(
+        csv_text.encode("utf-8"),
+        pf.id,
+        provider_id="test_no_running_balance",
+    )
+
+    assert result.status == "rejected"
+    assert len(result.failed_rows) == 1
+    assert "USD" in result.failed_rows[0]
+    assert agent.get_cash_balance(pf.id) is None

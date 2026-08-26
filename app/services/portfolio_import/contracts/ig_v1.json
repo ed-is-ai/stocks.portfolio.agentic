@@ -1,0 +1,40 @@
+{
+  "contract_id": "ig",
+  "version": "1",
+  "provider_id": "ig",
+  "provider_name": "IG",
+  "account_type_ids": ["share_dealing"],
+  "priority": 100,
+  "encoding": "utf-8-sig",
+  "delimiter": ",",
+  "required_columns": ["TextDate", "MarketName", "Reference", "PL Amount", "Period"],
+  "optional_columns": [
+    "Summary",
+    "Transaction type",
+    "ProfitAndLoss",
+    "Open level",
+    "Close level",
+    "Size",
+    "Currency",
+    "Cash transaction",
+    "DateUtc",
+    "OpenDateUtc",
+    "CurrencyIsoCode"
+  ],
+  "header_aliases": {},
+  "field_mapping": {
+    "TextDate": "date",
+    "Reference": "reference",
+    "MarketName": "description"
+  },
+  "signed_amount_column": { "source_column": "PL Amount" },
+  "text_extraction": {
+    "source_column": "MarketName",
+    "pattern": "^(?P<security_symbol>.+?) CONS (?P<quantity>[0-9.]+)@(?P<price>[0-9.]+)",
+    "required_marker": "CONS"
+  },
+  "reject_unless_column_equals": {
+    "source_column": "Period",
+    "allowed_value": "-"
+  }
+}

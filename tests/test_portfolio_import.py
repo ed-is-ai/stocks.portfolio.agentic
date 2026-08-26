@@ -1150,3 +1150,121 @@ def test_rendered_portfolio_partial_includes_portfolio_select_element():
     html = templates.get_template("_portfolio.html").render(**ctx)
 
     assert 'id="portfolioSelect"' in html
+
+
+# --- Story 3.4: IG, a contract-only provider --------------------------------
+
+_IG_FIXTURE_CSV = (
+    Path(__file__).parent / "fixtures" / "ig" / "valid_mixed.csv"
+).read_bytes()
+
+#: A minimal but *complete* II-shaped CSV (unlike the module-level ``_CSV``,
+#: which omits Description/Reference/Debit/Credit and is only ever fed to a
+#: mocked ``import_sipp`` elsewhere in this file) -- needed here because this
+#: test exercises a real, non-mocked ``TraderAgent``/contract-detection path.
+_II_FIXTURE_CSV = (
+    b"Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+    b"Running Balance\n"
+    b"01/01/2024,AAPL,B123,10,100.00,Buy AAPL,REF-1,1000.00,,5000.00\n"
+)
+
+
+def test_ig_route_level_import_succeeds_with_provider_context(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Route-level proof (AC1/AC3): selecting ``provider_id="ig"`` and
+    ``account_type_id="share_dealing"``, uploading a fabricated IG-shaped
+    CSV, succeeds through the real (non-mocked) ``TraderAgent``/
+    ``TraderService`` stack and echoes provider name "IG"/contract version
+    "1" with correct outcome counts -- proving no route-level behavior is
+    provider-specific."""
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.IMPORTED_FILES_DIR", tmp_path / "imported"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("IG Route Test")
+    trader = TraderService(agent)
+
+    contexts = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            contexts.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: PortfolioService(trader)
+    app.dependency_overrides[get_notifications_repository] = lambda: MagicMock()
+    try:
+        resp = _upload(
+            content=_IG_FIXTURE_CSV,
+            portfolio_id=pf.id,
+            provider_id="ig",
+            account_type_id="share_dealing",
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    assert contexts[-1]["import_provider_name"] == "IG"
+    assert contexts[-1]["import_contract_version"] == "1"
+    assert contexts[-1]["import_account_type"] == "share_dealing"
+    assert agent.get_cash_balance(pf.id) == pytest.approx(689.50)
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "account_type_id", "csv_bytes"),
+    [
+        pytest.param(
+            "interactive_investor", "sipp", _II_FIXTURE_CSV, id="interactive_investor"
+        ),
+        pytest.param("ig", "share_dealing", _IG_FIXTURE_CSV, id="ig"),
+    ],
+)
+def test_route_conformance_succeeds_for_every_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    provider_id: str,
+    account_type_id: str,
+    csv_bytes: bytes,
+) -> None:
+    """Parameterized route conformance across both II and IG: the same
+    upload flow, against the same real agent/service stack, succeeds
+    identically in kind for either provider -- no route-level behavior is
+    provider-specific (AC4)."""
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.services.portfolio_service import PortfolioService
+    from app.services.trader_service import TraderService
+
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.IMPORTED_FILES_DIR", tmp_path / "imported"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Conformance Test")
+    trader = TraderService(agent)
+
+    app.dependency_overrides[get_trader_service] = lambda: trader
+    app.dependency_overrides[get_portfolio_service] = lambda: PortfolioService(trader)
+    app.dependency_overrides[get_notifications_repository] = lambda: MagicMock()
+    try:
+        resp = _upload(
+            content=csv_bytes,
+            portfolio_id=pf.id,
+            provider_id=provider_id,
+            account_type_id=account_type_id,
+        )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200

@@ -28,6 +28,9 @@ from app.schemas.portfolio_import import ProviderOption
 from app.services.portfolio_import.contract_schema import (
     CanonicalField,
     PortfolioImportContractV1,
+    RejectedRowValueRule,
+    SignedAmountRule,
+    TextExtractionRule,
 )
 
 
@@ -57,6 +60,9 @@ def _load_contract_file(path: Path) -> PortfolioImportContractV1:
             str(column): CanonicalField(canonical)
             for column, canonical in data.get("field_mapping", {}).items()
         }
+        text_extraction_data = data.get("text_extraction")
+        signed_amount_data = data.get("signed_amount_column")
+        reject_unless_data = data.get("reject_unless_column_equals")
         contract = PortfolioImportContractV1(
             contract_id=data["contract_id"],
             version=str(data["version"]),
@@ -70,6 +76,21 @@ def _load_contract_file(path: Path) -> PortfolioImportContractV1:
             optional_columns=tuple(data.get("optional_columns", ())),
             header_aliases=dict(data.get("header_aliases", {})),
             field_mapping=field_mapping,
+            text_extraction=(
+                TextExtractionRule(**text_extraction_data)
+                if text_extraction_data is not None
+                else None
+            ),
+            signed_amount_column=(
+                SignedAmountRule(**signed_amount_data)
+                if signed_amount_data is not None
+                else None
+            ),
+            reject_unless_column_equals=(
+                RejectedRowValueRule(**reject_unless_data)
+                if reject_unless_data is not None
+                else None
+            ),
         )
     except (KeyError, TypeError, ValueError, ValidationError) as exc:
         raise ContractRegistryError(f"{path}: invalid contract: {exc}") from exc
