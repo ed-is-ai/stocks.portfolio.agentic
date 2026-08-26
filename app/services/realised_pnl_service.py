@@ -270,6 +270,56 @@ class RealisedPnlService:
                 return "consumed"
         return "consumed"
 
+    def opening_lot_statuses(
+        self, trades: list[Trade]
+    ) -> dict[int, Literal["unconsumed", "consumed"]]:
+        """Return FIFO consumption status for every Opening Lot in history.
+
+        ``partial_history`` already loads the all-portfolio trade list for
+        rendering, so it supplies that list here instead of causing a second
+        global history read. The list is split by relevant portfolio and each
+        portfolio is filtered, sorted, and replayed exactly once. This is a
+        display-only batch operation; edit/delete guards deliberately retain
+        ``opening_lot_status`` for their fresh authoritative check.
+
+        As with the single-lot operation, an invalid-date Opening Lot never
+        enters a queue and therefore reads as ``"consumed"``; a partially or
+        fully depleted lot does too. Statuses are keyed only by persisted
+        trade ID, avoiding ticker spelling collisions after alias resolution.
+        """
+        opening_lots = [
+            trade
+            for trade in trades
+            if trade.source == "opening_lot"
+            and trade.id is not None
+            and trade.portfolio_id is not None
+        ]
+        relevant_portfolio_ids = {trade.portfolio_id for trade in opening_lots}
+        statuses: dict[int, Literal["unconsumed", "consumed"]] = {}
+        for portfolio_id in relevant_portfolio_ids:
+            portfolio_trades = [
+                trade for trade in trades if trade.portfolio_id == portfolio_id
+            ]
+            valid_trades, _ = self._filter_and_sort_trades(portfolio_trades)
+            _, open_lots, _, _ = self._replay_fifo(valid_trades, portfolio_id)
+            open_lots_by_trade_id = {
+                lot.trade_id: lot
+                for lots in open_lots.values()
+                for lot in lots
+                if lot.trade_id is not None
+            }
+            for trade in opening_lots:
+                if trade.portfolio_id != portfolio_id:
+                    continue
+                lot = open_lots_by_trade_id.get(trade.id)
+                statuses[trade.id] = (
+                    "unconsumed"
+                    if lot is not None
+                    and abs(lot.shares_remaining - trade.shares) <= QUANTITY_EPSILON
+                    else "consumed"
+                )
+        return statuses
+
     def _sorted_valid_trades(
         self, portfolio_id: int
     ) -> tuple[list[Trade], list[SkippedInvalidDateTrade]]:
@@ -300,6 +350,12 @@ class RealisedPnlService:
         ``None`` arithmetic/comparison.
         """
         trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
+        return self._filter_and_sort_trades(trades)
+
+    def _filter_and_sort_trades(
+        self, trades: list[Trade]
+    ) -> tuple[list[Trade], list[SkippedInvalidDateTrade]]:
+        """Filter and deterministically sort already-loaded FIFO inputs."""
         valid = []
         skipped: list[SkippedInvalidDateTrade] = []
         for t in trades:

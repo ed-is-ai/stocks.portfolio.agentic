@@ -1536,6 +1536,83 @@ def test_opening_lot_status_unknown_trade_id_returns_none(tmp_path: Path) -> Non
     assert service.opening_lot_status(999999, PORTFOLIO_ID) is None
 
 
+def test_opening_lot_statuses_replays_each_relevant_portfolio_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The History-list bulk path uses supplied rows and replays each
+    relevant portfolio once while retaining partial and untouched status."""
+    service, agent = _make_service_with_agent(tmp_path)
+    first_portfolio = agent.create_portfolio("SIPP")
+    partially_consumed = agent.record_opening_lot(
+        "AAPL", 10, 100.0, "2026-01-01", portfolio_id=first_portfolio.id
+    )
+    untouched = agent.record_opening_lot(
+        "MSFT", 8, 200.0, "2026-01-01", portfolio_id=first_portfolio.id
+    )
+    agent.record_sell("AAPL", 4, 120.0, "2026-02-01", portfolio_id=first_portfolio.id)
+    other_portfolio = agent.create_portfolio("ISA")
+    fully_consumed = agent.record_opening_lot(
+        "TSLA", 3, 250.0, "2026-01-01", portfolio_id=other_portfolio.id
+    )
+    agent.record_sell("TSLA", 3, 300.0, "2026-02-01", portfolio_id=other_portfolio.id)
+    assert partially_consumed.id is not None
+    assert untouched.id is not None
+    assert fully_consumed.id is not None
+    trades = service._trader.get_trade_history()
+
+    replay_calls = 0
+    original_replay = service._replay_fifo
+
+    def counted_replay(rows: list[Trade], portfolio_id: int):
+        nonlocal replay_calls
+        replay_calls += 1
+        return original_replay(rows, portfolio_id)
+
+    monkeypatch.setattr(service, "_replay_fifo", counted_replay)
+    monkeypatch.setattr(
+        service._trader,
+        "get_trade_history",
+        lambda **kwargs: pytest.fail("bulk status must use supplied history rows"),
+    )
+
+    assert service.opening_lot_statuses(trades) == {
+        partially_consumed.id: "consumed",
+        untouched.id: "unconsumed",
+        fully_consumed.id: "consumed",
+    }
+    assert replay_calls == 2
+
+
+def test_opening_lot_statuses_preserves_malformed_date_and_alias_semantics(
+    tmp_path: Path,
+) -> None:
+    aliases = type(
+        "Aliases",
+        (_StubPortfolioService,),
+        {"load_ticker_aliases": lambda self: {"ABC": "AAPL"}},
+    )()
+    service, agent = _make_service_with_agent(tmp_path, portfolio_service=aliases)
+    aliased = agent.record_opening_lot(
+        "ABC", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID
+    )
+    assert aliased.id is not None
+    agent.record_sell("AAPL", 5, 110.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    malformed = Trade(
+        id=999,
+        ticker="BADDATE",
+        action="BUY",
+        shares=1,
+        price=1,
+        date="not-a-date",
+        portfolio_id=PORTFOLIO_ID,
+        source="opening_lot",
+    )
+
+    assert service.opening_lot_statuses(
+        service._trader.get_trade_history() + [malformed]
+    ) == {aliased.id: "consumed", malformed.id: "consumed"}
+
+
 # --- Story 2.4: Opening Lot re-match (AC5/AC9) -------------------------------
 
 
