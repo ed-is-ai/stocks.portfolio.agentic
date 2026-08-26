@@ -131,6 +131,33 @@ CREATE TABLE IF NOT EXISTS ticker_currency_cache (
     currency    TEXT NOT NULL,
     resolved_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS portfolio_import_receipts (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_batch_id          TEXT NOT NULL,
+    portfolio_id             INTEGER,
+    provider_id              TEXT NOT NULL,
+    account_type_id          TEXT,
+    contract_id              TEXT NOT NULL,
+    contract_version         TEXT NOT NULL,
+    contract_content_digest  TEXT NOT NULL,
+    source_digest            TEXT NOT NULL,
+    created_at               TEXT NOT NULL,
+    status                   TEXT NOT NULL,
+    inserted_count           INTEGER NOT NULL,
+    duplicate_count          INTEGER NOT NULL,
+    skipped_count            INTEGER NOT NULL,
+    failed_count             INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS portfolio_import_rows (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id           INTEGER NOT NULL REFERENCES portfolio_import_receipts(id),
+    physical_row_number  INTEGER NOT NULL,
+    canonical_row_digest TEXT NOT NULL,
+    outcome              TEXT NOT NULL,
+    reason               TEXT,
+    trade_id             INTEGER REFERENCES trades(id) ON DELETE SET NULL,
+    cash_flow_id         INTEGER REFERENCES cash_flows(id) ON DELETE SET NULL
+);
 """
 
 #: Name of the default portfolio existing single-portfolio data migrates into.
@@ -365,6 +392,18 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fx_unavailable_attempts_pair_date "
         "ON fx_unavailable_attempts(pair, requested_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_rows_receipt "
+        "ON portfolio_import_rows(receipt_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_receipts_portfolio "
+        "ON portfolio_import_receipts(portfolio_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_import_receipts_batch "
+        "ON portfolio_import_receipts(import_batch_id)"
     )
 
     for table in ("trades", "cash_flows"):

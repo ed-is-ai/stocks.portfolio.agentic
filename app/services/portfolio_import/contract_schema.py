@@ -13,6 +13,8 @@ validate at load time rather than silently no-op-ing at import time.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping
@@ -117,4 +119,46 @@ class PortfolioImportContractV1(_ContractModel):
         return self
 
 
-__all__ = ["CanonicalField", "PortfolioImportContractV1"]
+def contract_content_digest(contract: PortfolioImportContractV1) -> str:
+    """Stable content digest over every field that affects how this
+    contract parses a CSV.
+
+    A small, self-contained SHA-256 -- mirroring
+    ``gbp_valuation_service._quote_digest``'s style (GH-311) -- over
+    ``contract_id``, ``version``, ``encoding``, ``delimiter``, sorted
+    ``required_columns``, sorted ``optional_columns``, sorted
+    ``header_aliases`` items, and sorted ``field_mapping`` items.
+    Deliberately not the Backtest epic's shared canonicalizer
+    (``canonical_manifest.py``), which would be exactly the reverse
+    cross-epic coupling AD-10 forbids.
+
+    Covers every parsing-relevant field deliberately -- a contract edit to
+    ``header_aliases``/``optional_columns``/``delimiter``/``encoding``
+    changes how a CSV is actually read, so it must also change this
+    digest even without a version bump (review finding: an earlier
+    version only covered ``required_columns``/``field_mapping``, silently
+    missing edits to the other four fields).
+
+    Serializes via ``json.dumps`` of a fully-sorted, fully-typed
+    structure (not a naive ``"|"``-joined string) so no field value can
+    collide with a differently-shaped contract by containing a separator
+    character (review finding).
+    """
+    canonical_form = {
+        "contract_id": contract.contract_id,
+        "version": contract.version,
+        "encoding": contract.encoding,
+        "delimiter": contract.delimiter,
+        "required_columns": sorted(contract.required_columns),
+        "optional_columns": sorted(contract.optional_columns),
+        "header_aliases": sorted(contract.header_aliases.items()),
+        "field_mapping": sorted(
+            (column, canonical.value)
+            for column, canonical in contract.field_mapping.items()
+        ),
+    }
+    raw = json.dumps(canonical_form, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+__all__ = ["CanonicalField", "PortfolioImportContractV1", "contract_content_digest"]

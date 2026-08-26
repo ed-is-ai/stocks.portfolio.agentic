@@ -1,3 +1,4 @@
+import hashlib
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -13,8 +14,12 @@ from app.agents.trader.trader_agent import (
     _to_iso_date,
 )
 from app.core.config import PORTFOLIO_VALUE_CSV
+from app.repositories import db
+from app.repositories.import_receipt_repo import ImportReceiptRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.trades_repo import TradesRepository
+from app.services.portfolio_import.contract_schema import contract_content_digest
+from app.services.portfolio_import.registry_loader import get_contract_registry
 
 
 def test_record_multiple_buys(tmp_path: Path) -> None:
@@ -2178,3 +2183,307 @@ def test_delete_opening_lot_never_deletes_non_opening_lot_trade(tmp_path: Path) 
 
     assert deleted is False
     assert len(agent.get_trade_history("AAPL", pf.id)) == 1
+
+
+# --- GH-311: import receipt / row-lineage provenance -----------------------
+
+
+def _provenance_counts(db_path: Path) -> dict[str, int]:
+    """Row counts across the two new GH-311 provenance tables -- a sibling
+    to ``_table_counts`` (kept separate so none of the existing exact-dict
+    equality assertions in ``_table_counts``'s callers need to change)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        receipts = conn.execute(
+            "SELECT COUNT(*) FROM portfolio_import_receipts"
+        ).fetchone()[0]
+        rows = conn.execute("SELECT COUNT(*) FROM portfolio_import_rows").fetchone()[0]
+    finally:
+        conn.close()
+    return {"portfolio_import_receipts": receipts, "portfolio_import_rows": rows}
+
+
+_II_CSV_HEADER = (
+    "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+    "Running Balance\n"
+)
+
+
+def test_import_sipp_rejected_plan_writes_zero_provenance_rows(
+    tmp_path: Path,
+) -> None:
+    """GH-311: a rejected plan (a failed row present) writes zero receipt
+    and zero row-lineage rows, exactly like it writes zero trades/cash
+    flows today."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_text = _II_CSV_HEADER + (
+        "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
+        "03/01/2024,MSFT,B2,notanumber,100.00,Buy MSFT,REF-BAD,1000.00,,1500.00\n"
+    )
+
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+
+    assert result.status == "rejected"
+    assert result.receipt_id is None
+    assert _provenance_counts(agent.db_path) == {
+        "portfolio_import_receipts": 0,
+        "portfolio_import_rows": 0,
+    }
+
+
+def test_import_sipp_rollback_when_receipt_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GH-311: injecting a failure inside the new receipt write itself
+    rolls back the *entire* transaction -- proving the new writes share
+    the pre-existing trades/cash_flows/account_state/snapshot
+    transaction, not a separate one."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    def _boom(*args: object, **kwargs: object) -> int:
+        raise RuntimeError("boom: receipt write failed")
+
+    monkeypatch.setattr(ImportReceiptRepository, "insert_receipt_on_connection", _boom)
+
+    csv_text = _II_CSV_HEADER + (
+        "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
+        "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+
+    counts = _table_counts(agent.db_path, pf.id)
+    assert counts == {
+        "trades": 0,
+        "cash_flows": 0,
+        "account_state": 0,
+        "portfolio_snapshots": 0,
+    }
+    assert _provenance_counts(agent.db_path) == {
+        "portfolio_import_receipts": 0,
+        "portfolio_import_rows": 0,
+    }
+
+
+def test_import_sipp_receipt_records_contract_identity_and_counts(
+    tmp_path: Path,
+) -> None:
+    """GH-311, AC1: a successful commit writes one receipt row with the
+    correct contract id/version/content digest, source digest, and the
+    four outcome counts matching the returned ``SippImportResult`` -- plus
+    one row-lineage entry per source data row."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_bytes = (
+        _II_CSV_HEADER
+        + "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
+        + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    ).encode("utf-8")
+
+    contract = get_contract_registry().detect(_II_CSV_HEADER.strip("\n").split(","))
+    expected_source_digest = hashlib.sha256(csv_bytes).hexdigest()
+    expected_contract_digest = contract_content_digest(contract)
+
+    result = agent.import_sipp(csv_bytes, pf.id)
+
+    assert result.status == "ok"
+    assert result.receipt_id is not None
+
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        receipt = conn.execute(
+            "SELECT contract_id, contract_version, contract_content_digest, "
+            "source_digest, status, inserted_count, duplicate_count, "
+            "skipped_count, failed_count FROM portfolio_import_receipts "
+            "WHERE id = ?",
+            (result.receipt_id,),
+        ).fetchone()
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM portfolio_import_rows WHERE receipt_id = ?",
+            (result.receipt_id,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert receipt == (
+        contract.contract_id,
+        contract.version,
+        expected_contract_digest,
+        expected_source_digest,
+        result.status,
+        result.inserted_count,
+        result.duplicate_count,
+        result.skipped_count,
+        len(result.failed_rows),
+    )
+    assert row_count == 2
+
+
+def test_import_sipp_duplicate_row_lineage_has_no_link(
+    tmp_path: Path,
+) -> None:
+    """GH-311: importing the same CSV twice records the second import's
+    row-lineage entry for the repeated row as outcome ``duplicate`` with
+    no trade/cash-flow link -- nothing new was created for it."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    first = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    assert first.status == "ok"
+    second = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    assert second.status == "ok"
+    assert second.duplicate_count == 1
+    assert second.receipt_id is not None
+
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        lineage = conn.execute(
+            "SELECT outcome, trade_id, cash_flow_id FROM portfolio_import_rows "
+            "WHERE receipt_id = ?",
+            (second.receipt_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert lineage == [("duplicate", None, None)]
+
+
+def test_import_sipp_calls_contract_detect_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GH-311, AC5: the receipt's contract identity/digest must come from
+    the single ``detect()`` call ``import_sipp`` already makes -- never a
+    second commit-time lookup."""
+    from collections.abc import Sequence
+
+    from app.services.portfolio_import.contract_registry import ContractRegistry
+    from app.services.portfolio_import.contract_schema import (
+        PortfolioImportContractV1,
+    )
+
+    calls: list[Sequence[str]] = []
+    original_detect = ContractRegistry.detect
+
+    def _spy(
+        self: ContractRegistry, header_row: Sequence[str]
+    ) -> PortfolioImportContractV1:
+        calls.append(header_row)
+        return original_detect(self, header_row)
+
+    monkeypatch.setattr(ContractRegistry, "detect", _spy)
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+
+    assert result.status == "ok"
+    assert len(calls) == 1
+
+
+def test_init_trades_db_migration_is_idempotent_for_provenance_tables(
+    tmp_path: Path,
+) -> None:
+    """GH-311: the new tables are additive ``CREATE TABLE IF NOT EXISTS``
+    -- running the migration twice on a database with historical,
+    pre-provenance trades is a no-op the second time, those legacy rows
+    stay fully readable, and no receipt is fabricated for them."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+    agent.record_buy("AAPL", 10, 100.0, "2020-01-01", portfolio_id=pf.id)
+
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        db.init_trades_db(conn)
+        db.init_trades_db(conn)
+    finally:
+        conn.close()
+
+    assert len(agent.get_trade_history("AAPL", pf.id)) == 1
+    assert _provenance_counts(agent.db_path) == {
+        "portfolio_import_receipts": 0,
+        "portfolio_import_rows": 0,
+    }
+
+
+def test_deleting_a_sipp_imported_trade_does_not_violate_provenance_fk(
+    tmp_path: Path,
+) -> None:
+    """GH-311 review finding: ``portfolio_import_rows.trade_id`` referencing
+    ``trades(id)`` with ``PRAGMA foreign_keys = ON`` and no ``ON DELETE``
+    clause would make deleting any SIPP-imported trade raise
+    ``sqlite3.IntegrityError`` -- verified live before this fix. The FK
+    must be ``ON DELETE SET NULL``: the delete succeeds and the
+    row-lineage audit entry survives (outcome/digest intact) with its
+    ``trade_id`` link cleared, since the trade it pointed to no longer
+    exists."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    assert result.status == "ok"
+    trade_id = agent.get_trade_history("AAPL", pf.id)[0].id
+    assert trade_id is not None
+
+    assert agent.delete_trade(trade_id) is True
+
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        lineage = conn.execute(
+            "SELECT outcome, trade_id FROM portfolio_import_rows WHERE receipt_id = ?",
+            (result.receipt_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert lineage == [("inserted", None)]
+
+
+def test_deleting_a_portfolio_with_sipp_imports_does_not_violate_provenance_fk(
+    tmp_path: Path,
+) -> None:
+    """GH-311 review finding: ``delete_portfolio`` bulk-deletes trades and
+    cash_flows directly (``PortfoliosRepository.delete``) -- a distinct
+    code path from ``delete_trade`` that hit the identical FK violation
+    before the ``ON DELETE SET NULL`` fix."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test SIPP")
+
+    csv_text = _II_CSV_HEADER + (
+        "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
+        "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    assert result.status == "ok"
+
+    assert agent.delete_portfolio(pf.id) is True

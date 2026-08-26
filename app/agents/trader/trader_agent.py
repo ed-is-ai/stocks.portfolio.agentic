@@ -44,6 +44,11 @@ from app.repositories.cash_reconciliation_repo import CashReconciliationReposito
 from app.repositories.cash_flows_repo import CashFlowsRepository
 from app.repositories.db import Connect
 from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
+from app.repositories.import_receipt_repo import (
+    ImportReceiptRepository,
+    ImportRowLineage,
+    canonical_row_digest,
+)
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
@@ -51,6 +56,7 @@ from app.repositories.ticker_currency_cache_repo import TickerCurrencyCacheRepos
 from app.repositories.trades_repo import TradesRepository
 from app.schemas.trade import Portfolio
 from app.services.portfolio_import.contract_registry import ContractRegistryError
+from app.services.portfolio_import.contract_schema import contract_content_digest
 from app.services.portfolio_import.normalizer import ContractNormalizer
 from app.services.portfolio_import.registry_loader import get_contract_registry
 
@@ -210,6 +216,7 @@ class TraderAgent(Agent):
     _cash_flows: CashFlowsRepository = PrivateAttr()
     _cash_balances: CashBalancesRepository = PrivateAttr()
     _cash_reconciliation: CashReconciliationRepository = PrivateAttr()
+    _import_receipts: ImportReceiptRepository = PrivateAttr()
     _price_cache: PriceCacheRepository = PrivateAttr()
     _account: AccountStateRepository = PrivateAttr()
     _artifacts: ArtifactsRepository = PrivateAttr()
@@ -224,6 +231,7 @@ class TraderAgent(Agent):
         self._cash_flows = CashFlowsRepository(connect)
         self._cash_balances = CashBalancesRepository(connect)
         self._cash_reconciliation = CashReconciliationRepository(connect)
+        self._import_receipts = ImportReceiptRepository(connect)
         self._price_cache = PriceCacheRepository(connect)
         self._account = AccountStateRepository(connect)
         self._artifacts = ArtifactsRepository()
@@ -998,6 +1006,14 @@ class TraderAgent(Agent):
         # until every row has been evaluated).
         planned_trades: list[tuple[Any, ...]] = []
         planned_cash_flows: list[tuple[Any, ...]] = []
+        # GH-311: row-lineage bookkeeping, parallel to the two planned-write
+        # lists above. ``planned_trades`` already embeds its own row's
+        # ``idx`` (as ``source_row_index``, tuple position 10) so no
+        # parallel list is needed for it; ``planned_cash_flows`` does not,
+        # hence ``cash_flow_row_idxs``. A benign-empty row never joins
+        # either planned list, so its ``idx`` is recorded directly here.
+        cash_flow_row_idxs: list[int] = []
+        skipped_row_idxs: list[int] = []
         # Story 2.4: one fresh id per import call, stamped on every trade
         # this call writes -- traces a sell (or any trade) back to the
         # specific import that produced it.
@@ -1071,6 +1087,11 @@ class TraderAgent(Agent):
         # applied by default -- without it, a bare ``\r``-terminated CSV
         # (classic Mac-style line endings, occasionally seen in older
         # broker exports) raises ``_csv.Error`` instead of parsing cleanly.
+        # GH-311: a content digest of the raw uploaded bytes, computed once
+        # here (before decode) and reused for the receipt row -- never
+        # recomputed from the decoded text, which could differ byte-for-
+        # byte from the original upload.
+        source_digest = hashlib.sha256(csv_content).hexdigest()
         text = csv_content.decode("utf-8-sig")
         reader = csv.DictReader(io.StringIO(text, newline=None))
         # Some provider exports prepend a run of BOM noise to the very
@@ -1106,6 +1127,11 @@ class TraderAgent(Agent):
         normalized_rows = [
             ContractNormalizer.normalize_row(contract, row) for row in rows
         ]
+        # GH-311: one canonical-row digest per source row, computed once up
+        # front from the normalized (never raw) view -- reused below to
+        # build each row's lineage entry without persisting any raw
+        # financial CSV content.
+        row_digests = [canonical_row_digest(row) for row in normalized_rows]
 
         # Detection has no DB side effects of its own (Story 1.5, AC5) --
         # run it once the rows are available, independent of the main
@@ -1338,8 +1364,10 @@ class TraderAgent(Agent):
                                 amount_money.currency if amount_money else "GBP",
                             )
                         )
+                        cash_flow_row_idxs.append(idx)
                         classify(idempotency_key, existing_cash_flow_keys)
                     else:
+                        skipped_row_idxs.append(idx)
                         benign_empty_count += 1
             else:
                 # No Quantity means this can't be a share trade regardless
@@ -1369,8 +1397,10 @@ class TraderAgent(Agent):
                             amount_money.currency if amount_money else "GBP",
                         )
                     )
+                    cash_flow_row_idxs.append(idx)
                     classify(idempotency_key, existing_cash_flow_keys)
                 else:
+                    skipped_row_idxs.append(idx)
                     benign_empty_count += 1
 
             # Row-level contradictory-currency cross-check (AC3): among the
@@ -1464,23 +1494,77 @@ class TraderAgent(Agent):
         conn = self._conn()
         try:
             conn.execute("BEGIN IMMEDIATE")
+            # GH-311: one row-lineage entry per source row that reached the
+            # commit phase (a benign-empty row included) -- built here, at
+            # write time, so its outcome/link reflects what actually
+            # happened on this connection, never the earlier provisional
+            # read-only classification.
+            row_lineage: list[ImportRowLineage] = []
             # Write-time outcomes are authoritative: a row suppressed by the
             # unique index is a duplicate, never a buy/sell/cash "success".
             for trade_args in planned_trades:
-                if self._trades.insert_ignore(conn, *trade_args) == "duplicate":
+                idx = trade_args[10]
+                outcome = self._trades.insert_ignore(conn, *trade_args)
+                trade_id: int | None = None
+                if outcome == "duplicate":
                     duplicate_count += 1
-                    continue
-                inserted_count += 1
-                if trade_args[1] == "BUY":
-                    buy_count += 1
                 else:
-                    sell_count += 1
-            for flow_args in planned_cash_flows:
-                if self._cash_flows.insert_ignore(conn, *flow_args) == "duplicate":
+                    inserted_count += 1
+                    if trade_args[1] == "BUY":
+                        buy_count += 1
+                    else:
+                        sell_count += 1
+                    # ``cursor.rowcount`` (checked inside ``insert_ignore``)
+                    # already distinguished "actually inserted" from
+                    # "ignored as duplicate" -- ``last_insert_rowid()`` on
+                    # this same connection, read immediately after and
+                    # before any other write, is that row's id.
+                    trade_id = int(
+                        conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    )
+                row_lineage.append(
+                    ImportRowLineage(
+                        physical_row_number=idx,
+                        canonical_row_digest=row_digests[idx],
+                        outcome=outcome,
+                        trade_id=trade_id,
+                    )
+                )
+            # ``strict=True`` (review finding): these two lists are
+            # maintained in parallel by construction (every append site
+            # above appends to both together) -- fail loudly if a future
+            # edit ever breaks that invariant, instead of ``zip`` silently
+            # truncating and misattributing row-lineage to the wrong row.
+            for cf_idx, flow_args in zip(
+                cash_flow_row_idxs, planned_cash_flows, strict=True
+            ):
+                outcome = self._cash_flows.insert_ignore(conn, *flow_args)
+                cash_flow_id: int | None = None
+                if outcome == "duplicate":
                     duplicate_count += 1
-                    continue
-                inserted_count += 1
-                cash_count += 1
+                else:
+                    inserted_count += 1
+                    cash_count += 1
+                    cash_flow_id = int(
+                        conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    )
+                row_lineage.append(
+                    ImportRowLineage(
+                        physical_row_number=cf_idx,
+                        canonical_row_digest=row_digests[cf_idx],
+                        outcome=outcome,
+                        cash_flow_id=cash_flow_id,
+                    )
+                )
+            for skip_idx in skipped_row_idxs:
+                row_lineage.append(
+                    ImportRowLineage(
+                        physical_row_number=skip_idx,
+                        canonical_row_digest=row_digests[skip_idx],
+                        outcome="skipped",
+                        reason="benign empty row: no quantity/amount to import",
+                    )
+                )
 
             for (
                 currency,
@@ -1542,6 +1626,54 @@ class TraderAgent(Agent):
                     conn, portfolio_id, effective_cash_balance, prices
                 )
 
+            # Every data row must land in exactly one bucket -- a mismatch
+            # means some row was silently unaccounted for (a bug), not just
+            # a data-quality issue, so it's flagged distinctly from an
+            # ordinary skipped-row warning (#187). Reconciled on the four
+            # FR-13 outcomes rather than on buy/sell/cash, which no longer
+            # cover every written row now that a duplicate is counted as a
+            # duplicate instead of a success. Computed here (moved up from
+            # after the transaction, GH-311 review) so the receipt's
+            # ``status`` and the returned ``SippImportResult.status`` are
+            # the exact same value, never two independently-derived
+            # formulas that could silently diverge.
+            total_actions = (
+                inserted_count
+                + duplicate_count
+                + len(skipped_rows)
+                + benign_empty_count
+            )
+            status = "ok" if total_actions == total_rows else "error"
+
+            # GH-311: the durable receipt + row-lineage write, on the same
+            # open connection and inside this same transaction, immediately
+            # before commit -- every count here is already final (the
+            # trade/cash-flow loops above are the last thing that can
+            # change inserted/duplicate/skipped counts). A committed plan
+            # never has a failed row (the ``failed_rows`` early return
+            # above rejects the whole plan first), so ``failed_count`` is
+            # always 0 here.
+            account_type_id = ",".join(contract.account_type_ids) or None
+            receipt_id = self._import_receipts.insert_receipt_on_connection(
+                conn,
+                import_batch_id=import_batch_id,
+                portfolio_id=portfolio_id,
+                provider_id=contract.provider_id,
+                account_type_id=account_type_id,
+                contract_id=contract.contract_id,
+                contract_version=contract.version,
+                contract_content_digest=contract_content_digest(contract),
+                source_digest=source_digest,
+                status=status,
+                inserted_count=inserted_count,
+                duplicate_count=duplicate_count,
+                skipped_count=benign_empty_count,
+                failed_count=0,
+            )
+            self._import_receipts.insert_rows_on_connection(
+                conn, receipt_id, row_lineage
+            )
+
             conn.commit()
         except Exception:
             conn.rollback()
@@ -1557,18 +1689,6 @@ class TraderAgent(Agent):
             # committed (never for a rejected plan, never before the cash
             # balance it reads has landed).
             self.update_portfolio_snapshot(effective_cash_balance, portfolio_id)
-
-        # Every data row must land in exactly one bucket -- a mismatch means
-        # some row was silently unaccounted for (a bug), not just a
-        # data-quality issue, so it's flagged distinctly from an ordinary
-        # skipped-row warning (#187).
-        # Reconciled on the four FR-13 outcomes rather than on buy/sell/cash,
-        # which no longer cover every written row now that a duplicate is
-        # counted as a duplicate instead of a success.
-        total_actions = (
-            inserted_count + duplicate_count + len(skipped_rows) + benign_empty_count
-        )
-        status = "ok" if total_actions == total_rows else "error"
 
         print(
             f"SIPP import complete: {buy_count} BUY, {sell_count} SELL, "
@@ -1595,6 +1715,7 @@ class TraderAgent(Agent):
             total_rows=total_rows,
             status=status,
             reconciliation_issue_count=len(reconciliation_issues),
+            receipt_id=receipt_id,
         )
 
     def save_price_cache(
