@@ -99,10 +99,9 @@ backtest_strategy_skills:
 standalone_issues:
   performance_epic_319:
     issue: 319
-    status: in-progress
+    status: done
     sub_issues: [326, 324, 321, 320, 325, 323, 322]
-    completed_sub_issues: [326, 324, 321, 320, 325]
-    pending_merge_sub_issues: [323]
+    completed_sub_issues: [326, 324, 321, 320, 325, 323, 322]
     stories:
       gh-326-cache-strategy-snapshot-coverage-verification:
         issue: 326
@@ -126,11 +125,11 @@ standalone_issues:
         spec: spec-gh-325-batch-portfolio-price-downloads.md
       gh-323-bulk-opening-lot-status:
         issue: 323
-        status: in-review
-        pr: 338
+        status: done
+        spec: spec-gh-323-bulk-opening-lot-status.md
       gh-322-sql-prefilter-comparison-candidates:
         issue: 322
-        status: in-progress
+        status: done
         spec: spec-gh-322-sql-prefilter-comparison-candidates.md
   realised-pnl-average-win-loss-pct:
     issue: 301
