@@ -1,0 +1,35 @@
+{
+  "contract_id": "interactive_investor",
+  "version": "1",
+  "provider_id": "interactive_investor",
+  "provider_name": "Interactive Investor",
+  "account_type_ids": ["sipp"],
+  "priority": 100,
+  "encoding": "utf-8-sig",
+  "delimiter": ",",
+  "required_columns": [
+    "Date",
+    "Symbol",
+    "Quantity",
+    "Price",
+    "Description",
+    "Reference",
+    "Debit",
+    "Credit",
+    "Running Balance"
+  ],
+  "optional_columns": ["Sedol"],
+  "header_aliases": {},
+  "field_mapping": {
+    "Date": "date",
+    "Symbol": "security_symbol",
+    "Sedol": "security_identifier",
+    "Quantity": "quantity",
+    "Price": "price",
+    "Description": "description",
+    "Reference": "reference",
+    "Debit": "debit",
+    "Credit": "credit",
+    "Running Balance": "running_balance"
+  }
+}
