@@ -63,12 +63,19 @@ def _upload(
     content: bytes = _CSV,
     token: str = "s3cret",
     portfolio_id: int = 1,
+    provider_id: str | None = "interactive_investor",
+    account_type_id: str | None = "sipp",
 ):
     headers = {"X-Auth-Token": token} if token else {}
+    data = {"portfolio_id": str(portfolio_id)}
+    if provider_id is not None:
+        data["provider_id"] = provider_id
+    if account_type_id is not None:
+        data["account_type_id"] = account_type_id
     return client.post(
         "/import-sipp",
         files={"file": (filename, content, "text/csv")},
-        data={"portfolio_id": str(portfolio_id)},
+        data=data,
         headers=headers,
     )
 
@@ -515,6 +522,174 @@ def test_missing_columns_returns_400(mocked_import):
     mock_notifications.record.assert_not_called()
 
 
+# --- Story 3.3: provider/account-type selection ------------------------
+
+
+def test_missing_provider_id_returns_400_without_calling_import(mocked_import):
+    """AC3: an omitted provider selection is rejected before the agent is
+    ever called -- no write, no archive."""
+    mock_trader, _, mock_notifications, tmp_path = mocked_import
+    resp = _upload(provider_id=None)
+
+    assert resp.status_code == 400
+    mock_trader.import_sipp.assert_not_called()
+    mock_notifications.record.assert_not_called()
+    assert not (tmp_path / "imported").exists()
+
+
+def test_unknown_provider_id_returns_400_without_calling_import(mocked_import):
+    mock_trader, _, mock_notifications, tmp_path = mocked_import
+    resp = _upload(provider_id="fake_broker")
+
+    assert resp.status_code == 400
+    mock_trader.import_sipp.assert_not_called()
+    mock_notifications.record.assert_not_called()
+    assert not (tmp_path / "imported").exists()
+
+
+def test_provider_id_is_forwarded_to_trader_import_sipp(mocked_import):
+    """The route's own validation only checks known providers -- the
+    detected-contract mismatch check happens inside ``TraderAgent.
+    import_sipp``, so the route must forward the selection through."""
+    mock_trader, _, _, _ = mocked_import
+    _upload(provider_id="interactive_investor", account_type_id="sipp")
+
+    mock_trader.import_sipp.assert_called_once_with(
+        _CSV, 1, "interactive_investor", "sipp"
+    )
+
+
+def test_provider_contract_mismatch_returns_400_without_write(mocked_import):
+    """A provider/account-type mismatch surfaces as ``SippImportError`` from
+    the agent -- the route must not write or archive anything (I/O matrix:
+    "Tampered/mismatched provider")."""
+    from app.agents.trader.trader_agent import SippImportError
+
+    mock_trader, _, mock_notifications, tmp_path = mocked_import
+    mock_trader.import_sipp.side_effect = SippImportError(
+        "selected provider does not match this CSV's detected provider"
+    )
+    resp = _upload(provider_id="interactive_investor", account_type_id="sipp")
+
+    assert resp.status_code == 400
+    mock_notifications.record.assert_not_called()
+    assert not (tmp_path / "imported").exists()
+
+
+def test_account_type_omitted_returns_400_without_write(mocked_import):
+    """An omitted account-type against a contract that declares types is
+    rejected inside the agent -- the route surfaces it as a plain 400, no
+    write."""
+    from app.agents.trader.trader_agent import SippImportError
+
+    mock_trader, _, mock_notifications, tmp_path = mocked_import
+    mock_trader.import_sipp.side_effect = SippImportError(
+        "select an account type: sipp"
+    )
+    resp = _upload(provider_id="interactive_investor", account_type_id=None)
+
+    assert resp.status_code == 400
+    mock_notifications.record.assert_not_called()
+    assert not (tmp_path / "imported").exists()
+
+
+def test_successful_import_echoes_provider_account_type_and_version(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """AC5: a successful import's context carries the server-validated
+    provider name/account type/contract version, never the raw form
+    field."""
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=5000.0,
+        buy_count=2,
+        sell_count=0,
+        cash_flow_count=1,
+        provider_id="interactive_investor",
+        provider_name="Interactive Investor",
+        contract_version="1",
+        account_type_id="sipp",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload(provider_id="interactive_investor", account_type_id="sipp")
+
+    assert resp.status_code == 200
+    assert calls[-1]["import_provider_name"] == "Interactive Investor"
+    assert calls[-1]["import_account_type"] == "sipp"
+    assert calls[-1]["import_contract_version"] == "1"
+
+
+def test_rejected_plan_context_carries_bounded_failed_rows_and_preview(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """AC4: a rejected plan's context carries every discoverable row issue
+    (bounded, with an omitted count beyond the bound) plus the redacted
+    preview rows, every row sharing identical keys."""
+    failed_rows = [f"row {i}: bad" for i in range(210)]
+    preview_rows = [
+        {"date": "01/01/2024", "security_symbol": "AAPL", "quantity": "10"},
+        {"date": "02/01/2024", "security_symbol": "", "quantity": ""},
+    ]
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=0.0,
+        failed_rows=failed_rows,
+        total_rows=210,
+        status="rejected",
+        preview_rows=preview_rows,
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload(provider_id="interactive_investor", account_type_id="sipp")
+
+    assert resp.status_code == 400
+    ctx = calls[-1]
+    assert len(ctx["import_failed_rows"]) == 200
+    assert ctx["import_failed_rows_omitted"] == 10
+    assert ctx["import_preview_rows"] == preview_rows
+    keys = {frozenset(row.keys()) for row in ctx["import_preview_rows"]}
+    assert len(keys) == 1
+
+
+def test_generic_exception_path_does_not_leak_exception_text(
+    monkeypatch: pytest.MonkeyPatch, mocked_import
+):
+    """AC4/Boundaries: an unexpected exception must never echo
+    ``str(exception)``, a file path, or contract source internals -- only
+    the fixed, generic message."""
+    mock_trader, _, mock_notifications, _ = mocked_import
+    mock_trader.import_sipp.side_effect = RuntimeError(
+        "secret database path: /var/data/trades.db leaked"
+    )
+    calls = []
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: (
+            calls.append(k.get("context", {}))
+            or HTMLResponse("ok", status_code=k.get("status_code", 200))
+        ),
+    )
+    resp = _upload(provider_id="interactive_investor", account_type_id="sipp")
+
+    assert resp.status_code == 400
+    assert calls[-1]["error_message"] == "Import failed — see server logs."
+    assert "/var/data/trades.db" not in calls[-1]["error_message"]
+    mock_notifications.record.assert_not_called()
+
+
 def test_happy_path_context_carries_buy_sell_counts_for_queue_aggregation(
     monkeypatch: pytest.MonkeyPatch, mocked_import
 ):
@@ -817,7 +992,9 @@ def test_reconciliation_route_renders_detected_issue(tmp_path: Path) -> None:
         "02/01/2024,n/a,n/a,n/a,n/a,Contribution,R2,,100.00,500.00\n"
         "01/01/2024,n/a,n/a,n/a,n/a,Opening,R1,,,400.00\n"
     )
-    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+    agent.import_sipp(
+        csv_text.encode("utf-8"), portfolio_id=pf.id, account_type_id="sipp"
+    )
 
     trader = TraderService(agent)
     app.dependency_overrides[get_trader_service] = lambda: trader
@@ -857,7 +1034,9 @@ def test_portfolio_partial_renders_non_gbp_balance_without_a_fabricated_gbp_figu
         "Running Balance\n"
         "01/01/2024,n/a,n/a,n/a,n/a,US dividend,n/a,n/a,$154.86,$154.86\n"
     )
-    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+    agent.import_sipp(
+        csv_text.encode("utf-8"), portfolio_id=pf.id, account_type_id="sipp"
+    )
 
     trader = TraderService(agent)
 
@@ -904,7 +1083,9 @@ def test_cash_flow_ledger_renders_real_currency_not_a_fabricated_gbp_prefix(
         "01/01/2024,n/a,n/a,n/a,n/a,US dividend,USD1,n/a,$1.25,$1.25\n"
         "02/01/2024,n/a,n/a,n/a,n/a,GBP interest,GBP1,n/a,10.00,11.25\n"
     )
-    agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=pf.id)
+    agent.import_sipp(
+        csv_text.encode("utf-8"), portfolio_id=pf.id, account_type_id="sipp"
+    )
 
     trader = TraderService(agent)
 

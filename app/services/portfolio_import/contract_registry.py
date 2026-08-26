@@ -24,6 +24,7 @@ from typing import Sequence
 
 from pydantic import ValidationError
 
+from app.schemas.portfolio_import import ProviderOption
 from app.services.portfolio_import.contract_schema import (
     CanonicalField,
     PortfolioImportContractV1,
@@ -101,6 +102,7 @@ class ContractRegistry:
             )
         contracts: list[PortfolioImportContractV1] = []
         seen: dict[tuple[str, str], Path] = {}
+        provider_names: dict[str, tuple[str, Path]] = {}
         for path in sorted(contracts_dir.glob("*.json")):
             contract = _load_contract_file(path)
             key = (contract.contract_id, contract.version)
@@ -110,6 +112,26 @@ class ContractRegistry:
                     f"version={key[1]!r}) already loaded from {seen[key]}"
                 )
             seen[key] = path
+            # GH-308: two contracts sharing a provider_id must agree on
+            # provider_name -- checked here, at construction time, rather
+            # than lazily in list_providers(), so a contract-authoring
+            # mistake fails loudly once at startup instead of raising from
+            # inside a live page render the first time list_providers() is
+            # called (mirrors the duplicate-(contract_id, version) check
+            # above).
+            if contract.provider_id in provider_names:
+                other_name, other_path = provider_names[contract.provider_id]
+                if other_name != contract.provider_name:
+                    raise ContractRegistryError(
+                        f"{path}: provider_id {contract.provider_id!r} has "
+                        f"conflicting provider_name {contract.provider_name!r} "
+                        f"-- {other_path} already declared {other_name!r}"
+                    )
+            else:
+                provider_names[contract.provider_id] = (
+                    contract.provider_name,
+                    path,
+                )
             contracts.append(contract)
         if not contracts:
             raise ContractRegistryError(f"{contracts_dir}: no contract files found")
@@ -164,6 +186,38 @@ class ContractRegistry:
                 "this header equally"
             )
         return best[0]
+
+    def list_providers(self) -> tuple[ProviderOption, ...]:
+        """Return one :class:`ProviderOption` per distinct ``provider_id``.
+
+        ``account_type_ids`` is the union of every loaded contract's
+        declared account types for that provider, so a provider shipping
+        two contracts (e.g. one per account type) still surfaces every
+        option in one dropdown entry. Sorted by ``provider_id`` for
+        deterministic UI ordering.
+
+        Never raises: a ``provider_id`` naming two different
+        ``provider_name`` values is already rejected by :meth:`load` at
+        registry-construction time, so by the time an instance exists
+        every contract sharing a ``provider_id`` is guaranteed to agree
+        on its ``provider_name``.
+        """
+        names: dict[str, str] = {}
+        account_types: dict[str, set[str]] = {}
+        for contract in self._contracts:
+            provider_id = contract.provider_id
+            names[provider_id] = contract.provider_name
+            account_types.setdefault(provider_id, set()).update(
+                contract.account_type_ids
+            )
+        return tuple(
+            ProviderOption(
+                provider_id=provider_id,
+                provider_name=names[provider_id],
+                account_type_ids=tuple(sorted(account_types[provider_id])),
+            )
+            for provider_id in sorted(names)
+        )
 
 
 __all__ = ["ContractRegistry", "ContractRegistryError"]

@@ -216,3 +216,113 @@ def test_detect_prefers_more_specific_contract_over_less_specific(
 
     contract = registry.detect(["Date", "Amount"])
     assert contract.contract_id == "narrow"
+
+
+# --- list_providers() (Story 3.3) -------------------------------------------
+
+
+def test_list_providers_single_contract(tmp_path: Path) -> None:
+    _write_contract(
+        tmp_path,
+        contract_id="solo",
+        version="1",
+        provider_id="solo_provider",
+        provider_name="Solo Provider",
+        account_type_ids=["sipp"],
+    )
+    registry = ContractRegistry.load(tmp_path)
+
+    options = registry.list_providers()
+
+    assert len(options) == 1
+    assert options[0].provider_id == "solo_provider"
+    assert options[0].provider_name == "Solo Provider"
+    assert options[0].account_type_ids == ("sipp",)
+
+
+def test_list_providers_unions_account_types_across_same_provider(
+    tmp_path: Path,
+) -> None:
+    """Two contracts sharing a ``provider_id`` (e.g. one per account type)
+    surface as one dropdown entry whose ``account_type_ids`` is the union
+    of both."""
+    _write_contract(
+        tmp_path,
+        contract_id="acme_sipp",
+        version="1",
+        provider_id="acme",
+        provider_name="Acme Broker",
+        account_type_ids=["sipp"],
+    )
+    _write_contract(
+        tmp_path,
+        contract_id="acme_isa",
+        version="1",
+        provider_id="acme",
+        provider_name="Acme Broker",
+        account_type_ids=["isa"],
+        required_columns=["Date", "Balance"],
+        field_mapping={"Date": "date", "Balance": "debit"},
+    )
+    registry = ContractRegistry.load(tmp_path)
+
+    options = registry.list_providers()
+
+    assert len(options) == 1
+    assert options[0].provider_id == "acme"
+    assert set(options[0].account_type_ids) == {"sipp", "isa"}
+
+
+def test_list_providers_sorted_by_provider_id(tmp_path: Path) -> None:
+    _write_contract(
+        tmp_path,
+        contract_id="zeta",
+        version="1",
+        provider_id="zeta_provider",
+        provider_name="Zeta",
+    )
+    _write_contract(
+        tmp_path,
+        contract_id="alpha",
+        version="1",
+        provider_id="alpha_provider",
+        provider_name="Alpha",
+        required_columns=["Date", "Balance"],
+        field_mapping={"Date": "date", "Balance": "debit"},
+    )
+    registry = ContractRegistry.load(tmp_path)
+
+    options = registry.list_providers()
+
+    assert [opt.provider_id for opt in options] == ["alpha_provider", "zeta_provider"]
+
+
+def test_load_fails_closed_on_provider_name_conflict(tmp_path: Path) -> None:
+    """Two contracts sharing a ``provider_id`` but disagreeing on
+    ``provider_name`` must fail closed at construction time, rather than
+    let load order silently pick a winner (mirrors the duplicate-
+    ``(contract_id, version)`` fail-closed convention) or defer the failure
+    to the first live call to ``list_providers()``."""
+    _write_contract(
+        tmp_path,
+        contract_id="dupe_a",
+        version="1",
+        provider_id="dupe",
+        provider_name="Dupe One",
+    )
+    _write_contract(
+        tmp_path,
+        contract_id="dupe_b",
+        version="1",
+        provider_id="dupe",
+        provider_name="Dupe Two",
+        required_columns=["Date", "Balance"],
+        field_mapping={"Date": "date", "Balance": "debit"},
+    )
+
+    with pytest.raises(ContractRegistryError) as exc:
+        ContractRegistry.load(tmp_path)
+
+    assert "dupe" in str(exc.value)
+    assert "Dupe One" in str(exc.value)
+    assert "Dupe Two" in str(exc.value)

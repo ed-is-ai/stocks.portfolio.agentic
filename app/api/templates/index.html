@@ -752,6 +752,16 @@
     // rest of this function — this is the "locked" ID both the selector
     // disable below and the discard guard further down compare against.
     const portfolioId = form.querySelector('input[name=portfolio_id]').value;
+    // Story 3.3/AD-27: provider_id/account_type_id are captured once here,
+    // alongside portfolioId, and reused for every queued file -- same
+    // pinning rationale as portfolioId. Guarded the same defensive way as
+    // the existing `selectEl` lookup below: either select may legitimately
+    // be absent (e.g. `no_portfolios`'s empty state), and this must never
+    // throw if so.
+    const providerSelectEl = form.querySelector('select[name=provider_id]');
+    const accountTypeSelectEl = form.querySelector('select[name=account_type_id]');
+    const providerId = providerSelectEl ? providerSelectEl.value : '';
+    const accountTypeId = accountTypeSelectEl ? accountTypeSelectEl.value : '';
     const btn = form.querySelector('button[type=submit]');
     const originalBtnHtml = btn.innerHTML;
     // AD-27/AC3: disable the account selector for the duration of this
@@ -763,6 +773,8 @@
     btn.disabled = true;
     fileInput.disabled = true;
     if (selectEl) selectEl.disabled = true;
+    if (providerSelectEl) providerSelectEl.disabled = true;
+    if (accountTypeSelectEl) accountTypeSelectEl.disabled = true;
 
     let lastHtml = null;
     let lastSuccessHtml = null;
@@ -778,6 +790,8 @@
         const formData = new FormData();
         formData.append('file', file);
         formData.append('portfolio_id', portfolioId);
+        formData.append('provider_id', providerId);
+        formData.append('account_type_id', accountTypeId);
         const response = await fetch('/import-sipp', { method: 'POST', body: formData });
         const html = await response.text();
         lastHtml = html;
@@ -826,6 +840,8 @@
       btn.disabled = false;
       fileInput.disabled = false;
       if (selectEl) selectEl.disabled = false;
+      if (providerSelectEl) providerSelectEl.disabled = false;
+      if (accountTypeSelectEl) accountTypeSelectEl.disabled = false;
       btn.innerHTML = originalBtnHtml;
       alert('Import failed: ' + failures.join('; '));
       return false;
@@ -851,6 +867,8 @@
       btn.disabled = false;
       fileInput.disabled = false;
       if (selectEl) selectEl.disabled = false;
+      if (providerSelectEl) providerSelectEl.disabled = false;
+      if (accountTypeSelectEl) accountTypeSelectEl.disabled = false;
       btn.innerHTML = originalBtnHtml;
       // AC4 discards the *rendered view*, not the writes themselves: every
       // file already POSTed before the switch was written to the portfolio
@@ -870,6 +888,11 @@
       return false;
     }
     document.getElementById('tab-content').innerHTML = displayHtml;
+
+    // AC6: move focus to the outcome banner (success or error) so
+    // keyboard/AT users land on the result without hunting for it.
+    const alertEl = document.querySelector('#tab-content [role="alert"]');
+    if (alertEl) alertEl.focus();
 
     if (files.length > 1) {
       const mismatchedCount = fileSummaries.filter((f) => f.mismatched).length;

@@ -71,6 +71,20 @@ class SippImportResult(BaseModel):
     # ``None`` for a rejected plan, which writes no receipt. Lets a future
     # caller (Story 3.3) reference the receipt without a second query.
     receipt_id: int | None = None
+    # Story 3.3: the auto-detected contract identity, echoed back so the
+    # page can confirm what was actually used -- never user-supplied, always
+    # derived from ``ContractRegistry.detect``.
+    provider_id: str = ""
+    provider_name: str = ""
+    contract_version: str = ""
+    # The server-validated account type actually used for this import --
+    # never the caller's raw, unvalidated form field. Empty string means
+    # either the contract declares no account types, or (for a rejected
+    # plan reached before validation could run) no value was ever chosen.
+    account_type_id: str = ""
+    # Story 3.3, AC4: a bounded, redacted preview of parsed rows for a
+    # rejected plan only -- empty for every other status.
+    preview_rows: list[dict[str, str]] = []
 
 
 class Portfolio(BaseModel):

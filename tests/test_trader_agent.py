@@ -126,8 +126,10 @@ def test_import_sipp_is_idempotent(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    agent.import_sipp(csv_path.read_bytes())
-    agent.import_sipp(csv_path.read_bytes())  # re-import must not duplicate
+    agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
+    agent.import_sipp(
+        csv_path.read_bytes(), account_type_id="sipp"
+    )  # re-import must not duplicate
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -153,8 +155,8 @@ def test_sipp_reports_inserted_then_duplicate_outcomes(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    first = agent.import_sipp(csv_bytes)
-    second = agent.import_sipp(csv_bytes)
+    first = agent.import_sipp(csv_bytes, account_type_id="sipp")
+    second = agent.import_sipp(csv_bytes, account_type_id="sipp")
 
     assert (first.inserted_count, first.duplicate_count, first.buy_count) == (2, 0, 2)
     assert (second.inserted_count, second.duplicate_count, second.buy_count) == (
@@ -185,7 +187,7 @@ def test_sipp_rejected_plan_reports_four_outcomes_without_writing(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert result.status == "rejected"
     assert (result.inserted_count, result.duplicate_count, result.skipped_count) == (
@@ -227,7 +229,9 @@ def test_sipp_mixed_plan_counts_all_four_outcomes_simultaneously(
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp((header + already_imported).encode("utf-8"))
+    agent.import_sipp(
+        (header + already_imported).encode("utf-8"), account_type_id="sipp"
+    )
 
     mixed = (
         header
@@ -241,7 +245,7 @@ def test_sipp_mixed_plan_counts_all_four_outcomes_simultaneously(
         + "05/02/2024,TSLA,B789,notanumber,300.00,Buy TSLA,REF-D,900.00,,3100.00\n"
     )
 
-    result = agent.import_sipp(mixed.encode("utf-8"))
+    result = agent.import_sipp(mixed.encode("utf-8"), account_type_id="sipp")
 
     assert result.status == "rejected"
     assert result.inserted_count == 1
@@ -280,8 +284,8 @@ def test_overlapping_sipp_files_dedupe_without_reference(tmp_path: Path) -> None
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    agent.import_sipp(first.encode("utf-8"))
-    result = agent.import_sipp(second.encode("utf-8"))
+    agent.import_sipp(first.encode("utf-8"), account_type_id="sipp")
+    result = agent.import_sipp(second.encode("utf-8"), account_type_id="sipp")
 
     # The second file's row is the same content with a different Reference --
     # the content-based key still recognises it as an already-imported row.
@@ -303,7 +307,7 @@ def test_reference_no_reference_casing_is_normalized(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp((header + rows).encode("utf-8"))
+    result = agent.import_sipp((header + rows).encode("utf-8"), account_type_id="sipp")
 
     # Two identical rows within one file: the second is a duplicate, and the
     # read-only pre-check must agree with what INSERT OR IGNORE actually did.
@@ -329,7 +333,7 @@ def test_import_sipp_handles_stacked_bom_in_first_header(tmp_path: Path) -> None
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     trades = agent.get_trade_history()
     assert len(trades) == 1
@@ -356,7 +360,7 @@ def test_import_sipp_handles_mojibake_bom_in_first_header(tmp_path: Path) -> Non
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     trades = agent.get_trade_history()
     assert len(trades) == 1
@@ -491,7 +495,7 @@ def test_import_sipp_clean_well_formed_import_commits_and_closes_connection(
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
     assert len(agent.get_portfolio()) == 1
 
 
@@ -548,7 +552,7 @@ def test_import_sipp_rejected_plan_leaves_zero_rows_in_all_four_tables(
         "03/01/2024,MSFT,B2,notanumber,100.00,Buy MSFT,REF-BAD,1000.00,,1500.00\n"
     )
 
-    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
 
     assert result.status == "rejected"
     assert len(result.failed_rows) == 1
@@ -589,7 +593,7 @@ def test_import_sipp_mid_commit_failure_rolls_back_everything(
     )
 
     with pytest.raises(RuntimeError, match="boom"):
-        agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
 
     counts = _table_counts(agent.db_path, pf.id)
     assert counts == {
@@ -625,7 +629,7 @@ def test_import_sipp_commit_failure_before_any_write_also_rolls_back(
     )
 
     with pytest.raises(RuntimeError, match="boom"):
-        agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
 
     counts = _table_counts(agent.db_path, pf.id)
     assert counts == {
@@ -654,7 +658,7 @@ def test_import_sipp_reports_every_failed_row_with_distinguishable_reason(
         "02/02/2024,MSFT,B2,5,-100.00,Buy MSFT,REF-BAD-PRICE,1000.00,,4000.00\n"
     )
 
-    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
 
     assert result.status == "rejected"
     assert len(result.failed_rows) == 2
@@ -678,7 +682,7 @@ def test_replay_orders_by_trade_date_not_file_order(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -702,7 +706,7 @@ def test_replay_correct_with_mixed_date_formats(tmp_path: Path) -> None:
     )
     csv_path = tmp_path / "sipp.csv"
     csv_path.write_text(csv_text, encoding="utf-8")
-    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     portfolio = agent.get_portfolio()
     assert len(portfolio) == 1
@@ -731,7 +735,7 @@ def test_sipp_classifies_cash_flows(tmp_path: Path) -> None:
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    agent.import_sipp(csv_path.read_bytes())
+    agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     conn = sqlite3.connect(agent.db_path)
     rows = conn.execute(
@@ -781,7 +785,9 @@ def test_sipp_parses_eur_and_usd_amounts(tmp_path: Path) -> None:
     agent._init_db()
     pf = agent.create_portfolio("SIPP")
 
-    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
+    result = agent.import_sipp(
+        csv_path.read_bytes(), portfolio_id=pf.id, account_type_id="sipp"
+    )
 
     assert result.status == "ok"
     assert result.failed_rows == []
@@ -820,7 +826,7 @@ def test_sipp_imports_dividend_row_that_has_symbol_but_no_quantity(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.buy_count == 0 and result.sell_count == 0
     conn = sqlite3.connect(agent.db_path)
@@ -853,7 +859,7 @@ def test_sipp_issue_detail_falls_back_to_csv_row_when_reference_is_na(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert len(result.failed_rows) == 1
     # Row 1 is the header, so the first data row is CSV row 2.
@@ -876,7 +882,7 @@ def test_sipp_cash_balance_is_final_running_balance(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
     assert result.cash_balance == 500.0
 
 
@@ -897,7 +903,7 @@ def test_sipp_total_rows_and_status_ok_when_every_row_is_accounted_for(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.total_rows == 2
     assert result.buy_count + result.cash_flow_count == result.total_rows
@@ -923,7 +929,7 @@ def test_sipp_unparseable_cash_amount_rejects_the_whole_plan(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.total_rows == 1
     assert result.buy_count == 0
@@ -952,7 +958,7 @@ def test_sipp_benign_empty_row_does_not_flag_status_error(tmp_path: Path) -> Non
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.total_rows == 1
     assert result.status == "ok"
@@ -1013,7 +1019,7 @@ def test_sipp_malformed_quantity_rejects_the_whole_plan_including_good_rows(
     agent._init_db()
 
     with caplog.at_level(logging.WARNING):
-        result = agent.import_sipp(csv_path.read_bytes())
+        result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     # Nothing committed -- not even the well-formed MSFT buy.
     assert agent.get_portfolio() == []
@@ -1035,7 +1041,7 @@ def test_sipp_missing_columns_raises_and_writes_nothing(tmp_path: Path) -> None:
     agent._init_db()
 
     with pytest.raises(SippImportError) as exc:
-        agent.import_sipp(csv_path.read_bytes())
+        agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
     assert "Quantity" in str(exc.value)
     assert "Running Balance" in str(exc.value)
     assert agent.get_portfolio() == []
@@ -1058,7 +1064,7 @@ def test_sipp_reports_parse_errors(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
     assert agent.get_portfolio() == []
     assert any("Price" in e and "malformed_locale" in e for e in result.failed_rows)
     assert result.buy_count == 0
@@ -1081,7 +1087,7 @@ def test_sipp_clean_import_reports_counts(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
     assert result.buy_count == 1
     assert result.sell_count == 1
     assert result.cash_flow_count == 1
@@ -1110,7 +1116,7 @@ def test_sipp_hkd_row_imports_successfully(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status != "rejected"
     conn = sqlite3.connect(agent.db_path)
@@ -1140,7 +1146,7 @@ def test_sipp_unsupported_currency_rejects_whole_plan(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status == "rejected"
     assert any("unsupported_currency" in e for e in result.failed_rows)
@@ -1167,7 +1173,7 @@ def test_sipp_contradictory_currency_rejects_whole_plan(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status == "rejected"
     assert any("contradictory" in e for e in result.failed_rows)
@@ -1199,7 +1205,7 @@ def test_sipp_eu_locale_and_parenthesized_negative_are_parsed_not_dropped(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status == "ok"
     assert result.failed_rows == []
@@ -1229,7 +1235,7 @@ def test_sipp_ambiguous_single_separator_three_digits_rejects_whole_plan(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status == "rejected"
     assert any("ambiguous_currency" in e for e in result.failed_rows)
@@ -1259,7 +1265,7 @@ def test_sipp_three_decimal_unit_price_resolved_via_row_locale_evidence(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status != "rejected", result.failed_rows
     conn = sqlite3.connect(agent.db_path)
@@ -1290,7 +1296,7 @@ def test_sipp_row_with_both_debit_and_credit_rejects_whole_plan(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status == "rejected"
     assert any(
@@ -1317,7 +1323,7 @@ def test_sipp_row_with_only_debit_or_only_credit_imports_normally(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_path.read_bytes())
+    result = agent.import_sipp(csv_path.read_bytes(), account_type_id="sipp")
 
     assert result.status == "ok"
     assert result.cash_flow_count == 2
@@ -1459,7 +1465,9 @@ def test_sipp_import_persists_reconciliation_issue_end_to_end(
     agent._init_db()
     pf = agent.create_portfolio("SIPP")
 
-    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
+    result = agent.import_sipp(
+        csv_path.read_bytes(), portfolio_id=pf.id, account_type_id="sipp"
+    )
 
     assert result.status == "ok"
     assert result.reconciliation_issue_count == 1
@@ -1487,7 +1495,9 @@ def test_sipp_import_clean_fixture_records_no_reconciliation_issues(
     agent._init_db()
     pf = agent.create_portfolio("SIPP")
 
-    result = agent.import_sipp(csv_path.read_bytes(), portfolio_id=pf.id)
+    result = agent.import_sipp(
+        csv_path.read_bytes(), portfolio_id=pf.id, account_type_id="sipp"
+    )
 
     assert result.status == "ok"
     assert result.reconciliation_issue_count == 0
@@ -1530,7 +1540,7 @@ def test_import_sipp_never_opens_a_file_path(
 
     monkeypatch.setattr("builtins.open", _guarded_open)
 
-    result = agent.import_sipp(csv_bytes)
+    result = agent.import_sipp(csv_bytes, account_type_id="sipp")
     assert result.buy_count == 1
 
 
@@ -1552,7 +1562,7 @@ def test_import_sipp_handles_crlf_terminated_csv(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_bytes)
+    result = agent.import_sipp(csv_bytes, account_type_id="sipp")
     assert result.buy_count == 1
     assert result.parse_errors == []
     assert result.cash_balance == 5000.0
@@ -1581,7 +1591,7 @@ def test_import_sipp_handles_bare_cr_terminated_csv(tmp_path: Path) -> None:
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_bytes)
+    result = agent.import_sipp(csv_bytes, account_type_id="sipp")
     assert result.buy_count == 1
     assert result.parse_errors == []
     assert result.cash_balance == 5000.0
@@ -1649,7 +1659,7 @@ def test_sipp_aliased_symbol_recorded_under_canonical_ticker(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert result.status == "ok"
     with sqlite3.connect(agent.db_path) as conn:
@@ -1676,7 +1686,7 @@ def test_sipp_ambiguous_ticker_alias_rejects_whole_plan_including_good_row(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert agent.get_portfolio() == []
     assert result.status == "rejected"
@@ -1705,7 +1715,7 @@ def test_sipp_symbol_resolving_to_alias_target_imports_normally(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert {position.ticker for position in agent.get_portfolio()} == {"HSFWA"}
     assert result.status == "ok"
@@ -1728,7 +1738,7 @@ def test_sipp_uses_sedol_when_symbol_is_unavailable(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert result.status == "ok"
     with sqlite3.connect(agent.db_path) as conn:
@@ -1750,7 +1760,7 @@ def test_sipp_unconfigured_sedol_imports_as_raw_identity(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert result.status == "ok"
     with sqlite3.connect(agent.db_path) as conn:
@@ -1845,7 +1855,7 @@ def test_import_sipp_persists_source_row_index_matching_csv_position(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert result.status == "ok"
     # Insertion order (ascending id) matches CSV row order exactly -- each
@@ -1914,7 +1924,7 @@ def test_same_day_one_file_avg_cost_processes_last_listed_row_first(
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
     assert result.status == "ok"
 
     portfolio = agent.get_portfolio()
@@ -1977,7 +1987,7 @@ def test_import_sipp_stamps_source_and_one_batch_id_per_call(tmp_path: Path) -> 
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
 
-    agent.import_sipp(csv_text.encode("utf-8"))
+    agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
     first_history = agent.get_trade_history()
     assert len(first_history) == 2
     batch_ids = {t.import_batch_id for t in first_history}
@@ -1990,7 +2000,7 @@ def test_import_sipp_stamps_source_and_one_batch_id_per_call(tmp_path: Path) -> 
         "Running Balance\n"
         "03/02/2024,TSLA,T789,2,300.00,Buy TSLA,REF-C,600.00,,3400.00\n"
     )
-    agent.import_sipp(csv_text_2.encode("utf-8"))
+    agent.import_sipp(csv_text_2.encode("utf-8"), account_type_id="sipp")
     second_batch_trade = next(
         t for t in agent.get_trade_history() if t.ticker == "TSLA"
     )
@@ -2013,7 +2023,7 @@ def test_import_sipp_cash_flow_rows_unaffected_by_trade_provenance_columns(
     agent = TraderAgent(name="TraderAgent")
     agent.db_path = tmp_path / "trades.db"
     agent._init_db()
-    result = agent.import_sipp(csv_text.encode("utf-8"))
+    result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
     assert result.status == "ok"
     assert result.cash_flow_count == 1
     assert agent.get_trade_history() == []
@@ -2225,7 +2235,7 @@ def test_import_sipp_rejected_plan_writes_zero_provenance_rows(
         "03/01/2024,MSFT,B2,notanumber,100.00,Buy MSFT,REF-BAD,1000.00,,1500.00\n"
     )
 
-    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
 
     assert result.status == "rejected"
     assert result.receipt_id is None
@@ -2258,7 +2268,7 @@ def test_import_sipp_rollback_when_receipt_write_fails(
     )
 
     with pytest.raises(RuntimeError, match="boom"):
-        agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
 
     counts = _table_counts(agent.db_path, pf.id)
     assert counts == {
@@ -2295,7 +2305,7 @@ def test_import_sipp_receipt_records_contract_identity_and_counts(
     expected_source_digest = hashlib.sha256(csv_bytes).hexdigest()
     expected_contract_digest = contract_content_digest(contract)
 
-    result = agent.import_sipp(csv_bytes, pf.id)
+    result = agent.import_sipp(csv_bytes, pf.id, account_type_id="sipp")
 
     assert result.status == "ok"
     assert result.receipt_id is not None
@@ -2345,9 +2355,9 @@ def test_import_sipp_duplicate_row_lineage_has_no_link(
         _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
     )
 
-    first = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    first = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
     assert first.status == "ok"
-    second = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    second = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
     assert second.status == "ok"
     assert second.duplicate_count == 1
     assert second.receipt_id is not None
@@ -2397,7 +2407,7 @@ def test_import_sipp_calls_contract_detect_exactly_once(
     csv_text = (
         _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
     )
-    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
 
     assert result.status == "ok"
     assert len(calls) == 1
@@ -2449,7 +2459,7 @@ def test_deleting_a_sipp_imported_trade_does_not_violate_provenance_fk(
     csv_text = (
         _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
     )
-    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
     assert result.status == "ok"
     trade_id = agent.get_trade_history("AAPL", pf.id)[0].id
     assert trade_id is not None
@@ -2483,7 +2493,225 @@ def test_deleting_a_portfolio_with_sipp_imports_does_not_violate_provenance_fk(
         "01/01/2024,n/a,,,,Contribution,REF-C,,1000.00,1000.00\n"
         "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
     )
-    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id)
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
     assert result.status == "ok"
 
     assert agent.delete_portfolio(pf.id) is True
+
+
+# --- Story 3.3: provider/account-type validation + preview_rows ------------
+
+
+def _make_agent(tmp_path: Path) -> TraderAgent:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    return agent
+
+
+def test_import_sipp_raises_on_provider_mismatch(tmp_path: Path) -> None:
+    """A ``provider_id`` that doesn't match the CSV's auto-detected
+    contract raises ``SippImportError`` -- tampering/mismatch (I/O matrix)."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    with pytest.raises(SippImportError):
+        agent.import_sipp(
+            csv_text.encode("utf-8"),
+            pf.id,
+            provider_id="fake_broker",
+            account_type_id="sipp",
+        )
+
+
+def test_import_sipp_raises_when_account_type_missing_for_contract_with_types(
+    tmp_path: Path,
+) -> None:
+    """A contract that declares account types requires one -- omitted or
+    blank must raise ``SippImportError`` naming the valid options, not
+    silently import with no account type recorded (Spec Change Log fix)."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    with pytest.raises(SippImportError, match="sipp"):
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id=None)
+
+    with pytest.raises(SippImportError, match="sipp"):
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="   ")
+
+
+def test_import_sipp_raises_when_account_type_not_a_declared_value(
+    tmp_path: Path,
+) -> None:
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    with pytest.raises(SippImportError, match="sipp"):
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="isa")
+
+
+def test_import_sipp_raises_when_account_type_given_for_contract_with_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Symmetric with the missing-account-type case: a contract that
+    declares NO account types must reject any non-blank ``account_type_id``
+    too -- there is nothing to validate it against, so nothing can be
+    trusted or echoed back (Spec Change Log fix)."""
+    import json
+
+    from app.services.portfolio_import.contract_registry import ContractRegistry
+
+    contracts_dir = tmp_path / "no_account_type_contracts"
+    contracts_dir.mkdir()
+    (contracts_dir / "no_type.json").write_text(
+        json.dumps(
+            {
+                "contract_id": "no_type",
+                "version": "1",
+                "provider_id": "no_type_provider",
+                "provider_name": "No Type Provider",
+                "encoding": "utf-8-sig",
+                "delimiter": ",",
+                "required_columns": ["Date", "Amount"],
+                "field_mapping": {"Date": "date", "Amount": "debit"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    no_account_type_registry = ContractRegistry.load(contracts_dir)
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.get_contract_registry",
+        lambda: no_account_type_registry,
+    )
+
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+    csv_text = "Date,Amount\n01/01/2024,100\n"
+
+    with pytest.raises(SippImportError):
+        agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="anything")
+
+
+def test_preview_rows_present_only_on_rejected_status(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+    ok_csv = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+    ok_result = agent.import_sipp(ok_csv.encode("utf-8"), pf.id, account_type_id="sipp")
+    assert ok_result.status == "ok"
+    assert ok_result.preview_rows == []
+
+    bad_csv = _II_CSV_HEADER + (
+        "03/01/2024,MSFT,B2,notanumber,100.00,Buy MSFT,REF-BAD,1000.00,,1500.00\n"
+    )
+    rejected_result = agent.import_sipp(
+        bad_csv.encode("utf-8"), pf.id, account_type_id="sipp"
+    )
+    assert rejected_result.status == "rejected"
+    assert rejected_result.preview_rows != []
+
+
+def test_preview_rows_capped_at_twenty_and_shares_identical_keys(
+    tmp_path: Path,
+) -> None:
+    """Preview is capped at 20 rows, and every row shares exactly the same
+    key set (derived from ``CanonicalField``'s enum order) even when the
+    source rows differ in which fields actually parsed -- prevents the
+    preview table from misaligning values under the wrong headers."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+
+    # 25 good trade rows plus one bad row (to force rejection), plus a
+    # benign cash-only row with a different subset of populated fields.
+    rows = [
+        f"0{(i % 9) + 1}/01/2024,AAPL,B1,1,100.00,Buy AAPL,REF-{i},10.00,,{1000 + i}.00\n"
+        for i in range(25)
+    ]
+    rows.append("26/01/2024,n/a,,,,Contribution,REF-CASH,,50.00,1050.00\n")
+    rows.append(
+        "27/01/2024,MSFT,B2,notanumber,100.00,Buy MSFT,REF-BAD,1000.00,,1500.00\n"
+    )
+    csv_text = _II_CSV_HEADER + "".join(rows)
+
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
+
+    assert result.status == "rejected"
+    assert len(result.preview_rows) == 20
+    keys = {frozenset(row.keys()) for row in result.preview_rows}
+    assert len(keys) == 1
+
+
+def test_preview_rows_truncates_free_text_fields_harder(tmp_path: Path) -> None:
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+
+    long_description = "D" * 100
+    long_reference = "R" * 100
+    csv_text = _II_CSV_HEADER + (
+        f"01/01/2024,AAPL,B1,5,100.00,{long_description},{long_reference},"
+        "1000.00,,5000.00\n"
+        "02/01/2024,MSFT,B2,notanumber,100.00,Buy MSFT,REF-BAD,1000.00,,1500.00\n"
+    )
+
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
+
+    assert result.status == "rejected"
+    row = result.preview_rows[0]
+    assert len(row["description"]) == 41  # 40 chars + "…"
+    assert row["description"].endswith("…")
+    assert len(row["reference"]) == 41
+    assert row["reference"].endswith("…")
+
+
+def test_successful_import_echoes_provider_account_type_and_version(
+    tmp_path: Path,
+) -> None:
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
+
+    assert result.status == "ok"
+    assert result.provider_id == "interactive_investor"
+    assert result.provider_name == "Interactive Investor"
+    assert result.contract_version == "1"
+    assert result.account_type_id == "sipp"
+
+
+def test_receipt_records_callers_validated_account_type_not_contracts_full_set(
+    tmp_path: Path,
+) -> None:
+    """Deferred-work fix (Story 3.2 review): the receipt must record the
+    caller's actual per-request selection, never the contract's full
+    supported set."""
+    agent = _make_agent(tmp_path)
+    pf = agent.create_portfolio("Test SIPP")
+    csv_text = (
+        _II_CSV_HEADER + "02/01/2024,AAPL,B1,5,100.00,Buy AAPL,REF-B,500.00,,500.00\n"
+    )
+
+    result = agent.import_sipp(csv_text.encode("utf-8"), pf.id, account_type_id="sipp")
+    assert result.status == "ok"
+
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        account_type_id = conn.execute(
+            "SELECT account_type_id FROM portfolio_import_receipts WHERE id = ?",
+            (result.receipt_id,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert account_type_id == "sipp"

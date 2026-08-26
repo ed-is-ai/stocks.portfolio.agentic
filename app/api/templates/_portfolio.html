@@ -1,7 +1,23 @@
-{% macro import_form(portfolio_id) %}
+{% macro import_form(portfolio_id, provider_options) %}
 <form onsubmit="return handleSippImportSubmit(event, this)"
       class="d-flex align-items-center gap-2 flex-wrap">
   <input type="hidden" name="portfolio_id" value="{{ portfolio_id }}">
+  <select name="provider_id" id="importProviderSelect" required
+          aria-label="Import provider"
+          class="form-select form-select-sm" style="max-width:12rem">
+    <option value="" disabled selected>Select provider…</option>
+    {% for opt in provider_options %}
+    <option value="{{ opt.provider_id }}"
+            data-account-type-ids='{{ opt.account_type_ids|tojson }}'>
+      {{ opt.provider_name }}
+    </option>
+    {% endfor %}
+  </select>
+  <select name="account_type_id" id="importAccountTypeSelect"
+          aria-label="Account type" disabled
+          class="form-select form-select-sm" style="max-width:10rem">
+    <option value="">No account type</option>
+  </select>
   <input type="file" name="file" accept=".csv" multiple required
          aria-label="SIPP portfolio CSV file(s)"
          title="SIPP CSV with header row: Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance (dates DD/MM/YYYY; final Running Balance = cash). Select multiple files to queue them — import oldest first so the most recent file's balance wins."
@@ -10,6 +26,55 @@
     <i class="bi bi-upload"></i> Import CSV(s)
   </button>
 </form>
+<script>
+(function () {
+  // Filters the account-type select by the chosen provider's declared
+  // account_type_ids (Story 3.3): toggles option visibility and toggles
+  // the `required` attribute to match whether the current provider has
+  // any account types at all -- a provider with none must never force a
+  // selection (the server itself rejects any non-blank value for it).
+  const providerSelect = document.getElementById('importProviderSelect');
+  const accountTypeSelect = document.getElementById('importAccountTypeSelect');
+  if (!providerSelect || !accountTypeSelect) return;
+  function refreshAccountTypes() {
+    const selected = providerSelect.selectedOptions[0];
+    let accountTypeIds = [];
+    if (selected) {
+      try {
+        accountTypeIds = JSON.parse(selected.dataset.accountTypeIds || '[]');
+      } catch (e) {
+        accountTypeIds = [];
+      }
+    }
+    accountTypeSelect.innerHTML = '';
+    if (accountTypeIds.length) {
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = 'Select account type…';
+      placeholder.disabled = true;
+      placeholder.selected = true;
+      accountTypeSelect.appendChild(placeholder);
+      accountTypeIds.forEach((id) => {
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = id;
+        accountTypeSelect.appendChild(option);
+      });
+      accountTypeSelect.disabled = false;
+      accountTypeSelect.required = true;
+    } else {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'No account type';
+      accountTypeSelect.appendChild(option);
+      accountTypeSelect.disabled = true;
+      accountTypeSelect.required = false;
+    }
+  }
+  providerSelect.addEventListener('change', refreshAccountTypes);
+  refreshAccountTypes();
+})();
+</script>
 {% endmacro %}
 
 {% macro opening_lot_form(portfolio_id) %}
@@ -168,7 +233,7 @@
         <div class="fw-semibold mb-2" style="font-size:0.78rem">
           <i class="bi bi-upload me-1"></i>Import SIPP CSV(s)
         </div>
-        {{ import_form(portfolio_id) }}
+        {{ import_form(portfolio_id, provider_options) }}
         <div class="text-muted mt-2" style="font-size:0.68rem; line-height:1.5">
           Expected columns (header row required):
           <code>Date, Symbol, Sedol, Quantity, Price, Description, Reference, Debit, Credit, Running Balance</code>.
@@ -208,19 +273,67 @@
 
 {% if import_message %}
 <div class="alert {% if import_status == 'error' %}alert-danger{% elif import_status == 'warning' %}alert-warning{% else %}alert-success{% endif %} border-0 d-flex align-items-center gap-2 mt-1 mb-3"
+     role="alert" aria-live="assertive" tabindex="-1"
      data-import-buy-count="{{ import_buy_count|default(0) }}"
      data-import-sell-count="{{ import_sell_count|default(0) }}"
      data-import-cash-count="{{ import_cash_count|default(0) }}"
      data-import-skipped-count="{{ import_skipped_count|default(0) }}"
-     data-import-status="{{ import_status|default('ok') }}">
+     data-import-status="{{ import_status|default('ok') }}"
+     {% if import_provider_name %}data-import-provider="{{ import_provider_name }}"{% endif %}
+     {% if import_account_type %}data-import-account-type="{{ import_account_type }}"{% endif %}
+     {% if import_contract_version %}data-import-contract-version="{{ import_contract_version }}"{% endif %}>
   <i class="bi {% if import_status == 'error' %}bi-exclamation-octagon-fill{% elif import_status == 'warning' %}bi-exclamation-triangle-fill{% else %}bi-check-circle-fill{% endif %} fs-5"></i>
-  <span>{{ import_message }}</span>
+  <span>
+    {{ import_message }}
+    {% if import_provider_name %}
+    Provider: {{ import_provider_name }}{% if import_account_type %} ({{ import_account_type }}){% endif %}{% if import_contract_version %}, contract v{{ import_contract_version }}{% endif %}.
+    {% endif %}
+  </span>
 </div>
 {% endif %}
 {% if error_message %}
-<div class="alert alert-danger border-0 d-flex align-items-center gap-2 mt-1 mb-3">
+<div class="alert alert-danger border-0 d-flex align-items-center gap-2 mt-1 mb-3"
+     role="alert" aria-live="assertive" tabindex="-1">
   <i class="bi bi-exclamation-triangle-fill fs-5"></i>
   <span>{{ error_message }}</span>
+</div>
+{% endif %}
+{% if import_failed_rows %}
+<div class="mt-1 mb-3" style="font-size:0.78rem">
+  <div class="fw-semibold mb-1">Rows that failed:</div>
+  <ul class="mb-0 ps-3">
+    {% for issue in import_failed_rows %}
+    <li>{{ issue }}</li>
+    {% endfor %}
+    {% if import_failed_rows_omitted %}
+    <li>(+{{ import_failed_rows_omitted }} more)</li>
+    {% endif %}
+  </ul>
+</div>
+{% endif %}
+{% if import_preview_rows %}
+<div class="mt-1 mb-3" style="font-size:0.72rem">
+  <div class="fw-semibold mb-1">Preview of parsed rows (nothing was saved):</div>
+  <div class="table-responsive">
+    <table class="table table-sm table-bordered mb-0">
+      <thead>
+        <tr>
+          {% for key in import_preview_rows[0].keys() %}
+          <th>{{ key }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in import_preview_rows %}
+        <tr>
+          {% for value in row.values() %}
+          <td>{{ value }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
 </div>
 {% endif %}
 

@@ -263,7 +263,18 @@ class TraderService:
         self._agent.set_unmatched_sell_ack(trade_id, acknowledged)
 
     def import_sipp(
-        self, csv_content: bytes, portfolio_id: int | None = None
+        self,
+        csv_content: bytes,
+        portfolio_id: int | None = None,
+        provider_id: str | None = None,
+        account_type_id: str | None = None,
     ) -> SippImportResult:
-        """Import a SIPP CSV; return the outcome (cash balance + counts)."""
-        return self._agent.import_sipp(csv_content, portfolio_id)
+        """Import a SIPP CSV; return the outcome (cash balance + counts).
+
+        ``provider_id``/``account_type_id`` (Story 3.3) are forwarded
+        as-is to ``TraderAgent.import_sipp``, which validates them against
+        the CSV's auto-detected contract.
+        """
+        return self._agent.import_sipp(
+            csv_content, portfolio_id, provider_id, account_type_id
+        )

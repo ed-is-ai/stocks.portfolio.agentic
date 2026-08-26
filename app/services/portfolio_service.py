@@ -22,14 +22,35 @@ from app.core.ticker_identity import canonicalize_or_fallback, load_aliases
 from app.repositories import db
 from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.schemas.analysis_artifact import read_analysis_records
+from app.schemas.portfolio_import import ProviderOption
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
+from app.services.portfolio_import.contract_registry import ContractRegistryError
+from app.services.portfolio_import.registry_loader import get_contract_registry
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_GBPUSD = 1.35
+
+
+def _load_provider_options() -> tuple[ProviderOption, ...]:
+    """Best-effort read of the import-provider dropdown metadata.
+
+    A broken/misconfigured contracts directory should never take down an
+    otherwise-working portfolio page render -- mirrors this module's
+    existing best-effort conventions (e.g. price-refresh failures still
+    render cached data) rather than letting an unrelated feature's startup
+    problem surface as a raw 500 on every page load.
+    """
+    try:
+        return get_contract_registry().list_providers()
+    except ContractRegistryError:
+        logger.exception("Failed to load import provider options")
+        return ()
+
+
 _HISTORICAL_FX_PAIR: dict[str, str] = {
     "USD": "GBPUSD=X",
     "HKD": "GBPHKD=X",
@@ -674,6 +695,10 @@ class PortfolioService:
             "portfolio_id": portfolio_id,
             "portfolios": portfolios,
             "active_portfolio": active_portfolio,
+            # Story 3.3: sourced from the same cached registry singleton
+            # every render of the import form needs -- never absent, so the
+            # template can always render the provider/account-type selects.
+            "provider_options": _load_provider_options(),
             "cash_flows": cash_flows,
             "opening_lot_tickers": opening_lot_tickers,
             "reconciliation_issue_count": reconciliation_issue_count,
@@ -714,6 +739,7 @@ class PortfolioService:
                 "portfolios": [],
                 "portfolio_id": None,
                 "no_portfolios": True,
+                "provider_options": _load_provider_options(),
             }
         # Resolve the active portfolio: an unknown/None id falls back to the
         # first (migrated SIPP) portfolio.

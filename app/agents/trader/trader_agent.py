@@ -56,7 +56,10 @@ from app.repositories.ticker_currency_cache_repo import TickerCurrencyCacheRepos
 from app.repositories.trades_repo import TradesRepository
 from app.schemas.trade import Portfolio
 from app.services.portfolio_import.contract_registry import ContractRegistryError
-from app.services.portfolio_import.contract_schema import contract_content_digest
+from app.services.portfolio_import.contract_schema import (
+    CanonicalField,
+    contract_content_digest,
+)
 from app.services.portfolio_import.normalizer import ContractNormalizer
 from app.services.portfolio_import.registry_loader import get_contract_registry
 
@@ -114,6 +117,50 @@ def _idempotency_key(
     """
     raw = "|".join((date, symbol, sedol, quantity, description))
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+#: Story 3.3, AC4: a rejected plan's preview table is capped at this many
+#: rows, and each cell is length-capped below -- real user financial data,
+#: so redaction is intentionally conservative rather than configurable.
+_PREVIEW_ROW_CAP = 20
+_PREVIEW_FREE_TEXT_MAX_CHARS = 40
+_PREVIEW_CELL_MAX_CHARS = 60
+#: Free-text fields are truncated harder than numeric/date fields -- they're
+#: the most likely to carry incidentally-sensitive prose.
+_PREVIEW_FREE_TEXT_FIELDS = frozenset(
+    {CanonicalField.DESCRIPTION.value, CanonicalField.REFERENCE.value}
+)
+
+
+def _truncate_preview_cell(value: str, field: str) -> str:
+    """Truncate one preview cell, harder for free-text fields than others."""
+    limit = (
+        _PREVIEW_FREE_TEXT_MAX_CHARS
+        if field in _PREVIEW_FREE_TEXT_FIELDS
+        else _PREVIEW_CELL_MAX_CHARS
+    )
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "…"
+
+
+def _build_preview_rows(
+    normalized_rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Build a bounded, redacted preview of parsed rows for a rejected plan.
+
+    Capped at the first ``_PREVIEW_ROW_CAP`` rows. Every emitted row shares
+    exactly one fixed, ordered key list -- every value of ``CanonicalField``,
+    in enum declaration order -- with a missing value rendered as ``""``, so
+    the rendered preview table's column headers can never misalign against a
+    row that happened to parse a different subset of fields than another
+    (Story 3.3).
+    """
+    keys = [field.value for field in CanonicalField]
+    return [
+        {key: _truncate_preview_cell(row.get(key, ""), key) for key in keys}
+        for row in normalized_rows[:_PREVIEW_ROW_CAP]
+    ]
 
 
 def _detect_reconciliation_issues(
@@ -955,9 +1002,33 @@ class TraderAgent(Agent):
         )
 
     def import_sipp(
-        self, csv_content: bytes, portfolio_id: int | None = None
+        self,
+        csv_content: bytes,
+        portfolio_id: int | None = None,
+        provider_id: str | None = None,
+        account_type_id: str | None = None,
     ) -> SippImportResult:
         """Import a SIPP CSV into ``portfolio_id``; return counts and problems.
+
+        ``provider_id``/``account_type_id`` (Story 3.3) are the caller's
+        explicit selection, validated here against the CSV's
+        auto-detected ``contract`` -- never trusted as-is. Enforcing that
+        ``provider_id`` itself is present at all is the HTTP route's job
+        (``POST /import-sipp`` 400s before ever reaching this method); this
+        method only checks it *when given*: a non-blank ``provider_id``
+        that doesn't match the detected contract's own ``provider_id``
+        raises ``SippImportError`` (tampering/mismatch) -- ``None``/blank
+        is accepted here for callers other than that route (e.g. tests,
+        scripts) that don't go through its presence check.
+        Account-type validation is symmetric with provider validation, not
+        skippable by omission: if the detected contract declares any
+        ``account_type_ids``, ``account_type_id`` is required -- missing,
+        blank, or not one of the contract's declared values all raise
+        ``SippImportError`` naming the valid options. If the contract
+        declares no account types, any non-blank ``account_type_id`` itself
+        raises ``SippImportError`` (there is nothing to validate it
+        against). The value echoed back on ``SippImportResult`` is always
+        the one that passed this validation, never the raw parameter.
 
         The returned cash balance is the effective committed portfolio balance
         after stale-date protection, not necessarily this file's candidate.
@@ -1118,6 +1189,37 @@ class TraderAgent(Agent):
             contract = get_contract_registry().detect(fieldnames or [])
         except ContractRegistryError as exc:
             raise SippImportError(str(exc)) from exc
+
+        # Story 3.3: validate the caller's explicit selection against the
+        # auto-detected contract before doing anything else -- a rejected
+        # selection must abort before any row is even parsed further.
+        if provider_id and provider_id != contract.provider_id:
+            raise SippImportError(
+                "selected provider does not match this CSV's detected "
+                f"provider (expected {contract.provider_id!r}, got "
+                f"{provider_id!r})"
+            )
+
+        # Symmetric with the provider check above, not skippable by
+        # omission: a contract that declares account types requires one: a
+        # contract that declares none forbids one.
+        if contract.account_type_ids:
+            if not account_type_id or not account_type_id.strip():
+                raise SippImportError(
+                    "select an account type: " + ", ".join(contract.account_type_ids)
+                )
+            if account_type_id not in contract.account_type_ids:
+                raise SippImportError(
+                    f"unknown account type {account_type_id!r}; valid "
+                    "options: " + ", ".join(contract.account_type_ids)
+                )
+            validated_account_type_id = account_type_id
+        else:
+            if account_type_id and account_type_id.strip():
+                raise SippImportError(
+                    f"this provider has no account types; got {account_type_id!r}"
+                )
+            validated_account_type_id = ""
 
         # Every downstream phase reads canonical field keys, never raw
         # provider column names -- ``_detect_reconciliation_issues`` is the
@@ -1469,6 +1571,11 @@ class TraderAgent(Agent):
                 failed_rows=failed_rows,
                 total_rows=total_rows,
                 status="rejected",
+                provider_id=contract.provider_id,
+                provider_name=contract.provider_name,
+                contract_version=contract.version,
+                account_type_id=validated_account_type_id,
+                preview_rows=_build_preview_rows(normalized_rows),
             )
 
         # Commit phase: every row was safe to write. Persist trades, cash
@@ -1653,13 +1760,15 @@ class TraderAgent(Agent):
             # never has a failed row (the ``failed_rows`` early return
             # above rejects the whole plan first), so ``failed_count`` is
             # always 0 here.
-            account_type_id = ",".join(contract.account_type_ids) or None
+            # Story 3.3: the receipt now records exactly the caller's
+            # validated per-request selection, never the contract's full
+            # supported set (deferred-work.md item from Story 3.2's review).
             receipt_id = self._import_receipts.insert_receipt_on_connection(
                 conn,
                 import_batch_id=import_batch_id,
                 portfolio_id=portfolio_id,
                 provider_id=contract.provider_id,
-                account_type_id=account_type_id,
+                account_type_id=validated_account_type_id or None,
                 contract_id=contract.contract_id,
                 contract_version=contract.version,
                 contract_content_digest=contract_content_digest(contract),
@@ -1716,6 +1825,10 @@ class TraderAgent(Agent):
             status=status,
             reconciliation_issue_count=len(reconciliation_issues),
             receipt_id=receipt_id,
+            provider_id=contract.provider_id,
+            provider_name=contract.provider_name,
+            contract_version=contract.version,
+            account_type_id=validated_account_type_id,
         )
 
     def save_price_cache(

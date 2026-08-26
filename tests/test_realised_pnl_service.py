@@ -1206,7 +1206,9 @@ def test_same_day_one_file_fifo_processes_last_listed_row_first(
         + "01/03/2024,ORDX,S001,5,150.00,Sell ORDX,REF-SELL,,750.00,5750.00\n"
         + "01/03/2024,ORDX,S001,5,100.00,Buy ORDX,REF-BUY,500.00,,5000.00\n"
     )
-    result = agent.import_sipp(csv_text.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    result = agent.import_sipp(
+        csv_text.encode("utf-8"), portfolio_id=PORTFOLIO_ID, account_type_id="sipp"
+    )
     assert result.status == "ok"
 
     summary = service.compute_summary(PORTFOLIO_ID)
@@ -1240,14 +1242,22 @@ def test_same_day_cross_file_import_order_independence(tmp_path: Path) -> None:
     dir_ba.mkdir()
 
     service_ab, agent_ab = _make_service_with_agent(dir_ab)
-    agent_ab.import_sipp(file_buy.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
-    agent_ab.import_sipp(file_sell.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    agent_ab.import_sipp(
+        file_buy.encode("utf-8"), portfolio_id=PORTFOLIO_ID, account_type_id="sipp"
+    )
+    agent_ab.import_sipp(
+        file_sell.encode("utf-8"), portfolio_id=PORTFOLIO_ID, account_type_id="sipp"
+    )
     summary_ab = service_ab.compute_summary(PORTFOLIO_ID)
     portfolio_ab = agent_ab.get_portfolio(portfolio_id=PORTFOLIO_ID)
 
     service_ba, agent_ba = _make_service_with_agent(dir_ba)
-    agent_ba.import_sipp(file_sell.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
-    agent_ba.import_sipp(file_buy.encode("utf-8"), portfolio_id=PORTFOLIO_ID)
+    agent_ba.import_sipp(
+        file_sell.encode("utf-8"), portfolio_id=PORTFOLIO_ID, account_type_id="sipp"
+    )
+    agent_ba.import_sipp(
+        file_buy.encode("utf-8"), portfolio_id=PORTFOLIO_ID, account_type_id="sipp"
+    )
     summary_ba = service_ba.compute_summary(PORTFOLIO_ID)
     portfolio_ba = agent_ba.get_portfolio(portfolio_id=PORTFOLIO_ID)
 
