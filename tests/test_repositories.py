@@ -806,6 +806,52 @@ def test_alerts_clear(alerts_repo):
     assert alerts_repo.last_alerted_at("AAPL") is None
 
 
+def test_alerts_states_for_tickers_combines_alert_facts(alerts_repo):
+    with db.session(alerts_repo._connect) as conn:
+        conn.executemany(
+            "INSERT INTO alerts (ticker, alerted_at, status) VALUES (?, ?, ?)",
+            [
+                ("HIST", "2026-01-01T00:00:00+00:00", "entered"),
+                ("HIST", "2026-01-02T00:00:00+00:00", "stopped"),
+            ],
+        )
+        conn.commit()
+    alerts_repo.record("WATCH", 9, "Stage 2", "summary", 100.0, 90.0)
+
+    states = alerts_repo.states_for_tickers(["NONE", "HIST", "WATCH", "HIST"])
+
+    assert set(states) == {"HIST", "WATCH"}
+    assert states["HIST"].has_watching is False
+    assert states["HIST"].last_alerted_at == "2026-01-02T00:00:00+00:00"
+    assert states["WATCH"].has_watching is True
+    assert states["WATCH"].last_alerted_at is not None
+    assert alerts_repo.states_for_tickers([]) == {}
+
+
+def test_alerts_states_for_tickers_uses_one_select_for_many_tickers(tmp_path):
+    statements: list[str] = []
+
+    def connect():
+        connection = db.connect(tmp_path / "alerts.db")
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    repo = AlertsRepository(connect)
+    repo.ensure_schema()
+    repo.record("AAPL", 9, "Stage 2", "summary", 100.0, 90.0)
+    statements.clear()
+
+    repo.states_for_tickers(["AAPL", "MSFT", "NVDA", "AAPL"])
+
+    selects = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(selects) == 1
+    assert selects[0].count('"AAPL"') == 1
+
+
 # --- ResultsRepository -----------------------------------------------------
 
 
