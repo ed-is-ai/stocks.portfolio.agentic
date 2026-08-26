@@ -67,6 +67,10 @@ class SippImportResult(BaseModel):
     # without a second round-trip; the detail lives in the dedicated
     # reconciliation view (GET /portfolio/{id}/reconciliation).
     reconciliation_issue_count: int = 0
+    # The durable provenance record for this committed import (GH-311) --
+    # ``None`` for a rejected plan, which writes no receipt. Lets a future
+    # caller (Story 3.3) reference the receipt without a second query.
+    receipt_id: int | None = None
 
 
 class Portfolio(BaseModel):
