@@ -859,6 +859,11 @@ CREATE TABLE IF NOT EXISTS strategy_runs (
     created_at TEXT NOT NULL,
     CHECK(start_month <= end_month)
 );
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_comparison_dimensions
+ON strategy_runs(
+    start_month, end_month, profile_hash, ordered_month_digest,
+    base_currency, execution_contract_digest
+);
 
 CREATE TRIGGER IF NOT EXISTS strategy_run_subtype_matches_job
 BEFORE INSERT ON strategy_runs
@@ -2913,11 +2918,24 @@ class BacktestRepository:
 
         with session(self._connect) as conn:
             rows = conn.execute(
-                """SELECT id FROM strategy_jobs
-                   WHERE job_type='backtest' AND status='complete'
-                     AND deleted_at IS NULL AND id != ?
-                   ORDER BY enqueue_seq DESC""",
-                (run_id,),
+                """SELECT job.id FROM strategy_jobs AS job
+                   JOIN strategy_runs AS run ON run.id = job.id
+                   WHERE job.job_type='backtest' AND job.status='complete'
+                     AND job.deleted_at IS NULL AND job.id != ?
+                     AND run.start_month = ? AND run.end_month = ?
+                     AND run.profile_hash = ? AND run.ordered_month_digest = ?
+                     AND run.base_currency = ?
+                     AND run.execution_contract_digest = ?
+                   ORDER BY job.enqueue_seq DESC""",
+                (
+                    run_id,
+                    anchor_result.start_month,
+                    anchor_result.end_month,
+                    anchor_result.profile_hash,
+                    anchor_result.ordered_month_digest,
+                    anchor_result.base_currency,
+                    anchor_result.execution_contract_digest,
+                ),
             ).fetchall()
 
         candidates: list[ComparisonCandidateV1] = []
