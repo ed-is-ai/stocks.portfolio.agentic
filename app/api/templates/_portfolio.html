@@ -223,6 +223,12 @@
   <span>{{ error_message }}</span>
 </div>
 {% endif %}
+{% if warning_message %}
+<div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1 mb-3" role="status">
+  <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+  <span>{{ warning_message }}</span>
+</div>
+{% endif %}
 
 {% if not positions and cash_balance is none %}
 <div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
@@ -410,7 +416,7 @@
     </thead>
     <tbody>
       {% for p in positions %}
-      {% set sym = '$' if p.price_currency == 'USD' else '£' %}
+      {% set sym = '$' if p.price_currency == 'USD' else 'HK$' if p.price_currency == 'HKD' else '£' %}
       <tr class="{% if p.exit_signal and p.exit_signal.action == 'EXIT' %}row-exit{% endif %}">
         <td>
           <span class="fw-bold" style="color:var(--primary); font-size:0.85rem">{{ p.ticker }}</span>

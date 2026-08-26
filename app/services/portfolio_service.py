@@ -12,6 +12,7 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from functools import lru_cache
 from typing import Any, cast
 
@@ -35,6 +36,7 @@ _HISTORICAL_FX_PAIR: dict[str, str] = {
     "HKD": "GBPHKD=X",
 }
 _YFINANCE_SYMBOL_OVERRIDES: dict[str, str] = {"9988": "9988.HK"}
+_PRICE_DOWNLOAD_CHUNK_SIZE = 50
 
 
 class PortfolioService:
@@ -123,7 +125,24 @@ class PortfolioService:
     @staticmethod
     def _to_gbp(amount: float, currency: str, gbpusd: float) -> float:
         """Convert amount to GBP using current rate if currency is USD."""
-        return amount / gbpusd if currency == "USD" else amount
+        if currency == "USD":
+            return amount / gbpusd
+        if currency == "GBp":
+            return amount / 100
+        return amount
+
+    def _amount_in_gbp(
+        self, amount: float, currency: str, gbpusd: float
+    ) -> float | None:
+        """Value one native holding amount in GBP, never fabricating HKD FX."""
+        if currency != "HKD":
+            return self._to_gbp(amount, currency, gbpusd)
+        projection = self._gbp_valuation.value_in_gbp(
+            Money(amount=Decimal(str(amount)), currency="HKD")
+        )
+        return (
+            float(projection.gbp_amount) if projection.gbp_amount is not None else None
+        )
 
     @staticmethod
     def _is_valid_rate(rate: float | None) -> bool:
@@ -282,7 +301,7 @@ class PortfolioService:
             currency = yf.Ticker(yf_sym).fast_info.currency
             if not currency and yf_sym.upper().endswith(".HK"):
                 currency = "HKD"
-            return str(currency or "GBP").strip().upper()
+            return self._quote_currency(currency or "GBP")
         except Exception:
             if yf_sym.upper().endswith(".HK"):
                 logger.warning(
@@ -317,7 +336,7 @@ class PortfolioService:
 
         _prices, _fetched_at, display_info = self._trader.load_price_cache()
         resolved = {
-            ticker: str(display_info[ticker][1]).strip().upper()
+            ticker: self._trading_currency(display_info[ticker][1])
             for ticker in unique
             if ticker in display_info and display_info[ticker][1]
         }
@@ -326,7 +345,12 @@ class PortfolioService:
             return resolved
 
         cached = self._trader.get_cached_ticker_currencies(missing)
-        resolved.update(cached)
+        resolved.update(
+            {
+                ticker: self._trading_currency(currency)
+                for ticker, currency in cached.items()
+            }
+        )
         still_missing = [ticker for ticker in missing if ticker not in cached]
         if not still_missing:
             return resolved
@@ -339,80 +363,232 @@ class PortfolioService:
         self._trader.save_ticker_currencies(newly_resolved)
         return resolved
 
+    @staticmethod
+    def _quote_currency(currency: object) -> str:
+        """Normalise a provider quote unit without losing LSE pence case."""
+        value = str(currency).strip()
+        return (
+            "GBp"
+            if value.lower() == "gbp" and value != value.upper()
+            else value.upper()
+        )
+
+    @staticmethod
+    def _trading_currency(currency: object) -> str:
+        """Map a quote unit to its ISO trading currency for realised P&L."""
+        return (
+            "GBP"
+            if PortfolioService._quote_currency(currency) == "GBp"
+            else PortfolioService._quote_currency(currency)
+        )
+
+    def _price_quote_currencies(
+        self, tickers: list[str], symbols: dict[str, str]
+    ) -> dict[str, str]:
+        """Resolve quote units without N per-symbol provider metadata calls.
+
+        yfinance ``download`` does not reliably expose per-symbol currency.
+        Reuse persisted display/durable metadata first, then use Yahoo's
+        provider-symbol conventions for cold misses: ``.L`` is pence,
+        ``.HK`` is HKD, and unsuffixed Yahoo equities are USD.  The inferred
+        unit is persisted so it is paid once and can be corrected by a later
+        successful provider display payload.
+        """
+        _prices, _fetched_at, display_info = self._trader.load_price_cache()
+        resolved = {
+            ticker: self._quote_currency(display_info[ticker][1])
+            for ticker in tickers
+            if ticker in display_info and display_info[ticker][1]
+        }
+        missing = [ticker for ticker in tickers if ticker not in resolved]
+        if missing:
+            cached = self._trader.get_cached_ticker_currencies(missing)
+            resolved.update(
+                {
+                    ticker: self._quote_currency(currency)
+                    for ticker, currency in cached.items()
+                }
+            )
+        inferred = {
+            ticker: (
+                "GBp"
+                if symbols[ticker].upper().endswith(".L")
+                else "HKD"
+                if symbols[ticker].upper().endswith(".HK")
+                else "USD"
+            )
+            for ticker in tickers
+            if ticker not in resolved
+        }
+        if inferred:
+            self._trader.save_ticker_currencies(inferred)
+            resolved.update(inferred)
+        return resolved
+
     # --- live price fetching ---------------------------------------------
 
-    def _fetch_price_gbp(
-        self, yf_sym: str, gbpusd: float
-    ) -> tuple[float, float, str] | None:
-        """Fetch the most recent closing price for a yfinance symbol.
+    @staticmethod
+    def _latest_close(data: Any, symbol: str, batch_size: int) -> float | None:
+        """Extract one symbol's latest usable close from yfinance output.
 
-        Returns (gbp_price, original_price, currency_code) or None on failure.
-        gbp_price is always in GBP; original_price is in the native currency.
+        yfinance returns a flat frame for a single-symbol download and a
+        MultiIndex frame for batches.  It has also changed the MultiIndex
+        level order between releases, so select the ``Close`` level by name
+        rather than assuming a particular order.
         """
+        if data is None or data.empty:
+            return None
+        try:
+            columns = data.columns
+            if getattr(columns, "nlevels", 1) > 1:
+                close_columns = [
+                    column
+                    for column in columns
+                    if "Close" in column and symbol in column
+                ]
+                if not close_columns:
+                    return None
+                series = data[close_columns[0]]
+            elif batch_size == 1:
+                series = data["Close"] if "Close" in columns else data.iloc[:, 0]
+            else:
+                # A batch response without per-ticker columns cannot safely
+                # be attributed to a holding.
+                return None
+            series = series.dropna()
+            if series.empty:
+                return None
+            value = float(series.iloc[-1])
+            return value if math.isfinite(value) and value > 0 else None
+        except Exception:
+            logger.warning("Could not extract close for %s", symbol, exc_info=True)
+            return None
+
+    @staticmethod
+    def _chunked(items: list[str], size: int) -> list[list[str]]:
+        return [items[index : index + size] for index in range(0, len(items), size)]
+
+    def _download_closes(self, symbols: list[str]) -> tuple[dict[str, float], set[str]]:
+        """Download close prices in bounded chunks, isolating failed chunks."""
         import yfinance as yf
 
-        data = yf.download(yf_sym, period="5d", progress=False, auto_adjust=True)
-        if data.empty:
-            return None
-        close = data["Close"] if "Close" in data.columns else data.iloc[:, 0]
-        series = close.iloc[:, 0] if hasattr(close, "columns") else close
-        series = series.dropna()
-        if series.empty:
-            return None
-        val = float(series.iloc[-1])
-        if math.isnan(val):
-            return None
-        orig_price = round(val, 2)
-        gbp_price = orig_price
-        currency = "GBP"
-        try:
-            currency = yf.Ticker(yf_sym).fast_info.currency or "GBP"
-            if currency == "GBp":
-                gbp_price = round(orig_price / 100, 4)
-                currency = "GBP"
-            elif currency == "USD":
-                gbp_price = round(orig_price / gbpusd, 4)
-        except Exception:
-            logger.warning(
-                "Could not determine currency for %s; using raw price", yf_sym
+        prices: dict[str, float] = {}
+        failed: set[str] = set()
+        for chunk in self._chunked(symbols, _PRICE_DOWNLOAD_CHUNK_SIZE):
+            try:
+                data = yf.download(
+                    chunk if len(chunk) > 1 else chunk[0],
+                    period="5d",
+                    progress=False,
+                    auto_adjust=True,
+                )
+            except Exception:
+                logger.warning("Price batch fetch failed for %s", chunk, exc_info=True)
+                failed.update(chunk)
+                continue
+            for symbol in chunk:
+                close = self._latest_close(data, symbol, len(chunk))
+                if close is None:
+                    failed.add(symbol)
+                else:
+                    prices[symbol] = close
+        return prices, failed
+
+    def _price_in_gbp(
+        self, original_price: float, currency: str, gbpusd: float
+    ) -> float | None:
+        """Convert a provider quote unit to GBP without silently guessing FX."""
+        quote_currency = currency.strip() or "GBP"
+        if quote_currency == "GBp":
+            return round(original_price / 100, 4)
+        currency = quote_currency.upper()
+        if currency == "GBP":
+            return round(original_price, 4)
+        if currency == "USD":
+            return (
+                round(original_price / gbpusd, 4)
+                if self._is_valid_rate(gbpusd)
+                else None
             )
-        return gbp_price, orig_price, currency
+        if currency == "HKD":
+            projection = self._gbp_valuation.value_in_gbp(
+                Money(amount=Decimal(str(original_price)), currency="HKD")
+            )
+            return (
+                float(projection.gbp_amount)
+                if projection.gbp_amount is not None
+                else None
+            )
+        return None
+
+    def fetch_all_prices_with_failures(
+        self, tickers: list[str], aliases: dict[str, str], gbpusd: float
+    ) -> tuple[dict[str, float], dict[str, tuple[float, str]], set[str]]:
+        """Batch-fetch prices and return failures without dropping successes."""
+        unique_tickers = list(dict.fromkeys(tickers))
+        if not unique_tickers:
+            return {}, {}, set()
+        symbols = {
+            ticker: canonicalize_or_fallback(
+                ticker, aliases, logger=logger, context="fetch_all_prices"
+            )
+            for ticker in unique_tickers
+        }
+        # Price-cache display metadata and the durable cache are consulted
+        # before symbol-convention inference; no cold refresh issues N
+        # ``yf.Ticker`` metadata requests.
+        currencies = self._price_quote_currencies(unique_tickers, symbols)
+        closes, failed_symbols = self._download_closes(
+            list(dict.fromkeys(symbols.values()))
+        )
+
+        # Only symbols that had no configured alias may safely use the LSE
+        # suffix heuristic. Retry all such misses together, never per ticker.
+        lse_symbols = list(
+            dict.fromkeys(
+                f"{ticker}.L"
+                for ticker, symbol in symbols.items()
+                if symbol == ticker and symbol in failed_symbols
+            )
+        )
+        if lse_symbols:
+            fallback_closes, fallback_failed = self._download_closes(lse_symbols)
+            closes.update(fallback_closes)
+            for ticker, symbol in symbols.items():
+                fallback = f"{ticker}.L"
+                if symbol == ticker and fallback in fallback_closes:
+                    closes[symbol] = fallback_closes[fallback]
+                    failed_symbols.discard(symbol)
+                    currencies[ticker] = "GBp"
+                    self._trader.save_ticker_currencies({ticker: "GBp"})
+                elif symbol == ticker and fallback not in fallback_failed:
+                    failed_symbols.discard(symbol)
+
+        gbp_prices: dict[str, float] = {}
+        display_info: dict[str, tuple[float, str]] = {}
+        failures: set[str] = set()
+        for ticker, symbol in symbols.items():
+            close = closes.get(symbol)
+            if close is None:
+                failures.add(ticker)
+                continue
+            currency = currencies.get(ticker, "GBP")
+            gbp_price = self._price_in_gbp(close, currency, gbpusd)
+            if gbp_price is None or gbp_price < 0.01:
+                failures.add(ticker)
+                continue
+            gbp_prices[ticker] = gbp_price
+            display_info[ticker] = (round(close, 2), currency)
+        return gbp_prices, display_info, failures
 
     def fetch_all_prices(
         self, tickers: list[str], aliases: dict[str, str], gbpusd: float
     ) -> tuple[dict[str, float], dict[str, tuple[float, str]]]:
-        """Fetch GBP-normalised prices for all portfolio tickers (concurrently)."""
-
-        def _resolve(t: str) -> tuple[str, float, float, str] | None:
-            yf_sym = canonicalize_or_fallback(
-                t,
-                aliases,
-                logger=logger,
-                context="fetch_all_prices",
-            )
-            result = self._fetch_price_gbp(yf_sym, gbpusd)
-            # ``.L``-suffix retry only when canonicalization left `t`
-            # unchanged (no alias configured for it, safe to guess) -- not
-            # raw `t not in aliases` membership, which would miss an
-            # explicitly configured alias reached via a chain.
-            if (result is None or result[0] < 0.01) and yf_sym == t:
-                result = self._fetch_price_gbp(f"{t}.L", gbpusd)
-            if result is not None and result[0] >= 0.01:
-                gbp_price, orig_price, currency = result
-                return t, gbp_price, orig_price, currency
-            return None
-
-        gbp_prices: dict[str, float] = {}
-        display_info: dict[str, tuple[float, str]] = {}
-        if not tickers:
-            return gbp_prices, display_info
-        with ThreadPoolExecutor(max_workers=min(8, len(tickers))) as pool:
-            for res in pool.map(_resolve, tickers):
-                if res is not None:
-                    t, gbp_price, orig_price, currency = res
-                    gbp_prices[t] = gbp_price
-                    display_info[t] = (orig_price, currency)
-        return gbp_prices, display_info
+        """Compatibility wrapper for callers that do not need failures."""
+        prices, display_info, _failures = self.fetch_all_prices_with_failures(
+            tickers, aliases, gbpusd
+        )
+        return prices, display_info
 
     # --- headless pricing (shared by the orchestrator's email/snapshot) --
 
@@ -451,9 +627,8 @@ class PortfolioService:
         display_info = {**cached_display, **fetched_display}
         return prices, display_info, gbpusd
 
-    @staticmethod
     def gbp_totals(
-        positions: list[Position], gbpusd: float
+        self, positions: list[Position], gbpusd: float
     ) -> tuple[float, float, float]:
         """Return (total_value_gbp, total_cost_gbp, total_pnl_gbp) for positions.
 
@@ -464,13 +639,21 @@ class PortfolioService:
         with a known ``current_value`` (unpriced positions are excluded).
         """
         total_cost_gbp = sum(
-            PortfolioService._to_gbp(p.total_cost, p.price_currency, gbpusd)
-            for p in positions
+            amount
+            for amount in (
+                self._amount_in_gbp(p.total_cost, p.price_currency, gbpusd)
+                for p in positions
+            )
+            if amount is not None
         )
         total_value_gbp = sum(
-            PortfolioService._to_gbp(p.current_value, p.price_currency, gbpusd)
-            for p in positions
-            if p.current_value is not None
+            amount
+            for amount in (
+                self._amount_in_gbp(p.current_value, p.price_currency, gbpusd)
+                for p in positions
+                if p.current_value is not None
+            )
+            if amount is not None
         )
         total_pnl_gbp = total_value_gbp - total_cost_gbp
         return total_value_gbp, total_cost_gbp, total_pnl_gbp
@@ -577,6 +760,7 @@ class PortfolioService:
         gbpusd_rate: float | None = None,
         cash_balance: float | None = None,
         error_message: str | None = None,
+        warning_message: str | None = None,
         portfolio_id: int | None = None,
     ) -> dict:
         """Build the template context for the portfolio partial.
@@ -594,21 +778,27 @@ class PortfolioService:
 
         # Compute GBP-equivalent totals for summary cards (including cash)
         fx = gbpusd_rate or _DEFAULT_GBPUSD
-        total_cost_gbp = sum(
-            self._to_gbp(p.total_cost, p.price_currency, fx) for p in positions
-        )
+        valued_costs = [
+            self._amount_in_gbp(p.total_cost, p.price_currency, fx) for p in positions
+        ]
+        total_cost_gbp = sum(amount for amount in valued_costs if amount is not None)
         if cash_balance is not None:
             total_cost_gbp += cash_balance
         positions_with_value = [p for p in positions if p.current_value is not None]
-        total_value_gbp = sum(
-            self._to_gbp(p.current_value, p.price_currency, fx)  # type: ignore[arg-type]
+        valued_values = [
+            self._amount_in_gbp(p.current_value, p.price_currency, fx)  # type: ignore[arg-type]
             for p in positions_with_value
-        )
+        ]
+        total_value_gbp = sum(amount for amount in valued_values if amount is not None)
         if cash_balance is not None:
             total_value_gbp += cash_balance
         total_cost_gbp_valued = sum(
-            self._to_gbp(p.total_cost, p.price_currency, fx)
-            for p in positions_with_value
+            amount
+            for amount in (
+                self._amount_in_gbp(p.total_cost, p.price_currency, fx)
+                for p in positions_with_value
+            )
+            if amount is not None
         )
         total_pnl_gbp = total_value_gbp - total_cost_gbp_valued - (cash_balance or 0)
 
@@ -687,6 +877,7 @@ class PortfolioService:
             "prices_as_of": prices_as_of,
             "gbpusd_rate": gbpusd_rate,
             "error_message": error_message,
+            "warning_message": warning_message,
             "chart_labels": json.dumps(chart_data["labels"]),
             "chart_values": json.dumps(chart_data["values"]),
             "chart_costs": json.dumps(chart_data["costs"]),

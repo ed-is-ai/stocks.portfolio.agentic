@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any, cast
 
 import pandas as pd
@@ -69,6 +70,9 @@ def test_load_analysis_skips_invalid_records_without_dropping_valid(
 
 
 class _StubTrader:
+    def load_price_cache(self):
+        return {}, None, {}
+
     def get_trade_history(self, ticker=None, portfolio_id=None):
         return []
 
@@ -230,20 +234,30 @@ def test_cash_balances_by_currency_carries_a_gbp_valuation_projection_per_row(
     assert entries["USD"]["projection"].reason == "fetch_failed"
 
 
-def test_fetch_all_prices_assembles_results(monkeypatch) -> None:
+def test_fetch_all_prices_batches_multiindex_results_and_reuses_currencies(
+    monkeypatch,
+) -> None:
     svc = PortfolioService(
         cast(TraderService, _StubTrader()),
         cast(ExitEvaluator, _StubEvaluator()),
     )
+    calls: list[object] = []
 
-    def fake_fetch(yf_sym, gbpusd):
-        table = {"AAA": (10.0, 10.0, "GBP"), "BBB": (20.0, 20.0, "GBP")}
-        return table.get(yf_sym)
+    def fake_download(symbols, **_kwargs):
+        calls.append(symbols)
+        columns = pd.MultiIndex.from_product([["Close"], ["AAA", "BBB"]])
+        return pd.DataFrame([[10.0, 20.0]], columns=columns)
 
-    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    monkeypatch.setattr("yfinance.download", fake_download)
+    monkeypatch.setattr(
+        svc,
+        "_price_quote_currencies",
+        lambda tickers, _symbols: {t: "GBP" for t in tickers},
+    )
     prices, display = svc.fetch_all_prices(["AAA", "BBB"], {}, 1.35)
     assert prices == {"AAA": 10.0, "BBB": 20.0}
     assert display == {"AAA": (10.0, "GBP"), "BBB": (20.0, "GBP")}
+    assert calls == [["AAA", "BBB"]]
 
 
 def test_fetch_all_prices_retries_with_london_suffix(monkeypatch) -> None:
@@ -253,18 +267,19 @@ def test_fetch_all_prices_retries_with_london_suffix(monkeypatch) -> None:
     )
     calls: list[str] = []
 
-    def fake_fetch(yf_sym, gbpusd):
-        calls.append(yf_sym)
-        if yf_sym == "VOD":
-            return None
-        if yf_sym == "VOD.L":
-            return (1.23, 123.0, "GBP")
-        return None
+    def fake_download(symbols, **_kwargs):
+        calls.append(symbols)
+        if symbols == "VOD":
+            return pd.DataFrame()
+        return pd.DataFrame({"Close": [123.0]})
 
-    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    monkeypatch.setattr("yfinance.download", fake_download)
+    monkeypatch.setattr(
+        svc, "_price_quote_currencies", lambda _tickers, _symbols: {"VOD": "GBp"}
+    )
     prices, display = svc.fetch_all_prices(["VOD"], {}, 1.35)
     assert prices == {"VOD": 1.23}
-    assert "VOD.L" in calls
+    assert calls == ["VOD", "VOD.L"]
 
 
 def test_fetch_all_prices_drops_below_threshold(monkeypatch) -> None:
@@ -273,13 +288,66 @@ def test_fetch_all_prices_drops_below_threshold(monkeypatch) -> None:
         cast(ExitEvaluator, _StubEvaluator()),
     )
 
-    def fake_fetch(yf_sym, gbpusd):
-        return (0.0, 0.0, "GBP")
+    monkeypatch.setattr(
+        "yfinance.download", lambda *_args, **_kwargs: pd.DataFrame({"Close": [0.0]})
+    )
+    monkeypatch.setattr(
+        svc, "_price_quote_currencies", lambda _tickers, _symbols: {"ZZZ": "GBP"}
+    )
 
-    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
     prices, display = svc.fetch_all_prices(["ZZZ"], {"ZZZ": "ZZZ"}, 1.35)
     assert prices == {}
     assert display == {}
+
+
+def test_fetch_all_prices_uses_bounded_chunks_and_isolates_chunk_failure(
+    monkeypatch,
+) -> None:
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()), cast(ExitEvaluator, _StubEvaluator())
+    )
+    tickers = [f"T{index:02d}" for index in range(51)]
+    aliases = {ticker: f"Y{index:02d}" for index, ticker in enumerate(tickers)}
+    calls: list[object] = []
+
+    def fake_download(symbols, **_kwargs):
+        calls.append(symbols)
+        if isinstance(symbols, list):
+            raise ConnectionError("first chunk unavailable")
+        return pd.DataFrame({"Close": [25.0]})
+
+    monkeypatch.setattr("yfinance.download", fake_download)
+    monkeypatch.setattr(
+        svc,
+        "_price_quote_currencies",
+        lambda requested, _symbols: {ticker: "GBP" for ticker in requested},
+    )
+
+    prices, display, failures = svc.fetch_all_prices_with_failures(
+        tickers, aliases, 1.35
+    )
+
+    assert calls == [[f"Y{index:02d}" for index in range(50)], "Y50"]
+    assert prices == {"T50": 25.0}
+    assert display == {"T50": (25.0, "GBP")}
+    assert failures == set(tickers[:50])
+
+
+def test_price_normalisation_handles_gbp_gbpence_usd_and_hkd() -> None:
+    class _HkdValuation:
+        def value_in_gbp(self, _money):
+            return cast(Any, type("Projection", (), {"gbp_amount": Decimal("12.34")})())
+
+    svc = PortfolioService(
+        cast(TraderService, _StubTrader()),
+        cast(ExitEvaluator, _StubEvaluator()),
+        gbp_valuation=cast(Any, _HkdValuation()),
+    )
+
+    assert svc._price_in_gbp(12.34, "GBP", 1.25) == 12.34
+    assert svc._price_in_gbp(1234.0, "GBp", 1.25) == 12.34
+    assert svc._price_in_gbp(15.0, "USD", 1.25) == 12.0
+    assert svc._price_in_gbp(96.0, "HKD", 1.25) == 12.34
 
 
 # --- Story 1.2: historical_gbpusd_rates / ticker_currency ------------------
@@ -762,13 +830,14 @@ def test_fetch_all_prices_resolves_chained_alias(monkeypatch) -> None:
     )
     calls: list[str] = []
 
-    def fake_fetch(yf_sym, gbpusd):
-        calls.append(yf_sym)
-        if yf_sym == "ABC-YAHOO":
-            return (12.0, 12.0, "GBP")
-        return None
+    def fake_download(symbol, **_kwargs):
+        calls.append(symbol)
+        return pd.DataFrame({"Close": [12.0]})
 
-    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    monkeypatch.setattr("yfinance.download", fake_download)
+    monkeypatch.setattr(
+        svc, "_price_quote_currencies", lambda _tickers, _symbols: {"ABC.L": "GBP"}
+    )
     aliases = {"ABC.L": "ABC", "ABC": "ABC-YAHOO"}
     prices, display = svc.fetch_all_prices(["ABC.L"], aliases, 1.35)
 
@@ -782,13 +851,14 @@ def test_fetch_all_prices_resolves_legacy_identity_through_alias(monkeypatch) ->
     )
     calls: list[str] = []
 
-    def fake_fetch(yf_sym, gbpusd):
-        calls.append(yf_sym)
-        if yf_sym == "REAL.L":
-            return (5.0, 5.0, "GBP")
-        return None
+    def fake_download(symbol, **_kwargs):
+        calls.append(symbol)
+        return pd.DataFrame({"Close": [5.0]})
 
-    monkeypatch.setattr(svc, "_fetch_price_gbp", fake_fetch)
+    monkeypatch.setattr("yfinance.download", fake_download)
+    monkeypatch.setattr(
+        svc, "_price_quote_currencies", lambda _tickers, _symbols: {"HSFWA": "GBP"}
+    )
     prices, display = svc.fetch_all_prices(["HSFWA"], {"HSFWA": "REAL.L"}, 1.35)
 
     assert prices == {"HSFWA": 5.0}

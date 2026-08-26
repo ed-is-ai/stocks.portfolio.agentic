@@ -1117,7 +1117,7 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
             positions.extend(pf_positions)
             _trader.update_portfolio_snapshot(_trader.get_cash_balance(pf.id), pf.id)
         held = {p.ticker for p in positions}
-        gbp_totals = PortfolioService.gbp_totals(positions, gbpusd)
+        gbp_totals = portfolio_service.gbp_totals(positions, gbpusd)
         pf_value, pf_cost, _pf_pnl = gbp_totals
         if pf_value > 0:
             _append_portfolio_snapshot(pf_value, pf_cost)
