@@ -35,6 +35,17 @@ class FxQuote(BaseModel):
     digest: str
 
 
+class FxUnavailableAttempt(BaseModel):
+    """A durable failed exact-date FX lookup."""
+
+    model_config = ConfigDict(frozen=True)
+
+    provider: str
+    pair: str
+    requested_date: str
+    reason: str
+
+
 def _row_to_quote(row: tuple[str, str, str, str, str, str]) -> FxQuote:
     quote_digest, provider, pair, as_of, rate, _fetched_at = row
     return FxQuote(
@@ -73,6 +84,19 @@ class FxQuoteRepository:
             ).fetchone()
         return _row_to_quote(row) if row else None
 
+    def get_for_provider_pair_and_date(
+        self, provider: str, pair: str, as_of: str
+    ) -> FxQuote | None:
+        """Return a quote only when provider, pair, and date all match."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT quote_digest, provider, pair, as_of, rate, fetched_at "
+                "FROM fx_quotes WHERE provider = ? AND pair = ? AND as_of = ? "
+                "ORDER BY fetched_at DESC LIMIT 1",
+                (provider, pair, as_of),
+            ).fetchone()
+        return _row_to_quote(row) if row else None
+
     def get_by_digest(self, quote_digest: str) -> FxQuote | None:
         """Return the stored quote with this exact content digest, or None.
 
@@ -87,6 +111,60 @@ class FxQuoteRepository:
                 (quote_digest,),
             ).fetchone()
         return _row_to_quote(row) if row else None
+
+    def get_unavailable_attempt(
+        self, provider: str, pair: str, requested_date: str
+    ) -> FxUnavailableAttempt | None:
+        """Return the recorded failed attempt for this exact provider key."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT provider, pair, requested_date, reason "
+                "FROM fx_unavailable_attempts "
+                "WHERE provider = ? AND pair = ? AND requested_date = ?",
+                (provider, pair, requested_date),
+            ).fetchone()
+        return (
+            FxUnavailableAttempt(
+                provider=row[0],
+                pair=row[1],
+                requested_date=row[2],
+                reason=row[3],
+            )
+            if row
+            else None
+        )
+
+    def record_unavailable_attempt(
+        self, attempt: FxUnavailableAttempt
+    ) -> FxUnavailableAttempt:
+        """Persist an exact-date failed attempt, idempotently."""
+        attempted_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        with session(self._connect) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO fx_unavailable_attempts "
+                "(provider, pair, requested_date, reason, attempted_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    attempt.provider,
+                    attempt.pair,
+                    attempt.requested_date,
+                    attempt.reason,
+                    attempted_at,
+                ),
+            )
+            row = conn.execute(
+                "SELECT provider, pair, requested_date, reason "
+                "FROM fx_unavailable_attempts "
+                "WHERE provider = ? AND pair = ? AND requested_date = ?",
+                (attempt.provider, attempt.pair, attempt.requested_date),
+            ).fetchone()
+        assert row is not None
+        return FxUnavailableAttempt(
+            provider=row[0],
+            pair=row[1],
+            requested_date=row[2],
+            reason=row[3],
+        )
 
     def insert_or_get(self, quote: FxQuote) -> None:
         """Persist ``quote``, keyed on its content digest.

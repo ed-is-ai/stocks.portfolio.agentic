@@ -118,6 +118,14 @@ CREATE TABLE IF NOT EXISTS fx_quotes (
     rate         TEXT NOT NULL,
     fetched_at   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS fx_unavailable_attempts (
+    provider       TEXT NOT NULL,
+    pair           TEXT NOT NULL,
+    requested_date TEXT NOT NULL,
+    reason         TEXT NOT NULL,
+    attempted_at   TEXT NOT NULL,
+    PRIMARY KEY (provider, pair, requested_date)
+);
 CREATE TABLE IF NOT EXISTS ticker_currency_cache (
     ticker      TEXT PRIMARY KEY,
     currency    TEXT NOT NULL,
@@ -353,6 +361,10 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fx_quotes_pair_asof ON fx_quotes(pair, as_of)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fx_unavailable_attempts_pair_date "
+        "ON fx_unavailable_attempts(pair, requested_date)"
     )
 
     for table in ("trades", "cash_flows"):

@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 from app.repositories import db
-from app.repositories.fx_quote_repo import FxQuote, FxQuoteRepository
+from app.repositories.fx_quote_repo import (
+    FxQuote,
+    FxQuoteRepository,
+    FxUnavailableAttempt,
+)
 
 
 @pytest.fixture
@@ -83,3 +87,45 @@ def test_different_rate_same_day_produces_a_second_row_not_an_overwrite(
     stored = repo.get_for_pair_and_date("GBPUSD=X", "2026-08-10")
     assert stored is not None
     assert stored.digest in {first.digest, second.digest}
+
+
+def test_unavailable_attempt_is_durable_and_idempotent(repo: FxQuoteRepository) -> None:
+    attempt = FxUnavailableAttempt(
+        provider="yfinance",
+        pair="GBPUSD=X",
+        requested_date="2026-08-10",
+        reason="stale",
+    )
+
+    assert repo.record_unavailable_attempt(attempt) == attempt
+    assert repo.record_unavailable_attempt(attempt) == attempt
+    assert repo.get_unavailable_attempt("yfinance", "GBPUSD=X", "2026-08-10") == attempt
+
+    with db.session(repo._connect) as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM fx_unavailable_attempts").fetchone()[0]
+            == 1
+        )
+
+
+def test_unavailable_attempt_identity_is_scoped_by_provider_pair_and_date(
+    repo: FxQuoteRepository,
+) -> None:
+    base = FxUnavailableAttempt(
+        provider="yfinance",
+        pair="GBPUSD=X",
+        requested_date="2026-08-10",
+        reason="stale",
+    )
+    repo.record_unavailable_attempt(base)
+    repo.record_unavailable_attempt(base.model_copy(update={"provider": "other"}))
+    repo.record_unavailable_attempt(base.model_copy(update={"pair": "GBPEUR=X"}))
+    repo.record_unavailable_attempt(
+        base.model_copy(update={"requested_date": "2026-08-11"})
+    )
+
+    with db.session(repo._connect) as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) FROM fx_unavailable_attempts").fetchone()[0]
+            == 4
+        )

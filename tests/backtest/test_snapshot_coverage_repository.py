@@ -730,6 +730,109 @@ def test_coverage_never_bridges_gaps_or_profiles_and_readiness_is_exact(
     assert ready.ordered_month_digest is not None
 
 
+def test_coverage_cache_reuses_verified_summary_and_separates_profiles(
+    tmp_path, monkeypatch
+) -> None:
+    """The verification count is the deterministic performance evidence."""
+    repo = _repo(tmp_path / "backtest.db")
+    first = _profile()
+    second = _profile("Scanner data v2")
+    _commit(repo, _snapshot(first))
+    _commit(repo, _snapshot(second))
+
+    calls = 0
+    original = repo._load_verified_snapshot_month
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "_load_verified_snapshot_month", counted)
+    assert repo.snapshot_coverage(first.profile_hash).profile_hash == first.profile_hash
+    assert repo.snapshot_coverage(first.profile_hash).profile_hash == first.profile_hash
+    assert (
+        repo.snapshot_coverage(second.profile_hash).profile_hash == second.profile_hash
+    )
+    assert calls == 2
+
+
+def test_coverage_cache_invalidates_after_commit_and_reconstructs_after_restart(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile, "2026-05"))
+    calls = 0
+    original = repo._load_verified_snapshot_month
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "_load_verified_snapshot_month", counted)
+    repo.snapshot_coverage(profile.profile_hash)
+    repo.snapshot_coverage(profile.profile_hash)
+    assert calls == 1
+
+    _commit(repo, _snapshot(profile, "2026-07"))
+    coverage = repo.snapshot_coverage(profile.profile_hash)
+    assert coverage.snapshot_count == 2
+    assert calls == 3
+
+    reopened = _repo(path)
+    reopened_calls = 0
+    reopened_original = reopened._load_verified_snapshot_month
+
+    def reopened_counted(*args, **kwargs):
+        nonlocal reopened_calls
+        reopened_calls += 1
+        return reopened_original(*args, **kwargs)
+
+    monkeypatch.setattr(reopened, "_load_verified_snapshot_month", reopened_counted)
+    assert reopened.snapshot_coverage(profile.profile_hash).snapshot_count == 2
+    assert reopened_calls == 2
+
+
+def test_coverage_cache_never_masks_corruption_and_serializes_readers(
+    tmp_path, monkeypatch
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    calls = 0
+    original = repo._load_verified_snapshot_month
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "_load_verified_snapshot_month", counted)
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        results = list(
+            pool.map(lambda _: repo.snapshot_coverage(profile.profile_hash), range(6))
+        )
+    assert all(result == results[0] for result in results)
+    assert calls == 1
+
+    conn = repo._connect()
+    try:
+        conn.execute("DROP TRIGGER snapshot_month_immutable_update")
+        conn.execute(
+            "UPDATE snapshot_months SET expected_digest=?",
+            (DIGEST_B,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    with pytest.raises(BacktestIntegrityError):
+        repo.snapshot_coverage(profile.profile_hash)
+    assert calls == 2
+
+
 def test_coverage_reverifies_denormalized_month_columns_and_digests(tmp_path) -> None:
     repo = _repo(tmp_path / "backtest.db")
     profile = _profile()
