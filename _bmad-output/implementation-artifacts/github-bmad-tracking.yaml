@@ -102,6 +102,7 @@ standalone_issues:
     status: in-progress
     sub_issues: [326, 324, 321, 320, 325, 323, 322]
     completed_sub_issues: [326, 324, 321, 320, 325]
+    pending_merge_sub_issues: [323]
     stories:
       gh-326-cache-strategy-snapshot-coverage-verification:
         issue: 326
@@ -123,21 +124,15 @@ standalone_issues:
         issue: 325
         status: done
         spec: spec-gh-325-batch-portfolio-price-downloads.md
+      gh-323-bulk-opening-lot-status:
+        issue: 323
+        status: in-review
+        pr: 338
+      gh-322-sql-prefilter-comparison-candidates:
+        issue: 322
+        status: in-progress
+        spec: spec-gh-322-sql-prefilter-comparison-candidates.md
   realised-pnl-average-win-loss-pct:
     issue: 301
     status: done
     spec: spec-gh-301-realised-pnl-average-win-loss.md
-performance_epic_319:
-  issue: 319
-  status: in-progress
-  sub_issues: [326, 324, 321, 320, 325, 323, 322]
-  completed_sub_issues: [326, 324]
-  stories:
-    gh-326-cache-strategy-snapshot-coverage-verification:
-      issue: 326
-      status: done
-      spec: spec-gh-326-cache-snapshot-coverage-verification.md
-    gh-324-negative-cache-unavailable-fx-quotes:
-      issue: 324
-      status: done
-      spec: spec-gh-324-negative-cache-fx-quotes.md

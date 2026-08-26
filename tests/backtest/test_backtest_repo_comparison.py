@@ -550,6 +550,58 @@ def test_comparison_candidates_excludes_anchor_and_never_preselects(
     assert candidates == ()
 
 
+def test_comparison_candidates_sql_prefilter_loads_only_plausible_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id="eligible", enqueue_seq=20)
+    _complete_run(
+        path,
+        repo,
+        run_id="wrong-start",
+        enqueue_seq=19,
+        start_month="2026-02",
+        end_month="2026-02",
+    )
+    _complete_run(path, repo, run_id="wrong-end", enqueue_seq=18, end_month="2026-02")
+    _complete_run(
+        path, repo, run_id="wrong-profile", enqueue_seq=17, profile_hash="9" * 64
+    )
+    _complete_run(
+        path,
+        repo,
+        run_id="wrong-evidence",
+        enqueue_seq=16,
+        ordered_month_digest="8" * 64,
+    )
+    _complete_run(
+        path, repo, run_id="wrong-currency", enqueue_seq=15, base_currency="GBP"
+    )
+    _complete_run(
+        path,
+        repo,
+        run_id="wrong-contract",
+        enqueue_seq=14,
+        execution_contract_digest="7" * 64,
+    )
+
+    original_backtest_result = repo.backtest_result
+    loaded_ids: list[str] = []
+
+    def counting_backtest_result(candidate_id: str):
+        loaded_ids.append(candidate_id)
+        return original_backtest_result(candidate_id)
+
+    monkeypatch.setattr(repo, "backtest_result", counting_backtest_result)
+
+    candidates = repo.comparison_candidates(ANCHOR_ID)
+
+    assert [candidate.run_id for candidate in candidates] == ["eligible"]
+    assert loaded_ids == [ANCHOR_ID, "eligible"]
+
+
 def test_comparison_candidates_on_missing_anchor_raises(tmp_path: Path) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)
