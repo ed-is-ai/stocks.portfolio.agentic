@@ -165,14 +165,45 @@ async def refresh_portfolio_prices(
 
         gbpusd = portfolio.gbpusd_rate()
         tickers = [p.ticker for p in positions]
-        gbp_prices, display_info = portfolio.fetch_all_prices(
-            tickers, portfolio.load_ticker_aliases(), gbpusd
+        cached_prices, _cached_as_of, cached_display = trader.load_price_cache()
+        gbp_prices, display_info, failed_tickers = (
+            portfolio.fetch_all_prices_with_failures(
+                tickers, portfolio.load_ticker_aliases(), gbpusd
+            )
         )
 
         trader.save_price_cache(gbp_prices, display_info)
         _, prices_as_of, _ = trader.load_price_cache()
+        # A partial provider response must not make an otherwise valid
+        # holding disappear.  Fresh values win; only failed symbols inherit
+        # their previous cached price/display metadata.
+        effective_prices = {
+            ticker: gbp_prices[ticker]
+            if ticker in gbp_prices
+            else cached_prices[ticker]
+            for ticker in tickers
+            if ticker in gbp_prices or ticker in cached_prices
+        }
+        effective_display = {
+            ticker: display_info[ticker]
+            if ticker in display_info
+            else cached_display[ticker]
+            for ticker in tickers
+            if ticker in display_info or ticker in cached_display
+        }
+        cached_fallbacks = sorted(
+            ticker for ticker in failed_tickers if ticker in cached_prices
+        )
+        unavailable = sorted(failed_tickers - set(cached_fallbacks))
+        warning_parts: list[str] = []
+        if cached_fallbacks:
+            warning_parts.append(
+                "using cached values for: " + ", ".join(cached_fallbacks)
+            )
+        if unavailable:
+            warning_parts.append("prices unavailable for: " + ", ".join(unavailable))
         updated_positions = trader.refresh_portfolio_prices(
-            gbp_prices, display_info, pid
+            effective_prices, effective_display, pid
         )
         logger.info("Refreshed %d positions successfully", len(updated_positions))
         cash_balance = trader.get_cash_balance(pid)
@@ -182,6 +213,11 @@ async def refresh_portfolio_prices(
             prices_as_of=prices_as_of,
             gbpusd_rate=gbpusd,
             cash_balance=cash_balance,
+            warning_message=(
+                "Prices refreshed partially; " + "; ".join(warning_parts)
+                if warning_parts
+                else None
+            ),
             portfolio_id=pid,
         )
         return templates.TemplateResponse(request, "_portfolio.html", context=context)

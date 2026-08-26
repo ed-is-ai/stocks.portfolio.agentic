@@ -97,7 +97,47 @@ backtest_strategy_skills:
   rtly-backtest-turtle-trend: { issue: 250, status: done }
   rtly-backtest-moving-average: { issue: 248, status: done }
 standalone_issues:
+  performance_epic_319:
+    issue: 319
+    status: in-progress
+    sub_issues: [326, 324, 321, 320, 325, 323, 322]
+    completed_sub_issues: [326, 324, 321, 320, 325]
+    stories:
+      gh-326-cache-strategy-snapshot-coverage-verification:
+        issue: 326
+        status: done
+        spec: spec-gh-326-cache-snapshot-coverage-verification.md
+      gh-324-negative-cache-unavailable-fx-quotes:
+        issue: 324
+        status: done
+        spec: spec-gh-324-negative-cache-fx-quotes.md
+      gh-321-request-portfolio-snapshot:
+        issue: 321
+        status: done
+        spec: spec-gh-321-request-portfolio-snapshot.md
+      gh-320-batch-scanner-alert-reads:
+        issue: 320
+        status: done
+        spec: spec-gh-320-batch-scanner-alert-reads.md
+      gh-325-batch-portfolio-price-downloads:
+        issue: 325
+        status: done
+        spec: spec-gh-325-batch-portfolio-price-downloads.md
   realised-pnl-average-win-loss-pct:
     issue: 301
     status: done
     spec: spec-gh-301-realised-pnl-average-win-loss.md
+performance_epic_319:
+  issue: 319
+  status: in-progress
+  sub_issues: [326, 324, 321, 320, 325, 323, 322]
+  completed_sub_issues: [326, 324]
+  stories:
+    gh-326-cache-strategy-snapshot-coverage-verification:
+      issue: 326
+      status: done
+      spec: spec-gh-326-cache-snapshot-coverage-verification.md
+    gh-324-negative-cache-unavailable-fx-quotes:
+      issue: 324
+      status: done
+      spec: spec-gh-324-negative-cache-fx-quotes.md

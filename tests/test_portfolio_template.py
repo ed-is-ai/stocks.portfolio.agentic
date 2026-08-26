@@ -35,6 +35,7 @@ def _render(cash_balance: float | None, positions: list[Any] | None = None) -> s
         "prices_as_of": None,
         "gbpusd_rate": None,
         "error_message": None,
+        "warning_message": None,
     }
     return templates.get_template("_portfolio.html").render(**context)
 
@@ -133,3 +134,35 @@ def test_zero_cash_row_is_distinguishable_from_a_nonzero_balance() -> None:
     assert "£0.00" in row  # the hardcoded P&L cell
     assert "<td>£0.00</td>" not in row  # but not the balance cell
     assert "<td>£5.00</td>" in row
+
+
+def test_partial_refresh_warning_is_visible() -> None:
+    context = {
+        "positions": [],
+        "cash_balance": None,
+        "cash_flows": [],
+        "positions_with_value": [],
+        "chart_points": 0,
+        "portfolio_id": None,
+        "portfolios": [],
+        "active_portfolio": None,
+        "chart_labels": "[]",
+        "chart_values": "[]",
+        "chart_costs": "[]",
+        "chart_cash": "[]",
+        "chart_buys": "[]",
+        "chart_sells": "[]",
+        "chart_buy_tips": "[]",
+        "chart_sell_tips": "[]",
+        "total_cost_gbp": 0,
+        "total_value_gbp": 0,
+        "total_pnl_gbp": 0,
+        "total_cost_gbp_valued": 0,
+        "prices_as_of": None,
+        "gbpusd_rate": None,
+        "error_message": None,
+        "warning_message": "Prices refreshed partially; using cached values for: BAD",
+    }
+    html = templates.get_template("_portfolio.html").render(**context)
+    assert "alert-warning" in html
+    assert "using cached values for: BAD" in html

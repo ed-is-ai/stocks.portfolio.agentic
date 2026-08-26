@@ -4,7 +4,10 @@ Single owner of the ``alerts`` table schema. The cooldown *policy* stays in the
 agent; this repository only exposes the queries it needs.
 """
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 from typing import Any
 
 from app.repositories.db import Connect, session
@@ -23,6 +26,14 @@ _MIGRATIONS = (
     "ALTER TABLE alerts ADD COLUMN stop_loss REAL",
     "ALTER TABLE alerts ADD COLUMN status TEXT DEFAULT 'watching'",
 )
+
+
+@dataclass(frozen=True)
+class AlertReadState:
+    """Alert facts needed to construct one scanner tile's UI state."""
+
+    has_watching: bool
+    last_alerted_at: str | None
 
 
 class AlertsRepository:
@@ -97,6 +108,33 @@ class AlertsRepository:
                 (ticker,),
             ).fetchone()
         return row[0] if row else None
+
+    def states_for_tickers(self, tickers: Iterable[str]) -> dict[str, AlertReadState]:
+        """Return alert facts for all distinct requested ``tickers`` in one read.
+
+        Tickers without any alert history are absent so callers can use the
+        same ``False``/``None`` defaults that the former single-ticker reads
+        returned. Input order is preserved while deduplicating parameters.
+        A JSON array keeps the query to one SQLite bind value, avoiding the
+        engine's variable limit for large scanner artifacts.
+        """
+        unique_tickers = tuple(dict.fromkeys(tickers))
+        if not unique_tickers:
+            return {}
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT ticker, MAX(alerted_at),"
+                " MAX(CASE WHEN status='watching' THEN 1 ELSE 0 END)"
+                " FROM alerts WHERE ticker IN (SELECT value FROM json_each(?))"
+                " GROUP BY ticker",
+                (json.dumps(unique_tickers),),
+            ).fetchall()
+        return {
+            ticker: AlertReadState(
+                has_watching=bool(has_watching), last_alerted_at=last_alerted_at
+            )
+            for ticker, last_alerted_at, has_watching in rows
+        }
 
     def record(
         self,

@@ -21,9 +21,11 @@ from app.api.dependencies import (
     get_portfolio_service,
     get_trader_service,
 )
+from app.api.stock_scanner_context import build_stock_scanner_context
 from app.api.routes.pipeline import refresh_data
 from app.api.routes.views import partial_runlog, partial_stock_scanner
 from app.api.templating import templates
+from app.repositories.alerts_repo import AlertReadState
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.pipeline_status import PipelineState
@@ -169,6 +171,26 @@ def test_stock_scanner_cells_carry_canonical_numeric_data_values() -> None:
     # The Buy-recommendation row exposes its actionability rank for sorting
     # (mirrors app.core.recommendation._BUCKET_RANK, the canonical source).
     assert 'data-col="rec" data-val="5"' in html
+
+
+def test_scanner_context_batches_alert_reads_for_multi_ticker_records() -> None:
+    records = [*_sample_records(), _sample_records()[0]]
+    trader = MagicMock()
+    trader.held_tickers.return_value = set()
+    portfolio = MagicMock()
+    portfolio.load_analysis.return_value = records
+    alerts = MagicMock()
+    alerts.states_for_tickers.return_value = {
+        "AAPL.L": AlertReadState(has_watching=True, last_alerted_at=None),
+        "TSLA": AlertReadState(has_watching=False, last_alerted_at=None),
+    }
+
+    context = build_stock_scanner_context(trader, portfolio, alerts)
+
+    assert context["alert_states"]["AAPL.L"].suppressed is True
+    alerts.states_for_tickers.assert_called_once_with(("AAPL.L", "AAPL.L", "TSLA"))
+    alerts.has_watching.assert_not_called()
+    alerts.last_alerted_at.assert_not_called()
 
 
 def test_stock_scanner_prices_use_currency_symbol() -> None:

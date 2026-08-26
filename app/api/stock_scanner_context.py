@@ -82,6 +82,8 @@ def build_stock_scanner_context(
     )
     # "Held" spans every portfolio: a ticker owned in any account counts (#147).
     portfolio_tickers = trader.held_tickers()
+    tickers = tuple(record.ticker for record in records)
+    alert_read_states = alerts.states_for_tickers(tickers)
 
     recommendations: dict[str, Recommendation] = {}
     alert_states: dict[str, AlertUiState] = {}
@@ -89,10 +91,13 @@ def build_stock_scanner_context(
         recommendations[record.ticker] = classify_recommendation(
             record, is_portfolio_holding=record.ticker in portfolio_tickers
         )
+        alert_read_state = alert_read_states.get(record.ticker)
         alert_states[record.ticker] = build_alert_ui_state(
             record,
-            has_watching=alerts.has_watching(record.ticker),
-            last_alerted_at=alerts.last_alerted_at(record.ticker),
+            has_watching=alert_read_state.has_watching if alert_read_state else False,
+            last_alerted_at=(
+                alert_read_state.last_alerted_at if alert_read_state else None
+            ),
         )
 
     context: dict[str, Any] = {

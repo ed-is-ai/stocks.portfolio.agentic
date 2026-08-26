@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import threading
 from collections.abc import Callable
 from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_EVEN, Decimal
@@ -28,7 +29,11 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from app.core.money import Money
-from app.repositories.fx_quote_repo import FxQuote, FxQuoteRepository
+from app.repositories.fx_quote_repo import (
+    FxQuote,
+    FxQuoteRepository,
+    FxUnavailableAttempt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,9 @@ class GbpValuationService:
     """Values ``Money`` in GBP, backed by a same-day, digest-verifiable
     yfinance FX quote (Story 1.6, AC1-3)."""
 
+    _attempt_locks_guard = threading.Lock()
+    _attempt_locks: dict[tuple[str, str, str], threading.Lock] = {}
+
     def __init__(
         self,
         fx_quote_repo: FxQuoteRepository,
@@ -113,36 +121,66 @@ class GbpValuationService:
             )
 
         today = self._clock().date().isoformat()
+        provider = "yfinance"
+        key = (provider, pair, today)
+        with self._lock_for(key):
+            cached = self._fx_quote_repo.get_for_provider_pair_and_date(
+                provider, pair, today
+            )
+            if cached is not None:
+                return self._valued(money, cached)
+            unavailable = self._fx_quote_repo.get_unavailable_attempt(*key)
+            if unavailable is not None:
+                return self._unavailable(money, unavailable.reason)
 
-        cached = self._fx_quote_repo.get_for_pair_and_date(pair, today)
-        if cached is not None:
-            return self._valued(money, cached)
+            fetched = self._fetch_todays_quote(pair)
+            if fetched is None:
+                self._record_unavailable(provider, pair, today, "fetch_failed")
+                return self._unavailable(money, "fetch_failed")
 
-        fetched = self._fetch_todays_quote(pair)
-        if fetched is None:
-            return GbpValuationProjection(
-                money=money,
-                status="valuation_unavailable",
-                reason="fetch_failed",
+            as_of, rate = fetched
+            if as_of.isoformat() != today:
+                # Strict same-day semantics: a prior close is never a valid
+                # valuation for the requested date.
+                self._record_unavailable(provider, pair, today, "stale")
+                return self._unavailable(money, "stale")
+
+            digest = _quote_digest(provider, pair, today, rate)
+            quote = FxQuote(
+                pair=pair, provider=provider, as_of=today, rate=rate, digest=digest
+            )
+            self._fx_quote_repo.insert_or_get(quote)
+            return self._valued(money, quote)
+
+    @classmethod
+    def _lock_for(cls, key: tuple[str, str, str]) -> threading.Lock:
+        with cls._attempt_locks_guard:
+            return cls._attempt_locks.setdefault(key, threading.Lock())
+
+    def _record_unavailable(
+        self, provider: str, pair: str, today: str, reason: str
+    ) -> None:
+        try:
+            self._fx_quote_repo.record_unavailable_attempt(
+                FxUnavailableAttempt(
+                    provider=provider, pair=pair, requested_date=today, reason=reason
+                )
+            )
+        except Exception:
+            # Negative caching is an optimization. A locked/read-only
+            # database must not turn a provider miss into a valuation error.
+            logger.warning(
+                "Unable to persist unavailable FX attempt for %s on %s",
+                pair,
+                today,
+                exc_info=True,
             )
 
-        as_of, rate = fetched
-        if as_of.isoformat() != today:
-            # A real, dated quote -- just not from today (e.g. a weekend
-            # where the last available close is Friday's). Strict equality
-            # only (AC2): no multi-day grace window. Not cached under
-            # today's date -- that would poison the cache-check above for
-            # the rest of the day.
-            return GbpValuationProjection(
-                money=money, status="valuation_unavailable", reason="stale"
-            )
-
-        digest = _quote_digest("yfinance", pair, today, rate)
-        quote = FxQuote(
-            pair=pair, provider="yfinance", as_of=today, rate=rate, digest=digest
+    @staticmethod
+    def _unavailable(money: Money, reason: str) -> GbpValuationProjection:
+        return GbpValuationProjection(
+            money=money, status="valuation_unavailable", reason=reason
         )
-        self._fx_quote_repo.insert_or_get(quote)
-        return self._valued(money, quote)
 
     @staticmethod
     def _valued(money: Money, quote: FxQuote) -> GbpValuationProjection:

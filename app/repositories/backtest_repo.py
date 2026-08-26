@@ -12,6 +12,7 @@ import html
 import json
 import logging
 import sqlite3
+from threading import RLock
 from typing import Callable, Literal, Mapping, Protocol, TYPE_CHECKING, cast, overload
 from uuid import uuid4
 
@@ -1376,10 +1377,13 @@ def _migrate_bats_mic_constraints(conn: sqlite3.Connection) -> None:
     stale_replacements: list[str] = []
     for table in tables:
         replacement = f"{table}__bats_migration"
-        if conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-            (replacement,),
-        ).fetchone() is not None:
+        if (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (replacement,),
+            ).fetchone()
+            is not None
+        ):
             stale_replacements.append(replacement)
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
@@ -1420,9 +1424,7 @@ def _migrate_bats_mic_constraints(conn: sqlite3.Connection) -> None:
                 create_sql = table_sql.replace(
                     f"CREATE TABLE {table}", f"CREATE TABLE {replacement}", 1
                 )
-            create_sql = create_sql.replace(
-                legacy_constraint, expanded_constraint
-            )
+            create_sql = create_sql.replace(legacy_constraint, expanded_constraint)
             conn.execute(create_sql)
             rendered_columns = ", ".join(f'"{column}"' for column in columns)
             conn.execute(
@@ -1543,6 +1545,12 @@ class BacktestRepository:
         self._instant_clock = instant_clock
         self._id_generator = id_generator
         self._token_generator = token_generator
+        # Coverage summaries are process-local projections of immutable evidence.
+        # The lock also makes miss/verify/publish one operation for callers that
+        # share a repository instance.
+        self._snapshot_coverage_lock = RLock()
+        self._snapshot_coverage_cache: dict[str, tuple[str, CoverageSummaryV1]] = {}
+        self._snapshot_coverage_cache_limit = 16
 
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
@@ -5955,56 +5963,187 @@ class BacktestRepository:
             raise BacktestIntegrityError("active snapshot profile is invalid") from exc
 
     def snapshot_coverage(self, profile_hash: str | None = None) -> CoverageSummaryV1:
-        selected_hash = profile_hash
-        if selected_hash is None:
-            active = self.active_snapshot_profile()
-            if active is None:
-                raise BacktestIntegrityError("no active snapshot profile")
-            selected_hash = active.profile_hash
-        profile = self.snapshot_profile(selected_hash)
-        if profile is None:
-            raise BacktestIntegrityError("snapshot profile does not exist")
-        with session(self._connect) as conn:
-            rows = conn.execute(
-                """SELECT snapshot_month FROM snapshot_months
-                   WHERE profile_hash=? AND processing_complete=1
-                     AND market_complete='unknown'
-                   ORDER BY snapshot_month""",
-                (selected_hash,),
-            ).fetchall()
-            manifests = tuple(
-                self._load_verified_snapshot_month(conn, selected_hash, str(row[0]))
-                for row in rows
-            )
-        if any(item is None for item in manifests):
-            raise BacktestIntegrityError("snapshot coverage evidence is invalid")
-        manifests = tuple(item for item in manifests if item is not None)
-        months = tuple(item.snapshot_month for item in manifests)
-        intervals = self._coverage_intervals(months)
-        provenance: list[ProvenanceCoverageV1] = []
-        for quality in ("best_effort_reconstructed", "observed_bau"):
-            quality_months = tuple(
-                item.snapshot_month
-                for item in manifests
-                if item.provenance_quality == quality
-            )
-            if quality_months:
-                provenance.append(
-                    ProvenanceCoverageV1(
-                        provenance_quality=quality,
-                        snapshot_count=len(quality_months),
-                        intervals=self._coverage_intervals(quality_months),
+        with self._snapshot_coverage_lock:
+            with session(self._connect) as conn:
+                conn.execute("BEGIN")
+                selected_hash = profile_hash
+                if selected_hash is None:
+                    active_row = conn.execute(
+                        "SELECT profile_hash FROM active_snapshot_profile "
+                        "WHERE singleton_id=1"
+                    ).fetchone()
+                    if active_row is None:
+                        raise BacktestIntegrityError("no active snapshot profile")
+                    selected_hash = str(active_row[0])
+                revision = self._snapshot_coverage_revision(conn, selected_hash)
+                cached = self._snapshot_coverage_cache.get(selected_hash)
+                if cached is not None and cached[0] == revision:
+                    # Re-run the profile authority check on every hit. The
+                    # revision detects database changes; this preserves the
+                    # existing runtime-authority failure semantics as well.
+                    profile = self._load_snapshot_profile_on_connection(
+                        conn, selected_hash
                     )
+                    self._validate_profile_authority(profile)
+                    return cached[1]
+
+                # A failed integrity check must not leave an older value that
+                # could be returned by a later lookup.
+                self._snapshot_coverage_cache.pop(selected_hash, None)
+                profile = self._load_snapshot_profile_on_connection(conn, selected_hash)
+                self._validate_profile_authority(profile)
+                rows = conn.execute(
+                    """SELECT snapshot_month FROM snapshot_months
+                       WHERE profile_hash=? AND processing_complete=1
+                         AND market_complete='unknown'
+                       ORDER BY snapshot_month""",
+                    (selected_hash,),
+                ).fetchall()
+                manifests = tuple(
+                    self._load_verified_snapshot_month(conn, selected_hash, str(row[0]))
+                    for row in rows
                 )
-        return CoverageSummaryV1(
-            profile_hash=selected_hash,
-            display_version=profile.display_version,
-            earliest_month=None if not months else months[0],
-            latest_month=None if not months else months[-1],
-            snapshot_count=len(months),
-            intervals=intervals,
-            provenance=tuple(provenance),
-        )
+                if any(item is None for item in manifests):
+                    raise BacktestIntegrityError(
+                        "snapshot coverage evidence is invalid"
+                    )
+                manifests = tuple(item for item in manifests if item is not None)
+                months = tuple(item.snapshot_month for item in manifests)
+                provenance: list[ProvenanceCoverageV1] = []
+                for quality in ("best_effort_reconstructed", "observed_bau"):
+                    quality_months = tuple(
+                        item.snapshot_month
+                        for item in manifests
+                        if item.provenance_quality == quality
+                    )
+                    if quality_months:
+                        provenance.append(
+                            ProvenanceCoverageV1(
+                                provenance_quality=quality,
+                                snapshot_count=len(quality_months),
+                                intervals=self._coverage_intervals(quality_months),
+                            )
+                        )
+                summary = CoverageSummaryV1(
+                    profile_hash=selected_hash,
+                    display_version=profile.display_version,
+                    earliest_month=None if not months else months[0],
+                    latest_month=None if not months else months[-1],
+                    snapshot_count=len(months),
+                    intervals=self._coverage_intervals(months),
+                    provenance=tuple(provenance),
+                )
+                # Recompute against the same explicit SQLite read snapshot. A
+                # writer racing this read cannot cause a partial projection to
+                # be published, and its committed revision will miss next time.
+                verified_revision = self._snapshot_coverage_revision(
+                    conn, selected_hash
+                )
+                if (
+                    selected_hash not in self._snapshot_coverage_cache
+                    and len(self._snapshot_coverage_cache)
+                    >= self._snapshot_coverage_cache_limit
+                ):
+                    self._snapshot_coverage_cache.pop(
+                        next(iter(self._snapshot_coverage_cache))
+                    )
+                self._snapshot_coverage_cache[selected_hash] = (
+                    verified_revision,
+                    summary,
+                )
+                return summary
+
+    @staticmethod
+    def _load_snapshot_profile_on_connection(
+        conn: sqlite3.Connection, profile_hash: str
+    ) -> SnapshotProfileV1:
+        row = conn.execute(
+            """SELECT canonical_profile_json, display_version, roster_digest,
+                      scanner_schema_version, calendar_dataset_version,
+                      calendar_dataset_digest, cadence
+               FROM snapshot_profiles WHERE profile_hash=?""",
+            (profile_hash,),
+        ).fetchone()
+        if row is None:
+            raise BacktestIntegrityError("snapshot profile does not exist")
+        return BacktestRepository._validated_profile_row(profile_hash, row)
+
+    @staticmethod
+    def _snapshot_coverage_revision(conn: sqlite3.Connection, profile_hash: str) -> str:
+        """Return a cheap identity for all evidence used by coverage reads.
+
+        This intentionally hashes stored bytes and denormalized columns rather
+        than parsing them. Thus cache hits avoid month verification, while any
+        committed profile, roster, alias, month, member, or result mutation
+        changes the identity and forces the normal fail-closed verifier.
+        """
+        profile_row = conn.execute(
+            "SELECT * FROM snapshot_profiles WHERE profile_hash=?", (profile_hash,)
+        ).fetchone()
+        if profile_row is None:
+            raise BacktestIntegrityError("snapshot profile does not exist")
+        roster_digest = str(profile_row[3])
+        parts: list[str] = []
+        for table, query, params in (
+            (
+                "profile",
+                "SELECT * FROM snapshot_profiles WHERE profile_hash=?",
+                (profile_hash,),
+            ),
+            ("active", "SELECT * FROM active_snapshot_profile", ()),
+            (
+                "months",
+                "SELECT * FROM snapshot_months WHERE profile_hash=? ORDER BY snapshot_month",
+                (profile_hash,),
+            ),
+            (
+                "members",
+                "SELECT * FROM snapshot_members WHERE profile_hash=? ORDER BY snapshot_month, security_id",
+                (profile_hash,),
+            ),
+            (
+                "results",
+                "SELECT * FROM monthly_scan_results WHERE profile_hash=? ORDER BY snapshot_month, security_id",
+                (profile_hash,),
+            ),
+            (
+                "roster",
+                "SELECT * FROM reconstruction_rosters WHERE roster_digest=?",
+                (roster_digest,),
+            ),
+            (
+                "roster_members",
+                "SELECT * FROM reconstruction_roster_members WHERE roster_digest=? ORDER BY security_id",
+                (roster_digest,),
+            ),
+        ):
+            parts.append(table)
+            parts.extend(repr(tuple(row)) for row in conn.execute(query, params))
+        alias_revision = conn.execute(
+            "SELECT alias_revision FROM reconstruction_rosters WHERE roster_digest=?",
+            (roster_digest,),
+        ).fetchone()
+        if alias_revision is not None:
+            parts.extend(
+                [
+                    "aliases",
+                    *(
+                        repr(tuple(row))
+                        for row in conn.execute(
+                            "SELECT * FROM security_alias_manifests WHERE alias_revision=?",
+                            (str(alias_revision[0]),),
+                        )
+                    ),
+                ]
+            )
+            parts.extend(
+                repr(tuple(row))
+                for row in conn.execute(
+                    "SELECT * FROM security_alias_entries WHERE alias_revision=? ORDER BY provider, mic, observed_symbol",
+                    (str(alias_revision[0]),),
+                )
+            )
+        return sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
     @staticmethod
     def _coverage_intervals(months: tuple[str, ...]) -> tuple[CoverageIntervalV1, ...]:
