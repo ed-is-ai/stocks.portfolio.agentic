@@ -84,6 +84,12 @@ class _StubTrader:
     def list_cash_balances(self, portfolio_id=None):
         return []
 
+    def get_cached_ticker_currencies(self, tickers):
+        return {}
+
+    def save_ticker_currencies(self, currencies):
+        pass
+
 
 class _StubEvaluator:
     def evaluate(self, position, stock):
@@ -611,6 +617,50 @@ def test_ticker_currencies_prefers_price_cache_and_only_resolves_misses(
         "VOD.L": "GBP",
     }
     assert misses == ["VOD.L"]
+
+
+def test_ticker_currencies_uses_persistent_cache_before_live_lookup(
+    monkeypatch,
+) -> None:
+    """A ticker absent from the live price cache (delisted/no-longer-scanned)
+    but present in the durable ticker-currency cache must never trigger a
+    live Yahoo lookup -- this is the whole point of the durable cache: it
+    survives process restarts where the in-process ``@lru_cache`` cannot.
+    """
+    trader = _StubTrader()
+    trader.load_price_cache = lambda: ({}, None, {})  # type: ignore[attr-defined]
+    trader.get_cached_ticker_currencies = lambda tickers: {  # type: ignore[attr-defined]
+        "DELISTED": "USD"
+    }
+    svc = PortfolioService(
+        cast(TraderService, trader), cast(ExitEvaluator, _StubEvaluator())
+    )
+
+    def fail_if_called(ticker: str) -> str:
+        raise AssertionError("must not resolve a durably-cached ticker live")
+
+    monkeypatch.setattr(svc, "ticker_currency", fail_if_called)
+
+    assert svc.ticker_currencies(["DELISTED"]) == {"DELISTED": "USD"}
+
+
+def test_ticker_currencies_persists_newly_resolved_misses(monkeypatch) -> None:
+    """A ticker resolved via a live lookup (durable cache miss) must be
+    saved back to the durable cache so a future process restart doesn't
+    re-pay the same lookup."""
+    trader = _StubTrader()
+    trader.load_price_cache = lambda: ({}, None, {})  # type: ignore[attr-defined]
+    saved: dict[str, str] = {}
+    trader.save_ticker_currencies = lambda currencies: saved.update(  # type: ignore[attr-defined]
+        currencies
+    )
+    svc = PortfolioService(
+        cast(TraderService, trader), cast(ExitEvaluator, _StubEvaluator())
+    )
+    monkeypatch.setattr(svc, "ticker_currency", lambda ticker: "HKD")
+
+    assert svc.ticker_currencies(["0700.HK"]) == {"0700.HK": "HKD"}
+    assert saved == {"0700.HK": "HKD"}
 
 
 def test_ticker_currency_resolves_canonical_ticker_fed_back(monkeypatch) -> None:

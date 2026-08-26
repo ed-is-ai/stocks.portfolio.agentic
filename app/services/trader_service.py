@@ -109,6 +109,11 @@ class TraderService:
         """Return cached ``{date: rate}`` rows for one FX pair."""
         return self._agent.get_cached_fx_rates(dates, pair)
 
+    def get_cached_ticker_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return persisted ``{ticker: currency}`` rows for tickers with no
+        live price-cache entry (delisted/no-longer-scanned)."""
+        return self._agent.get_cached_ticker_currencies(tickers)
+
     # --- writes -----------------------------------------------------------
 
     def save_price_cache(
@@ -122,6 +127,11 @@ class TraderService:
     def save_fx_rates(self, rates: dict[str, float], pair: str = "GBPUSD=X") -> None:
         """Persist resolved ``{date: rate}`` rows for one FX pair."""
         self._agent.save_fx_rates(rates, pair)
+
+    def save_ticker_currencies(self, currencies: dict[str, str]) -> None:
+        """Persist resolved ``{ticker: currency}`` rows so a delisted or
+        no-longer-scanned ticker's currency lookup survives restarts."""
+        self._agent.save_ticker_currencies(currencies)
 
     def refresh_portfolio_prices(
         self,

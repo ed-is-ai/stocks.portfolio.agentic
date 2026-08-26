@@ -118,6 +118,11 @@ CREATE TABLE IF NOT EXISTS fx_quotes (
     rate         TEXT NOT NULL,
     fetched_at   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS ticker_currency_cache (
+    ticker      TEXT PRIMARY KEY,
+    currency    TEXT NOT NULL,
+    resolved_at TEXT NOT NULL
+);
 """
 
 #: Name of the default portfolio existing single-portfolio data migrates into.

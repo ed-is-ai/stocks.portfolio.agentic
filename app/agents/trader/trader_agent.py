@@ -47,6 +47,7 @@ from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
+from app.repositories.ticker_currency_cache_repo import TickerCurrencyCacheRepository
 from app.repositories.trades_repo import TradesRepository
 from app.schemas.trade import Portfolio
 
@@ -225,6 +226,7 @@ class TraderAgent(Agent):
     _portfolios: PortfoliosRepository = PrivateAttr()
     _snapshots: PortfolioSnapshotsRepository = PrivateAttr()
     _fx_rates: FxRateCacheRepository = PrivateAttr()
+    _ticker_currency_cache: TickerCurrencyCacheRepository = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
@@ -238,6 +240,7 @@ class TraderAgent(Agent):
         self._portfolios = PortfoliosRepository(connect)
         self._snapshots = PortfolioSnapshotsRepository(connect)
         self._fx_rates = FxRateCacheRepository(connect)
+        self._ticker_currency_cache = TickerCurrencyCacheRepository(connect)
         self._init_db()
 
     # --- portfolio CRUD (#147) -------------------------------------------
@@ -1628,6 +1631,16 @@ class TraderAgent(Agent):
     def save_fx_rates(self, rates: dict[str, float], pair: str = "GBPUSD=X") -> None:
         """Persist resolved ``{date: rate}`` rows for one FX pair."""
         self._fx_rates.upsert_many(rates, pair)
+
+    def get_cached_ticker_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return persisted ``{ticker: currency}`` rows for tickers with no
+        live price-cache entry (delisted/no-longer-scanned)."""
+        return self._ticker_currency_cache.get_many(tickers)
+
+    def save_ticker_currencies(self, currencies: dict[str, str]) -> None:
+        """Persist resolved ``{ticker: currency}`` rows so a delisted or
+        no-longer-scanned ticker's currency lookup survives restarts."""
+        self._ticker_currency_cache.upsert_many(currencies)
 
     def set_cash_balance(self, amount: float, portfolio_id: int | None = None) -> None:
         """Persist a portfolio's cash balance (Running Balance) to account_state."""

@@ -302,6 +302,14 @@ class PortfolioService:
         Realised P&L can contain many historical tickers. Resolving each one
         serially through Yahoo on every render made the tab's latency scale
         with the size of the account instead of the local FIFO calculation.
+
+        A ticker no longer in the live price-scan cache (delisted, or sold
+        long enough ago to have dropped off it) falls through to a second,
+        durable cache (``ticker_currency_cache``, keyed only by ticker) before
+        paying for a live Yahoo lookup -- that lookup's in-process
+        ``@lru_cache`` on ``ticker_currency`` resets on every server restart,
+        so without this a delisted ticker re-pays its (failing) network
+        lookup on every restart forever.
         """
         unique = tuple(dict.fromkeys(tickers))
         if not unique:
@@ -317,10 +325,18 @@ class PortfolioService:
         if not missing:
             return resolved
 
-        worker_count = min(8, len(missing))
+        cached = self._trader.get_cached_ticker_currencies(missing)
+        resolved.update(cached)
+        still_missing = [ticker for ticker in missing if ticker not in cached]
+        if not still_missing:
+            return resolved
+
+        worker_count = min(8, len(still_missing))
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            currencies = executor.map(self.ticker_currency, missing)
-            resolved.update(zip(missing, currencies, strict=True))
+            currencies = executor.map(self.ticker_currency, still_missing)
+            newly_resolved = dict(zip(still_missing, currencies, strict=True))
+        resolved.update(newly_resolved)
+        self._trader.save_ticker_currencies(newly_resolved)
         return resolved
 
     # --- live price fetching ---------------------------------------------
