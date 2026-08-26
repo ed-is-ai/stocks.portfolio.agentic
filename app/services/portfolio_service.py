@@ -11,6 +11,7 @@ import json
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
@@ -37,6 +38,25 @@ _HISTORICAL_FX_PAIR: dict[str, str] = {
 }
 _YFINANCE_SYMBOL_OVERRIDES: dict[str, str] = {"9988": "9988.HK"}
 _PRICE_DOWNLOAD_CHUNK_SIZE = 50
+_CASH_BALANCE_UNSET = object()
+
+
+@dataclass(frozen=True)
+class PortfolioInputSnapshot:
+    """Inputs read once while building a single portfolio render context.
+
+    This deliberately is not a cache: callers create one snapshot for one
+    response only, so subsequent requests always observe the current ledger.
+    """
+
+    analysis_records: list[StockRecord]
+    portfolios: list[Any]
+    chart_data: dict[str, list]
+    trades: list[Any]
+    cash_flows: list[Any]
+    reconciliation_issue_count: int
+    cash_balances: list[tuple[str, Any, str | None]]
+    cash_balance: float | None
 
 
 class PortfolioService:
@@ -695,7 +715,10 @@ class PortfolioService:
         }
 
     def _trade_markers(
-        self, chart_data: dict, portfolio_id: int | None = None
+        self,
+        chart_data: dict,
+        portfolio_id: int | None = None,
+        trades: list[Any] | None = None,
     ) -> tuple[list, list, list, list]:
         """Return (buy_values, sell_values, buy_labels, sell_labels) aligned to labels.
 
@@ -722,7 +745,8 @@ class PortfolioService:
         buy_tips: list = [None] * n
         sell_tips: list = [None] * n
 
-        trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
+        if trades is None:
+            trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
         trades.sort(key=lambda t: t.date)
 
         for trade in trades:
@@ -753,22 +777,107 @@ class PortfolioService:
 
     # --- context builders -------------------------------------------------
 
+    def portfolio_input_snapshot(
+        self,
+        portfolio_id: int | None,
+        *,
+        analysis_records: list[StockRecord] | None = None,
+        portfolios: list[Any] | None = None,
+        cash_balance: float | None | object = _CASH_BALANCE_UNSET,
+    ) -> PortfolioInputSnapshot:
+        """Read all mutable inputs needed by one portfolio partial once."""
+        if portfolio_id is None:
+            return PortfolioInputSnapshot(
+                analysis_records=analysis_records
+                if analysis_records is not None
+                else self.load_analysis(),
+                portfolios=portfolios
+                if portfolios is not None
+                else self._trader.list_portfolios(),
+                chart_data=self._load_portfolio_history(),
+                # Legacy unscoped refreshes render aggregate chart markers too.
+                # Preserve that output while still loading the history once.
+                trades=self._trader.get_trade_history(),
+                cash_flows=[],
+                reconciliation_issue_count=0,
+                cash_balances=[],
+                cash_balance=(
+                    self._trader.get_cash_balance()
+                    if cash_balance is _CASH_BALANCE_UNSET
+                    else cash_balance
+                ),
+            )
+
+        trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
+        return PortfolioInputSnapshot(
+            analysis_records=analysis_records
+            if analysis_records is not None
+            else self.load_analysis(),
+            portfolios=portfolios
+            if portfolios is not None
+            else self._trader.list_portfolios(),
+            chart_data=self._load_portfolio_history(portfolio_id),
+            trades=trades,
+            cash_flows=self._trader.get_cash_flows(portfolio_id),
+            reconciliation_issue_count=len(
+                self._trader.list_reconciliation_issues(portfolio_id)
+            ),
+            cash_balances=self._trader.list_cash_balances(portfolio_id),
+            # A caller that already read cash for its response (notably a
+            # successful import) must not make this snapshot depend on a
+            # second mutable-ledger read.
+            cash_balance=(
+                self._trader.get_cash_balance(portfolio_id)
+                if cash_balance is _CASH_BALANCE_UNSET
+                else cash_balance
+            ),
+        )
+
+    def with_current_chart_data(
+        self, snapshot: PortfolioInputSnapshot, portfolio_id: int | None
+    ) -> PortfolioInputSnapshot:
+        """Refresh chart history after a route persists a new value snapshot."""
+        return replace(snapshot, chart_data=self._load_portfolio_history(portfolio_id))
+
+    def positions_from_input_snapshot(
+        self,
+        snapshot: PortfolioInputSnapshot,
+        current_prices: dict[str, float] | None = None,
+        display_info: dict[str, tuple[float, str]] | None = None,
+    ) -> list[Position]:
+        """Calculate positions from the exact trade read in ``snapshot``."""
+        return self._trader.get_portfolio_from_trades(
+            snapshot.trades, current_prices, display_info
+        )
+
     def portfolio_partial_context(
         self,
         positions: list[Position],
         prices_as_of: str | None = None,
         gbpusd_rate: float | None = None,
-        cash_balance: float | None = None,
+        cash_balance: float | None | object = _CASH_BALANCE_UNSET,
         error_message: str | None = None,
         warning_message: str | None = None,
         portfolio_id: int | None = None,
+        input_snapshot: PortfolioInputSnapshot | None = None,
     ) -> dict:
         """Build the template context for the portfolio partial.
 
         Enriches positions with exit signals/next pivots, computes GBP-equivalent
         summary totals, and serialises chart data. Rendering stays in the route.
         """
-        records = self.load_analysis()
+        snapshot = input_snapshot or self.portfolio_input_snapshot(
+            portfolio_id, cash_balance=cash_balance
+        )
+        # The normal render derives its cash from the same snapshot as the
+        # chart, trades, and positions. An explicitly supplied value wins for
+        # backwards-compatible callers such as import responses.
+        effective_cash_balance = (
+            snapshot.cash_balance
+            if cash_balance is _CASH_BALANCE_UNSET
+            else cash_balance
+        )
+        records = snapshot.analysis_records
         analysis_map = {r.ticker: r for r in records}
         for pos in positions:
             stock = analysis_map.get(pos.ticker)
@@ -782,16 +891,16 @@ class PortfolioService:
             self._amount_in_gbp(p.total_cost, p.price_currency, fx) for p in positions
         ]
         total_cost_gbp = sum(amount for amount in valued_costs if amount is not None)
-        if cash_balance is not None:
-            total_cost_gbp += cash_balance
+        if effective_cash_balance is not None:
+            total_cost_gbp += effective_cash_balance
         positions_with_value = [p for p in positions if p.current_value is not None]
         valued_values = [
             self._amount_in_gbp(p.current_value, p.price_currency, fx)  # type: ignore[arg-type]
             for p in positions_with_value
         ]
         total_value_gbp = sum(amount for amount in valued_values if amount is not None)
-        if cash_balance is not None:
-            total_value_gbp += cash_balance
+        if effective_cash_balance is not None:
+            total_value_gbp += effective_cash_balance
         total_cost_gbp_valued = sum(
             amount
             for amount in (
@@ -800,30 +909,24 @@ class PortfolioService:
             )
             if amount is not None
         )
-        total_pnl_gbp = total_value_gbp - total_cost_gbp_valued - (cash_balance or 0)
+        total_pnl_gbp = (
+            total_value_gbp - total_cost_gbp_valued - (effective_cash_balance or 0)
+        )
 
-        chart_data = self._load_portfolio_history(portfolio_id)
+        chart_data = snapshot.chart_data
         buy_vals, sell_vals, buy_tips, sell_tips = self._trade_markers(
-            chart_data, portfolio_id
+            chart_data, portfolio_id, snapshot.trades
         )
         # Always attach the account switcher metadata so any render of the
         # partial (trade, import, refresh, quick-add) keeps the selector (#147).
-        portfolios = self._trader.list_portfolios()
+        portfolios = snapshot.portfolios
         active_portfolio = next((p for p in portfolios if p.id == portfolio_id), None)
         # Cash-flow ledger for the selected account — read-only activity view
         # (#161). The balance still comes from the provider Running Balance.
-        cash_flows = (
-            self._trader.get_cash_flows(portfolio_id)
-            if portfolio_id is not None
-            else []
-        )
+        cash_flows = snapshot.cash_flows
         # Story 1.5, AC5: a count-only pointer to the dedicated
         # reconciliation view -- the detail lives there, not here.
-        reconciliation_issue_count = (
-            len(self._trader.list_reconciliation_issues(portfolio_id))
-            if portfolio_id is not None
-            else 0
-        )
+        reconciliation_issue_count = snapshot.reconciliation_issue_count
         # Story 1.6, AC3: every currency this portfolio holds a cash
         # balance in, each paired with a GBP Valuation Projection -- never
         # a fabricated GBP figure. Additive alongside the legacy GBP-only
@@ -838,9 +941,7 @@ class PortfolioService:
                         Money(amount=amount, currency=currency)
                     ),
                 }
-                for currency, amount, as_of in self._trader.list_cash_balances(
-                    portfolio_id
-                )
+                for currency, amount, as_of in snapshot.cash_balances
             ]
             if portfolio_id is not None
             else []
@@ -851,11 +952,7 @@ class PortfolioService:
         # ``Position`` is an aggregate over possibly-several trades, not
         # one row this schema can tag itself.
         opening_lot_tickers = (
-            {
-                t.ticker
-                for t in self._trader.get_trade_history(portfolio_id=portfolio_id)
-                if t.source == "opening_lot"
-            }
+            {t.ticker for t in snapshot.trades if t.source == "opening_lot"}
             if portfolio_id is not None
             else set()
         )
@@ -873,7 +970,7 @@ class PortfolioService:
             "total_value_gbp": total_value_gbp,
             "total_pnl_gbp": total_pnl_gbp,
             "total_cost_gbp_valued": total_cost_gbp_valued,
-            "cash_balance": cash_balance,
+            "cash_balance": effective_cash_balance,
             "prices_as_of": prices_as_of,
             "gbpusd_rate": gbpusd_rate,
             "error_message": error_message,
@@ -912,18 +1009,19 @@ class PortfolioService:
         if active_id is None or not any(p.id == active_id for p in portfolios):
             active_id = portfolios[0].id
 
+        snapshot = self.portfolio_input_snapshot(active_id, portfolios=portfolios)
         cached_prices, prices_as_of, display_info = self._trader.load_price_cache()
-        analysis_prices = self.current_prices(self.load_analysis())
+        analysis_prices = self.current_prices(snapshot.analysis_records)
         prices = {**cached_prices, **analysis_prices}
-        positions = self._trader.get_portfolio(
-            prices or None, display_info or None, active_id
+        positions = self.positions_from_input_snapshot(
+            snapshot, prices or None, display_info or None
         )
         gbpusd = cached_prices.get("__GBPUSD__")
-        cash_balance = self._trader.get_cash_balance(active_id)
         return self.portfolio_partial_context(
             positions,
             prices_as_of=prices_as_of,
             gbpusd_rate=gbpusd,
-            cash_balance=cash_balance,
+            cash_balance=snapshot.cash_balance,
             portfolio_id=active_id,
+            input_snapshot=snapshot,
         )

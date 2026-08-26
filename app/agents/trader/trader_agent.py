@@ -683,6 +683,45 @@ class TraderAgent(Agent):
         rows = self._trades.open_rows(portfolio_id)
         return self._compute_positions(rows, current_prices, display_info)
 
+    def get_portfolio_from_trades(
+        self,
+        trades: list[Trade],
+        current_prices: dict[str, float] | None = None,
+        display_info: dict[str, tuple[float, str]] | None = None,
+    ) -> list[Position]:
+        """Compute positions from one already-read trade snapshot.
+
+        ``get_trade_history()`` is intentionally presentation-ordered, while
+        position replay must retain ``TradesRepository.open_rows()`` ordering.
+        Reconstruct that ordered, valid-ticker projection here so a request
+        can share one trade read between holdings, chart markers, and opening
+        lot indicators without changing average-cost semantics.
+        """
+        ordered = sorted(
+            (trade for trade in trades if trade.ticker not in {"", "n/a", "N/A"}),
+            key=lambda trade: (
+                trade.date,
+                -(trade.source_row_index if trade.source_row_index is not None else -1),
+                trade.idempotency_key is not None,
+                trade.idempotency_key or "",
+                trade.id is not None,
+                trade.id or 0,
+            ),
+        )
+        rows = [
+            (
+                trade.ticker,
+                trade.action,
+                trade.shares,
+                trade.price,
+                trade.date,
+                trade.stop_loss,
+                trade.entry_price,
+            )
+            for trade in ordered
+        ]
+        return self._compute_positions(rows, current_prices, display_info)
+
     @staticmethod
     def _compute_positions(
         rows: list[tuple[Any, ...]],

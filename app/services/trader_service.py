@@ -77,6 +77,17 @@ class TraderService:
         """Return open positions, optionally valued with live prices."""
         return self._agent.get_portfolio(current_prices, display_info, portfolio_id)
 
+    def get_portfolio_from_trades(
+        self,
+        trades: list[Trade],
+        current_prices: dict[str, float] | None = None,
+        display_info: dict[str, tuple[float, str]] | None = None,
+    ) -> list[Position]:
+        """Return positions from an already-read request trade snapshot."""
+        return self._agent.get_portfolio_from_trades(
+            trades, current_prices, display_info
+        )
+
     def get_trade_history(
         self, ticker: str | None = None, portfolio_id: int | None = None
     ) -> list[Trade]:

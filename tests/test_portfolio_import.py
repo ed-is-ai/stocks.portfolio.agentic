@@ -44,7 +44,6 @@ def mocked_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     mock_trader.import_sipp.return_value = SippImportResult(
         cash_balance=5000.0, buy_count=2, sell_count=0, cash_flow_count=1
     )
-    mock_trader.get_portfolio.return_value = [object(), object()]
     mock_trader.get_portfolio_meta.return_value = None
     mock_portfolio = MagicMock()
     mock_portfolio.default_portfolio_context.return_value = {}
@@ -75,7 +74,7 @@ def _upload(
 
 
 def test_happy_path_passes_uploaded_bytes_directly(mocked_import):
-    mock_trader, _, _, tmp_path = mocked_import
+    mock_trader, mock_portfolio, _, tmp_path = mocked_import
     resp = _upload()
 
     assert resp.status_code == 200
@@ -84,7 +83,57 @@ def test_happy_path_passes_uploaded_bytes_directly(mocked_import):
     mock_trader.import_sipp.assert_called_once()
     assert mock_trader.import_sipp.call_args.args[0] == _CSV
     assert not (tmp_path / "SIPP").exists()
-    mock_trader.get_portfolio.assert_called_once()
+    mock_portfolio.portfolio_input_snapshot.assert_called_once_with(
+        1, cash_balance=5000.0
+    )
+    mock_portfolio.positions_from_input_snapshot.assert_called_once_with(
+        mock_portfolio.portfolio_input_snapshot.return_value
+    )
+
+
+def test_refresh_uses_one_public_input_snapshot_for_positions_and_context(
+    mocked_import,
+):
+    mock_trader, mock_portfolio, _, _ = mocked_import
+    snapshot = MagicMock(cash_balance=5000.0)
+    chart_snapshot = MagicMock(cash_balance=5000.0)
+    initial_positions = [MagicMock(ticker="AAPL")]
+    refreshed_positions = [MagicMock(ticker="AAPL")]
+    mock_portfolio.portfolio_input_snapshot.return_value = snapshot
+    mock_portfolio.with_current_chart_data.return_value = chart_snapshot
+    mock_portfolio.positions_from_input_snapshot.side_effect = [
+        initial_positions,
+        refreshed_positions,
+    ]
+    mock_portfolio.gbpusd_rate.return_value = 1.25
+    mock_portfolio.load_ticker_aliases.return_value = {}
+    mock_portfolio.fetch_all_prices_with_failures.return_value = (
+        {"AAPL": 100.0},
+        {},
+        set(),
+    )
+    mock_trader.load_price_cache.return_value = ({"AAPL": 100.0}, "now", {})
+
+    response = client.post("/api/portfolio/refresh", headers={"X-Auth-Token": "s3cret"})
+
+    assert response.status_code == 200
+    mock_portfolio.portfolio_input_snapshot.assert_called_once_with(None)
+    assert mock_portfolio.positions_from_input_snapshot.call_args_list == [
+        ((snapshot,), {}),
+        ((snapshot, {"AAPL": 100.0}, {}), {}),
+    ]
+    mock_portfolio.portfolio_partial_context.assert_called_once_with(
+        refreshed_positions,
+        prices_as_of="now",
+        gbpusd_rate=1.25,
+        cash_balance=5000.0,
+        warning_message=None,
+        portfolio_id=None,
+        input_snapshot=chart_snapshot,
+    )
+    mock_portfolio.with_current_chart_data.assert_called_once_with(snapshot, None)
+    mock_trader.get_portfolio.assert_not_called()
+    mock_trader.refresh_portfolio_prices.assert_not_called()
 
 
 def test_refresh_keeps_cached_failures_and_names_unavailable_symbols(mocked_import):
@@ -94,8 +143,9 @@ def test_refresh_keeps_cached_failures_and_names_unavailable_symbols(mocked_impo
         SimpleNamespace(ticker="MISSING"),
         SimpleNamespace(ticker="FRESH"),
     ]
-    mock_trader.get_portfolio.return_value = positions
-    mock_trader.refresh_portfolio_prices.return_value = positions
+    snapshot = MagicMock(cash_balance=0.0)
+    mock_portfolio.portfolio_input_snapshot.return_value = snapshot
+    mock_portfolio.positions_from_input_snapshot.side_effect = [positions, positions]
     mock_trader.load_price_cache.return_value = (
         {"CACHED": 10.0},
         "now",
@@ -113,11 +163,18 @@ def test_refresh_keeps_cached_failures_and_names_unavailable_symbols(mocked_impo
     response = client.post("/api/portfolio/refresh", headers={"X-Auth-Token": "s3cret"})
 
     assert response.status_code == 200
-    mock_trader.refresh_portfolio_prices.assert_called_once_with(
-        {"CACHED": 10.0, "FRESH": 20.0},
-        {"CACHED": (10.0, "GBP"), "FRESH": (20.0, "GBP")},
-        None,
-    )
+    assert mock_portfolio.positions_from_input_snapshot.call_args_list == [
+        ((snapshot,), {}),
+        (
+            (
+                snapshot,
+                {"CACHED": 10.0, "FRESH": 20.0},
+                {"CACHED": (10.0, "GBP"), "FRESH": (20.0, "GBP")},
+            ),
+            {},
+        ),
+    ]
+    mock_trader.refresh_portfolio_prices.assert_not_called()
     assert (
         "using cached values for: CACHED"
         in (
