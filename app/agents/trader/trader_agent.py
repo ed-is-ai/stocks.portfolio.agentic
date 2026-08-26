@@ -50,6 +50,9 @@ from app.repositories.price_cache_repo import PriceCacheRepository
 from app.repositories.ticker_currency_cache_repo import TickerCurrencyCacheRepository
 from app.repositories.trades_repo import TradesRepository
 from app.schemas.trade import Portfolio
+from app.services.portfolio_import.contract_registry import ContractRegistryError
+from app.services.portfolio_import.normalizer import ContractNormalizer
+from app.services.portfolio_import.registry_loader import get_contract_registry
 
 logger = logging.getLogger(__name__)
 
@@ -61,19 +64,6 @@ _DB_PATH = TRADES_DB
 # "ï»¿" produced when a BOM gets decoded as Latin-1 and re-saved as UTF-8
 # (#171).
 _HEADER_BOM_NOISE_RE = re.compile(r"^(?:﻿|ï»¿)+")
-
-# Columns a SIPP CSV must carry for the import to make sense (Sedol optional).
-REQUIRED_SIPP_COLUMNS = (
-    "Date",
-    "Symbol",
-    "Quantity",
-    "Price",
-    "Description",
-    "Reference",
-    "Debit",
-    "Credit",
-    "Running Balance",
-)
 
 
 class SippImportError(ValueError):
@@ -1097,12 +1087,25 @@ class TraderAgent(Agent):
         fieldnames = reader.fieldnames
         rows = list(reader)
 
-        present = set(fieldnames)
-        missing = [c for c in REQUIRED_SIPP_COLUMNS if c not in present]
-        if missing:
-            raise SippImportError(
-                "CSV is missing required columns: " + ", ".join(missing)
-            )
+        # Contract detection is header-based and deterministic (GH-310):
+        # it replaces the previous hardcoded "every REQUIRED_SIPP_COLUMNS
+        # cell present" check with a registry lookup over versioned,
+        # data-driven contracts. Zero or ambiguous matches fail closed
+        # before any DB write, preserving the route's existing
+        # ``except SippImportError`` 400 contract.
+        try:
+            contract = get_contract_registry().detect(fieldnames or [])
+        except ContractRegistryError as exc:
+            raise SippImportError(str(exc)) from exc
+
+        # Every downstream phase reads canonical field keys, never raw
+        # provider column names -- ``_detect_reconciliation_issues`` is the
+        # one exception: it's independently unit-tested against raw
+        # column-name dicts, so it keeps reading ``rows`` (the raw rows)
+        # directly rather than the normalized view below.
+        normalized_rows = [
+            ContractNormalizer.normalize_row(contract, row) for row in rows
+        ]
 
         # Detection has no DB side effects of its own (Story 1.5, AC5) --
         # run it once the rows are available, independent of the main
@@ -1149,10 +1152,10 @@ class TraderAgent(Agent):
         # rarely-changing local config file (no per-row/caching concern).
         aliases = load_aliases()
 
-        for idx, row in enumerate(rows):
-            qty = row.get("Quantity", "").strip()
-            symbol = row.get("Symbol", "").strip()
-            reference_raw = row.get("Reference", "").strip()
+        for idx, row in enumerate(normalized_rows):
+            qty = row.get("quantity", "").strip()
+            symbol = row.get("security_symbol", "").strip()
+            reference_raw = row.get("reference", "").strip()
             # Blank/"n/a" means "this provider didn't give one" — treat it
             # as no reference (None), not a literal value. Every insert is
             # deduped per-portfolio on (portfolio_id, reference) via a
@@ -1182,8 +1185,8 @@ class TraderAgent(Agent):
             # amounts: a parse failure and a blank cell both resolve to
             # None/0, which would make "populated" indistinguishable from
             # "genuinely absent".
-            debit_raw = row.get("Debit", "").strip()
-            credit_raw = row.get("Credit", "").strip()
+            debit_raw = row.get("debit", "").strip()
+            credit_raw = row.get("credit", "").strip()
             if debit_raw not in ("", "n/a") and credit_raw not in ("", "n/a"):
                 failed_rows.append(
                     f"row {row_label}: contradictory row has both Debit "
@@ -1192,14 +1195,14 @@ class TraderAgent(Agent):
                 continue
 
             debit_money, debit_marker = parse_field_money(
-                row.get("Debit", ""), "Debit", row_label
+                row.get("debit", ""), "Debit", row_label
             )
             credit_money, credit_marker = parse_field_money(
-                row.get("Credit", ""), "Credit", row_label
+                row.get("credit", ""), "Credit", row_label
             )
-            rb_raw = row.get("Running Balance", "").strip()
+            rb_raw = row.get("running_balance", "").strip()
             rb_money, rb_marker = parse_field_money(
-                row.get("Running Balance", ""), "Running Balance", row_label
+                row.get("running_balance", ""), "Running Balance", row_label
             )
             # A trade row's Price can be a genuinely ambiguous 3dp amount
             # (e.g. "£2.351") that's indistinguishable from a grouped
@@ -1212,9 +1215,9 @@ class TraderAgent(Agent):
             )
             debit = debit_money.amount if debit_money else Decimal("0")
             credit = credit_money.amount if credit_money else Decimal("0")
-            date = _to_iso_date(row.get("Date", "").strip())
-            sedol = row.get("Sedol", "").strip()
-            description = row.get("Description", "").strip()
+            date = _to_iso_date(row.get("date", "").strip())
+            sedol = row.get("security_identifier", "").strip()
+            description = row.get("description", "").strip()
             idempotency_key = _idempotency_key(date, symbol, sedol, qty, description)
 
             # Price is only monetary evidence on a trade row -- a non-trade
@@ -1254,7 +1257,7 @@ class TraderAgent(Agent):
 
                     if shares is not None:
                         price_money, price_marker = parse_field_money(
-                            row.get("Price", ""),
+                            row.get("price", ""),
                             "Price",
                             row_label,
                             decimal_separator_hint=row_decimal_hint,
