@@ -842,10 +842,13 @@ class TraderAgent(Agent):
 
         disp = display_info.get(ticker) if display_info else None
         currency = disp[1] if disp else "GBP"
-        is_usd = currency == "USD"
+        # Display metadata is the native quote unit.  Every non-GBP unit
+        # must use its native close so current value/P&L never combines a
+        # GBP-normalised close with a native-currency cost basis.
+        is_native_quote = currency != "GBP"
 
-        if is_usd and disp is not None:
-            # Use original USD price so cost (USD) and value (USD) are comparable
+        if is_native_quote and disp is not None:
+            # Use original native price so cost and value are comparable.
             cp: float | None = disp[0]
         else:
             cp = current_prices.get(ticker) if current_prices else None

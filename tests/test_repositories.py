@@ -678,6 +678,21 @@ def test_price_cache_upsert_and_load(trades_connect):
     assert rows[0][1] == 110.0
 
 
+def test_price_cache_subset_upserts_preserve_other_refresh_results(trades_connect):
+    """Overlapping refreshes write only their successful ticker subset.
+
+    This is the persistence invariant used by concurrent price refreshes:
+    a later subset upsert may replace its own ticker, but cannot discard a
+    valid value that another refresh stored for a different ticker.
+    """
+    repo = PriceCacheRepository(trades_connect)
+    repo.upsert_many({"AAPL": 100.0, "VOD.L": 2.0})
+    repo.upsert_many({"AAPL": 101.0})
+
+    values = {row[0]: row[1] for row in repo.load_all()}
+    assert values == {"AAPL": 101.0, "VOD.L": 2.0}
+
+
 # --- FxRateCacheRepository (Story 1.2) --------------------------------------
 
 

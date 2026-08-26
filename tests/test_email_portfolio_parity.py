@@ -12,6 +12,7 @@ miss triggers exactly one.
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from app.agents.trader.trader_agent import TraderAgent
@@ -49,20 +50,20 @@ def test_get_prices_for_holdings_fetches_only_cache_misses(
         PortfolioService, "_fetch_gbpusd_rate", staticmethod(lambda: 1.25)
     )
 
-    fetch_calls: list[str] = []
+    download_calls: list[str] = []
 
-    def fake_fetch_price_gbp(self, yf_sym, gbpusd):
-        fetch_calls.append(yf_sym)
-        assert yf_sym == "OFFLIST"  # WATCHED must never be re-fetched
-        return (60.0 / gbpusd, 60.0, "USD")  # native USD price, GBP-converted
+    def fake_download(symbol, **_kwargs):
+        download_calls.append(symbol)
+        assert symbol == "OFFLIST"  # WATCHED must never be re-fetched
+        return pd.DataFrame({"Close": [60.0]})
 
-    monkeypatch.setattr(PortfolioService, "_fetch_price_gbp", fake_fetch_price_gbp)
+    monkeypatch.setattr("yfinance.download", fake_download)
 
     service = _service(trader)
     held_tickers = [p.ticker for p in trader.get_portfolio()]
     prices, display_info, gbpusd = service.get_prices_for_holdings(held_tickers)
 
-    assert fetch_calls == ["OFFLIST"]  # exactly one fetch, for the miss only
+    assert download_calls == ["OFFLIST"]  # exactly one batch for the miss only
     assert prices["WATCHED"] == 120.0  # served from cache, untouched
     assert display_info["OFFLIST"] == (60.0, "USD")
     assert gbpusd == 1.25
@@ -72,9 +73,9 @@ def test_get_prices_for_holdings_fetches_only_cache_misses(
     assert cached_prices["OFFLIST"] == pytest.approx(60.0 / 1.25)
     assert cached_display["OFFLIST"] == (60.0, "USD")
 
-    fetch_calls.clear()
+    download_calls.clear()
     service.get_prices_for_holdings(held_tickers)
-    assert fetch_calls == []  # now fully cached: zero net-new fetches
+    assert download_calls == []  # now fully cached: zero net-new fetches
 
 
 def test_email_and_ui_paths_agree_on_value_and_pnl(
@@ -90,10 +91,18 @@ def test_email_and_ui_paths_agree_on_value_and_pnl(
     monkeypatch.setattr(
         PortfolioService, "_fetch_gbpusd_rate", staticmethod(lambda: 1.25)
     )
+    download_calls: list[str] = []
+
+    def fake_download(symbol, **_kwargs):
+        download_calls.append(symbol)
+        assert symbol == "OFFLIST"
+        return pd.DataFrame({"Close": [60.0]})
+
+    monkeypatch.setattr("yfinance.download", fake_download)
     monkeypatch.setattr(
         PortfolioService,
-        "_fetch_price_gbp",
-        lambda self, yf_sym, gbpusd: (60.0 / gbpusd, 60.0, "USD"),
+        "ticker_currencies",
+        lambda _self, tickers: {ticker: "USD" for ticker in tickers},
     )
 
     service = _service(trader)
@@ -101,6 +110,7 @@ def test_email_and_ui_paths_agree_on_value_and_pnl(
     # Orchestrator/email path: price every actual holding, cache-first.
     held_tickers = [p.ticker for p in trader.get_portfolio()]
     prices, display_info, gbpusd = service.get_prices_for_holdings(held_tickers)
+    assert download_calls == ["OFFLIST"]
     email_positions = trader.get_portfolio(prices, display_info)
 
     # /portfolio route's cache-based view, reading the same (now fully
@@ -126,7 +136,7 @@ def test_email_and_ui_paths_agree_on_value_and_pnl(
 
     # Aggregate GBP totals convert the USD leg instead of summing raw
     # cross-currency numbers.
-    total_value_gbp, total_cost_gbp, total_pnl_gbp = PortfolioService.gbp_totals(
+    total_value_gbp, total_cost_gbp, total_pnl_gbp = service.gbp_totals(
         email_positions, gbpusd
     )
     expected_value = 10.0 * 120.0 + (5.0 * 60.0) / 1.25
@@ -158,9 +168,30 @@ def test_gbp_totals_converts_usd_positions() -> None:
             price_currency="USD",
         ),
     ]
-    total_value, total_cost, total_pnl = PortfolioService.gbp_totals(
-        positions, gbpusd=2.0
-    )
+    service = PortfolioService(TraderService(TraderAgent(name="TraderAgent")))
+    total_value, total_cost, total_pnl = service.gbp_totals(positions, gbpusd=2.0)
     assert total_value == 285.0  # 150 + 270/2
     assert total_cost == 200.0  # 100 + 200/2
     assert total_pnl == 85.0
+
+
+def test_gbp_totals_values_hkd_positions_through_the_valuation_service(trader) -> None:
+    class _HkdValuation:
+        def value_in_gbp(self, money):
+            assert money.currency == "HKD"
+            return type("Projection", (), {"gbp_amount": 12.5})()
+
+    service = _service(trader)
+    service._gbp_valuation = _HkdValuation()
+    position = Position(
+        ticker="9988.HK",
+        shares=1,
+        avg_cost=100.0,
+        total_cost=100.0,
+        current_value=100.0,
+        price_currency="HKD",
+    )
+
+    value, cost, pnl = service.gbp_totals([position], gbpusd=1.25)
+
+    assert (value, cost, pnl) == (12.5, 12.5, 0.0)

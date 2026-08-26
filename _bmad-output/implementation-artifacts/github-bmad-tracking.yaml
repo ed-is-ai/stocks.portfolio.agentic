@@ -101,7 +101,7 @@ standalone_issues:
     issue: 319
     status: in-progress
     sub_issues: [326, 324, 321, 320, 325, 323, 322]
-    completed_sub_issues: [326, 324, 321, 320]
+    completed_sub_issues: [326, 324, 321, 320, 325]
     stories:
       gh-326-cache-strategy-snapshot-coverage-verification:
         issue: 326
@@ -119,6 +119,10 @@ standalone_issues:
         issue: 320
         status: done
         spec: spec-gh-320-batch-scanner-alert-reads.md
+      gh-325-batch-portfolio-price-downloads:
+        issue: 325
+        status: done
+        spec: spec-gh-325-batch-portfolio-price-downloads.md
   realised-pnl-average-win-loss-pct:
     issue: 301
     status: done

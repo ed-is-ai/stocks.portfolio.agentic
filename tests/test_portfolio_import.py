@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -84,6 +85,51 @@ def test_happy_path_passes_uploaded_bytes_directly(mocked_import):
     assert mock_trader.import_sipp.call_args.args[0] == _CSV
     assert not (tmp_path / "SIPP").exists()
     mock_trader.get_portfolio.assert_called_once()
+
+
+def test_refresh_keeps_cached_failures_and_names_unavailable_symbols(mocked_import):
+    mock_trader, mock_portfolio, _, _ = mocked_import
+    positions = [
+        SimpleNamespace(ticker="CACHED"),
+        SimpleNamespace(ticker="MISSING"),
+        SimpleNamespace(ticker="FRESH"),
+    ]
+    mock_trader.get_portfolio.return_value = positions
+    mock_trader.refresh_portfolio_prices.return_value = positions
+    mock_trader.load_price_cache.return_value = (
+        {"CACHED": 10.0},
+        "now",
+        {"CACHED": (10.0, "GBP")},
+    )
+    mock_trader.get_cash_balance.return_value = 0.0
+    mock_portfolio.gbpusd_rate.return_value = 1.25
+    mock_portfolio.load_ticker_aliases.return_value = {}
+    mock_portfolio.fetch_all_prices_with_failures.return_value = (
+        {"FRESH": 20.0},
+        {"FRESH": (20.0, "GBP")},
+        {"CACHED", "MISSING"},
+    )
+
+    response = client.post("/api/portfolio/refresh", headers={"X-Auth-Token": "s3cret"})
+
+    assert response.status_code == 200
+    mock_trader.refresh_portfolio_prices.assert_called_once_with(
+        {"CACHED": 10.0, "FRESH": 20.0},
+        {"CACHED": (10.0, "GBP"), "FRESH": (20.0, "GBP")},
+        None,
+    )
+    assert (
+        "using cached values for: CACHED"
+        in (
+            mock_portfolio.portfolio_partial_context.call_args.kwargs["warning_message"]
+        )
+    )
+    assert (
+        "prices unavailable for: MISSING"
+        in (
+            mock_portfolio.portfolio_partial_context.call_args.kwargs["warning_message"]
+        )
+    )
 
 
 def test_happy_path_archives_a_copy_of_the_uploaded_file(mocked_import):
