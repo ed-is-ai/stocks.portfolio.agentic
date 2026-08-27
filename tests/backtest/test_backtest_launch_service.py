@@ -37,7 +37,12 @@ from app.services.backtest.backtest_launch_service import (
     BacktestLaunchService,
     BacktestLaunchValidationError,
 )
-from app.services.backtest.strategy_job import BacktestSubmissionV1
+from app.services.backtest.run_universe import run_universe_digest
+from app.services.backtest.strategy_job import (
+    BacktestSubmissionV1,
+    PreparationSubmissionV1,
+    RunUniverseSelectionV1,
+)
 from app.services.backtest.strategy_job_service import StrategyJobService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -156,6 +161,7 @@ class FakeFxQuoteRepo:
 class FakeJobs:
     def __init__(self) -> None:
         self.submissions: list[BacktestSubmissionV1] = []
+        self.preparation_submissions: list[PreparationSubmissionV1] = []
 
     def enqueue_backtest(self, submission: BacktestSubmissionV1):
         self.submissions.append(submission)
@@ -163,6 +169,10 @@ class FakeJobs:
             job=SimpleNamespace(id=f"job-{len(self.submissions)}"),
             backtest=SimpleNamespace(job_id=f"job-{len(self.submissions)}"),
         )
+
+    def enqueue_preparation(self, submission: PreparationSubmissionV1):
+        self.preparation_submissions.append(submission)
+        return SimpleNamespace(job=SimpleNamespace(id="preparation-1"))
 
 
 def _service(
@@ -440,6 +450,46 @@ def test_launch_applies_declared_defaults_for_omitted_parameters() -> None:
     service.launch(_command(parameters={"watch_security_id": "sec-aapl"}))
 
     assert jobs.submissions[0].parameters["fixed_shares"] == 1
+
+
+def test_launch_accepts_host_bound_universe_for_preparation() -> None:
+    """The universe binding is runtime input, not a Strategy tuning field."""
+    service, jobs = _service()
+    selected = ("sec-aapl", "sec-msft")
+    selection = RunUniverseSelectionV1(
+        profile_hash=PROFILE_HASH,
+        activation_seq=1,
+        universe_schema="strategy_universe.v1",
+        universe_mode="selected-securities",
+        universe_parameter="selected_securities",
+        canonical_security_ids=selected,
+        run_universe_digest=run_universe_digest(
+            selected,
+            universe_schema="strategy_universe.v1",
+            mode="selected-securities",
+            parameter="selected_securities",
+            profile_hash=PROFILE_HASH,
+        ),
+    )
+
+    result = service.launch(
+        _command(
+            idempotency_key="whole-universe",
+            parameters={
+                "watch_security_id": "sec-aapl",
+                "selected_securities": list(selected),
+            },
+            universe_selection=selection,
+        )
+    )
+
+    assert result.job.id == "preparation-1"
+    assert jobs.submissions == []
+    assert jobs.preparation_submissions[0].parameters["watch_security_id"] == "sec-aapl"
+    assert jobs.preparation_submissions[0].parameters["selected_securities"] == [
+        "sec-aapl",
+        "sec-msft",
+    ]
 
 
 # ---------------------------------------------------------------------------
