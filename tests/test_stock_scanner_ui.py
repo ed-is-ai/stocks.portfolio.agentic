@@ -404,18 +404,24 @@ def test_refresh_controls_explain_cached_and_fresh_institutional_data() -> None:
     cached_button = markup.split('id="refresh-data-button"', 1)[1].split(
         "</button>", 1
     )[0]
-    fresh_button = markup.split('id="refresh-institutional-button"', 1)[1].split(
+    # The institutional control is now a Bootstrap dropdown panel; inspect the
+    # toggle button plus the form in its dropdown-menu.
+    fresh_toggle = markup.split('id="refresh-institutional-button"', 1)[1].split(
         "</button>", 1
+    )[0]
+    fresh_panel = markup.split('id="refresh-institutional-button"', 1)[1].split(
+        "</form>", 1
     )[0]
 
     assert 'title="Run the full scan and analysis' in cached_button
     assert "cached WhaleWisdom / StockTwits data" in cached_button
-    assert 'title="Run the full scan and analysis' in fresh_button
-    assert "refreshing WhaleWisdom / StockTwits from source" in fresh_button
+    assert "refreshing WhaleWisdom / StockTwits from source" in fresh_toggle
     assert 'hx-post="/refresh-data"' in cached_button
-    assert 'hx-post="/refresh-data"' in fresh_button
+    assert 'hx-post="/refresh-data"' in fresh_panel
     assert "hx-vals" not in cached_button
-    assert "hx-vals" in fresh_button and '"extract": true' in fresh_button
+    assert 'name="extract" value="true"' in fresh_panel
+    assert 'name="force_whale_wisdom"' in fresh_panel
+    assert 'name="force_stocktwits"' in fresh_panel
 
 
 def test_removed_scanner_partial_returns_not_found() -> None:
@@ -497,9 +503,11 @@ async def test_refresh_data_threads_extract_flag_to_run_once() -> None:
         alerts,
         confirm_missing=True,
         extract=True,
+        force_whale_wisdom=False,
+        force_stocktwits=False,
     )
 
-    pipeline.run_once.assert_called_once_with(True)
+    pipeline.run_once.assert_called_once_with(True, False, False)
 
 
 def test_refresh_completion_banner_removed() -> None:

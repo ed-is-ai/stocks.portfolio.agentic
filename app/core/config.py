@@ -33,6 +33,10 @@ EXTRACTION_RESULTS_JSON = (
     ROOT_DIR / "app" / "agents" / "extraction" / "extraction_results.json"
 )
 WW_CONTEXT_JSON = ROOT_DIR / "app" / "agents" / "extraction" / "ww_context.json"
+# Durable single-entry cache of the last good WhaleWisdom heat-map payload
+# (period-keyed, 7-day validity) so an institutional refresh reuses a fresh
+# payload without a network call (#345).
+HEAT_MAP_CACHE_JSON = ROOT_DIR / "app" / "agents" / "extraction" / "heat_map_cache.json"
 # Watermark of the last StockTwits weekly email processed (#137), so the vision
 # extraction only re-runs when a strictly newer email has arrived.
 STOCKTWITS_EMAIL_WATERMARK_JSON = (

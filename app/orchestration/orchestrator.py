@@ -860,7 +860,12 @@ def _recover_bau_run_authority(
     return tuple(recovered)
 
 
-def pipeline(force: bool = False, extract: bool = False) -> bool:
+def pipeline(
+    force: bool = False,
+    extract: bool = False,
+    force_whale_wisdom: bool = False,
+    force_stocktwits: bool = False,
+) -> bool:
     start_dt = datetime.now(timezone.utc)
     status_repo = PipelineStatusRepository(
         PIPELINE_STATUS_JSON,
@@ -1006,7 +1011,11 @@ def pipeline(force: bool = False, extract: bool = False) -> bool:
                 expected_run_id=run_id,
                 substage="extraction",
             )
-            extractor = ExtractionAgent(name="ExtractionAgent")
+            extractor = ExtractionAgent(
+                name="ExtractionAgent",
+                force_whale_wisdom=force_whale_wisdom,
+                force_stocktwits=force_stocktwits,
+            )
             extractor.run()
             source_health.update(extractor.source_health)
         watchlist = load_watchlist()
@@ -1511,6 +1520,16 @@ def main() -> None:
         help="Pull watchlist from WisdomWise instead of default",
     )
     parser.add_argument(
+        "--force-whale-wisdom",
+        action="store_true",
+        help="Bypass the WhaleWisdom heat-map cache and refetch",
+    )
+    parser.add_argument(
+        "--force-stocktwits",
+        action="store_true",
+        help="Bypass the StockTwits email watermark and re-process the newest email",
+    )
+    parser.add_argument(
         "--interval",
         type=int,
         default=15,
@@ -1519,7 +1538,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.once:
-        if not pipeline(force=True, extract=args.extract):
+        if not pipeline(
+            force=True,
+            extract=args.extract,
+            force_whale_wisdom=args.force_whale_wisdom,
+            force_stocktwits=args.force_stocktwits,
+        ):
             raise SystemExit(1)
         return
 

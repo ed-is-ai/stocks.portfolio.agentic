@@ -47,6 +47,8 @@ config/ticker_aliases.json
 portfolio_value.csv
 pipeline_runs.csv
 app/agents/extraction/ww_context.json
+app/agents/extraction/heat_map_cache.json
+app/agents/extraction/heat_map_cache.json.*
 app/agents/extraction/stocktwits_email_watermark.json
 app/agents/extraction/extraction_results.json
 app/agents/scanner/scan_history.json

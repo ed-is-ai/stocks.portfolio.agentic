@@ -59,6 +59,8 @@ async def refresh_data(
     alerts: AlertsDep,
     confirm_missing: bool = Form(False),
     extract: bool = Form(False),
+    force_whale_wisdom: bool = Form(False),
+    force_stocktwits: bool = Form(False),
 ) -> HTMLResponse:
     """Refresh the analysis dataset by running the pipeline once.
 
@@ -70,14 +72,21 @@ async def refresh_data(
         response = templates.TemplateResponse(
             request,
             "_pipeline_confirmation.html",
-            context={"warnings": warnings, "extract": extract},
+            context={
+                "warnings": warnings,
+                "extract": extract,
+                "force_whale_wisdom": force_whale_wisdom,
+                "force_stocktwits": force_stocktwits,
+            },
         )
         response.headers["HX-Retarget"] = "#pipeline-confirmation"
         response.headers["HX-Reswap"] = "innerHTML"
         return response
     # The run outcome (success or failure) is surfaced by the live
     # /pipeline-status bar; no inline completion banner is rendered here.
-    await asyncio.to_thread(pipeline.run_once, extract)
+    await asyncio.to_thread(
+        pipeline.run_once, extract, force_whale_wisdom, force_stocktwits
+    )
     return templates.TemplateResponse(
         request,
         "_stock_scanner.html",
