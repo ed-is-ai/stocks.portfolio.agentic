@@ -2,10 +2,21 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
 import pandas as pd
 import pytest
 
 from app.agents.analyst import historical_pivots as hp
+
+
+@pytest.fixture(autouse=True)
+def _clear_historical_pivot_cache() -> None:
+    """Keep process-cache tests independent from pure detector tests."""
+    with hp._pivot_cache_lock:
+        hp._pivot_cache.clear()
+        hp._pivot_flights.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -525,3 +536,149 @@ def test_find_historical_pivots_flat_frame_returns_empty(
     # No confirmed/failed/resistance pivots expected
     for p in result:
         assert p.get("status") in ("open", "resistance", "confirmed", "failed")
+
+
+# ---------------------------------------------------------------------------
+# Completed-week cache
+# ---------------------------------------------------------------------------
+
+
+def test_completed_week_uses_each_symbol_market_close() -> None:
+    """A London weekly bar is final before the US market closes that Friday."""
+    instant = pd.Timestamp("2026-08-28 15:45:00+00:00")
+
+    assert hp._completed_week_start("VOD.L", now=instant) == pd.Timestamp("2026-08-24")
+    assert hp._completed_week_start("AAPL", now=instant) == pd.Timestamp("2026-08-17")
+
+
+def test_completed_weekly_bars_excludes_the_active_week() -> None:
+    """Only bars through the completed week feed the unchanged detector."""
+    weekly = pd.DataFrame(
+        {"high": [1.0, 2.0, 3.0], "low": [0.0, 1.0, 2.0], "close": [1.0, 2.0, 3.0]},
+        index=pd.to_datetime(["2026-08-17", "2026-08-24", "2026-08-31"]),
+    )
+
+    completed = hp._completed_weekly_bars(weekly, pd.Timestamp("2026-08-24"))
+
+    assert list(completed.index) == list(pd.to_datetime(["2026-08-17", "2026-08-24"]))
+
+
+def test_completed_weekly_bars_preserves_exchange_local_week_for_aware_index() -> None:
+    """A local-Monday weekly label must not become the preceding UTC Sunday."""
+    weekly = pd.DataFrame(
+        {"high": [1.0, 2.0], "low": [0.0, 1.0], "close": [1.0, 2.0]},
+        index=pd.DatetimeIndex(
+            ["2026-08-17 00:00:00", "2026-08-24 00:00:00"], tz="Europe/London"
+        ),
+    )
+
+    completed = hp._completed_weekly_bars(weekly, pd.Timestamp("2026-08-17"))
+
+    assert list(completed.index) == [pd.Timestamp("2026-08-17", tz="Europe/London")]
+
+
+def test_same_completed_week_uses_one_provider_call_and_returns_copies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same canonical ticker/week avoids redownloads and caller mutation."""
+    frame = _e2e_frame()
+    calls = 0
+
+    def fetch(_ticker: str, _period: str) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        return frame
+
+    monkeypatch.setattr(hp, "fetch_weekly_ohlcv", fetch)
+    monkeypatch.setattr(hp, "_completed_week_start", lambda _ticker: pd.Timestamp("2022-01-03"))
+
+    first = hp.find_historical_pivots(" test ", require_stage2=False)
+    first[0]["pivot_price"] = -1.0
+    second = hp.find_historical_pivots("TEST", require_stage2=False)
+
+    assert calls == 1
+    assert second[0]["pivot_price"] != -1.0
+
+
+def test_new_completed_week_recomputes_from_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The completed-week identity makes a rollover a cache miss."""
+    frame = _e2e_frame()
+    calls = 0
+    week = pd.Timestamp("2022-01-03")
+
+    def fetch(_ticker: str, _period: str) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        return frame
+
+    monkeypatch.setattr(hp, "fetch_weekly_ohlcv", fetch)
+    monkeypatch.setattr(hp, "_completed_week_start", lambda _ticker: week)
+
+    hp.find_historical_pivots("TEST", require_stage2=False)
+    week = pd.Timestamp("2022-01-10")
+    hp.find_historical_pivots("TEST", require_stage2=False)
+
+    assert calls == 2
+
+
+def test_concurrent_same_key_misses_share_one_provider_calculation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Concurrent callers join one flight instead of duplicating the download."""
+    frame = _e2e_frame()
+    provider_started = threading.Event()
+    release_provider = threading.Event()
+    follower_joined = threading.Event()
+    calls = 0
+
+    def fetch(_ticker: str, _period: str) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        provider_started.set()
+        assert release_provider.wait(timeout=2)
+        return frame
+
+    original_acquire = hp._get_cached_or_begin_flight
+
+    def acquire(key: hp._PivotCacheKey):
+        cached, flight, is_leader = original_acquire(key)
+        if cached is None and not is_leader:
+            follower_joined.set()
+        return cached, flight, is_leader
+
+    monkeypatch.setattr(hp, "fetch_weekly_ohlcv", fetch)
+    monkeypatch.setattr(hp, "_get_cached_or_begin_flight", acquire)
+    monkeypatch.setattr(hp, "_completed_week_start", lambda _ticker: pd.Timestamp("2022-01-03"))
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(hp.find_historical_pivots, "TEST", require_stage2=False)
+        assert provider_started.wait(timeout=2)
+        second = executor.submit(hp.find_historical_pivots, "TEST", require_stage2=False)
+        assert follower_joined.wait(timeout=2)
+        release_provider.set()
+        assert first.result(timeout=2) == second.result(timeout=2)
+
+    assert calls == 1
+
+
+def test_provider_failure_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Failures remain fail-soft for callers and cannot poison a later retry."""
+    calls = 0
+
+    def fail(_ticker: str, _period: str) -> pd.DataFrame:
+        nonlocal calls
+        calls += 1
+        raise ValueError("provider unavailable")
+
+    monkeypatch.setattr(hp, "fetch_weekly_ohlcv", fail)
+    monkeypatch.setattr(hp, "_completed_week_start", lambda _ticker: pd.Timestamp("2020-01-06"))
+
+    with pytest.raises(ValueError, match="provider unavailable"):
+        hp.find_historical_pivots("TEST", require_stage2=False)
+    with pytest.raises(ValueError, match="provider unavailable"):
+        hp.find_historical_pivots("TEST", require_stage2=False)
+
+    assert calls == 2
+    assert hp._pivot_cache == {}

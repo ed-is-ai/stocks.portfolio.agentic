@@ -12,9 +12,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
+from copy import deepcopy
+from functools import lru_cache
 import json
+import threading
 from typing import Any
 
+import exchange_calendars as xcals
 import pandas as pd
 import yfinance as yf
 
@@ -33,6 +38,158 @@ _ADVANCE_WINDOW_WEEKS = 52
 _DEDUP_BAND = 0.05  # merge pivots within 5% of each other
 _BREAKOUT_THRESHOLD = 1.005  # close must be > pivot * this to count as breakout
 _MIN_HISTORY_BARS = 60  # raise if fewer weekly bars than this
+
+# Historical pivot analysis is invoked repeatedly by both VCP scoring and the
+# multi-year-breakout check.  Weekly bars only become evidence once their
+# exchange's final session has closed, so cache by that completed week rather
+# than by wall-clock time.  This remains a deliberately small process cache:
+# it is an optimisation, not durable strategy evidence.
+_PIVOT_CACHE_MAX_ENTRIES = 256
+_PivotCacheKey = tuple[str, str, int, int, float, float, bool, str]
+_pivot_cache: OrderedDict[_PivotCacheKey, list[dict[str, Any]]] = OrderedDict()
+_pivot_cache_lock = threading.Lock()
+
+
+class _PivotFlight:
+    """One in-progress calculation shared by concurrent callers for a cache key."""
+
+    def __init__(self) -> None:
+        self.ready = threading.Event()
+        self.result: list[dict[str, Any]] | None = None
+        self.error: BaseException | None = None
+
+
+_pivot_flights: dict[_PivotCacheKey, _PivotFlight] = {}
+
+
+def _canonical_ticker(ticker: str) -> str:
+    """Normalize the Yahoo symbol used as the in-process cache identity."""
+    return ticker.strip().upper()
+
+
+def _calendar_name_for_ticker(ticker: str) -> str:
+    """Return the exchange calendar implied by this project's Yahoo symbols.
+
+    The scanner and portfolio provider convention is ``.L`` for London and
+    ``.HK`` for Hong Kong; unsuffixed symbols are its US equities convention.
+    Keeping this mapping local avoids a second provider lookup solely to cache
+    a result, while still respecting the non-US symbols the application uses.
+    """
+    symbol = _canonical_ticker(ticker)
+    if symbol.endswith(".L"):
+        return "XLON"
+    if symbol.endswith(".HK"):
+        return "XHKG"
+    return "XNYS"
+
+
+@lru_cache(maxsize=3)
+def _exchange_calendar(name: str) -> Any:
+    """Load one supported exchange calendar once per process."""
+    return xcals.get_calendar(name)
+
+
+def _completed_week_start(ticker: str, *, now: pd.Timestamp | None = None) -> pd.Timestamp:
+    """Return Monday for the newest fully closed exchange trading week.
+
+    A Friday is not considered complete until that exchange's actual final
+    session close.  This captures holidays and early closes from
+    ``exchange_calendars`` and makes the boundary injectable in tests.
+    """
+    calendar = _exchange_calendar(_calendar_name_for_ticker(ticker))
+    instant = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    if instant.tzinfo is None:
+        instant = instant.tz_localize("UTC")
+    local_now = instant.tz_convert(calendar.tz)
+    today = pd.Timestamp(local_now.date())
+    week_start = today - pd.Timedelta(days=today.weekday())
+    week_end = week_start + pd.Timedelta(days=6)
+    sessions = calendar.sessions_in_range(week_start, week_end)
+
+    if len(sessions) and local_now >= calendar.session_close(sessions[-1]):
+        return sessions[-1].to_period("W-SUN").start_time
+
+    previous_week_start = week_start - pd.Timedelta(days=7)
+    previous_sessions = calendar.sessions_in_range(
+        previous_week_start, week_start - pd.Timedelta(days=1)
+    )
+    if not len(previous_sessions):  # pragma: no cover - calendars always have sessions
+        raise ValueError(f"No completed trading week available for {ticker}")
+    return previous_sessions[-1].to_period("W-SUN").start_time
+
+
+def _completed_weekly_bars(
+    weekly: pd.DataFrame, completed_week_start: pd.Timestamp
+) -> pd.DataFrame:
+    """Drop any weekly bar that belongs to a not-yet-completed trading week."""
+    index = pd.DatetimeIndex(weekly.index)
+    if index.tz is not None:
+        # Weekly labels represent the exchange-local trading week. Converting
+        # a midnight London/Hong Kong label to UTC can move it into Sunday.
+        index = index.tz_localize(None)
+    bar_week_starts = index.to_period("W-SUN").start_time
+    return weekly.loc[bar_week_starts <= completed_week_start].copy()
+
+
+def _cache_key(
+    ticker: str,
+    period: str,
+    half_window: int,
+    min_base_weeks: int,
+    max_depth_pct: float,
+    min_advance_pct: float,
+    require_stage2: bool,
+    completed_week_start: pd.Timestamp,
+) -> _PivotCacheKey:
+    """Include every detector input plus the completed-week identity."""
+    return (
+        _canonical_ticker(ticker),
+        period,
+        half_window,
+        min_base_weeks,
+        max_depth_pct,
+        min_advance_pct,
+        require_stage2,
+        completed_week_start.date().isoformat(),
+    )
+
+
+def _get_cached_or_begin_flight(
+    key: _PivotCacheKey,
+) -> tuple[list[dict[str, Any]] | None, _PivotFlight | None, bool]:
+    """Return a cached copy or join/create the key's single-flight calculation."""
+    with _pivot_cache_lock:
+        cached = _pivot_cache.get(key)
+        if cached is not None:
+            _pivot_cache.move_to_end(key)
+            return deepcopy(cached), None, False
+
+        flight = _pivot_flights.get(key)
+        if flight is None:
+            flight = _PivotFlight()
+            _pivot_flights[key] = flight
+            return None, flight, True
+        return None, flight, False
+
+
+def _finish_flight(
+    key: _PivotCacheKey,
+    flight: _PivotFlight,
+    *,
+    result: list[dict[str, Any]] | None = None,
+    error: BaseException | None = None,
+) -> None:
+    """Publish a result or error and release every caller waiting on ``flight``."""
+    with _pivot_cache_lock:
+        if result is not None:
+            flight.result = deepcopy(result)
+            _pivot_cache[key] = deepcopy(result)
+            _pivot_cache.move_to_end(key)
+            while len(_pivot_cache) > _PIVOT_CACHE_MAX_ENTRIES:
+                _pivot_cache.popitem(last=False)
+        flight.error = error
+        _pivot_flights.pop(key, None)
+        flight.ready.set()
 
 
 # ---------------------------------------------------------------------------
@@ -326,46 +483,79 @@ def find_historical_pivots(
         pivot_price, base_start, base_end, base_weeks, max_depth_pct,
         breakout_date, breakout_close, advance_pct, stage2_at_pivot, status
     """
-    weekly = fetch_weekly_ohlcv(ticker, period)
-    peak_indices = _find_peak_candidates(weekly, half_window)
+    completed_week_start = _completed_week_start(ticker)
+    key = _cache_key(
+        ticker,
+        period,
+        half_window,
+        min_base_weeks,
+        max_depth_pct,
+        min_advance_pct,
+        require_stage2,
+        completed_week_start,
+    )
+    cached, flight, is_leader = _get_cached_or_begin_flight(key)
+    if cached is not None:
+        return cached
+    assert flight is not None
+    if not is_leader:
+        flight.ready.wait()
+        if flight.error is not None:
+            raise flight.error
+        assert flight.result is not None
+        return deepcopy(flight.result)
 
-    pivots: list[dict[str, Any]] = []
-    for idx in peak_indices:
-        pivot_price = round(float(weekly["high"].iloc[idx]), 2)
+    try:
+        weekly = fetch_weekly_ohlcv(ticker, period)
+        weekly = _completed_weekly_bars(weekly, completed_week_start)
+        if len(weekly) < _MIN_HISTORY_BARS:
+            raise ValueError(
+                f"Only {len(weekly)} completed weekly bars for {ticker}; "
+                f"need ≥{_MIN_HISTORY_BARS}"
+            )
+        peak_indices = _find_peak_candidates(weekly, half_window)
 
-        if require_stage2 and not _is_stage2_at_pivot(weekly, idx):
-            continue
+        pivots: list[dict[str, Any]] = []
+        for idx in peak_indices:
+            pivot_price = round(float(weekly["high"].iloc[idx]), 2)
 
-        base = _build_base(weekly, idx, max_depth_pct, min_base_weeks)
-        if base is None:
-            continue
+            if require_stage2 and not _is_stage2_at_pivot(weekly, idx):
+                continue
 
-        breakout = _find_breakout(
-            weekly,
-            idx,
-            float(weekly["high"].iloc[idx]),
-            min_advance_pct=min_advance_pct,
-        )
+            base = _build_base(weekly, idx, max_depth_pct, min_base_weeks)
+            if base is None:
+                continue
 
-        pivots.append(
-            {
-                "pivot_price": pivot_price,
-                **{
-                    k: v
-                    for k, v in base.items()
-                    if k not in ("base_start_idx", "base_end_idx")
-                },
-                **breakout,
-                "stage2_at_pivot": _is_stage2_at_pivot(weekly, idx),
-            }
-        )
+            breakout = _find_breakout(
+                weekly,
+                idx,
+                float(weekly["high"].iloc[idx]),
+                min_advance_pct=min_advance_pct,
+            )
 
-    confirmed = _deduplicate_pivots(pivots)
+            pivots.append(
+                {
+                    "pivot_price": pivot_price,
+                    **{
+                        k: v
+                        for k, v in base.items()
+                        if k not in ("base_start_idx", "base_end_idx")
+                    },
+                    **breakout,
+                    "stage2_at_pivot": _is_stage2_at_pivot(weekly, idx),
+                }
+            )
 
-    open_base = _detect_open_base(weekly, confirmed, max_depth_pct, min_base_weeks)
-    if open_base is not None:
-        confirmed.append(open_base)
+        confirmed = _deduplicate_pivots(pivots)
 
+        open_base = _detect_open_base(weekly, confirmed, max_depth_pct, min_base_weeks)
+        if open_base is not None:
+            confirmed.append(open_base)
+    except BaseException as exc:
+        _finish_flight(key, flight, error=exc)
+        raise
+
+    _finish_flight(key, flight, result=confirmed)
     return confirmed
 
 
