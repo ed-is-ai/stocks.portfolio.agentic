@@ -6,10 +6,15 @@ from decimal import Decimal
 from pathlib import Path
 import sys
 import threading
+import sqlite3
 
 import pytest
 
-from app.services.backtest.strategy_job_service import StrategyJobService
+from app.services.backtest.strategy_job_service import (
+    StrategyJobService,
+    dispatcher_lock_backoff_seconds,
+    is_transient_sqlite_lock,
+)
 from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
     BootstrapSubmissionV1,
@@ -287,6 +292,41 @@ def test_dispatch_loop_survives_one_repository_error() -> None:
     thread.join(timeout=1)
 
     assert calls == 2
+
+
+def test_sqlite_lock_classifier_is_narrow() -> None:
+    assert is_transient_sqlite_lock(sqlite3.OperationalError("database is locked"))
+    assert not is_transient_sqlite_lock(sqlite3.OperationalError("no such table"))
+    assert not is_transient_sqlite_lock(RuntimeError("database is locked"))
+
+
+def test_sqlite_lock_backoff_is_exponential_and_capped() -> None:
+    assert dispatcher_lock_backoff_seconds(0) == 0.25
+    assert dispatcher_lock_backoff_seconds(1) == 0.5
+    assert dispatcher_lock_backoff_seconds(99) == 5.0
+
+
+def test_dispatcher_defers_after_locked_heartbeat_without_dispatching(caplog) -> None:
+    service = StrategyJobService(FakeRepository(None))
+    dispatched = False
+
+    def locked_heartbeat() -> None:
+        service._stop.set()
+        raise sqlite3.OperationalError("database is locked")
+
+    def dispatch() -> bool:
+        nonlocal dispatched
+        dispatched = True
+        return False
+
+    service._heartbeat = locked_heartbeat  # type: ignore[method-assign]
+    service.dispatch_once = dispatch  # type: ignore[method-assign]
+
+    with caplog.at_level("WARNING"):
+        service._dispatch_loop(0.001)
+
+    assert not dispatched
+    assert "another process is writing it" in caplog.text
 
 
 def test_shutdown_kills_child_after_graceful_wait_failure() -> None:

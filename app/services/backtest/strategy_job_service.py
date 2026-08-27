@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -47,10 +48,45 @@ def _worker_python_executable() -> str:
             return str(candidate)
     return sys.executable
 
+
 #: How long an acquired worker lease stays valid without a heartbeat.
 #: Deliberately several dispatcher poll intervals wide so an ordinary
 #: scheduling hiccup never lets a second instance evict a healthy worker.
 DEFAULT_LEASE_TTL_SECONDS = 30.0
+
+# A lock is expected briefly while the standalone orchestrator holds a write
+# transaction.  Retry progressively rather than turning the 250ms dispatcher
+# tick into a stream of error logs and competing immediate transactions.
+DISPATCHER_LOCK_BACKOFF_INITIAL_SECONDS = 0.25
+DISPATCHER_LOCK_BACKOFF_MAX_SECONDS = 5.0
+
+
+def is_transient_sqlite_lock(error: BaseException) -> bool:
+    """Return whether ``error`` is SQLite's retryable lock contention.
+
+    Do not classify arbitrary OperationalErrors as retryable: a malformed
+    query, missing schema, or disk I/O error must remain visible as a normal
+    dispatcher failure.
+    """
+
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+        return True
+    return (
+        "database is locked" in str(error).lower()
+        or "database table is locked" in str(error).lower()
+    )
+
+
+def dispatcher_lock_backoff_seconds(lock_failures: int) -> float:
+    """Return the bounded retry delay for consecutive lock failures."""
+
+    return min(
+        DISPATCHER_LOCK_BACKOFF_INITIAL_SECONDS * (2**lock_failures),
+        DISPATCHER_LOCK_BACKOFF_MAX_SECONDS,
+    )
 
 
 class ProcessLike(Protocol):
@@ -282,11 +318,26 @@ class StrategyJobService:
             self._thread.start()
 
     def _dispatch_loop(self, poll_interval: float) -> None:
+        lock_failures = 0
         while not self._stop.wait(poll_interval):
             try:
                 self._heartbeat()
+                # A dispatch is only safe after its immediately preceding
+                # heartbeat completed: otherwise a lease takeover may have
+                # happened while SQLite was unavailable.
                 self.dispatch_once()
-            except Exception:
+                lock_failures = 0
+            except Exception as exc:
+                if is_transient_sqlite_lock(exc):
+                    delay = dispatcher_lock_backoff_seconds(lock_failures)
+                    lock_failures += 1
+                    logger.warning(
+                        "Strategy job dispatcher deferred: backtest database is locked; "
+                        "another process is writing it. Retrying in %.2fs.",
+                        delay,
+                    )
+                    self._stop.wait(delay)
+                    continue
                 logger.exception("Strategy job dispatcher iteration failed")
 
     def shutdown(self) -> None:

@@ -111,6 +111,7 @@ class FakeRepo:
         self.strategy_job_error: Exception | None = None
         self.bootstrap = SimpleNamespace(job_id="job-1")
         self.bootstrap_run_calls = 0
+        self.active_profile_calls = 0
 
     def roster_member_identities(self, profile_hash):
         return [("sid_001", "AAPL", "XNYS", "USD")]
@@ -193,6 +194,7 @@ class FakeRepo:
         return self.result
 
     def active_snapshot_profile(self):
+        self.active_profile_calls += 1
         return FakeActiveProfile()
 
     def snapshot_profile(self, _hash):
@@ -296,6 +298,17 @@ def test_main_renders_coverage_and_canonical_reconstruction_warning(services):
         in response.text
     )
     assert "source-gap" not in response.text
+
+
+def test_main_reads_active_profile_once_and_logs_render_timing(services, caplog):
+    repo, _ = services
+
+    with caplog.at_level("INFO"):
+        response = client.get("/partials/strategy-manager")
+
+    assert response.status_code == 200
+    assert repo.active_profile_calls == 1
+    assert "Strategy Manager tab rendered in" in caplog.text
 
 
 def test_initialization_is_disabled_when_not_qualified(services):

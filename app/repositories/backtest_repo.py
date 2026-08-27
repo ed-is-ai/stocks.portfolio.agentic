@@ -87,6 +87,11 @@ if TYPE_CHECKING:
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
 
+# Backtest work is served by both the web process and the orchestrator.  Keep
+# its SQLite tuning local to this repository: the trading and alert databases
+# have different contention profiles and must not inherit it accidentally.
+BACKTEST_SQLITE_BUSY_TIMEOUT_MS = 5_000
+
 
 @dataclass(frozen=True)
 class BauPromotionDecision:
@@ -1545,7 +1550,7 @@ class BacktestRepository:
         id_generator: Callable[[], str] = lambda: str(uuid4()),
         token_generator: Callable[[], str] = lambda: str(uuid4()),
     ) -> None:
-        self._connect = connect
+        self._connect = self._backtest_connection(connect)
         self._clock = clock
         self._instant_clock = instant_clock
         self._id_generator = id_generator
@@ -1557,8 +1562,29 @@ class BacktestRepository:
         self._snapshot_coverage_cache: dict[str, tuple[str, CoverageSummaryV1]] = {}
         self._snapshot_coverage_cache_limit = 16
 
+    @staticmethod
+    def _backtest_connection(connect: Connect) -> Connect:
+        """Return a fresh backtest connection with bounded lock waiting.
+
+        ``Connect`` deliberately returns a new connection for each repository
+        operation, so the pragma must be applied here rather than only during
+        schema setup.  SQLite scopes ``busy_timeout`` to the connection.
+        """
+
+        def open_connection() -> sqlite3.Connection:
+            conn = connect()
+            conn.execute(f"PRAGMA busy_timeout = {BACKTEST_SQLITE_BUSY_TIMEOUT_MS}")
+            return conn
+
+        return open_connection
+
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
+            # WAL lets Strategy Manager's read-heavy tab rendering proceed
+            # alongside the orchestrator's short lease/write transactions.
+            # The mode is durable database state, but issuing it here also
+            # upgrades existing rollback-journal databases at startup.
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(
                 _QUALIFICATION_SCHEMA
                 + _ROSTER_SCHEMA

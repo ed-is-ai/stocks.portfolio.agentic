@@ -9,7 +9,9 @@ from __future__ import annotations
 from datetime import date, timedelta
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
+import logging
 import re
+from time import perf_counter
 from typing import Annotated, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
@@ -79,6 +81,7 @@ from app.services.backtest.strategy_readiness_service import (
 from app.services.backtest.trading_calendar import TradingCalendar
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 BacktestDep = Annotated[BacktestRepository, Depends(get_backtest_repository)]
 JobsDep = Annotated[StrategyJobService, Depends(get_strategy_job_service)]
 LaunchDep = Annotated[BacktestLaunchService, Depends(get_backtest_launch_service)]
@@ -90,6 +93,7 @@ _TERMINAL = {
     StrategyJobStatus.FAILED,
     StrategyJobStatus.CANCELLED,
 }
+_ACTIVE_PROFILE_UNSET = object()
 
 
 def _coverage_context(repo: BacktestRepository) -> dict[str, object]:
@@ -101,9 +105,12 @@ def _coverage_context(repo: BacktestRepository) -> dict[str, object]:
         return {"coverage": None, "coverage_error": str(exc)}
 
 
-def _profile_context(repo: BacktestRepository) -> dict[str, object]:
+def _profile_context(
+    repo: BacktestRepository, *, active: object = _ACTIVE_PROFILE_UNSET
+) -> dict[str, object]:
     try:
-        active = repo.active_snapshot_profile()
+        if active is _ACTIVE_PROFILE_UNSET:
+            active = repo.active_snapshot_profile()
         if active is None:
             return {
                 "profile": None,
@@ -168,10 +175,20 @@ def _strategy_manager_context(repo: BacktestRepository) -> dict[str, object]:
     or ``list_backtest_activities()``'s verified-complete Metrics rebuild
     for the unrelated Historical Initialization sub-view/submit handler,
     which render neither."""
-    active = repo.active_snapshot_profile()
+    try:
+        active = repo.active_snapshot_profile()
+    except BacktestIntegrityError as exc:
+        active = None
+        profile_context = {
+            "profile": None,
+            "qualification_available": False,
+            "qualification_reason": str(exc),
+        }
+    else:
+        profile_context = _profile_context(repo, active=active)
     return {
         **_coverage_context(repo),
-        **_profile_context(repo),
+        **profile_context,
         **_backtest_activities_context(repo),
         "setup_required": active is None,
     }
@@ -212,9 +229,15 @@ def _form_error_status(request: Request) -> int:
 @router.get("/partials/strategy-manager", response_class=HTMLResponse)
 @router.get("/strategy-manager", response_class=HTMLResponse)
 async def strategy_manager(request: Request, backtest: BacktestDep) -> HTMLResponse:
-    return templates.TemplateResponse(
+    started = perf_counter()
+    response = templates.TemplateResponse(
         request, "_strategy_manager.html", _strategy_manager_context(backtest)
     )
+    logger.info(
+        "Strategy Manager tab rendered in %.1fms",
+        (perf_counter() - started) * 1_000,
+    )
+    return response
 
 
 # ---------------------------------------------------------------------------

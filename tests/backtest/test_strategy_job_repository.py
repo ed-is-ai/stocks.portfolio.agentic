@@ -86,6 +86,17 @@ def _empty_repo(path: Path) -> BacktestRepository:
     return repo
 
 
+def test_backtest_schema_uses_wal_and_configures_each_connection_timeout(
+    tmp_path: Path,
+):
+    path = tmp_path / "backtest.db"
+    repo = _empty_repo(path)
+
+    with repo._connect() as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5_000
+
+
 def _create_bootstrap_stage_job(repo: BacktestRepository):
     """Create a lifecycle fixture without applying setup/no-op policy."""
     return repo._create_stage_job(StrategyJobType.BOOTSTRAP, None)
