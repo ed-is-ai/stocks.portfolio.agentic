@@ -56,8 +56,14 @@ from app.repositories.ticker_currency_cache_repo import TickerCurrencyCacheRepos
 from app.repositories.trades_repo import TradesRepository
 from app.schemas.trade import Portfolio
 from app.services.portfolio_import.contract_registry import ContractRegistryError
-from app.services.portfolio_import.contract_schema import contract_content_digest
-from app.services.portfolio_import.normalizer import ContractNormalizer
+from app.services.portfolio_import.contract_schema import (
+    CanonicalField,
+    contract_content_digest,
+)
+from app.services.portfolio_import.normalizer import (
+    REJECTED_REASON_KEY,
+    ContractNormalizer,
+)
 from app.services.portfolio_import.registry_loader import get_contract_registry
 
 logger = logging.getLogger(__name__)
@@ -85,14 +91,15 @@ class OpeningLotDuplicateError(ValueError):
 def _to_iso_date(value: str) -> str:
     """Return ``value`` as ISO ``YYYY-MM-DD``.
 
-    Accepts the SIPP CSV's ``DD/MM/YYYY`` and already-ISO ``YYYY-MM-DD``.
-    Unrecognized formats are logged and returned unchanged so a single odd
-    row never aborts an import. BOM characters (which some provider exports
+    Accepts the SIPP CSV's ``DD/MM/YYYY``, already-ISO ``YYYY-MM-DD``, and
+    (Story 3.4, for IG's export) 2-digit-year ``DD/MM/YY`` -- tried last,
+    after both 4-digit formats, so a genuinely 4-digit-year value is never
+    misread as a 2-digit one. BOM characters (which some provider exports
     embed even mid-value, e.g. ``12/10/2﻿﻿020``) are stripped first
     so a polluted date still parses (#166).
     """
     value = value.replace("﻿", "").strip()
-    for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d/%m/%y"):
         try:
             return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
         except ValueError:
@@ -114,6 +121,50 @@ def _idempotency_key(
     """
     raw = "|".join((date, symbol, sedol, quantity, description))
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+#: Story 3.3, AC4: a rejected plan's preview table is capped at this many
+#: rows, and each cell is length-capped below -- real user financial data,
+#: so redaction is intentionally conservative rather than configurable.
+_PREVIEW_ROW_CAP = 20
+_PREVIEW_FREE_TEXT_MAX_CHARS = 40
+_PREVIEW_CELL_MAX_CHARS = 60
+#: Free-text fields are truncated harder than numeric/date fields -- they're
+#: the most likely to carry incidentally-sensitive prose.
+_PREVIEW_FREE_TEXT_FIELDS = frozenset(
+    {CanonicalField.DESCRIPTION.value, CanonicalField.REFERENCE.value}
+)
+
+
+def _truncate_preview_cell(value: str, field: str) -> str:
+    """Truncate one preview cell, harder for free-text fields than others."""
+    limit = (
+        _PREVIEW_FREE_TEXT_MAX_CHARS
+        if field in _PREVIEW_FREE_TEXT_FIELDS
+        else _PREVIEW_CELL_MAX_CHARS
+    )
+    if len(value) <= limit:
+        return value
+    return value[:limit] + "…"
+
+
+def _build_preview_rows(
+    normalized_rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """Build a bounded, redacted preview of parsed rows for a rejected plan.
+
+    Capped at the first ``_PREVIEW_ROW_CAP`` rows. Every emitted row shares
+    exactly one fixed, ordered key list -- every value of ``CanonicalField``,
+    in enum declaration order -- with a missing value rendered as ``""``, so
+    the rendered preview table's column headers can never misalign against a
+    row that happened to parse a different subset of fields than another
+    (Story 3.3).
+    """
+    keys = [field.value for field in CanonicalField]
+    return [
+        {key: _truncate_preview_cell(row.get(key, ""), key) for key in keys}
+        for row in normalized_rows[:_PREVIEW_ROW_CAP]
+    ]
 
 
 def _detect_reconciliation_issues(
@@ -997,9 +1048,33 @@ class TraderAgent(Agent):
         )
 
     def import_sipp(
-        self, csv_content: bytes, portfolio_id: int | None = None
+        self,
+        csv_content: bytes,
+        portfolio_id: int | None = None,
+        provider_id: str | None = None,
+        account_type_id: str | None = None,
     ) -> SippImportResult:
         """Import a SIPP CSV into ``portfolio_id``; return counts and problems.
+
+        ``provider_id``/``account_type_id`` (Story 3.3) are the caller's
+        explicit selection, validated here against the CSV's
+        auto-detected ``contract`` -- never trusted as-is. Enforcing that
+        ``provider_id`` itself is present at all is the HTTP route's job
+        (``POST /import-sipp`` 400s before ever reaching this method); this
+        method only checks it *when given*: a non-blank ``provider_id``
+        that doesn't match the detected contract's own ``provider_id``
+        raises ``SippImportError`` (tampering/mismatch) -- ``None``/blank
+        is accepted here for callers other than that route (e.g. tests,
+        scripts) that don't go through its presence check.
+        Account-type validation is symmetric with provider validation, not
+        skippable by omission: if the detected contract declares any
+        ``account_type_ids``, ``account_type_id`` is required -- missing,
+        blank, or not one of the contract's declared values all raise
+        ``SippImportError`` naming the valid options. If the contract
+        declares no account types, any non-blank ``account_type_id`` itself
+        raises ``SippImportError`` (there is nothing to validate it
+        against). The value echoed back on ``SippImportResult`` is always
+        the one that passed this validation, never the raw parameter.
 
         The returned cash balance is the effective committed portfolio balance
         after stale-date protection, not necessarily this file's candidate.
@@ -1161,6 +1236,37 @@ class TraderAgent(Agent):
         except ContractRegistryError as exc:
             raise SippImportError(str(exc)) from exc
 
+        # Story 3.3: validate the caller's explicit selection against the
+        # auto-detected contract before doing anything else -- a rejected
+        # selection must abort before any row is even parsed further.
+        if provider_id and provider_id != contract.provider_id:
+            raise SippImportError(
+                "selected provider does not match this CSV's detected "
+                f"provider (expected {contract.provider_id!r}, got "
+                f"{provider_id!r})"
+            )
+
+        # Symmetric with the provider check above, not skippable by
+        # omission: a contract that declares account types requires one: a
+        # contract that declares none forbids one.
+        if contract.account_type_ids:
+            if not account_type_id or not account_type_id.strip():
+                raise SippImportError(
+                    "select an account type: " + ", ".join(contract.account_type_ids)
+                )
+            if account_type_id not in contract.account_type_ids:
+                raise SippImportError(
+                    f"unknown account type {account_type_id!r}; valid "
+                    "options: " + ", ".join(contract.account_type_ids)
+                )
+            validated_account_type_id = account_type_id
+        else:
+            if account_type_id and account_type_id.strip():
+                raise SippImportError(
+                    f"this provider has no account types; got {account_type_id!r}"
+                )
+            validated_account_type_id = ""
+
         # Every downstream phase reads canonical field keys, never raw
         # provider column names -- ``_detect_reconciliation_issues`` is the
         # one exception: it's independently unit-tested against raw
@@ -1216,6 +1322,25 @@ class TraderAgent(Agent):
         cash_balance_rank: dict[str, tuple[int, str, int]] = {}
         cash_balance: dict[str, Decimal] = {}
 
+        # Story 3.4: a contract with no ``running_balance`` mapping at all
+        # (e.g. IG, which never states an absolute balance) uses the
+        # additive delta-sum fallback below instead of the snapshot-style
+        # Running Balance handling -- keyed only on the contract's own
+        # capability, never on ``contract.provider_id`` (AC4).
+        has_running_balance_mapping = (
+            CanonicalField.RUNNING_BALANCE in contract.field_mapping.values()
+        )
+        # Parallel to ``planned_trades``/``planned_cash_flows`` (by row
+        # ``idx``): each row's net cash contribution (credit - debit),
+        # already confirmed GBP -- populated only when
+        # ``has_running_balance_mapping`` is False, since it's the only
+        # path that ever reads it. Summed at commit time, filtered to rows
+        # whose *actual* write outcome was not "duplicate", so a repeated
+        # import never double-counts (mirrors the II Running Balance
+        # path's own idempotency, which is guaranteed by #160's stale-date
+        # guard on an absolute snapshot instead).
+        fallback_delta_rows: list[tuple[int, Decimal]] = []
+
         # Loaded once per import (not per row) -- the alias map is a small,
         # rarely-changing local config file (no per-row/caching concern).
         aliases = load_aliases()
@@ -1244,6 +1369,18 @@ class TraderAgent(Agent):
             # point at a specific row instead of a useless "row n/a" for
             # every such row (#185).
             row_label = reference if reference else f"CSV row {idx + 2}"
+
+            # Story 3.4: a row ``ContractNormalizer.normalize_row`` already
+            # marked for whole-plan rejection (``reject_unless_column_equals``
+            # not satisfied, or ``text_extraction``'s ``required_marker``
+            # matched but the full pattern still failed) -- reuse the exact
+            # same ``failed_rows``/whole-plan-rejection mechanism every
+            # other row-level failure in this method uses, rather than a
+            # second, parallel rejection channel.
+            rejected_reason = row.get(REJECTED_REASON_KEY)
+            if rejected_reason:
+                failed_rows.append(f"row {row_label}: {rejected_reason}")
+                continue
 
             # Story 1.5, AC4: both Debit and Credit populated on one row is
             # contradictory monetary evidence -- reject it outright rather
@@ -1287,6 +1424,30 @@ class TraderAgent(Agent):
             sedol = row.get("security_identifier", "").strip()
             description = row.get("description", "").strip()
             idempotency_key = _idempotency_key(date, symbol, sedol, qty, description)
+
+            # Story 3.4: the cash-balance fallback (no ``running_balance``
+            # mapping on this contract) writes to the legacy single-value,
+            # GBP-only ``cash_balance:{portfolio_id}`` slot -- so a
+            # contributing row resolving to any other currency must reject
+            # the whole plan rather than be silently excluded from the sum
+            # (money must not silently vanish from a reported balance).
+            # Checked here, before any write, exactly like every other
+            # ``failed_rows`` gate in this loop.
+            if not has_running_balance_mapping and (debit > 0 or credit > 0):
+                flow_currency = (
+                    credit_money.currency
+                    if credit_money is not None and credit > 0
+                    else debit_money.currency
+                    if debit_money is not None and debit > 0
+                    else "GBP"
+                )
+                if flow_currency != "GBP":
+                    failed_rows.append(
+                        f"row {row_label}: cash-balance fallback only "
+                        f"supports GBP, got {flow_currency!r}"
+                    )
+                else:
+                    fallback_delta_rows.append((idx, credit - debit))
 
             # Price is only monetary evidence on a trade row -- a non-trade
             # row's Price cell can carry an unrelated numeric shape (e.g. a
@@ -1511,6 +1672,11 @@ class TraderAgent(Agent):
                 failed_rows=failed_rows,
                 total_rows=total_rows,
                 status="rejected",
+                provider_id=contract.provider_id,
+                provider_name=contract.provider_name,
+                contract_version=contract.version,
+                account_type_id=validated_account_type_id,
+                preview_rows=_build_preview_rows(normalized_rows),
             )
 
         # Commit phase: every row was safe to write. Persist trades, cash
@@ -1542,11 +1708,19 @@ class TraderAgent(Agent):
             # happened on this connection, never the earlier provisional
             # read-only classification.
             row_lineage: list[ImportRowLineage] = []
+            # Story 3.4: the fallback delta's per-row write outcome,
+            # keyed by ``idx`` -- populated in both insert loops below,
+            # read afterwards so the delta sum only counts a row actually
+            # inserted this transaction, never one suppressed as a
+            # duplicate (idempotent re-import, mirroring the II Running
+            # Balance path's own dedup guarantee).
+            outcome_by_idx: dict[int, str] = {}
             # Write-time outcomes are authoritative: a row suppressed by the
             # unique index is a duplicate, never a buy/sell/cash "success".
             for trade_args in planned_trades:
                 idx = trade_args[10]
                 outcome = self._trades.insert_ignore(conn, *trade_args)
+                outcome_by_idx[idx] = outcome
                 trade_id: int | None = None
                 if outcome == "duplicate":
                     duplicate_count += 1
@@ -1581,6 +1755,7 @@ class TraderAgent(Agent):
                 cash_flow_row_idxs, planned_cash_flows, strict=True
             ):
                 outcome = self._cash_flows.insert_ignore(conn, *flow_args)
+                outcome_by_idx[cf_idx] = outcome
                 cash_flow_id: int | None = None
                 if outcome == "duplicate":
                     duplicate_count += 1
@@ -1643,16 +1818,41 @@ class TraderAgent(Agent):
             # not migrated onto cash_balances by this story.
             gbp_balance = cash_balance.get("GBP")
             gbp_candidate = float(gbp_balance) if gbp_balance is not None else 0.0
-            # Story 1.5, AC1/AC2: test whether a winner was found at all
-            # (gbp_balance is not None), never its sign -- a winning 0.0 or
-            # negative balance must still be applied.
-            if gbp_balance is not None:
-                gbp_rank = cash_balance_rank.get("GBP")
-                cash_asof = (
-                    gbp_rank[1] if gbp_rank is not None and gbp_rank[0] == 1 else None
+            if has_running_balance_mapping:
+                # Story 1.5, AC1/AC2: test whether a winner was found at all
+                # (gbp_balance is not None), never its sign -- a winning
+                # 0.0 or negative balance must still be applied.
+                if gbp_balance is not None:
+                    gbp_rank = cash_balance_rank.get("GBP")
+                    cash_asof = (
+                        gbp_rank[1]
+                        if gbp_rank is not None and gbp_rank[0] == 1
+                        else None
+                    )
+                    self._apply_import_cash_balance(
+                        conn, portfolio_id, gbp_candidate, cash_asof
+                    )
+            else:
+                # Story 3.4 (review pass 2 correction): a contract with no
+                # ``running_balance`` mapping (e.g. IG) has no absolute
+                # snapshot to compare by date at all -- apply this
+                # import's own net delta unconditionally, via a dedicated
+                # method that never consults the #160 stale-date guard
+                # (see ``_apply_import_cash_balance_delta``'s docstring for
+                # why routing a delta through that guard is exactly review
+                # pass 1's bug). Counts only rows whose actual write
+                # outcome (``outcome_by_idx``) was not "duplicate", so a
+                # repeated import never double-counts.
+                fallback_delta = sum(
+                    (
+                        contribution
+                        for row_idx, contribution in fallback_delta_rows
+                        if outcome_by_idx.get(row_idx) != "duplicate"
+                    ),
+                    start=Decimal("0"),
                 )
-                self._apply_import_cash_balance(
-                    conn, portfolio_id, gbp_candidate, cash_asof
+                self._apply_import_cash_balance_delta(
+                    conn, portfolio_id, float(fallback_delta)
                 )
 
             # Read the balance that is actually committed -- never this
@@ -1695,13 +1895,15 @@ class TraderAgent(Agent):
             # never has a failed row (the ``failed_rows`` early return
             # above rejects the whole plan first), so ``failed_count`` is
             # always 0 here.
-            account_type_id = ",".join(contract.account_type_ids) or None
+            # Story 3.3: the receipt now records exactly the caller's
+            # validated per-request selection, never the contract's full
+            # supported set (deferred-work.md item from Story 3.2's review).
             receipt_id = self._import_receipts.insert_receipt_on_connection(
                 conn,
                 import_batch_id=import_batch_id,
                 portfolio_id=portfolio_id,
                 provider_id=contract.provider_id,
-                account_type_id=account_type_id,
+                account_type_id=validated_account_type_id or None,
                 contract_id=contract.contract_id,
                 contract_version=contract.version,
                 contract_content_digest=contract_content_digest(contract),
@@ -1758,6 +1960,10 @@ class TraderAgent(Agent):
             status=status,
             reconciliation_issue_count=len(reconciliation_issues),
             receipt_id=receipt_id,
+            provider_id=contract.provider_id,
+            provider_name=contract.provider_name,
+            contract_version=contract.version,
+            account_type_id=validated_account_type_id,
         )
 
     def save_price_cache(
@@ -1878,6 +2084,66 @@ class TraderAgent(Agent):
                 self._account.set_on_connection(
                     conn, self._cash_date_key(portfolio_id), as_of
                 )
+
+    def _apply_import_cash_balance_delta(
+        self, conn: Any, portfolio_id: int | None, delta: float
+    ) -> None:
+        """Add ``delta`` to the currently-stored GBP cash balance for
+        ``portfolio_id`` -- unconditionally, on the caller's open ``conn``.
+        Does not commit.
+
+        Story 3.4 (review pass 2 correction, see the spec's Spec Change
+        Log): used by the cash-balance fallback for a contract with no
+        ``running_balance`` mapping (e.g. IG, whose export never states an
+        absolute balance, only per-row deltas). This method deliberately
+        **never** consults ``_cash_date_key``/the ``#160`` stale-date
+        guard at all -- that guard exists to compare two *absolute
+        snapshot candidates* by date and keep the newer one; it has no
+        meaning for a *delta*, which is always correct to add regardless
+        of what date (if any) the currently-stored value carries. Routing
+        the delta through ``_apply_import_cash_balance``'s date comparison
+        (review pass 1's approach, with ``as_of=None``) meant that once
+        any dated running-balance import ever set a stored date for a
+        portfolio, every subsequent undated delta silently failed that
+        guard and was dropped forever, with no error -- a real,
+        user-invisible financial-data bug. An additive delta is
+        unconditionally valid to apply; gating it through a date
+        comparison was the bug, not a safety net.
+
+        Reads the existing value via ``get_on_connection`` on this same
+        open ``conn`` (never a separate connection, unlike
+        ``get_cash_balance()``), so it observes this same transaction's
+        own prior writes and this import's read never races a concurrent
+        one. A stored value that fails to parse as a number is treated as
+        ``0.0`` rather than raising -- this runs inside the import's write
+        transaction, so one malformed legacy value must not roll back an
+        otherwise-valid import (mirrors ``_effective_cash_balance``'s own
+        fallback behaviour).
+
+        Known, bounded limitation (see ``deferred-work.md``): a single
+        portfolio realistically maps to one broker account, so mixing a
+        running-balance provider (II) and a non-running-balance provider
+        (IG) into the *same* ``portfolio_id`` is an unusual setup this
+        legacy single-value ``cash_key`` slot was never designed to
+        reconcile between two independent sources of truth. This method
+        guarantees the additive delta is never silently dropped -- it does
+        not make the two mechanisms produce a jointly-coherent number when
+        combined in one portfolio.
+        """
+        stored = self._account.get_on_connection(conn, self._cash_key(portfolio_id))
+        try:
+            current = float(stored) if stored is not None else 0.0
+        except (TypeError, ValueError):
+            logger.warning(
+                "unparseable stored cash balance %r for portfolio %s; "
+                "treating as 0.0 before applying this import's delta",
+                stored,
+                portfolio_id,
+            )
+            current = 0.0
+        self._account.set_on_connection(
+            conn, self._cash_key(portfolio_id), str(current + delta)
+        )
 
     def _apply_import_cash_balances(
         self,

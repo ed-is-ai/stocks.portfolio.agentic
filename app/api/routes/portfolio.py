@@ -28,6 +28,8 @@ from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.trade import Trade
+from app.services.portfolio_import.contract_registry import ContractRegistryError
+from app.services.portfolio_import.registry_loader import get_contract_registry
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
@@ -45,6 +47,12 @@ NotificationsDep = Annotated[
 #: Cap on how many individual row/value issues to spell out in the import
 #: message and notification body before falling back to "(+N more)".
 _MAX_ISSUE_DETAILS = 5
+
+#: Cap on how many failed-row entries the rejected-import page lists in
+#: full (GH-308/AC4) -- a separate, larger bound than `_MAX_ISSUE_DETAILS`
+#: above, which caps only the short prose summary sent to the notification
+#: centre. Named (not inlined) so the two caps stay easy to tell apart.
+_MAX_FAILED_ROWS_LISTED = 200
 
 
 #: Anything other than alphanumerics/dot/dash/underscore in an uploaded
@@ -261,6 +269,8 @@ async def import_sipp(
     notifications: NotificationsDep,
     file: Annotated[UploadFile, File()],
     portfolio_id: Annotated[str | None, Form()] = None,
+    provider_id: Annotated[str | None, Form()] = None,
+    account_type_id: Annotated[str | None, Form()] = None,
 ) -> HTMLResponse:
     """Import an uploaded SIPP portfolio CSV into the selected portfolio.
 
@@ -281,6 +291,14 @@ async def import_sipp(
     import queue (index.html's ``handleSippImportSubmit``) calls this
     endpoint once per queued file, so this naturally yields one archived
     file and one event per file.
+
+    Story 3.3: ``provider_id``/``account_type_id`` are the user's explicit
+    selection from the import form. ``provider_id`` is validated here
+    against the registry's known providers before ``trader.import_sipp`` is
+    even called (AC3, no write); ``account_type_id`` is forwarded as-is and
+    validated inside ``TraderAgent.import_sipp`` against the CSV's
+    auto-detected contract, since only that contract (not this route) knows
+    which account types are valid for it.
     """
     filename = file.filename or ""
     content = await file.read()
@@ -303,18 +321,44 @@ async def import_sipp(
         )
 
     try:
-        result = trader.import_sipp(content, pid)
+        known_provider_ids = {
+            opt.provider_id for opt in get_contract_registry().list_providers()
+        }
+    except ContractRegistryError:
+        # A broken/misconfigured contracts directory must not surface as a
+        # raw 500 -- an empty known-set naturally falls through to the
+        # same "select a provider" 400 below as any other unknown
+        # provider_id, without a second error-handling path.
+        logger.exception("Failed to load known import providers")
+        known_provider_ids = set()
+    if (
+        not provider_id
+        or not provider_id.strip()
+        or provider_id not in known_provider_ids
+    ):
+        context = portfolio.default_portfolio_context(pid)
+        context["error_message"] = "Select a provider to import from."
+        return templates.TemplateResponse(
+            request, "_portfolio.html", context=context, status_code=400
+        )
+
+    try:
+        result = trader.import_sipp(content, pid, provider_id, account_type_id)
     except SippImportError as e:
-        # Validation failure (e.g. missing columns) — show the reason verbatim.
+        # Validation failure (e.g. missing columns, provider/account-type
+        # mismatch) — show the reason verbatim; already a user-safe message.
         context = portfolio.default_portfolio_context(pid)
         context["error_message"] = str(e)
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=400
         )
     except Exception as e:
+        # Never leak str(exception), file paths, or contract source
+        # internals for an unexpected failure -- log the real detail
+        # server-side only, and show a fixed, generic message (AC4).
         logger.exception("SIPP import failed: %s", e)
         context = portfolio.default_portfolio_context(pid)
-        context["error_message"] = f"Import failed: {e}"
+        context["error_message"] = "Import failed — see server logs."
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=400
         )
@@ -348,6 +392,14 @@ async def import_sipp(
         context["import_skipped_count"] = result.skipped_count
         context["import_failed_count"] = len(result.failed_rows)
         context["import_status"] = result.status
+        # AC4: every discoverable row issue (bounded) plus a redacted
+        # preview of parsed rows, so a rejected plan shows what would have
+        # been imported without ever writing anything.
+        context["import_failed_rows"] = result.failed_rows[:_MAX_FAILED_ROWS_LISTED]
+        context["import_failed_rows_omitted"] = max(
+            0, len(result.failed_rows) - _MAX_FAILED_ROWS_LISTED
+        )
+        context["import_preview_rows"] = result.preview_rows
         try:
             account = trader.get_portfolio_meta(pid)
             notifications.record(
@@ -450,6 +502,11 @@ async def import_sipp(
     context["import_failed_count"] = len(result.failed_rows)
     context["import_skipped_count"] = result.skipped_count
     context["import_status"] = result.status
+    # AC5: auto-detected provider/account-type/contract-version, echoed
+    # from the server-validated result -- never the raw form field.
+    context["import_provider_name"] = result.provider_name
+    context["import_account_type"] = result.account_type_id
+    context["import_contract_version"] = result.contract_version
     logger.info(
         "SIPP import: %d buys, %d sells, %d cash flows, %d duplicates, "
         "%d skipped, %d parse errors, cash £%.2f, status=%s",

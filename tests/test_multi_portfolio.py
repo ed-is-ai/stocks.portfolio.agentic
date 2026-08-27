@@ -170,8 +170,10 @@ def test_import_is_idempotent_within_a_portfolio(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
     csv_path = _write_csv(tmp_path)
-    agent.import_sipp(csv_path.read_bytes(), pf.id)
-    agent.import_sipp(csv_path.read_bytes(), pf.id)  # re-import must not duplicate
+    agent.import_sipp(csv_path.read_bytes(), pf.id, account_type_id="sipp")
+    agent.import_sipp(
+        csv_path.read_bytes(), pf.id, account_type_id="sipp"
+    )  # re-import must not duplicate
     positions = agent.get_portfolio(portfolio_id=pf.id)
     assert len(positions) == 1
     assert positions[0].shares == 10
@@ -182,9 +184,9 @@ def test_same_csv_imports_into_two_portfolios_independently(tmp_path: Path) -> N
     a = agent.create_portfolio("SIPP")
     b = agent.create_portfolio("ISA")
     csv_path = _write_csv(tmp_path)
-    agent.import_sipp(csv_path.read_bytes(), a.id)
+    agent.import_sipp(csv_path.read_bytes(), a.id, account_type_id="sipp")
     agent.import_sipp(
-        csv_path.read_bytes(), b.id
+        csv_path.read_bytes(), b.id, account_type_id="sipp"
     )  # same references, different portfolio
     assert len(agent.get_portfolio(portfolio_id=a.id)) == 1
     assert len(agent.get_portfolio(portfolio_id=b.id)) == 1
@@ -216,8 +218,8 @@ def test_two_different_files_into_two_portfolios_never_cross_contaminate(
         "01/01/2024,MSFT,B1,5,200,Buy MSFT,ISA-R1,1000,,9999\n"
     ).encode("utf-8")
 
-    agent.import_sipp(sipp_csv, sipp.id)
-    agent.import_sipp(isa_csv, isa.id)
+    agent.import_sipp(sipp_csv, sipp.id, account_type_id="sipp")
+    agent.import_sipp(isa_csv, isa.id, account_type_id="sipp")
 
     assert agent.get_cash_balance(sipp.id) == 4000.0
     assert agent.get_cash_balance(isa.id) == 9999.0
@@ -255,11 +257,14 @@ def test_cash_balance_is_independent_of_row_order(tmp_path: Path) -> None:
     fwd = agent.create_portfolio("Forward")
     rev = agent.create_portfolio("Reversed")
     agent.import_sipp(
-        _write_rows(tmp_path, "fwd.csv", _MULTI_ROWS).read_bytes(), fwd.id
+        _write_rows(tmp_path, "fwd.csv", _MULTI_ROWS).read_bytes(),
+        fwd.id,
+        account_type_id="sipp",
     )
     agent.import_sipp(
         _write_rows(tmp_path, "rev.csv", list(reversed(_MULTI_ROWS))).read_bytes(),
         rev.id,
+        account_type_id="sipp",
     )
     # Authoritative balance is the latest-dated row (2024-03-10 -> 2450),
     # whether the file is oldest-first or fully reversed.
@@ -284,11 +289,17 @@ def test_cash_balance_does_not_regress_when_older_file_imported_after_newer(
     # the balance with the older file's (stale) Running Balance.
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
-    agent.import_sipp(_write_rows(tmp_path, "new.csv", _NEW_FILE).read_bytes(), pf.id)
+    agent.import_sipp(
+        _write_rows(tmp_path, "new.csv", _NEW_FILE).read_bytes(),
+        pf.id,
+        account_type_id="sipp",
+    )
     assert agent.get_cash_balance(pf.id) == 9000.0
     # Now import the OLDER file — balance must stay on the newer date.
     result = agent.import_sipp(
-        _write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(), pf.id
+        _write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(),
+        pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 9000.0
     assert result.cash_balance == 9000.0
@@ -309,10 +320,16 @@ def test_cash_balance_advances_when_newer_file_imported_after_older(
     # The normal order still advances the balance to the newer date.
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
-    agent.import_sipp(_write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(), pf.id)
+    agent.import_sipp(
+        _write_rows(tmp_path, "old.csv", _OLD_FILE).read_bytes(),
+        pf.id,
+        account_type_id="sipp",
+    )
     assert agent.get_cash_balance(pf.id) == 4000.0
     result = agent.import_sipp(
-        _write_rows(tmp_path, "new.csv", _NEW_FILE).read_bytes(), pf.id
+        _write_rows(tmp_path, "new.csv", _NEW_FILE).read_bytes(),
+        pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 9000.0
     # The effective-balance re-read must be right in the accepting direction
@@ -350,6 +367,7 @@ def test_cash_balance_zero_running_balance_is_not_discarded(tmp_path: Path) -> N
             ["01/01/2024,n/a,n/a,n/a,n/a,Contribution,R1,,500.00,500.00"],
         ).read_bytes(),
         pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 500.0
     agent.import_sipp(
@@ -359,6 +377,7 @@ def test_cash_balance_zero_running_balance_is_not_discarded(tmp_path: Path) -> N
             ["01/02/2024,n/a,n/a,n/a,n/a,Withdrawal,R2,500.00,,0.00"],
         ).read_bytes(),
         pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 0.0
     cash_balances = CashBalancesRepository(db.make_connect(lambda: agent.db_path))
@@ -381,6 +400,7 @@ def test_cash_balance_negative_running_balance_is_accepted(tmp_path: Path) -> No
             ["01/01/2024,n/a,n/a,n/a,n/a,Overdraft,R1,150.50,,-150.50"],
         ).read_bytes(),
         pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == -150.50
     cash_balances = CashBalancesRepository(db.make_connect(lambda: agent.db_path))
@@ -401,6 +421,7 @@ def test_cash_balance_undated_running_balance_does_not_overwrite_dated(
             ["01/01/2024,n/a,n/a,n/a,n/a,Contribution,R1,,500.00,500.00"],
         ).read_bytes(),
         pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 500.0
     agent.import_sipp(
@@ -410,6 +431,7 @@ def test_cash_balance_undated_running_balance_does_not_overwrite_dated(
             ["not-a-date,n/a,n/a,n/a,n/a,Note,R2,,,999.00"],
         ).read_bytes(),
         pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 500.0
 
@@ -429,6 +451,7 @@ def test_cash_balance_undated_running_balance_applies_when_nothing_stored(
             ["not-a-date,n/a,n/a,n/a,n/a,Note,R1,,,750.00"],
         ).read_bytes(),
         pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 750.0
 
@@ -450,7 +473,9 @@ def test_cash_balance_same_day_tie_break_prefers_first_listed_row(
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
     agent.import_sipp(
-        _write_rows(tmp_path, "sameday.csv", same_day_rows).read_bytes(), pf.id
+        _write_rows(tmp_path, "sameday.csv", same_day_rows).read_bytes(),
+        pf.id,
+        account_type_id="sipp",
     )
     assert agent.get_cash_balance(pf.id) == 1000.0
 
@@ -468,7 +493,11 @@ def test_cash_balance_same_day_tie_break_does_not_disturb_cross_date_ordering(
     ]
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
-    agent.import_sipp(_write_rows(tmp_path, "mixed.csv", rows).read_bytes(), pf.id)
+    agent.import_sipp(
+        _write_rows(tmp_path, "mixed.csv", rows).read_bytes(),
+        pf.id,
+        account_type_id="sipp",
+    )
     # The later date (15/03) always wins over the earlier one (01/01), and
     # within it, the first-listed row (RA, 1000) wins the same-day tie.
     assert agent.get_cash_balance(pf.id) == 1000.0

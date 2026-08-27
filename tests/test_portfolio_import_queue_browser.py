@@ -123,7 +123,10 @@ def mocked_trader() -> Iterator[MagicMock]:
     mock_trader.get_portfolio_meta.return_value = None
 
     def _slow_successful_import(
-        content: bytes, portfolio_id: int | None
+        content: bytes,
+        portfolio_id: int | None,
+        provider_id: str | None = None,
+        account_type_id: str | None = None,
     ) -> SippImportResult:
         # Simulates real processing time so the queue's fetch is reliably
         # still in flight when the test asserts the mid-import disabled
@@ -183,7 +186,12 @@ def mocked_trader_mixed_results() -> Iterator[MagicMock]:
         ),
     ]
 
-    def _mixed_import(content: bytes, portfolio_id: int | None) -> SippImportResult:
+    def _mixed_import(
+        content: bytes,
+        portfolio_id: int | None,
+        provider_id: str | None = None,
+        account_type_id: str | None = None,
+    ) -> SippImportResult:
         return results.pop(0)
 
     mock_trader.import_sipp.side_effect = _mixed_import
@@ -260,6 +268,18 @@ def _open_import_dropdown(page: Page) -> None:
     expect(page.locator("input[type=file]")).to_be_attached()
 
 
+def _select_import_provider(page: Page) -> None:
+    """Select the only registered provider/account-type (Story 3.3).
+
+    The provider select is now a required field with no valid default
+    selection, so every queue test must choose one before submitting --
+    otherwise the browser's own native form validation blocks the submit
+    event from ever firing, and ``handleSippImportSubmit`` never runs.
+    """
+    page.select_option("select[name=provider_id]", "interactive_investor")
+    page.select_option("select[name=account_type_id]", "sipp")
+
+
 def _capture_dialogs(page: Page) -> list[str]:
     """Register a handler that dismisses every ``alert()``/``confirm()``
     and records its message, returning the list that fills in as dialogs
@@ -283,6 +303,7 @@ def test_selector_disabled_during_queue_then_reenabled(
     import queue, then usable again once it finishes."""
     _load_portfolio_tab(page, base_url)
     _open_import_dropdown(page)
+    _select_import_provider(page)
 
     page.set_input_files("input[type=file]", str(sample_csv))
     page.click("button:has-text('Import CSV')")
@@ -322,6 +343,7 @@ def test_response_for_switched_away_portfolio_is_discarded(
 
     _load_portfolio_tab(page, base_url)
     _open_import_dropdown(page)
+    _select_import_provider(page)
 
     page.set_input_files("input[type=file]", str(sample_csv))
     page.click("button:has-text('Import CSV')")
@@ -377,6 +399,7 @@ def test_discard_reports_files_already_imported_mid_batch_switch(
 
     _load_portfolio_tab(page, base_url)
     _open_import_dropdown(page)
+    _select_import_provider(page)
 
     page.set_input_files("input[type=file]", [str(csv_a), str(csv_b)])
     page.click("button:has-text('Import CSV')")
@@ -420,6 +443,7 @@ def test_multi_file_summary_flags_mismatch_without_losing_counts(
 
     _load_portfolio_tab(page, base_url)
     _open_import_dropdown(page)
+    _select_import_provider(page)
 
     page.set_input_files("input[type=file]", [str(csv_a), str(csv_b)])
     page.click("button:has-text('Import CSV')")
