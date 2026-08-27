@@ -121,6 +121,19 @@ class TestBuildDeterministicNarrative:
         assert "Most heavily net-bought by Congress/Senate: AAA (+8)" in joined
         assert "Most multi-year breakouts by sector: Energy (2)" in joined
 
+    def test_breadth_bullet_shows_fetch_or_cache_provenance(self) -> None:
+        cycle = get_market_cycle_context(date(2026, 2, 15))
+        fetched = MarketBreadth(pct_above_200dma=50, as_of="x")
+        cached = fetched.model_copy(update={"retrieval_source": "cached"})
+
+        fetched_narrative = build_deterministic_narrative(
+            _snapshot(), [], cycle, fetched
+        )
+        cached_narrative = build_deterministic_narrative(_snapshot(), [], cycle, cached)
+
+        assert any("fetched from source" in bullet for bullet in fetched_narrative.bullets)
+        assert any("retrieved from cache" in bullet for bullet in cached_narrative.bullets)
+
     def test_not_advice_note_always_present(self) -> None:
         cycle = get_market_cycle_context(date(2026, 2, 15))
         narrative = build_deterministic_narrative(_snapshot(), [], cycle)

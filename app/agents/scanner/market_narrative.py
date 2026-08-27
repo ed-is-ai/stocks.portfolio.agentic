@@ -119,9 +119,14 @@ def _breadth_bullet(breadth: MarketBreadth | None) -> str | None:
         else "flat"
     )
     divergence = " — breadth-divergence flag set" if breadth.bearish_signal else ""
+    provenance = (
+        "retrieved from cache"
+        if breadth.retrieval_source == "cached"
+        else "fetched from source"
+    )
     return (
         f"S&P 500 breadth: {breadth.pct_above_200dma:.0f}% of members above "
-        f"their 200DMA ({trend}){divergence}."
+        f"their 200DMA ({trend}){divergence}; {provenance}."
     )
 
 
