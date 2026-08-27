@@ -1,4 +1,7 @@
 from decimal import Decimal
+import math
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import pandas as pd
@@ -93,6 +96,151 @@ class _StubTrader:
 
     def save_ticker_currencies(self, currencies):
         pass
+
+
+class _LiveRateTrader(_StubTrader):
+    def __init__(
+        self,
+        persisted_rate: float | None = None,
+        *,
+        load_raises: bool = False,
+        save_raises: bool = False,
+    ) -> None:
+        self.persisted_rate = persisted_rate
+        self.load_raises = load_raises
+        self.save_raises = save_raises
+        self.saved_rates: list[dict[str, float]] = []
+
+    def load_price_cache(self):
+        if self.load_raises:
+            raise OSError("cache unavailable")
+        prices = (
+            {"__GBPUSD__": self.persisted_rate}
+            if self.persisted_rate is not None
+            else {}
+        )
+        return prices, None, {}
+
+    def save_price_cache(self, prices, display_info=None):
+        if self.save_raises:
+            raise OSError("cache unavailable")
+        self.saved_rates.append(prices)
+        self.persisted_rate = prices["__GBPUSD__"]
+
+
+def _make_live_rate_service(monkeypatch, trader, clock) -> PortfolioService:
+    monkeypatch.setattr("app.services.portfolio_service.time.monotonic", clock)
+    service = PortfolioService(
+        cast(TraderService, trader),
+        cast(ExitEvaluator, _StubEvaluator()),
+    )
+    service.reset_gbpusd_cache()
+    return service
+
+
+def test_gbpusd_rate_uses_live_ttl_cache_and_refreshes_at_expiry(monkeypatch) -> None:
+    trader = _LiveRateTrader()
+    now = [100.0]
+    svc = _make_live_rate_service(monkeypatch, trader, lambda: now[0])
+    fetched = iter([1.25, 1.30])
+    monkeypatch.setattr(svc, "_fetch_gbpusd_rate", lambda: next(fetched))
+
+    assert svc.gbpusd_rate() == 1.25
+    now[0] += 59.9
+    assert svc.gbpusd_rate() == 1.25
+    now[0] += 0.1
+    assert svc.gbpusd_rate() == 1.30
+    now[0] += 1
+    assert svc.gbpusd_rate() == 1.30
+    assert trader.saved_rates == [{"__GBPUSD__": 1.25}, {"__GBPUSD__": 1.30}]
+
+
+def test_gbpusd_rate_invalid_live_result_uses_valid_persisted_fallback(monkeypatch) -> None:
+    trader = _LiveRateTrader(persisted_rate=1.27)
+    svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
+
+    for invalid_rate in (None, 0.0, -1.0, math.inf, math.nan):
+        monkeypatch.setattr(svc, "_fetch_gbpusd_rate", lambda rate=invalid_rate: rate)
+        assert svc.gbpusd_rate() == 1.27
+        svc.reset_gbpusd_cache()
+
+    assert trader.saved_rates == []
+
+
+def test_gbpusd_rate_invalid_live_and_persisted_rates_use_default(monkeypatch) -> None:
+    trader = _LiveRateTrader(persisted_rate=0.0)
+    svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
+    monkeypatch.setattr(svc, "_fetch_gbpusd_rate", lambda: float("nan"))
+
+    assert svc.gbpusd_rate() == 1.35
+    assert trader.saved_rates == []
+
+
+def test_gbpusd_rate_returns_default_when_provider_and_persisted_cache_fail(
+    monkeypatch,
+) -> None:
+    trader = _LiveRateTrader(load_raises=True)
+    svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
+    monkeypatch.setattr(svc, "_fetch_gbpusd_rate", lambda: None)
+
+    assert svc.gbpusd_rate() == 1.35
+
+
+def test_gbpusd_rate_returns_live_rate_when_persistence_write_fails(monkeypatch) -> None:
+    trader = _LiveRateTrader(save_raises=True)
+    svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
+    monkeypatch.setattr(svc, "_fetch_gbpusd_rate", lambda: 1.25)
+
+    assert svc.gbpusd_rate() == 1.25
+    assert svc.gbpusd_rate() == 1.25
+
+
+def test_gbpusd_rate_concurrent_refresh_is_single_flight(monkeypatch) -> None:
+    trader = _LiveRateTrader()
+    svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
+    started = threading.Event()
+    release = threading.Event()
+    calls = [0]
+
+    def delayed_fetch() -> float:
+        calls[0] += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return 1.24
+
+    monkeypatch.setattr(svc, "_fetch_gbpusd_rate", delayed_fetch)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(svc.gbpusd_rate) for _ in range(4)]
+        assert started.wait(timeout=2)
+        release.set()
+        assert [future.result(timeout=2) for future in futures] == [1.24] * 4
+
+    assert calls == [1]
+
+
+def test_gbpusd_rate_concurrent_failed_refresh_uses_one_persisted_fallback(
+    monkeypatch,
+) -> None:
+    trader = _LiveRateTrader(persisted_rate=1.27)
+    svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
+    started = threading.Event()
+    release = threading.Event()
+    calls = [0]
+
+    def delayed_failure() -> None:
+        calls[0] += 1
+        started.set()
+        assert release.wait(timeout=2)
+        return None
+
+    monkeypatch.setattr(svc, "_fetch_gbpusd_rate", delayed_failure)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(svc.gbpusd_rate) for _ in range(4)]
+        assert started.wait(timeout=2)
+        release.set()
+        assert [future.result(timeout=2) for future in futures] == [1.27] * 4
+
+    assert calls == [1]
 
 
 class _StubEvaluator:
