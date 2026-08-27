@@ -149,16 +149,11 @@ async def partial_history(
         pf.id: (f"{pf.name} #{pf.id}" if seen[pf.name] > 1 else pf.name)
         for pf in portfolios
     }
-    # Story 2.4 (AC6/AC7/AC8): an Opening Lot row is labelled "Manually
-    # entered" and its edit/delete actions are gated on a fresh
-    # consumed/unconsumed check -- computed here (not persisted) so the
-    # template can render a read-only state for a consumed lot without a
-    # second round trip.
-    opening_lot_status = {
-        t.id: realised_pnl.opening_lot_status(t.id, t.portfolio_id)
-        for t in trades
-        if t.source == "opening_lot" and t.id is not None and t.portfolio_id is not None
-    }
+    # The History list supplies its already-loaded rows to one bulk FIFO
+    # status calculation. Edit/delete routes retain their own fresh
+    # single-lot guards because this display snapshot is not an authority to
+    # mutate against.
+    opening_lot_status = realised_pnl.opening_lot_statuses(trades)
     return templates.TemplateResponse(
         request,
         "_history.html",

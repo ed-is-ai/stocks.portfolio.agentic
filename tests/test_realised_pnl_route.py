@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from app.api.app import app
 from app.api.dependencies import get_realised_pnl_service, get_trader_service
-from app.schemas import Portfolio, RealisedPnlSummary, RoundTrip, UnmatchedSell
+from app.schemas import Portfolio, RealisedPnlSummary, RoundTrip, Trade, UnmatchedSell
 
 client = TestClient(app)
 _AUTH = {"X-Auth-Token": "s3cret"}
@@ -102,6 +102,32 @@ def test_zero_round_trips_shows_empty_state_copy(mocked):
     assert average_card.count("&mdash;") == 2
     assert 'class="pos"' not in average_card
     assert 'class="neg"' not in average_card
+
+
+def test_history_uses_one_bulk_opening_lot_status_operation(mocked):
+    mock_trader, mock_realised_pnl = mocked
+    opening_lot = Trade(
+        id=7,
+        ticker="AAPL",
+        action="BUY",
+        shares=10,
+        price=100.0,
+        date="2026-01-01",
+        portfolio_id=1,
+        source="opening_lot",
+    )
+    regular_trade = opening_lot.model_copy(update={"id": 8, "source": "manual"})
+    mock_trader.get_trade_history.return_value = [opening_lot, regular_trade]
+    mock_realised_pnl.opening_lot_statuses.return_value = {7: "unconsumed"}
+
+    resp = client.get("/partials/history")
+
+    assert resp.status_code == 200
+    mock_trader.get_trade_history.assert_called_once_with()
+    mock_realised_pnl.opening_lot_statuses.assert_called_once_with(
+        [opening_lot, regular_trade]
+    )
+    mock_realised_pnl.opening_lot_status.assert_not_called()
 
 
 def _round_trip(
