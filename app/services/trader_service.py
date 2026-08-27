@@ -94,6 +94,18 @@ class TraderService:
         """Return trades, newest first; optionally filter by ticker/portfolio."""
         return self._agent.get_trade_history(ticker, portfolio_id)
 
+    def get_trade_revision(self, portfolio_id: int) -> int:
+        """Return the durable revision for one portfolio's trade ledger."""
+        return self._agent.get_trade_revision(portfolio_id)
+
+    def get_trade_revisions(self, portfolio_ids: list[int]) -> dict[int, int]:
+        """Return durable revisions for several portfolio trade ledgers."""
+        return self._agent.get_trade_revisions(portfolio_ids)
+
+    def get_pnl_input_revision(self) -> int:
+        """Return the durable shared FX/currency revision for realised P&L."""
+        return self._agent.get_pnl_input_revision()
+
     def held_tickers(self) -> set[str]:
         """Return tickers held (net-positive) in any portfolio."""
         return self._agent.held_tickers()

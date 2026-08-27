@@ -57,6 +57,47 @@ def test_set_unmatched_sell_ack_persists_and_clears(tmp_path: Path) -> None:
     assert history[sell.id].realised_pnl_ack_at is None
 
 
+def test_trade_revisions_advance_only_with_committed_trade_writes(
+    tmp_path: Path,
+) -> None:
+    """#341: all write shapes share transactional trigger invalidation."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    portfolio_id = 1
+    assert agent.get_trade_revision(portfolio_id) == 0
+
+    lot = agent.record_opening_lot(
+        "TEST1", 2, 10.0, "2026-01-01", portfolio_id=portfolio_id
+    )
+    after_insert = agent.get_trade_revision(portfolio_id)
+    agent.update_opening_lot(
+        lot.id or 0, "TEST1", 3, 10.0, "2026-01-01", portfolio_id=portfolio_id
+    )
+    after_update = agent.get_trade_revision(portfolio_id)
+    assert after_insert > 0
+    assert after_update > after_insert
+
+    sell = agent.record_sell("TEST1", 1, 11.0, "2026-01-02", portfolio_id=portfolio_id)
+    before_ack = agent.get_trade_revision(portfolio_id)
+    agent.set_unmatched_sell_ack(sell.id or 0, True)
+    assert agent.get_trade_revision(portfolio_id) > before_ack
+
+    assert agent.delete_opening_lot(lot.id or 0, portfolio_id) is True
+    after_delete = agent.get_trade_revision(portfolio_id)
+    conn = agent._conn()
+    try:
+        conn.execute(
+            "INSERT INTO trades (ticker, action, shares, price, date, portfolio_id) "
+            "VALUES ('ROLLBACK', 'BUY', 1, 1, '2026-01-03', ?)",
+            (portfolio_id,),
+        )
+        conn.rollback()
+    finally:
+        conn.close()
+    assert agent.get_trade_revision(portfolio_id) == after_delete
+
+
 def test_get_and_save_cached_fx_rates_round_trip(tmp_path: Path) -> None:
     """Story 1.2: TraderAgent's get/save_cached_fx_rates wiring persists
     through a real FxRateCacheRepository against a real DB."""
@@ -75,6 +116,58 @@ def test_get_and_save_cached_fx_rates_round_trip(tmp_path: Path) -> None:
         "2026-01-01": 10.25
     }
     assert agent.get_cached_fx_rates(["2026-01-01"]) == {"2026-01-01": 1.35}
+
+
+def test_pnl_input_revision_advances_for_changed_fx_and_currency_data(
+    tmp_path: Path,
+) -> None:
+    """#341 review: durable P&L inputs invalidate without trade writes."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    assert agent.get_pnl_input_revision() == 0
+    agent.save_fx_rates({"2026-01-01": 1.35})
+    after_fx_insert = agent.get_pnl_input_revision()
+    agent.save_fx_rates({"2026-01-01": 1.35})
+    assert agent.get_pnl_input_revision() == after_fx_insert
+    agent.save_fx_rates({"2026-01-01": 1.36})
+    after_fx_update = agent.get_pnl_input_revision()
+    assert after_fx_update > after_fx_insert
+
+    agent.save_ticker_currencies({"TEST1": "USD"})
+    after_currency_insert = agent.get_pnl_input_revision()
+    agent.save_ticker_currencies({"TEST1": "USD"})
+    assert agent.get_pnl_input_revision() == after_currency_insert
+    agent.save_ticker_currencies({"TEST1": "GBP"})
+    assert agent.get_pnl_input_revision() > after_currency_insert
+
+
+def test_pnl_input_revision_ignores_price_refreshes_without_currency_change(
+    tmp_path: Path,
+) -> None:
+    """#341 review: price values are not realised-P&L inputs by themselves."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    agent.save_price_cache({"TEST1": 100.0}, {"TEST1": (100.0, "GBP")})
+    with_display_metadata = agent.get_pnl_input_revision()
+    agent.save_price_cache({"TEST1": 101.0}, {"TEST1": (101.0, "GBP")})
+    assert agent.get_pnl_input_revision() == with_display_metadata
+
+    # GBp is a price quote unit but the same realised-P&L trading currency.
+    agent.save_price_cache({"TEST1": 102.0}, {"TEST1": (102.0, "GBp")})
+    assert agent.get_pnl_input_revision() == with_display_metadata
+
+    agent.save_price_cache({"TEST1": 102.0}, {"TEST1": (102.0, "USD")})
+    usd_currency = agent.get_pnl_input_revision()
+    assert usd_currency > with_display_metadata
+
+    # Removing usable display metadata makes ticker_currencies fall through
+    # to the durable currency cache/live resolver, so it must invalidate.
+    agent.save_price_cache({"TEST1": 102.0})
+    assert agent.get_pnl_input_revision() > usd_currency
 
 
 def test_correct_latest_trade(tmp_path: Path) -> None:

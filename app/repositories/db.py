@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS trades (
     reference   TEXT,
     currency    TEXT NOT NULL DEFAULT 'GBP'
 );
+CREATE TABLE IF NOT EXISTS portfolio_trade_revisions (
+    portfolio_id INTEGER PRIMARY KEY,
+    revision     INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS realised_pnl_input_revision (
+    id       INTEGER PRIMARY KEY CHECK(id = 1),
+    revision INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS cash_flows (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,
@@ -418,4 +426,127 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
             logger.debug("date migration step skipped: %s", exc)
 
     _migrate_default_portfolio(conn)
+    # A revision is the single invalidation source for derived trade views.
+    # The triggers execute in the same transaction as every trade mutation;
+    # failed writes consequently leave both ledger and revision unchanged.
+    # ``-1`` is the safe bucket for legacy rows with no portfolio ID.
+    conn.executescript(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_trades_revision_insert
+        AFTER INSERT ON trades
+        BEGIN
+            INSERT INTO portfolio_trade_revisions (portfolio_id, revision)
+            VALUES (COALESCE(NEW.portfolio_id, -1), 1)
+            ON CONFLICT(portfolio_id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_trades_revision_delete
+        AFTER DELETE ON trades
+        BEGIN
+            INSERT INTO portfolio_trade_revisions (portfolio_id, revision)
+            VALUES (COALESCE(OLD.portfolio_id, -1), 1)
+            ON CONFLICT(portfolio_id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_trades_revision_update_same_portfolio
+        AFTER UPDATE ON trades
+        WHEN COALESCE(OLD.portfolio_id, -1) = COALESCE(NEW.portfolio_id, -1)
+        BEGIN
+            INSERT INTO portfolio_trade_revisions (portfolio_id, revision)
+            VALUES (COALESCE(NEW.portfolio_id, -1), 1)
+            ON CONFLICT(portfolio_id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_trades_revision_update_moved_portfolio
+        AFTER UPDATE ON trades
+        WHEN COALESCE(OLD.portfolio_id, -1) != COALESCE(NEW.portfolio_id, -1)
+        BEGIN
+            INSERT INTO portfolio_trade_revisions (portfolio_id, revision)
+            VALUES (COALESCE(OLD.portfolio_id, -1), 1)
+            ON CONFLICT(portfolio_id) DO UPDATE SET revision = revision + 1;
+            INSERT INTO portfolio_trade_revisions (portfolio_id, revision)
+            VALUES (COALESCE(NEW.portfolio_id, -1), 1)
+            ON CONFLICT(portfolio_id) DO UPDATE SET revision = revision + 1;
+        END;
+        -- Realised P&L depends on these durable valuation inputs in addition
+        -- to its portfolio's trade ledger.  Keep one revision for the shared
+        -- input set: FX and currency classifications can serve many
+        -- portfolios, while their cache entries remain portfolio-specific.
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_fx_rate_insert
+        AFTER INSERT ON fx_rate_cache
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_fx_rate_update
+        AFTER UPDATE OF rate ON fx_rate_cache
+        WHEN OLD.rate IS NOT NEW.rate
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_fx_rate_delete
+        AFTER DELETE ON fx_rate_cache
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_ticker_currency_insert
+        AFTER INSERT ON ticker_currency_cache
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_ticker_currency_update
+        AFTER UPDATE OF currency ON ticker_currency_cache
+        WHEN OLD.currency IS NOT NEW.currency
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_ticker_currency_delete
+        AFTER DELETE ON ticker_currency_cache
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        -- ``ticker_currencies`` prefers price-cache display metadata. Price
+        -- refreshes themselves do not affect P&L: only a usable metadata
+        -- entry appearing/disappearing, or its *trading-currency*
+        -- classification changing, does.  In particular, GBp and GBP both
+        -- classify as GBP for realised P&L.
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_price_currency_insert
+        AFTER INSERT ON price_cache
+        WHEN NEW.original_price IS NOT NULL
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_price_currency_update
+        AFTER UPDATE OF currency, original_price ON price_cache
+        WHEN (OLD.original_price IS NULL) IS NOT (NEW.original_price IS NULL)
+          OR (
+              OLD.original_price IS NOT NULL
+              AND NEW.original_price IS NOT NULL
+              AND CASE
+                    WHEN lower(trim(COALESCE(OLD.currency, 'GBP'))) = 'gbp'
+                    THEN 'GBP'
+                    ELSE upper(trim(COALESCE(OLD.currency, 'GBP')))
+                  END
+                  IS NOT CASE
+                    WHEN lower(trim(COALESCE(NEW.currency, 'GBP'))) = 'gbp'
+                    THEN 'GBP'
+                    ELSE upper(trim(COALESCE(NEW.currency, 'GBP')))
+                  END
+          )
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_pnl_input_price_currency_delete
+        AFTER DELETE ON price_cache
+        WHEN OLD.original_price IS NOT NULL
+        BEGIN
+            INSERT INTO realised_pnl_input_revision (id, revision) VALUES (1, 1)
+            ON CONFLICT(id) DO UPDATE SET revision = revision + 1;
+        END;
+        """
+    )
     conn.commit()

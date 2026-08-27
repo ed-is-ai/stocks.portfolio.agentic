@@ -140,7 +140,6 @@ async def partial_history(
 ) -> HTMLResponse:
     # Trade History spans every portfolio; a name map feeds the Portfolio
     # column, disambiguating duplicate names with #id (#147).
-    trades = trader.get_trade_history()
     portfolios = trader.list_portfolios()
     seen: dict[str, int] = {}
     for pf in portfolios:
@@ -149,11 +148,12 @@ async def partial_history(
         pf.id: (f"{pf.name} #{pf.id}" if seen[pf.name] > 1 else pf.name)
         for pf in portfolios
     }
-    # The History list supplies its already-loaded rows to one bulk FIFO
-    # status calculation. Edit/delete routes retain their own fresh
-    # single-lot guards because this display snapshot is not an authority to
-    # mutate against.
-    opening_lot_status = realised_pnl.opening_lot_statuses(trades)
+    # FIFO display work is revision-cached in the service. Edit/delete
+    # routes retain their fresh single-lot guards; this snapshot is never a
+    # mutation authority.
+    trades, opening_lot_status = realised_pnl.get_history_presentation(
+        [pf.id for pf in portfolios]
+    )
     return templates.TemplateResponse(
         request,
         "_history.html",

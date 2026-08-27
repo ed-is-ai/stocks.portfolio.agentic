@@ -50,6 +50,9 @@ from app.repositories.import_receipt_repo import (
     canonical_row_digest,
 )
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
+from app.repositories.portfolio_trade_revisions_repo import (
+    PortfolioTradeRevisionsRepository,
+)
 from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
 from app.repositories.ticker_currency_cache_repo import TickerCurrencyCacheRepository
@@ -275,6 +278,7 @@ class TraderAgent(Agent):
     _snapshots: PortfolioSnapshotsRepository = PrivateAttr()
     _fx_rates: FxRateCacheRepository = PrivateAttr()
     _ticker_currency_cache: TickerCurrencyCacheRepository = PrivateAttr()
+    _trade_revisions: PortfolioTradeRevisionsRepository = PrivateAttr()
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
@@ -290,6 +294,7 @@ class TraderAgent(Agent):
         self._snapshots = PortfolioSnapshotsRepository(connect)
         self._fx_rates = FxRateCacheRepository(connect)
         self._ticker_currency_cache = TickerCurrencyCacheRepository(connect)
+        self._trade_revisions = PortfolioTradeRevisionsRepository(connect)
         self._init_db()
 
     # --- portfolio CRUD (#147) -------------------------------------------
@@ -701,6 +706,14 @@ class TraderAgent(Agent):
     ) -> list[Trade]:
         """Return trades newest first. Optionally filter by ticker/portfolio."""
         return self._trades.history(ticker.upper() if ticker else None, portfolio_id)
+
+    def get_trade_revision(self, portfolio_id: int) -> int:
+        """Return the durable revision for one portfolio's trade ledger."""
+        return self._trade_revisions.get(portfolio_id)
+
+    def get_trade_revisions(self, portfolio_ids: list[int]) -> dict[int, int]:
+        """Return durable revisions for several portfolio trade ledgers."""
+        return self._trade_revisions.get_many(portfolio_ids)
 
     def held_tickers(self) -> set[str]:
         """Return tickers held (net-positive) in any portfolio (#147)."""
@@ -1999,6 +2012,10 @@ class TraderAgent(Agent):
     ) -> dict[str, float]:
         """Return cached ``{date: rate}`` rows for one FX pair."""
         return self._fx_rates.get_many(dates, pair)
+
+    def get_pnl_input_revision(self) -> int:
+        """Return the durable shared FX/currency revision for realised P&L."""
+        return self._trade_revisions.get_pnl_input_revision()
 
     def save_fx_rates(self, rates: dict[str, float], pair: str = "GBPUSD=X") -> None:
         """Persist resolved ``{date: rate}`` rows for one FX pair."""

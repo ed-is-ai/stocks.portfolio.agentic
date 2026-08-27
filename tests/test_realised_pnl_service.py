@@ -21,6 +21,7 @@ from app.schemas import Trade
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
+import app.services.realised_pnl_service as realised_pnl_service
 
 PORTFOLIO_ID = 1
 
@@ -100,6 +101,219 @@ def test_simple_one_to_one_round_trip(tmp_path: Path) -> None:
     assert rt.holding_period_days == 31
     assert rt.realised_pnl_gbp == 500.0
     assert summary.total_realised_pnl_gbp == 500.0
+
+
+def test_summary_cache_reuses_revision_and_returns_independent_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#341: unchanged ledgers avoid replay and callers cannot poison cache."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_buy("TEST1", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("TEST1", 1, 150.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    original = service._trader.get_trade_history
+    calls = 0
+
+    def counted_history(**kwargs: object) -> list[Trade]:
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
+    first = service.compute_summary(PORTFOLIO_ID)
+    first.total_realised_pnl_gbp = -1.0
+    second = service.compute_summary(PORTFOLIO_ID)
+
+    assert calls == 1
+    assert second.total_realised_pnl_gbp == 50.0
+
+    agent.record_buy("TEST2", 1, 100.0, "2026-01-03", portfolio_id=PORTFOLIO_ID)
+    service.compute_summary(PORTFOLIO_ID)
+    assert calls == 2
+
+
+def test_summary_cache_invalidates_for_persisted_fx_and_currency_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#341 review: P&L inputs change independently of trade revisions."""
+
+    class _ValuationInputs:
+        currency = "USD"
+        rate = 1.0
+
+        def ticker_currencies(self, tickers: list[str]) -> dict[str, str]:
+            return {ticker: self.currency for ticker in tickers}
+
+        def historical_fx_rates(
+            self, currency: str, dates: list[str]
+        ) -> dict[str, float]:
+            return {trade_date: self.rate for trade_date in dates}
+
+        def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
+            return self.historical_fx_rates("USD", dates)
+
+        def load_ticker_aliases(self) -> dict[str, str]:
+            return {}
+
+    inputs = _ValuationInputs()
+    service, agent = _make_service_with_agent(tmp_path, inputs)
+    agent.record_buy("TEST1", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("TEST1", 1, 150.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    original = service._trader.get_trade_history
+    calls = 0
+
+    def counted_history(**kwargs: object) -> list[Trade]:
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
+    assert service.compute_summary(PORTFOLIO_ID).total_realised_pnl_gbp == 50.0
+    assert service.compute_summary(PORTFOLIO_ID).total_realised_pnl_gbp == 50.0
+    assert calls == 1
+
+    inputs.rate = 2.0
+    agent.save_fx_rates({"2026-01-01": 2.0})
+    assert service.compute_summary(PORTFOLIO_ID).total_realised_pnl_gbp == 25.0
+    assert calls == 2
+
+    inputs.currency = "GBP"
+    agent.save_ticker_currencies({"TEST1": "GBP"})
+    assert service.compute_summary(PORTFOLIO_ID).total_realised_pnl_gbp == 50.0
+    assert calls == 3
+
+
+def test_summary_cache_invalidates_when_ticker_aliases_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#341 review: FIFO aliases change independently of trade writes."""
+
+    class _MutableAliases(_StubPortfolioService):
+        def __init__(self) -> None:
+            self.aliases: dict[str, str] = {}
+
+        def load_ticker_aliases(self) -> dict[str, str]:
+            return dict(self.aliases)
+
+    aliases = _MutableAliases()
+    service, agent = _make_service_with_agent(tmp_path, aliases)
+    agent.record_buy("OLD", 1, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("NEW", 1, 150.0, "2026-01-02", portfolio_id=PORTFOLIO_ID)
+    original = service._trader.get_trade_history
+    calls = 0
+
+    def counted_history(**kwargs: object) -> list[Trade]:
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
+    assert service.compute_summary(PORTFOLIO_ID).round_trip_count == 0
+    assert service.compute_summary(PORTFOLIO_ID).round_trip_count == 0
+    assert calls == 1
+
+    trade_revision = service._trader.get_trade_revision(PORTFOLIO_ID)
+    aliases.aliases = {"OLD": "NEW"}
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+    assert summary.round_trip_count == 1
+    assert summary.total_realised_pnl_gbp == 50.0
+    assert service._trader.get_trade_revision(PORTFOLIO_ID) == trade_revision
+    assert calls == 2
+
+
+def test_history_cache_is_revision_keyed_and_returns_independent_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#341: history is cached by the whole portfolio/revision vector."""
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_opening_lot("ONE", 1, 10.0, "2026-01-01", portfolio_id=1)
+    agent.record_opening_lot("TWO", 1, 20.0, "2026-01-01", portfolio_id=2)
+    original = service._trader.get_trade_history
+    calls = 0
+
+    def counted_history(**kwargs: object) -> list[Trade]:
+        nonlocal calls
+        calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
+    first_rows, _ = service.get_history_presentation([1, 2])
+    first_rows[0].ticker = "MUTATED"
+    second_rows, _ = service.get_history_presentation([1, 2])
+    assert calls == 1
+    assert {trade.ticker for trade in second_rows} == {"ONE", "TWO"}
+
+    agent.record_buy("ONE", 1, 11.0, "2026-01-02", portfolio_id=1)
+    service.get_history_presentation([1, 2])
+    assert calls == 2
+
+
+def test_history_cache_invalidates_when_ticker_aliases_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#341 review: History statuses use the same canonical ticker aliases."""
+
+    class _MutableAliases(_StubPortfolioService):
+        def __init__(self) -> None:
+            self.aliases: dict[str, str] = {}
+
+        def load_ticker_aliases(self) -> dict[str, str]:
+            return dict(self.aliases)
+
+    aliases = _MutableAliases()
+    service, agent = _make_service_with_agent(tmp_path, aliases)
+    agent.record_opening_lot("OLD", 1, 100.0, "2026-01-01", portfolio_id=1)
+    agent.record_sell("NEW", 1, 150.0, "2026-01-02", portfolio_id=1)
+    original = service._compute_history_presentation_uncached
+    calls = 0
+
+    def counted_presentation() -> tuple[list[Trade], dict[int, str]]:
+        nonlocal calls
+        calls += 1
+        return original()
+
+    monkeypatch.setattr(service, "_compute_history_presentation_uncached", counted_presentation)
+    _rows, statuses = service.get_history_presentation([1])
+    assert statuses
+    service.get_history_presentation([1])
+    assert calls == 1
+
+    aliases.aliases = {"OLD": "NEW"}
+    _rows, statuses = service.get_history_presentation([1])
+    assert statuses
+    assert calls == 2
+
+
+def test_alias_file_a_to_b_to_a_change_retries_before_history_cache_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#341 review: filesystem identity catches an alias change that returns to A."""
+    alias_file = tmp_path / "ticker_aliases.json"
+    alias_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(realised_pnl_service, "TICKER_ALIASES_JSON", alias_file)
+    service, agent = _make_service_with_agent(tmp_path)
+    agent.record_opening_lot("ONE", 1, 10.0, "2026-01-01", portfolio_id=1)
+    original = service._compute_history_presentation_uncached
+    calls = 0
+
+    def mutate_alias_file_during_first_compute() -> tuple[
+        list[Trade], dict[int, str]
+    ]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            alias_file.write_text('{"ONE":"TWO"}', encoding="utf-8")
+            alias_file.write_text("{}", encoding="utf-8")
+        return original()
+
+    monkeypatch.setattr(
+        service,
+        "_compute_history_presentation_uncached",
+        mutate_alias_file_during_first_compute,
+    )
+    service.get_history_presentation([1])
+    service.get_history_presentation([1])
+    assert calls == 2
 
 
 def test_partial_sell_leaves_remainder_open(tmp_path: Path) -> None:

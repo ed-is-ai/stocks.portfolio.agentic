@@ -104,7 +104,7 @@ def test_zero_round_trips_shows_empty_state_copy(mocked):
     assert 'class="neg"' not in average_card
 
 
-def test_history_uses_one_bulk_opening_lot_status_operation(mocked):
+def test_history_uses_service_owned_cached_presentation(mocked):
     mock_trader, mock_realised_pnl = mocked
     opening_lot = Trade(
         id=7,
@@ -117,16 +117,16 @@ def test_history_uses_one_bulk_opening_lot_status_operation(mocked):
         source="opening_lot",
     )
     regular_trade = opening_lot.model_copy(update={"id": 8, "source": "manual"})
-    mock_trader.get_trade_history.return_value = [opening_lot, regular_trade]
-    mock_realised_pnl.opening_lot_statuses.return_value = {7: "unconsumed"}
+    mock_realised_pnl.get_history_presentation.return_value = (
+        [opening_lot, regular_trade],
+        {7: "unconsumed"},
+    )
 
     resp = client.get("/partials/history")
 
     assert resp.status_code == 200
-    mock_trader.get_trade_history.assert_called_once_with()
-    mock_realised_pnl.opening_lot_statuses.assert_called_once_with(
-        [opening_lot, regular_trade]
-    )
+    mock_realised_pnl.get_history_presentation.assert_called_once_with([1])
+    mock_trader.get_trade_history.assert_not_called()
     mock_realised_pnl.opening_lot_status.assert_not_called()
 
 

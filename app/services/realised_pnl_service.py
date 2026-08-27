@@ -10,12 +10,18 @@ this story's schema fields.
 from __future__ import annotations
 
 import logging
+from hashlib import sha256
+import json
 from collections import deque
+from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
+from threading import RLock
 from typing import Literal
 
 from app.core.quantity import QUANTITY_EPSILON, round_quantity
+from app.core.config import TICKER_ALIASES_JSON
 from app.core.ticker_identity import canonicalize_or_fallback
 from app.schemas import (
     MatchTrace,
@@ -44,6 +50,7 @@ _PARTIAL_SHORTFALL_REASON = "Sell exceeds available BUY lots by {shares:g} share
 # stored ``date`` isn't valid ISO-8601 -- surfaced both in the log line and
 # in the retrievable ``SkippedInvalidDateTrade`` structure.
 _INVALID_DATE_REASON = "Trade date {raw_date!r} is not valid ISO-8601"
+_CACHE_LIMIT = 128
 
 
 def _round2(x: float) -> float:
@@ -117,8 +124,9 @@ class RealisedPnlService:
     may reuse immutable currency classifications; FIFO and summary data are
     always recomputed from the current trade ledger.
 
-    No persistence or caching of FIFO/summary results: every
-    ``compute_summary`` call recomputes fresh from live trade data.
+    Derived summaries are cached against durable trade and valuation-input
+    revisions plus the current ticker-alias map. Mutation guards deliberately
+    remain uncached.
     """
 
     def __init__(
@@ -126,13 +134,85 @@ class RealisedPnlService:
     ) -> None:
         self._trader = trader_service
         self._portfolio = portfolio_service
+        self._cache_lock = RLock()
+        self._summary_cache: OrderedDict[
+            tuple[int, int, int, str], RealisedPnlSummary
+        ] = OrderedDict()
+        self._history_cache: OrderedDict[
+            tuple[tuple[tuple[int, int], ...], str],
+            tuple[list[Trade], dict[int, Literal["unconsumed", "consumed"]]],
+        ] = OrderedDict()
 
     def compute_summary(self, portfolio_id: int) -> RealisedPnlSummary:
-        """Return a fully-populated Realised P&L summary for one Account.
+        """Return a revision-validated, independently mutable P&L summary."""
+        try:
+            trade_revision = self._trader.get_trade_revision(portfolio_id)
+            input_revision = self._trader.get_pnl_input_revision()
+            alias_identity = self._alias_identity()
+        except Exception:
+            logger.warning("Realised P&L: revision unavailable; bypassing cache")
+            return self._compute_summary_uncached(portfolio_id)
+        key = (portfolio_id, trade_revision, input_revision, alias_identity)
+        cached = self._cache_get(self._summary_cache, key)
+        if cached is not None:
+            return cached.model_copy(deep=True)
 
-        Recomputed from scratch on every call — nothing is cached or
-        persisted (AC 6).
+        # Do not seed a cache entry from a ledger snapshot that was changed
+        # while FIFO/FX work was underway. A bounded retry handles a write
+        # racing the first computation; the final fallback stays uncached.
+        for _ in range(2):
+            summary = self._compute_summary_uncached(portfolio_id)
+            try:
+                current_trade_revision = self._trader.get_trade_revision(portfolio_id)
+                current_input_revision = self._trader.get_pnl_input_revision()
+                current_alias_identity = self._alias_identity()
+            except Exception:
+                return summary
+            if (
+                current_trade_revision == trade_revision
+                and current_input_revision == input_revision
+                and current_alias_identity == alias_identity
+            ):
+                self._cache_put(self._summary_cache, key, summary)
+                return summary.model_copy(deep=True)
+            trade_revision = current_trade_revision
+            input_revision = current_input_revision
+            alias_identity = current_alias_identity
+            key = (portfolio_id, trade_revision, input_revision, alias_identity)
+            cached = self._cache_get(self._summary_cache, key)
+            if cached is not None:
+                return cached.model_copy(deep=True)
+        return self._compute_summary_uncached(portfolio_id)
+
+    def _alias_identity(self) -> str:
+        """Return a stable identity for file-backed FIFO alias configuration.
+
+        The effective mapping makes this work with injected/mock portfolio
+        services. For the real file-backed source, filesystem change identity
+        also prevents an A→B→A edit while FIFO is running from looking stable
+        merely because its final aliases happen to equal its initial aliases.
         """
+        aliases = self._portfolio.load_ticker_aliases()
+        try:
+            stat = TICKER_ALIASES_JSON.stat()
+            file_identity: tuple[int, int, int, int, int] | None = (
+                stat.st_dev,
+                stat.st_ino,
+                stat.st_size,
+                stat.st_mtime_ns,
+                stat.st_ctime_ns,
+            )
+        except OSError:
+            file_identity = None
+        payload = json.dumps(
+            {"aliases": sorted(aliases.items()), "file": file_identity},
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()
+
+    def _compute_summary_uncached(self, portfolio_id: int) -> RealisedPnlSummary:
+        """Build a P&L summary from the current ledger without cache access."""
         trades, skipped_invalid_dates = self._sorted_valid_trades(portfolio_id)
         raw_round_trips, open_lots, unmatched_sells, _traces = self._replay_fifo(
             trades, portfolio_id
@@ -176,6 +256,73 @@ class RealisedPnlService:
             mismatched_tickers=mismatched,
             skipped_invalid_date_trades=skipped_invalid_dates,
         )
+
+    @staticmethod
+    def _history_key(
+        revisions: dict[int, int], alias_identity: str
+    ) -> tuple[tuple[tuple[int, int], ...], str]:
+        return tuple(sorted(revisions.items())), alias_identity
+
+    def get_history_presentation(
+        self, portfolio_ids: list[int]
+    ) -> tuple[list[Trade], dict[int, Literal["unconsumed", "consumed"]]]:
+        """Return cached History rows and display-only Opening Lot statuses.
+
+        Portfolio display names intentionally stay in the route: renaming an
+        account must be visible without changing its trade revision.
+        """
+        ids = list(dict.fromkeys([*portfolio_ids, -1]))
+        try:
+            revisions = self._trader.get_trade_revisions(ids)
+            alias_identity = self._alias_identity()
+        except Exception:
+            logger.warning("Trade History: revisions unavailable; bypassing cache")
+            return self._compute_history_presentation_uncached()
+        key = self._history_key(revisions, alias_identity)
+        cached = self._cache_get(self._history_cache, key)
+        if cached is not None:
+            return deepcopy(cached)
+
+        for _ in range(2):
+            presentation = self._compute_history_presentation_uncached()
+            try:
+                current_revisions = self._trader.get_trade_revisions(ids)
+                current_alias_identity = self._alias_identity()
+            except Exception:
+                return presentation
+            if (
+                current_revisions == revisions
+                and current_alias_identity == alias_identity
+            ):
+                self._cache_put(self._history_cache, key, presentation)
+                return deepcopy(presentation)
+            revisions = current_revisions
+            alias_identity = current_alias_identity
+            key = self._history_key(revisions, alias_identity)
+            cached = self._cache_get(self._history_cache, key)
+            if cached is not None:
+                return deepcopy(cached)
+        return self._compute_history_presentation_uncached()
+
+    def _compute_history_presentation_uncached(
+        self,
+    ) -> tuple[list[Trade], dict[int, Literal["unconsumed", "consumed"]]]:
+        trades = self._trader.get_trade_history()
+        return trades, self.opening_lot_statuses(trades)
+
+    def _cache_get(self, cache: OrderedDict, key: object):
+        with self._cache_lock:
+            value = cache.get(key)
+            if value is not None:
+                cache.move_to_end(key)
+            return value
+
+    def _cache_put(self, cache: OrderedDict, key: object, value: object) -> None:
+        with self._cache_lock:
+            cache[key] = value
+            cache.move_to_end(key)
+            while len(cache) > _CACHE_LIMIT:
+                cache.popitem(last=False)
 
     def toggle_unmatched_sell_ack(
         self, trade_id: int, portfolio_id: int
