@@ -891,20 +891,24 @@ async def submit_strategy_configuration(
             )
         elif whole_universe:
             # Never trust a client-submitted list of security IDs for
-            # whole-universe mode -- resolve fresh from the roster
-            # from the current active roster. The resolved set is definitionally
-            # in-roster, so the "unknown securities" check below is
-            # skipped for this branch.
-            raw_security_ids = [
-                sid
-                for sid, _ps, _mic, _cur in backtest.roster_member_identities(
-                    active.profile_hash
-                )
-            ]
+            # whole-universe mode.  A historical snapshot can contain a
+            # documented exclusion (for example a newly listed security
+            # without the required history), which is a roster member but
+            # cannot be sealed as price/action evidence.  Resolve the full
+            # *runnable* universe from the requested start month instead.
+            try:
+                raw_security_ids = [
+                    security_id
+                    for security_id, _revision in backtest.snapshot_member_revisions(
+                        active.profile_hash, command.start_month
+                    )
+                ]
+            except BacktestIntegrityError as exc:
+                errors.setdefault("security_ids", str(exc))
             if not raw_security_ids:
                 errors.setdefault(
                     "security_ids",
-                    "The active roster has no securities to select.",
+                    "The selected period has no runnable securities.",
                 )
         elif raw_security_ids:
             # Validate all submitted IDs are in the roster

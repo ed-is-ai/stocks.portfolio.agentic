@@ -47,6 +47,9 @@ class UniverseFakeRepo(routes_helpers.FakeRepo):
     def roster_member_identities(self, profile_hash):
         return list(self._securities)
 
+    def snapshot_member_revisions(self, profile_hash, snapshot_month):
+        return tuple((security_id, f"revision-{security_id}") for security_id, *_ in self._securities)
+
     def strategy_job(self, job_id):
         return SimpleNamespace(
             id=job_id,
@@ -406,6 +409,37 @@ def test_configuration_submit_whole_universe_resolves_full_roster(
     )
 
 
+def test_configuration_submit_whole_universe_excludes_unrunnable_members(
+    universe_env,
+) -> None:
+    repo, launch = universe_env
+    repo.snapshot_member_revisions = lambda _profile_hash, _snapshot_month: (
+        ("sid_001", "revision-sid_001"),
+        ("sid_003", "revision-sid_003"),
+    )
+
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "runnable-universe",
+            "whole_universe": "true",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    command = launch.launch_calls[0]
+    assert command.universe_selection.canonical_security_ids == ("sid_001", "sid_003")
+
+
 def test_configuration_submit_whole_universe_empty_roster_fails(
     universe_env,
 ) -> None:
@@ -427,7 +461,7 @@ def test_configuration_submit_whole_universe_empty_roster_fails(
         headers={"X-Auth-Token": "s3cret"},
     )
     assert response.status_code == 422
-    assert "The active roster has no securities to select" in response.text
+    assert "The selected period has no runnable securities" in response.text
 
 
 def test_configuration_submit_toggle_off_falls_back_to_manual_ids(
