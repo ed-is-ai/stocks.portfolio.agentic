@@ -252,14 +252,43 @@ class BacktestLaunchService:
                 )
             )
 
+        # ``strategy.universe.parameter`` is a host-owned runtime input, not
+        # a Strategy-authored tuning parameter.  The Strategy Manager binds
+        # it only after validating the roster selection, so do not hand it
+        # to the strict user-parameter validator (which correctly rejects
+        # every name absent from ``strategy.parameters``).
+        universe_parameter = strategy.universe.parameter
+        submitted_parameters = dict(command.parameters)
+        bound_universe = submitted_parameters.pop(universe_parameter, None)
+        if bound_universe is not None and command.universe_selection is None:
+            errors.append(
+                LaunchFieldError(
+                    f"param__{universe_parameter}",
+                    f"unknown parameter {universe_parameter!r}",
+                )
+            )
         validated_parameters = validate_strategy_parameters(
-            strategy.parameters, command.parameters, apply_defaults=True
+            strategy.parameters, submitted_parameters, apply_defaults=True
         )
         if isinstance(validated_parameters, tuple):
             errors.extend(
                 LaunchFieldError(f"param__{error.parameter_name}", error.message)
                 for error in validated_parameters
             )
+        elif command.universe_selection is not None:
+            expected_universe = list(command.universe_selection.canonical_security_ids)
+            if bound_universe != expected_universe:
+                errors.append(
+                    LaunchFieldError(
+                        f"param__{universe_parameter}",
+                        "The selected securities do not match the prepared universe.",
+                    )
+                )
+            else:
+                validated_parameters = {
+                    **validated_parameters,
+                    universe_parameter: bound_universe,
+                }
 
         if errors:
             raise BacktestLaunchValidationError(tuple(errors))
