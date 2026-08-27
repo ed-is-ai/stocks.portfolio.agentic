@@ -10,12 +10,14 @@ import csv
 import json
 import logging
 import math
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
@@ -35,6 +37,7 @@ from app.services.trader_service import TraderService
 logger = logging.getLogger(__name__)
 
 _DEFAULT_GBPUSD = 1.35
+_GBPUSD_CACHE_TTL_SECONDS = 60.0
 
 
 def _load_provider_options() -> tuple[ProviderOption, ...]:
@@ -82,6 +85,12 @@ class PortfolioInputSnapshot:
 
 class PortfolioService:
     """Valuation and presentation-data builder for the portfolio views."""
+
+    _gbpusd_cache_rate: ClassVar[float | None] = None
+    _gbpusd_cache_fetched_at: ClassVar[float | None] = None
+    _gbpusd_refreshing: ClassVar[bool] = False
+    _gbpusd_cache_generation: ClassVar[int] = 0
+    _gbpusd_cache_condition: ClassVar[threading.Condition] = threading.Condition()
 
     def __init__(
         self,
@@ -150,18 +159,87 @@ class PortfolioService:
         except Exception:
             return None
 
-    def gbpusd_rate(self) -> float:
-        """Return live GBP/USD rate, falling back to last cached value."""
-        rate = self._fetch_gbpusd_rate()
-        if rate:
-            self._trader.save_price_cache({"__GBPUSD__": rate})
+    def reset_gbpusd_cache(self) -> None:
+        """Clear the process-local live cache without touching persistence."""
+        cls = PortfolioService
+        with cls._gbpusd_cache_condition:
+            cls._gbpusd_cache_rate = None
+            cls._gbpusd_cache_fetched_at = None
+            cls._gbpusd_cache_generation += 1
+            cls._gbpusd_cache_condition.notify_all()
+
+    def _cached_gbpusd_rate(self, now: float) -> float | None:
+        cls = PortfolioService
+        rate = self._valid_rate_or_none(cls._gbpusd_cache_rate)
+        if (
+            rate is not None
+            and cls._gbpusd_cache_fetched_at is not None
+            and now - cls._gbpusd_cache_fetched_at < _GBPUSD_CACHE_TTL_SECONDS
+        ):
             return rate
-        cached, _, _disp = self._trader.load_price_cache()
-        if "__GBPUSD__" in cached:
+        return None
+
+    def _persisted_or_default_gbpusd_rate(self) -> float:
+        try:
+            cached, _, _disp = self._trader.load_price_cache()
+        except Exception:
+            logger.exception("Failed to load persisted GBPUSD rate")
+            cached = {}
+        persisted_rate = self._valid_rate_or_none(cached.get("__GBPUSD__"))
+        if persisted_rate is not None:
             logger.warning("GBPUSD rate fetch failed; using cached rate")
-            return cached["__GBPUSD__"]
+            return persisted_rate
         logger.warning("GBPUSD rate unavailable; defaulting to %s", _DEFAULT_GBPUSD)
         return _DEFAULT_GBPUSD
+
+    def gbpusd_rate(self) -> float:
+        """Return a single-flight cached live GBP/USD rate or durable fallback."""
+        cls = PortfolioService
+        use_durable_fallback = False
+        with cls._gbpusd_cache_condition:
+            cached_rate = self._cached_gbpusd_rate(time.monotonic())
+            if cached_rate is not None:
+                return cached_rate
+            if cls._gbpusd_refreshing:
+                cls._gbpusd_cache_condition.wait_for(lambda: not cls._gbpusd_refreshing)
+                cached_rate = self._cached_gbpusd_rate(time.monotonic())
+                if cached_rate is not None:
+                    return cached_rate
+                use_durable_fallback = True
+            else:
+                cls._gbpusd_refreshing = True
+                refresh_generation = cls._gbpusd_cache_generation
+
+        if use_durable_fallback:
+            return self._persisted_or_default_gbpusd_rate()
+
+        try:
+            try:
+                rate = self._valid_rate_or_none(self._fetch_gbpusd_rate())
+            except Exception:
+                logger.exception("GBPUSD rate fetch raised unexpectedly")
+                rate = None
+            if rate is None:
+                return self._persisted_or_default_gbpusd_rate()
+            published = False
+            with cls._gbpusd_cache_condition:
+                if refresh_generation == cls._gbpusd_cache_generation:
+                    cls._gbpusd_cache_rate = rate
+                    cls._gbpusd_cache_fetched_at = time.monotonic()
+                    published = True
+                cls._gbpusd_refreshing = False
+                cls._gbpusd_cache_condition.notify_all()
+            if published:
+                try:
+                    self._trader.save_price_cache({"__GBPUSD__": rate})
+                except Exception:
+                    logger.exception("Failed to persist live GBPUSD rate")
+            return rate
+        finally:
+            with cls._gbpusd_cache_condition:
+                if cls._gbpusd_refreshing:
+                    cls._gbpusd_refreshing = False
+                    cls._gbpusd_cache_condition.notify_all()
 
     @staticmethod
     def _to_gbp(amount: float, currency: str, gbpusd: float) -> float:
@@ -186,13 +264,24 @@ class PortfolioService:
         )
 
     @staticmethod
-    def _is_valid_rate(rate: float | None) -> bool:
+    def _valid_rate_or_none(rate: Any) -> float | None:
+        """Return a finite positive rate, rejecting malformed cache contents."""
+        if isinstance(rate, (bool, str, bytes)):
+            return None
+        try:
+            numeric_rate = float(rate)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return numeric_rate if math.isfinite(numeric_rate) and numeric_rate > 0 else None
+
+    @staticmethod
+    def _is_valid_rate(rate: Any) -> bool:
         """Return True for a usable rate: not None and strictly positive.
 
         A cached or freshly-fetched rate of ``0``, negative, or ``None`` is
         always treated as unavailable, never fed into a conversion (AC7).
         """
-        return rate is not None and math.isfinite(rate) and rate > 0
+        return PortfolioService._valid_rate_or_none(rate) is not None
 
     def historical_gbpusd_rates(self, dates: list[str]) -> dict[str, float]:
         """Compatibility wrapper for historical GBP/USD rates."""
