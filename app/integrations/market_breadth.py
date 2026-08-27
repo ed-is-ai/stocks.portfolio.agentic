@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from threading import RLock
 
 import requests
 from tenacity import (
@@ -34,6 +35,29 @@ _TIMEOUT_SECONDS = 20
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = 2.0
 _FRESH_MAX_DAYS = 7
+
+# The feed publishes daily, so a process-local cache avoids repeat downloads
+# during one UTC day.  It intentionally has no persistence/lifecycle beyond
+# this process.  Entries are keyed by URL to keep the injectable test/source
+# URL argument from accidentally sharing the production entry.
+_daily_cache: dict[str, tuple[date, MarketBreadth]] = {}
+_daily_cache_lock = RLock()
+
+
+def _utc_today() -> date:
+    """Return today's UTC date (a small clock seam for deterministic tests)."""
+    return datetime.now(timezone.utc).date()
+
+
+def reset_market_breadth_cache() -> None:
+    """Clear the process-local cache, primarily for isolated test runs."""
+    with _daily_cache_lock:
+        _daily_cache.clear()
+
+
+def _reset_daily_cache() -> None:
+    """Backward-compatible private reset seam for cache-focused tests."""
+    reset_market_breadth_cache()
 
 
 @retry(
@@ -62,7 +86,7 @@ def _parse_latest(text: str) -> MarketBreadth | None:
     latest = max(rows, key=lambda r: r.get("Date", ""))
     date_str = latest["Date"].strip()
     reading_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    today = datetime.now(timezone.utc).date()
+    today = _utc_today()
     days_old = (today - reading_date).days if reading_date <= today else None
     smoothed = latest.get("Breadth_Index_8MA")
     trend = latest.get("Breadth_200MA_Trend")
@@ -85,10 +109,26 @@ def fetch_market_breadth(url: str = _BREADTH_CSV_URL) -> MarketBreadth | None:
     an unparseable row all yield ``None`` so the caller can treat breadth as
     best-effort context.
     """
-    text = _fetch_csv(url)
-    if not text:
-        return None
-    try:
-        return _parse_latest(text)
-    except (KeyError, ValueError, TypeError):
-        return None
+    today = _utc_today()
+    with _daily_cache_lock:
+        cached = _daily_cache.get(url)
+        if cached is not None and cached[0] == today:
+            # Never return the stored model directly: callers may mutate it.
+            return cached[1].model_copy(
+                deep=True, update={"retrieval_source": "cached"}
+            )
+
+        text = _fetch_csv(url)
+        if not text:
+            return None
+        try:
+            breadth = _parse_latest(text)
+        except (KeyError, ValueError, TypeError):
+            return None
+        if breadth is None:
+            return None
+
+        # Only a fully parsed value earns a cache entry.  A failed refresh
+        # therefore cannot overwrite yesterday's valid diagnostic value.
+        _daily_cache[url] = (today, breadth.model_copy(deep=True))
+        return breadth.model_copy(deep=True, update={"retrieval_source": "fetched"})

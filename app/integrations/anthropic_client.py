@@ -154,7 +154,7 @@ def _build_user_prompt(
         lines.append(
             f"S&P 500 market breadth: {breadth.pct_above_200dma:.0f}% of members "
             f"above their 200DMA, trend {trend}{bearish} "
-            f"(as of {breadth.as_of}{stale})."
+            f"(as of {breadth.as_of}{stale}; {breadth.retrieval_source} today)."
         )
 
     if congress:

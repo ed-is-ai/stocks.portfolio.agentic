@@ -10,6 +10,8 @@ context the candidate list alone can't provide.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -23,3 +25,5 @@ class MarketBreadth(BaseModel):
     as_of: str  # ISO date of the reading
     is_fresh: bool = True  # reading is recent enough to trust
     days_old: int | None = None  # calendar days between the reading and today
+    retrieval_source: Literal["fetched", "cached"] = "fetched"
+    """Whether this process fetched the reading or reused today's cache."""
