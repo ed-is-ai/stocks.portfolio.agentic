@@ -57,6 +57,8 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "minimum_relative_volume": 1.5,
         "maximum_pivot_extension_pct": 3.0,
         "maximum_loss_pct": 8.0,
+        "enable_position_upgrade": False,
+        "upgrade_score_margin": 15,
     },
     "rtly-backtest-moving-average": {
         "fixed_shares": 10,
@@ -73,6 +75,8 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "breakout_lookback_sessions": 50,
         "minimum_relative_volume": 1.5,
         "maximum_loss_pct": 10.0,
+        "enable_position_upgrade": False,
+        "upgrade_score_margin_pct": 10.0,
     },
 }
 

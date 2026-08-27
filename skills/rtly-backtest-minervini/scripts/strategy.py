@@ -18,6 +18,7 @@ STRATEGY_ID = "rtly-backtest-minervini"
 STRATEGY_API_VERSION = 1
 _ENTRY_RULE = "minervini_vcp_breakout_v1"
 _EXIT_RULE = "minervini_risk_exit_v1"
+_UPGRADE_EXIT_RULE = "minervini_upgrade_exit_v1"
 
 
 UNIVERSE_PARAMETER = "selected_securities"
@@ -119,11 +120,24 @@ class MinerviniStrategy:
             self._exit_signal(view, portfolio, parameters, security_id)
             for security_id in _universe(parameters)
         ]
-        return [signal for signal in signals if signal is not None]
+        signals = [signal for signal in signals if signal is not None]
+        upgrade = self._upgrade_exit_signal(
+            view,
+            portfolio,
+            parameters,
+            frozenset(signal.security_id for signal in signals),
+        )
+        if upgrade is not None:
+            signals.append(upgrade)
+        return signals
 
-    def _entry_signal(
+    def _entry_qualification(
         self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
-    ) -> Signal | None:
+    ) -> int | None:
+        """Return this security's VCP score if it qualifies for entry today,
+        else ``None``. Factored out of :meth:`_entry_signal` so the upgrade-
+        exit ranking (below) can score a would-be candidate using the exact
+        same qualification rules, without duplicating them."""
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
         if history is None or scan is None or len(history) < 51:
@@ -179,11 +193,104 @@ class MinerviniStrategy:
         )
         if not qualifies:
             return None
+        assert isinstance(score, int)
+        return score
+
+    def _entry_signal(
+        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
+    ) -> Signal | None:
+        if self._entry_qualification(view, parameters, security_id) is None:
+            return None
         return Signal(
             security_id=security_id,
             side=SignalSide.BUY,
             session=view.as_of_session,
             rule_id=_ENTRY_RULE,
+        )
+
+    def _held_vcp_score(self, view: MarketViewV1, security_id: str) -> int | None:
+        """Return a held position's current VCP score for upgrade ranking,
+        or ``None`` if no visible scan evidence exists today -- a position
+        with no computable score is never treated as the weakest holding."""
+        scan = _visible_scan(view, security_id)
+        if scan is None:
+            return None
+        score = getattr(getattr(scan, "vcp", None), "score", None)
+        return score if isinstance(score, int) and not isinstance(score, bool) else None
+
+    def _upgrade_exit_signal(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        already_exiting: frozenset[str],
+    ) -> Signal | None:
+        """Story: portfolio upgrading (Minervini's "upgrade" discipline).
+
+        When every position slot is committed (cash cannot fund the
+        strongest unheld candidate's fixed-share entry) and that candidate's
+        VCP score clears the weakest held position's own current score by
+        at least ``upgrade_score_margin``, sell the weakest holding to free
+        cash for the stronger setup -- exactly mirroring the mechanical
+        stop/SMA/pattern-invalidation exits above, never overriding them.
+        The freed cash is picked up by the ordinary ``entry_signals`` path
+        on a later qualifying session; this method never buys anything
+        itself.
+        """
+        if parameters.get("enable_position_upgrade") is not True:
+            return None
+        fixed_shares = _plain_int(parameters["fixed_shares"])
+        margin = _plain_int(parameters["upgrade_score_margin"])
+        if fixed_shares is None or fixed_shares <= 0 or margin is None:
+            return None
+
+        held_ids = {
+            position.security_id
+            for position in portfolio.positions
+            if position.quantity > 0 and position.security_id not in already_exiting
+        }
+        if not held_ids:
+            return None
+
+        candidates: list[tuple[int, str]] = []
+        for security_id in _universe(parameters):
+            if security_id in held_ids:
+                continue
+            score = self._entry_qualification(view, parameters, security_id)
+            if score is not None:
+                candidates.append((score, security_id))
+        if not candidates:
+            return None
+        best_score, best_security_id = max(candidates, key=lambda item: item)
+
+        history = _current_history(view, best_security_id)
+        if history is None:
+            return None
+        closes = _decimals(history["close"])
+        if closes is None:
+            return None
+        estimated_cost = closes[-1] * Decimal(fixed_shares)
+        if portfolio.cash >= estimated_cost:
+            # Cash already covers the strongest candidate -- the ordinary
+            # entry_signals path will take it without sacrificing anything.
+            return None
+
+        held_scored = [
+            (score, security_id)
+            for security_id in held_ids
+            if (score := self._held_vcp_score(view, security_id)) is not None
+        ]
+        if not held_scored:
+            return None
+        weakest_score, weakest_security_id = min(held_scored, key=lambda item: item)
+
+        if best_score - weakest_score < margin:
+            return None
+        return Signal(
+            security_id=weakest_security_id,
+            side=SignalSide.SELL,
+            session=view.as_of_session,
+            rule_id=_UPGRADE_EXIT_RULE,
         )
 
     def _exit_signal(

@@ -54,14 +54,16 @@ def _scan(
     stage: str = "Stage 2",
     state: str = "Breakout",
     as_of: date = date(2026, 7, 31),
+    score: int = 70,
+    security_id: str = "sec-aapl",
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        security_id="sec-aapl",
+        security_id=security_id,
         as_of_session_date=as_of,
         stage=SimpleNamespace(value=stage),
         vcp=SimpleNamespace(
             valid_vcp=True,
-            score=70,
+            score=score,
             trend_template_score=Decimal("85"),
             trend_template_passed=True,
             breakout_volume_detected=True,
@@ -246,6 +248,141 @@ def test_multi_security_universe_exits_only_held_securities() -> None:
     )
 
     assert [signal.security_id for signal in exits] == ["sec-aapl"]
+
+
+class _KeyedView:
+    """Serves distinct history/scan evidence per security_id, for
+    upgrade-exit tests that need a weak held position and a stronger
+    unheld candidate to differ."""
+
+    def __init__(
+        self,
+        histories: dict[str, pd.DataFrame],
+        scans: dict[str, SimpleNamespace | None],
+    ) -> None:
+        self.as_of_session = AS_OF
+        self._histories = histories
+        self._scans = scans
+
+    def price_history(self, security_id: str) -> pd.DataFrame:
+        return self._histories.get(security_id, pd.DataFrame())
+
+    def scan_result(self, security_id: str) -> SimpleNamespace | None:
+        scan = self._scans.get(security_id)
+        if scan is None:
+            return None
+        return SimpleNamespace(**{**vars(scan), "security_id": security_id})
+
+
+def _upgrade_parameters(**overrides: object) -> dict[str, object]:
+    return {
+        **PARAMETERS,
+        "selected_securities": ["sec-aapl", "sec-msft"],
+        "enable_position_upgrade": True,
+        "upgrade_score_margin": 15,
+        **overrides,
+    }
+
+
+def _held_portfolio(cash: str, security_id: str = "sec-aapl") -> PortfolioView:
+    return PortfolioView(
+        as_of_session=AS_OF,
+        base_currency="GBP",
+        cash=Decimal(cash),
+        positions=(
+            PositionSummaryV1(
+                security_id=security_id,
+                quantity=Decimal("10"),
+                average_cost=Decimal("100"),
+            ),
+        ),
+        volatility_observations=(),
+    )
+
+
+def test_upgrade_exit_disabled_by_default_even_with_a_stronger_starved_candidate() -> (
+    None
+):
+    strategy = MinerviniStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history()},
+        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=95)},
+    )
+
+    exits = strategy.exit_signals(
+        view,
+        _held_portfolio(cash="1"),
+        {**PARAMETERS, "selected_securities": ["sec-aapl", "sec-msft"]},
+    )
+
+    assert exits == []
+
+
+def test_upgrade_exit_sells_weakest_position_when_cash_insufficient_and_margin_cleared() -> (
+    None
+):
+    strategy = MinerviniStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history()},
+        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=95)},
+    )
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(view, _held_portfolio(cash="1"), _upgrade_parameters())
+    )
+
+    assert [(s.security_id, s.rule_id) for s in exits] == [
+        ("sec-aapl", "minervini_upgrade_exit_v1")
+    ]
+
+
+def test_upgrade_exit_does_not_fire_when_cash_already_covers_the_candidate() -> None:
+    strategy = MinerviniStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history()},
+        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=95)},
+    )
+
+    exits = strategy.exit_signals(
+        view, _held_portfolio(cash="10000"), _upgrade_parameters()
+    )
+
+    assert exits == []
+
+
+def test_upgrade_exit_does_not_fire_when_margin_not_cleared() -> None:
+    strategy = MinerviniStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history()},
+        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=80)},
+    )
+
+    exits = strategy.exit_signals(
+        view, _held_portfolio(cash="1"), _upgrade_parameters()
+    )
+
+    assert exits == []
+
+
+def test_upgrade_exit_never_duplicates_a_position_already_exiting_on_its_own_rule() -> (
+    None
+):
+    """The held position is already exiting via its own risk rule
+    (Damaged VCP) -- the upgrade check must not also emit a second SELL
+    for the same security."""
+    strategy = MinerviniStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history()},
+        {"sec-aapl": _scan(score=70, state="Damaged"), "sec-msft": _scan(score=95)},
+    )
+
+    exits = strategy.exit_signals(
+        view, _held_portfolio(cash="1"), _upgrade_parameters()
+    )
+
+    assert [(s.security_id, s.rule_id) for s in exits] == [
+        ("sec-aapl", "minervini_risk_exit_v1")
+    ]
 
 
 def test_empty_or_malformed_universe_emits_nothing() -> None:

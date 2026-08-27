@@ -42,6 +42,24 @@ parameters:
     required: true
     minimum: 0.0
     maximum: 100.0
+  - name: enable_position_upgrade
+    type: boolean
+    default: false
+    description: >-
+      Sell the weakest held position (by percent above its 150-session SMA)
+      to fund a stronger unheld candidate when cash cannot cover its
+      fixed-share entry.
+    required: true
+  - name: upgrade_score_margin_pct
+    type: number
+    default: 10.0
+    description: >-
+      Minimum percent-above-150-session-SMA edge the strongest unheld
+      candidate must hold over the weakest held position before an upgrade
+      exit fires.
+    required: true
+    minimum: 0.0
+    maximum: 1000.0
 ---
 
 # Weinstein Backtest
@@ -58,6 +76,16 @@ both report Stage 2, the close strictly exceeds the prior configured high, and
 current volume meets the prior 50-session mean multiple. Exit the full
 position at the configured loss threshold, on a non-Stage-2 scan, or when the
 close falls below its current 150-session SMA.
+
+When `enable_position_upgrade` is true, also sell the weakest held position
+(lowest percent above its own 150-session SMA) to fund the strongest unheld
+qualifying candidate when cash cannot cover that candidate's fixed-share
+entry cost and its percent-above-SMA reading exceeds the weakest holding's
+by at least `upgrade_score_margin_pct` points. This mirrors Weinstein's own
+practice of rotating capital toward leadership during a Stage 2 advance; it
+never overrides the mechanical exits above and never buys anything itself --
+the freed cash is picked up by the ordinary entry path on a later qualifying
+session.
 
 Do not pyramid, partially exit, simulate an intraday stop, access live state,
 or fetch data outside the supplied bounded views.

@@ -18,6 +18,7 @@ STRATEGY_ID = "rtly-backtest-weinstein"
 STRATEGY_API_VERSION = 1
 _ENTRY_RULE = "weinstein_stage2_breakout_v1"
 _EXIT_RULE = "weinstein_stage_exit_v1"
+_UPGRADE_EXIT_RULE = "weinstein_upgrade_exit_v1"
 
 
 UNIVERSE_PARAMETER = "selected_securities"
@@ -167,11 +168,25 @@ class WeinsteinStrategy:
             self._exit_signal(view, portfolio, parameters, security_id)
             for security_id in _universe(parameters)
         ]
-        return [signal for signal in signals if signal is not None]
+        signals = [signal for signal in signals if signal is not None]
+        upgrade = self._upgrade_exit_signal(
+            view,
+            portfolio,
+            parameters,
+            frozenset(signal.security_id for signal in signals),
+        )
+        if upgrade is not None:
+            signals.append(upgrade)
+        return signals
 
-    def _entry_signal(
+    def _entry_qualification(
         self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
-    ) -> Signal | None:
+    ) -> Decimal | None:
+        """Return this security's trend-strength score -- percent close is
+        above its 150-session SMA -- if it qualifies for entry today, else
+        ``None``. Factored out of :meth:`_entry_signal` so the upgrade-exit
+        ranking (below) can score a would-be candidate using the exact same
+        qualification rules, without duplicating them."""
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
         lookback = _plain_int(parameters["breakout_lookback_sessions"])
@@ -208,13 +223,118 @@ class WeinsteinStrategy:
             or daily_stage != "Stage 2"
             or close <= prior_high
             or volumes[-1] < prior_volume_mean * minimum_volume
+            or sma150 <= 0
         ):
+            return None
+        return (close - sma150) / sma150 * Decimal(100)
+
+    def _entry_signal(
+        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
+    ) -> Signal | None:
+        if self._entry_qualification(view, parameters, security_id) is None:
             return None
         return Signal(
             security_id=security_id,
             side=SignalSide.BUY,
             session=view.as_of_session,
             rule_id=_ENTRY_RULE,
+        )
+
+    def _held_trend_strength(
+        self, view: MarketViewV1, security_id: str
+    ) -> Decimal | None:
+        """Return a held position's current percent-above-150-session-SMA
+        for upgrade ranking, or ``None`` if there isn't enough bounded
+        history today -- a position with no computable score is never
+        treated as the weakest holding."""
+        history = _current_history(view, security_id)
+        if history is None or len(history) < 150:
+            return None
+        closes = _decimals(history["close"].iloc[-150:])
+        if closes is None:
+            return None
+        close = closes[-1]
+        sma150 = sum(closes, Decimal(0)) / Decimal(150)
+        if sma150 <= 0:
+            return None
+        return (close - sma150) / sma150 * Decimal(100)
+
+    def _upgrade_exit_signal(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        already_exiting: frozenset[str],
+    ) -> Signal | None:
+        """Portfolio upgrading: rotate capital toward the strongest Stage 2
+        leadership when a slot isn't otherwise free.
+
+        When every position slot is committed (cash cannot fund the
+        strongest unheld candidate's fixed-share entry) and that
+        candidate's percent-above-150-session-SMA clears the weakest held
+        position's own current reading by at least
+        ``upgrade_score_margin_pct`` points, sell the weakest holding to
+        free cash for the stronger setup -- mirroring Weinstein's own
+        practice of rotating out of laggards into leadership during a Stage
+        2 advance. This never overrides the mechanical stop/SMA/stage
+        exits above and never buys anything itself -- the freed cash is
+        picked up by the ordinary entry path on a later qualifying
+        session.
+        """
+        if parameters.get("enable_position_upgrade") is not True:
+            return None
+        fixed_shares = _plain_int(parameters["fixed_shares"])
+        margin = _decimal(parameters["upgrade_score_margin_pct"])
+        if fixed_shares is None or fixed_shares <= 0 or margin is None:
+            return None
+
+        held_ids = {
+            position.security_id
+            for position in portfolio.positions
+            if position.quantity > 0 and position.security_id not in already_exiting
+        }
+        if not held_ids:
+            return None
+
+        candidates: list[tuple[Decimal, str]] = []
+        for security_id in _universe(parameters):
+            if security_id in held_ids:
+                continue
+            score = self._entry_qualification(view, parameters, security_id)
+            if score is not None:
+                candidates.append((score, security_id))
+        if not candidates:
+            return None
+        best_score, best_security_id = max(candidates, key=lambda item: item)
+
+        history = _current_history(view, best_security_id)
+        if history is None:
+            return None
+        closes = _decimals(history["close"])
+        if closes is None:
+            return None
+        estimated_cost = closes[-1] * Decimal(fixed_shares)
+        if portfolio.cash >= estimated_cost:
+            # Cash already covers the strongest candidate -- the ordinary
+            # entry_signals path will take it without sacrificing anything.
+            return None
+
+        held_scored = [
+            (score, security_id)
+            for security_id in held_ids
+            if (score := self._held_trend_strength(view, security_id)) is not None
+        ]
+        if not held_scored:
+            return None
+        weakest_score, weakest_security_id = min(held_scored, key=lambda item: item)
+
+        if best_score - weakest_score < margin:
+            return None
+        return Signal(
+            security_id=weakest_security_id,
+            side=SignalSide.SELL,
+            session=view.as_of_session,
+            rule_id=_UPGRADE_EXIT_RULE,
         )
 
     def _exit_signal(

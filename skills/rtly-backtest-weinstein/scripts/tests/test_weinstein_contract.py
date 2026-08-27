@@ -240,6 +240,141 @@ def test_multi_security_universe_exits_only_held_securities() -> None:
     assert [signal.security_id for signal in exits] == ["sec-aapl"]
 
 
+class _KeyedView:
+    """Serves distinct history/scan evidence per security_id, for
+    upgrade-exit tests that need a weak held position and a stronger
+    unheld candidate to differ."""
+
+    def __init__(
+        self,
+        histories: dict[str, pd.DataFrame],
+        scans: dict[str, SimpleNamespace | None],
+    ) -> None:
+        self.as_of_session = AS_OF
+        self._histories = histories
+        self._scans = scans
+
+    def price_history(self, security_id: str) -> pd.DataFrame:
+        return self._histories.get(security_id, pd.DataFrame())
+
+    def scan_result(self, security_id: str) -> SimpleNamespace | None:
+        scan = self._scans.get(security_id)
+        if scan is None:
+            return None
+        return SimpleNamespace(**{**vars(scan), "security_id": security_id})
+
+
+def _upgrade_parameters(**overrides: object) -> dict[str, object]:
+    return {
+        **PARAMETERS,
+        "selected_securities": ["sec-aapl", "sec-msft"],
+        "enable_position_upgrade": True,
+        "upgrade_score_margin_pct": 10.0,
+        **overrides,
+    }
+
+
+def _held_portfolio(cash: str, security_id: str = "sec-aapl") -> PortfolioView:
+    return PortfolioView(
+        as_of_session=AS_OF,
+        base_currency="GBP",
+        cash=Decimal(cash),
+        positions=(
+            PositionSummaryV1(
+                security_id=security_id,
+                quantity=Decimal("10"),
+                average_cost=Decimal("100"),
+            ),
+        ),
+        volatility_observations=(),
+    )
+
+
+def test_upgrade_exit_disabled_by_default_even_with_a_stronger_starved_candidate() -> (
+    None
+):
+    strategy = WeinsteinStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
+        {"sec-aapl": _scan(), "sec-msft": _scan()},
+    )
+
+    exits = strategy.exit_signals(
+        view,
+        _held_portfolio(cash="1"),
+        {**PARAMETERS, "selected_securities": ["sec-aapl", "sec-msft"]},
+    )
+
+    assert exits == []
+
+
+def test_upgrade_exit_sells_weakest_position_when_cash_insufficient_and_margin_cleared() -> (
+    None
+):
+    strategy = WeinsteinStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
+        {"sec-aapl": _scan(), "sec-msft": _scan()},
+    )
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(view, _held_portfolio(cash="1"), _upgrade_parameters())
+    )
+
+    assert [(s.security_id, s.rule_id) for s in exits] == [
+        ("sec-aapl", "weinstein_upgrade_exit_v1")
+    ]
+
+
+def test_upgrade_exit_does_not_fire_when_cash_already_covers_the_candidate() -> None:
+    strategy = WeinsteinStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
+        {"sec-aapl": _scan(), "sec-msft": _scan()},
+    )
+
+    exits = strategy.exit_signals(
+        view, _held_portfolio(cash="100000"), _upgrade_parameters()
+    )
+
+    assert exits == []
+
+
+def test_upgrade_exit_does_not_fire_when_margin_not_cleared() -> None:
+    strategy = WeinsteinStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history(current_close="325")},
+        {"sec-aapl": _scan(), "sec-msft": _scan()},
+    )
+
+    exits = strategy.exit_signals(
+        view, _held_portfolio(cash="1"), _upgrade_parameters()
+    )
+
+    assert exits == []
+
+
+def test_upgrade_exit_never_duplicates_a_position_already_exiting_on_its_own_rule() -> (
+    None
+):
+    """The held position is already exiting via its own Stage 3 rule --
+    the upgrade check must not also emit a second SELL for the same
+    security."""
+    strategy = WeinsteinStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
+        {"sec-aapl": _scan("Stage 3"), "sec-msft": _scan()},
+    )
+
+    exits = strategy.exit_signals(
+        view, _held_portfolio(cash="1"), _upgrade_parameters()
+    )
+
+    assert [(s.security_id, s.rule_id) for s in exits] == [
+        ("sec-aapl", "weinstein_stage_exit_v1")
+    ]
+
+
 def test_empty_or_malformed_universe_emits_nothing() -> None:
     strategy = WeinsteinStrategy()
     view = _UniverseView(_history(), _scan())
