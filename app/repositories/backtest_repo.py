@@ -5771,7 +5771,9 @@ class BacktestRepository:
                 raise BacktestIntegrityError("snapshot month does not exist")
             rows = conn.execute(
                 """SELECT security_id, provider_data_revision FROM snapshot_members
-                   WHERE profile_hash=? AND snapshot_month=? ORDER BY security_id""",
+                   WHERE profile_hash=? AND snapshot_month=?
+                     AND resolution='valid_scan'
+                   ORDER BY security_id""",
                 (profile_hash, snapshot_month),
             ).fetchall()
         return tuple((str(row[0]), str(row[1])) for row in rows)
