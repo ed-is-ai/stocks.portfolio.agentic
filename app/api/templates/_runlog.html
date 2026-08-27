@@ -93,9 +93,10 @@
             <summary>{{ r.source_health|length }} sources</summary>
             <div class="run-source-health">
             {% call(source) macros.source_stage_groups(r.source_health) %}
-              {% set is_cached = source.detail_code == 'cached_input' %}
+              {% set is_stale = source.detail_code == 'stale_cache' %}
+              {% set is_cached = source.detail_code in ('cached_input', 'cache_hit', 'stale_cache') %}
               <span class="source-badge source-{{ source.state }}{% if is_cached %} source-cached{% endif %}" title="{{ source.display_message }}">
-                {{ source.label }}: {% if is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
+                {{ source.label }}: {% if is_stale %}Stale{% elif is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
                 <span class="source-count{% if is_cached %} source-count-stale{% endif %}">&middot; {{ source.count }}</span>
               </span>
             {% endcall %}

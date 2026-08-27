@@ -12,7 +12,7 @@
       <button class="btn btn-sm btn-outline-secondary" onclick="document.getElementById('pipeline-confirmation').innerHTML=''">Cancel</button>
       <button class="btn btn-sm btn-primary"
               hx-post="/refresh-data"
-              hx-vals='{"confirm_missing": true, "extract": {{ "true" if extract else "false" }}}'
+              hx-vals='{"confirm_missing": true, "extract": {{ "true" if extract else "false" }}, "force_whale_wisdom": {{ "true" if force_whale_wisdom else "false" }}, "force_stocktwits": {{ "true" if force_stocktwits else "false" }}}'
               hx-target="#tab-content" hx-swap="innerHTML"
               hx-on::before-request="document.getElementById('pipeline-confirmation').innerHTML=''">
         Continue with partial refresh

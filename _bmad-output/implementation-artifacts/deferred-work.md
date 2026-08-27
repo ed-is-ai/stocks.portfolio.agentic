@@ -265,3 +265,11 @@
 - source_spec: `spec-gh-309-add-ig-as-a-contract-only-provider.md`
   summary: `RejectedRowValueRule.allowed_value` is a single hardcoded string, so a future IG export variant using a differently-formatted (but equally valid) share-dealing marker value would need a whole new contract version rather than an updated allow-list.
   evidence: Confirmed the schema has no way to express "any of these values are acceptable." Low priority, YAGNI until a second real value variant is actually observed -- speculative multi-value support now would be unvalidated against any real data.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-345-cache-whalewisdom-heat-map.md`
+  summary: When ExtractionAgent serves a stale WhaleWisdom heat-map cache after a failed refresh, it still overwrites ww_context.json and the extraction_results.json WW group with the stale payload stamped with today's date, so file consumers see no staleness signal (only source_health carries it).
+  evidence: `_fetch_heat_map` stale_cache path returns cached children; `run()` unconditionally calls `_save_ww_context(ranked)` and `_update_results_with_sources(...)` which key on `datetime.today()`.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-345-cache-whalewisdom-heat-map.md`
+  summary: The heat-map cache file has no cross-process lock; a CLI pipeline run and the web-server pipeline run in parallel could have the slower one overwrite a newer entry.
+  evidence: `heat_map_cache.store()` does a bare tmp-write + `os.replace`; `_run_lock` in pipeline_service is process-local and the orchestrator runs as a subprocess. `os.replace` keeps writes atomic (no corruption); spec Block-If already flags richer storage as out of scope.

@@ -196,10 +196,14 @@ class StockTwitsEmailSource:
         config: ImapConfig | None = None,
         api_key: str | None = None,
         watermark_path: Path | None = None,
+        force: bool = False,
     ) -> None:
         self.config = config or ImapConfig.from_env()
         self.api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
         self.watermark_path = watermark_path or STOCKTWITS_EMAIL_WATERMARK_JSON
+        # When set, ignore the watermark gate and re-process the newest email
+        # even if it is not newer than what we last saw (#345).
+        self.force = force
 
     @property
     def enabled(self) -> bool:
@@ -222,7 +226,7 @@ class StockTwitsEmailSource:
         received_at, html = fetched
 
         watermark = self._read_watermark()
-        if received_at is not None and watermark is not None:
+        if not self.force and received_at is not None and watermark is not None:
             if received_at <= watermark:
                 return None  # nothing newer than what we've already processed
 

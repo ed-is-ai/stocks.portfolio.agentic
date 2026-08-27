@@ -11,8 +11,10 @@ from datetime import datetime, timezone
 from typing import Any, cast
 
 import requests
+from pydantic import PrivateAttr
 
 from app.agents.base import Agent
+from app.agents.extraction import heat_map_cache
 from app.core.config import (
     EXTRACTION_RESULTS_JSON,
     STOCKTWITS_WATCHLIST_JSON,
@@ -44,6 +46,14 @@ _WW_CONTEXT = WW_CONTEXT_JSON
 _ST_WATCHLIST = STOCKTWITS_WATCHLIST_JSON
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Return ``int(value)`` when possible, else ``default``."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 class ExtractionAgent(Agent):
     """Aggregate watchlist from multiple sources: WhaleWisdom institutional data
     and the StockTwits Top 25 momentum lists (from the weekly newsletter email,
@@ -55,6 +65,15 @@ class ExtractionAgent(Agent):
     source_health: dict[SourceName, SourceHealth] = {}
     stocktwits_error: bool = False
     stocktwits_source: str = "config"
+    force_whale_wisdom: bool = False
+    force_stocktwits: bool = False
+
+    # (mode, period, fetched_at) for the heat-map retrieval this run; consumed
+    # only when assembling source_health. mode ∈ {"", cache_hit, fetched,
+    # stale_cache}.
+    _ww_retrieval: tuple[str, str, datetime | None] = PrivateAttr(
+        default=("", "", None)
+    )
 
     def run(self, payload: Any = None) -> list[str]:  # noqa: ARG002
         """Fetch WhaleWisdom and StockTwits tickers, merge, and update results.
@@ -73,7 +92,7 @@ class ExtractionAgent(Agent):
             stocks = self._fetch_heat_map()
             if stocks:
                 ranked = sorted(
-                    stocks, key=lambda s: int(s.get("overall_rank") or 9999)
+                    stocks, key=lambda s: _safe_int(s.get("overall_rank"), 9999)
                 )
                 tickers = [str(s["name"]) for s in ranked if s.get("name")]
                 ww_result = list(dict.fromkeys(tickers))[:TOP_N]
@@ -85,21 +104,37 @@ class ExtractionAgent(Agent):
             ww_error = True
             print(f"    [err] {exc}")
         ww_completed = datetime.now(timezone.utc)
+        mode, ww_period, ww_fetched_at = self._ww_retrieval
+        if ww_error:
+            ww_state = SourceState.FAILED
+            ww_code = "provider_failure"
+            ww_message = "WhaleWisdom request failed."
+        elif mode == "stale_cache":
+            ww_state = SourceState.OK
+            ww_code = "stale_cache"
+            ww_message = (
+                f"WhaleWisdom heat-map fetch failed; serving cached "
+                f"{ww_period or 'payload'} "
+                f"({self._age_in_days(ww_fetched_at, ww_completed)})."
+            )
+        elif not ww_result:
+            ww_state = SourceState.EMPTY
+            ww_code = ""
+            ww_message = "WhaleWisdom completed successfully."
+        else:
+            ww_state = SourceState.OK
+            ww_code = "cache_hit" if mode == "cache_hit" else ""
+            ww_message = (
+                f"WhaleWisdom {ww_period or 'heat map'} "
+                f"({self._age_in_days(ww_fetched_at, ww_completed)})."
+            )
         self.source_health = {
             SourceName.WHALE_WISDOM: SourceHealth(
                 source=SourceName.WHALE_WISDOM,
-                state=(
-                    SourceState.FAILED
-                    if ww_error
-                    else (SourceState.OK if ww_result else SourceState.EMPTY)
-                ),
+                state=ww_state,
                 count=len(ww_result),
-                detail_code="provider_failure" if ww_error else "",
-                display_message=(
-                    "WhaleWisdom request failed."
-                    if ww_error
-                    else "WhaleWisdom completed successfully."
-                ),
+                detail_code=ww_code,
+                display_message=ww_message,
                 started_at=ww_started,
                 completed_at=ww_completed,
                 duration_seconds=(ww_completed - ww_started).total_seconds(),
@@ -148,7 +183,7 @@ class ExtractionAgent(Agent):
     def _load_stocktwits_from_email(self) -> dict[str, list[str]]:
         """Load the Top 25 lists from the weekly email, or {} if unavailable."""
         try:
-            source = StockTwitsEmailSource()
+            source = StockTwitsEmailSource(force=self.force_stocktwits)
             if not source.enabled:
                 print("  StockTwits: email source not configured, using config")
                 return {}
@@ -215,7 +250,61 @@ class ExtractionAgent(Agent):
         )
 
     def _fetch_heat_map(self) -> list[HeatMapStock]:
-        """Call the heat map JSON endpoint and return the children list."""
+        """Return the heat-map children, routed through the durable cache.
+
+        Serves a fresh (< 7 day) cached entry with no network call; otherwise
+        fetches, repopulates the cache, and on a fetch/parse failure falls back
+        to any usable cached payload (marked stale). ``force_whale_wisdom``
+        bypasses the cache read. This stays the seam that
+        ``tests/test_source_health.py`` monkeypatches.
+        """
+        self._ww_retrieval = ("", "", None)
+        now = datetime.now(timezone.utc)
+
+        entry = None
+        if not self.force_whale_wisdom:
+            entry = heat_map_cache.load()
+            if (
+                entry
+                and entry["source_period"]
+                and entry["children"]
+                and entry.get("heat_map_id", HEAT_MAP_ID) == HEAT_MAP_ID
+                and heat_map_cache.is_fresh(entry, now)
+            ):
+                self.last_quarter = entry["source_period"]
+                self._ww_retrieval = (
+                    "cache_hit",
+                    entry["source_period"],
+                    heat_map_cache.entry_fetched_at(entry),
+                )
+                return list(entry["children"])
+
+        try:
+            period, children = self._fetch_heat_map_network()
+        except Exception:
+            if entry is None:
+                entry = heat_map_cache.load()
+            if entry is not None and entry["source_period"] and entry["children"]:
+                self.last_quarter = entry["source_period"]
+                self._ww_retrieval = (
+                    "stale_cache",
+                    entry["source_period"],
+                    heat_map_cache.entry_fetched_at(entry),
+                )
+                return list(entry["children"])
+            raise
+
+        if children and period:
+            try:
+                heat_map_cache.store(period, children, HEAT_MAP_ID)
+            except OSError as exc:
+                print(f"  [warn] heat-map cache write failed: {exc}")
+        self.last_quarter = period
+        self._ww_retrieval = ("fetched", period, datetime.now(timezone.utc))
+        return children
+
+    def _fetch_heat_map_network(self) -> tuple[str, list[HeatMapStock]]:
+        """Call the heat map JSON endpoint and return ``(period, children)``."""
         resp = requests.get(
             HEAT_MAP_URL,
             params={"heat_map_id": HEAT_MAP_ID},
@@ -225,7 +314,7 @@ class ExtractionAgent(Agent):
         resp.raise_for_status()
         payload: dict[str, Any] = cast(dict[str, Any], resp.json())
 
-        if not isinstance(payload, dict) or "children" in payload is False:
+        if not isinstance(payload, dict) or "children" not in payload:
             keys = (
                 list(payload.keys())
                 if isinstance(payload, dict)
@@ -233,18 +322,25 @@ class ExtractionAgent(Agent):
             )
             raise ValueError(f"Unexpected API response shape: {keys}")
 
-        self.last_quarter = str(payload.get("name") or "")
         children = cast(list[HeatMapStock], payload["children"])
         print(f"  [net] {len(children)} stocks from heat map (id={HEAT_MAP_ID})")
-        return children
+        return str(payload.get("name") or ""), children
+
+    @staticmethod
+    def _age_in_days(fetched_at: datetime | None, now: datetime) -> str:
+        """Return a human phrase for the cache entry's age."""
+        if fetched_at is None:
+            return "age unknown"
+        days = max(0, (now - fetched_at).days)
+        return f"{days} day{'s' if days != 1 else ''}"
 
     def _save_ww_context(self, ranked: list[HeatMapStock]) -> None:
         """Write per-ticker WhalWisdom buyer/seller counts to ww_context.json."""
         context = {
             str(s["name"]): {
-                "filers_increasing": int(s.get("number_of_filers_increasing") or 0),
-                "filers_decreasing": int(s.get("number_of_filers_decreasing") or 0),
-                "ww_rank": int(s.get("overall_rank") or 0),
+                "filers_increasing": _safe_int(s.get("number_of_filers_increasing")),
+                "filers_decreasing": _safe_int(s.get("number_of_filers_decreasing")),
+                "ww_rank": _safe_int(s.get("overall_rank")),
             }
             for s in ranked
             if s.get("name")
