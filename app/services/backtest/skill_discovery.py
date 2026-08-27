@@ -46,15 +46,20 @@ Design constraints, all deliberate:
   following the first is treated as malformed rather than silently
   ignored. Whole-file reads are capped at :data:`_MAX_SKILL_MD_BYTES` and
   decoded strictly as UTF-8.
-- **No import-time singleton.** :func:`discover_strategies` re-reads the
-  filesystem on every call; nothing here is cached across calls, so a
-  caller always sees the current state of ``skills_root``.
+- **Revision-keyed process cache.** :func:`discover_strategies` first makes
+  a deterministic, recursive filesystem revision from paths and stat
+  identities.  A process-local cache reuses the immutable result only for
+  that exact root and revision; edits, additions, and removals get a new
+  revision.  The cache is initially empty -- there is no import-time
+  discovery singleton.
 """
 
 from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
+from functools import lru_cache
+import hashlib
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path, PurePosixPath
 import re
@@ -934,22 +939,52 @@ def _installed_pydantic_version() -> str:
 # ---------------------------------------------------------------------------
 
 
-def discover_strategies(skills_root: Path) -> StrategyDiscoveryResultV1:
-    """Scan ``skills_root``'s immediate child folders for Strategy Skills.
+def _filesystem_revision(root: Path) -> str | None:
+    """Return a deterministic stat-based revision of ``root``'s tree.
 
-    Re-reads the filesystem on every call -- no import-time singleton, no
-    caching. Returns every valid :class:`StrategyDescriptorV1` and every
-    :class:`StrategyDiscoveryWarningV1`, both in one deterministic order
-    (folders sorted by their normalized POSIX-relative path). One
-    malformed Skill never aborts the scan: a folder whose ``SKILL.md`` has
-    no ``kind: backtest-strategy`` is silently skipped, and a folder that
-    declares that kind but is otherwise invalid is isolated with a
-    warning naming the folder and, where applicable, the offending field.
-
-    Never imports or executes a discovered Strategy's
-    ``scripts/strategy.py`` -- discovery is metadata-only.
+    A directory's mtime catches child additions/removals; each descendant's
+    mode, size, and nanosecond mtime catch normal edits.  Symlinks are
+    fingerprinted but never followed, preserving discovery's isolation
+    boundary.  ``None`` means the tree could not be inspected safely.
     """
-    root = skills_root.resolve()
+    digest = hashlib.sha256()
+
+    def add_entry(path: Path) -> None:
+        stat = path.lstat()
+        relative = path.relative_to(root).as_posix()
+        digest.update(
+            f"{relative}\0{stat.st_dev}\0{stat.st_ino}\0{stat.st_mode}\0"
+            f"{stat.st_size}\0{stat.st_mtime_ns}\n".encode()
+        )
+
+    def visit(directory: Path) -> None:
+        entries = sorted(directory.iterdir(), key=lambda path: path.name)
+        for entry in entries:
+            add_entry(entry)
+            if entry.is_dir() and not entry.is_symlink():
+                visit(entry)
+
+    try:
+        add_entry(root)
+        visit(root)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+@lru_cache(maxsize=32)
+def _discover_strategies_for_revision(
+    resolved_root: str, revision: str
+) -> StrategyDiscoveryResultV1:
+    """Compute one immutable discovery result for an observed revision."""
+    del revision  # The key, not the scan algorithm, supplies cache identity.
+    return _discover_strategies_uncached(Path(resolved_root))
+
+
+def _discover_strategies_uncached(root: Path) -> StrategyDiscoveryResultV1:
+    """Perform the fail-soft scan after the caller has established its key."""
+    # The revision has already been obtained from this resolved directory.
+    # Keep this guard for direct callers and an unlikely removal race.
     if not root.is_dir():
         return StrategyDiscoveryResultV1(strategies=(), warnings=())
 
@@ -1030,6 +1065,29 @@ def discover_strategies(skills_root: Path) -> StrategyDiscoveryResultV1:
         strategies=tuple(valid_descriptors),
         warnings=tuple(warnings),
     )
+
+
+def discover_strategies(skills_root: Path) -> StrategyDiscoveryResultV1:
+    """Scan ``skills_root``'s immediate child folders for Strategy Skills.
+
+    Reads a recursive filesystem revision on every call, then reuses the
+    process-local immutable result for an unchanged root/revision pair.
+    Returns every valid :class:`StrategyDescriptorV1` and every
+    :class:`StrategyDiscoveryWarningV1`, both in one deterministic order
+    (folders sorted by their normalized POSIX-relative path). One
+    malformed Skill never aborts the scan: a folder whose ``SKILL.md`` has
+    no ``kind: backtest-strategy`` is silently skipped, and a folder that
+    declares that kind but is otherwise invalid is isolated with a
+    warning naming the folder and, where applicable, the offending field.
+
+    Never imports or executes a discovered Strategy's
+    ``scripts/strategy.py`` -- discovery is metadata-only.
+    """
+    root = skills_root.resolve()
+    revision = _filesystem_revision(root) if root.is_dir() else None
+    if revision is None:
+        return StrategyDiscoveryResultV1(strategies=(), warnings=())
+    return _discover_strategies_for_revision(str(root), revision)
 
 
 __all__ = [

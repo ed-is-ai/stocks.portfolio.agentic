@@ -442,6 +442,53 @@ def test_discover_strategies_scan_order_is_deterministic() -> None:
     assert first.warnings == second.warnings
 
 
+def test_discover_strategies_caches_only_an_unchanged_filesystem_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revision change must bypass the process cache for edits/adds/removals."""
+    root = tmp_path / "skills"
+    first_folder = _write_skill(root, "first")
+    skill_discovery_module._discover_strategies_for_revision.cache_clear()
+
+    calls = 0
+    real_process_folder = skill_discovery_module._process_folder
+
+    def counting_process_folder(folder: Path, skills_root: Path):
+        nonlocal calls
+        calls += 1
+        return real_process_folder(folder, skills_root)
+
+    monkeypatch.setattr(
+        skill_discovery_module, "_process_folder", counting_process_folder
+    )
+
+    first = discover_strategies(root)
+    second = discover_strategies(root)
+    assert first is second
+    assert calls == 1
+
+    (first_folder / "scripts" / "strategy.py").write_text(
+        "STRATEGY_API_VERSION = 2\n", encoding="utf-8"
+    )
+    discover_strategies(root)
+    assert calls == 2
+
+    _write_skill(root, "second")
+    assert {item.strategy_id for item in discover_strategies(root).strategies} == {
+        "first",
+        "second",
+    }
+    assert calls == 4
+
+    (root / "second" / "SKILL.md").unlink()
+    # Removing the manifest leaves an ordinary folder, which discovery must
+    # not replace with the cached descriptor from the former Strategy.
+    result = discover_strategies(root)
+    assert {item.strategy_id for item in result.strategies} == {"first"}
+    assert not result.warnings
+    assert calls == 6
+
+
 def test_discover_strategies_warning_order_is_sorted_by_folder() -> None:
     result = discover_strategies(FIXTURES_ROOT)
     folders = [warning.folder for warning in result.warnings]
