@@ -1,10 +1,10 @@
 {% import "_macros.html" as m %}
-{% macro buy_card(stock, trigger, url, score_color, entry, stop, risk_str, n, verdict_bg, verdict_border, congress, congress_net_color, svg_chart, canslim) %}
+{% macro buy_card(stock, trigger, url, score_color, score_str, stage_str, entry, stop, risk_str, n, verdict_bg, verdict_border, congress, congress_net_color, svg_chart, canslim) %}
 <div style="border:1px solid #c3e6cb;border-radius:6px;padding:14px;margin-bottom:14px;background:#f8fff9">
   <div style="font-weight:700;font-size:1em;color:#1e3a5f;margin-bottom:4px">
     &#9889; <a href="{{ url }}" style="color:#1e3a5f;text-decoration:none;font-weight:800" target="_blank">{{ stock.ticker }}</a>
     <span style="color:{{ score_color }};font-size:0.88em;margin-left:6px">
-      Score {{ stock.analysis.score }}/10 &mdash; {{ stock.analysis.stage }}
+      {{ score_str }} &mdash; {{ stage_str }}
     </span>
     <span style="background:#1e3a5f;color:white;padding:2px 8px;border-radius:3px;
                  font-size:0.75em;margin-left:8px">{{ trigger }}</span>

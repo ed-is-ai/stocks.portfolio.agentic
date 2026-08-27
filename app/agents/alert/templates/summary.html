@@ -48,10 +48,10 @@
 </div>
 {% endif %}
 
-{% if entry_triggered_rows or breaking_out_cards %}
+{% if entry_triggered_cards or breaking_out_cards %}
 <div style="margin:20px 0">
   <h3 style="color:#27ae60;margin-bottom:12px">&#9889; BUY</h3>
-  {% for c in entry_triggered_rows %}{{ wr.watched_row(**c) }}{% endfor %}
+  {% for c in entry_triggered_cards %}{{ bc.buy_card(**c) }}{% endfor %}
   {% for c in breaking_out_cards %}{{ bc.buy_card(**c) }}{% endfor %}
 </div>
 {% endif %}

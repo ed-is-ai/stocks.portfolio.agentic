@@ -112,6 +112,21 @@ _CTA_NO_ALERTS = "No actionable tickers today — nothing below needs a decision
 # app/schemas/market_narrative.py: MarketNarrative.not_advice default.
 _CTA_NOT_ADVICE = "Informational only — not financial advice."
 
+# Narrative shown on a Buy card for a watchlist setup that crossed its entry
+# price on a run where the screener produced no full analysis for it (#356).
+# The card still renders every field the Approaching Entry card does, with the
+# analysis-derived rows explicitly marked unavailable rather than omitted.
+_ANALYSIS_UNAVAILABLE = "Full breakout analysis was not available this run."
+_BLANK_BREAKOUT_NARRATIVE = {
+    "volume": _ANALYSIS_UNAVAILABLE,
+    "sepa": _ANALYSIS_UNAVAILABLE,
+    "canslim": _ANALYSIS_UNAVAILABLE,
+    "momentum": _ANALYSIS_UNAVAILABLE,
+    "verdict": (
+        "Watchlist setup crossed its configured entry price. " + _ANALYSIS_UNAVAILABLE
+    ),
+}
+
 
 class AlertAgent(Agent):
     name: str = "AlertAgent"
@@ -1154,13 +1169,15 @@ class AlertAgent(Agent):
         if entry_triggered or breaking_out:
             text_parts.append("\n\n*** BUY ***\n")
             for ticker, current, entry, wstock in entry_triggered:
-                canslim = (
-                    wstock.analysis.canslim if wstock and wstock.analysis else None
+                header = (
+                    f"  ENTRY TRIGGERED — {ticker}: "
+                    f"${current:.2f} crossed entry ${entry:.2f}"
                 )
-                text_parts.append(
-                    f"  {ticker}: ${current:.2f} crossed entry ${entry:.2f}\n"
-                    f"  {self._canslim_text(canslim)}"
-                )
+                if wstock and wstock.analysis:
+                    text_parts.append(header + "\n" + self.format_alert_text(wstock))
+                else:
+                    text_parts.append(f"{header}\n  {_ANALYSIS_UNAVAILABLE}")
+                text_parts.append("\n" + "-" * 40)
             for stock, trigger in breaking_out:
                 text_parts.append(self.format_alert_text(stock, trigger))
                 text_parts.append("\n" + "-" * 40)
@@ -1229,9 +1246,10 @@ class AlertAgent(Agent):
             self._watched_row_ctx(t, c, lvl, stock=wstock, stop=True)
             for t, c, lvl, wstock in watched_stops
         ]
-        entry_triggered_rows = [
-            self._watched_row_ctx(t, c, lvl, stock=wstock, stop=False)
-            for t, c, lvl, wstock in entry_triggered
+        entry_triggered_cards = [
+            self._buy_card_context(wstock, "ENTRY TRIGGERED", entry_override=lvl)
+            for _t, _c, lvl, wstock in entry_triggered
+            if wstock is not None
         ]
         breaking_out_cards = [
             self._buy_card_context(stock, trigger) for stock, trigger in breaking_out
@@ -1252,7 +1270,7 @@ class AlertAgent(Agent):
             cta_no_alerts=_CTA_NO_ALERTS,
             sell_cards=sell_cards,
             watched_stop_rows=watched_stop_rows,
-            entry_triggered_rows=entry_triggered_rows,
+            entry_triggered_cards=entry_triggered_cards,
             breaking_out_cards=breaking_out_cards,
             approaching_cards=approaching_cards,
             low_conviction_count=low_conviction_count,
@@ -1345,34 +1363,48 @@ class AlertAgent(Agent):
             "canslim": canslim,
         }
 
-    def _buy_card_context(self, stock: StockRecord, trigger: str) -> dict[str, Any]:
-        """Render context shared by ``_buy_card_html`` and the digest."""
+    def _buy_card_context(
+        self,
+        stock: StockRecord,
+        trigger: str,
+        *,
+        entry_override: float | None = None,
+    ) -> dict[str, Any]:
+        """Render context shared by ``_buy_card_html`` and the digest.
+
+        Every Buy-section ticker renders through this one contract so the
+        emailed BUY and APPROACHING ENTRY cards expose identical fields,
+        labels, ordering, and value formatting (#356). ``entry_override``
+        supplies the pivot for a watchlist setup whose ``StockRecord`` carries
+        no full analysis; the analysis-derived fields then render as an
+        explicit unavailable state rather than being dropped.
+        """
         a = stock.analysis
-        assert a is not None
         score_color = (
-            "#27ae60" if a.score >= 8 else "#f39c12" if a.score >= 6 else "#e74c3c"
+            "#27ae60"
+            if a and a.score >= 8
+            else "#f39c12"
+            if a and a.score >= 6
+            else "#e74c3c"
         )
-        entry = f"${a.entry_price:.2f}" if a.entry_price else "—"
-        stop = f"${a.stop_loss:.2f}" if a.stop_loss else "—"
-        if a.entry_price and a.stop_loss:
-            risk_pct = (a.entry_price - a.stop_loss) / a.entry_price * 100
+        score_str = f"Score {a.score}/10" if a else "Score —"
+        stage_str = a.stage if a else "—"
+        entry_price = a.entry_price if a and a.entry_price else entry_override
+        entry = f"${entry_price:.2f}" if entry_price else "—"
+        stop = f"${a.stop_loss:.2f}" if a and a.stop_loss else "—"
+        if entry_price and a and a.stop_loss:
+            risk_pct = (entry_price - a.stop_loss) / entry_price * 100
             risk_str = f"{risk_pct:.1f}%"
         else:
             risk_str = "—"
-        verdict_bg = (
-            "#d4edda"
-            if a.score >= 8 and stock.rel_volume >= 1.5
-            else "#fff3cd"
-            if a.score >= 7
-            else "#f8d7da"
-        )
-        verdict_border = (
-            "#27ae60"
-            if a.score >= 8 and stock.rel_volume >= 1.5
-            else "#f39c12"
-            if a.score >= 7
-            else "#e74c3c"
-        )
+        if a and a.score >= 8 and stock.rel_volume >= 1.5:
+            verdict_bg, verdict_border = "#d4edda", "#27ae60"
+        elif a and a.score >= 7:
+            verdict_bg, verdict_border = "#fff3cd", "#f39c12"
+        elif a:
+            verdict_bg, verdict_border = "#f8d7da", "#e74c3c"
+        else:
+            verdict_bg, verdict_border = "#fff3cd", "#f39c12"
         congress = self._congress_summary(stock)
         congress_net_color = "#555"
         if congress:
@@ -1385,16 +1417,22 @@ class AlertAgent(Agent):
             "trigger": trigger,
             "url": self._yahoo_url(stock.ticker),
             "score_color": score_color,
+            "score_str": score_str,
+            "stage_str": stage_str,
             "entry": entry,
             "stop": stop,
             "risk_str": risk_str,
-            "n": self._breakout_narrative(stock),
+            "n": (
+                self._breakout_narrative(stock)
+                if a
+                else dict(_BLANK_BREAKOUT_NARRATIVE)
+            ),
             "verdict_bg": verdict_bg,
             "verdict_border": verdict_border,
             "congress": congress,
             "congress_net_color": congress_net_color,
             "svg_chart": self._svg_chart(stock.price_history, score_color),
-            "canslim": a.canslim,
+            "canslim": a.canslim if a else None,
         }
 
     def _buy_card_html(self, stock: StockRecord, trigger: str) -> str:

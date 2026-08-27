@@ -9,6 +9,7 @@ immediate individual email and are persisted regardless of send success.
 from unittest.mock import MagicMock, patch
 
 from app.agents.alert.alert_agent import AlertAgent
+from app.agents.alert.templating import get_macro
 from app.core.alerting import classify_alert
 from app.repositories.notifications_repo import build_notifications_repository
 from app.schemas import (
@@ -165,7 +166,10 @@ def test_watched_signals_appear_in_digest(mock_smtp, tmp_path) -> None:
         agent.send_summary_email(positions=[_position("AMD", 175.0)])
 
     assert "BUY" in captured["html"]
-    assert "crossed entry" in captured["html"]
+    # Entry-triggered watchlist setups render as full Buy cards, identical in
+    # field set and formatting to APPROACHING ENTRY cards (#356).
+    assert "ENTRY TRIGGERED" in captured["html"]
+    assert "crossed entry" in captured["text"]
     assert "STOPPED OUT" in captured["html"]
     assert "NVDA" in captured["text"]
     assert "AMD" in captured["text"]
@@ -234,7 +238,7 @@ def test_tracked_signal_without_analysis_shows_unavailable(mock_smtp, tmp_path) 
         agent.send_summary_email()
 
     assert captured["html"].count(">unavailable</td>") == 7
-    assert "CANSLIM: unavailable" in captured["text"]
+    assert "Full breakout analysis was not available this run." in captured["text"]
 
 
 @patch("smtplib.SMTP")
@@ -477,7 +481,7 @@ def test_cta_group_order_matches_sections(mock_smtp, tmp_path) -> None:
     # The actual sections' order, via text unique to each real section.
     assert (
         html.index("(held)")
-        < html.index("crossed entry")
+        < html.index("ENTRY TRIGGERED")
         < html.index("APPROACHING ENTRY")
     )
 
@@ -526,11 +530,51 @@ def test_entry_reached_and_breaking_out_merge_into_one_buy_section(
     for body in (html, text):
         assert "ENTRY REACHED" not in body
         assert "BREAKING OUT NOW" not in body
-        # Per-row detail survives the merge: the watched-row reason and the
-        # breakout's trigger label are both still present underneath.
-        assert "crossed entry" in body
+        # Per-ticker detail survives the merge: both names and the
+        # entry-triggered marker are still present underneath.
+        assert "ENTRY TRIGGERED" in body
         assert "NVDA" in body
         assert "BRKO" in body
+    # The Buy-specific "crossed entry $pivot" wording stays in the text body.
+    assert "crossed entry" in text
+
+
+def test_buy_and_approaching_share_one_card_contract(tmp_path) -> None:
+    """Every Buy-section ticker and every Approaching Entry ticker render
+    through the same context contract, so the emailed cards expose an
+    identical field set, labels, and formatting (#356).
+    """
+    agent = _agent(tmp_path)
+    breakout = _buy_record("BRKO", breakout=True)
+    approaching = _buy_record("WTCH", breakout=False)
+    triggered = _buy_record("TRIG", breakout=False).model_copy(update={"price": 105.0})
+
+    breakout_ctx = agent._buy_card_context(breakout, "Breakout")
+    approaching_ctx = agent._buy_card_context(approaching, "Stay Alert")
+    triggered_ctx = agent._buy_card_context(
+        triggered, "ENTRY TRIGGERED", entry_override=100.0
+    )
+    no_analysis_ctx = agent._buy_card_context(
+        _stock("BARE", 105.0), "ENTRY TRIGGERED", entry_override=100.0
+    )
+
+    assert (
+        breakout_ctx.keys()
+        == approaching_ctx.keys()
+        == triggered_ctx.keys()
+        == no_analysis_ctx.keys()
+    )
+
+    # Rendered cards carry the same field labels regardless of source.
+    render = get_macro("_buy_card.html", "buy_card")
+    for label in ("Price", "Entry", "Stop", "Risk", "RSI", "RelVol"):
+        assert label in render(**approaching_ctx)
+        assert label in render(**triggered_ctx)
+        assert label in render(**no_analysis_ctx)
+
+    # A watchlist trigger with no analysis still shows its pivot, not a blank.
+    assert no_analysis_ctx["entry"] == "$100.00"
+    assert no_analysis_ctx["score_str"] == "Score —"
 
 
 @patch("smtplib.SMTP")
