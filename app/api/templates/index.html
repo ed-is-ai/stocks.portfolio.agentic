@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/css/tokens.css">
   <link rel="stylesheet" href="/static/css/theme.css">
   <link rel="stylesheet" href="/static/css/watchlist.css">
+  <link rel="stylesheet" href="/static/css/splash.css">
   <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <style>
@@ -342,6 +343,100 @@
   </style>
 </head>
 <body>
+
+<!-- Boot splash (#377) — covers the hydration gap, then crossfades out.
+     Retired by the inline script below as soon as fonts and the first htmx
+     swap settle; splash.css carries a 4s CSS-only failsafe so a script
+     failure can never leave it covering the app. -->
+<div id="boot-splash" class="boot-splash" data-state="waiting" role="status" aria-live="polite">
+  <div class="boot-mark">
+    <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+    <p class="boot-wordmark">Stock<span>Manager</span></p>
+  </div>
+  <div class="boot-rail">
+    <p class="boot-status">
+      <span class="boot-status-fast">Loading</span>
+      <span class="boot-status-slow">Still loading — waiting on the dashboard</span>
+    </p>
+    <p class="boot-credit">
+      Built by <a href="https://reinvently.co.uk/" target="_blank" rel="noopener noreferrer">Reinvently</a>
+    </p>
+  </div>
+</div>
+<script>
+  // Retire the boot splash once the page is genuinely usable. No minimum
+  // display time — if the app is ready in 80ms, the splash is gone in 80ms.
+  (function () {
+    var splash = document.getElementById('boot-splash');
+    if (!splash) return;
+
+    var slowTimer = window.setTimeout(function () {
+      if (splash.dataset.state === 'waiting') splash.dataset.state = 'slow';
+    }, 1200);
+
+    var done = false;
+    function retire() {
+      if (done) return;
+      done = true;
+      window.clearTimeout(slowTimer);
+      splash.dataset.state = 'fading';
+      // Match the CSS transition, then take it out of the a11y tree entirely.
+      window.setTimeout(function () {
+        splash.dataset.state = 'hidden';
+        splash.setAttribute('aria-hidden', 'true');
+      }, 200);
+    }
+
+    // "Usable" needs BOTH gates, or the splash hands off to the #tab-content
+    // spinner and the user sees two loading treatments back to back:
+    //   1. fonts resolved + document loaded  (self-hosted Inter, page parsed)
+    //   2. the first htmx swap into #tab-content has landed — the Watchlist
+    //      tab fetches /partials/stock-scanner on `load`, which completes
+    //      AFTER window.load, so waiting on window.load alone is not enough.
+    var pageLoaded = false;
+    var tabSwapped = false;
+    function maybeRetire() {
+      if (pageLoaded && tabSwapped) retire();
+    }
+
+    // Gate 1 — fonts + document. document.fonts may be unavailable in older
+    // browsers; fall back cleanly rather than blocking forever.
+    var fontsReady = (document.fonts && document.fonts.ready)
+      ? document.fonts.ready
+      : Promise.resolve();
+
+    Promise.resolve(fontsReady).then(function () {
+      function markLoaded() { pageLoaded = true; maybeRetire(); }
+      if (document.readyState === 'complete') {
+        markLoaded();
+      } else {
+        window.addEventListener('load', markLoaded, { once: true });
+      }
+    });
+
+    // Gate 2 — the first content swap. htmx:afterSwap fires per swap, so this
+    // only listens for the one targeting #tab-content, then stops caring.
+    // htmx:responseError / :timeout also release the gate: a failed tab fetch
+    // must still uncover the app (the error state is more useful than a splash).
+    var tabContent = document.getElementById('tab-content');
+    function markSwapped(event) {
+      if (event.target !== tabContent) return;
+      tabSwapped = true;
+      maybeRetire();
+    }
+    document.body.addEventListener('htmx:afterSwap', markSwapped);
+    document.body.addEventListener('htmx:responseError', markSwapped);
+    document.body.addEventListener('htmx:timeout', markSwapped);
+    // If htmx never loads at all, gate 2 would never open — release it on the
+    // window load tick so a missing htmx degrades to the old behaviour.
+    window.addEventListener('load', function () {
+      if (!window.htmx) { tabSwapped = true; maybeRetire(); }
+    }, { once: true });
+
+    // Hard ceiling: retire regardless if either gate never opens.
+    window.setTimeout(retire, 3000);
+  })();
+</script>
 
 <!-- Navbar -->
 <nav class="navbar d-flex justify-content-between align-items-center">
