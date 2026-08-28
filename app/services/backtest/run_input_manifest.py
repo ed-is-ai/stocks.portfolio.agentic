@@ -80,8 +80,8 @@ RUN_INPUT_MANIFEST_V2_VERSION = "run_input_manifest.v2"
 #: ``execution_contract_digest`` computed against the pre-Story-2.4
 #: placeholder semantics is no longer comparable. Bump again the moment
 #: engine/protocol behavior changes.
-ENGINE_VERSION = "backtest_engine.v2"
-PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v2"
+ENGINE_VERSION = "backtest_engine.v3"
+PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v3"
 
 #: Story 2.4 landed ``backtest_engine.py`` as real, hashable source, so
 #: :func:`_ledger_action_metrics_digest` now hashes it via
@@ -89,7 +89,7 @@ PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v2"
 #: exactly) instead of returning this placeholder's digest. The version
 #: string itself is kept only as the ``defaults`` identity fed into that
 #: digest -- bump it whenever fill/ledger/action semantics change.
-LEDGER_ACTION_METRICS_POLICY_VERSION = "ledger_action_metrics.v2"
+LEDGER_ACTION_METRICS_POLICY_VERSION = "ledger_action_metrics.v3"
 
 #: The concrete file behind the real fill/ledger/action/skip-reason
 #: semantics ``_ledger_action_metrics_digest`` now hashes -- mirrors

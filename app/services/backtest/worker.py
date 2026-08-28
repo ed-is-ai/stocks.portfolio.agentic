@@ -63,6 +63,7 @@ from app.services.backtest.strategy_job import (
     WorkerLeaseFenceV1,
 )
 from app.services.backtest.strategy_protocol import (
+    InitialEntrySelectionV1,
     JsonValue,
     StrategyParameterV1,
     StrategyProtocolV1,
@@ -717,6 +718,7 @@ class _StagingSink:
     events: list[TradeLogEvent] = field(default_factory=list)
     equity_curve: list[EquityCurvePointV1] = field(default_factory=list)
     open_positions: dict[str, Decimal] = field(default_factory=dict)
+    initial_entry_selection: InitialEntrySelectionV1 | None = None
 
     def publish_session(
         self,
@@ -724,8 +726,13 @@ class _StagingSink:
         session: date,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None:
         del session  # already carried by equity_point.session
+        if initial_entry_selection is not None:
+            if self.initial_entry_selection is not None:
+                raise _BacktestEngineDefect("initial selection was published twice")
+            self.initial_entry_selection = initial_entry_selection
         self.events.extend(events)
         self.equity_curve.append(equity_point)
         for event in events:
@@ -750,6 +757,7 @@ class _StagingSink:
                 events=tuple(self.events),
                 equity_curve=tuple(self.equity_curve),
                 final_cash_base=equity_point.cash_base,
+                initial_entry_selection=self.initial_entry_selection,
                 lease=self.lease,
             )
         except StrategyJobConflict as exc:

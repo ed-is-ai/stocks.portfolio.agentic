@@ -68,6 +68,15 @@ from app.services.backtest.strategy_job import (
     WorkerLeaseV1,
     requested_month_digest,
 )
+from app.services.backtest.strategy_protocol import (
+    EntrySelectionDecisionV1,
+    EntrySelectionState,
+    InitialEntrySelectionV1,
+    Signal,
+    SignalSide,
+    StrategyProtocolError,
+    validate_initial_entry_selection,
+)
 
 
 if TYPE_CHECKING:
@@ -900,8 +909,31 @@ CREATE TABLE IF NOT EXISTS backtest_staging (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS backtest_staging_entry_selection (
+    run_id TEXT PRIMARY KEY REFERENCES backtest_staging(run_id) ON DELETE CASCADE,
+    session TEXT NOT NULL,
+    metric_id TEXT NOT NULL,
+    metric_version TEXT NOT NULL,
+    rule_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS backtest_staging_entry_selection_decisions (
+    run_id TEXT NOT NULL REFERENCES backtest_staging_entry_selection(run_id)
+        ON DELETE CASCADE,
+    security_id TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK(rank > 0),
+    state TEXT NOT NULL CHECK(state IN (
+        'selected', 'eligible_not_selected', 'excluded'
+    )),
+    score TEXT,
+    reason_code TEXT,
+    PRIMARY KEY(run_id, security_id),
+    UNIQUE(run_id, rank)
+);
+
 CREATE TABLE IF NOT EXISTS backtest_results (
     run_id TEXT PRIMARY KEY REFERENCES strategy_runs(id),
+    result_schema_version TEXT NOT NULL DEFAULT 'backtest_result.v1'
+        CHECK(result_schema_version IN ('backtest_result.v1', 'backtest_result.v2')),
     metrics_json TEXT NOT NULL,
     final_cash_base TEXT NOT NULL,
     result_digest TEXT NOT NULL CHECK(length(result_digest) = 64),
@@ -911,9 +943,43 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS backtest_result_entry_selection (
+    run_id TEXT PRIMARY KEY REFERENCES backtest_results(run_id),
+    session TEXT NOT NULL,
+    metric_id TEXT NOT NULL,
+    metric_version TEXT NOT NULL,
+    rule_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS backtest_result_entry_selection_decisions (
+    run_id TEXT NOT NULL REFERENCES backtest_result_entry_selection(run_id),
+    security_id TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK(rank > 0),
+    state TEXT NOT NULL CHECK(state IN (
+        'selected', 'eligible_not_selected', 'excluded'
+    )),
+    score TEXT,
+    reason_code TEXT,
+    PRIMARY KEY(run_id, security_id),
+    UNIQUE(run_id, rank)
+);
+
+CREATE TRIGGER IF NOT EXISTS backtest_result_entry_selection_immutable_update
+BEFORE UPDATE ON backtest_result_entry_selection
+BEGIN SELECT RAISE(ABORT, 'backtest result entry selection is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backtest_result_entry_selection_immutable_delete
+BEFORE DELETE ON backtest_result_entry_selection
+BEGIN SELECT RAISE(ABORT, 'backtest result entry selection is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backtest_result_entry_selection_decision_immutable_update
+BEFORE UPDATE ON backtest_result_entry_selection_decisions
+BEGIN SELECT RAISE(ABORT, 'backtest result entry selection decision is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backtest_result_entry_selection_decision_immutable_delete
+BEFORE DELETE ON backtest_result_entry_selection_decisions
+BEGIN SELECT RAISE(ABORT, 'backtest result entry selection decision is immutable'); END;
+
 CREATE TRIGGER IF NOT EXISTS backtest_result_evidence_immutable
 BEFORE UPDATE ON backtest_results
 WHEN NEW.run_id != OLD.run_id
+  OR NEW.result_schema_version != OLD.result_schema_version
   OR NEW.metrics_json != OLD.metrics_json
   OR NEW.final_cash_base != OLD.final_cash_base
   OR NEW.result_digest != OLD.result_digest
@@ -1111,6 +1177,7 @@ class BacktestStagingV1:
     equity_curve: tuple[EquityCurvePointV1, ...]
     final_cash_base: Decimal
     updated_at: str
+    initial_entry_selection: InitialEntrySelectionV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -1146,6 +1213,7 @@ class BacktestResultV1:
     manifest_version: str = "run_input_manifest.v1"
     universe_selection: RunUniverseSelectionV1 | None = None
     source_preparation_job_id: str | None = None
+    initial_entry_selection: InitialEntrySelectionV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -1654,6 +1722,30 @@ class BacktestRepository:
             ):
                 if definition.split()[0] not in run_cols:
                     conn.execute(f"ALTER TABLE strategy_runs ADD COLUMN {definition}")
+            result_cols = {
+                str(x[1]) for x in conn.execute("PRAGMA table_info(backtest_results)")
+            }
+            if "result_schema_version" not in result_cols:
+                conn.execute(
+                    "ALTER TABLE backtest_results ADD COLUMN result_schema_version "
+                    "TEXT NOT NULL DEFAULT 'backtest_result.v1'"
+                )
+            # ``CREATE TRIGGER IF NOT EXISTS`` in the schema script does not
+            # replace a pre-selection trigger on an existing database. Rebuild
+            # this one after its additive column migration so legacy and fresh
+            # stores enforce the same immutable evidence contract.
+            conn.execute("DROP TRIGGER IF EXISTS backtest_result_evidence_immutable")
+            conn.execute(
+                """CREATE TRIGGER backtest_result_evidence_immutable
+                   BEFORE UPDATE ON backtest_results
+                   WHEN NEW.run_id != OLD.run_id
+                     OR NEW.result_schema_version != OLD.result_schema_version
+                     OR NEW.metrics_json != OLD.metrics_json
+                     OR NEW.final_cash_base != OLD.final_cash_base
+                     OR NEW.result_digest != OLD.result_digest
+                     OR NEW.completed_at != OLD.completed_at
+                   BEGIN SELECT RAISE(ABORT, 'backtest result evidence is immutable'); END"""
+            )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS "
                 "idx_strategy_runs_source_preparation "
@@ -3615,6 +3707,7 @@ class BacktestRepository:
         events: tuple[TradeLogEvent, ...],
         equity_curve: tuple[EquityCurvePointV1, ...],
         final_cash_base: Decimal,
+        initial_entry_selection: InitialEntrySelectionV1 | None = None,
         lease: WorkerLeaseFenceV1 | None = None,
     ) -> None:
         """Attempt-owned compare-and-swap staging write (AC 1, 6).
@@ -3648,6 +3741,11 @@ class BacktestRepository:
                 )
         if not final_cash_base.is_finite():
             raise ValueError("staging final_cash_base must be finite")
+        if initial_entry_selection is not None:
+            if not equity_curve:
+                raise BacktestIntegrityError(
+                    "initial entry selection requires a first equity-curve session"
+                )
         now = self._job_now()
         try:
             state_json = json.dumps(
@@ -3682,6 +3780,24 @@ class BacktestRepository:
                 or lease_matches is None
             ):
                 raise StrategyJobConflict("staging write ownership is stale")
+            if initial_entry_selection is not None:
+                strategy_run = self._load_strategy_run_row(conn, run_id)
+                selection = strategy_run.universe_selection
+                if selection is None:
+                    raise BacktestIntegrityError(
+                        "initial entry selection requires a pinned universe"
+                    )
+                try:
+                    initial_entry_selection = validate_initial_entry_selection(
+                        initial_entry_selection,
+                        pinned_security_ids=selection.canonical_security_ids,
+                        expected_session=equity_curve[0].session,
+                    )
+                except StrategyProtocolError as exc:
+                    raise BacktestIntegrityError(
+                        "staged initial entry selection is invalid",
+                        code=exc.code.value,
+                    ) from exc
             conn.execute(
                 """INSERT INTO backtest_staging (
                        run_id, state_schema_version, state_json, events_json,
@@ -3704,6 +3820,22 @@ class BacktestRepository:
                     now,
                 ),
             )
+            conn.execute(
+                "DELETE FROM backtest_staging_entry_selection_decisions WHERE run_id=?",
+                (run_id,),
+            )
+            conn.execute(
+                "DELETE FROM backtest_staging_entry_selection WHERE run_id=?",
+                (run_id,),
+            )
+            if initial_entry_selection is not None:
+                self._insert_entry_selection(
+                    conn,
+                    "backtest_staging_entry_selection",
+                    "backtest_staging_entry_selection_decisions",
+                    run_id,
+                    initial_entry_selection,
+                )
 
     def complete_claimed_backtest_job(
         self,
@@ -3777,6 +3909,7 @@ class BacktestRepository:
                 equity_curve=staging.equity_curve,
                 final_cash_base=staging.final_cash_base,
                 completed_at=now,
+                initial_entry_selection=staging.initial_entry_selection,
             )
             proposed_digest = manifest_digest(payload)
 
@@ -3795,6 +3928,7 @@ class BacktestRepository:
                     final_cash_base=staging.final_cash_base,
                     result_digest=proposed_digest,
                     completed_at=now,
+                    initial_entry_selection=staging.initial_entry_selection,
                 )
 
             fence = _lease_fence_params(lease)
@@ -3871,7 +4005,8 @@ class BacktestRepository:
         with session(self._connect) as conn:
             strategy_run = self._load_strategy_run_row(conn, run_id)
             row = conn.execute(
-                """SELECT metrics_json, final_cash_base, result_digest, note,
+                """SELECT result_schema_version, metrics_json, final_cash_base,
+                          result_digest, note,
                           note_version, completed_at
                    FROM backtest_results WHERE run_id=?""",
                 (run_id,),
@@ -3888,11 +4023,31 @@ class BacktestRepository:
                    FROM equity_curve WHERE run_id=? ORDER BY date""",
                 (run_id,),
             ).fetchall()
+            initial_entry_selection = self._load_entry_selection(
+                conn,
+                "backtest_result_entry_selection",
+                "backtest_result_entry_selection_decisions",
+                run_id,
+            )
+
+        result_schema_version = str(row[0])
+        if result_schema_version == "backtest_result.v1":
+            if initial_entry_selection is not None:
+                raise BacktestIntegrityError(
+                    "legacy backtest result contains unexpected selection evidence"
+                )
+        elif result_schema_version == "backtest_result.v2":
+            if initial_entry_selection is None:
+                raise BacktestIntegrityError(
+                    "selection-bearing backtest result is missing selection evidence"
+                )
+        else:
+            raise BacktestIntegrityError("stored backtest result schema is invalid")
 
         try:
-            metrics = BacktestMetricsV1.model_validate(json.loads(str(row[0])))
-            final_cash_base = Decimal(str(row[1]))
-            completed_at_raw = str(row[5])
+            metrics = BacktestMetricsV1.model_validate(json.loads(str(row[1])))
+            final_cash_base = Decimal(str(row[2]))
+            completed_at_raw = str(row[6])
             completed_at = datetime.fromisoformat(completed_at_raw)
             events = tuple(
                 self._parse_trade_log_event(json.loads(str(item[0])))
@@ -3924,8 +4079,9 @@ class BacktestRepository:
             equity_curve=equity_curve,
             final_cash_base=final_cash_base,
             completed_at=completed_at_raw,
+            initial_entry_selection=initial_entry_selection,
         )
-        if manifest_digest(payload) != str(row[2]):
+        if manifest_digest(payload) != str(row[3]):
             raise BacktestIntegrityError("stored backtest result digest is invalid")
 
         closed_trades = tuple(
@@ -3958,11 +4114,12 @@ class BacktestRepository:
             equity_curve=equity_curve,
             final_cash_base=final_cash_base,
             completed_at=completed_at,
-            note=None if row[3] is None else str(row[3]),
-            note_version=int(row[4]),
+            note=None if row[4] is None else str(row[4]),
+            note_version=int(row[5]),
             manifest_version=strategy_run.manifest_version,
             universe_selection=strategy_run.universe_selection,
             source_preparation_job_id=strategy_run.source_preparation_job_id,
+            initial_entry_selection=initial_entry_selection,
         )
 
     @staticmethod
@@ -4206,6 +4363,12 @@ class BacktestRepository:
         ).fetchone()
         if row is None:
             return None
+        initial_entry_selection = self._load_entry_selection(
+            conn,
+            "backtest_staging_entry_selection",
+            "backtest_staging_entry_selection_decisions",
+            run_id,
+        )
         try:
             state = json.loads(str(row[2]))
             if not isinstance(state, dict):
@@ -4232,6 +4395,7 @@ class BacktestRepository:
             equity_curve=equity_curve,
             final_cash_base=final_cash_base,
             updated_at=str(row[6]),
+            initial_entry_selection=initial_entry_selection,
         )
 
     def _insert_backtest_result(
@@ -4245,17 +4409,24 @@ class BacktestRepository:
         final_cash_base: Decimal,
         result_digest: str,
         completed_at: str,
+        initial_entry_selection: InitialEntrySelectionV1 | None,
     ) -> None:
         metrics_json = json.dumps(
             metrics.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         )
         conn.execute(
             """INSERT INTO backtest_results (
-                   run_id, metrics_json, final_cash_base, result_digest,
+                   run_id, result_schema_version, metrics_json, final_cash_base,
+                   result_digest,
                    note, note_version, completed_at, updated_at
-               ) VALUES (?, ?, ?, ?, NULL, 1, ?, ?)""",
+               ) VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?)""",
             (
                 run_id,
+                (
+                    "backtest_result.v2"
+                    if initial_entry_selection is not None
+                    else "backtest_result.v1"
+                ),
                 metrics_json,
                 str(final_cash_base),
                 result_digest,
@@ -4263,6 +4434,14 @@ class BacktestRepository:
                 completed_at,
             ),
         )
+        if initial_entry_selection is not None:
+            self._insert_entry_selection(
+                conn,
+                "backtest_result_entry_selection",
+                "backtest_result_entry_selection_decisions",
+                run_id,
+                initial_entry_selection,
+            )
         for event in events:
             conn.execute(
                 """INSERT INTO trade_log (
@@ -4305,6 +4484,7 @@ class BacktestRepository:
         equity_curve: tuple[EquityCurvePointV1, ...],
         final_cash_base: Decimal,
         completed_at: str,
+        initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> dict[str, object]:
         """The one canonical shape both digest computation (on write) and
         tamper verification (on read) hash -- pre-stringifies every
@@ -4315,14 +4495,115 @@ class BacktestRepository:
         read back verbatim from the ``backtest_results`` row) so a
         tampered ``completed_at`` fails the digest rebuild-and-compare
         just like every other evidence field."""
-        return {
-            "schema_version": "backtest_result.v1",
+        payload: dict[str, object] = {
+            "schema_version": (
+                "backtest_result.v2"
+                if initial_entry_selection is not None
+                else "backtest_result.v1"
+            ),
             "metrics": metrics.model_dump(mode="json"),
             "events": [event.model_dump(mode="json") for event in events],
             "equity_curve": [point.model_dump(mode="json") for point in equity_curve],
             "final_cash_base": str(final_cash_base),
             "completed_at": completed_at,
         }
+        if initial_entry_selection is not None:
+            payload["initial_entry_selection"] = initial_entry_selection.model_dump(
+                mode="json"
+            )
+        return payload
+
+    @staticmethod
+    def _insert_entry_selection(
+        conn: sqlite3.Connection,
+        header_table: str,
+        decision_table: str,
+        run_id: str,
+        selection: InitialEntrySelectionV1,
+    ) -> None:
+        conn.execute(
+            f"INSERT INTO {header_table} "
+            "(run_id, session, metric_id, metric_version, rule_id) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (
+                run_id,
+                selection.session.isoformat(),
+                selection.metric_id,
+                selection.metric_version,
+                selection.rule_id,
+            ),
+        )
+        for decision in selection.decisions:
+            conn.execute(
+                f"INSERT INTO {decision_table} "
+                "(run_id, security_id, rank, state, score, reason_code) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    run_id,
+                    decision.security_id,
+                    decision.rank,
+                    decision.state.value,
+                    None if decision.score is None else str(decision.score),
+                    decision.reason_code,
+                ),
+            )
+
+    @staticmethod
+    def _load_entry_selection(
+        conn: sqlite3.Connection,
+        header_table: str,
+        decision_table: str,
+        run_id: str,
+    ) -> InitialEntrySelectionV1 | None:
+        header = conn.execute(
+            f"SELECT session, metric_id, metric_version, rule_id "
+            f"FROM {header_table} WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+        decision_rows = conn.execute(
+            f"SELECT security_id, rank, state, score, reason_code "
+            f"FROM {decision_table} WHERE run_id=? ORDER BY rank",
+            (run_id,),
+        ).fetchall()
+        if header is None:
+            if decision_rows:
+                raise BacktestIntegrityError(
+                    "entry selection decisions exist without a header"
+                )
+            return None
+        try:
+            decisions = tuple(
+                EntrySelectionDecisionV1(
+                    security_id=str(row[0]),
+                    rank=int(row[1]),
+                    state=EntrySelectionState(str(row[2])),
+                    score=None if row[3] is None else Decimal(str(row[3])),
+                    reason_code=None if row[4] is None else str(row[4]),
+                )
+                for row in decision_rows
+            )
+            selection_session = date.fromisoformat(str(header[0]))
+            rule_id = str(header[3])
+            signals = tuple(
+                Signal(
+                    security_id=decision.security_id,
+                    side=SignalSide.BUY,
+                    session=selection_session,
+                    rule_id=rule_id,
+                )
+                for decision in decisions
+                if decision.state.value == "selected"
+            )
+            return InitialEntrySelectionV1(
+                session=selection_session,
+                metric_id=str(header[1]),
+                metric_version=str(header[2]),
+                rule_id=rule_id,
+                decisions=decisions,
+                signals=signals,
+            )
+        except (ValueError, TypeError) as exc:
+            raise BacktestIntegrityError("stored entry selection is invalid") from exc
 
     @staticmethod
     def _parse_trade_log_event(payload: object) -> TradeLogEvent:

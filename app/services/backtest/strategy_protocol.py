@@ -63,6 +63,13 @@ class StrategyProtocolErrorCode(StrEnum):
     DUPLICATE_POSITION = "duplicate_position"
     DUPLICATE_VOLATILITY_OBSERVATION = "duplicate_volatility_observation"
     DUPLICATE_PARAMETER_DECLARATION = "duplicate_parameter_declaration"
+    INVALID_INITIAL_SELECTION = "invalid_initial_selection"
+    INITIAL_SELECTION_SESSION_MISMATCH = "initial_selection_session_mismatch"
+    INITIAL_SELECTION_UNIVERSE_MISMATCH = "initial_selection_universe_mismatch"
+    INITIAL_SELECTION_DUPLICATE_SECURITY = "initial_selection_duplicate_security"
+    INITIAL_SELECTION_RANK_INVALID = "initial_selection_rank_invalid"
+    INITIAL_SELECTION_SIGNAL_MISMATCH = "initial_selection_signal_mismatch"
+    INITIAL_SELECTION_PROVIDER_FAILURE = "initial_selection_provider_failure"
 
 
 class StrategyProtocolError(Exception):
@@ -141,6 +148,40 @@ class Signal(_StrategyModel):
             _SIDE_EXECUTION_RANK[self.side],
             self.rule_id,
         )
+
+
+class EntrySelectionState(StrEnum):
+    """Closed audit vocabulary for one initial-universe decision."""
+
+    SELECTED = "selected"
+    ELIGIBLE_NOT_SELECTED = "eligible_not_selected"
+    EXCLUDED = "excluded"
+
+
+class EntrySelectionDecisionV1(_StrategyModel):
+    """One ranked, immutable decision for a pinned Run security."""
+
+    security_id: str = Field(min_length=1)
+    rank: int = Field(ge=1)
+    state: EntrySelectionState
+    score: Decimal | None = None
+    reason_code: str | None = Field(default=None, min_length=1)
+
+
+class InitialEntrySelectionV1(_StrategyModel):
+    """One complete initial ranked decision and its executable BUYs."""
+
+    session: date
+    metric_id: str = Field(min_length=1)
+    metric_version: str = Field(min_length=1)
+    rule_id: str = Field(min_length=1)
+    decisions: tuple[EntrySelectionDecisionV1, ...]
+    signals: tuple[Signal, ...]
+
+    @field_validator("decisions", "signals", mode="before")
+    @classmethod
+    def _detach_selection_collections(cls, value: object) -> tuple[object, ...]:
+        return _as_detached_tuple(value)
 
 
 class PositionSummaryV1(_StrategyModel):
@@ -338,6 +379,15 @@ class StrategyProtocolV1(Protocol):
         ...
 
 
+@runtime_checkable
+class InitialEntrySelectionProviderV1(Protocol):
+    """Optional capability for one atomic initial ranked entry decision."""
+
+    def initial_entry_selection(
+        self, view: MarketViewV1, parameters: StrategyParameters
+    ) -> InitialEntrySelectionV1: ...
+
+
 # ---------------------------------------------------------------------------
 # Pure result validators
 # ---------------------------------------------------------------------------
@@ -396,6 +446,79 @@ def validate_position_size(value: object) -> int:
             f"position_size cannot be negative: {value}",
         )
     return value
+
+
+def validate_initial_entry_selection(
+    value: object,
+    *,
+    pinned_security_ids: Sequence[str],
+    expected_session: date,
+) -> InitialEntrySelectionV1:
+    """Detach, validate, and canonically order one complete initial batch.
+
+    The complete pinned universe and expected first union session are engine
+    context, deliberately not inputs a Strategy can choose.  Nothing is
+    returned until coverage, ranks, and selected BUY agreement all validate.
+    """
+    if not isinstance(value, InitialEntrySelectionV1):
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.INVALID_INITIAL_SELECTION,
+            "initial_entry_selection must return InitialEntrySelectionV1",
+        )
+    if value.session != expected_session:
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.INITIAL_SELECTION_SESSION_MISMATCH,
+            "initial selection session does not match the first Run session",
+        )
+
+    decisions = tuple(sorted(value.decisions, key=lambda item: item.rank))
+    ids = [item.security_id for item in decisions]
+    if len(ids) != len(set(ids)):
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.INITIAL_SELECTION_DUPLICATE_SECURITY,
+            "initial selection repeats a security_id",
+        )
+    pinned = tuple(pinned_security_ids)
+    if len(pinned) != len(set(pinned)) or set(ids) != set(pinned):
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.INITIAL_SELECTION_UNIVERSE_MISMATCH,
+            "initial selection must cover every pinned security exactly once",
+        )
+    if [item.rank for item in decisions] != list(range(1, len(decisions) + 1)):
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.INITIAL_SELECTION_RANK_INVALID,
+            "initial selection ranks must be unique and contiguous from one",
+        )
+
+    signals = tuple(sorted(value.signals, key=lambda signal: signal.sort_key))
+    expected_signals = tuple(
+        sorted(
+            (
+                Signal(
+                    security_id=item.security_id,
+                    side=SignalSide.BUY,
+                    session=value.session,
+                    rule_id=value.rule_id,
+                )
+                for item in decisions
+                if item.state is EntrySelectionState.SELECTED
+            ),
+            key=lambda signal: signal.sort_key,
+        )
+    )
+    if signals != expected_signals:
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.INITIAL_SELECTION_SIGNAL_MISMATCH,
+            "selected decisions must agree exactly with canonical BUY signals",
+        )
+    return InitialEntrySelectionV1(
+        session=value.session,
+        metric_id=value.metric_id,
+        metric_version=value.metric_version,
+        rule_id=value.rule_id,
+        decisions=decisions,
+        signals=signals,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -741,6 +864,10 @@ def validate_strategy_parameters(
 
 
 __all__ = [
+    "EntrySelectionDecisionV1",
+    "EntrySelectionState",
+    "InitialEntrySelectionProviderV1",
+    "InitialEntrySelectionV1",
     "JsonScalar",
     "JsonValue",
     "MarketViewV1",
@@ -760,6 +887,7 @@ __all__ = [
     "VolatilityObservationV1",
     "validate_entry_signals",
     "validate_exit_signals",
+    "validate_initial_entry_selection",
     "validate_position_size",
     "validate_strategy_parameters",
 ]

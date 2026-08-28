@@ -38,6 +38,9 @@ from app.services.backtest.run_input_manifest import (
     RunInputManifestV1,
 )
 from app.services.backtest.strategy_protocol import (
+    EntrySelectionDecisionV1,
+    EntrySelectionState,
+    InitialEntrySelectionV1,
     MarketViewV1,
     PortfolioView,
     Signal,
@@ -335,6 +338,77 @@ class _ScriptedStrategy:
     ) -> int:
         del view, portfolio, parameters
         return self._size_by_rule.get(signal.rule_id, self._default_size)
+
+
+class _SelectionStrategy(_ScriptedStrategy):
+    def __init__(self, selection: InitialEntrySelectionV1, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.selection = selection
+        self.selection_calls = 0
+        self.entry_calls: list[date] = []
+
+    def initial_entry_selection(
+        self, view: MarketViewV1, parameters: StrategyParameters
+    ) -> InitialEntrySelectionV1:
+        del view, parameters
+        self.selection_calls += 1
+        return self.selection
+
+    def entry_signals(
+        self, view: MarketViewV1, parameters: StrategyParameters
+    ) -> list[Signal]:
+        self.entry_calls.append(view.as_of_session)
+        return super().entry_signals(view, parameters)
+
+
+def test_initial_selection_is_called_once_and_suppresses_first_ordinary_entries() -> (
+    None
+):
+    start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
+    sessions = _sessions("XNYS", start, end_exclusive)
+    market_data, pinned = _build_security("sec-a", "XNYS", sessions, revision=DIGEST_A)
+    first = sessions[0]
+    selected = Signal(
+        security_id="sec-a", side=SignalSide.BUY, session=first, rule_id="rank"
+    )
+    strategy = _SelectionStrategy(
+        InitialEntrySelectionV1(
+            session=first,
+            metric_id="metric",
+            metric_version="v1",
+            rule_id="rank",
+            decisions=[
+                EntrySelectionDecisionV1(
+                    security_id="sec-a",
+                    rank=1,
+                    state=EntrySelectionState.SELECTED,
+                    score=Decimal("1"),
+                )
+            ],
+            signals=[selected],
+        ),
+        entries={first: [selected]},
+        size_by_rule={"rank": 2},
+    )
+    output = run_simulation(
+        manifest=_manifest(
+            securities=(pinned,),
+            start_month=_month_str(start),
+            end_month=_month_str(start),
+        ),
+        strategy=strategy,
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+    )
+
+    assert strategy.selection_calls == 1
+    assert first not in strategy.entry_calls
+    assert strategy.entry_calls == list(sessions[1:])
+    assert output.initial_entry_selection == strategy.selection
+    assert (
+        len([event for event in output.events if isinstance(event, EntryFillEventV1)])
+        == 1
+    )
 
 
 # ---------------------------------------------------------------------------

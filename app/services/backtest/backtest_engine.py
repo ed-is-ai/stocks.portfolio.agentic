@@ -72,6 +72,8 @@ from app.services.backtest.market_planes import (
 )
 from app.services.backtest.run_input_manifest import RunInputManifestV1
 from app.services.backtest.strategy_protocol import (
+    InitialEntrySelectionProviderV1,
+    InitialEntrySelectionV1,
     MarketViewV1,
     PortfolioView,
     PositionSummaryV1,
@@ -79,9 +81,11 @@ from app.services.backtest.strategy_protocol import (
     SignalSide,
     StrategyParameters,
     StrategyProtocolError,
+    StrategyProtocolErrorCode,
     StrategyProtocolV1,
     validate_entry_signals,
     validate_exit_signals,
+    validate_initial_entry_selection,
     validate_position_size,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
@@ -302,6 +306,7 @@ class SimulationOutputV1(_EngineModel):
     equity_curve: tuple[EquityCurvePointV1, ...]
     final_cash_base: Decimal
     final_open_positions: tuple[OpenPositionMarkEventV1, ...]
+    initial_entry_selection: InitialEntrySelectionV1 | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +374,7 @@ class SessionBatchSink(Protocol):
         session: date,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None: ...
 
 
@@ -386,8 +392,10 @@ class InMemorySessionBatchSink:
         session: date,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None:
         del session  # already carried by equity_point.session
+        del initial_entry_selection
         self.events.extend(events)
         self.equity_curve.append(equity_point)
 
@@ -622,6 +630,7 @@ class _Engine:
         self.output_events: list[TradeLogEvent] = []
         self.equity_curve: list[EquityCurvePointV1] = []
         self.final_open_positions: tuple[OpenPositionMarkEventV1, ...] = ()
+        self.initial_entry_selection: InitialEntrySelectionV1 | None = None
 
     # -- sequencing -----------------------------------------------------
 
@@ -978,7 +987,7 @@ class _Engine:
 
     def _process_signals(
         self, session: date, session_events: list[TradeLogEvent]
-    ) -> None:
+    ) -> InitialEntrySelectionV1 | None:
         view = self.market_view_factory(session)
         if view.as_of_session != session:
             raise _fatal(
@@ -987,36 +996,71 @@ class _Engine:
                 "market view factory returned a view bound to the wrong session",
             )
         portfolio = self._portfolio_view(session)
+        is_initial_session = session == self.union_sessions[0]
         try:
             exits = validate_exit_signals(
                 self.strategy.exit_signals(view, portfolio, self.manifest_parameters)
             )
-            entries = validate_entry_signals(
-                self.strategy.entry_signals(view, self.manifest_parameters)
-            )
-            combined = sorted(exits + entries, key=_engine_signal_sort_key)
-            seen: set[tuple[date, str, SignalSide, str]] = set()
-            for signal in combined:
-                identity = (
-                    signal.session,
-                    signal.security_id,
-                    signal.side,
-                    signal.rule_id,
-                )
-                if identity in seen:
-                    session_events.append(
-                        self._skip_signal(
-                            signal,
-                            session,
-                            SkipReasonCode.DUPLICATE_SIGNAL,
-                            "duplicate signal instruction",
-                        )
+            selection: InitialEntrySelectionV1 | None = None
+            if is_initial_session and isinstance(
+                self.strategy, InitialEntrySelectionProviderV1
+            ):
+                try:
+                    raw_selection = self.strategy.initial_entry_selection(
+                        view, self.manifest_parameters
                     )
-                    continue
-                seen.add(identity)
-                skip = self._schedule_signal(signal, session, view, portfolio)
-                if skip is not None:
-                    session_events.append(skip)
+                except StrategyProtocolError:
+                    raise
+                except Exception as exc:
+                    raise StrategyProtocolError(
+                        StrategyProtocolErrorCode.INITIAL_SELECTION_PROVIDER_FAILURE,
+                        "initial_entry_selection raised an exception",
+                    ) from exc
+                selection = validate_initial_entry_selection(
+                    raw_selection,
+                    pinned_security_ids=tuple(
+                        item.security_id for item in self.manifest.securities
+                    ),
+                    expected_session=session,
+                )
+                entries = selection.signals
+            else:
+                entries = validate_entry_signals(
+                    self.strategy.entry_signals(view, self.manifest_parameters)
+                )
+            combined = sorted(exits + entries, key=_engine_signal_sort_key)
+            pending_before = dict(self.pending)
+            sequence_before = self._sequence
+            events_before = len(session_events)
+            seen: set[tuple[date, str, SignalSide, str]] = set()
+            try:
+                for signal in combined:
+                    identity = (
+                        signal.session,
+                        signal.security_id,
+                        signal.side,
+                        signal.rule_id,
+                    )
+                    if identity in seen:
+                        session_events.append(
+                            self._skip_signal(
+                                signal,
+                                session,
+                                SkipReasonCode.DUPLICATE_SIGNAL,
+                                "duplicate signal instruction",
+                            )
+                        )
+                        continue
+                    seen.add(identity)
+                    skip = self._schedule_signal(signal, session, view, portfolio)
+                    if skip is not None:
+                        session_events.append(skip)
+            except Exception:
+                self.pending = pending_before
+                self._sequence = sequence_before
+                del session_events[events_before:]
+                raise
+            return selection
         except StrategyProtocolError as exc:
             raise _fatal(exc.code, session, str(exc)) from exc
 
@@ -1163,17 +1207,21 @@ class _Engine:
 
     def _process_session(
         self, session: date, *, is_final: bool
-    ) -> tuple[tuple[TradeLogEvent, ...], EquityCurvePointV1]:
+    ) -> tuple[
+        tuple[TradeLogEvent, ...],
+        EquityCurvePointV1,
+        InitialEntrySelectionV1 | None,
+    ]:
         session_events: list[TradeLogEvent] = []
         self._apply_actions(session, session_events)
         self._execute_fills(session, session_events)
         equity_point = self._value_state(session)
-        self._process_signals(session, session_events)
+        selection = self._process_signals(session, session_events)
         if is_final:
             final_marks = self._mark_final_positions(session)
             session_events.extend(final_marks)
             self.final_open_positions = final_marks
-        return tuple(session_events), equity_point
+        return tuple(session_events), equity_point, selection
 
     def run(self) -> SimulationOutputV1:
         current_month: str | None = None
@@ -1183,12 +1231,17 @@ class _Engine:
             if month != current_month:
                 current_month = month
                 self.month_observer.on_month_boundary(month=month)
-            session_events, equity_point = self._process_session(
+            session_events, equity_point, selection = self._process_session(
                 session, is_final=(index == last_index)
             )
             self.sink.publish_session(
-                session=session, events=session_events, equity_point=equity_point
+                session=session,
+                events=session_events,
+                equity_point=equity_point,
+                initial_entry_selection=selection,
             )
+            if selection is not None:
+                self.initial_entry_selection = selection
             self.output_events.extend(session_events)
             self.equity_curve.append(equity_point)
 
@@ -1198,6 +1251,7 @@ class _Engine:
             equity_curve=tuple(self.equity_curve),
             final_cash_base=self.cash,
             final_open_positions=self.final_open_positions,
+            initial_entry_selection=self.initial_entry_selection,
         )
 
 
