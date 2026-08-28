@@ -62,7 +62,11 @@ from app.services.backtest.strategy_job import (
     StrategyJobV1,
     WorkerLeaseFenceV1,
 )
-from app.services.backtest.strategy_protocol import JsonValue, StrategyProtocolV1
+from app.services.backtest.strategy_protocol import (
+    JsonValue,
+    StrategyParameterV1,
+    StrategyProtocolV1,
+)
 from app.services.backtest.strategy_job_service import StrategyJobService
 
 
@@ -297,10 +301,7 @@ class PreparationStageEngine(StageWalkEngine):
                 job = self._repository.strategy_job(job_id)
                 if not _owns(job, claim_token):
                     return job
-                if (
-                    job.cancel_requested_at is not None
-                    and stage != "manifest_sealing"
-                ):
+                if job.cancel_requested_at is not None and stage != "manifest_sealing":
                     return self._cancel(job_id, claim_token)
                 try:
                     job = self._repository.set_strategy_job_current_stage(
@@ -388,6 +389,7 @@ class PreparationStageEngine(StageWalkEngine):
             )
             return self._repository.strategy_job(job_id)
         except Exception as exc:
+            logger.exception("Preparation job %s failed", job_id)
             current = self._repository.strategy_job(job_id)
             if not _owns(current, claim_token):
                 return current
@@ -711,6 +713,7 @@ class _StagingSink:
 
     repository: BacktestRepository
     state: _ClaimState
+    lease: WorkerLeaseFenceV1 | None = None
     events: list[TradeLogEvent] = field(default_factory=list)
     equity_curve: list[EquityCurvePointV1] = field(default_factory=list)
     open_positions: dict[str, Decimal] = field(default_factory=dict)
@@ -747,6 +750,7 @@ class _StagingSink:
                 events=tuple(self.events),
                 equity_curve=tuple(self.equity_curve),
                 final_cash_base=equity_point.cash_base,
+                lease=self.lease,
             )
         except StrategyJobConflict as exc:
             # ``write_backtest_staging``'s own CAS predicate rejects any
@@ -777,6 +781,7 @@ class _ProgressObserver:
     repository: BacktestRepository
     state: _ClaimState
     backtest: BacktestRunV1
+    lease: WorkerLeaseFenceV1 | None = None
 
     def on_month_boundary(self, *, month: str) -> None:
         current = self.repository.strategy_job(self.state.job_id)
@@ -798,6 +803,7 @@ class _ProgressObserver:
                 self.state.claim_token,
                 expected_version=current.status_version,
                 month=month,
+                lease=self.lease,
             )
         except StrategyJobConflict as exc:
             raise _BacktestOwnershipLost(str(exc)) from exc
@@ -813,6 +819,37 @@ def _resolve_strategy_descriptor(strategy_id: str) -> StrategyDescriptorV1:
         JobFailureCode.INTEGRITY_ERROR,
         f"Strategy is no longer discoverable: {strategy_id}",
     )
+
+
+def _restore_legacy_float_parameters(
+    manifest: RunInputManifestV1,
+    schema: Sequence[StrategyParameterV1],
+) -> RunInputManifestV1:
+    """Restore floats written by the pre-fix manifest canonicalizer.
+
+    Historical manifests remain immutable and are digest-checked before this
+    compatibility projection. Only a currently declared ``number`` parameter
+    whose stored string is exactly Python's canonical ``float.hex`` spelling
+    is restored; ordinary string/enum parameters and host-bound values are
+    untouched.
+    """
+    parameters = dict(manifest.parameters)
+    changed = False
+    for declaration in schema:
+        value = parameters.get(declaration.name)
+        if declaration.type != "number" or not isinstance(value, str):
+            continue
+        try:
+            restored = float.fromhex(value)
+        except ValueError:
+            continue
+        if restored.hex() != value:
+            continue
+        parameters[declaration.name] = restored
+        changed = True
+    if not changed:
+        return manifest
+    return manifest.model_copy(update={"parameters": parameters})
 
 
 def _load_strategy_instance(runtime_path: Path) -> StrategyProtocolV1:
@@ -893,11 +930,13 @@ class BacktestExecutionEngine:
         backtest: BacktestRunV1,
         prices: HistoricalPriceRepository,
         project_root: Path,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> None:
         self._repository = repository
         self._backtest = backtest
         self._prices = prices
         self._project_root = project_root
+        self._lease = lease
 
     def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
         job = self._repository.strategy_job(job_id)
@@ -949,15 +988,21 @@ class BacktestExecutionEngine:
             return job
         if job.cancel_requested_at is not None:
             return self._repository.cancel_claimed_strategy_job(
-                job_id, claim_token, expected_version=job.status_version
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
             )
 
         state = _ClaimState(
             job_id=job_id, claim_token=claim_token, status_version=job.status_version
         )
-        sink = _StagingSink(repository=self._repository, state=state)
+        sink = _StagingSink(repository=self._repository, state=state, lease=self._lease)
         observer = _ProgressObserver(
-            repository=self._repository, state=state, backtest=self._backtest
+            repository=self._repository,
+            state=state,
+            backtest=self._backtest,
+            lease=self._lease,
         )
 
         def market_view_factory(session: date) -> MarketView:
@@ -1033,7 +1078,10 @@ class BacktestExecutionEngine:
             return self._cancel(job_id, claim_token)
         try:
             return self._repository.complete_claimed_backtest_job(
-                job_id, claim_token, expected_version=job.status_version
+                job_id,
+                claim_token,
+                expected_version=job.status_version,
+                lease=self._lease,
             )
         except StrategyJobConflict:
             # Ambiguous completion: re-read authoritative state rather
@@ -1098,6 +1146,7 @@ class BacktestExecutionEngine:
                 JobFailureCode.INTEGRITY_ERROR,
                 "Pinned Strategy identity no longer matches the discovered Skill",
             )
+        manifest = _restore_legacy_float_parameters(manifest, descriptor.parameters)
         runtime_path = config.SKILLS_DIR / descriptor.runtime_path
         strategy = _load_strategy_instance(runtime_path)
 
@@ -1140,7 +1189,10 @@ class BacktestExecutionEngine:
             return current
         try:
             return self._repository.cancel_claimed_strategy_job(
-                job_id, claim_token, expected_version=current.status_version
+                job_id,
+                claim_token,
+                expected_version=current.status_version,
+                lease=self._lease,
             )
         except StrategyJobConflict:
             return self._repository.strategy_job(job_id)
@@ -1156,7 +1208,10 @@ class BacktestExecutionEngine:
         try:
             if job.cancel_requested_at is not None:
                 return self._repository.cancel_claimed_strategy_job(
-                    job.id, claim_token, expected_version=job.status_version
+                    job.id,
+                    claim_token,
+                    expected_version=job.status_version,
+                    lease=self._lease,
                 )
             return self._repository.fail_claimed_strategy_job(
                 job.id,
@@ -1165,6 +1220,7 @@ class BacktestExecutionEngine:
                 failure_code=code,
                 failed_month=failed_month,
                 detail=detail,
+                lease=self._lease,
             )
         except StrategyJobConflict:
             current = self._repository.strategy_job(job.id)
@@ -1183,7 +1239,11 @@ class BacktestExecutionEngine:
 
 
 def build_backtest_engine(
-    job_id: str, claim_token: str, backtest: BacktestRepository
+    job_id: str,
+    claim_token: str,
+    backtest: BacktestRepository,
+    *,
+    lease: WorkerLeaseFenceV1 | None = None,
 ) -> BacktestExecutionEngine:
     """Build one claimed Backtest's execution engine (AC 2, 3).
 
@@ -1205,6 +1265,7 @@ def build_backtest_engine(
         backtest=strategy_run,
         prices=prices,
         project_root=config.ROOT_DIR,
+        lease=lease,
     )
 
 
@@ -1250,7 +1311,9 @@ def main(
                 args.job_id, args.claim_token, repository, lease=lease
             )
         elif job.job_type is StrategyJobType.BACKTEST:
-            engine = build_backtest_engine(args.job_id, args.claim_token, repository)
+            engine = build_backtest_engine(
+                args.job_id, args.claim_token, repository, lease=lease
+            )
         elif job.job_type in STAGE_SEQUENCES:
             engine = build_stage_walk_engine(
                 args.job_id, repository, job.job_type, lease=lease
@@ -1292,7 +1355,36 @@ def main(
         # whole-heap cyclic-GC traversals and can dominate the worker's CPU.
         gc.disable()
     try:
-        result = engine.run(args.job_id, args.claim_token)
+        try:
+            result = engine.run(args.job_id, args.claim_token)
+        except Exception as exc:
+            logger.exception("Strategy worker execution failed for %s", args.job_id)
+            current = repository.strategy_job(args.job_id)
+            if (
+                current.status is StrategyJobStatus.RUNNING
+                and current.claim_token == args.claim_token
+            ):
+                if current.cancel_requested_at is not None:
+                    repository.cancel_claimed_strategy_job(
+                        current.id,
+                        args.claim_token,
+                        expected_version=current.status_version,
+                        lease=lease,
+                    )
+                else:
+                    detail = (
+                        f"Strategy worker execution failed: {type(exc).__name__}: {exc}"
+                    )
+                    repository.fail_claimed_strategy_job(
+                        current.id,
+                        args.claim_token,
+                        expected_version=current.status_version,
+                        failure_code=JobFailureCode.INTEGRITY_ERROR,
+                        failed_month=current.current_month,
+                        detail=detail[:500],
+                        lease=lease,
+                    )
+            return 1
     finally:
         if job.job_type is StrategyJobType.INITIALIZATION and gc_was_enabled:
             gc.enable()

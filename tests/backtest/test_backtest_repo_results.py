@@ -6,7 +6,7 @@ on-disk-SQLite-plus-``ThreadPoolExecutor`` race pattern."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import json
@@ -292,6 +292,58 @@ def test_staging_write_rejects_a_stale_owner(tmp_path: Path) -> None:
             ).fetchone()
             is None
         )
+
+
+def test_staging_write_requires_the_current_worker_lease(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    lease = repo.acquire_or_renew_worker_lease("worker-a", ttl_seconds=30)
+
+    with pytest.raises(StrategyJobConflict):
+        _write_staging(repo)
+
+    repo.write_backtest_staging(
+        RUN_ID,
+        claim_token=CLAIM_TOKEN,
+        expected_version=1,
+        lease=lease.fence,
+        **_staging_payload(),  # type: ignore[arg-type]
+    )
+
+
+def test_staging_write_rejects_a_stale_worker_lease_generation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    instant = [NOW]
+    repo = BacktestRepository(
+        db.make_connect(lambda: path),
+        clock=lambda: date(2026, 8, 12),
+        instant_clock=lambda: instant[0],
+    )
+    repo.ensure_schema()
+    _seed_backtest_run(path)
+    stale = repo.acquire_or_renew_worker_lease("worker-a", ttl_seconds=1)
+    instant[0] += timedelta(seconds=2)
+    current = repo.acquire_or_renew_worker_lease("worker-b", ttl_seconds=30)
+
+    with pytest.raises(StrategyJobConflict):
+        repo.write_backtest_staging(
+            RUN_ID,
+            claim_token=CLAIM_TOKEN,
+            expected_version=1,
+            lease=stale.fence,
+            **_staging_payload(),  # type: ignore[arg-type]
+        )
+
+    repo.write_backtest_staging(
+        RUN_ID,
+        claim_token=CLAIM_TOKEN,
+        expected_version=1,
+        lease=current.fence,
+        **_staging_payload(),  # type: ignore[arg-type]
+    )
 
 
 def test_staging_write_rejects_a_completed_or_cancelled_owner(tmp_path: Path) -> None:
