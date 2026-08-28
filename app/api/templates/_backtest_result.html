@@ -158,7 +158,13 @@
         <tr>
           <td>{{ row.sequence }}</td>
           <td>{{ row.kind_label }}</td>
-          <td>{{ row.security_id }}</td>
+          <td>
+            {{ row.security_label }}
+            <details class="mt-1">
+              <summary>Audit detail</summary>
+              <div class="mt-1">Security ID: {{ row.security_id }}</div>
+            </details>
+          </td>
           <td>{{ row.date }}</td>
           <td>{{ row.shares }}</td>
           <td>{{ row.price }}</td>

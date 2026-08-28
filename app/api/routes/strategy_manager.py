@@ -1173,6 +1173,18 @@ async def delete_initialization(
 # ---------------------------------------------------------------------------
 
 
+def _roster_identity_map(
+    repo: BacktestRepository, profile_hash: str
+) -> dict[str, tuple[str, str]]:
+    """Return the run's pinned ``security_id -> (provider_symbol, mic)`` map
+    for Trade Log label resolution (gh-367), projecting away the currency
+    column ``result_presenter`` does not need."""
+    return {
+        sid: (sym, mic)
+        for sid, sym, mic, _ccy in repo.roster_member_identities(profile_hash)
+    }
+
+
 def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
     """Build the Result page's full context from Story 2.5's aggregate
     alone -- every Metrics/Equity-Curve/Trade-Log/provenance value is
@@ -1188,13 +1200,14 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
             f"backtest result evidence is missing for a complete job: {exc}"
         ) from exc
     coverage = repo.snapshot_coverage(profile_hash=result.profile_hash)
+    identities = _roster_identity_map(repo, result.profile_hash)
     return {
         "run_id": run_id,
         "integrity_error": None,
         "result": result,
         "metrics": metrics_view(result),
         "equity_curve_payload": equity_curve_payload(result),
-        "trade_log": trade_log_view(result),
+        "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
         "note": note_view(result),
         "submitted_note_text": None,
@@ -1538,11 +1551,12 @@ def _comparison_side_context(
     except StrategyJobNotFound as exc:
         raise _reraise_vanished_evidence(exc) from exc
     coverage = repo.snapshot_coverage(profile_hash=result.profile_hash)
+    identities = _roster_identity_map(repo, result.profile_hash)
     return {
         "run_id": run_id,
         "result": result,
         "metrics": metrics_view(result),
-        "trade_log": trade_log_view(result),
+        "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
     }
 

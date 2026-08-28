@@ -301,3 +301,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
   summary: When `narrative_input_digest` returns `None` (non-finite float from a glitchy feed), `resolve_market_narrative` regenerates and overwrites the previously-good narrative + digest on disk with `input_digest=""`, so the next healthy run cannot reuse and must regenerate a second time.
   evidence: The `digest is None` path still calls `save_market_narrative(stamped)` with an empty digest. Spec I/O matrix currently mandates this ("no digest stamped; regenerate"); leaving the existing file untouched when the digest cannot be computed would avoid the double regen.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-367-trade-log-security-names.md`
+  summary: When a Trade Log row's security_id does not resolve in the pinned roster, the "Unknown security" label is identical across rows and the only distinguishing datum (the GUID) is hidden in a collapsed per-row `<details>`, so an operator cannot tell unresolved rows apart at a glance.
+  evidence: `resolve_security_label` returns the bare constant `UNRESOLVED_SECURITY_LABEL` on a miss; the spec's read-only I/O matrix fixes that as "the fixed fallback string". A future change could append a short id to the fallback label.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-367-trade-log-security-names.md`
+  summary: The Trade Log renders one `<details>/<summary>Audit detail</summary>` disclosure per row; a 200-event backtest produces 200 disclosure widgets in one column, all with the same non-unique accessible name.
+  evidence: `_backtest_result.html` and `_comparison.html` Security cells. The `<details>` pattern is mandated by the spec intent-contract; a column-level toggle or per-row `aria-label` would scale better.

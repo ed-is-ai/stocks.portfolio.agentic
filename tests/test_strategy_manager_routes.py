@@ -112,9 +112,16 @@ class FakeRepo:
         self.bootstrap = SimpleNamespace(job_id="job-1")
         self.bootstrap_run_calls = 0
         self.active_profile_calls = 0
+        # Story gh-367: pinned roster identities for Trade Log label
+        # resolution. Includes the event fixtures' ``SEC1`` so rendered
+        # Security cells show a readable ticker/exchange label.
+        self.roster_identities: list[tuple[str, str, str, str]] = [
+            ("sid_001", "AAPL", "XNYS", "USD"),
+            ("SEC1", "MSFT", "XNAS", "USD"),
+        ]
 
     def roster_member_identities(self, profile_hash):
-        return [("sid_001", "AAPL", "XNYS", "USD")]
+        return self.roster_identities
 
     def recent_job_failures(self, limit: int = 5):
         return ()
@@ -361,9 +368,7 @@ def test_strategy_manager_js_swaps_expected_form_error_responses() -> None:
 def test_strategy_manager_script_url_is_cache_versioned(services) -> None:
     response = client.get("/")
 
-    assert (
-        'src="/static/js/strategy-manager.js?v=20260824-1"' in response.text
-    )
+    assert 'src="/static/js/strategy-manager.js?v=20260824-1"' in response.text
 
 
 def test_valid_submission_enqueues_once_and_redirects(services):
@@ -1399,6 +1404,23 @@ def test_result_all_event_kinds_render_without_forcing_buy_sell_shape(services):
     assert "No executed simulated trades" not in text
     for label in ("Skipped", "Buy", "Sell", "Split", "Open mark", "Dividend"):
         assert label in text
+    # gh-367: the pinned roster resolves SEC1 to a readable label; the
+    # bare GUID survives only inside the row's audit-detail disclosure.
+    assert "MSFT (XNAS)" in text
+    assert "Security ID: SEC1" in text
+    assert "<td>SEC1</td>" not in text
+
+
+def test_result_trade_log_unresolved_security_falls_back(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.roster_identities = []
+    repo.result = _result(events=(_entry_event(1), _exit_event(2)))
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "Unknown security" in text
+    assert "Security ID: SEC1" in text
 
 
 def test_result_chart_and_table_share_the_same_ordered_payload(services):
@@ -2024,6 +2046,21 @@ def test_comparison_happy_path_renders_both_sides(services):
     assert "View equity data table" in text
     # Notes are a standalone-Result concern -- never rendered here.
     assert "Decision note" not in text
+
+
+def test_comparison_trade_log_resolves_security_labels_on_both_sides(services):
+    # gh-367: the comparison view uses the same pinned-roster label
+    # resolution as the single-result view, on both sides.
+    repo, _ = services
+    repo.result = _result(run_id="run-1", events=(_entry_event(1), _exit_event(2)))
+    repo.result_b = _result(run_id="run-2", events=(_entry_event(1),))
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.get("/strategy-manager/comparisons/run-1/run-2")
+    assert response.status_code == 200
+    text = response.text
+    assert text.count("MSFT (XNAS)") >= 3
+    assert text.count("Security ID: SEC1") >= 3
+    assert "<td>SEC1</td>" not in text
 
 
 def test_comparison_ineligible_redirects_to_picker_with_reason(services):

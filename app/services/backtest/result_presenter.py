@@ -10,6 +10,7 @@ display in a local variable; the typed aggregate handed in is read-only.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 import html
@@ -56,6 +57,30 @@ _SKIP_REASON_TEXT: dict[SkipReasonCode, str] = {
 
 _EXECUTED_FILL_KINDS = frozenset({"entry_fill", "exit_fill"})
 
+#: Primary Security-cell label when a row's ``security_id`` is not present
+#: in the run's pinned reconstruction roster.
+UNRESOLVED_SECURITY_LABEL = "Unknown security"
+
+
+def resolve_security_label(
+    security_id: str, identities: Mapping[str, tuple[str, str]]
+) -> str:
+    """Resolve ``security_id`` to a readable label via the run's pinned
+    roster identity map (``security_id -> (provider_symbol, mic)``).
+
+    Returns ``f"{symbol} ({mic})"`` when ``mic`` is non-empty, the bare
+    ``symbol`` otherwise, and :data:`UNRESOLVED_SECURITY_LABEL` on a miss
+    (key absent, or a blank/whitespace provider symbol). Never raises.
+    """
+    identity = identities.get(security_id)
+    if identity is None:
+        return UNRESOLVED_SECURITY_LABEL
+    symbol, mic = identity
+    symbol, mic = symbol.strip(), mic.strip()
+    if not symbol:
+        return UNRESOLVED_SECURITY_LABEL
+    return f"{symbol} ({mic})" if mic else symbol
+
 
 @dataclass(frozen=True)
 class MetricsViewV1:
@@ -76,6 +101,7 @@ class TradeLogRowV1:
     kind: str
     kind_label: str
     security_id: str
+    security_label: str
     date: str
     shares: str
     price: str
@@ -240,7 +266,11 @@ def _money(value: Decimal, currency: str) -> str:
     return f"{value:,.2f} {currency}"
 
 
-def _trade_log_row(event: TradeLogEvent, base_currency: str) -> TradeLogRowV1:
+def _trade_log_row(
+    event: TradeLogEvent,
+    base_currency: str,
+    identities: Mapping[str, tuple[str, str]],
+) -> TradeLogRowV1:
     kind_label = _KIND_LABELS[event.kind]
     if isinstance(event, SkippedSignalEventV1):
         reason_text = _SKIP_REASON_TEXT.get(event.reason, event.reason.value)
@@ -249,6 +279,7 @@ def _trade_log_row(event: TradeLogEvent, base_currency: str) -> TradeLogRowV1:
             kind=event.kind,
             kind_label=kind_label,
             security_id=event.security_id,
+            security_label=resolve_security_label(event.security_id, identities),
             date=event.signal_session.isoformat(),
             shares="—",
             price="—",
@@ -270,6 +301,7 @@ def _trade_log_row(event: TradeLogEvent, base_currency: str) -> TradeLogRowV1:
             kind=event.kind,
             kind_label=kind_label,
             security_id=event.security_id,
+            security_label=resolve_security_label(event.security_id, identities),
             date=event.fill_session.isoformat(),
             shares=str(event.shares),
             price=_money(event.fill_price_native, event.fill_currency),
@@ -283,6 +315,7 @@ def _trade_log_row(event: TradeLogEvent, base_currency: str) -> TradeLogRowV1:
             kind=event.kind,
             kind_label=kind_label,
             security_id=event.security_id,
+            security_label=resolve_security_label(event.security_id, identities),
             date=event.session.isoformat(),
             shares="—",
             price="—",
@@ -299,6 +332,7 @@ def _trade_log_row(event: TradeLogEvent, base_currency: str) -> TradeLogRowV1:
             kind=event.kind,
             kind_label=kind_label,
             security_id=event.security_id,
+            security_label=resolve_security_label(event.security_id, identities),
             date=event.session.isoformat(),
             shares="—",
             price=_money(event.per_share_amount, event.currency),
@@ -317,6 +351,7 @@ def _trade_log_row(event: TradeLogEvent, base_currency: str) -> TradeLogRowV1:
         kind=event.kind,
         kind_label=kind_label,
         security_id=event.security_id,
+        security_label=resolve_security_label(event.security_id, identities),
         date=event.session.isoformat(),
         shares=str(event.shares),
         price=f"{event.mark_price_native:,.2f} (native)",
@@ -330,12 +365,17 @@ def _trade_log_row(event: TradeLogEvent, base_currency: str) -> TradeLogRowV1:
     )
 
 
-def trade_log_view(result: BacktestResultV1) -> TradeLogViewV1:
+def trade_log_view(
+    result: BacktestResultV1, identities: Mapping[str, tuple[str, str]]
+) -> TradeLogViewV1:
     """Map every persisted event to one stable column set in ``sequence``
     order (AC 4) -- no event kind is dropped or forced into a buy/sell
     shape, and the two AC 5 empty states are computed here, not inferred
     from Metrics."""
-    rows = tuple(_trade_log_row(event, result.base_currency) for event in result.events)
+    rows = tuple(
+        _trade_log_row(event, result.base_currency, identities)
+        for event in result.events
+    )
     has_executed_fills = any(row.kind in _EXECUTED_FILL_KINDS for row in rows)
     return TradeLogViewV1(
         rows=rows, has_events=bool(rows), has_executed_fills=has_executed_fills
@@ -410,6 +450,8 @@ def note_view(result: BacktestResultV1) -> NoteViewV1:
 
 
 __all__ = [
+    "UNRESOLVED_SECURITY_LABEL",
+    "resolve_security_label",
     "MetricsViewV1",
     "TradeLogRowV1",
     "TradeLogViewV1",
