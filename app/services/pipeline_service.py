@@ -49,12 +49,19 @@ class PipelineRunResult(BaseModel):
 class PipelineService:
     """Runs the momentum pipeline once and reports the outcome."""
 
-    def run_once(self, extract: bool = False) -> PipelineRunResult:
+    def run_once(
+        self,
+        extract: bool = False,
+        force_whale_wisdom: bool = False,
+        force_stocktwits: bool = False,
+    ) -> PipelineRunResult:
         """Run the orchestrator pipeline once and capture its output.
 
         When ``extract`` is true the run passes ``--extract`` to the
         orchestrator so WhaleWisdom/StockTwits are pulled fresh instead of
-        reusing the cached extraction file.
+        reusing the cached extraction file. ``force_whale_wisdom`` /
+        ``force_stocktwits`` additionally bypass the heat-map cache / email
+        watermark for that source.
         """
         if not _run_lock.acquire(blocking=False):
             return PipelineRunResult(
@@ -62,11 +69,20 @@ class PipelineService:
                 details="A pipeline refresh is already running.",
             )
         try:
-            return self._run_once_locked(extract=extract)
+            return self._run_once_locked(
+                extract=extract,
+                force_whale_wisdom=force_whale_wisdom,
+                force_stocktwits=force_stocktwits,
+            )
         finally:
             _run_lock.release()
 
-    def _run_once_locked(self, extract: bool = False) -> PipelineRunResult:
+    def _run_once_locked(
+        self,
+        extract: bool = False,
+        force_whale_wisdom: bool = False,
+        force_stocktwits: bool = False,
+    ) -> PipelineRunResult:
         """Run one refresh while holding the process-wide single-run lock."""
         run_id = str(uuid4())
         try:
@@ -78,6 +94,10 @@ class PipelineService:
         argv = [sys.executable, "-m", "app.orchestration.orchestrator", "--once"]
         if extract:
             argv.append("--extract")
+        if force_whale_wisdom:
+            argv.append("--force-whale-wisdom")
+        if force_stocktwits:
+            argv.append("--force-stocktwits")
         try:
             result = subprocess.run(
                 argv,

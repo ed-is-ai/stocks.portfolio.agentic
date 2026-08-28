@@ -378,14 +378,39 @@
             title="Run the full scan and analysis using cached WhaleWisdom / StockTwits data — faster">
       <i class="bi bi-arrow-clockwise"></i> Refresh Data
     </button>
-    <button id="refresh-institutional-button" class="btn btn-sm btn-light btn-refresh"
-            hx-post="/refresh-data"
-            hx-vals='{"extract": true}'
-            hx-target="#tab-content" hx-swap="innerHTML"
-            hx-indicator="#spinner"
-            title="Run the full scan and analysis after refreshing WhaleWisdom / StockTwits from source — slower">
-      <i class="bi bi-bank"></i> Refresh Institutional Data
-    </button>
+    <div class="dropdown d-inline-block">
+      <button id="refresh-institutional-button" type="button"
+              class="btn btn-sm btn-light btn-refresh dropdown-toggle"
+              data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"
+              title="Run the full scan and analysis after refreshing WhaleWisdom / StockTwits from source — slower">
+        <i class="bi bi-bank"></i> Refresh Institutional Data
+      </button>
+      <div class="dropdown-menu p-3" style="min-width: 20rem;">
+        <form hx-post="/refresh-data"
+              hx-target="#tab-content" hx-swap="innerHTML"
+              hx-indicator="#spinner"
+              hx-on::after-request="bootstrap.Dropdown.getOrCreateInstance(document.getElementById('refresh-institutional-button')).hide()">
+          <input type="hidden" name="extract" value="true">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" value="true"
+                   name="force_whale_wisdom" id="force-whale-wisdom">
+            <label class="form-check-label" for="force-whale-wisdom">
+              Force-refresh WhaleWisdom heat map
+              <span class="text-muted d-block small">else: reuse &lt; 7-day cache</span>
+            </label>
+          </div>
+          <div class="form-check mt-2">
+            <input class="form-check-input" type="checkbox" value="true"
+                   name="force_stocktwits" id="force-stocktwits">
+            <label class="form-check-label" for="force-stocktwits">
+              Force-refresh StockTwits Top 25
+              <span class="text-muted d-block small">else: newest-email only</span>
+            </label>
+          </div>
+          <button type="submit" class="btn btn-sm btn-primary mt-3">Run</button>
+        </form>
+      </div>
+    </div>
     <span id="spinner" class="htmx-indicator spinner-border spinner-border-sm text-light"></span>
   </div>
 </nav>

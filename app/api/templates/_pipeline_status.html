@@ -57,10 +57,11 @@
         {% if source_health %}
         <div class="source-health" aria-label="Source coverage">
           {% call(source) macros.source_stage_groups(source_health) %}
-          {% set is_cached = source.detail_code == 'cached_input' %}
+          {% set is_stale = source.detail_code == 'stale_cache' %}
+          {% set is_cached = source.detail_code in ('cached_input', 'cache_hit', 'stale_cache') %}
           <span class="source-badge source-{{ source.state }}{% if is_cached %} source-cached{% endif %}" title="{{ source.display_message }}">
-            <i class="bi bi-{% if source.state == 'ok' %}check-circle-fill{% elif source.state == 'empty' %}dash-circle{% elif is_cached %}clock-history{% elif source.state == 'skipped' %}skip-forward-circle{% else %}x-circle-fill{% endif %}"></i>
-            {{ source.label }}: {% if is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
+            <i class="bi bi-{% if source.state == 'ok' and not is_cached %}check-circle-fill{% elif source.state == 'empty' %}dash-circle{% elif is_cached %}clock-history{% elif source.state == 'skipped' %}skip-forward-circle{% else %}x-circle-fill{% endif %}"></i>
+            {{ source.label }}: {% if is_stale %}Stale{% elif is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
             <span class="source-count{% if is_cached %} source-count-stale{% endif %}">&middot; {{ source.count }}</span>
           </span>
           {% endcall %}
