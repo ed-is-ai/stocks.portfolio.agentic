@@ -265,7 +265,9 @@ class StrategyJobService:
                     return False
                 owned, self._owned = self._owned, None
                 self._fallback_if_nonterminal(
-                    owned, "Worker exited before terminal state"
+                    owned,
+                    "Worker exited before terminal state "
+                    f"(exit code {owned.process.poll()})",
                 )
                 return False
 
@@ -325,6 +327,10 @@ class StrategyJobService:
                 # A dispatch is only safe after its immediately preceding
                 # heartbeat completed: otherwise a lease takeover may have
                 # happened while SQLite was unavailable.
+                if self._lease is None:
+                    self._stop_owned_child_after_lease_loss()
+                    lock_failures = 0
+                    continue
                 self.dispatch_once()
                 lock_failures = 0
             except Exception as exc:
@@ -339,6 +345,24 @@ class StrategyJobService:
                     self._stop.wait(delay)
                     continue
                 logger.exception("Strategy job dispatcher iteration failed")
+
+    def _stop_owned_child_after_lease_loss(self) -> None:
+        """Stop a child immediately after another instance owns the lease.
+
+        The new owner reconciles the durable running claim.  This process
+        must only reap its now-unfenced child; retaining it would block later
+        dispatch if this instance eventually reacquires the singleton lease.
+        """
+        with self._lock:
+            owned, self._owned = self._owned, None
+            if owned is None or owned.process.poll() is not None:
+                return
+            owned.process.terminate()
+            try:
+                owned.process.wait(timeout=5)
+            except Exception:
+                owned.process.kill()
+                owned.process.wait(timeout=5)
 
     def shutdown(self) -> None:
         self._stop.set()

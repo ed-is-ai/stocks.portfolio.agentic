@@ -69,6 +69,7 @@ from app.services.backtest.strategy_job import (
     requested_month_digest,
 )
 
+
 if TYPE_CHECKING:
     # Deferred to break the real import cycle: ``backtest_engine.py`` and
     # ``metrics.py`` both import ``run_input_manifest.py``, which imports
@@ -1585,17 +1586,23 @@ class BacktestRepository:
             # The mode is durable database state, but issuing it here also
             # upgrades existing rollback-journal databases at startup.
             conn.execute("PRAGMA journal_mode = WAL")
+            # ``executescript`` otherwise commits before running and permits
+            # two startup processes to interleave a trigger DROP/CREATE pair.
+            # Keep each schema phase under SQLite's cross-process write lock.
             conn.executescript(
-                _QUALIFICATION_SCHEMA
+                "BEGIN IMMEDIATE;\n"
+                + _QUALIFICATION_SCHEMA
                 + _ROSTER_SCHEMA
                 + _SCAN_RECONSTRUCTION_CACHE_SCHEMA
                 + _SNAPSHOT_COVERAGE_SCHEMA
                 + _BAU_RUN_AUTHORITY_SCHEMA
                 + _STRATEGY_JOB_SCHEMA
                 + _BACKTEST_RESULT_SCHEMA
+                + "\nCOMMIT;"
             )
             _migrate_bats_mic_constraints(conn)
             _migrate_snapshot_exclusion_constraints(conn)
+            conn.execute("BEGIN IMMEDIATE")
             columns = {
                 str(row[1])
                 for row in conn.execute(
@@ -1647,9 +1654,46 @@ class BacktestRepository:
             ):
                 if definition.split()[0] not in run_cols:
                     conn.execute(f"ALTER TABLE strategy_runs ADD COLUMN {definition}")
-            conn.executescript("""CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_runs_source_preparation ON strategy_runs(source_preparation_job_id) WHERE source_preparation_job_id IS NOT NULL;
-            DROP TRIGGER IF EXISTS strategy_run_v2_contract_insert;
-            CREATE TRIGGER strategy_run_v2_contract_insert BEFORE INSERT ON strategy_runs WHEN NOT EXISTS(SELECT 1 FROM run_input_manifests m WHERE m.digest=NEW.run_input_manifest_digest AND m.manifest_version=NEW.manifest_version) OR NOT ((NEW.manifest_version='run_input_manifest.v1' AND NEW.run_universe_digest IS NULL AND NEW.source_preparation_job_id IS NULL AND NEW.selection_json IS NULL) OR (NEW.manifest_version='run_input_manifest.v2' AND length(NEW.run_universe_digest)=64 AND NEW.selection_json IS NOT NULL AND EXISTS(SELECT 1 FROM strategy_jobs j WHERE j.id=NEW.id AND ((NEW.source_preparation_job_id IS NOT NULL AND j.parent_job_id IS NULL) OR (NEW.source_preparation_job_id IS NULL AND j.parent_job_id IS NOT NULL))))) BEGIN SELECT RAISE(ABORT,'strategy run version provenance mismatch'); END;""")
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_strategy_runs_source_preparation "
+                "ON strategy_runs(source_preparation_job_id) "
+                "WHERE source_preparation_job_id IS NOT NULL"
+            )
+            conn.execute("DROP TRIGGER IF EXISTS strategy_run_v2_contract_insert")
+            conn.execute(
+                """CREATE TRIGGER strategy_run_v2_contract_insert
+                   BEFORE INSERT ON strategy_runs
+                   WHEN NOT EXISTS(
+                       SELECT 1 FROM run_input_manifests m
+                       WHERE m.digest=NEW.run_input_manifest_digest
+                         AND m.manifest_version=NEW.manifest_version
+                   ) OR NOT (
+                       (NEW.manifest_version='run_input_manifest.v1'
+                        AND NEW.run_universe_digest IS NULL
+                        AND NEW.source_preparation_job_id IS NULL
+                        AND NEW.selection_json IS NULL)
+                       OR
+                       (NEW.manifest_version='run_input_manifest.v2'
+                        AND length(NEW.run_universe_digest)=64
+                        AND NEW.selection_json IS NOT NULL
+                        AND EXISTS(
+                            SELECT 1 FROM strategy_jobs j
+                            WHERE j.id=NEW.id AND (
+                                (NEW.source_preparation_job_id IS NOT NULL
+                                 AND j.parent_job_id IS NULL)
+                                OR
+                                (NEW.source_preparation_job_id IS NULL
+                                 AND j.parent_job_id IS NOT NULL)
+                            )
+                        ))
+                   )
+                   BEGIN
+                       SELECT RAISE(
+                           ABORT, 'strategy run version provenance mismatch'
+                       );
+                   END"""
+            )
             existing = conn.execute(
                 """SELECT id FROM strategy_jobs
                    WHERE id NOT IN (SELECT job_id FROM notification_outbox)
@@ -3571,6 +3615,7 @@ class BacktestRepository:
         events: tuple[TradeLogEvent, ...],
         equity_curve: tuple[EquityCurvePointV1, ...],
         final_cash_base: Decimal,
+        lease: WorkerLeaseFenceV1 | None = None,
     ) -> None:
         """Attempt-owned compare-and-swap staging write (AC 1, 6).
 
@@ -3625,11 +3670,16 @@ class BacktestRepository:
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
             job = self._load_strategy_job(conn, run_id)
+            fence = _lease_fence_params(lease)
+            lease_matches = conn.execute(
+                f"SELECT 1 WHERE 1=1 {_LEASE_FENCE_SQL}", fence
+            ).fetchone()
             if (
                 job.status is not StrategyJobStatus.RUNNING
                 or job.claim_token != claim_token
                 or job.status_version != expected_version
                 or job.cancel_requested_at is not None
+                or lease_matches is None
             ):
                 raise StrategyJobConflict("staging write ownership is stale")
             conn.execute(

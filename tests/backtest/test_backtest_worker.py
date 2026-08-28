@@ -43,6 +43,7 @@ from app.services.backtest.strategy_job import (
     StrategyJobType,
     WorkerLeaseFenceV1,
 )
+from app.services.backtest.strategy_protocol import StrategyParameterV1
 from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.worker import main
 import app.services.backtest.worker as worker_module
@@ -198,6 +199,68 @@ def test_backtest_engine_construction_failure_is_not_mislabeled_interruption(
     assert repo.failures[0]["detail"] == (
         "Strategy worker configuration is invalid: RuntimeError: corrupt strategy run"
     )
+
+
+def test_backtest_dispatch_propagates_worker_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = Repository(ClaimedJob(job_type=StrategyJobType.BACKTEST))
+    engine = Engine(StrategyJobStatus.COMPLETE)
+    captured: list[WorkerLeaseFenceV1 | None] = []
+
+    def build(_job_id, _claim_token, _repository, *, lease=None):
+        captured.append(lease)
+        return engine
+
+    monkeypatch.setattr(worker_module, "build_backtest_engine", build)
+
+    assert (
+        main(
+            [
+                "--job-id",
+                "job-1",
+                "--claim-token",
+                "claim-1",
+                "--owner-instance-id",
+                "worker-1",
+                "--lease-generation",
+                "7",
+            ],
+            repository_factory=lambda: repo,  # type: ignore[arg-type]
+        )
+        == 0
+    )
+    assert captured == [WorkerLeaseFenceV1(instance_id="worker-1", generation=7)]
+
+
+def test_legacy_hex_float_parameter_is_restored_only_for_number_schema() -> None:
+    manifest = _manifest(
+        revision="1" * 64,
+        start_month="2026-06",
+        end_month="2026-06",
+        parameters={"threshold": "0x1.8000000000000p+0", "label": "0x1p+0"},
+    )
+    schema = (
+        StrategyParameterV1(
+            name="threshold",
+            type="number",
+            default=1.0,
+            description="Numeric threshold.",
+            required=True,
+        ),
+        StrategyParameterV1(
+            name="label",
+            type="string",
+            default="default",
+            description="String label.",
+            required=True,
+        ),
+    )
+
+    restored = worker_module._restore_legacy_float_parameters(manifest, schema)
+
+    assert restored.parameters == {"threshold": 1.5, "label": "0x1p+0"}
+    assert manifest.parameters["threshold"] == "0x1.8000000000000p+0"
 
 
 # ---------------------------------------------------------------------------
@@ -563,10 +626,15 @@ def test_worker_honours_a_cancellation_requested_mid_month(
     real_progress = BacktestRepository.set_strategy_job_current_month
 
     def request_cancel_after_first_month(
-        self, job_id, claim_token, *, expected_version, month
+        self, job_id, claim_token, *, expected_version, month, lease=None
     ):  # noqa: ANN001
         job = real_progress(
-            self, job_id, claim_token, expected_version=expected_version, month=month
+            self,
+            job_id,
+            claim_token,
+            expected_version=expected_version,
+            month=month,
+            lease=lease,
         )
         if month == "2026-06":
             self.request_strategy_job_cancellation(

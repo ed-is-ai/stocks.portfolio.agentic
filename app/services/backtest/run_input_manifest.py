@@ -35,6 +35,7 @@ from __future__ import annotations
 from decimal import Decimal
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
+import json
 from pathlib import Path
 import sys
 from typing import Annotated, Literal, Mapping, cast
@@ -48,7 +49,7 @@ from app.repositories.historical_price_repo import (
     HistoricalPriceRepository,
 )
 from app.services.backtest.canonical_manifest import (
-    canonical_json as shared_canonical_json,
+    jsonable,
     manifest_digest,
 )
 from app.services.backtest.detectors import DETECTOR_REGISTRY
@@ -276,11 +277,26 @@ class RunInputManifestV1(_RunInputModel):
         return payload
 
     def canonical_json(self) -> str:
-        return shared_canonical_json(self.canonical_payload())
+        # Strategy parameters are executable typed inputs.  The shared
+        # evidence canonicalizer renders floats as hexadecimal strings,
+        # which is appropriate for opaque evidence but would change a
+        # numeric Strategy parameter into a runtime string on replay.
+        # Canonicalize every other manifest field through the shared
+        # authority, then restore the already-validated JSON parameter
+        # values before the final deterministic encoding.
+        payload = cast(dict[str, object], jsonable(self.canonical_payload()))
+        payload["parameters"] = dict(self.parameters)
+        return json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
 
     def digest(self) -> str:
         """The full cache-only replay identity -- see module docstring."""
-        return manifest_digest(self.canonical_payload())
+        return sha256(self.canonical_json().encode("utf-8")).hexdigest()
 
     def execution_contract_payload(self) -> dict[str, object]:
         """AD-20's narrower comparison-eligibility subset (AD-19).

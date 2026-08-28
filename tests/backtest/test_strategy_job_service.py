@@ -183,7 +183,10 @@ def test_nonterminal_child_exit_gets_fallback_failure() -> None:
 
     assert service.dispatch_once() is False
     assert len(repo.failed) == 1
-    assert repo.failed[0][-1]["detail"] == "Worker exited before terminal state"
+    assert (
+        repo.failed[0][-1]["detail"]
+        == "Worker exited before terminal state (exit code 1)"
+    )
 
 
 def test_shutdown_terminates_only_owned_child_and_marks_interrupted() -> None:
@@ -498,3 +501,24 @@ def test_dispatcher_takes_a_lease_it_could_not_get_at_startup() -> None:
     assert repo.reconcile_fences == [
         WorkerLeaseFenceV1(instance_id="worker-b", generation=1)
     ]
+
+
+def test_lease_loss_stops_and_reaps_the_owned_child() -> None:
+    repo = FakeRepository(FakeClaim(FakeJob("job-1", 2), "claim-1"))
+    process = FakeProcess()
+    service = StrategyJobService(
+        repo,
+        popen=lambda *_a, **_k: process,
+        project_root=Path("/project"),
+        instance_id="worker-a",
+    )
+    service.acquire_lease()
+    assert service.dispatch_once() is True
+
+    repo.lease_conflict = True
+    service._heartbeat()
+    service._stop_owned_child_after_lease_loss()
+
+    assert process.terminated and process.waited
+    assert service._owned is None
+    assert repo.failed == []

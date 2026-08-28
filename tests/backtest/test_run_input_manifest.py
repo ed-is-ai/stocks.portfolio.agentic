@@ -177,6 +177,16 @@ def test_v2_manifest_dispatch_and_runtime_selection_equality() -> None:
         )
 
 
+def test_manifest_float_parameters_round_trip_as_numbers() -> None:
+    manifest = _manifest(parameters={"threshold": 1.5})
+
+    restored = read_run_input_manifest(manifest.canonical_json())
+
+    assert restored.parameters == {"threshold": 1.5}
+    assert isinstance(restored.parameters["threshold"], float)
+    assert restored.digest() == manifest.digest()
+
+
 def test_digest_changes_when_a_pinned_evidence_revision_changes() -> None:
     first = _manifest()
     changed = first.model_copy(
