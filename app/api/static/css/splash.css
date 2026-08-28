@@ -1,0 +1,202 @@
+/* Hallmark · component: boot-splash · genre: editorial (dense-utilitarian)
+ * theme: studied-DNA (Bloomberg) via design.md — consumes existing tokens only
+ * states: initial · waiting · slow · ready · fading · hidden · reduced-motion · no-JS failsafe
+ * contrast: pass (46-50)
+ *
+ * Boot splash for the Stock Manager dashboard. Covers the hydration gap
+ * between first paint and fonts/htmx settling, then crossfades out.
+ *
+ * Deliberate omissions, per design.md § Motion stance (motion-cut) and the
+ * studied DNA's utilitarian-newsroom identity:
+ *   - no spinner            (implies indeterminate waiting; the app is server-rendered)
+ *   - no progress bar       (any percentage would be invented — see honest-copy rule)
+ *   - no minimum display    (a splash that outlasts the load is added latency)
+ *   - no entrance animation (it is already on screen at first paint)
+ * The only motion is the exit crossfade.
+ */
+
+/* ── The field ───────────────────────────────────────────────────────────
+   Reuses the masthead ink, so the splash reads as the app's own darkest
+   surface rather than a separate branded screen.                        */
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  z-index: 2000; /* above Bootstrap modal (1055) and pipeline overlay (1050) */
+  display: grid;
+  grid-template-rows: 1fr auto;
+  /* Literal, not a token: design.md documents a --space-3xs…4xl scale, but
+     tokens.css does not actually define one. Rather than ship a fragment of
+     a spacing scale from a component, this stays a literal until the scale
+     lands. See the note handed back with this build. */
+  gap: 1.5rem;
+  padding: clamp(1.5rem, 5vw, 3rem);
+  background: var(--primary);
+  color: #fff;
+  overflow-x: clip;
+}
+
+/* ── Exit ────────────────────────────────────────────────────────────────
+   Opacity only — never layout properties. `visibility` is stepped at the
+   end so the splash stops trapping pointer events mid-fade.             */
+.boot-splash {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    opacity var(--dur-fast, 180ms) var(--ease-out),
+    visibility 0s linear var(--dur-fast, 180ms);
+}
+.boot-splash[data-state="fading"],
+.boot-splash[data-state="hidden"] {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* ── Wordmark block ──────────────────────────────────────────────────────
+   Mirrors the navbar's brand grammar (flat ink square + weight-only
+   wordmark) so the splash resolves visually into the masthead it
+   uncovers.                                                             */
+.boot-mark {
+  align-self: end;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.boot-mark-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex: none;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.12);
+}
+.boot-mark-glyph .bi {
+  color: #fff;
+  font-size: 1.25rem;
+  line-height: 1;
+}
+.boot-wordmark {
+  font-family: var(--font-ui);
+  font-size: var(--fs-2xl);
+  font-weight: var(--fw-bold);
+  font-style: normal; /* roman display — italic headers are banned */
+  line-height: var(--lh-tight, 1.2);
+  letter-spacing: var(--tracking-tight, -0.01em);
+  color: #fff;
+  margin: 0;
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+/* Second word carries hierarchy by colour, not italic — matches .brand-name em */
+.boot-wordmark span {
+  font-style: normal;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+/* ── Status + credit rail ────────────────────────────────────────────────
+   Hairline rule above, per the DNA's divider language.                  */
+.boot-rail {
+  align-self: end;
+  border-top: 1px solid rgba(255, 255, 255, 0.16);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 1.25rem;
+}
+.boot-status {
+  font-family: var(--font-num);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.62);
+  margin: 0;
+  min-width: 0;
+}
+/* Slow boot (> 1.2s) swaps in a longer, still-honest message. The element
+   holds both strings; only one is shown, so there is no layout shift. */
+.boot-status-slow { display: none; }
+.boot-splash[data-state="slow"] .boot-status-fast { display: none; }
+.boot-splash[data-state="slow"] .boot-status-slow { display: inline; }
+
+.boot-credit {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-normal);
+  color: rgba(255, 255, 255, 0.45);
+  margin: 0;
+  min-width: 0;
+}
+.boot-credit a {
+  color: rgba(255, 255, 255, 0.78);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.28);
+  padding-bottom: 1px;
+  /* single-line clickable text — never wraps to two lines */
+  white-space: nowrap;
+  transition: color var(--dur-fast, 180ms) var(--ease-out),
+              border-color var(--dur-fast, 180ms) var(--ease-out);
+}
+.boot-credit a:hover,
+.boot-credit a.is-hover {
+  color: #fff;
+  border-bottom-color: #fff;
+}
+.boot-credit a:focus-visible,
+.boot-credit a.is-focus {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+  /* focus ring is never animated — it must appear instantly */
+  transition: none;
+}
+.boot-credit a:active,
+.boot-credit a.is-active {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+/* ── No-JS failsafe ──────────────────────────────────────────────────────
+   If the boot script never runs (JS disabled, script error, CSP block),
+   the splash would otherwise cover the app forever. This CSS-only animation
+   retires it unconditionally at 4s. The script normally removes the splash
+   long before this fires; it is a floor, not the mechanism.             */
+@keyframes boot-splash-failsafe {
+  to { opacity: 0; visibility: hidden; }
+}
+.boot-splash {
+  animation: boot-splash-failsafe 1ms var(--ease-out) 4s forwards;
+}
+/* Once the script has taken control, the failsafe is irrelevant. */
+.boot-splash[data-state="ready"],
+.boot-splash[data-state="fading"],
+.boot-splash[data-state="hidden"] {
+  animation: none;
+}
+
+/* ── Reduced motion ──────────────────────────────────────────────────────
+   design.md's fallback is a <=150ms opacity crossfade; that is already the
+   default here, so reduced-motion only tightens it and keeps the failsafe
+   working (an instant, non-animated retirement).                        */
+@media (prefers-reduced-motion: reduce) {
+  .boot-splash {
+    transition-duration: 120ms;
+    animation-duration: 1ms;
+  }
+}
+
+/* ── Mobile ──────────────────────────────────────────────────────────────
+   Verified at 320 / 375 / 414 / 768px. The rail stacks; nothing scrolls
+   horizontally; the credit link never breaks across two lines.          */
+@media (max-width: 30rem) {
+  .boot-rail {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .boot-wordmark { font-size: var(--fs-xl); }
+}

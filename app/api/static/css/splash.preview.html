@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boot splash — states</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+<link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="stylesheet" href="/static/css/theme.css">
+<link rel="stylesheet" href="/static/css/splash.css">
+<style>
+  /* Preview harness only — not production code. Delete this file once the
+     component has been reviewed. */
+  body { background: var(--surface); color: var(--primary); padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: var(--fs-xl); font-weight: var(--fw-bold); margin: 0 0 .35rem; }
+  .lede { color: var(--muted); font-size: var(--fs-sm); margin: 0 0 2rem; max-width: 60ch; }
+  .state { margin-bottom: 2rem; }
+  .state-label {
+    font-family: var(--font-num);
+    font-size: var(--fs-2xs);
+    font-weight: var(--fw-semibold);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: block;
+    margin-bottom: .5rem;
+  }
+  .state-note { font-size: var(--fs-xs); color: var(--muted); margin: .4rem 0 0; }
+  /* Stage the fixed-position splash inline so all states render at once. */
+  .stage { position: relative; height: 15rem; overflow: hidden; border: 1px solid var(--border); }
+  .stage #boot-splash,
+  .stage .boot-splash { position: absolute; animation: none; }
+  .stage-checker {
+    position: absolute; inset: 0; display: grid; place-items: center;
+    font-size: var(--fs-sm); color: var(--muted); background: var(--surface);
+  }
+</style>
+</head>
+<body>
+
+<h1>Boot splash — 8 states</h1>
+<p class="lede">
+  Rendered on the locked Bloomberg-DNA tokens. Open once, confirm each state, then
+  delete this file — it is not production code.
+</p>
+
+<!-- 1 · initial / waiting -->
+<div class="state">
+  <span class="state-label">1 · waiting (default)</span>
+  <div class="stage">
+    <div class="stage-checker">dashboard underneath</div>
+    <div class="boot-splash" id="boot-splash" data-state="waiting" role="status">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+      <div class="boot-rail">
+        <p class="boot-status"><span class="boot-status-fast">Loading</span><span class="boot-status-slow">Still loading — waiting on the dashboard</span></p>
+        <p class="boot-credit">Built by <a href="https://reinvently.co.uk/">Reinvently</a></p>
+      </div>
+    </div>
+  </div>
+  <p class="state-note">No spinner, no progress bar. Present at first paint — no entrance animation.</p>
+</div>
+
+<!-- 2 · slow -->
+<div class="state">
+  <span class="state-label">2 · slow (&gt; 1.2s)</span>
+  <div class="stage">
+    <div class="stage-checker">dashboard underneath</div>
+    <div class="boot-splash" data-state="slow" role="status">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+      <div class="boot-rail">
+        <p class="boot-status"><span class="boot-status-fast">Loading</span><span class="boot-status-slow">Still loading — waiting on the dashboard</span></p>
+        <p class="boot-credit">Built by <a href="https://reinvently.co.uk/">Reinvently</a></p>
+      </div>
+    </div>
+  </div>
+  <p class="state-note">Honest longer message. No invented percentage — the app has no real progress signal to report.</p>
+</div>
+
+<!-- 3 · hover on credit link -->
+<div class="state">
+  <span class="state-label">3 · credit link — hover</span>
+  <div class="stage">
+    <div class="boot-splash" data-state="waiting">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+      <div class="boot-rail">
+        <p class="boot-status"><span class="boot-status-fast">Loading</span></p>
+        <p class="boot-credit">Built by <a href="https://reinvently.co.uk/" class="is-hover">Reinvently</a></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 4 · focus -->
+<div class="state">
+  <span class="state-label">4 · credit link — focus-visible</span>
+  <div class="stage">
+    <div class="boot-splash" data-state="waiting">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+      <div class="boot-rail">
+        <p class="boot-status"><span class="boot-status-fast">Loading</span></p>
+        <p class="boot-credit">Built by <a href="https://reinvently.co.uk/" class="is-focus">Reinvently</a></p>
+      </div>
+    </div>
+  </div>
+  <p class="state-note">Ring appears instantly — never animated.</p>
+</div>
+
+<!-- 5 · active -->
+<div class="state">
+  <span class="state-label">5 · credit link — active</span>
+  <div class="stage">
+    <div class="boot-splash" data-state="waiting">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+      <div class="boot-rail">
+        <p class="boot-status"><span class="boot-status-fast">Loading</span></p>
+        <p class="boot-credit">Built by <a href="https://reinvently.co.uk/" class="is-active">Reinvently</a></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 6 · fading -->
+<div class="state">
+  <span class="state-label">6 · fading (ready → exit)</span>
+  <div class="stage">
+    <div class="stage-checker">dashboard underneath</div>
+    <div class="boot-splash" data-state="fading" style="opacity:.45;visibility:visible">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+      <div class="boot-rail">
+        <p class="boot-status"><span class="boot-status-fast">Loading</span></p>
+        <p class="boot-credit">Built by <a href="https://reinvently.co.uk/">Reinvently</a></p>
+      </div>
+    </div>
+  </div>
+  <p class="state-note">Opacity only — no transform, no scale, no blur. Frozen mid-fade here for inspection.</p>
+</div>
+
+<!-- 7 · hidden -->
+<div class="state">
+  <span class="state-label">7 · hidden</span>
+  <div class="stage">
+    <div class="stage-checker">dashboard underneath — splash fully retired, pointer events released</div>
+    <div class="boot-splash" data-state="hidden" aria-hidden="true">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 8 · no-JS failsafe -->
+<div class="state">
+  <span class="state-label">8 · no-JS failsafe</span>
+  <div class="stage">
+    <div class="stage-checker">recovers on its own at 4s</div>
+    <div class="boot-splash" data-state="waiting" style="animation: boot-splash-failsafe 1ms var(--ease-out) 4s forwards">
+      <div class="boot-mark">
+        <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
+        <p class="boot-wordmark">Stock<span>Manager</span></p>
+      </div>
+      <div class="boot-rail">
+        <p class="boot-status"><span class="boot-status-fast">Loading</span></p>
+        <p class="boot-credit">Built by <a href="https://reinvently.co.uk/">Reinvently</a></p>
+      </div>
+    </div>
+  </div>
+  <p class="state-note">
+    Reload this page and watch: with JS disabled the CSS-only animation still retires the
+    splash at 4s, so a script failure can never brick the app behind it.
+  </p>
+</div>
+
+</body>
+</html>

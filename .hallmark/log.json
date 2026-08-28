@@ -1,5 +1,16 @@
 [
   {
+    "date": "2026-08-28",
+    "macrostructure": "n/a (component-scope)",
+    "theme": "studied-DNA",
+    "theme_axes": "light system / grotesk-sans (weight-only) / neutral \u2014 splash inverts to the masthead ink field",
+    "enrichment": "none",
+    "scope": "component",
+    "component": "boot-splash",
+    "status": "shipped \u2014 splash.css + index.html markup/script + splash.preview.html (8-state harness, delete after review)",
+    "brief": "Agents.stocks \u2014 app boot splash on page load, utilitarian, credited to Reinvently; motion held to one exit crossfade per design.md motion-cut"
+  },
+  {
     "date": "2026-08-25",
     "macrostructure": "Index-First",
     "theme": "studied-DNA",
@@ -7,6 +18,6 @@
     "enrichment": "none",
     "scope": "app",
     "status": "all 7 tabs converted (shell, Watchlist, Portfolio, Trade History, Realised P&L, Run Log, Strategy Manager, Settings); Bootstrap CSS+JS still loaded, CDN removal is future work",
-    "brief": "Agents.stocks — retokenize app-wide :root + Bootstrap radius vars onto Bloomberg-studied DNA; Bootstrap CSS kept loaded, Bootstrap JS kept permanently (modals/dropdowns)"
+    "brief": "Agents.stocks \u2014 retokenize app-wide :root + Bootstrap radius vars onto Bloomberg-studied DNA; Bootstrap CSS kept loaded, Bootstrap JS kept permanently (modals/dropdowns)"
   }
 ]
