@@ -72,7 +72,6 @@ def _history(
 def _parameters() -> dict[str, object]:
     return {
         "selected_securities": ["sec-aapl"],
-        "fixed_shares": 10,
         "entry_lookback_sessions": 3,
         "exit_lookback_sessions": 2,
     }
@@ -164,7 +163,9 @@ def test_unheld_security_does_not_exit() -> None:
     )
 
 
-def test_position_size_uses_fixed_buy_and_full_integral_sell_quantity() -> None:
+def test_position_size_defers_buy_to_engine_and_sizes_full_integral_sell_quantity() -> (
+    None
+):
     strategy = MODULE.TurtleTrendStrategy()
     as_of, history = _history()
     view = _View(as_of, history)
@@ -181,12 +182,7 @@ def test_position_size_uses_fixed_buy_and_full_integral_sell_quantity() -> None:
         rule_id="sell",
     )
 
-    assert (
-        validate_position_size(
-            strategy.position_size(buy, view, _portfolio(), _parameters())
-        )
-        == 10
-    )
+    assert strategy.position_size(buy, view, _portfolio(), _parameters()) == 0
     assert (
         validate_position_size(
             strategy.position_size(sell, view, _portfolio("7"), _parameters())

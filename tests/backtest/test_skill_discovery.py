@@ -41,17 +41,14 @@ LIVE_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
 
 EXPECTED_LIVE_STRATEGY_DEFAULTS = {
     "rtly-backtest-buy-and-hold": {
-        "fixed_shares": 10,
         "entry_on_or_after": "2000-01-01",
     },
     "rtly-backtest-darvas-box": {
-        "fixed_shares": 10,
         "box_lookback_sessions": 20,
         "maximum_box_depth_pct": 15.0,
         "volume_multiplier": 1.5,
     },
     "rtly-backtest-minervini": {
-        "fixed_shares": 10,
         "minimum_vcp_score": 70,
         "minimum_trend_score": 85.0,
         "minimum_relative_volume": 1.5,
@@ -61,17 +58,14 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "upgrade_score_margin": 15,
     },
     "rtly-backtest-moving-average": {
-        "fixed_shares": 10,
         "fast_window": 50,
         "slow_window": 200,
     },
     "rtly-backtest-turtle-trend": {
-        "fixed_shares": 10,
         "entry_lookback_sessions": 20,
         "exit_lookback_sessions": 10,
     },
     "rtly-backtest-weinstein": {
-        "fixed_shares": 10,
         "breakout_lookback_sessions": 50,
         "minimum_relative_volume": 1.5,
         "maximum_loss_pct": 10.0,

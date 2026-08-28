@@ -49,7 +49,7 @@ from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from decimal import Decimal, DecimalException
+from decimal import Decimal, DecimalException, ROUND_DOWN
 from enum import StrEnum
 from typing import Literal, Protocol, cast
 
@@ -154,6 +154,7 @@ class SkipReasonCode(StrEnum):
     POSITION_CONFLICT = "position_conflict"
     INSUFFICIENT_CASH = "insufficient_cash"
     POSITION_SIZE_ZERO = "position_size_zero"
+    ALLOCATION_UNAFFORDABLE = "allocation_unaffordable"
     FILL_BEYOND_END = "fill_beyond_end"
 
 
@@ -328,7 +329,13 @@ class PendingOrderV1:
     signal_session: date
     fill_session: date
     rule_id: str
-    requested_shares: int
+    # BUY quantities are deliberately not strategy-owned.  A BUY carries a
+    # base-currency reservation and derives its whole-share quantity at its
+    # own fill open.  SELL quantities retain the existing full-exit check.
+    requested_shares: int | None
+    #: Engine-owned base-currency target reserved for a shared BUY cohort.
+    #: ``None`` remains the legacy/full-exit path.
+    allocation_target_base: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -819,15 +826,47 @@ class _Engine:
                 SkipReasonCode.POSITION_CONFLICT,
                 "position already open at fill time",
             )
+        if order.allocation_target_base is None:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                session,
+                "BUY order is missing its equal-capital allocation target",
+            )
+        # The target is base currency while the as-traded open is native
+        # currency.  Convert one share at the exact fill session first, then
+        # floor the target divided by that cost.  This is intentionally not a
+        # strategy callback: no strategy can make a same-cohort order consume
+        # another candidate's reservation.
+        one_share = self._convert(price_native, plane, valuation_session=session)
+        if one_share.base_amount <= 0:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                session,
+                "converted per-share BUY cost is not positive",
+            )
         try:
             with deterministic_decimal_context():
-                native_cost = price_native * Decimal(order.requested_shares)
+                fill_shares = int(order.allocation_target_base // one_share.base_amount)
+                native_cost = price_native * Decimal(fill_shares)
         except DecimalException as exc:
             raise _fatal(
                 "integrity_error", session, "fill cost arithmetic failed"
             ) from exc
+        if fill_shares == 0:
+            return self._skip_order(
+                order,
+                session,
+                SkipReasonCode.ALLOCATION_UNAFFORDABLE,
+                "equal-capital allocation cannot buy one whole share at the fill open",
+            )
         conversion = self._convert(native_cost, plane, valuation_session=session)
         cost_base = conversion.base_amount
+        if cost_base > order.allocation_target_base:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                session,
+                "whole-share BUY cost exceeded its reserved allocation target",
+            )
         if cost_base > self.cash:
             return self._skip_order(
                 order,
@@ -844,22 +883,20 @@ class _Engine:
             )
         try:
             with deterministic_decimal_context():
-                per_share_basis = quantize_eight(
-                    cost_base / Decimal(order.requested_shares)
-                )
+                per_share_basis = quantize_eight(cost_base / Decimal(fill_shares))
         except DecimalException as exc:
             raise _fatal(
                 "integrity_error", session, "cost-basis arithmetic failed"
             ) from exc
         self.positions[order.security_id] = PositionState(
-            shares=Decimal(order.requested_shares), per_share_basis=per_share_basis
+            shares=Decimal(fill_shares), per_share_basis=per_share_basis
         )
         return EntryFillEventV1(
             security_id=order.security_id,
             signal_session=order.signal_session,
             fill_session=session,
             rule_id=order.rule_id,
-            shares=order.requested_shares,
+            shares=fill_shares,
             fill_price_native=price_native,
             fill_currency=plane.currency,
             fill_quote_unit=plane.quote_unit,
@@ -1034,6 +1071,8 @@ class _Engine:
             events_before = len(session_events)
             seen: set[tuple[date, str, SignalSide, str]] = set()
             try:
+                buy_candidates: list[tuple[Signal, date]] = []
+                pending_buy_security_ids: set[str] = set()
                 for signal in combined:
                     identity = (
                         signal.session,
@@ -1052,9 +1091,65 @@ class _Engine:
                         )
                         continue
                     seen.add(identity)
+                    if signal.side is SignalSide.BUY:
+                        if signal.security_id in pending_buy_security_ids:
+                            session_events.append(
+                                self._skip_signal(
+                                    signal,
+                                    session,
+                                    SkipReasonCode.POSITION_CONFLICT,
+                                    "another BUY for this security is already eligible in this cohort",
+                                )
+                            )
+                            continue
+                        fill_session, skip = self._preflight_buy(signal, session)
+                        if skip is not None:
+                            session_events.append(skip)
+                            continue
+                        assert fill_session is not None
+                        pending_buy_security_ids.add(signal.security_id)
+                        buy_candidates.append((signal, fill_session))
+                        continue
                     skip = self._schedule_signal(signal, session, view, portfolio)
                     if skip is not None:
                         session_events.append(skip)
+
+                # Reserve every eligible candidate's equal target before any
+                # of their (potentially different-MIC) opens occur.  Pending
+                # targets are never debited early, but they are excluded from
+                # later cohorts' cash, preventing calendar/order-dependent
+                # overspend.
+                if buy_candidates:
+                    reserved = sum(
+                        (
+                            order.allocation_target_base or Decimal(0)
+                            for order in self.pending.values()
+                            if order.side is SignalSide.BUY
+                        ),
+                        Decimal(0),
+                    )
+                    unreserved = quantize_eight(self.cash - reserved)
+                    if unreserved < 0:
+                        raise _fatal(
+                            SimulationErrorCode.INVARIANT_VIOLATION,
+                            session,
+                            "BUY reservations exceed simulated cash",
+                        )
+                    # A per-candidate target must never round up: doing so
+                    # could reserve more than the available cash in aggregate.
+                    target = (unreserved / Decimal(len(buy_candidates))).quantize(
+                        Decimal("0.00000001"), rounding=ROUND_DOWN
+                    )
+                    for signal, fill_session in buy_candidates:
+                        self.pending[signal.security_id] = PendingOrderV1(
+                            security_id=signal.security_id,
+                            side=SignalSide.BUY,
+                            signal_session=session,
+                            fill_session=fill_session,
+                            rule_id=signal.rule_id,
+                            requested_shares=None,
+                            allocation_target_base=target,
+                        )
             except Exception:
                 self.pending = pending_before
                 self._sequence = sequence_before
@@ -1093,12 +1188,11 @@ class _Engine:
                 "an order is already pending for this security",
             )
         held = self.positions.get(signal.security_id)
-        if signal.side is SignalSide.BUY and held is not None:
-            return self._skip_signal(
-                signal,
+        if signal.side is SignalSide.BUY:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
                 session,
-                SkipReasonCode.POSITION_CONFLICT,
-                "position already open -- V1 forbids pyramiding a duplicate entry",
+                "BUY scheduling must use the equal-capital cohort allocator",
             )
         if signal.side is SignalSide.SELL and held is None:
             return self._skip_signal(
@@ -1107,6 +1201,7 @@ class _Engine:
                 SkipReasonCode.POSITION_CONFLICT,
                 "no open position to sell",
             )
+        assert held is not None
         requested = validate_position_size(
             self.strategy.position_size(
                 signal, view, portfolio, self.manifest_parameters
@@ -1119,11 +1214,7 @@ class _Engine:
                 SkipReasonCode.POSITION_SIZE_ZERO,
                 "position size is zero",
             )
-        if (
-            signal.side is SignalSide.SELL
-            and held is not None
-            and Decimal(requested) != held.shares
-        ):
+        if Decimal(requested) != held.shares:
             return self._skip_signal(
                 signal,
                 session,
@@ -1147,6 +1238,53 @@ class _Engine:
             requested_shares=requested,
         )
         return None
+
+    def _preflight_buy(
+        self, signal: Signal, session: date
+    ) -> tuple[date | None, SkippedSignalEventV1 | None]:
+        """Reject a BUY before it enters a same-session allocation cohort.
+
+        The check does not mutate engine state, so the cohort cardinality is
+        known before any target is reserved.  That is what makes every
+        accepted candidate receive the same base-currency target.
+        """
+        if signal.session != session:
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.SIGNAL_SESSION_MISMATCH,
+                "signal session does not match the invoking session",
+            )
+        if signal.security_id not in self.planes:
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.INELIGIBLE_SECURITY,
+                "security is not pinned for this Run",
+            )
+        if signal.security_id in self.pending:
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.POSITION_CONFLICT,
+                "an order is already pending for this security",
+            )
+        if signal.security_id in self.positions:
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.POSITION_CONFLICT,
+                "position already open -- V1 forbids pyramiding a duplicate entry",
+            )
+        fill_session = self._next_mic_session(signal.security_id, session)
+        if fill_session is None:
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.FILL_BEYOND_END,
+                "no fillable session remains before the normalized end",
+            )
+        return fill_session, None
 
     def _skip_signal(
         self, signal: Signal, session: date, reason: SkipReasonCode, detail: str

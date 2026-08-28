@@ -65,6 +65,11 @@ class MinimalStrategy:
         portfolio: PortfolioView,
         parameters: StrategyParameters,
     ) -> int:
+        if signal.side is SignalSide.SELL:
+            for position in portfolio.positions:
+                if position.security_id == signal.security_id:
+                    return int(position.quantity)
+            return 0
         fixed_shares = parameters.get("fixed_shares", 1)
         if isinstance(fixed_shares, bool) or not isinstance(fixed_shares, int):
             raise TypeError("fixed_shares parameter must be a plain int")

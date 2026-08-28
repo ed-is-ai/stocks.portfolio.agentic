@@ -31,7 +31,6 @@ WeinsteinStrategy = MODULE.WeinsteinStrategy
 AS_OF = date(2026, 8, 20)
 PARAMETERS = {
     "selected_securities": ["sec-aapl"],
-    "fixed_shares": 10,
     "breakout_lookback_sessions": 50,
     "minimum_relative_volume": 1.5,
     "maximum_loss_pct": 10.0,
@@ -169,7 +168,7 @@ def test_non_stage2_exit_and_position_sizing_are_fail_closed() -> None:
         session=AS_OF,
         rule_id="test_buy",
     )
-    assert strategy.position_size(buy, view, portfolio, PARAMETERS) == 10
+    assert strategy.position_size(buy, view, portfolio, PARAMETERS) == 0
 
 
 def test_price_risk_exit_does_not_require_scan_and_zero_quantity_does_not_sell() -> (
@@ -308,9 +307,7 @@ def test_upgrade_exit_disabled_by_default_even_with_a_stronger_starved_candidate
     assert exits == []
 
 
-def test_upgrade_exit_sells_weakest_position_when_cash_insufficient_and_margin_cleared() -> (
-    None
-):
+def test_upgrade_exit_sells_weakest_position_when_margin_cleared() -> None:
     strategy = WeinsteinStrategy()
     view = _KeyedView(
         {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
@@ -318,7 +315,7 @@ def test_upgrade_exit_sells_weakest_position_when_cash_insufficient_and_margin_c
     )
 
     exits = validate_exit_signals(
-        strategy.exit_signals(view, _held_portfolio(cash="1"), _upgrade_parameters())
+        strategy.exit_signals(view, _held_portfolio(cash="0"), _upgrade_parameters())
     )
 
     assert [(s.security_id, s.rule_id) for s in exits] == [
@@ -326,7 +323,7 @@ def test_upgrade_exit_sells_weakest_position_when_cash_insufficient_and_margin_c
     ]
 
 
-def test_upgrade_exit_does_not_fire_when_cash_already_covers_the_candidate() -> None:
+def test_upgrade_exit_keeps_a_cash_slot_for_engine_owned_buy_allocation() -> None:
     strategy = WeinsteinStrategy()
     view = _KeyedView(
         {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},

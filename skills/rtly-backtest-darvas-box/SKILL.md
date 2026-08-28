@@ -15,13 +15,6 @@ strategy_universe:
   mode: selected-securities
   parameter: selected_securities
 parameters:
-  - name: fixed_shares
-    type: integer
-    default: 10
-    description: Whole shares to buy for each accepted entry signal.
-    required: true
-    minimum: 1
-    maximum: 100000
   - name: box_lookback_sessions
     type: integer
     default: 20
@@ -50,7 +43,8 @@ parameters:
 Use `scripts/strategy.py` through Strategy Manager's in-process
 `StrategyProtocolV1` runtime. The host binds the Run's canonical
 selected-security tuple to `selected_securities`; iterate it in that order and
-trade each selected security independently with fixed-share sizing. Enter when
+trade each selected security independently. The engine owns BUY allocation and
+whole-share sizing. Enter when
 the current close strictly exceeds the prior-window box top,
 the box depth is within the configured maximum, and current volume is at least
 the configured multiple of the prior-window mean. Exit a held position when the

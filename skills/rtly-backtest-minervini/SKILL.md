@@ -5,7 +5,7 @@ display_name: Minervini Backtest
 description: >
   Backtest a deterministic long-only Minervini VCP breakout across the Run's
   selected securities against bounded historical scan and daily OHLCV
-  evidence with fixed-share sizing.
+  evidence with engine-owned equal-capital allocation.
 api_version: 1
 runtime_files:
   - scripts/strategy.py
@@ -14,13 +14,6 @@ strategy_universe:
   mode: selected-securities
   parameter: selected_securities
 parameters:
-  - name: fixed_shares
-    type: integer
-    default: 10
-    description: Whole shares requested for each entry.
-    required: true
-    minimum: 1
-    maximum: 100000
   - name: minimum_vcp_score
     type: integer
     default: 70
@@ -60,9 +53,8 @@ parameters:
     type: boolean
     default: false
     description: >-
-      Sell the weakest held position (by current VCP score) to fund a
-      stronger unheld candidate when cash cannot cover its fixed-share
-      entry.
+      Sell the weakest held position (by current VCP score) when a stronger
+      unheld candidate clears the configured score margin.
     required: true
   - name: upgrade_score_margin
     type: integer
@@ -90,12 +82,13 @@ full position on the configured loss threshold, a close below the current
 50-session SMA, a non-Stage-2 scan, or `Invalid`/`Damaged` VCP state.
 
 When `enable_position_upgrade` is true, also sell the weakest held position
-(lowest current VCP score) to fund the strongest unheld qualifying candidate
-when cash cannot cover that candidate's fixed-share entry cost and its VCP
-score exceeds the weakest holding's by at least `upgrade_score_margin`. This
-mirrors Minervini's own "upgrading" discipline; it never overrides the
+(lowest current VCP score) when the strongest unheld qualifying candidate's
+VCP score exceeds the weakest holding's by at least `upgrade_score_margin`.
+This mirrors Minervini's own "upgrading" discipline; it never overrides the
 mechanical exits above and never buys anything itself -- the freed cash is
 picked up by the ordinary entry path on a later qualifying session.
+
+The engine owns BUY allocation and whole-share sizing.
 
 Do not pyramid, partially exit, simulate an intraday stop, access live state,
 or fetch data outside the supplied bounded views.

@@ -15,13 +15,6 @@ strategy_universe:
   mode: selected-securities
   parameter: selected_securities
 parameters:
-  - name: fixed_shares
-    type: integer
-    default: 10
-    description: Number of shares to buy on an entry signal.
-    required: false
-    minimum: 1
-    maximum: 100000
   - name: fast_window
     type: integer
     default: 50
@@ -49,9 +42,9 @@ beyond the slow window to prove a crossover, ignore equality, reject
 `fast_window >= slow_window`, and fail closed on missing, malformed, short,
 or stale history.
 
-Use `fixed_shares` for BUY sizing. Close only an integral held quantity for a
-SELL. Make decisions from bounded close-of-session evidence; the engine fills
-accepted signals at the next-session open.
+The engine owns BUY allocation and whole-share sizing. Close only an integral
+held quantity for a SELL. Make decisions from bounded close-of-session
+evidence; the engine fills accepted signals at the next-session open.
 
 ```bash
 uv run pytest skills/rtly-backtest-moving-average/scripts/tests -q

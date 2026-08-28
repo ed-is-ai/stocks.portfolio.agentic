@@ -177,8 +177,8 @@ class TurtleTrendStrategy:
     ) -> int:
         if signal.side == SignalSide.SELL:
             return _held_quantity(portfolio, signal.security_id)
-        fixed_shares = _plain_int(parameters, "fixed_shares")
-        return fixed_shares if fixed_shares is not None and fixed_shares > 0 else 0
+        # The engine reserves equal capital and determines whole shares.
+        return 0
 
 
 strategy = TurtleTrendStrategy()

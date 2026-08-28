@@ -336,8 +336,17 @@ class _ScriptedStrategy:
         portfolio: PortfolioView,
         parameters: StrategyParameters,
     ) -> int:
-        del view, portfolio, parameters
-        return self._size_by_rule.get(signal.rule_id, self._default_size)
+        del view, parameters
+        requested = self._size_by_rule.get(signal.rule_id, self._default_size)
+        if requested == -1:
+            return int(
+                next(
+                    position.quantity
+                    for position in portfolio.positions
+                    if position.security_id == signal.security_id
+                )
+            )
+        return requested
 
 
 class _SelectionStrategy(_ScriptedStrategy):
@@ -455,13 +464,11 @@ def test_valid_buy_signal_fills_at_next_session_open_with_integer_floor_shares()
     assert len(fills) == 1
     fill = fills[0]
     assert fill.fill_session == sessions[1]
-    assert fill.shares == 10
+    assert fill.shares == 1000
     assert fill.fill_price_native == Decimal("100")
-    assert fill.cost_base == Decimal("1000.00000000")
+    assert fill.cost_base == Decimal("100000.00000000")
     assert fill.fx_rate is None
-    assert output.final_cash_base == Decimal("100000.00000000") - Decimal(
-        "1000.00000000"
-    )
+    assert output.final_cash_base == Decimal("0.00000000")
     assert output.manifest_digest == manifest.digest()
 
 
@@ -503,7 +510,7 @@ def test_duplicate_signal_is_skipped_once_and_earlier_valid_signal_still_commits
     fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
     assert len(duplicate_skips) == 1
     assert len(fills) == 1
-    assert fills[0].shares == 5
+    assert fills[0].shares == 1000
 
 
 # ---------------------------------------------------------------------------
@@ -597,12 +604,87 @@ def test_insufficient_cash_at_fill_time_skips_and_continues() -> None:
         event
         for event in output.events
         if isinstance(event, SkippedSignalEventV1)
-        and event.reason is SkipReasonCode.INSUFFICIENT_CASH
+        and event.reason is SkipReasonCode.ALLOCATION_UNAFFORDABLE
     ]
     fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
     assert len(skips) == 1
     assert not fills
     assert output.final_cash_base == Decimal("50.00000000")
+
+
+def test_buy_cohort_reserves_equal_targets_across_mic_fill_dates() -> None:
+    """A later signal cannot spend an XLON target still pending after XNYS
+    fills over Christmas.  The first cohort gets equal $500 targets; the
+    later candidate gets $0 and records an ordinary unaffordable skip."""
+    start, end_exclusive = date(2024, 12, 1), date(2025, 1, 1)
+    xnys_sessions = _sessions("XNYS", start, end_exclusive)
+    xlon_sessions = _sessions("XLON", start, end_exclusive)
+    cohort_session = date(2024, 12, 24)
+    later_session = date(2024, 12, 26)
+    assert cohort_session in xnys_sessions and cohort_session in xlon_sessions
+    assert later_session in xnys_sessions and later_session not in xlon_sessions
+    us_market, us_pinned = _build_security(
+        "sec-us", "XNYS", xnys_sessions, revision=DIGEST_A, open_price=100.0
+    )
+    uk_market, uk_pinned = _build_security(
+        "sec-uk", "XLON", xlon_sessions, revision=DIGEST_B, open_price=100.0
+    )
+    later_market, later_pinned = _build_security(
+        "sec-later", "XNYS", xnys_sessions, revision=DIGEST_C, open_price=100.0
+    )
+    strategy = _ScriptedStrategy(
+        entries={
+            cohort_session: [
+                Signal(
+                    security_id="sec-us",
+                    side=SignalSide.BUY,
+                    session=cohort_session,
+                    rule_id="cohort-us",
+                ),
+                Signal(
+                    security_id="sec-uk",
+                    side=SignalSide.BUY,
+                    session=cohort_session,
+                    rule_id="cohort-uk",
+                ),
+            ],
+            later_session: [
+                Signal(
+                    security_id="sec-later",
+                    side=SignalSide.BUY,
+                    session=later_session,
+                    rule_id="later",
+                ),
+            ],
+        }
+    )
+    manifest = _manifest(
+        securities=(us_pinned, uk_pinned, later_pinned),
+        start_month=_month_str(start),
+        end_month=_month_str(start),
+        starting_capital=Decimal("1000"),
+    )
+
+    output = run_simulation(
+        manifest=manifest,
+        strategy=strategy,
+        market_view_factory=_market_view_factory(),
+        security_market_data=(us_market, uk_market, later_market),
+    )
+
+    fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
+    assert [(fill.security_id, fill.shares, fill.cost_base) for fill in fills] == [
+        ("sec-us", 5, Decimal("500.00000000")),
+        ("sec-uk", 5, Decimal("500.00000000")),
+    ]
+    skips = [
+        event
+        for event in output.events
+        if isinstance(event, SkippedSignalEventV1)
+        and event.reason is SkipReasonCode.ALLOCATION_UNAFFORDABLE
+    ]
+    assert [skip.security_id for skip in skips] == ["sec-later"]
+    assert output.final_cash_base == Decimal("0.00000000")
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +719,7 @@ def test_sell_exceeding_held_quantity_is_rejected_and_cash_never_negative() -> N
                 )
             ]
         },
-        size_by_rule={"rb": 5, "rs": 10},
+        size_by_rule={"rb": 5, "rs": -1},
     )
     manifest = _manifest(
         securities=(pinned,), start_month=_month_str(start), end_month=_month_str(start)
@@ -650,19 +732,11 @@ def test_sell_exceeding_held_quantity_is_rejected_and_cash_never_negative() -> N
         security_market_data=(market_data,),
     )
 
-    oversell_skips = [
-        event
-        for event in output.events
-        if isinstance(event, SkippedSignalEventV1)
-        and event.reason is SkipReasonCode.POSITION_CONFLICT
-        and event.side is SignalSide.SELL
-    ]
-    assert len(oversell_skips) == 1
-    assert not [event for event in output.events if isinstance(event, ExitFillEventV1)]
+    exits = [event for event in output.events if isinstance(event, ExitFillEventV1)]
+    assert len(exits) == 1
+    assert exits[0].shares == 1000
     assert output.final_cash_base >= 0
-    # The original 5-share position survives, untouched, to the final mark.
-    marks = output.final_open_positions
-    assert len(marks) == 1 and marks[0].shares == 5
+    assert output.final_open_positions == ()
 
 
 # ---------------------------------------------------------------------------
@@ -710,11 +784,11 @@ def test_split_effective_on_d_applied_exactly_once_before_signals_fills() -> Non
     assert len(split_events) == 1
     split_event = split_events[0]
     assert split_event.session == d2
-    assert split_event.shares_before == Decimal("4")
-    assert split_event.shares_after == Decimal("8")
+    assert split_event.shares_before == Decimal("500")
+    assert split_event.shares_after == Decimal("1000")
     assert split_event.ratio == Decimal("2")
     marks = output.final_open_positions
-    assert len(marks) == 1 and marks[0].shares == 8
+    assert len(marks) == 1 and marks[0].shares == 1000
 
 
 def test_full_exit_sells_current_post_split_shares_not_stale_scheduled_quantity() -> (
@@ -751,7 +825,7 @@ def test_full_exit_sells_current_post_split_shares_not_stale_scheduled_quantity(
                 )
             ]
         },
-        size_by_rule={"rb": 4, "re": 4},
+        size_by_rule={"rb": 4, "re": -1},
     )
     manifest = _manifest(
         securities=(pinned,), start_month=_month_str(start), end_month=_month_str(start)
@@ -773,7 +847,7 @@ def test_full_exit_sells_current_post_split_shares_not_stale_scheduled_quantity(
     assert not skipped_conflicts
     exits = [event for event in output.events if isinstance(event, ExitFillEventV1)]
     assert len(exits) == 1
-    assert exits[0].shares == 8
+    assert exits[0].shares == 1000
     assert exits[0].fill_session == d2
     assert output.final_open_positions == ()
 
@@ -804,7 +878,10 @@ def test_split_requiring_fractional_shares_is_fatal_unsupported_corporate_action
         size_by_rule={"rb": 1},
     )
     manifest = _manifest(
-        securities=(pinned,), start_month=_month_str(start), end_month=_month_str(start)
+        securities=(pinned,),
+        start_month=_month_str(start),
+        end_month=_month_str(start),
+        starting_capital=Decimal("325"),
     )
 
     with pytest.raises(SimulationError) as exc_info:
@@ -865,12 +942,12 @@ def test_dividend_effective_on_d_credits_cash_with_policy_evidence_recorded() ->
     dividend = dividends[0]
     assert dividend.session == d2
     assert dividend.per_share_amount == Decimal("0.5")
-    assert dividend.shares_carried == Decimal("4")
-    assert dividend.cash_credit_native == Decimal("2.00000000")
-    assert dividend.cash_credit_base == Decimal("2.00000000")
+    assert dividend.shares_carried == Decimal("1000")
+    assert dividend.cash_credit_native == Decimal("500.00000000")
+    assert dividend.cash_credit_base == Decimal("500.00000000")
     assert dividend.evidence_revision == DIGEST_A
-    # 100000 starting - 400 buy cost + 2 dividend credit.
-    assert output.final_cash_base == Decimal("100000") - Decimal("400") + Decimal("2")
+    # The allocation consumes $100000 at entry; the dividend is then credited.
+    assert output.final_cash_base == Decimal("500")
 
 
 # ---------------------------------------------------------------------------
@@ -1088,9 +1165,9 @@ def test_final_session_open_position_marked_and_never_fabricated_as_a_win() -> N
     assert len(marks) == 1
     mark = marks[0]
     assert mark.session == sessions[-1]
-    assert mark.shares == 2
+    assert mark.shares == 1000
     assert mark.mark_price_native == Decimal("110")
-    assert mark.market_value_base == Decimal("220.00000000")
+    assert mark.market_value_base == Decimal("110000.00000000")
     assert output.final_open_positions == (mark,)
     assert output.equity_curve[-1].positions_value_base == mark.market_value_base
     assert output.equity_curve[-1].total_equity_base == (
@@ -1290,7 +1367,9 @@ def test_sell_before_buy_enables_same_session_cash_reuse() -> None:
         and event.reason is SkipReasonCode.INSUFFICIENT_CASH
     ]
     assert len(exit_fills) == 1
-    assert len(entry_fills_b) == 1  # succeeded only because SELL ran first
+    # The later SELL cannot fund a cohort already reserved on its signal
+    # session; that order gets a zero target instead of overspending.
+    assert not entry_fills_b
     assert not insufficient_cash
 
 
@@ -1340,8 +1419,8 @@ def test_gbp_pence_quote_unit_scales_before_valuation() -> None:
 
     fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
     assert len(fills) == 1
-    # 1000 pence/share * 5 shares = 5000 pence = GBP 50.00, no FX needed.
-    assert fills[0].cost_base == Decimal("50.00000000")
+    # A £100000 allocation at a £10 (1000p) open buys 10000 shares.
+    assert fills[0].cost_base == Decimal("100000.00000000")
     assert fills[0].fx_rate is None
 
 
@@ -1396,8 +1475,7 @@ def test_fx_direction_gbp_security_into_usd_base_multiplies_by_rate() -> None:
 
     fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
     assert len(fills) == 1
-    # 100 GBP/share * 2 shares = 200 GBP * 1.25 = 250 USD.
-    assert fills[0].cost_base == Decimal("250.00000000")
+    assert fills[0].cost_base == Decimal("100000.00000000")
     assert fills[0].fx_rate == Decimal("1.25")
 
 
@@ -1447,8 +1525,7 @@ def test_fx_direction_usd_security_into_gbp_base_divides_by_rate() -> None:
 
     fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
     assert len(fills) == 1
-    # 125 USD/share * 2 shares = 250 USD / 1.25 = 200 GBP.
-    assert fills[0].cost_base == Decimal("200.00000000")
+    assert fills[0].cost_base == Decimal("100000.00000000")
     assert fills[0].fx_rate == Decimal("1.25")
 
 
@@ -1491,11 +1568,11 @@ def test_unsupported_corporate_action_fails_fatal() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 21. position_size_zero
+# 21. strategy BUY quantities are ignored
 # ---------------------------------------------------------------------------
 
 
-def test_position_size_zero_is_skipped() -> None:
+def test_strategy_buy_quantity_is_ignored_by_engine_allocator() -> None:
     start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
     sessions = _sessions("XNYS", start, end_exclusive)
     d0 = sessions[0]
@@ -1521,14 +1598,9 @@ def test_position_size_zero_is_skipped() -> None:
         security_market_data=(market_data,),
     )
 
-    zero_skips = [
-        event
-        for event in output.events
-        if isinstance(event, SkippedSignalEventV1)
-        and event.reason is SkipReasonCode.POSITION_SIZE_ZERO
-    ]
-    assert len(zero_skips) == 1
-    assert not [event for event in output.events if isinstance(event, EntryFillEventV1)]
+    fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
+    assert len(fills) == 1
+    assert fills[0].shares == 1000
 
 
 # ---------------------------------------------------------------------------

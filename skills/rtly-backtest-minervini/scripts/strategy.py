@@ -227,11 +227,10 @@ class MinerviniStrategy:
     ) -> Signal | None:
         """Story: portfolio upgrading (Minervini's "upgrade" discipline).
 
-        When every position slot is committed (cash cannot fund the
-        strongest unheld candidate's fixed-share entry) and that candidate's
-        VCP score clears the weakest held position's own current score by
-        at least ``upgrade_score_margin``, sell the weakest holding to free
-        cash for the stronger setup -- exactly mirroring the mechanical
+        When a stronger unheld candidate's VCP score clears the weakest held
+        position's own current score by at least ``upgrade_score_margin``,
+        sell the weakest holding to free cash for the stronger setup --
+        exactly mirroring the mechanical
         stop/SMA/pattern-invalidation exits above, never overriding them.
         The freed cash is picked up by the ordinary ``entry_signals`` path
         on a later qualifying session; this method never buys anything
@@ -239,9 +238,12 @@ class MinerviniStrategy:
         """
         if parameters.get("enable_position_upgrade") is not True:
             return None
-        fixed_shares = _plain_int(parameters["fixed_shares"])
         margin = _plain_int(parameters["upgrade_score_margin"])
-        if fixed_shares is None or fixed_shares <= 0 or margin is None:
+        if margin is None:
+            return None
+        # The shared allocator owns BUY affordability.  Do not liquidate a
+        # holding while a cash slot remains for its next cohort.
+        if portfolio.cash > 0:
             return None
 
         held_ids = {
@@ -262,18 +264,6 @@ class MinerviniStrategy:
         if not candidates:
             return None
         best_score, best_security_id = max(candidates, key=lambda item: item)
-
-        history = _current_history(view, best_security_id)
-        if history is None:
-            return None
-        closes = _decimals(history["close"])
-        if closes is None:
-            return None
-        estimated_cost = closes[-1] * Decimal(fixed_shares)
-        if portfolio.cash >= estimated_cost:
-            # Cash already covers the strongest candidate -- the ordinary
-            # entry_signals path will take it without sacrificing anything.
-            return None
 
         held_scored = [
             (score, security_id)
@@ -335,7 +325,5 @@ class MinerviniStrategy:
     ) -> int:
         if signal.side == SignalSide.SELL:
             return _integral_quantity(portfolio, signal.security_id)
-        fixed_shares = parameters["fixed_shares"]
-        if isinstance(fixed_shares, int) and not isinstance(fixed_shares, bool):
-            return fixed_shares
+        # The engine reserves equal capital and determines whole shares.
         return 0

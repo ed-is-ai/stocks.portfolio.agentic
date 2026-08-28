@@ -77,7 +77,6 @@ def _history(
 def _parameters() -> dict[str, object]:
     return {
         "selected_securities": ["sec-aapl"],
-        "fixed_shares": 10,
         "box_lookback_sessions": 3,
         "maximum_box_depth_pct": 10.0,
         "volume_multiplier": 1.5,
@@ -166,7 +165,9 @@ def test_short_stale_and_non_finite_history_fail_closed() -> None:
     assert strategy.entry_signals(_View(as_of, malformed), _parameters()) == []
 
 
-def test_position_size_uses_fixed_buy_and_full_integral_sell_quantity() -> None:
+def test_position_size_defers_buy_to_engine_and_sizes_full_integral_sell_quantity() -> (
+    None
+):
     strategy = MODULE.DarvasBoxStrategy()
     as_of, history = _history()
     view = _View(as_of, history)
@@ -183,12 +184,7 @@ def test_position_size_uses_fixed_buy_and_full_integral_sell_quantity() -> None:
         rule_id="sell",
     )
 
-    assert (
-        validate_position_size(
-            strategy.position_size(buy, view, _portfolio(), _parameters())
-        )
-        == 10
-    )
+    assert strategy.position_size(buy, view, _portfolio(), _parameters()) == 0
     assert (
         validate_position_size(
             strategy.position_size(sell, view, _portfolio("7"), _parameters())

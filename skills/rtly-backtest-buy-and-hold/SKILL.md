@@ -14,13 +14,6 @@ strategy_universe:
   mode: selected-securities
   parameter: selected_securities
 parameters:
-  - name: fixed_shares
-    type: integer
-    default: 10
-    description: Number of shares requested for the initial purchase.
-    required: false
-    minimum: 1
-    maximum: 100000
   - name: entry_on_or_after
     type: string
     default: '2000-01-01'
@@ -40,8 +33,9 @@ StrategyProtocolV1 does not expose run start or portfolio state to
 as position conflicts. Never emit SELL.
 
 Fail closed on malformed cutoff dates and missing or stale target history. Use
-`fixed_shares` for BUY sizing. Implement SELL sizing defensively for protocol
-completeness by returning only an integral held quantity.
+The engine owns BUY allocation and whole-share sizing. Implement SELL sizing
+defensively for protocol completeness by returning only an integral held
+quantity.
 
 ```bash
 uv run pytest skills/rtly-backtest-buy-and-hold/scripts/tests -q

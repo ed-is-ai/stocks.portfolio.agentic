@@ -108,12 +108,8 @@ class BuyAndHoldStrategy:
         parameters: StrategyParameters,
     ) -> int:
         if signal.side == SignalSide.BUY:
-            shares = parameters.get("fixed_shares", 10)
-            return (
-                shares
-                if isinstance(shares, int) and not isinstance(shares, bool)
-                else 0
-            )
+            # The engine reserves equal capital and determines whole shares.
+            return 0
         for position in portfolio.positions:
             if position.security_id == signal.security_id:
                 integral = position.quantity.to_integral_value()

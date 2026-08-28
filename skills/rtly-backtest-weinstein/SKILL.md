@@ -5,7 +5,7 @@ display_name: Weinstein Backtest
 description: >
   Backtest a deterministic long-only Weinstein Stage 2 breakout across the
   Run's selected securities against bounded monthly scan and daily OHLCV
-  evidence with fixed-share sizing.
+  evidence with engine-owned equal-capital allocation.
 api_version: 1
 runtime_files:
   - scripts/strategy.py
@@ -14,13 +14,6 @@ strategy_universe:
   mode: selected-securities
   parameter: selected_securities
 parameters:
-  - name: fixed_shares
-    type: integer
-    default: 10
-    description: Whole shares requested for each entry.
-    required: true
-    minimum: 1
-    maximum: 100000
   - name: breakout_lookback_sessions
     type: integer
     default: 50
@@ -47,8 +40,7 @@ parameters:
     default: false
     description: >-
       Sell the weakest held position (by percent above its 150-session SMA)
-      to fund a stronger unheld candidate when cash cannot cover its
-      fixed-share entry.
+      when a stronger unheld candidate clears the configured score margin.
     required: true
   - name: upgrade_score_margin_pct
     type: number
@@ -78,14 +70,15 @@ position at the configured loss threshold, on a non-Stage-2 scan, or when the
 close falls below its current 150-session SMA.
 
 When `enable_position_upgrade` is true, also sell the weakest held position
-(lowest percent above its own 150-session SMA) to fund the strongest unheld
-qualifying candidate when cash cannot cover that candidate's fixed-share
-entry cost and its percent-above-SMA reading exceeds the weakest holding's
-by at least `upgrade_score_margin_pct` points. This mirrors Weinstein's own
+(lowest percent above its own 150-session SMA) when the strongest unheld
+candidate's percent-above-SMA reading exceeds the weakest holding's by at
+least `upgrade_score_margin_pct` points. This mirrors Weinstein's own
 practice of rotating capital toward leadership during a Stage 2 advance; it
 never overrides the mechanical exits above and never buys anything itself --
 the freed cash is picked up by the ordinary entry path on a later qualifying
 session.
+
+The engine owns BUY allocation and whole-share sizing.
 
 Do not pyramid, partially exit, simulate an intraday stop, access live state,
 or fetch data outside the supplied bounded views.

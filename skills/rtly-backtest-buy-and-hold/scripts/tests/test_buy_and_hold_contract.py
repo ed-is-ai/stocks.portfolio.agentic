@@ -17,7 +17,6 @@ from app.services.backtest.strategy_protocol import (
     StrategyProtocolV1,
     validate_entry_signals,
     validate_exit_signals,
-    validate_position_size,
 )
 
 _RUNTIME = Path(__file__).resolve().parents[1] / "strategy.py"
@@ -30,7 +29,6 @@ BuyAndHoldStrategy = _MODULE.BuyAndHoldStrategy
 AS_OF = date(2026, 1, 8)
 PARAMETERS = {
     "selected_securities": ["sec-aapl"],
-    "fixed_shares": 10,
     "entry_on_or_after": "2000-01-01",
 }
 
@@ -157,10 +155,10 @@ def test_strategy_never_exits() -> None:
     )
 
 
-def test_position_size_uses_fixed_buy_and_integral_sell_defensively() -> None:
+def test_position_size_defers_buy_to_engine_and_sizes_sell_integrally() -> None:
     strategy = BuyAndHoldStrategy()
     view = _View()
-    buy = strategy.entry_signals(view, {**PARAMETERS, "fixed_shares": 12})[0]
+    buy = strategy.entry_signals(view, PARAMETERS)[0]
     sell = Signal(
         security_id="sec-aapl",
         side=SignalSide.SELL,
@@ -168,14 +166,7 @@ def test_position_size_uses_fixed_buy_and_integral_sell_defensively() -> None:
         rule_id="test_sell",
     )
 
-    assert (
-        validate_position_size(
-            strategy.position_size(
-                buy, view, _portfolio(), {**PARAMETERS, "fixed_shares": 12}
-            )
-        )
-        == 12
-    )
+    assert strategy.position_size(buy, view, _portfolio(), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio("7"), PARAMETERS) == 7
     assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio(), PARAMETERS) == 0

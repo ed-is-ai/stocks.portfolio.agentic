@@ -17,7 +17,6 @@ from app.services.backtest.strategy_protocol import (
     StrategyProtocolV1,
     validate_entry_signals,
     validate_exit_signals,
-    validate_position_size,
 )
 
 _RUNTIME = Path(__file__).resolve().parents[1] / "strategy.py"
@@ -30,7 +29,6 @@ MovingAverageStrategy = _MODULE.MovingAverageStrategy
 AS_OF = date(2026, 1, 8)
 PARAMETERS = {
     "selected_securities": ["sec-aapl"],
-    "fixed_shares": 10,
     "fast_window": 2,
     "slow_window": 3,
 }
@@ -128,10 +126,10 @@ def test_missing_malformed_and_stale_history_fail_closed() -> None:
     assert strategy.entry_signals(missing, PARAMETERS) == []
 
 
-def test_position_size_uses_fixed_buy_and_full_integral_sell() -> None:
+def test_position_size_defers_buy_to_engine_and_sizes_full_integral_sell() -> None:
     strategy = MovingAverageStrategy()
     view = _View([3, 2, 1, 4])
-    buy = strategy.entry_signals(view, {**PARAMETERS, "fixed_shares": 12})[0]
+    buy = strategy.entry_signals(view, PARAMETERS)[0]
     sell = Signal(
         security_id="sec-aapl",
         side=SignalSide.SELL,
@@ -139,14 +137,7 @@ def test_position_size_uses_fixed_buy_and_full_integral_sell() -> None:
         rule_id="test_sell",
     )
 
-    assert (
-        validate_position_size(
-            strategy.position_size(
-                buy, view, _portfolio(), {**PARAMETERS, "fixed_shares": 12}
-            )
-        )
-        == 12
-    )
+    assert strategy.position_size(buy, view, _portfolio(), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio("7"), PARAMETERS) == 7
     assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio(), PARAMETERS) == 0

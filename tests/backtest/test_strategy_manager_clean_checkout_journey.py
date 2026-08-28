@@ -316,7 +316,6 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
     # manifest (Story 4.6/4.6.3).
     parameters: dict[str, object] = {
         **universe_binding,
-        "fixed_shares": 1,
         "entry_on_or_after": "2026-06-01",
     }
     preparation_result = jobs.enqueue_preparation(
