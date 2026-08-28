@@ -25,9 +25,25 @@ from app.services.backtest.backtest_engine import (
 )
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.metrics import BacktestMetricsV1
-from app.services.backtest.strategy_job import StrategyJobConflict, StrategyJobNotFound
-from app.services.backtest.strategy_protocol import SignalSide
+from app.services.backtest.run_universe import run_universe_digest
+from app.services.backtest.run_input_manifest import (
+    PinnedSecurityEvidenceV1,
+    build_run_input_manifest_v2,
+)
+from app.services.backtest.strategy_job import (
+    RunUniverseSelectionV1,
+    StrategyJobConflict,
+    StrategyJobNotFound,
+)
+from app.services.backtest.strategy_protocol import (
+    EntrySelectionDecisionV1,
+    EntrySelectionState,
+    InitialEntrySelectionV1,
+    Signal,
+    SignalSide,
+)
 from app.services.backtest.trading_calendar import TradingCalendar
+from tests.backtest.test_run_input_manifest import _manifest
 
 NOW = datetime(2026, 8, 12, 9, 30, tzinfo=timezone.utc)
 PROFILE_HASH = "a" * 64
@@ -217,6 +233,211 @@ def _staging_payload() -> dict[str, object]:
         "equity_curve": equity_curve,
         "final_cash_base": Decimal("10050"),
     }
+
+
+def _initial_selection() -> InitialEntrySelectionV1:
+    session = date(2026, 1, 2)
+    return InitialEntrySelectionV1(
+        session=session,
+        metric_id="momentum-252",
+        metric_version="v1",
+        rule_id="initial-rank",
+        decisions=[
+            EntrySelectionDecisionV1(
+                security_id="AAA",
+                rank=1,
+                state=EntrySelectionState.SELECTED,
+                score=Decimal("0.25"),
+            )
+        ],
+        signals=[
+            Signal(
+                security_id="AAA",
+                side=SignalSide.BUY,
+                session=session,
+                rule_id="initial-rank",
+            )
+        ],
+    )
+
+
+def _initial_selection_universe() -> RunUniverseSelectionV1:
+    return RunUniverseSelectionV1(
+        profile_hash=PROFILE_HASH,
+        activation_seq=1,
+        universe_parameter="security_ids",
+        canonical_security_ids=("AAA",),
+        run_universe_digest=run_universe_digest(
+            ["AAA"], parameter="security_ids", profile_hash=PROFILE_HASH
+        ),
+    )
+
+
+def _seed_v2_backtest_run_for_initial_selection(path: Path) -> None:
+    """Seed the same immutable V2 provenance shape production uses."""
+    _seed_profile(path)
+    selection = _initial_selection_universe()
+    manifest = build_run_input_manifest_v2(
+        _manifest(
+            strategy_id="momentum_v1",
+            strategy_api_version=1,
+            strategy_source_digest=STRATEGY_SOURCE_DIGEST,
+            parameters={"security_ids": ["AAA"]},
+            profile_hash=PROFILE_HASH,
+            start_month="2026-01",
+            end_month="2026-01",
+            ordered_month_digest=ORDERED_MONTH_DIGEST,
+            base_currency="USD",
+            securities=(
+                PinnedSecurityEvidenceV1(
+                    security_id="AAA",
+                    price_revision="7" * 64,
+                    action_revision="7" * 64,
+                ),
+            ),
+        ),
+        selection=selection,
+        source_preparation_job_id="prep-run-1",
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute(
+            """INSERT INTO run_input_manifests
+               (digest, execution_contract_digest, canonical_manifest_json, created_at,
+                manifest_version)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                manifest.digest(),
+                manifest.execution_contract_digest(),
+                manifest.canonical_json(),
+                NOW.isoformat(),
+                manifest.schema_version,
+            ),
+        )
+        conn.execute(
+            """INSERT INTO strategy_jobs
+               (id, job_type, status, enqueue_seq, claim_token, status_version,
+                created_at, updated_at)
+               VALUES (?, 'backtest', 'running', 1, ?, 1, ?, ?)""",
+            (RUN_ID, CLAIM_TOKEN, NOW.isoformat(), NOW.isoformat()),
+        )
+        conn.execute(
+            """INSERT INTO strategy_runs
+               (id, strategy_id, strategy_api_version, strategy_source_digest,
+                parameters_json, profile_hash, start_month, end_month,
+                ordered_month_digest, base_currency, starting_capital,
+                run_input_manifest_digest, execution_contract_digest,
+                manifest_version, run_universe_digest, selection_json,
+                source_preparation_job_id, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                RUN_ID,
+                manifest.strategy_id,
+                manifest.strategy_api_version,
+                manifest.strategy_source_digest,
+                json.dumps(manifest.parameters, sort_keys=True),
+                manifest.profile_hash,
+                manifest.start_month,
+                manifest.end_month,
+                manifest.ordered_month_digest,
+                manifest.base_currency,
+                str(manifest.starting_capital),
+                manifest.digest(),
+                manifest.execution_contract_digest(),
+                manifest.schema_version,
+                selection.run_universe_digest,
+                selection.model_dump_json(),
+                "prep-run-1",
+                NOW.isoformat(),
+            ),
+        )
+
+
+def test_selection_bearing_result_round_trips_as_v2_and_missing_evidence_fails(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_v2_backtest_run_for_initial_selection(path)
+    payload = _staging_payload()
+    payload["initial_entry_selection"] = _initial_selection()
+    _write_staging(repo, payload=payload)
+
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    result = repo.backtest_result(RUN_ID)
+    assert result.initial_entry_selection == _initial_selection()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT result_schema_version FROM backtest_results WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone() == ("backtest_result.v2",)
+        conn.execute(
+            "DROP TRIGGER backtest_result_entry_selection_decision_immutable_delete"
+        )
+        conn.execute("DROP TRIGGER backtest_result_entry_selection_immutable_delete")
+        conn.execute(
+            "DELETE FROM backtest_result_entry_selection_decisions WHERE run_id=?",
+            (RUN_ID,),
+        )
+        conn.execute(
+            "DELETE FROM backtest_result_entry_selection WHERE run_id=?", (RUN_ID,)
+        )
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.backtest_result(RUN_ID)
+
+
+def test_staging_selection_is_revalidated_against_the_pinned_run_universe(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_v2_backtest_run_for_initial_selection(path)
+    payload = _staging_payload()
+    payload["initial_entry_selection"] = _initial_selection().model_copy(
+        update={"signals": ()}
+    )
+
+    with pytest.raises(
+        BacktestIntegrityError, match="staged initial entry selection is invalid"
+    ) as exc_info:
+        _write_staging(repo, payload=payload)
+
+    assert exc_info.value.code == "initial_selection_signal_mismatch"
+
+
+def test_schema_upgrade_rebuilds_legacy_result_immutability_trigger(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _write_staging(repo)
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER backtest_result_evidence_immutable")
+        conn.execute(
+            """CREATE TRIGGER backtest_result_evidence_immutable
+               BEFORE UPDATE ON backtest_results
+               WHEN NEW.run_id != OLD.run_id
+                 OR NEW.metrics_json != OLD.metrics_json
+                 OR NEW.final_cash_base != OLD.final_cash_base
+                 OR NEW.result_digest != OLD.result_digest
+                 OR NEW.completed_at != OLD.completed_at
+               BEGIN SELECT RAISE(ABORT, 'backtest result evidence is immutable'); END"""
+        )
+
+    repo.ensure_schema()
+
+    with sqlite3.connect(path) as conn:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute(
+                "UPDATE backtest_results SET result_schema_version='backtest_result.v2' "
+                "WHERE run_id=?",
+                (RUN_ID,),
+            )
 
 
 def _write_staging(

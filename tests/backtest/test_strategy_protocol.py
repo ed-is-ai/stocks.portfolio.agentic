@@ -16,6 +16,9 @@ import pytest
 from pydantic import ValidationError
 
 from app.services.backtest.strategy_protocol import (
+    EntrySelectionDecisionV1,
+    EntrySelectionState,
+    InitialEntrySelectionV1,
     MarketViewV1,
     ParameterFieldErrorV1,
     ParameterValidationErrorCode,
@@ -30,9 +33,135 @@ from app.services.backtest.strategy_protocol import (
     VolatilityObservationV1,
     validate_entry_signals,
     validate_exit_signals,
+    validate_initial_entry_selection,
     validate_position_size,
     validate_strategy_parameters,
 )
+
+
+def test_initial_entry_selection_canonicalizes_complete_ranked_batch() -> None:
+    session = date(2026, 6, 1)
+    selected = Signal(
+        security_id="sec-a", side=SignalSide.BUY, session=session, rule_id="momentum"
+    )
+    batch = InitialEntrySelectionV1(
+        session=session,
+        metric_id="split-adjusted-return-252",
+        metric_version="v1",
+        rule_id="momentum",
+        decisions=[
+            EntrySelectionDecisionV1(
+                security_id="sec-b",
+                rank=2,
+                state=EntrySelectionState.ELIGIBLE_NOT_SELECTED,
+                score=Decimal("0.1"),
+            ),
+            EntrySelectionDecisionV1(
+                security_id="sec-a",
+                rank=1,
+                state=EntrySelectionState.SELECTED,
+                score=Decimal("0.2"),
+            ),
+        ],
+        signals=[selected],
+    )
+
+    validated = validate_initial_entry_selection(
+        batch,
+        pinned_security_ids=("sec-b", "sec-a"),
+        expected_session=session,
+    )
+
+    assert [item.security_id for item in validated.decisions] == ["sec-a", "sec-b"]
+    assert validated.signals == (selected,)
+
+
+@pytest.mark.parametrize(
+    ("decisions", "code"),
+    [
+        (
+            [
+                EntrySelectionDecisionV1(
+                    security_id="sec-a",
+                    rank=1,
+                    state=EntrySelectionState.SELECTED,
+                    score=Decimal("0.2"),
+                )
+            ],
+            StrategyProtocolErrorCode.INITIAL_SELECTION_UNIVERSE_MISMATCH,
+        ),
+        (
+            [
+                EntrySelectionDecisionV1(
+                    security_id="sec-a",
+                    rank=2,
+                    state=EntrySelectionState.SELECTED,
+                    score=Decimal("0.2"),
+                ),
+                EntrySelectionDecisionV1(
+                    security_id="sec-b",
+                    rank=3,
+                    state=EntrySelectionState.ELIGIBLE_NOT_SELECTED,
+                    score=Decimal("0.1"),
+                ),
+            ],
+            StrategyProtocolErrorCode.INITIAL_SELECTION_RANK_INVALID,
+        ),
+    ],
+)
+def test_initial_entry_selection_rejects_incomplete_or_gapped_decisions(
+    decisions, code
+) -> None:
+    session = date(2026, 6, 1)
+    batch = InitialEntrySelectionV1(
+        session=session,
+        metric_id="metric",
+        metric_version="v1",
+        rule_id="rule",
+        decisions=decisions,
+        signals=[
+            Signal(
+                security_id="sec-a",
+                side=SignalSide.BUY,
+                session=session,
+                rule_id="rule",
+            )
+        ],
+    )
+    with pytest.raises(StrategyProtocolError) as excinfo:
+        validate_initial_entry_selection(
+            batch,
+            pinned_security_ids=("sec-a", "sec-b"),
+            expected_session=session,
+        )
+    assert excinfo.value.code is code
+
+
+def test_initial_entry_selection_rejects_selected_signal_disagreement() -> None:
+    session = date(2026, 6, 1)
+    batch = InitialEntrySelectionV1(
+        session=session,
+        metric_id="metric",
+        metric_version="v1",
+        rule_id="rule",
+        decisions=[
+            EntrySelectionDecisionV1(
+                security_id="sec-a",
+                rank=1,
+                state=EntrySelectionState.SELECTED,
+                score=Decimal("0.2"),
+            )
+        ],
+        signals=[],
+    )
+    with pytest.raises(StrategyProtocolError) as excinfo:
+        validate_initial_entry_selection(
+            batch, pinned_security_ids=("sec-a",), expected_session=session
+        )
+    assert (
+        excinfo.value.code
+        is StrategyProtocolErrorCode.INITIAL_SELECTION_SIGNAL_MISMATCH
+    )
 
 
 def _signal(
