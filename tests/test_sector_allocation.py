@@ -365,3 +365,68 @@ class TestTopCongressionalBuys:
         ]
         rows = sa.top_congressional_buys(records, limit=3)
         assert len(rows) == 3
+
+
+# ---------------------------------------------------------------------------
+# Total-order / tie-break determinism (#377)
+# ---------------------------------------------------------------------------
+
+
+class TestSortDeterminism:
+    def test_prevalence_shares_stable_under_shuffle(self) -> None:
+        import random
+
+        records = (
+            [_record(f"T{i}", "Technology") for i in range(3)]
+            + [_record(f"H{i}", "Healthcare") for i in range(3)]
+            + [_record(f"E{i}", "Energy") for i in range(3)]
+        )
+        baseline = sa.compute_sector_prevalence(records).model_dump()
+        for seed in range(10):
+            shuffled = list(records)
+            random.Random(seed).shuffle(shuffled)
+            assert sa.compute_sector_prevalence(shuffled).model_dump() == baseline
+
+    def test_prevalence_ties_sort_by_sector_name(self) -> None:
+        records = [_record("A", "Technology"), _record("B", "Healthcare")]
+        shares = sa.compute_sector_prevalence(records).shares
+        assert [s.sector for s in shares] == ["Healthcare", "Technology"]
+
+    def test_deltas_stable_and_ties_sort_by_sector(self) -> None:
+        prior = SectorAllocationSnapshot(
+            as_of="2024-01-01",
+            total_candidates=2,
+            shares=[
+                SectorShare(sector="Zeta", count=1, count_share=0.5, score_share=0.5),
+                SectorShare(sector="Alpha", count=1, count_share=0.5, score_share=0.5),
+            ],
+        )
+        current = SectorAllocationSnapshot(
+            as_of="2024-01-08",
+            total_candidates=2,
+            shares=[
+                SectorShare(sector="Zeta", count=1, count_share=0.25, score_share=0.5),
+                SectorShare(sector="Alpha", count=1, count_share=0.75, score_share=0.5),
+            ],
+        )
+        deltas = sa.compute_sector_deltas(current, prior)
+        # both |delta| == 0.25 -> tie broken by sector name ascending
+        assert [d.sector for d in deltas] == ["Alpha", "Zeta"]
+        # order of shares in current must not affect the delta order
+        reordered = current.model_copy(
+            update={"shares": list(reversed(current.shares))}
+        )
+        assert [d.sector for d in sa.compute_sector_deltas(reordered, prior)] == [
+            "Alpha",
+            "Zeta",
+        ]
+
+    def test_congress_ties_sort_by_ticker(self) -> None:
+        records = [
+            _congress_record("ZZZ", "Technology", congress_buys=5, senate_buys=2),
+            _congress_record("AAA", "Energy", congress_buys=5, senate_buys=2),
+        ]
+        rows = sa.top_congressional_buys(records)
+        assert [r.ticker for r in rows] == ["AAA", "ZZZ"]
+        rows_rev = sa.top_congressional_buys(list(reversed(records)))
+        assert [r.ticker for r in rows_rev] == ["AAA", "ZZZ"]

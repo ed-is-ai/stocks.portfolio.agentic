@@ -28,3 +28,6 @@ class MarketNarrative(BaseModel):
     sources: list[MarketNarrativeSource] = []
     not_advice: str = "Informational only — not financial advice."
     generated_at: str = ""  # ISO timestamp; set by the builder
+    input_digest: str = ""  # sha256 over the semantic market facts (#377)
+    narrative_version: str = ""  # NARRATIVE_VERSION at generation time (#377)
+    from_fallback: bool = False  # deterministic fallback — never reused (#377)

@@ -71,7 +71,7 @@ def compute_sector_prevalence(
             strong_share=(strong.get(sector, 0) / total) if total else 0.0,
             myb_count=mybs.get(sector, 0),
         )
-        for sector, count in sorted(counts.items(), key=lambda kv: -kv[1])
+        for sector, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
     return SectorAllocationSnapshot(as_of=today, total_candidates=total, shares=shares)
 
@@ -99,9 +99,9 @@ def compute_sector_deltas(
                 current_by_sector.get(sector, 0.0) - prior_by_sector.get(sector, 0.0)
             ),
         )
-        for sector in all_sectors
+        for sector in sorted(all_sectors)
     ]
-    return sorted(deltas, key=lambda d: -abs(d.delta))
+    return sorted(deltas, key=lambda d: (-abs(d.delta), d.sector))
 
 
 def with_deltas(
@@ -229,7 +229,7 @@ def top_congressional_buys(
                 senate_net=senate_net,
             )
         )
-    rows.sort(key=lambda r: (-r.congress_net, -r.senate_net))
+    rows.sort(key=lambda r: (-r.congress_net, -r.senate_net, r.ticker))
     return rows[:limit]
 
 

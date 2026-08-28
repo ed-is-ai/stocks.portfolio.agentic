@@ -273,3 +273,31 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-345-cache-whalewisdom-heat-map.md`
   summary: The heat-map cache file has no cross-process lock; a CLI pipeline run and the web-server pipeline run in parallel could have the slower one overwrite a newer entry.
   evidence: `heat_map_cache.store()` does a bare tmp-write + `os.replace`; `_run_lock` in pipeline_service is process-local and the orchestrator runs as a subprocess. `os.replace` keeps writes atomic (no corruption); spec Block-If already flags richer storage as out of scope.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
+  summary: Deterministic-fallback narrative runs (no Anthropic key) re-save with a fresh `generated_at` every pipeline run, churning the banner timestamp even though the deterministic text never changes.
+  evidence: `resolve_market_narrative` always calls `save_market_narrative` on the non-reuse path, and `reusable_narrative` unconditionally rejects `from_fallback` narratives, so a keyless deployment never benefits from the cache.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
+  summary: A transient news/Claude outage overwrites a good persisted LLM narrative with a `from_fallback` one, forcing an extra regeneration once the outage clears even though the facts never moved.
+  evidence: The fallback path stamps `from_fallback=True` and saves unconditionally; the next run cannot reuse it (fallback refusal) so it regenerates. Spec's I/O matrix mandates the overwrite.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
+  summary: `NARRATIVE_VERSION` is a hand-maintained constant with no enforcement — editing the Claude system prompt or a narrative builder without bumping it serves stale cached prose for up to `NARRATIVE_MAX_AGE` (24h) after each unchanged run.
+  evidence: Nothing ties the prompt-file / builder source to the version; a test asserting a bump on prompt change, or folding a hash of the prompt file into the digest, would close it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
+  summary: The digest includes `breadth.as_of` but deliberately excludes `snapshot.as_of`; the asymmetry is safe today (breadth `as_of` is a date string, stable intraday) but a future intraday-timestamped breadth feed would defeat the cache.
+  evidence: `narrative_input_digest` canonical dict includes `breadth.as_of`; `snapshot.as_of` is omitted with a stated rationale that also applies to breadth.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
+  summary: `breadth.retrieval_source` is in the digest and flips from "fetched"/"source" on the first pipeline run of the day to "cached" on the second once the #343 daily breadth cache is populated, forcing exactly one extra narrative regeneration (news fetch + Claude call) per day at the run1->run2 transition.
+  evidence: `narrative_input_digest` includes `breadth.retrieval_source`; it was added in review pass 2 because it renders verbatim in `_breadth_bullet` and the Claude prompt. Excluding it would trade a small provenance-phrase inaccuracy in a reused narrative for eliminating that daily regen.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
+  summary: The digest hashes the full `congress` and `portfolio_weights` lists although the prose only renders `[:_TOP_N]` (3), so a change to a rank-4+ entry invalidates the cache and spends an LLM call with no possible change to rendered output.
+  evidence: `_congress_bullet`/`_portfolio_bullet` slice to `_TOP_N`; `narrative_input_digest` iterates the whole list. `shares` genuinely cannot be truncated (`_myb_bullet` scans all of it), but congress/weights could be sliced in the digest.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-377-narrative-input-digest.md`
+  summary: When `narrative_input_digest` returns `None` (non-finite float from a glitchy feed), `resolve_market_narrative` regenerates and overwrites the previously-good narrative + digest on disk with `input_digest=""`, so the next healthy run cannot reuse and must regenerate a second time.
+  evidence: The `digest is None` path still calls `save_market_narrative(stamped)` with an empty digest. Spec I/O matrix currently mandates this ("no digest stamped; regenerate"); leaving the existing file untouched when the digest cannot be computed would avoid the double regen.

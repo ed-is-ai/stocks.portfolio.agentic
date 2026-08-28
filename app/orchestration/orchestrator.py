@@ -52,12 +52,7 @@ from app.agents.scanner.scan_history import (
     save_history,
 )
 from app.agents.scanner.market_cycle import get_market_cycle_context
-from app.agents.scanner.market_narrative import (
-    build_deterministic_narrative,
-    build_llm_narrative,
-    save_market_narrative,
-)
-from app.agents.scanner.news_context import gather_news_context
+from app.agents.scanner.market_narrative import resolve_market_narrative
 from app.integrations.anthropic_client import AnthropicNarrativeClient
 from app.agents.scanner.sector_allocation import (
     compute_portfolio_sector_weights,
@@ -1173,28 +1168,20 @@ def pipeline(
         # lookups) only runs when Claude is actually configured, so the
         # feature costs nothing extra when unused.
         anthropic_client = AnthropicNarrativeClient()
-        market_narrative = None
-        if anthropic_client.enabled:
-            top_sectors = [s.sector for s in sector_snapshot.shares[:3]]
-            news_context = gather_news_context(top_sectors, _shared_av_client)
-            market_narrative = build_llm_narrative(
-                sector_snapshot,
-                portfolio_sector_weights,
-                market_cycle,
-                news_context,
-                anthropic_client,
-                market_breadth,
-                congress_buys,
-            )
-        if market_narrative is None:
-            market_narrative = build_deterministic_narrative(
-                sector_snapshot,
-                portfolio_sector_weights,
-                market_cycle,
-                market_breadth,
-                congress_buys,
-            )
-        save_market_narrative(market_narrative)
+        market_narrative, narrative_reused = resolve_market_narrative(
+            sector_snapshot,
+            portfolio_sector_weights,
+            market_cycle,
+            market_breadth,
+            congress_buys,
+            anthropic_client,
+            _shared_av_client,
+        )
+        print(
+            "      market narrative reused (digest hit)"
+            if narrative_reused
+            else "      market narrative regenerated"
+        )
 
         alerter.send_summary_email(
             positions, gbp_totals=gbp_totals, market_narrative=market_narrative

@@ -13,8 +13,13 @@ the hallucination guard (``app.agents.scanner.narrative_guard``). Callers
 
 from __future__ import annotations
 
+import hashlib
 import json
-from datetime import datetime, timezone
+import math
+import os
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
 from app.agents.scanner.market_cycle import (
     PHASE_MID_CYCLE,
@@ -22,6 +27,7 @@ from app.agents.scanner.market_cycle import (
     PHASE_PRE_FOMC_BLACKOUT,
 )
 from app.agents.scanner.narrative_guard import validate_against_context
+from app.agents.scanner.news_context import gather_news_context
 from app.core.config import MARKET_NARRATIVE_JSON
 from app.integrations.anthropic_client import AnthropicNarrativeClient
 from app.schemas.market_breadth import MarketBreadth
@@ -33,6 +39,19 @@ from app.schemas.sector_allocation import (
     PortfolioSectorWeight,
     SectorAllocationSnapshot,
 )
+
+if TYPE_CHECKING:
+    from app.integrations.alpha_vantage import AlphaVantageClient
+
+NARRATIVE_VERSION = "1"
+"""Bump whenever the system prompt or either narrative builder changes.
+
+Folded into the hashed digest dict, so a bump invalidates every cached
+narrative without a separate explicit comparison.
+"""
+
+NARRATIVE_MAX_AGE = timedelta(hours=24)
+"""Upper bound on how long a digest-matched narrative may be reused."""
 
 NOT_ADVICE_NOTE = (
     "Informational only, not financial advice. Sector prevalence reflects "
@@ -267,16 +286,209 @@ def build_llm_narrative(
     )
 
 
-def save_market_narrative(narrative: MarketNarrative) -> None:
-    """Persist *narrative* so the web banner and digest re-renders can reuse it.
+class _NonFiniteFloat(Exception):
+    """Raised internally when a float that must be quantised is NaN/inf."""
 
-    A simple whole-file overwrite is enough — only the latest run's narrative
-    is ever needed (unlike the sector/scan history, which tracks deltas
-    across runs).
+
+def _quant(value: float, ndigits: int) -> float:
+    """Round *value* to *ndigits*, normalising ``-0.0`` to ``0.0``.
+
+    Raises :class:`_NonFiniteFloat` for NaN/inf so the caller can abort the
+    digest rather than stamp one over corrupt data.
     """
-    MARKET_NARRATIVE_JSON.write_text(
-        json.dumps(narrative.model_dump(mode="json"), indent=2), encoding="utf-8"
+    if not math.isfinite(value):
+        raise _NonFiniteFloat
+    return round(value, ndigits) + 0.0
+
+
+def narrative_input_digest(
+    sector_snapshot: SectorAllocationSnapshot,
+    portfolio_weights: list[PortfolioSectorWeight],
+    cycle: MarketCycleContext,
+    breadth: MarketBreadth | None,
+    congress: list[CongressionalBuy],
+) -> str | None:
+    """Return a sha256 hex digest over the narrative's semantic market facts.
+
+    Builds an explicit canonical dict (never ``model_dump()`` wholesale),
+    digesting each collection in its incoming order because the rendered
+    narrative is order-sensitive (headline is ``shares[0]``, bullets slice
+    ``[:3]``). Floats are quantised to the precision the prose renders. A
+    non-finite float aborts the digest (returns ``None``), forcing a
+    regeneration rather than caching corrupt data. Follows the local-sha256
+    idiom in ``import_receipt_repo.canonical_row_digest``.
+    """
+    try:
+        canonical = {
+            "version": NARRATIVE_VERSION,
+            "snapshot": {
+                "total_candidates": sector_snapshot.total_candidates,
+                "lookback_days": sector_snapshot.lookback_days,
+                "shares": [
+                    {
+                        "sector": s.sector,
+                        "count": s.count,
+                        "count_share": _quant(s.count_share, 2),
+                        "strong_count": s.strong_count,
+                        "strong_share": _quant(s.strong_share, 2),
+                        "myb_count": s.myb_count,
+                    }
+                    for s in sector_snapshot.shares
+                ],
+                "deltas": [
+                    {"sector": d.sector, "delta": qd}
+                    for d in sector_snapshot.deltas
+                    if (qd := _quant(d.delta, 2)) != 0.0
+                ],
+            },
+            "weights": [
+                {
+                    "sector": w.sector,
+                    "count": w.count,
+                    "value_share": _quant(w.value_share, 2),
+                }
+                for w in portfolio_weights
+            ],
+            "cycle": {"phase": cycle.phase},
+            "breadth": None
+            if breadth is None
+            else {
+                "as_of": breadth.as_of,
+                "pct_above_200dma": _quant(breadth.pct_above_200dma, 0),
+                "smoothed_8ma": None
+                if breadth.smoothed_8ma is None
+                else _quant(breadth.smoothed_8ma, 0),
+                "trend_rising": breadth.trend_rising,
+                "bearish_signal": breadth.bearish_signal,
+                "retrieval_source": breadth.retrieval_source,
+            },
+            "congress": [
+                {
+                    "ticker": c.ticker,
+                    "sector": c.sector,
+                    "congress_net": c.congress_net,
+                    "senate_net": c.senate_net,
+                }
+                for c in congress
+            ],
+        }
+        raw = json.dumps(
+            canonical, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    except (_NonFiniteFloat, ValueError, TypeError):
+        # _NonFiniteFloat / ValueError: NaN or inf reached the digest.
+        # TypeError: a non-numeric slipped into a quantised field. Either way,
+        # abort rather than raise out of the narrative step — this module
+        # degrades to a regeneration, it never crashes the pipeline.
+        return None
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def reusable_narrative(digest: str | None) -> MarketNarrative | None:
+    """Return the stored narrative iff it is a safe verbatim reuse.
+
+    Reuse requires: a truthy *digest*, a loadable stored narrative whose
+    ``input_digest`` matches, that was not a deterministic fallback, and
+    whose ``generated_at`` parses and is within ``NARRATIVE_MAX_AGE``. The
+    version is gated implicitly — it is folded into *digest* — so it is not
+    compared again here. Any failure is a miss (``None``).
+    """
+    if not digest:
+        return None
+    stored = load_market_narrative()
+    if stored is None or stored.input_digest != digest or stored.from_fallback:
+        return None
+    try:
+        generated_at = datetime.fromisoformat(stored.generated_at)
+    except ValueError:
+        return None
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - generated_at
+    if age < timedelta(0) or age > NARRATIVE_MAX_AGE:
+        return None
+    return stored
+
+
+def save_market_narrative(narrative: MarketNarrative) -> None:
+    """Persist *narrative* atomically so re-renders reuse the same snapshot.
+
+    Writes a process-unique temp sibling then ``os.replace``s it into place.
+    The whole write is wrapped in ``try/except BaseException`` so an
+    interrupt or ENOSPC cannot orphan a ``.tmp`` file in the source tree;
+    the cleanup is itself nested so a failing ``unlink`` cannot mask the
+    original error. Mirrors ``app/agents/extraction/heat_map_cache.py``.
+    """
+    MARKET_NARRATIVE_JSON.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = MARKET_NARRATIVE_JSON.with_name(
+        f"{MARKET_NARRATIVE_JSON.name}.{os.getpid()}.{uuid4().hex}.tmp"
     )
+    try:
+        tmp_path.write_text(
+            json.dumps(narrative.model_dump(mode="json"), indent=2),
+            encoding="utf-8",
+        )
+        os.replace(tmp_path, MARKET_NARRATIVE_JSON)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+
+def resolve_market_narrative(
+    sector_snapshot: SectorAllocationSnapshot,
+    portfolio_weights: list[PortfolioSectorWeight],
+    cycle: MarketCycleContext,
+    breadth: MarketBreadth | None,
+    congress: list[CongressionalBuy],
+    anthropic_client: AnthropicNarrativeClient,
+    av_client: AlphaVantageClient | None,
+) -> tuple[MarketNarrative, bool]:
+    """Resolve the run's ``MarketNarrative``, reusing the cache when possible.
+
+    Owns the whole decision: compute the digest, try ``reusable_narrative``,
+    and on a miss run the news-fetch/LLM/deterministic-fallback ladder,
+    stamp ``input_digest``/``narrative_version``/``from_fallback``, and save.
+    Returns ``(narrative, reused)``. A reused narrative is returned verbatim
+    (original ``generated_at`` preserved) and is **not** re-saved.
+    """
+    digest = narrative_input_digest(
+        sector_snapshot, portfolio_weights, cycle, breadth, congress
+    )
+    reused = reusable_narrative(digest)
+    if reused is not None:
+        return reused, True
+
+    narrative: MarketNarrative | None = None
+    if anthropic_client.enabled:
+        top_sectors = [s.sector for s in sector_snapshot.shares[:_TOP_N]]
+        news_context = gather_news_context(top_sectors, av_client)
+        narrative = build_llm_narrative(
+            sector_snapshot,
+            portfolio_weights,
+            cycle,
+            news_context,
+            anthropic_client,
+            breadth,
+            congress,
+        )
+    from_fallback = narrative is None
+    if narrative is None:
+        narrative = build_deterministic_narrative(
+            sector_snapshot, portfolio_weights, cycle, breadth, congress
+        )
+
+    stamped = narrative.model_copy(
+        update={
+            "input_digest": digest or "",
+            "narrative_version": NARRATIVE_VERSION,
+            "from_fallback": from_fallback,
+        }
+    )
+    save_market_narrative(stamped)
+    return stamped, False
 
 
 def load_market_narrative() -> MarketNarrative | None:
