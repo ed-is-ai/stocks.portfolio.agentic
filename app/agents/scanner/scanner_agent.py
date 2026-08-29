@@ -31,6 +31,7 @@ from app.core.config import (
     SKILLS_DIR,
     WW_CONTEXT_JSON,
 )
+from app.core.market_regime import fetch_spy_market_regime
 from app.core.technical_indicators import compute_live_technicals
 from app.integrations.alpha_vantage import AlphaVantageClient
 from app.integrations.congress import CongressClient
@@ -255,23 +256,8 @@ def _fetch_spy_context() -> tuple[bool, float]:
     spy_uptrend  — True when SPY's latest close is above its 200-day SMA.
     spy_52w_return_pct — SPY percentage return over the past ~52 weeks.
     """
-    try:
-        end = datetime.today()
-        start = end - timedelta(days=PERIOD_DAYS + 60)
-        df = yf.download("SPY", start=start, end=end, progress=False, auto_adjust=True)
-        if df.empty or len(df) < 200:
-            return True, 0.0
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        close = df["Close"] if "Close" in df.columns else df["close"]
-        sma200 = float(close.rolling(200).mean().iloc[-1])
-        latest = float(close.iloc[-1])
-        oldest = float(close.iloc[max(0, len(close) - 252)])
-        spy_uptrend = latest > sma200
-        spy_52w_return = (latest / oldest - 1) * 100
-        return spy_uptrend, round(spy_52w_return, 2)
-    except Exception:
-        return True, 0.0
+    reading = fetch_spy_market_regime()
+    return reading.spy_uptrend, reading.return_52w_pct
 
 
 @retry(

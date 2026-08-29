@@ -738,6 +738,43 @@ class TestCurrencyNormalization:
         assert 40 < results[0].price < 60
 
 
+class TestFetchSpyContext:
+    """`_fetch_spy_context` delegates to the shared market-regime helper."""
+
+    def test_delegates_to_market_regime_reading(self, monkeypatch):
+        from app.agents.scanner import scanner_agent
+        from app.core.market_regime import MarketRegimeReadingV1
+
+        reading = MarketRegimeReadingV1(
+            spy_uptrend=False,
+            return_52w_pct=-3.21,
+            sma_200=123.0,
+            latest_close=100.0,
+            session_count=210,
+            is_degraded=False,
+        )
+        monkeypatch.setattr(scanner_agent, "fetch_spy_market_regime", lambda: reading)
+        assert scanner_agent._fetch_spy_context() == (False, -3.21)
+
+    @patch("yfinance.download")
+    def test_parity_with_pre_refactor_inline_formula(self, mock_download):
+        from app.agents.scanner.scanner_agent import _fetch_spy_context
+
+        closes = [100.0 + (i % 7) - (i % 3) * 1.5 for i in range(220)]
+        closes[-1] = 175.0
+        dates = pd.date_range(start="2024-01-01", periods=len(closes), freq="B")
+        df = pd.DataFrame({"Close": closes}, index=dates)
+        mock_download.return_value = df
+
+        close = df["Close"]
+        sma200 = float(close.rolling(200).mean().iloc[-1])
+        latest = float(close.iloc[-1])
+        oldest = float(close.iloc[max(0, len(close) - 252)])
+        expected = (latest > sma200, round((latest / oldest - 1) * 100, 2))
+
+        assert _fetch_spy_context() == expected
+
+
 class TestSelectValidVcpSymbols:
     """VCP intake narrows scored output to genuine valid_vcp setups (#132)."""
 
