@@ -64,24 +64,31 @@
 <div class="tbl-wrap wl-tbl-wrap">
   <table class="table table-hover align-middle wl-table" id="watchlist-table">
     <thead>
+      <tr class="wl-group-row">
+        <th class="wl-group-label wl-group-qualify" id="wl-group-qualify" colspan="10" scope="colgroup"
+            data-cols="ticker,sector,score,stage,sepa,rsi,congress,funds,canslim,momentum">Qualify</th>
+        <th class="wl-group-label wl-group-execute" id="wl-group-execute" colspan="9" scope="colgroup"
+            data-cols="rec,price,vsentry,entry,stop,targets,risk,vsstop,buy">Execute</th>
+      </tr>
       <tr>
-        <th class="wl-col wl-col-ticker" data-col="ticker"><button class="wl-sort" data-col="ticker" type="button">Ticker<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-ticker wl-qualify" data-col="ticker"><button class="wl-sort" data-col="ticker" type="button">Ticker<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-sector wl-qualify" data-col="sector"><button class="wl-sort" data-col="sector" type="button">Sector<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-score wl-qualify" data-col="score" title="Overall score /10"><button class="wl-sort" data-col="score" type="button">Score<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-stage wl-qualify" data-col="stage"><button class="wl-sort" data-col="stage" type="button">Stage<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-sepa wl-qualify" data-col="sepa" title="Minervini SEPA trend template (8 conditions)"><button class="wl-sort" data-col="sepa" type="button">SEPA<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-rsi wl-qualify" data-col="rsi" title="14-day RSI — <30 oversold, >70 overbought"><button class="wl-sort" data-col="rsi" type="button">RSI<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-congress wl-qualify" data-col="congress" title="Net congressional trades (buys − sells, trailing 12 months). ±3 net nudges the score."><button class="wl-sort" data-col="congress" type="button">Congress<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-funds wl-qualify" data-col="funds" title="Net institutional 13F filers adding vs trimming last quarter (WhaleWisdom, quarterly ~45-day lag, sparse coverage). ±3 net nudges the score."><button class="wl-sort" data-col="funds" type="button">Funds<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-canslim wl-qualify" data-col="canslim" title="CANSLIM fundamental score /14"><button class="wl-sort" data-col="canslim" type="button">CANSLIM<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-momentum wl-qualify" data-col="momentum" title="Technical momentum score /14"><button class="wl-sort" data-col="momentum" type="button">Momentum<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-rec" data-col="rec"><button class="wl-sort" data-col="rec" type="button">Rec<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-score" data-col="score" title="Overall score /10"><button class="wl-sort" data-col="score" type="button">Score<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-canslim" data-col="canslim" title="CANSLIM fundamental score /14"><button class="wl-sort" data-col="canslim" type="button">CANSLIM<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-momentum" data-col="momentum" title="Technical momentum score /14"><button class="wl-sort" data-col="momentum" type="button">Momentum<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-stage" data-col="stage"><button class="wl-sort" data-col="stage" type="button">Stage<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-sector" data-col="sector"><button class="wl-sort" data-col="sector" type="button">Sector<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-price" data-col="price"><button class="wl-sort" data-col="price" type="button">Price<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-entry" data-col="entry" title="Next entry price"><button class="wl-sort" data-col="entry" type="button">Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-vsentry" data-col="vsentry" title="Current price distance to entry"><button class="wl-sort" data-col="vsentry" type="button">vs Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-entry" data-col="entry" title="Next entry price"><button class="wl-sort" data-col="entry" type="button">Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-stop" data-col="stop" title="Stop-loss price"><button class="wl-sort" data-col="stop" type="button">Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-vsstop" data-col="vsstop" title="Cushion above stop"><button class="wl-sort" data-col="vsstop" type="button">vs Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-risk" data-col="risk" title="Position risk % (entry to stop)"><button class="wl-sort" data-col="risk" type="button">Risk %<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-targets" data-col="targets" title="1R/2R price targets &amp; reward:risk ratio"><button class="wl-sort" data-col="targets" type="button">Targets<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-rsi" data-col="rsi"><button class="wl-sort" data-col="rsi" type="button">RSI<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-sepa" data-col="sepa" title="Minervini SEPA trend template (8 conditions)"><button class="wl-sort" data-col="sepa" type="button">SEPA<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-congress" data-col="congress" title="Net congressional trades (buys − sells, trailing 12 months). ±3 net nudges the score."><button class="wl-sort" data-col="congress" type="button">Congress<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-risk" data-col="risk" title="Position risk % (entry to stop)"><button class="wl-sort" data-col="risk" type="button">Risk %<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-vsstop" data-col="vsstop" title="Cushion above stop"><button class="wl-sort" data-col="vsstop" type="button">vs Stop<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-buy" data-col="buy"></th>
       </tr>
     </thead>
@@ -109,6 +116,9 @@
          chamber-combined totals; Senate counts are a subset shown in the tooltip. #}
       {% set has_congress = r.congress_buys is not none or r.congress_sells is not none %}
       {% set congress_net = (r.congress_buys or 0) - (r.congress_sells or 0) if has_congress else none %}
+      {# Net institutional 13F flow — funds adding minus trimming last quarter.
+         The scanner agent precomputes the net (unlike congress). #}
+      {% set has_funds = r.funds_net is not none %}
       {# Recommendation bucket — precomputed in Python (app.core.recommendation)
          so the Rec column, filter buttons, and AlertAgent's email triggers
          all derive from the same thresholds. See #58. #}
@@ -122,7 +132,7 @@
           data-market="{{ 'uk' if is_uk else 'us' }}">
 
         <!-- Ticker -->
-        <td class="wl-col wl-col-ticker" data-col="ticker" data-val="{{ r.ticker }}">
+        <td class="wl-col wl-col-ticker wl-qualify" data-col="ticker" data-val="{{ r.ticker }}">
           <a href="{{ yahoo_url }}" target="_blank" rel="noopener" class="ticker">{{ r.ticker }}</a>
           {% if a and a.fresh_breakout %}
             <span class="badge-vcp" title="VCP breakout — entry zone just transitioned to broken_out this run">VCP</span>
@@ -132,6 +142,105 @@
           {% endif %}
           {% if is_uk %}
             <span class="badge-uk" title="London Stock Exchange (LSE)">🇬🇧</span>
+          {% endif %}
+        </td>
+
+        <!-- Sector -->
+        <td class="wl-col wl-col-sector wl-qualify" data-col="sector" data-val="{{ r.sector or '' }}"><span class="text-muted" style="font-size:0.76rem">{{ r.sector or "" }}</span></td>
+
+        <!-- Score /10 -->
+        <td class="wl-col wl-col-score wl-qualify" data-col="score" data-val="{{ a.score if a else '' }}">
+          {% if a %}
+            {% set s = a.score %}
+            <span class="sc sc-band-{{ s }} {% if s >= 8 %}sc-hi{% elif s >= 5 %}sc-mid{% else %}sc-lo{% endif %}">{{ s }}/10</span>
+          {% endif %}
+        </td>
+
+        <!-- Stage -->
+        <td class="wl-col wl-col-stage wl-qualify" data-col="stage" data-val="{{ stage_num }}">
+          {% if a %}
+            {% set stg = a.stage %}
+            <span class="stage {% if stg == 'Stage 1' %}stage-1{% elif stg == 'Stage 2' %}stage-2{% elif stg == 'Stage 3' %}stage-3{% elif stg == 'Stage 4' %}stage-4{% endif %}">{{ stg }}</span>
+          {% endif %}
+        </td>
+
+        <!-- SEPA -->
+        <td class="wl-col wl-col-sepa wl-qualify" data-col="sepa" data-val="{{ sepa_count if a and a.sepa_template else '' }}">
+          {% if a and a.sepa_template %}
+            {% set t = a.sepa_template %}
+            {% set sepa_tip = "P>SMA150&200:" ~ ("✓" if t.above_150_200 else "✗")
+                ~ " | SMA150>200:" ~ ("✓" if t.sma150_above_200 else "✗")
+                ~ " | SMA200↑:" ~ ("✓" if t.sma200_rising else "✗")
+                ~ " | SMA50>150&200:" ~ ("✓" if t.sma50_above_150_200 else "✗")
+                ~ " | ≥25%abvLow:" ~ ("✓" if t.above_25pct_of_low else "✗")
+                ~ " | ≤25%frmHigh:" ~ ("✓" if t.within_25pct_of_high else "✗")
+                ~ " | RSLeader:" ~ ("✓" if t.rs_leader else "✗")
+                ~ " | P>SMA50:" ~ ("✓" if t.above_sma50 else "✗") %}
+            <span class="sc {% if sepa_count == 8 %}sc-hi{% elif sepa_count >= 6 %}sc-mid{% else %}sc-lo{% endif %}"
+                  title="{{ sepa_tip }}" style="cursor:help; min-width:2.2rem">{{ sepa_count }}/8</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- RSI -->
+        <td class="wl-col wl-col-rsi wl-qualify" data-col="rsi" data-val="{{ dval(r.rsi14) if r.rsi14 else '' }}">
+          {% if r.rsi14 %}
+            {% set rsi_v = r.rsi14 %}
+            {% set rsi_pos = [[rsi_v, 0]|max, 100]|min %}
+            <span class="wl-rsi {% if rsi_v > 70 %}wl-rsi-hot{% elif rsi_v < 30 %}wl-rsi-cold{% endif %}" title="RSI {{ rsi_v }} — 30 oversold / 70 overbought">
+              <span class="wl-rsi-track" aria-hidden="true"><span class="wl-rsi-marker" style="left:{{ rsi_pos }}%"></span></span>
+              <span class="wl-rsi-val text-muted">{{ rsi_v }}</span>
+            </span>
+          {% endif %}
+        </td>
+
+        <!-- Congressional trading -->
+        <td class="wl-col wl-col-congress wl-qualify" data-col="congress" data-val="{{ congress_net if congress_net is not none else '' }}">
+          {% if congress_net is not none %}
+            {% set c_tip = "Congress: " ~ (r.congress_buys or 0) ~ " buys / " ~ (r.congress_sells or 0) ~ " sells (12mo)"
+                ~ " | Senate: " ~ (r.senate_buys or 0) ~ " buys / " ~ (r.senate_sells or 0) ~ " sells" %}
+            <span class="cong {% if congress_net > 0 %}pos{% elif congress_net < 0 %}neg{% else %}text-muted{% endif %}"
+                  data-bs-toggle="tooltip" title="{{ c_tip }}"
+                  style="cursor:help; white-space:nowrap; font-size:0.76rem">
+              <i class="bi bi-bank" aria-hidden="true"></i>
+              {{ '+' if congress_net > 0 else '' }}{{ congress_net }}
+            </span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Institutional 13F flow -->
+        <td class="wl-col wl-col-funds wl-qualify" data-col="funds" data-val="{{ r.funds_net if has_funds else '' }}">
+          {% if has_funds %}
+            {% set f_tip = "Funds: " ~ (r.funds_buying or 0) ~ " adding / " ~ (r.funds_selling or 0) ~ " trimming (last quarter 13F)" %}
+            <span class="fund {% if r.funds_net > 0 %}pos{% elif r.funds_net < 0 %}neg{% else %}text-muted{% endif %}"
+                  data-bs-toggle="tooltip" title="{{ f_tip }}"
+                  style="cursor:help; white-space:nowrap; font-size:0.76rem">
+              <i class="bi bi-buildings" aria-hidden="true"></i>
+              {{ '+' if r.funds_net > 0 else '' }}{{ r.funds_net }}
+            </span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- CANSLIM /14 -->
+        <td class="wl-col wl-col-canslim wl-qualify" data-col="canslim" data-val="{{ canslim_val }}">
+          {% if canslim_val != '' %}
+            <span class="sc {% if canslim_val >= 10 %}sc-hi{% elif canslim_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ canslim_val }}/14</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
+        <!-- Momentum /14 -->
+        <td class="wl-col wl-col-momentum wl-qualify" data-col="momentum" data-val="{{ momentum_val }}">
+          {% if momentum_val != '' %}
+            <span class="sc {% if momentum_val >= 10 %}sc-hi{% elif momentum_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ momentum_val }}/14</span>
+          {% else %}
+            <span class="text-muted">—</span>
           {% endif %}
         </td>
 
@@ -160,54 +269,8 @@
           {% endif %}
         </td>
 
-        <!-- Score /10 -->
-        <td class="wl-col wl-col-score" data-col="score" data-val="{{ a.score if a else '' }}">
-          {% if a %}
-            {% set s = a.score %}
-            <span class="sc {% if s >= 8 %}sc-hi{% elif s >= 5 %}sc-mid{% else %}sc-lo{% endif %}">{{ s }}/10</span>
-          {% endif %}
-        </td>
-
-        <!-- CANSLIM /14 -->
-        <td class="wl-col wl-col-canslim" data-col="canslim" data-val="{{ canslim_val }}">
-          {% if canslim_val != '' %}
-            <span class="sc {% if canslim_val >= 10 %}sc-hi{% elif canslim_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ canslim_val }}/14</span>
-          {% else %}
-            <span class="text-muted">—</span>
-          {% endif %}
-        </td>
-
-        <!-- Momentum /14 -->
-        <td class="wl-col wl-col-momentum" data-col="momentum" data-val="{{ momentum_val }}">
-          {% if momentum_val != '' %}
-            <span class="sc {% if momentum_val >= 10 %}sc-hi{% elif momentum_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ momentum_val }}/14</span>
-          {% else %}
-            <span class="text-muted">—</span>
-          {% endif %}
-        </td>
-
-        <!-- Stage -->
-        <td class="wl-col wl-col-stage" data-col="stage" data-val="{{ stage_num }}">
-          {% if a %}
-            {% set stg = a.stage %}
-            <span class="stage {% if stg == 'Stage 1' %}stage-1{% elif stg == 'Stage 2' %}stage-2{% elif stg == 'Stage 3' %}stage-3{% elif stg == 'Stage 4' %}stage-4{% endif %}">{{ stg }}</span>
-          {% endif %}
-        </td>
-
-        <!-- Sector -->
-        <td class="wl-col wl-col-sector" data-col="sector" data-val="{{ r.sector or '' }}"><span class="text-muted" style="font-size:0.76rem">{{ r.sector or "" }}</span></td>
-
         <!-- Price -->
         <td data-col="price" data-val="{{ dval(r.price) }}" class="wl-col wl-col-price fw-semibold">{{ sym }}{{ "%.2f"|format(r.price) }}</td>
-
-        <!-- Entry price -->
-        <td class="wl-col wl-col-entry" data-col="entry" data-val="{{ dval(a.entry_price) if a and a.entry_price else '' }}">
-          {% if a and a.entry_price %}
-            <span class="text-muted">{{ sym }}{{ "%.2f"|format(a.entry_price) }}</span>
-          {% else %}
-            <span class="text-muted">—</span>
-          {% endif %}
-        </td>
 
         <!-- Current price vs entry -->
         <td class="wl-col wl-col-vsentry" data-col="vsentry" data-val="{{ dval(vsentry_val) }}">
@@ -229,36 +292,19 @@
           {% endif %}
         </td>
 
+        <!-- Entry price -->
+        <td class="wl-col wl-col-entry" data-col="entry" data-val="{{ dval(a.entry_price) if a and a.entry_price else '' }}">
+          {% if a and a.entry_price %}
+            <span class="text-muted">{{ sym }}{{ "%.2f"|format(a.entry_price) }}</span>
+          {% else %}
+            <span class="text-muted">—</span>
+          {% endif %}
+        </td>
+
         <!-- Stop price -->
         <td class="wl-col wl-col-stop" data-col="stop" data-val="{{ dval(a.stop_loss) if a and a.stop_loss else '' }}">
           {% if a and a.stop_loss %}
             <span class="text-muted">{{ sym }}{{ "%.2f"|format(a.stop_loss) }}</span>
-          {% else %}
-            <span class="text-muted">—</span>
-          {% endif %}
-        </td>
-
-        <!-- Cushion above stop -->
-        <td class="wl-col wl-col-vsstop" data-col="vsstop" data-val="{{ dval(vsstop_val) }}">
-          {% if vsstop_val != '' %}
-            {% set vs_s = vsstop_val %}
-            {% if vs_s < 3 %}
-              <span class="dl dl-danger">{{ "%.1f"|format(vs_s) }}%</span>
-            {% elif vs_s < 8 %}
-              <span class="dl dl-ok">{{ "%.1f"|format(vs_s) }}%</span>
-            {% else %}
-              <span class="text-muted">{{ "%.1f"|format(vs_s) }}%</span>
-            {% endif %}
-          {% else %}
-            <span class="text-muted">—</span>
-          {% endif %}
-        </td>
-
-        <!-- Position risk % -->
-        <td class="wl-col wl-col-risk" data-col="risk" data-val="{{ dval(risk_val) }}">
-          {% if risk_val != '' %}
-            {% set risk = risk_val %}
-            <span class="{% if risk > 20 %}lo{% elif risk > 12 %}text-warning fw-semibold{% endif %}">{{ "%.1f"|format(risk) }}%</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
@@ -277,43 +323,27 @@
           {% endif %}
         </td>
 
-        <!-- RSI -->
-        <td class="wl-col wl-col-rsi" data-col="rsi" data-val="{{ dval(r.rsi14) if r.rsi14 else '' }}">
-          {% if r.rsi14 %}
-            <span style="font-size:0.76rem" class="{% if r.rsi14 > 70 %}neg{% elif r.rsi14 < 30 %}pos{% else %}text-muted{% endif %}">{{ r.rsi14 }}</span>
-          {% endif %}
-        </td>
-
-        <!-- SEPA -->
-        <td class="wl-col wl-col-sepa" data-col="sepa" data-val="{{ sepa_count if a and a.sepa_template else '' }}">
-          {% if a and a.sepa_template %}
-            {% set t = a.sepa_template %}
-            {% set sepa_tip = "P>SMA150&200:" ~ ("✓" if t.above_150_200 else "✗")
-                ~ " | SMA150>200:" ~ ("✓" if t.sma150_above_200 else "✗")
-                ~ " | SMA200↑:" ~ ("✓" if t.sma200_rising else "✗")
-                ~ " | SMA50>150&200:" ~ ("✓" if t.sma50_above_150_200 else "✗")
-                ~ " | ≥25%abvLow:" ~ ("✓" if t.above_25pct_of_low else "✗")
-                ~ " | ≤25%frmHigh:" ~ ("✓" if t.within_25pct_of_high else "✗")
-                ~ " | RSLeader:" ~ ("✓" if t.rs_leader else "✗")
-                ~ " | P>SMA50:" ~ ("✓" if t.above_sma50 else "✗") %}
-            <span class="sc {% if sepa_count == 8 %}sc-hi{% elif sepa_count >= 6 %}sc-mid{% else %}sc-lo{% endif %}"
-                  title="{{ sepa_tip }}" style="cursor:help; min-width:2.2rem">{{ sepa_count }}/8</span>
+        <!-- Position risk % -->
+        <td class="wl-col wl-col-risk" data-col="risk" data-val="{{ dval(risk_val) }}">
+          {% if risk_val != '' %}
+            {% set risk = risk_val %}
+            <span class="{% if risk > 20 %}lo{% elif risk > 12 %}text-warning fw-semibold{% endif %}">{{ "%.1f"|format(risk) }}%</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
         </td>
 
-        <!-- Congressional trading -->
-        <td class="wl-col wl-col-congress" data-col="congress" data-val="{{ congress_net if congress_net is not none else '' }}">
-          {% if congress_net is not none %}
-            {% set c_tip = "Congress: " ~ (r.congress_buys or 0) ~ " buys / " ~ (r.congress_sells or 0) ~ " sells (12mo)"
-                ~ " | Senate: " ~ (r.senate_buys or 0) ~ " buys / " ~ (r.senate_sells or 0) ~ " sells" %}
-            <span class="cong {% if congress_net > 0 %}pos{% elif congress_net < 0 %}neg{% else %}text-muted{% endif %}"
-                  data-bs-toggle="tooltip" title="{{ c_tip }}"
-                  style="cursor:help; white-space:nowrap; font-size:0.76rem">
-              <i class="bi bi-bank" aria-hidden="true"></i>
-              {{ '+' if congress_net > 0 else '' }}{{ congress_net }}
-            </span>
+        <!-- Cushion above stop -->
+        <td class="wl-col wl-col-vsstop" data-col="vsstop" data-val="{{ dval(vsstop_val) }}">
+          {% if vsstop_val != '' %}
+            {% set vs_s = vsstop_val %}
+            {% if vs_s < 3 %}
+              <span class="dl dl-danger">{{ "%.1f"|format(vs_s) }}%</span>
+            {% elif vs_s < 8 %}
+              <span class="dl dl-ok">{{ "%.1f"|format(vs_s) }}%</span>
+            {% else %}
+              <span class="text-muted">{{ "%.1f"|format(vs_s) }}%</span>
+            {% endif %}
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}

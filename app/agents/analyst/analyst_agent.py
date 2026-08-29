@@ -364,6 +364,36 @@ def _congress_bias(stock: StockRecord) -> int:
     return 0
 
 
+#: Net institutional 13F filers (funds adding minus funds trimming last quarter)
+#: at or beyond which the rule-based score is nudged by a point. Matches the
+#: congressional threshold so a couple of stray filings don't move the score.
+_FUNDS_NET_BIAS_THRESHOLD = 3
+
+
+def _funds_net(stock: StockRecord) -> int | None:
+    """Net institutional 13F flow (funds adding minus trimming) last quarter.
+
+    Uses the scanner-agent-precomputed ``funds_net``. Returns None when no
+    WhaleWisdom 13F data was fetched for the ticker.
+    """
+    return stock.funds_net
+
+
+def _funds_bias(stock: StockRecord) -> int:
+    """Score nudge from institutional flow: +1 net accumulation, -1 net distribution.
+
+    Returns 0 when there's no data or flow is too balanced to be a signal.
+    """
+    net = _funds_net(stock)
+    if net is None:
+        return 0
+    if net >= _FUNDS_NET_BIAS_THRESHOLD:
+        return 1
+    if net <= -_FUNDS_NET_BIAS_THRESHOLD:
+        return -1
+    return 0
+
+
 def _compute_vcp_stop(
     entry_price: float,
     handle_low: float | None,
@@ -789,7 +819,18 @@ class AnalystAgent(Agent):
         elif congress_bias < 0:
             net = _congress_net(stock)
             risks.append(f"Congress net selling ({net} txns, 12mo)")
-        score = max(1, min(10, base_score + vcp_bonus + congress_bias))
+        funds_bias = _funds_bias(stock)
+        if funds_bias > 0:
+            funds_net = _funds_net(stock)
+            strengths.append(
+                f"Institutions accumulating (+{funds_net} net filers, last quarter)"
+            )
+        elif funds_bias < 0:
+            funds_net = _funds_net(stock)
+            risks.append(
+                f"Institutions distributing ({funds_net} net filers, last quarter)"
+            )
+        score = max(1, min(10, base_score + vcp_bonus + congress_bias + funds_bias))
 
         # Entry price from VCP pivot; stop from pivot proximity calculator
         pivot = vcp["vcp"].get("pivot_price") if vcp else None

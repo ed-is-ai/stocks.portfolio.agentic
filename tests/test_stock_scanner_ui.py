@@ -81,6 +81,9 @@ def _sample_records() -> list[StockRecord]:
         congress_sells=13,
         senate_buys=1,
         senate_sells=4,
+        funds_buying=12,
+        funds_selling=4,
+        funds_net=8,
         analysis=analysis,
     )
     without_analysis = StockRecord(
@@ -148,6 +151,7 @@ SORTABLE_COLUMNS = (
     "rsi",
     "sepa",
     "congress",
+    "funds",
 )
 
 
@@ -261,6 +265,54 @@ def test_stock_scanner_congress_empty_when_no_data() -> None:
     assert 'data-col="congress" data-val=""' in html
 
 
+def test_stock_scanner_funds_column_renders_net_and_tooltip() -> None:
+    html = _render_stock_scanner()
+    # Net comes straight from the precomputed funds_net (8); the tooltip breaks
+    # out adding vs trimming filers.
+    assert 'data-col="funds" data-val="8"' in html
+    assert "Funds: 12 adding / 4 trimming (last quarter 13F)" in html
+    assert "wl-col-funds wl-qualify" in html
+
+
+def test_stock_scanner_funds_empty_when_no_data() -> None:
+    html = _render_stock_scanner()
+    # The analysis-less TSLA row has no 13F data → empty, sorts last like Congress.
+    assert 'data-col="funds" data-val=""' in html
+
+
+def test_stock_scanner_funds_column_is_sortable_and_grouped() -> None:
+    html = _render_stock_scanner()
+    assert 'class="wl-sort" data-col="funds"' in html
+    # #394 Qualify/Execute group-label row.
+    assert 'class="wl-group-label wl-group-qualify"' in html
+    assert 'class="wl-group-label wl-group-execute"' in html
+
+
+def test_stock_scanner_group_headers_declare_bands_and_js_resyncs_colspan() -> None:
+    html = _render_stock_scanner()
+    # Each group <th> carries an id and the data-col keys in its band so the
+    # controller can recompute colSpan after hiding columns.
+    assert 'id="wl-group-qualify"' in html
+    assert 'id="wl-group-execute"' in html
+    assert (
+        'data-cols="ticker,sector,score,stage,sepa,rsi,congress,funds,canslim,momentum"'
+        in html
+    )
+    assert 'data-cols="rec,price,vsentry,entry,stop,targets,risk,vsstop,buy"' in html
+
+    js = (ROOT / "app" / "api" / "static" / "js" / "watchlist.js").read_text(
+        encoding="utf-8"
+    )
+    assert "tr.wl-group-row th[data-cols]" in js
+    assert "th.colSpan = cols.filter((c) => !hidden.has(c)).length" in js
+
+
+def test_stock_scanner_rsi_meter_replaces_bare_number() -> None:
+    html = _render_stock_scanner()
+    assert "wl-rsi-track" in html
+    assert "wl-rsi-marker" in html
+
+
 def test_stock_scanner_toolbar_exposes_search_and_control_mount() -> None:
     html = _render_stock_scanner()
     assert 'id="wl-search"' in html
@@ -293,7 +345,8 @@ def test_stock_scanner_table_wrap_and_ticker_buy_columns_are_sticky() -> None:
     html = _render_stock_scanner()
     assert 'class="tbl-wrap wl-tbl-wrap"' in html
     assert "wl-table" in html
-    assert 'class="wl-col wl-col-ticker" data-col="ticker"' in html
+    # #394 adds a wl-qualify band class to the Qualify-side cells.
+    assert 'class="wl-col wl-col-ticker wl-qualify" data-col="ticker"' in html
     assert 'class="wl-col wl-col-buy" data-col="buy"' in html
 
     css = (ROOT / "app" / "api" / "static" / "css" / "watchlist.css").read_text(
@@ -324,9 +377,13 @@ def test_stock_scanner_js_persists_state_and_seeds_presets() -> None:
     )
     assert "wl-state-v1" in js
     assert "wl-presets-v1" in js
-    assert "marketNarrativeCollapsed: false" in js
+    assert "marketNarrativeCollapsed: true" in js
     assert "state.marketNarrativeCollapsed = !state.marketNarrativeCollapsed" in js
     assert "applyMarketNarrative();" in js
+    # #394 density toggle persisted in the same wl-state-v1 object.
+    assert "density: 'comfortable'" in js
+    assert "wl-density-toggle" in js
+    assert "wl-compact" in js
     assert "htmx:afterSettle" in js
     for preset in ("Buy-ready", "UK breakouts", "Low-risk Stage 2"):
         assert preset in js, f"missing built-in preset {preset}"
@@ -350,10 +407,13 @@ def test_market_narrative_renders_accessible_collapsible_details() -> None:
 
     assert 'id="market-narrative"' in html
     assert 'id="market-narrative-toggle"' in html
+    # Rendered expanded server-side so the details stay reachable without JS;
+    # the controller collapses on load when state.marketNarrativeCollapsed.
     assert 'aria-expanded="true"' in html
     assert 'aria-controls="market-narrative-details"' in html
     assert 'aria-label="Collapse market narrative"' in html
     assert 'id="market-narrative-details"' in html
+    assert 'id="market-narrative-details" hidden' not in html
     assert "Breadth is improving" in html
     assert "Technology leads the current scan." in html
 
@@ -630,7 +690,7 @@ def test_stock_scanner_frontend_assets_are_served() -> None:
 def test_dashboard_cache_busts_watchlist_controller() -> None:
     markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
 
-    assert 'src="/static/js/watchlist.js?v=20260802-1"' in markup
+    assert 'src="/static/js/watchlist.js?v=20260829-1"' in markup
     assert 'src="/static/js/watchlist.js"' not in markup
 
 

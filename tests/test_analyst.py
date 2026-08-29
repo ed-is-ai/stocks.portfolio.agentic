@@ -10,6 +10,8 @@ from app.agents.analyst.analyst_agent import (
     AnalystAgent,
     _congress_bias,
     _congress_net,
+    _funds_bias,
+    _funds_net,
     _sepa_assessment,
     _select_multiyear_breakout,
     recommendation,
@@ -573,3 +575,110 @@ class TestCongressSignal:
         assert buying.score >= neutral.score
         if neutral.score < 10:
             assert buying.score == neutral.score + 1
+
+
+class TestFundsSignal:
+    """Institutional 13F net flow feeds an independent score nudge (#393)."""
+
+    def test_net_none_when_no_data(self):
+        """No 13F data yields a None net (not zero)."""
+        assert _funds_net(_make_scan()) is None
+
+    def test_net_uses_precomputed_value(self):
+        """Net is the scanner-agent-precomputed ``funds_net``."""
+        assert _funds_net(_make_scan(funds_net=8)) == 8
+
+    def test_bias_positive_on_net_accumulation(self):
+        """Net accumulation at/above the threshold nudges the score up by one."""
+        assert _funds_bias(_make_scan(funds_net=3)) == 1
+
+    def test_bias_negative_on_net_distribution(self):
+        """Net distribution at/beyond the threshold nudges the score down by one."""
+        assert _funds_bias(_make_scan(funds_net=-6)) == -1
+
+    def test_bias_neutral_when_balanced(self):
+        """Light net flow is not a signal."""
+        assert _funds_bias(_make_scan(funds_net=2)) == 0
+
+    def test_bias_neutral_when_no_data(self):
+        """Missing data never moves the score."""
+        assert _funds_bias(_make_scan()) == 0
+
+    def test_score_reflects_funds_bias(self):
+        """Two identical stocks differ by the institutional net-flow nudge."""
+        agent = AnalystAgent()
+        base = dict(
+            price=100.0,
+            sma10=95.0,
+            sma30=90.0,
+            sma50=85.0,
+            sma150=75.0,
+            sma200=70.0,
+            rsi14=70.0,
+            rel_volume=1.2,
+            pct_from_52w_high=-5.0,
+            pct_change_week=3.0,
+        )
+        neutral = agent.rule_based_score(_make_scan(**base))
+        accumulating = agent.rule_based_score(_make_scan(**base, funds_net=9))
+        assert accumulating.score >= neutral.score
+        if neutral.score < 10:
+            assert accumulating.score == neutral.score + 1
+
+    def test_combined_congress_and_funds_stay_within_bounds(self):
+        """funds_bias stacks on top of congress_bias, then the sum clamps 1..10."""
+        agent = AnalystAgent()
+
+        # Mid-range base (score 6): each positive nudge lands as its own point.
+        mid = dict(
+            price=100.0,
+            sma10=95.0,
+            sma30=90.0,
+            sma50=85.0,
+            sma150=75.0,
+            sma200=70.0,
+            rsi14=70.0,
+            rel_volume=1.2,
+            pct_from_52w_high=-5.0,
+            pct_change_week=3.0,
+        )
+        congress_only = agent.rule_based_score(
+            _make_scan(**mid, congress_buys=9, congress_sells=0)
+        )
+        congress_and_funds = agent.rule_based_score(
+            _make_scan(**mid, congress_buys=9, congress_sells=0, funds_net=9)
+        )
+        # Adding strong institutional accumulation raises the score a further
+        # point beyond the congressional nudge — neither term is clamped here.
+        assert congress_only.score == congress_and_funds.score - 1
+        assert congress_and_funds.score > congress_only.score
+
+        # Full-marks base (CANSLIM 14 + momentum 14 -> base_score 10). Both
+        # nudges pushing up sum to 12 pre-clamp but the score caps at 10;
+        # both pushing down subtract the full two points (10 -> 8).
+        maxed = dict(
+            price=100.0,
+            sma10=98.0,
+            sma30=95.0,
+            sma50=90.0,
+            sma150=78.0,
+            sma200=70.0,
+            rsi14=72.0,
+            rel_volume=3.0,
+            pct_from_52w_high=-1.0,
+            pct_change_week=12.0,
+            eps_growth=0.9,
+            annual_eps_growth=0.9,
+            rel_strength_vs_spy=40.0,
+            inst_ownership_pct=0.7,
+            spy_uptrend=True,
+        )
+        assert agent.rule_based_score(_make_scan(**maxed)).score == 10
+        both_up = agent.rule_based_score(
+            _make_scan(**maxed, congress_buys=9, congress_sells=0, funds_net=9)
+        )
+        both_down = agent.rule_based_score(
+            _make_scan(**maxed, congress_buys=0, congress_sells=9, funds_net=-9)
+        )
+        assert both_up.score == 10
+        assert both_down.score == 8

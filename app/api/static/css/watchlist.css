@@ -455,3 +455,85 @@ a.ticker:focus-visible,
 }
 .settings-field { margin-bottom: 0.6rem; }
 .settings-field .form-label { display: flex; align-items: center; gap: 0.4rem; }
+
+/* ── #392 Funds (institutional 13F) column — mirrors Congress ───── */
+#watchlist-table th.wl-col-funds,
+#watchlist-table td.wl-col-funds,
+#watchlist-table th.wl-col-congress,
+#watchlist-table td.wl-col-congress {
+  text-align: center;
+  white-space: nowrap;
+}
+.fund { display: inline-flex; align-items: center; gap: 0.25rem; }
+
+/* ── #394 Qualify / Execute group labels ──────────────────────────
+ * The group row scrolls with the body (static); the real header row
+ * below it keeps its sticky top:0 behaviour. */
+#watchlist-table thead tr.wl-group-row th {
+  position: static;
+  top: auto;
+  z-index: 1;
+  text-align: left;
+  font-size: var(--fs-2xs);
+  letter-spacing: 0.08em;
+  padding: 0.3rem 0.75rem;
+  background: var(--primary-2);
+  color: rgba(255, 255, 255, 0.72);
+}
+#watchlist-table thead tr.wl-group-row th.wl-group-execute {
+  border-left: 2px solid var(--accent-2);
+}
+
+/* Qualify-band cell tint — a faint wash separating signal columns
+ * from the trade-execution math. */
+#watchlist-table td.wl-qualify { background: color-mix(in srgb, var(--blue-bg) 35%, transparent); }
+#watchlist-table tbody tr:hover td.wl-qualify { background: color-mix(in srgb, var(--blue-bg) 55%, var(--surface)); }
+#watchlist-table td.wl-col-ticker.wl-qualify { background: var(--card); }
+#watchlist-table tbody tr:hover td.wl-col-ticker.wl-qualify { background: var(--surface); }
+
+/* ── #394 Score-band pill tint (10/9/8…) ─────────────────────────
+ * Layered on top of the existing sc-hi/mid/lo backgrounds. */
+.sc-band-10, .sc-band-9 { box-shadow: inset 0 0 0 1px var(--green); }
+.sc-band-8, .sc-band-7 { box-shadow: inset 0 0 0 1px var(--amber); }
+.sc-band-6, .sc-band-5 { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--amber) 55%, transparent); }
+.sc-band-4, .sc-band-3, .sc-band-2, .sc-band-1 { box-shadow: inset 0 0 0 1px var(--red); }
+
+/* ── #394 Inline RSI meter ───────────────────────────────────────── */
+.wl-rsi { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.76rem; }
+.wl-rsi-track {
+  position: relative;
+  width: 3.2rem;
+  height: 0.42rem;
+  border-radius: 0.25rem;
+  background: linear-gradient(
+    to right,
+    var(--blue-bg) 0%,
+    var(--blue-bg) 30%,
+    var(--border) 30%,
+    var(--border) 70%,
+    var(--amber-bg) 70%,
+    var(--red-bg) 100%
+  );
+}
+.wl-rsi-marker {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 0.72rem;
+  margin-left: -1px;
+  transform: translateY(-50%);
+  background: var(--primary);
+}
+.wl-rsi-hot .wl-rsi-marker { background: var(--red); }
+.wl-rsi-cold .wl-rsi-marker { background: var(--blue); }
+.wl-rsi-val { font-variant-numeric: tabular-nums; }
+.wl-rsi-cold .wl-rsi-val { color: var(--blue); }
+.wl-rsi-hot .wl-rsi-val { color: var(--red); }
+
+/* ── #394 Compact density ────────────────────────────────────────── */
+#watchlist-table.wl-compact tbody td { padding: 0.14rem 0.55rem; font-size: var(--fs-2xs); }
+#watchlist-table.wl-compact thead th { padding: 0.34rem 0.55rem; }
+#watchlist-table.wl-compact .cell-sub,
+#watchlist-table.wl-compact .wl-rsi-track { display: none; }
+/* .wl-density is also a .btn-filter, so .btn-filter.active supplies the
+ * active styling — no separate rule needed here. */

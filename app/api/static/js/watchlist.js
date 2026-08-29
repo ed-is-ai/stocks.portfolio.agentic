@@ -18,27 +18,29 @@
     { col: 'vsentry', label: 'vs Entry %', min: -50, max: 50 },
     { col: 'sepa', label: 'SEPA', min: 0, max: 8 },
     { col: 'congress', label: 'Congress net', min: -20, max: 20 },
+    { col: 'funds', label: 'Funds net', min: -20, max: 20 },
   ];
 
   // Every column in table order. `locked` columns can never be hidden.
   const COLUMNS = [
     { col: 'ticker', label: 'Ticker', locked: true },
-    { col: 'rec', label: 'Rec' },
+    { col: 'sector', label: 'Sector' },
     { col: 'score', label: 'Score' },
+    { col: 'stage', label: 'Stage' },
+    { col: 'sepa', label: 'SEPA' },
+    { col: 'rsi', label: 'RSI' },
+    { col: 'congress', label: 'Congress' },
+    { col: 'funds', label: 'Funds' },
     { col: 'canslim', label: 'CANSLIM' },
     { col: 'momentum', label: 'Momentum' },
-    { col: 'stage', label: 'Stage' },
-    { col: 'sector', label: 'Sector' },
+    { col: 'rec', label: 'Rec' },
     { col: 'price', label: 'Price' },
-    { col: 'entry', label: 'Entry' },
     { col: 'vsentry', label: 'vs Entry' },
+    { col: 'entry', label: 'Entry' },
     { col: 'stop', label: 'Stop' },
-    { col: 'vsstop', label: 'vs Stop' },
-    { col: 'risk', label: 'Risk %' },
     { col: 'targets', label: 'Targets' },
-    { col: 'rsi', label: 'RSI' },
-    { col: 'sepa', label: 'SEPA' },
-    { col: 'congress', label: 'Congress' },
+    { col: 'risk', label: 'Risk %' },
+    { col: 'vsstop', label: 'vs Stop' },
     { col: 'buy', label: 'Action', locked: true },
   ];
 
@@ -92,7 +94,8 @@
     sortKeys: [],
     hidden: DEFAULT_HIDDEN.slice(),
     presetId: null,
-    marketNarrativeCollapsed: false,
+    marketNarrativeCollapsed: true,
+    density: 'comfortable',
   });
 
   let state = loadState();
@@ -179,6 +182,35 @@
         cell.classList.toggle('wl-hidden', on);
       });
     });
+    // Keep the Qualify/Execute group-label spans in step with the columns
+    // that are actually visible (some are hidden by default).
+    document
+      .querySelectorAll('#watchlist-table thead tr.wl-group-row th[data-cols]')
+      .forEach((th) => {
+        const cols = (th.dataset.cols || '').split(',').filter(Boolean);
+        th.colSpan = cols.filter((c) => !hidden.has(c)).length;
+      });
+  }
+
+  // ── Density (Comfortable / Compact) ────────────────────────────
+  function applyDensity() {
+    const compact = state.density === 'compact';
+    const t = table();
+    if (t) t.classList.toggle('wl-compact', compact);
+    const wrap = document.querySelector('.wl-tbl-wrap');
+    if (wrap) wrap.classList.toggle('wl-compact', compact);
+    const btn = document.getElementById('wl-density-toggle');
+    if (btn) {
+      btn.setAttribute('aria-pressed', String(compact));
+      btn.classList.toggle('active', compact);
+      btn.innerHTML = densityLabel(compact);
+    }
+  }
+
+  // Icon reflects state: collapsed rows when compact, expanded when not.
+  function densityLabel(compact) {
+    const icon = compact ? 'bi-arrows-collapse' : 'bi-arrows-expand';
+    return '<i class="bi ' + icon + '"></i> ' + (compact ? 'Compact' : 'Comfortable');
   }
 
   // ── Sorting ────────────────────────────────────────────────────
@@ -293,6 +325,7 @@
   // ── Apply everything + persist ─────────────────────────────────
   function apply() {
     applyColumns();
+    applyDensity();
     applySort();
     applyFilters();
     saveState();
@@ -416,6 +449,18 @@
     adv.appendChild(dropdown('Filters', 'sliders', buildRangesPanel()));
     adv.appendChild(dropdown('Columns', 'layout-three-columns', buildColumnsPanel()));
     adv.appendChild(dropdown('Views', 'bookmark-star', buildViewsPanel()));
+    adv.appendChild(el('button', {
+      class: 'btn-filter wl-density' + (state.density === 'compact' ? ' active' : ''),
+      id: 'wl-density-toggle', type: 'button',
+      'aria-pressed': String(state.density === 'compact'),
+      title: 'Toggle Comfortable / Compact row density',
+      html: densityLabel(state.density === 'compact'),
+      onclick: () => {
+        state.density = state.density === 'compact' ? 'comfortable' : 'compact';
+        applyDensity();
+        saveState();
+      },
+    }));
     adv.appendChild(el('button', {
       class: 'btn-filter wl-reset', type: 'button',
       html: '<i class="bi bi-arrow-counterclockwise"></i> Recommended order',

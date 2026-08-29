@@ -15,6 +15,7 @@
   --primary:     #111418;   /* was #0f2744 — near-black ink, not navy */
   --primary-2:   #1c2126;   /* was #123a63 — hover/active shade of ink */
   --surface:     #f8f9fa;   /* was #f1f5f9 with radial teal wash */
+  --card:        #ffffff;   /* pure-white elevated surface — sticky cells */
   --border:      #dfe3e8;   /* was #e2e8f0 */
   --muted:       #5b6470;   /* was #64748b */
 
