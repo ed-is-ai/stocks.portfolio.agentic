@@ -133,6 +133,8 @@ table,
   transition: background-color .15s, border-color .15s, color .15s;
 }
 .sm-btn:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.sm-btn:disabled,
+.sm-btn[aria-disabled="true"] { cursor: not-allowed; opacity: .65; pointer-events: none; }
 .sm-btn-primary { background: var(--primary); border-color: var(--primary); color: #fff; }
 .sm-btn-primary:hover { background: var(--primary-2); border-color: var(--primary-2); color: #fff; }
 .sm-btn-secondary { background: #fff; border-color: var(--border); color: var(--primary); }
@@ -274,10 +276,11 @@ table,
 .sm-table { --bs-table-bg: transparent; }
 .sm-muted-badge { background: #f1f5f9; color: var(--muted); }
 .status-info { background: var(--blue-bg); color: var(--blue); }
-/* Strategy Manager: progress remains textual when motion is disabled. */
-.month-progress { border-left: 3px solid var(--primary); padding-left: .65rem; animation: sm-month-pulse 1.5s ease-in-out infinite; }
-@keyframes sm-month-pulse { 50% { border-left-color: var(--accent-2); } }
-@media (prefers-reduced-motion: reduce) { .month-progress { animation: none; } }
+/* Strategy Manager backtest activity progress is explicit and non-animated. */
+.month-progress { border-left: 3px solid var(--primary); padding-left: .65rem; }
+.month-progress-label { margin-bottom: .4rem; }
+.month-progress-bar { height: .75rem; max-width: 24rem; overflow: hidden; background: var(--blue-bg); border: 1px solid var(--border); }
+.month-progress-fill { display: block; height: 100%; background: var(--primary); }
 
 /* ── Notification centre (#80) ───────────────────────────── */
 .nav-bell { position: relative; }

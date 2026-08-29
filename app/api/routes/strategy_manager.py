@@ -1178,6 +1178,28 @@ _ACTIVITY_TEMPLATES: dict[StrategyJobType, str] = {
 }
 
 
+def _backtest_progress(
+    run: object, current_month: str | None
+) -> dict[str, int | float] | None:
+    """Return a safe, one-based view of a running backtest's calendar progress."""
+    if current_month is None:
+        return None
+    start_month = getattr(run, "start_month", None)
+    end_month = getattr(run, "end_month", None)
+    if not isinstance(start_month, str) or not isinstance(end_month, str):
+        return None
+    try:
+        months = TradingCalendar.months_inclusive(start_month, end_month)
+        position = months.index(current_month) + 1
+    except (ValueError, IndexError):
+        return None
+    return {
+        "position": position,
+        "total": len(months),
+        "percentage": position / len(months) * 100,
+    }
+
+
 def _activity_context(
     repo: BacktestRepository, service: StrategyJobService, job_id: str
 ) -> dict[str, object]:
@@ -1223,6 +1245,12 @@ def _activity_context(
         "stage_progress": (
             _bootstrap_stage_progress(job)
             if job.job_type is StrategyJobType.BOOTSTRAP
+            else None
+        ),
+        "backtest_progress": (
+            _backtest_progress(run, job.current_month)
+            if job.job_type is StrategyJobType.BACKTEST
+            and job.status is StrategyJobStatus.RUNNING
             else None
         ),
     }
