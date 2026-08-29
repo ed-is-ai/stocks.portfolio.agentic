@@ -929,7 +929,11 @@ class TraderAgent(Agent):
 
         For USD stocks, all monetary fields (current_price, current_value,
         unrealised_pnl) are kept in USD so that P&L is self-consistent.
-        The web layer converts to GBP for aggregate totals.
+        The web layer converts to GBP for aggregate totals. An LSE pence
+        quote unit (``"GBp"``/``"GBX"``) is not native: the SIPP provider CSV
+        quotes LSE trades in pounds (so ``avg_cost`` is already pounds) while
+        the live feed quotes pence, so the position is valued in pounds from
+        the GBP-normalised ``current_prices`` entry.
 
         ``shares``/``avg_cost`` are rounded via the shared
         ``round_quantity`` (8dp round-half-even, Story 2.3) rather than
@@ -944,7 +948,15 @@ class TraderAgent(Agent):
         total_cost = round(avg_cost * remaining, 2)
 
         disp = display_info.get(ticker) if display_info else None
-        currency = disp[1] if disp else "GBP"
+        currency = disp[1] if disp and disp[1] else "GBP"
+        # An LSE pence quote unit ("GBp"/"GBX", tolerating whitespace/case) is
+        # not a native foreign quote: the SIPP CSV quotes LSE trades in pounds
+        # so avg_cost is already pounds, and _price_in_gbp already /100s the
+        # live price. Value it from the GBP-normalised current_prices entry
+        # like any "GBP" holding. USD/HKD stay native.
+        _unit = currency.strip()
+        if _unit == "GBp" or _unit.upper() == "GBX":
+            currency = "GBP"
         # Display metadata is the native quote unit.  Every non-GBP unit
         # must use its native close so current value/P&L never combines a
         # GBP-normalised close with a native-currency cost basis.

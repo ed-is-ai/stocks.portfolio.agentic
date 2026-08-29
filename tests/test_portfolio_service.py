@@ -155,7 +155,9 @@ def test_gbpusd_rate_uses_live_ttl_cache_and_refreshes_at_expiry(monkeypatch) ->
     assert trader.saved_rates == [{"__GBPUSD__": 1.25}, {"__GBPUSD__": 1.30}]
 
 
-def test_gbpusd_rate_invalid_live_result_uses_valid_persisted_fallback(monkeypatch) -> None:
+def test_gbpusd_rate_invalid_live_result_uses_valid_persisted_fallback(
+    monkeypatch,
+) -> None:
     trader = _LiveRateTrader(persisted_rate=1.27)
     svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
 
@@ -186,7 +188,9 @@ def test_gbpusd_rate_returns_default_when_provider_and_persisted_cache_fail(
     assert svc.gbpusd_rate() == 1.35
 
 
-def test_gbpusd_rate_returns_live_rate_when_persistence_write_fails(monkeypatch) -> None:
+def test_gbpusd_rate_returns_live_rate_when_persistence_write_fails(
+    monkeypatch,
+) -> None:
     trader = _LiveRateTrader(save_raises=True)
     svc = _make_live_rate_service(monkeypatch, trader, lambda: 100.0)
     monkeypatch.setattr(svc, "_fetch_gbpusd_rate", lambda: 1.25)
@@ -293,6 +297,29 @@ def test_portfolio_totals_convert_usd_and_include_cash(monkeypatch) -> None:
     assert ctx["total_cost_gbp_valued"] == 200.0
     assert ctx["total_pnl_gbp"] == 85.0
     assert ctx["cash_balance"] == 1000.0
+
+
+def test_gbp_totals_not_double_divided_for_pence_holding_priced_in_pounds(
+    monkeypatch,
+) -> None:
+    # gh-383: a pence-quoted holding now reaches gbp_totals as price_currency
+    # "GBP" with an already-pounds current_value, so _amount_in_gbp must NOT
+    # divide by 100 again -- the totals equal the raw pounds figures.
+    svc = _make_service(monkeypatch)
+    positions = [
+        Position(
+            ticker="WCOG",
+            shares=1717,
+            avg_cost=13.97,
+            total_cost=23986.49,
+            current_value=24312.72,
+            price_currency="GBP",
+        )
+    ]
+    value_gbp, cost_gbp, pnl_gbp = svc.gbp_totals(positions, gbpusd=1.35)
+    assert cost_gbp == 23986.49
+    assert value_gbp == 24312.72
+    assert round(pnl_gbp, 2) == 326.23
 
 
 def test_position_without_current_value_excluded_from_value_totals(
@@ -1011,3 +1038,26 @@ def test_fetch_all_prices_resolves_legacy_identity_through_alias(monkeypatch) ->
 
     assert prices == {"HSFWA": 5.0}
     assert calls == ["REAL.L"]
+
+
+def test_warm_cache_pence_holding_keeps_gbp_pence_quote_unit_and_div100() -> None:
+    """A pence holding priced a second time from the warm ``price_cache``
+    (no ``.L`` retry) still resolves quote unit ``"GBp"`` and still yields
+    ``price == close / 100`` -- proving the caching path is not regressed
+    by the ``_build_position`` fix (#383).
+    """
+    trader = _StubTrader()
+    trader.load_price_cache = lambda: (  # type: ignore[attr-defined]
+        {"WCOG": 14.16},
+        None,
+        {"WCOG": (1416.0, "GBp")},
+    )
+    svc = PortfolioService(
+        cast(TraderService, trader), cast(ExitEvaluator, _StubEvaluator())
+    )
+
+    # Warm cache: the display_info entry drives the quote unit, no `.L`
+    # inference needed on this second pass.
+    currencies = svc._price_quote_currencies(["WCOG"], {"WCOG": "WCOG"})
+    assert currencies == {"WCOG": "GBp"}
+    assert svc._price_in_gbp(1416.0, "GBp", 1.25) == 14.16

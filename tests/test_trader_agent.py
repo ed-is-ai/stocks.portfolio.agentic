@@ -3131,3 +3131,85 @@ def test_import_sipp_ig_non_gbp_fallback_delta_rejects_whole_plan(
     assert len(result.failed_rows) == 1
     assert "USD" in result.failed_rows[0]
     assert agent.get_cash_balance(pf.id) is None
+
+
+def _replay_state(shares: float, avg_cost: float) -> dict:
+    """Minimal replay-state dict accepted by ``_build_position``."""
+    return {
+        "shares": shares,
+        "avg_cost": avg_cost,
+        "entry_date": "2024-01-02",
+        "entry_price": avg_cost,
+        "stop_loss": None,
+    }
+
+
+def test_build_position_pence_quote_valued_in_pounds() -> None:
+    """An LSE ``"GBp"`` quote is valued from the ÷100 ``current_prices``
+    entry, not from the raw pence figure in ``display_info`` (#383)."""
+    state = _replay_state(shares=1717.0, avg_cost=13.97)
+    pos = TraderAgent._build_position(
+        "WCOG",
+        state,
+        {"WCOG": 14.16},
+        display_info={"WCOG": (1416.0, "GBp")},
+    )
+    assert pos.current_price == 14.16
+    assert pos.current_value == round(14.16 * 1717.0, 2)
+    assert pos.price_currency == "GBP"
+
+
+def test_build_position_gbx_quote_valued_in_pounds() -> None:
+    """``"GBX"`` is the same LSE pence unit as ``"GBp"`` (#383)."""
+    state = _replay_state(shares=1717.0, avg_cost=13.97)
+    pos = TraderAgent._build_position(
+        "WCOG",
+        state,
+        {"WCOG": 14.16},
+        display_info={"WCOG": (1416.0, "GBX")},
+    )
+    assert pos.current_price == 14.16
+    assert pos.current_value == round(14.16 * 1717.0, 2)
+    assert pos.price_currency == "GBP"
+
+
+def test_build_position_pence_quote_missing_price_degrades_to_unpriced() -> None:
+    """A pence holding absent from ``current_prices`` degrades to unpriced
+    rather than reporting a wrong-scale pence figure (#383)."""
+    state = _replay_state(shares=1717.0, avg_cost=13.97)
+    pos = TraderAgent._build_position(
+        "WCOG",
+        state,
+        {},
+        display_info={"WCOG": (1416.0, "GBp")},
+    )
+    assert pos.current_price is None
+    assert pos.current_value is None
+    assert pos.unrealised_pnl is None
+
+
+def test_build_position_usd_quote_still_native() -> None:
+    """USD holdings keep the native-quote valuation path (#383)."""
+    state = _replay_state(shares=100.0, avg_cost=40.0)
+    pos = TraderAgent._build_position(
+        "AAPL",
+        state,
+        {"AAPL": 44.0},
+        display_info={"AAPL": (59.78, "USD")},
+    )
+    assert pos.current_price == 59.78
+    assert pos.price_currency == "USD"
+
+
+def test_build_position_gbp_lse_reads_current_prices_not_display_info() -> None:
+    """An already-``"GBP"`` LSE holding is valued from ``current_prices``,
+    not ``display_info[0]`` (distinct numbers pin the source) (#383)."""
+    state = _replay_state(shares=100.0, avg_cost=7.0)
+    pos = TraderAgent._build_position(
+        "BP",
+        state,
+        {"BP": 7.30},
+        display_info={"BP": (7.18, "GBP")},
+    )
+    assert pos.current_price == 7.30
+    assert pos.price_currency == "GBP"
