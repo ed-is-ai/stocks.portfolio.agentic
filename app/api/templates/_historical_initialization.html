@@ -1,6 +1,6 @@
 <section aria-labelledby="historical-initialization-heading">
-  <h1 id="historical-initialization-heading" tabindex="-1" class="h3">Historical initialization</h1>
-  <p class="text-muted">Choose completed historical months. Existing cached scans are reused; only missing months are reconstructed.</p>
+  <h1 id="historical-initialization-heading" tabindex="-1" class="h3">Prepare historical data</h1>
+  <p class="text-muted">Choose completed historical months. Existing cached scans are reused; only missing months are prepared.</p>
   {% if message %}<div class="sm-alert sm-alert-success" role="status">{{ message }}</div>{% endif %}
   {% if errors %}<div id="initialization-errors" class="sm-alert sm-alert-danger" role="alert" tabindex="-1"><strong>Correct the following:</strong><ul class="mb-0">{% for field, error in errors.items() %}<li>{% if field != 'form' %}<a href="#{{ field }}">{{ error }}</a>{% else %}{{ error }}{% endif %}</li>{% endfor %}</ul></div>{% endif %}
   <form method="post" action="/strategy-manager/initialization" hx-post="/strategy-manager/initialization" hx-target="#tab-content" hx-swap="innerHTML" class="card sm-card"><div class="card-body">

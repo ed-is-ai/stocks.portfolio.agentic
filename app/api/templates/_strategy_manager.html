@@ -1,12 +1,12 @@
 <section aria-labelledby="strategy-manager-heading">
   <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-4">
-    <div><h1 id="strategy-manager-heading" tabindex="-1" class="h3 mb-1">Strategy Manager</h1><p class="text-muted mb-0">Historical scanner coverage for the active data version.</p></div>
+    <div><h1 id="strategy-manager-heading" tabindex="-1" class="h3 mb-1">Strategy Manager</h1><p class="text-muted mb-0">Historical market data prepared for the active data version.</p></div>
     <div class="d-flex flex-column align-items-start align-items-md-end gap-2">
       <button class="sm-btn sm-btn-primary" hx-get="{{ primary_cta.href }}" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-play-circle"></i> {{ primary_cta.label }}</button>
       <p class="text-muted small mb-0">{{ ready_count }} of 5 prerequisites ready.</p>
       <div class="d-flex gap-2">
         <a class="sm-btn sm-btn-secondary" href="/strategy-manager/readiness" hx-get="/strategy-manager/readiness" hx-target="#tab-content" hx-swap="innerHTML">Readiness</a>
-        <a class="sm-btn sm-btn-secondary" href="/strategy-manager/initialization" hx-get="/strategy-manager/initialization" hx-target="#tab-content" hx-swap="innerHTML">Historical initialization</a>
+        <a class="sm-btn sm-btn-secondary" href="/strategy-manager/initialization" hx-get="/strategy-manager/initialization" hx-target="#tab-content" hx-swap="innerHTML">Prepare historical data</a>
       </div>
     </div>
   </div>
@@ -16,7 +16,7 @@
   {% if setup_required %}
   <div class="sm-alert sm-alert-warning" role="alert">
     <div class="d-flex align-items-center gap-3">
-      <div><strong>Strategy Manager needs setup.</strong> No active scanner-data profile is configured. Run setup to qualify historical data, capture the securities roster, and activate a profile.</div>
+      <div><strong>Strategy Manager needs setup.</strong> No active scanner-data profile is configured. Run setup to qualify historical data, capture the securities list, and activate a profile.</div>
       <button class="sm-btn sm-btn-warning ms-auto" hx-get="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-gear-wide-connected"></i> Set up Strategy Manager</button>
     </div>
   </div>
@@ -24,8 +24,9 @@
   {% if coverage_error %}<div class="sm-alert sm-alert-danger" role="alert">Coverage evidence needs attention: {{ coverage_error }}</div>
   {% elif not coverage or not coverage.snapshot_count %}<div class="sm-alert sm-alert-info">Historical monthly snapshots must be initialized before a backtest can run.</div>
   {% else %}
-  <article class="card sm-card"><div class="card-body"><h2 class="h5">Coverage Ready</h2><dl class="row mb-0 mono-num"><dt class="col-sm-3">Scanner-data version</dt><dd class="col-sm-9">{{ coverage.display_version }}</dd><dt class="col-sm-3">Coverage</dt><dd class="col-sm-9">{{ coverage.earliest_month }} to {{ coverage.latest_month }} · {{ coverage.snapshot_count }} monthly snapshots</dd><dt class="col-sm-3">Ready intervals</dt><dd class="col-sm-9">{% for interval in coverage.intervals %}{{ interval.start_month }}–{{ interval.end_month }}{% if not loop.last %}; {% endif %}{% endfor %}</dd></dl></div></article>
-  {% for source in coverage.provenance %}<p class="mt-3 mb-0"><strong>{{ source.provenance_quality|replace('_', ' ')|title }}:</strong> {{ source.snapshot_count }} snapshots {% for interval in source.intervals %}({{ interval.start_month }}–{{ interval.end_month }}){% endfor %}</p>{% if source.provenance_quality == 'best_effort_reconstructed' %}<p class="text-muted">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>{% endif %}{% endfor %}
+  <article class="card sm-card"><div class="card-body"><h2 class="h5">Historical data ready</h2><dl class="row mb-0 mono-num"><dt class="col-sm-3">Data version</dt><dd class="col-sm-9">{{ coverage.display_version }}</dd><dt class="col-sm-3">Months prepared</dt><dd class="col-sm-9">{{ coverage.earliest_month }} to {{ coverage.latest_month }} · {{ coverage.snapshot_count }} monthly snapshots</dd><dt class="col-sm-3"><span title="A stretch of months with continuous historical data you can backtest over." aria-label="Backtestable periods. A stretch of months with continuous historical data you can backtest over.">Backtestable periods</span></dt><dd class="col-sm-9">{% for interval in coverage.intervals %}{{ interval.start_month }}–{{ interval.end_month }}{% if not loop.last %}; {% endif %}{% endfor %}</dd></dl></div></article>
+  {% set provenance_labels = {'best_effort_reconstructed': 'Reconstructed (approximate)', 'observed_bau': 'Observed (from live scans)'} %}
+  {% for source in coverage.provenance %}<p class="mt-3 mb-0"><strong>{{ provenance_labels.get(source.provenance_quality, source.provenance_quality|replace('_', ' ')|title) }}:</strong> {{ source.snapshot_count }} snapshots {% for interval in source.intervals %}({{ interval.start_month }}–{{ interval.end_month }}){% endfor %}</p>{% if source.provenance_quality == 'best_effort_reconstructed' %}<p class="text-muted">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>{% endif %}{% endfor %}
   {% endif %}
   {% include "_backtest_results_list.html" %}
 </section>

@@ -525,6 +525,30 @@ def test_readiness_page_exposes_advanced_disclosure(services):
     assert "No recent failures." in response.text
 
 
+def test_readiness_and_landing_use_plain_language(services):
+    # gh-398: enum values render through plain-language label maps and each
+    # readiness prerequisite name carries a one-line `title` tooltip.
+    readiness = client.get("/strategy-manager/readiness")
+    assert readiness.status_code == 200
+    # No raw snake_case enum token leaks as visible copy...
+    assert "stale_incompatible" not in readiness.text
+    assert "integrity_error" not in readiness.text
+    # ...and the plain-language labels are what render instead.
+    assert "Historical data check" in readiness.text
+    # Every prerequisite name carries a one-line explanation tooltip.
+    assert (
+        'title="Confirms the market-data providers are certified '
+        'for backtesting."' in readiness.text
+    )
+    assert 'aria-label="Historical data check.' in readiness.text
+
+    landing = client.get("/strategy-manager")
+    assert landing.status_code == 200
+    assert "Backtestable periods" in landing.text
+    assert "Data version" in landing.text
+    assert "Scanner-data version" not in landing.text
+
+
 def test_initialization_is_disabled_when_not_qualified(services):
     repo, _ = services
     repo.qualified = False

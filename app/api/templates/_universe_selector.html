@@ -56,7 +56,7 @@
     </div>
 
     {% if not securities %}
-    <p class="text-muted">No securities are available in the roster. Ensure setup is complete.</p>
+    <p class="text-muted">No securities are available yet. Ensure setup is complete.</p>
     {% else %}
     <div class="border rounded p-2" style="max-height: 300px; overflow-y: auto;" role="listbox" aria-multiselectable="true" aria-labelledby="universe-selector-label">
       {% set matches = namespace(count=0) %}

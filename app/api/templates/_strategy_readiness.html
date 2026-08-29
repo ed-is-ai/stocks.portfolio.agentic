@@ -2,6 +2,25 @@
     this page never creates, repairs, acquires, activates, or queues
     anything. Recovery links navigate to the corresponding workflow. -#}
 <section aria-labelledby="strategy-readiness-heading">
+  {% set prerequisite_labels = {
+    'qualification': ('Historical data check', 'Confirms the market-data providers are certified for backtesting.'),
+    'roster': ('Securities list', 'The fixed list of securities backtests run against for this data version.'),
+    'active_profile': ('Active data version', 'A prepared historical dataset must be active before backtests can run.'),
+    'coverage': ('Prepared months', 'How many monthly market snapshots are ready to backtest over.'),
+    'discovery': ('Available strategies', 'Strategy definitions the app has found and can run.'),
+  } %}
+  {% set state_labels = {
+    'ready': 'Ready', 'missing': 'Not ready', 'running': 'In progress',
+    'stale_incompatible': 'Outdated', 'failed': 'Failed', 'integrity_error': 'Data error',
+  } %}
+  {% set worker_state_labels = {
+    'ready': 'Ready', 'disabled': 'Disabled',
+    'unavailable_interrupted': 'Interrupted', 'busy': 'Working',
+  } %}
+  {% set recovery_labels = {
+    'set_up': 'Set up', 'initialize': 'Prepare data', 'configure': 'Configure',
+    'reconcile_worker': 'Reconcile worker', 'retry': 'Retry',
+  } %}
   <h1 id="strategy-readiness-heading" tabindex="-1" class="h3">Readiness</h1>
 
   {% if readiness.is_fixture %}
@@ -15,7 +34,7 @@
     {% for item in [readiness.qualification, readiness.roster, readiness.active_profile, readiness.coverage, readiness.discovery] %}
       {% if item.state == 'ready' %}{% set ready_count.count = ready_count.count + 1 %}{% endif %}
     {% endfor %}
-    <p class="text-muted mb-0">{{ ready_count.count }} of 5 prerequisites ready. Worker: {{ readiness.worker.state.value }}.</p>
+    <p class="text-muted mb-0">{{ ready_count.count }} of 5 prerequisites ready. Worker: {{ worker_state_labels.get(readiness.worker.state.value, readiness.worker.state.value|replace('_', ' ')|title) }}.</p>
   </div>
 
   <table class="table table-sm align-middle sm-table" aria-describedby="strategy-readiness-heading">
@@ -23,15 +42,17 @@
     <tbody>
       {% for item in [readiness.qualification, readiness.roster, readiness.active_profile, readiness.coverage, readiness.discovery] %}
       <tr>
-        <th scope="row">{{ item.name|replace('_', ' ')|title }}</th>
+        {% set prereq = prerequisite_labels.get(item.name, (item.name|replace('_', ' ')|title, None)) %}
+        <th scope="row">{% if prereq[1] %}<span title="{{ prereq[1] }}" aria-label="{{ prereq[0] }}. {{ prereq[1] }}">{{ prereq[0] }}</span>{% else %}{{ prereq[0] }}{% endif %}</th>
         <td>
           {% set state_class = {'ready': 'status-ok', 'missing': 'status-skip', 'running': 'status-info', 'stale_incompatible': 'status-skip', 'failed': 'status-error', 'integrity_error': 'status-error'} %}
-          <span class="badge-status {{ state_class.get(item.state.value, 'sm-muted-badge') }}">{{ item.state.value }}</span>
+          <span class="badge-status {{ state_class.get(item.state.value, 'sm-muted-badge') }}">{{ state_labels.get(item.state.value, item.state.value|replace('_', ' ')|title) }}</span>
         </td>
         <td>{{ item.reason }}</td>
         <td>
           {% set recovery_url = {'set_up': '/strategy-manager/setup', 'initialize': '/strategy-manager/initialization', 'configure': '/strategy-manager'}.get(item.recovery_action.value) %}
-          {% if recovery_url %}<a class="sm-btn sm-btn-secondary" href="{{ recovery_url }}" hx-get="{{ recovery_url }}" hx-target="#tab-content" hx-swap="innerHTML">{{ item.recovery_action.value|replace('_', ' ')|title }}</a>{% elif item.recovery_action.value != 'none' %}<span class="badge-status sm-muted-badge">{{ item.recovery_action.value|replace('_', ' ')|title }}</span>{% else %}—{% endif %}
+          {% set recovery_label = recovery_labels.get(item.recovery_action.value, item.recovery_action.value|replace('_', ' ')|title) %}
+          {% if recovery_url %}<a class="sm-btn sm-btn-secondary" href="{{ recovery_url }}" hx-get="{{ recovery_url }}" hx-target="#tab-content" hx-swap="innerHTML">{{ recovery_label }}</a>{% elif item.recovery_action.value != 'none' %}<span class="badge-status sm-muted-badge">{{ recovery_label }}</span>{% else %}—{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -39,10 +60,10 @@
         <th scope="row">Worker</th>
         <td>
           {% set worker_class = {'ready': 'status-ok', 'disabled': 'sm-muted-badge', 'unavailable_interrupted': 'status-error', 'busy': 'status-info'} %}
-          <span class="badge-status {{ worker_class.get(readiness.worker.state.value, 'sm-muted-badge') }}">{{ readiness.worker.state.value }}</span>
+          <span class="badge-status {{ worker_class.get(readiness.worker.state.value, 'sm-muted-badge') }}">{{ worker_state_labels.get(readiness.worker.state.value, readiness.worker.state.value|replace('_', ' ')|title) }}</span>
         </td>
         <td>{{ readiness.worker.reason }}</td>
-        <td>{% if readiness.worker.recovery_action.value != 'none' %}<span class="badge-status sm-muted-badge">{{ readiness.worker.recovery_action.value|replace('_', ' ')|title }}</span>{% else %}—{% endif %}</td>
+        <td>{% if readiness.worker.recovery_action.value != 'none' %}<span class="badge-status sm-muted-badge">{{ recovery_labels.get(readiness.worker.recovery_action.value, readiness.worker.recovery_action.value|replace('_', ' ')|title) }}</span>{% else %}—{% endif %}</td>
       </tr>
     </tbody>
   </table>
@@ -57,10 +78,10 @@
         {% for failure in readiness.recent_failures %}
         <tr>
           <td><code>{{ failure.job_id[:8] }}</code></td>
-          <td>{{ failure.job_type.value }}</td>
-          <td>{{ failure.failure_code.value }}</td>
+          <td>{{ failure.job_type.value|replace('_', ' ')|title }}</td>
+          <td>{{ failure.failure_code.value|replace('_', ' ')|title }}</td>
           <td>{{ failure.stage_or_month or '—' }}</td>
-          <td><span class="badge-status sm-muted-badge">{{ failure.recovery_action.value|replace('_', ' ')|title }}</span></td>
+          <td>{% if failure.recovery_action.value != 'none' %}<span class="badge-status sm-muted-badge">{{ recovery_labels.get(failure.recovery_action.value, failure.recovery_action.value|replace('_', ' ')|title) }}</span>{% else %}—{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>

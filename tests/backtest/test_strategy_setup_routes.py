@@ -271,9 +271,7 @@ def test_setup_submit_rejects_invalid_key_without_queuing(
 def test_readiness_page_returns_200(setup_env_no_profile) -> None:
     response = client.get("/strategy-manager/readiness")
     assert response.status_code == 200
-    assert "Qualification" in response.text or "qualification" in (
-        response.text.lower()
-    )
+    assert "Historical data check" in response.text
 
 
 def test_readiness_page_shows_missing_prerequisites(
@@ -281,7 +279,7 @@ def test_readiness_page_shows_missing_prerequisites(
 ) -> None:
     response = client.get("/strategy-manager/readiness")
     assert response.status_code == 200
-    assert "missing" in response.text.lower()
+    assert "Not ready" in response.text
 
 
 def test_readiness_coverage_initialize_is_an_action_link(
@@ -295,7 +293,7 @@ def test_readiness_coverage_initialize_is_an_action_link(
     assert response.status_code == 200
     assert 'href="/strategy-manager/initialization"' in response.text
     assert 'hx-get="/strategy-manager/initialization"' in response.text
-    assert "Initialize</a>" in response.text
+    assert "Prepare data</a>" in response.text
 
 
 # ---------------------------------------------------------------------------
