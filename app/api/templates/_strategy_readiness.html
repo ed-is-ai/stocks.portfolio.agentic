@@ -2,9 +2,7 @@
     this page never creates, repairs, acquires, activates, or queues
     anything. Recovery links navigate to the corresponding workflow. -#}
 <section aria-labelledby="strategy-readiness-heading">
-  <h1 id="strategy-readiness-heading" tabindex="-1" class="h3">
-    {% if diagnostics_view %}Diagnostics{% else %}Readiness{% endif %}
-  </h1>
+  <h1 id="strategy-readiness-heading" tabindex="-1" class="h3">Readiness</h1>
 
   {% if readiness.is_fixture %}
   <div class="sm-alert sm-alert-neutral" role="alert">
@@ -49,32 +47,30 @@
     </tbody>
   </table>
 
-  {% if diagnostics_view and readiness.recent_failures %}
-  <h2 class="h5 mt-4">Recent failures</h2>
-  <table class="table table-sm align-middle">
-    <thead><tr><th scope="col">Job</th><th scope="col">Type</th><th scope="col">Code</th><th scope="col">Stage/Month</th><th scope="col">Recovery</th></tr></thead>
-    <tbody>
-      {% for failure in readiness.recent_failures %}
-      <tr>
-        <td><code>{{ failure.job_id[:8] }}</code></td>
-        <td>{{ failure.job_type.value }}</td>
-        <td>{{ failure.failure_code.value }}</td>
-        <td>{{ failure.stage_or_month or '—' }}</td>
-        <td><span class="badge-status sm-muted-badge">{{ failure.recovery_action.value|replace('_', ' ')|title }}</span></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% elif diagnostics_view %}
-  <p class="text-muted mt-3">No recent failures.</p>
-  {% endif %}
+  <details id="advanced" class="mt-4"{% if open_advanced %} open{% endif %}>
+    <summary class="h5 d-inline">Advanced / troubleshooting</summary>
+    {% if readiness.recent_failures %}
+    <h2 class="h5 mt-4">Recent failures</h2>
+    <table class="table table-sm align-middle">
+      <thead><tr><th scope="col">Job</th><th scope="col">Type</th><th scope="col">Code</th><th scope="col">Stage/Month</th><th scope="col">Recovery</th></tr></thead>
+      <tbody>
+        {% for failure in readiness.recent_failures %}
+        <tr>
+          <td><code>{{ failure.job_id[:8] }}</code></td>
+          <td>{{ failure.job_type.value }}</td>
+          <td>{{ failure.failure_code.value }}</td>
+          <td>{{ failure.stage_or_month or '—' }}</td>
+          <td><span class="badge-status sm-muted-badge">{{ failure.recovery_action.value|replace('_', ' ')|title }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="text-muted mt-3">No recent failures.</p>
+    {% endif %}
+  </details>
 
-  {% if not diagnostics_view %}
   <div class="d-flex gap-2 mt-3">
-    <a class="sm-btn sm-btn-secondary" href="/strategy-manager/diagnostics" hx-get="/strategy-manager/diagnostics" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-activity"></i> View diagnostics</a>
     <a class="sm-btn sm-btn-secondary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
   </div>
-  {% else %}
-  <a class="sm-btn sm-btn-secondary mt-3" href="/strategy-manager/readiness" hx-get="/strategy-manager/readiness" hx-target="#tab-content" hx-swap="innerHTML">Back to readiness</a>
-  {% endif %}
 </section>

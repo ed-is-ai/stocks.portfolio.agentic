@@ -6,7 +6,7 @@ GET routes only render repository state.  All lifecycle changes stay behind
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 import logging
@@ -71,7 +71,9 @@ from app.services.backtest.strategy_job import (
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
+    PrerequisiteState,
     RunUniverseSelectionV1,
+    StrategyReadinessV1,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1
@@ -94,6 +96,60 @@ _TERMINAL = {
     StrategyJobStatus.CANCELLED,
 }
 _ACTIVE_PROFILE_UNSET = object()
+
+#: gh-396: the landing screen's one adaptive primary CTA follows the
+#: Setup -> Initialize -> Configure pipeline stage.
+_SETUP_CTA: dict[str, str] = {
+    "label": "Set up Strategy Manager",
+    "href": "/strategy-manager/setup",
+}
+_INITIALIZE_CTA: dict[str, str] = {
+    "label": "Prepare historical data",
+    "href": "/strategy-manager/initialization",
+}
+_READINESS_CTA: dict[str, str] = {
+    "label": "Review readiness",
+    "href": "/strategy-manager/readiness",
+}
+_CONFIGURE_CTA: dict[str, str] = {
+    "label": "Configure a Backtest",
+    "href": "/strategy-manager/configuration",
+}
+_SETUP_NOTICES = frozenset({"already"})
+
+
+def _readiness_progress(readiness: StrategyReadinessV1) -> tuple[int, bool]:
+    """Return ``(ready_count, coverage_ready)`` over the same five
+    prerequisites the Readiness screen counts (gh-396)."""
+    items = (
+        readiness.qualification,
+        readiness.roster,
+        readiness.active_profile,
+        readiness.coverage,
+        readiness.discovery,
+    )
+    ready_count = sum(1 for item in items if item.state is PrerequisiteState.READY)
+    return ready_count, readiness.coverage.state is PrerequisiteState.READY
+
+
+def _primary_cta(
+    *, setup_required: bool, coverage_ready: bool, ready_count: int
+) -> dict[str, str]:
+    """Pick the landing CTA by pipeline stage (gh-396).
+
+    ``setup_required`` -> Set up; historical coverage not ready -> Prepare
+    historical data; any remaining prerequisite still not READY (roster,
+    qualification, discovery) -> Review readiness so the user is never
+    sent to Configure while a prerequisite is unmet; all five READY ->
+    Configure a Backtest.
+    """
+    if setup_required:
+        return _SETUP_CTA
+    if not coverage_ready:
+        return _INITIALIZE_CTA
+    if ready_count < 5:
+        return _READINESS_CTA
+    return _CONFIGURE_CTA
 
 
 def _coverage_context(repo: BacktestRepository) -> dict[str, object]:
@@ -169,7 +225,15 @@ def _initialization_context(
     }
 
 
-def _strategy_manager_context(repo: BacktestRepository) -> dict[str, object]:
+def _strategy_manager_context(
+    repo: BacktestRepository,
+    *,
+    setup_required: bool,
+    ready_count: int,
+    coverage_ready: bool,
+    setup_notice: str | None,
+    activated_at: datetime | None,
+) -> dict[str, object]:
     """Context for the main Strategy Manager view only -- unlike
     ``_initialization_context``, this never queries ``list_strategy_jobs()``
     or ``list_backtest_activities()``'s verified-complete Metrics rebuild
@@ -190,7 +254,15 @@ def _strategy_manager_context(repo: BacktestRepository) -> dict[str, object]:
         **_coverage_context(repo),
         **profile_context,
         **_backtest_activities_context(repo),
-        "setup_required": active is None,
+        "setup_required": setup_required,
+        "ready_count": ready_count,
+        "primary_cta": _primary_cta(
+            setup_required=setup_required,
+            coverage_ready=coverage_ready,
+            ready_count=ready_count,
+        ),
+        "setup_notice": setup_notice,
+        "activated_at": activated_at,
     }
 
 
@@ -228,11 +300,49 @@ def _form_error_status(request: Request) -> int:
 
 @router.get("/partials/strategy-manager", response_class=HTMLResponse)
 @router.get("/strategy-manager", response_class=HTMLResponse)
-async def strategy_manager(request: Request, backtest: BacktestDep) -> HTMLResponse:
+async def strategy_manager(
+    request: Request,
+    backtest: BacktestDep,
+    readiness: ReadinessDep,
+    bootstrap: BootstrapDep,
+    setup: str | None = None,
+) -> HTMLResponse:
     started = perf_counter()
-    response = templates.TemplateResponse(
-        request, "_strategy_manager.html", _strategy_manager_context(backtest)
+    try:
+        ready_count, coverage_ready = _readiness_progress(readiness.evaluate())
+        setup_required = bootstrap.is_setup_required()
+    except Exception:  # noqa: BLE001
+        # gh-396: the landing must still render when a prerequisite is in
+        # integrity_error or a readiness/bootstrap read raises -- mirror
+        # the pre-gh-396 setup gate and show no progress.
+        logger.warning(
+            "Strategy Manager readiness/bootstrap state unavailable", exc_info=True
+        )
+        ready_count, coverage_ready = 0, False
+        try:
+            setup_required = backtest.active_snapshot_profile() is None
+        except BacktestIntegrityError:
+            setup_required = True
+    setup_notice: str | None = None
+    activated_at: datetime | None = None
+    if setup in _SETUP_NOTICES and not setup_required:
+        try:
+            already, activated_at = bootstrap.is_already_set_up()
+        except Exception:  # noqa: BLE001
+            already, activated_at = False, None
+        if already:
+            setup_notice = "already"
+        else:
+            activated_at = None
+    context = _strategy_manager_context(
+        backtest,
+        setup_required=setup_required,
+        ready_count=ready_count,
+        coverage_ready=coverage_ready,
+        setup_notice=setup_notice,
+        activated_at=activated_at,
     )
+    response = templates.TemplateResponse(request, "_strategy_manager.html", context)
     logger.info(
         "Strategy Manager tab rendered in %.1fms",
         (perf_counter() - started) * 1_000,
@@ -250,17 +360,20 @@ async def strategy_setup(
     request: Request,
     backtest: BacktestDep,
     bootstrap: BootstrapDep,
-) -> HTMLResponse:
-    """Show setup confirmation form or 'already set up' message."""
-    already, activated_at = bootstrap.is_already_set_up()
-    setup_required = bootstrap.is_setup_required()
+) -> Response:
+    """Show the setup confirmation form, or redirect to the landing banner
+    when setup is not required (gh-396 -- no standalone dead-end page).
+
+    ``is_already_set_up()`` is the exact logical negation of
+    ``is_setup_required()`` for an active profile, so "not required"
+    always means "already set up" here."""
+    if not bootstrap.is_setup_required():
+        return RedirectResponse("/strategy-manager?setup=already", status_code=303)
     return templates.TemplateResponse(
         request,
         "_strategy_setup.html",
         {
-            "already_set_up": already,
-            "setup_required": setup_required,
-            "activated_at": activated_at,
+            "setup_required": True,
             "is_fixture": bootstrap.is_fixture,
             "idempotency_key": str(uuid4()),
         },
@@ -309,7 +422,7 @@ async def submit_strategy_setup(
             status_code=422,
         )
     except StrategyBootstrapAlreadySetUp:
-        return RedirectResponse("/strategy-manager/setup", status_code=303)
+        return RedirectResponse("/strategy-manager?setup=already", status_code=303)
     except StrategyJobConflict:
         return templates.TemplateResponse(
             request,
@@ -336,36 +449,26 @@ async def strategy_readiness(
     request: Request,
     backtest: BacktestDep,
     readiness: ReadinessDep,
+    section: str | None = None,
 ) -> HTMLResponse:
-    """Show readiness prerequisite rows (read-only)."""
+    """Show readiness prerequisite rows (read-only).
+
+    ``section=advanced`` (the diagnostics deep link) expands the
+    Advanced / troubleshooting disclosure on load."""
     result = readiness.evaluate()
     return templates.TemplateResponse(
         request,
         "_strategy_readiness.html",
-        {
-            "readiness": result,
-            "diagnostics_view": False,
-        },
+        {"readiness": result, "open_advanced": section == "advanced"},
     )
 
 
 @router.get("/strategy-manager/diagnostics", response_class=HTMLResponse)
-async def strategy_diagnostics(
-    request: Request,
-    backtest: BacktestDep,
-    readiness: ReadinessDep,
-) -> HTMLResponse:
-    """Show bounded diagnostics (read-only)."""
-    result = readiness.evaluate()
-    diagnostics = readiness.diagnostics(readiness=result)
-    return templates.TemplateResponse(
-        request,
-        "_strategy_readiness.html",
-        {
-            "readiness": result,
-            "diagnostics": diagnostics,
-            "diagnostics_view": True,
-        },
+async def strategy_diagnostics(request: Request) -> Response:
+    """Diagnostics folded into Readiness (gh-396); keep the deep link alive
+    so recovery links and bookmarks never 404."""
+    return RedirectResponse(
+        "/strategy-manager/readiness?section=advanced", status_code=303
     )
 
 

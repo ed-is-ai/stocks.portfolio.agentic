@@ -225,7 +225,7 @@ def test_setup_submit_already_set_up_returns_redirect(
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert "/strategy-manager/setup" in response.headers.get("location", "")
+    assert response.headers.get("location", "") == "/strategy-manager?setup=already"
 
 
 # ---------------------------------------------------------------------------
@@ -288,9 +288,7 @@ def test_readiness_coverage_initialize_is_an_action_link(
     setup_env_with_profile,
 ) -> None:
     repo, _jobs, _bootstrap = setup_env_with_profile
-    repo.result_coverage = type(
-        "EmptyCoverage", (), {"snapshot_count": 0}
-    )()
+    repo.result_coverage = type("EmptyCoverage", (), {"snapshot_count": 0})()
 
     response = client.get("/strategy-manager/readiness")
 

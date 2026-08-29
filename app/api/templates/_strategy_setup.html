@@ -10,15 +10,7 @@
   </div>
   {% endif %}
 
-  {% if already_set_up %}
-  <div class="sm-alert sm-alert-success" role="alert">
-    <strong>Strategy Manager is already set up.</strong>
-    {% if activated_at %}Verified at {{ activated_at.strftime('%Y-%m-%d %H:%M UTC') }}.{% endif %}
-    No recapture or new profile is needed.
-  </div>
-  <a class="sm-btn sm-btn-primary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
-
-  {% elif setup_required %}
+  {% if setup_required %}
   <p class="text-muted">Setup runs three stages:</p>
   <ol class="sm-stage-list">
     <li class="sm-stage"><span><strong>Verifying historical data</strong> — checks that providers have passed certification.</span></li>
@@ -34,9 +26,5 @@
     <button class="sm-btn sm-btn-warning" type="submit"><i class="bi bi-gear-wide-connected"></i> Confirm setup</button>
     <a class="sm-btn sm-btn-secondary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Cancel</a>
   </form>
-
-  {% else %}
-  <div class="sm-alert sm-alert-info" role="alert">Setup is not currently required.</div>
-  <a class="sm-btn sm-btn-primary" href="/strategy-manager" hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
   {% endif %}
 </section>

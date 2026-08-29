@@ -16,6 +16,8 @@ from app.api.app import app
 from app.api.dependencies import (
     get_backtest_launch_service,
     get_backtest_repository,
+    get_bootstrap_service,
+    get_readiness_service,
     get_strategy_job_service,
 )
 from app.repositories.backtest_repo import (
@@ -63,7 +65,13 @@ from app.services.backtest.strategy_job import (
     StrategyJobType,
     StrategyJobV1,
 )
+from app.services.backtest.strategy_bootstrap_service import (
+    StrategyBootstrapService,
+)
 from app.services.backtest.strategy_protocol import SignalSide, StrategyParameterV1
+from app.services.backtest.strategy_readiness_service import (
+    StrategyReadinessService,
+)
 
 client = TestClient(app)
 
@@ -72,6 +80,7 @@ client = TestClient(app)
 class FakeProfile:
     profile_hash: str = "a" * 64
     calendar_dataset_version: str = "exchange-calendars-v1"
+    roster_digest: str = "r" * 64
 
 
 class FakeActiveProfile:
@@ -81,9 +90,26 @@ class FakeActiveProfile:
 
 
 class FakeRepo:
-    def __init__(self, *, qualified: bool = True, coverage_error: str | None = None):
+    def __init__(
+        self,
+        *,
+        qualified: bool = True,
+        coverage_error: str | None = None,
+        has_active: bool = True,
+        snapshot_count: int = 3,
+        stale_profile: bool = False,
+        readiness_error: Exception | None = None,
+    ):
         self.qualified = qualified
         self.coverage_error = coverage_error
+        # gh-396: knobs so landing-CTA/readiness tests can drive each
+        # pipeline stage (no active profile -> setup; zero snapshots ->
+        # initialize; all ready -> configure; stale provider map -> setup;
+        # readiness read raising -> degraded-but-rendered landing).
+        self.has_active = has_active
+        self.snapshot_count = snapshot_count
+        self.stale_profile = stale_profile
+        self.readiness_error = readiness_error
         self.profile = FakeProfile()
         self.activity = None
         self.backtest_activities: tuple[object, ...] = ()
@@ -123,7 +149,24 @@ class FakeRepo:
     def roster_member_identities(self, profile_hash):
         return self.roster_identities
 
+    def roster_manifest_json(self, roster_digest):
+        # gh-396: readiness `roster` prerequisite is READY when the active
+        # profile's roster manifest is present.
+        return "{}"
+
+    def stored_snapshot_profile(self, profile_hash):
+        # gh-396: bootstrap `_active_profile_needs_refresh` reads this. A
+        # stored profile whose hash cannot match the freshly recomputed
+        # one models a stale provider map -> setup is required again.
+        if self.stale_profile:
+            return SimpleNamespace(
+                roster_digest="a" * 64, profile_hash="stale-provider-map"
+            )
+        return None
+
     def recent_job_failures(self, limit: int = 5):
+        if self.readiness_error is not None:
+            raise self.readiness_error
         return ()
 
     def identity_rows(self):
@@ -141,7 +184,7 @@ class FakeRepo:
             display_version="Scanner v1",
             earliest_month="2024-01",
             latest_month="2024-03",
-            snapshot_count=3,
+            snapshot_count=self.snapshot_count,
             intervals=(SimpleNamespace(start_month="2024-01", end_month="2024-03"),),
             provenance=(
                 SimpleNamespace(
@@ -202,7 +245,7 @@ class FakeRepo:
 
     def active_snapshot_profile(self):
         self.active_profile_calls += 1
-        return FakeActiveProfile()
+        return FakeActiveProfile() if self.has_active else None
 
     def snapshot_profile(self, _hash):
         return self.profile
@@ -288,6 +331,21 @@ def services(monkeypatch):
     repo, jobs = FakeRepo(), FakeJobs()
     app.dependency_overrides[get_backtest_repository] = lambda: repo
     app.dependency_overrides[get_strategy_job_service] = lambda: jobs
+    # gh-396: the landing now also reads readiness + bootstrap; the real
+    # providers are @lru_cache'd against the real repo, so override both
+    # with fakes built on this test's FakeRepo.
+    app.dependency_overrides[get_readiness_service] = lambda: StrategyReadinessService(
+        repo
+    )
+    app.dependency_overrides[get_bootstrap_service] = lambda: StrategyBootstrapService(
+        repo, jobs
+    )
+    # gh-396: keep the `discovery` prerequisite deterministic -- the real
+    # `discover_strategies(SKILLS_DIR)` walks the repo filesystem.
+    monkeypatch.setattr(
+        "app.services.backtest.strategy_readiness_service.discover_strategies",
+        lambda _root: SimpleNamespace(strategies=(object(),), warnings=()),
+    )
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     try:
         yield repo, jobs
@@ -307,15 +365,163 @@ def test_main_renders_coverage_and_canonical_reconstruction_warning(services):
     assert "source-gap" not in response.text
 
 
-def test_main_reads_active_profile_once_and_logs_render_timing(services, caplog):
+def test_main_logs_render_timing(services, caplog):
     repo, _ = services
 
     with caplog.at_level("INFO"):
         response = client.get("/partials/strategy-manager")
 
     assert response.status_code == 200
-    assert repo.active_profile_calls == 1
+    # gh-396: landing now composes readiness + bootstrap state; each reads
+    # the active profile. 6 calls = 1 (_strategy_manager_context) + 3
+    # (readiness roster/active_profile/coverage) + 2 (bootstrap
+    # is_setup_required + _active_profile_needs_refresh).
+    assert repo.active_profile_calls == 6
     assert "Strategy Manager tab rendered in" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# gh-396: adaptive guided landing (one primary CTA + progress line)
+# ---------------------------------------------------------------------------
+
+
+def test_landing_cta_is_setup_when_no_active_profile(services):
+    repo, _ = services
+    repo.has_active = False
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "Set up Strategy Manager" in response.text
+    assert 'hx-get="/strategy-manager/setup"' in response.text
+    # qualification + discovery are READY without an active profile.
+    assert "2 of 5 prerequisites ready." in response.text
+
+
+def test_landing_cta_is_prepare_data_when_no_coverage(services):
+    repo, _ = services
+    repo.snapshot_count = 0
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "Prepare historical data" in response.text
+    assert 'hx-get="/strategy-manager/initialization"' in response.text
+    assert "4 of 5 prerequisites ready." in response.text
+
+
+def test_landing_cta_is_configure_when_all_ready(services):
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "Configure a Backtest" in response.text
+    assert 'hx-get="/strategy-manager/configuration"' in response.text
+    assert "5 of 5 prerequisites ready." in response.text
+
+
+def test_landing_cta_is_review_readiness_at_four_of_five(services):
+    # gh-396 patch A: coverage is ready but another prerequisite is not,
+    # so the CTA must not send the user to Configure (the removed
+    # dead-end) -- it routes to Readiness instead.
+    repo, _ = services
+    repo.qualified = False
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "4 of 5 prerequisites ready." in response.text
+    assert "Review readiness</button>" in response.text
+    # The primary CTA is not the Configure button (the removed dead-end);
+    # "Configure a Backtest" still appears as an <a> in the results list.
+    assert "Configure a Backtest</button>" not in response.text
+
+
+def test_landing_cta_is_setup_when_active_profile_is_stale(services):
+    # gh-396 patch H: a stale provider map means setup is required again
+    # even with an active profile present.
+    repo, _ = services
+    repo.stale_profile = True
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "Set up Strategy Manager" in response.text
+    assert 'hx-get="/strategy-manager/setup"' in response.text
+
+
+def test_landing_renders_when_readiness_state_unavailable(services):
+    # gh-396 patch B: an integrity error in readiness/bootstrap must not
+    # 500 the landing -- it degrades to no progress + the setup gate.
+    repo, _ = services
+    repo.readiness_error = BacktestIntegrityError("worker ledger corrupt")
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "0 of 5 prerequisites ready." in response.text
+    assert "Prepare historical data" in response.text
+
+
+def test_landing_has_no_top_level_diagnostics_control(services):
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "Diagnostics" not in response.text
+    assert "/strategy-manager/diagnostics" not in response.text
+
+
+def test_landing_setup_already_notice_banner(services):
+    response = client.get("/strategy-manager?setup=already")
+    assert response.status_code == 200
+    assert "Strategy Manager is already set up." in response.text
+    assert "Verified at 2026-08-21 00:00 UTC." in response.text
+
+
+def test_landing_setup_already_notice_suppressed_when_setup_required(services):
+    # gh-396 patch C: reconcile the notice with live state -- never show
+    # the "already set up" banner above the "setup required" warning.
+    repo, _ = services
+    repo.has_active = False
+    response = client.get("/strategy-manager?setup=already")
+    assert response.status_code == 200
+    assert "already set up" not in response.text.lower()
+    assert "Set up Strategy Manager" in response.text
+
+
+def test_landing_ignores_unknown_setup_query(services):
+    response = client.get("/strategy-manager?setup=bogus")
+    assert response.status_code == 200
+    assert "already set up" not in response.text
+
+
+def test_setup_get_redirects_to_landing_banner_when_already_set_up(services):
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/strategy-manager?setup=already"
+    followed = client.get("/strategy-manager/setup")
+    assert "Strategy Manager is already set up." in followed.text
+
+
+def test_setup_get_renders_form_when_setup_required(services):
+    repo, _ = services
+    repo.has_active = False
+    response = client.get("/strategy-manager/setup")
+    assert response.status_code == 200
+    assert 'action="/strategy-manager/setup"' in response.text
+    assert 'name="idempotency_key"' in response.text
+
+
+def test_diagnostics_route_redirects_and_never_404s(services):
+    response = client.get("/strategy-manager/diagnostics", follow_redirects=False)
+    assert response.status_code == 303
+    assert (
+        response.headers["location"] == "/strategy-manager/readiness?section=advanced"
+    )
+
+
+def test_diagnostics_deep_link_opens_advanced_disclosure(services):
+    # gh-396 patch D: following the diagnostics redirect lands on Readiness
+    # with the Advanced disclosure already expanded.
+    followed = client.get("/strategy-manager/diagnostics")
+    assert followed.status_code == 200
+    assert '<details id="advanced" class="mt-4" open>' in followed.text
+
+
+def test_readiness_page_exposes_advanced_disclosure(services):
+    response = client.get("/strategy-manager/readiness")
+    assert response.status_code == 200
+    # Collapsed by default (no `section=advanced`).
+    assert '<details id="advanced" class="mt-4">' in response.text
+    assert "Advanced / troubleshooting" in response.text
+    assert "No recent failures." in response.text
 
 
 def test_initialization_is_disabled_when_not_qualified(services):
