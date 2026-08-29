@@ -61,6 +61,7 @@ from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
 from app.services.backtest.strategy_job import (
+    STAGE_SEQUENCES,
     BootstrapSubmissionV1,
     InitializationSubmissionV1,
     StrategyJobCancellationV1,
@@ -116,6 +117,63 @@ _CONFIGURE_CTA: dict[str, str] = {
     "href": "/strategy-manager/configuration",
 }
 _SETUP_NOTICES = frozenset({"already"})
+
+#: gh-397: the setup GET hands a returning user to the running job's own
+#: activity page instead of the static explainer for these statuses. A
+#: ``complete`` job deliberately falls through to the gh-396 gate so setup
+#: can be re-run when the active profile later goes stale.
+_BOOTSTRAP_ACTIVITY_STATUSES = frozenset(
+    {
+        StrategyJobStatus.QUEUED,
+        StrategyJobStatus.RUNNING,
+    }
+)
+#: gh-397: labels mirror the copy already shown in ``_strategy_setup.html``.
+_BOOTSTRAP_STAGE_LABELS: dict[str, str] = {
+    "qualification": "Verifying historical data",
+    "roster_capture": "Capturing securities",
+    "profile_activation": "Activating setup",
+}
+
+
+def _bootstrap_stage_label(stage: str) -> str:
+    """Human label for a bootstrap stage, tolerant of unmapped enum values."""
+    return _BOOTSTRAP_STAGE_LABELS.get(stage, stage.replace("_", " ").title())
+
+
+def _bootstrap_stage_progress(job: StrategyJobV1) -> list[dict[str, str]]:
+    """Return the ordered bootstrap stages with a per-stage lifecycle state.
+
+    ``state`` is one of ``complete``/``current``/``pending``/``failed``/
+    ``stopped``, derived only from ``STAGE_SEQUENCES``, ``job.current_stage``
+    and ``job.status`` -- gh-397 adds no new persisted progress field.
+    A ``queued`` job has started no work, so every stage reads ``pending``.
+    """
+    stages = STAGE_SEQUENCES[StrategyJobType.BOOTSTRAP]
+    current = job.current_stage
+    idx = stages.index(current) if current in stages else 0
+    progress: list[dict[str, str]] = []
+    for position, stage in enumerate(stages):
+        if job.status is StrategyJobStatus.QUEUED:
+            state = "pending"
+        elif job.status is StrategyJobStatus.COMPLETE or position < idx:
+            state = "complete"
+        elif position == idx and job.status is StrategyJobStatus.FAILED:
+            state = "failed"
+        elif position == idx and job.status is StrategyJobStatus.CANCELLED:
+            state = "stopped"
+        elif position == idx:
+            state = "current"
+        else:
+            state = "pending"
+        progress.append(
+            {
+                "key": stage,
+                "label": _bootstrap_stage_label(stage),
+                "state": state,
+            }
+        )
+    return progress
 
 
 def _readiness_progress(readiness: StrategyReadinessV1) -> tuple[int, bool]:
@@ -367,6 +425,21 @@ async def strategy_setup(
     ``is_already_set_up()`` is the exact logical negation of
     ``is_setup_required()`` for an active profile, so "not required"
     always means "already set up" here."""
+    try:
+        bootstrap_jobs = [
+            job
+            for job in backtest.list_strategy_jobs()
+            if job.job_type is StrategyJobType.BOOTSTRAP and job.deleted_at is None
+        ]
+    except BacktestIntegrityError:
+        logger.warning("Bootstrap job scan unavailable for setup GET", exc_info=True)
+        bootstrap_jobs = []
+    if bootstrap_jobs:
+        newest = max(bootstrap_jobs, key=lambda job: job.enqueue_seq)
+        if newest.status in _BOOTSTRAP_ACTIVITY_STATUSES:
+            return RedirectResponse(
+                f"/strategy-manager/activities/{newest.id}", status_code=303
+            )
     if not bootstrap.is_setup_required():
         return RedirectResponse("/strategy-manager?setup=already", status_code=303)
     return templates.TemplateResponse(
@@ -1146,6 +1219,11 @@ def _activity_context(
         ),
         "review_url": review_url,
         "child_url": f"/strategy-manager/activities/{child_id}" if child_id else None,
+        "stage_progress": (
+            _bootstrap_stage_progress(job)
+            if job.job_type is StrategyJobType.BOOTSTRAP
+            else None
+        ),
     }
 
 

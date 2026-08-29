@@ -65,6 +65,7 @@ from app.services.backtest.strategy_job import (
     StrategyJobType,
     StrategyJobV1,
 )
+from app.api.routes.strategy_manager import _bootstrap_stage_progress
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
@@ -746,9 +747,10 @@ def test_bootstrap_activity_renders_status_stage_and_terminal_polling(
     assert repo.bootstrap_run_calls == 1
     if current_stage:
         assert "Roster Capture" in response.text
-    assert ("hx-get=" in response.text) is polls
+    assert ("hx-trigger=" in response.text) is polls
+    polling = "/status?last_seen_version" in response.text
+    assert polling is polls
     if not polls:
-        assert "hx-get=" not in response.text
         assert "hx-trigger=" not in response.text
 
 
@@ -774,7 +776,8 @@ def test_failed_bootstrap_activity_shows_failure_and_legal_action(services):
     assert 'name="idempotency_key"' in response.text
     assert "Delete setup attempt" in response.text
     assert 'data-bs-target="#delete-confirmation-job-1"' in response.text
-    assert "hx-get=" not in response.text
+    assert "hx-trigger=" not in response.text
+    assert "/status?last_seen_version" not in response.text
 
 
 def test_bootstrap_activity_cancel_uses_the_guarded_lifecycle_command(services):
@@ -864,6 +867,225 @@ def test_bootstrap_activity_poll_renders_newer_version(services):
     assert response.status_code == 200
     assert "Profile Activation" in response.text
     assert 'data-status-version="8"' in response.text
+
+
+def _bootstrap_job(
+    *,
+    status,
+    current_stage=None,
+    status_version=7,
+    enqueue_seq=1,
+    deleted_at=None,
+):
+    return SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.BOOTSTRAP,
+        status=status,
+        status_version=status_version,
+        enqueue_seq=enqueue_seq,
+        current_month=None,
+        current_stage=current_stage,
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail="Roster capture failed"
+        if status is StrategyJobStatus.FAILED
+        else None,
+        deleted_at=deleted_at,
+        created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+    )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [StrategyJobStatus.QUEUED, StrategyJobStatus.RUNNING],
+)
+def test_setup_get_redirects_to_activity_for_live_bootstrap_job(services, status):
+    repo, _ = services
+    repo.activity = _bootstrap_job(status=status)
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/strategy-manager/activities/job-1"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [None, StrategyJobStatus.CANCELLED, StrategyJobStatus.FAILED],
+)
+def test_setup_get_renders_form_when_no_live_bootstrap_job(services, status):
+    repo, _ = services
+    repo.has_active = False
+    repo.activity = None if status is None else _bootstrap_job(status=status)
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 200
+    assert 'action="/strategy-manager/setup"' in response.text
+
+
+def test_setup_get_completed_job_but_setup_required_again_renders_form(services):
+    repo, _ = services
+    repo.has_active = False
+    repo.activity = _bootstrap_job(status=StrategyJobStatus.COMPLETE)
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 200
+    assert 'action="/strategy-manager/setup"' in response.text
+
+
+def test_setup_get_completed_job_when_set_up_redirects_to_already_banner(services):
+    repo, _ = services
+    repo.activity = _bootstrap_job(status=StrategyJobStatus.COMPLETE)
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/strategy-manager?setup=already"
+
+
+def test_setup_get_ignores_soft_deleted_newer_bootstrap_job(services):
+    repo, _ = services
+    repo.has_active = False
+
+    live = _bootstrap_job(status=StrategyJobStatus.RUNNING, enqueue_seq=5)
+    live.id = "job-live"
+    deleted = _bootstrap_job(status=StrategyJobStatus.RUNNING, enqueue_seq=9)
+    deleted.id = "job-deleted"
+    deleted.deleted_at = datetime(2026, 8, 29, tzinfo=timezone.utc)
+    repo.list_strategy_jobs = lambda: (live, deleted)
+
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/strategy-manager/activities/job-live"
+
+
+def test_setup_get_uses_newest_bootstrap_job_for_redirect(services):
+    repo, _ = services
+
+    older = _bootstrap_job(status=StrategyJobStatus.CANCELLED, enqueue_seq=1)
+    older.id = "job-old"
+    newer = _bootstrap_job(status=StrategyJobStatus.RUNNING, enqueue_seq=7)
+    newer.id = "job-new"
+    repo.list_strategy_jobs = lambda: (older, newer)
+
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/strategy-manager/activities/job-new"
+
+
+def test_setup_get_survives_integrity_error_from_job_scan(services):
+    repo, _ = services
+    repo.has_active = False
+
+    def _raise():
+        raise BacktestIntegrityError("ledger unavailable")
+
+    repo.list_strategy_jobs = _raise
+    response = client.get("/strategy-manager/setup", follow_redirects=False)
+    assert response.status_code == 200
+    assert 'action="/strategy-manager/setup"' in response.text
+
+
+def test_bootstrap_activity_shows_ordered_stage_progress_mid_run(services):
+    repo, jobs = services
+    jobs.actions = ("cancel",)
+    repo.activity = _bootstrap_job(
+        status=StrategyJobStatus.RUNNING, current_stage="roster_capture"
+    )
+    text = client.get("/strategy-manager/activities/job-1").text
+    assert "Verifying historical data" in text
+    assert "Capturing securities" in text
+    assert "Activating setup" in text
+    assert "sm-stage-complete" in text
+    assert "sm-stage-current" in text
+    assert "sm-stage-pending" in text
+    assert 'aria-current="step"' in text
+
+
+def test_bootstrap_activity_marks_failed_stage_and_recovery_link(services):
+    repo, jobs = services
+    jobs.actions = ("delete",)
+    repo.activity = _bootstrap_job(
+        status=StrategyJobStatus.FAILED,
+        current_stage="roster_capture",
+        status_version=8,
+    )
+    text = client.get("/strategy-manager/activities/job-1").text
+    assert "sm-stage-failed" in text
+    assert "Roster capture failed" in text
+    assert 'href="/strategy-manager/setup"' in text
+    assert "Try setup again" in text
+
+
+def test_bootstrap_activity_cancelled_shows_stopped_stage_and_recovery_link(services):
+    repo, jobs = services
+    jobs.actions = ("delete",)
+    repo.activity = _bootstrap_job(
+        status=StrategyJobStatus.CANCELLED,
+        current_stage="roster_capture",
+        status_version=8,
+    )
+    text = client.get("/strategy-manager/activities/job-1").text
+    assert "sm-stage-stopped" in text
+    assert "Stopped" in text
+    assert "sm-stage-failed" not in text
+    assert 'href="/strategy-manager/setup"' in text
+
+
+def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(services):
+    repo, jobs = services
+    jobs.actions = ()
+    repo.activity = _bootstrap_job(status=StrategyJobStatus.COMPLETE, status_version=9)
+    text = client.get("/strategy-manager/activities/job-1").text
+    assert "Strategy Manager is set up." in text
+    assert 'href="/strategy-manager"' in text
+    assert "hx-trigger=" not in text
+    assert text.count("sm-stage-complete") == 3
+
+
+@pytest.mark.parametrize(
+    ("status", "current_stage", "expected"),
+    [
+        (StrategyJobStatus.QUEUED, None, ["pending", "pending", "pending"]),
+        (StrategyJobStatus.RUNNING, None, ["current", "pending", "pending"]),
+        (
+            StrategyJobStatus.RUNNING,
+            "roster_capture",
+            ["complete", "current", "pending"],
+        ),
+        (
+            StrategyJobStatus.RUNNING,
+            "profile_activation",
+            ["complete", "complete", "current"],
+        ),
+        (
+            StrategyJobStatus.FAILED,
+            "roster_capture",
+            ["complete", "failed", "pending"],
+        ),
+        (StrategyJobStatus.FAILED, None, ["failed", "pending", "pending"]),
+        (
+            StrategyJobStatus.CANCELLED,
+            "roster_capture",
+            ["complete", "stopped", "pending"],
+        ),
+        (StrategyJobStatus.CANCELLED, None, ["stopped", "pending", "pending"]),
+        (
+            StrategyJobStatus.COMPLETE,
+            "profile_activation",
+            ["complete", "complete", "complete"],
+        ),
+        (StrategyJobStatus.COMPLETE, None, ["complete", "complete", "complete"]),
+    ],
+)
+def test_bootstrap_stage_progress_matrix(status, current_stage, expected):
+    job = _bootstrap_job(status=status, current_stage=current_stage)
+    progress = _bootstrap_stage_progress(cast(StrategyJobV1, job))
+    assert [stage["key"] for stage in progress] == [
+        "qualification",
+        "roster_capture",
+        "profile_activation",
+    ]
+    assert [stage["label"] for stage in progress] == [
+        "Verifying historical data",
+        "Capturing securities",
+        "Activating setup",
+    ]
+    assert [stage["state"] for stage in progress] == expected
 
 
 def test_backtest_cancel_reuses_the_generic_lifecycle_command(services):
