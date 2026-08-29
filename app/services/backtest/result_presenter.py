@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import html
 
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestResultV1
@@ -28,6 +28,7 @@ from app.services.backtest.backtest_engine import (
 )
 from app.services.backtest.metrics import MetricUnavailableReason
 from app.services.backtest.snapshot_profile import CoverageIntervalV1, CoverageSummaryV1
+from app.services.backtest.strategy_protocol import EntrySelectionState
 from app.services.backtest.trading_calendar import TradingCalendar
 
 #: AC 2: the two null-Metric display strings, sourced only from
@@ -60,6 +61,24 @@ _EXECUTED_FILL_KINDS = frozenset({"entry_fill", "exit_fill"})
 #: Primary Security-cell label when a row's ``security_id`` is not present
 #: in the run's pinned reconstruction roster.
 UNRESOLVED_SECURITY_LABEL = "Unknown security"
+
+# Buy-and-Hold's persisted reason vocabulary is an audit contract, but its
+# machine-facing codes do not belong in the Result UI.  Keep this mapping at
+# the presentation boundary: it neither re-ranks nor derives a decision.
+_INITIAL_BASKET_EXCLUSION_TEXT: dict[str, str] = {
+    "entry_cutoff_not_reached": "The basket-selection date is before the configured entry date.",
+    "invalid_entry_cutoff": "The configured entry date is invalid.",
+    "history_unavailable": "Price history is unavailable for the 252-session return.",
+    "insufficient_history": "Insufficient price history for the 252-session return.",
+    "invalid_close_history": "Price history is invalid for the 252-session return.",
+    "regime_filter_not_permitted": "Market conditions did not permit an initial entry.",
+}
+
+_INITIAL_BASKET_OUTCOME_TEXT: dict[EntrySelectionState, str] = {
+    EntrySelectionState.SELECTED: "Selected",
+    EntrySelectionState.ELIGIBLE_NOT_SELECTED: "Eligible, not selected",
+    EntrySelectionState.EXCLUDED: "Excluded",
+}
 
 
 def resolve_security_label(
@@ -147,6 +166,35 @@ class NoteViewV1:
     version: int
 
 
+@dataclass(frozen=True)
+class InitialBasketRowV1:
+    """One immutable, persisted initial-selection decision for display."""
+
+    rank: int
+    security_id: str
+    security_label: str
+    trailing_return: str
+    outcome: str
+    exclusion: str | None
+
+
+@dataclass(frozen=True)
+class InitialBasketViewV1:
+    """The Result-page projection of optional V2 selection evidence.
+
+    ``recorded`` deliberately distinguishes an old Result (no evidence was
+    persisted) from a recorded all-excluded selection (valid evidence with no
+    selected members).
+    """
+
+    recorded: bool
+    selection_session: str | None
+    metric_id: str | None
+    metric_version: str | None
+    rows: tuple[InitialBasketRowV1, ...]
+    has_selected: bool
+
+
 def _signed_percent(value: float, *, signed: bool) -> str:
     pct = round(value * 100, 1)
     if pct == 0:
@@ -157,6 +205,70 @@ def _signed_percent(value: float, *, signed: bool) -> str:
 
 def _unsigned_percent(value: float) -> str:
     return f"{round(value * 100, 1):.1f}%"
+
+
+def _one_decimal_percent(value: Decimal) -> str:
+    """Format a persisted Decimal score without changing the stored value."""
+    with localcontext() as context:
+        context.prec = max(
+            28, len(value.as_tuple().digits) + max(value.adjusted(), 0) + 3
+        )
+        rounded = (value * Decimal("100")).quantize(Decimal("0.1"))
+    if rounded == 0:
+        rounded = Decimal(0)
+    return f"{rounded:.1f}%"
+
+
+def initial_basket_view(
+    result: BacktestResultV1, identities: Mapping[str, tuple[str, str]]
+) -> InitialBasketViewV1:
+    """Project stored initial-entry evidence for the Result page only.
+
+    This function intentionally does no price lookup, score calculation, or
+    identity repair.  Its input is optional to preserve historical Results.
+    """
+    selection = result.initial_entry_selection
+    if selection is None:
+        return InitialBasketViewV1(
+            recorded=False,
+            selection_session=None,
+            metric_id=None,
+            metric_version=None,
+            rows=(),
+            has_selected=False,
+        )
+    rows = tuple(
+        InitialBasketRowV1(
+            rank=decision.rank,
+            security_id=decision.security_id,
+            security_label=resolve_security_label(decision.security_id, identities),
+            trailing_return=(
+                _one_decimal_percent(decision.score)
+                if decision.score is not None
+                else "—"
+            ),
+            outcome=_INITIAL_BASKET_OUTCOME_TEXT[decision.state],
+            exclusion=(
+                _INITIAL_BASKET_EXCLUSION_TEXT.get(
+                    decision.reason_code or "", "Not eligible for the initial basket."
+                )
+                if decision.state is EntrySelectionState.EXCLUDED
+                else None
+            ),
+        )
+        for decision in sorted(selection.decisions, key=lambda item: item.rank)
+    )
+    return InitialBasketViewV1(
+        recorded=True,
+        selection_session=selection.session.isoformat(),
+        metric_id=selection.metric_id,
+        metric_version=selection.metric_version,
+        rows=rows,
+        has_selected=any(
+            decision.state is EntrySelectionState.SELECTED
+            for decision in selection.decisions
+        ),
+    )
 
 
 def _null_reason_text(reason: MetricUnavailableReason | None) -> str:
@@ -458,10 +570,13 @@ __all__ = [
     "ProvenanceEntryViewV1",
     "ProvenanceViewV1",
     "NoteViewV1",
+    "InitialBasketRowV1",
+    "InitialBasketViewV1",
     "metrics_view",
     "equity_curve_payload",
     "comparison_equity_payload",
     "trade_log_view",
     "provenance_view",
     "note_view",
+    "initial_basket_view",
 ]

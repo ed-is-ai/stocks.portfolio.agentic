@@ -31,9 +31,12 @@ parameters:
 
 Use `scripts/strategy.py` through the Backtest Engine. The host binds the
 Run's canonical selected-security tuple to `selected_securities`. On the first
-normalized Run session only, rank every member by split-adjusted close return:
-the last close strictly before selection divided by the close 252 security
-sessions earlier, minus one. Both endpoints and all 253 closes are required.
+normalized Run session only, rank every member by its trailing return (252
+sessions): the last close strictly before selection divided by the close 252
+security sessions earlier, minus one. A security with fewer than 253 valid
+positive split-adjusted closing prices strictly before selection is
+disqualified as insufficient history; missing or invalid price inputs are also
+excluded with a plain-language reason in the completed Result.
 Select the top `top_x` (default 10) by return descending and canonical security
 ID ascending; record a stable excluded decision for every other member. Never
 rerank, rebalance, emit an ordinary entry candidate, or emit SELL.

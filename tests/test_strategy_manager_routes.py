@@ -69,7 +69,14 @@ from app.api.routes.strategy_manager import _bootstrap_stage_progress
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
-from app.services.backtest.strategy_protocol import SignalSide, StrategyParameterV1
+from app.services.backtest.strategy_protocol import (
+    EntrySelectionDecisionV1,
+    EntrySelectionState,
+    InitialEntrySelectionV1,
+    Signal,
+    SignalSide,
+    StrategyParameterV1,
+)
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
@@ -1272,6 +1279,32 @@ STRATEGY_ALPHA = StrategyDescriptorV1(
     ),
 )
 
+STRATEGY_BUY_AND_HOLD = StrategyDescriptorV1(
+    strategy_id="rtly-backtest-buy-and-hold",
+    source_manifest_version="strategy_source_manifest.v1",
+    source_digest="h" * 64,
+    display_name="Buy and Hold Backtest",
+    description="A one-time ranked passive basket.",
+    api_version=1,
+    parameters=(
+        _param(
+            name="top_x",
+            type="integer",
+            default=10,
+            minimum=1,
+            description="Number of strongest eligible securities to buy once at the first Run session.",
+        ),
+    ),
+    default_parameters={"top_x": 10},
+    runtime_path="rtly-backtest-buy-and-hold/scripts/strategy.py",
+    runtime_files=("rtly-backtest-buy-and-hold/scripts/strategy.py",),
+    universe=StrategyUniverseContractV1(
+        schema_version="strategy_universe.v1",
+        mode="selected-securities",
+        parameter="selected_securities",
+    ),
+)
+
 
 class FakeLaunchService:
     """Minimal fake mirroring ``BacktestLaunchService``'s public surface."""
@@ -1367,6 +1400,48 @@ def test_configuration_selecting_strategy_renders_its_parameters(launch):
     assert 'name="param__enabled"' in response.text
     assert 'name="param__label"' in response.text
     assert 'name="param__mode"' in response.text
+
+
+def test_buy_and_hold_top_x_uses_shared_metadata_driven_integer_field(launch):
+    launch.strategies = (STRATEGY_ALPHA, STRATEGY_BUY_AND_HOLD)
+    response = client.get(
+        "/strategy-manager/configuration?strategy_id=rtly-backtest-buy-and-hold"
+    )
+    assert response.status_code == 200
+    text = response.text
+    assert 'id="param__top_x"' in text
+    assert 'name="param__top_x"' in text
+    assert 'value="10"' in text
+    assert 'min="1"' in text
+    assert 'step="1"' in text
+    assert "Number of strongest eligible securities" in text
+
+
+def test_buy_and_hold_top_x_validation_error_stays_on_its_field(launch):
+    """``top_x`` uses the shared decoder, including retry-value retention."""
+    launch.strategies = (STRATEGY_BUY_AND_HOLD,)
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "rtly-backtest-buy-and-hold",
+            "profile_hash": "a" * 64,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-02",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "buy-and-hold-invalid-top-x",
+            "security_ids": "sid_001",
+            "param__top_x": "1.5",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    text = response.text
+    assert 'id="param__top_x-error"' in text
+    assert 'aria-invalid="true"' in text
+    assert 'value="1.5"' in text
+    assert launch.launch_calls == []
 
 
 def test_strategy_radio_label_shows_count_not_default_dump(launch):
@@ -1815,6 +1890,7 @@ def _result(
     start_month: str = "2024-01",
     end_month: str = "2024-01",
     profile_hash: str = RESULT_PROFILE_HASH,
+    initial_entry_selection: InitialEntrySelectionV1 | None = None,
 ) -> BacktestResultV1:
     curve = (
         equity_curve
@@ -1843,6 +1919,7 @@ def _result(
         completed_at=datetime(2024, 2, 1, 12, 0, tzinfo=timezone.utc),
         note=note,
         note_version=note_version,
+        initial_entry_selection=initial_entry_selection,
     )
 
 
@@ -1883,6 +1960,56 @@ def test_result_page_renders_sections_in_order(services):
     assert "momentum_v1 v1" in text
     assert "2024-01 to 2024-01" in text
     assert "No live-portfolio" not in text  # sanity: no live-import copy leaks in
+
+
+def test_result_initial_basket_is_visible_and_explains_persisted_evidence(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    selection_session = date(2024, 1, 1)
+    repo.result = _result(
+        initial_entry_selection=InitialEntrySelectionV1(
+            session=selection_session,
+            metric_id="split_adjusted_close_return_252_sessions",
+            metric_version="v1",
+            rule_id="buy_and_hold_top_x_entry_v1",
+            decisions=(
+                EntrySelectionDecisionV1(
+                    security_id="sid_001",
+                    rank=1,
+                    state=EntrySelectionState.SELECTED,
+                    score=Decimal("0.1236"),
+                ),
+                EntrySelectionDecisionV1(
+                    security_id="missing-id",
+                    rank=2,
+                    state=EntrySelectionState.EXCLUDED,
+                    reason_code="insufficient_history",
+                ),
+            ),
+            signals=(
+                Signal(
+                    security_id="sid_001",
+                    side=SignalSide.BUY,
+                    session=selection_session,
+                    rule_id="buy_and_hold_top_x_entry_v1",
+                ),
+            ),
+        )
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "Initial basket" in text
+    assert "Trailing return (252 sessions)" in text
+    assert "split_adjusted_close_return_252_sessions v1" in text
+    assert "split_adjusted_close_return_252_sessions vv1" not in text
+    assert "Calculated from the 252 prior trading sessions" in text
+    assert "12.4%" in text
+    assert "AAPL (XNYS)" in text
+    assert "Unknown security" in text
+    assert "missing-id" in text
+    assert "Insufficient price history for the 252-session return." in text
+    assert "insufficient_history" not in text
 
 
 def test_result_metrics_format_signed_and_neutral(services):

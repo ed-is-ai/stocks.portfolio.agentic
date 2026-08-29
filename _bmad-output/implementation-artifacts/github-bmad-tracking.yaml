@@ -137,7 +137,7 @@ standalone_issues:
     spec: spec-gh-301-realised-pnl-average-win-loss.md
   buy-and-hold-top-x-strength:
     issue: 366
-    status: in-progress
+    status: done
     prerequisite_issues: [368]
     sub_issues: [369, 370, 371]
     stories:
@@ -151,4 +151,5 @@ standalone_issues:
         spec: spec-gh-370-rank-and-buy-top-x-basket.md
       gh-371-configure-and-explain-top-x-basket:
         issue: 371
-        status: backlog
+        status: done
+        spec: spec-gh-371-configure-and-explain-top-x-basket.md

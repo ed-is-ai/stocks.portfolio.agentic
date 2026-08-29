@@ -90,7 +90,7 @@ development_status:
   4-8-compare-results-using-compatible-evidence-rules: backlog
   4-9-complete-the-first-backtest-from-a-clean-checkout: backlog
   epic-4-retrospective: optional
-  feature-gh-366-buy-and-hold-top-x-strength: in-progress
+  feature-gh-366-buy-and-hold-top-x-strength: done
   366-1-record-one-initial-ranked-entry-selection: done
   366-2-rank-and-buy-the-strongest-top-x-basket: done
-  366-3-configure-and-explain-the-top-x-basket: backlog
+  366-3-configure-and-explain-the-top-x-basket: done

@@ -317,6 +317,7 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
     parameters: dict[str, object] = {
         **universe_binding,
         "entry_on_or_after": "2026-06-01",
+        "top_x": 1,
     }
     preparation_result = jobs.enqueue_preparation(
         PreparationSubmissionV1(
@@ -347,6 +348,7 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
     backtest_run = repo.strategy_run(backtest_job_id)
     assert backtest_run.manifest_version == "run_input_manifest.v2"
     assert backtest_run.universe_selection == selection
+    assert backtest_run.parameters["top_x"] == 1
 
     # --- Backtest: build_backtest_engine, real Strategy discovery against
     # the actual skills/ directory -- never the _patch_strategy_resolution
@@ -370,6 +372,80 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
     result = repo.backtest_result(backtest_job_id)
     assert len(result.events) > 0
     assert len(result.equity_curve) > 0
+    assert result.parameters["top_x"] == 1
+    assert result.initial_entry_selection is not None
+    assert len(result.initial_entry_selection.signals) == 1
+    assert len(result.initial_entry_selection.decisions) == len(canonical)
+    assert not any(event.kind == "exit_fill" for event in result.events)
+    assert any(event.kind == "open_position_mark" for event in result.events)
+
+    # --- Restart: a separately prepared but otherwise identical Backtest
+    # is cancelled before execution, then restarted through the durable
+    # repository seam.  The restart must reuse (not rebuild) its canonical
+    # manifest/parameters and reproduce the same persisted decision evidence
+    # and final marks as the completed first run above.
+    replay_preparation = jobs.enqueue_preparation(
+        PreparationSubmissionV1(
+            selection=selection,
+            strategy_id=strategy.strategy_id,
+            strategy_api_version=strategy.api_version,
+            strategy_source_digest=strategy.source_digest,
+            parameters=parameters,
+            start_month=INITIALIZATION_MONTH,
+            end_month=INITIALIZATION_MONTH,
+            base_currency="USD",
+            starting_capital=Decimal("10000"),
+            idempotency_key="clean-checkout-journey-replay-preparation",
+        )
+    )
+    replay_preparation_claim = repo.claim_next_strategy_job()
+    assert replay_preparation_claim is not None
+    replay_preparation_engine = build_stage_walk_engine(
+        replay_preparation_claim.job.id, repo, StrategyJobType.PREPARATION
+    )
+    assert (
+        replay_preparation_engine.run(
+            replay_preparation_claim.job.id,
+            replay_preparation_claim.claim_token,
+        ).status
+        is StrategyJobStatus.COMPLETE
+    )
+    cancelled_backtest_id = repo.preparation_child_backtest_id(
+        replay_preparation.job.id
+    )
+    assert cancelled_backtest_id is not None
+    cancelled = repo.request_strategy_job_cancellation(
+        cancelled_backtest_id,
+        expected_version=repo.strategy_job(cancelled_backtest_id).status_version,
+    )
+    restarted = repo.restart_backtest_job(
+        cancelled_backtest_id,
+        expected_version=cancelled.status_version,
+        idempotency_key="clean-checkout-journey-restart",
+    )
+    cancelled_run = repo.strategy_run(cancelled_backtest_id)
+    assert restarted.backtest.parameters["top_x"] == 1
+    assert restarted.backtest.run_input_manifest_digest == (
+        cancelled_run.run_input_manifest_digest
+    )
+    assert repo.run_input_manifest_json(
+        restarted.backtest.run_input_manifest_digest
+    ) == repo.run_input_manifest_json(cancelled_run.run_input_manifest_digest)
+
+    restarted_claim = repo.claim_next_strategy_job()
+    assert restarted_claim is not None and restarted_claim.job.id == restarted.job.id
+    restarted_engine = build_backtest_engine(
+        restarted.job.id, restarted_claim.claim_token, repo
+    )
+    assert (
+        restarted_engine.run(restarted.job.id, restarted_claim.claim_token).status
+        is StrategyJobStatus.COMPLETE
+    )
+    restarted_result = repo.backtest_result(restarted.job.id)
+    assert restarted_result.parameters["top_x"] == 1
+    assert restarted_result.initial_entry_selection == result.initial_entry_selection
+    assert restarted_result.final_cash_base == result.final_cash_base
+    assert restarted_result.events == result.events
 
 
 def test_a_deliberately_failed_stage_surfaces_a_named_stable_failure(

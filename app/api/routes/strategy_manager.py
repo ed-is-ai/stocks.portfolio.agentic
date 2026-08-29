@@ -44,6 +44,7 @@ from app.services.backtest.backtest_launch_service import (
 from app.services.backtest.result_presenter import (
     comparison_equity_payload,
     equity_curve_payload,
+    initial_basket_view,
     metrics_view,
     note_view,
     provenance_view,
@@ -1388,6 +1389,7 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         "result": result,
         "metrics": metrics_view(result),
         "equity_curve_payload": equity_curve_payload(result),
+        "initial_basket": initial_basket_view(result, identities),
         "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
         "note": note_view(result),

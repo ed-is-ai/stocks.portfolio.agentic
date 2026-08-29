@@ -36,6 +36,50 @@
     </dl>
   </div></article>
 
+  <!-- Initial basket: optional immutable V2 evidence, deliberately shown
+       before performance so the Result explains what was bought. -->
+  <section aria-labelledby="initial-basket-heading" class="mb-4">
+    <h2 id="initial-basket-heading" class="h5">Initial basket</h2>
+    {% if not initial_basket.recorded %}
+    <p class="text-muted">Initial basket evidence was not recorded for this historical run.</p>
+    {% else %}
+    <dl class="row mb-2 mono-num">
+      <dt class="col-sm-3">Basket-selection date</dt>
+      <dd class="col-sm-9">{{ initial_basket.selection_session }}</dd>
+      <dt class="col-sm-3">Metric</dt>
+      <dd class="col-sm-9">Trailing return (252 sessions) — {{ initial_basket.metric_id }} {{ initial_basket.metric_version }}</dd>
+    </dl>
+    <p>Calculated from the 252 prior trading sessions, ending before the basket-selection date.</p>
+    {% if not initial_basket.has_selected %}
+    <p>No securities qualified for the initial basket.</p>
+    {% endif %}
+    <div class="tbl-wrap" style="overflow-x:auto" tabindex="0" role="region" aria-label="Initial basket evidence">
+      <table class="table table-hover align-middle mono-num">
+        <caption class="visually-hidden">Persisted initial basket decisions in stored rank order</caption>
+        <thead>
+          <tr>
+            <th scope="col">Rank</th><th scope="col">Security</th>
+            <th scope="col">Canonical ID</th><th scope="col">Trailing return (252 sessions)</th>
+            <th scope="col">Outcome</th><th scope="col">Exclusion</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in initial_basket.rows %}
+          <tr>
+            <td>{{ row.rank }}</td>
+            <td>{{ row.security_label }}</td>
+            <td class="text-break">{{ row.security_id }}</td>
+            <td>{{ row.trailing_return }}</td>
+            <td>{{ row.outcome }}</td>
+            <td class="text-wrap">{{ row.exclusion or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+
   <!-- Metrics -->
   <h2 class="h5">Metrics</h2>
   <div class="d-flex flex-wrap gap-3 mb-4">
