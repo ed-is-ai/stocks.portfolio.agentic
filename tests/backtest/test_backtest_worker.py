@@ -24,10 +24,13 @@ from app.services.backtest.run_input_manifest import (
     DetectorSourceDigestV1,
     PinnedSecurityEvidenceV1,
     RunInputManifestV1,
+    build_run_input_manifest_v2,
 )
+from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
     StrategyUniverseContractV1,
+    discover_strategies,
 )
 from app.services.backtest.snapshot_profile import (
     IntervalReadinessV1,
@@ -38,6 +41,8 @@ from app.services.backtest.source_manifest import detector_source_manifests
 from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
     JobFailureCode,
+    PreparationSubmissionV1,
+    RunUniverseSelectionV1,
     STAGE_SEQUENCES,
     StrategyJobStatus,
     StrategyJobType,
@@ -595,6 +600,122 @@ def test_worker_completes_a_real_backtest_end_to_end(
             ).fetchone()
             is None
         )
+
+
+def test_worker_persists_production_buy_and_hold_top_x_selection_from_sealed_v2(
+    tmp_path: Path,
+) -> None:
+    """Exercise production selection evidence through the sealed V2 path."""
+    database_path = tmp_path / "backtest.db"
+    repo = _repo(database_path)
+    _seed_selected_member(database_path)
+    _patch_ready(repo)
+    prices = _price_repo(tmp_path)
+    descriptor = next(
+        item
+        for item in discover_strategies(config.SKILLS_DIR).strategies
+        if item.strategy_id == "rtly-backtest-buy-and-hold"
+    )
+    calendar = TradingCalendar()
+    history = calendar.sessions_in_range("XNYS", date(2025, 5, 1), date(2026, 7, 1))
+    revision = _commit_evidence(prices, security_id=SECURITY_ID, sessions=history)
+    selection = RunUniverseSelectionV1(
+        profile_hash=PROFILE_HASH,
+        activation_seq=1,
+        universe_parameter="selected_securities",
+        canonical_security_ids=(SECURITY_ID,),
+        run_universe_digest=run_universe_digest(
+            [SECURITY_ID], parameter="selected_securities", profile_hash=PROFILE_HASH
+        ),
+    )
+    accepted = repo.create_preparation_job(
+        PreparationSubmissionV1(
+            selection=selection,
+            strategy_id=descriptor.strategy_id,
+            strategy_api_version=descriptor.api_version,
+            strategy_source_digest=descriptor.source_digest,
+            parameters={
+                "entry_on_or_after": "2000-01-01",
+                "top_x": 1,
+                "selected_securities": [SECURITY_ID],
+            },
+            start_month="2026-06",
+            end_month="2026-06",
+            base_currency="USD",
+            starting_capital=Decimal("10000"),
+            idempotency_key="buy-and-hold-top-x-v2",
+        )
+    )
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    base = _manifest(
+        revision=revision,
+        start_month="2026-06",
+        end_month="2026-06",
+        parameters=dict(accepted.preparation.parameters),
+    ).model_copy(
+        update={
+            "strategy_id": descriptor.strategy_id,
+            "strategy_api_version": descriptor.api_version,
+            "strategy_source_digest": descriptor.source_digest,
+        }
+    )
+    manifest = build_run_input_manifest_v2(
+        base, selection=selection, source_preparation_job_id=accepted.job.id
+    )
+    child = repo.seal_preparation_and_create_backtest(
+        accepted.job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        submission=BacktestSubmissionV1(
+            strategy_id=manifest.strategy_id,
+            strategy_api_version=manifest.strategy_api_version,
+            strategy_source_digest=manifest.strategy_source_digest,
+            parameters=dict(manifest.parameters),
+            profile_hash=manifest.profile_hash,
+            start_month=manifest.start_month,
+            end_month=manifest.end_month,
+            base_currency=manifest.base_currency,
+            starting_capital=manifest.starting_capital,
+            run_input_manifest_digest=manifest.digest(),
+            execution_contract_digest=manifest.execution_contract_digest(),
+            canonical_manifest_json=manifest.canonical_json(),
+            manifest_version="run_input_manifest.v2",
+            universe_selection=selection,
+            source_preparation_job_id=accepted.job.id,
+        ),
+    )
+    cancelled = repo.request_strategy_job_cancellation(
+        child.job.id, expected_version=child.job.status_version
+    )
+    replay = repo.restart_backtest_job(
+        child.job.id,
+        expected_version=cancelled.status_version,
+        idempotency_key="buy-and-hold-top-x-v2-replay",
+    )
+    assert (
+        replay.backtest.run_input_manifest_digest
+        == child.backtest.run_input_manifest_digest
+    )
+    assert replay.backtest.universe_selection == child.backtest.universe_selection
+    backtest_claim = repo.claim_next_strategy_job()
+    assert backtest_claim is not None and backtest_claim.job.id == replay.job.id
+    engine = worker_module.build_backtest_engine(
+        replay.job.id, backtest_claim.claim_token, repo
+    )
+    engine._prices = prices  # type: ignore[attr-defined]
+
+    completed_job = engine.run(replay.job.id, backtest_claim.claim_token)
+
+    assert completed_job.status is StrategyJobStatus.COMPLETE
+    result = repo.backtest_result(replay.job.id)
+    assert result.initial_entry_selection is not None
+    assert [item.security_id for item in result.initial_entry_selection.decisions] == [
+        SECURITY_ID
+    ]
+    assert [item.security_id for item in result.initial_entry_selection.signals] == [
+        SECURITY_ID
+    ]
 
 
 def test_worker_honours_a_cancellation_requested_mid_month(

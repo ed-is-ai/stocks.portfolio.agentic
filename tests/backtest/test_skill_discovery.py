@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
-from typing import Mapping
+from typing import Mapping, cast
 
 import pytest
 
@@ -28,7 +28,11 @@ from app.services.backtest.skill_discovery import (
     StrategyDiscoveryWarningV1,
     discover_strategies,
 )
-from app.services.backtest.strategy_protocol import StrategyProtocolV1
+from app.services.backtest.strategy_protocol import (
+    JsonValue,
+    StrategyProtocolV1,
+    validate_strategy_parameters,
+)
 from app.services.backtest.worker import _load_strategy_instance
 
 FIXTURES_ROOT = (
@@ -50,6 +54,7 @@ COMMON_REGIME_FILTER_DEFAULTS = {
 EXPECTED_LIVE_STRATEGY_DEFAULTS = {
     "rtly-backtest-buy-and-hold": {
         "entry_on_or_after": "2000-01-01",
+        "top_x": 10,
         **COMMON_REGIME_FILTER_DEFAULTS,
     },
     "rtly-backtest-darvas-box": {
@@ -159,6 +164,24 @@ def test_live_backtest_strategies_expose_common_regime_filter_params() -> None:
         assert by_name["regime_filter_benchmark_security_id"].default == ""
         assert by_name["regime_filter_ma_length"].default == 200
         assert descriptor.default_parameters["regime_filter_enabled"] is False
+
+
+@pytest.mark.parametrize("bad_top_x", [True, 0, -1, 1.5, "10"])
+def test_buy_and_hold_top_x_uses_shared_positive_integer_validation(
+    bad_top_x: object,
+) -> None:
+    descriptor = _strategies_by_id(discover_strategies(LIVE_SKILLS_ROOT).strategies)[
+        "rtly-backtest-buy-and-hold"
+    ]
+
+    result = validate_strategy_parameters(
+        descriptor.parameters,
+        {"entry_on_or_after": "2000-01-01", "top_x": cast(JsonValue, bad_top_x)},
+        apply_defaults=True,
+    )
+
+    assert not isinstance(result, Mapping)
+    assert result[0].parameter_name == "top_x"
 
 
 def test_live_backtest_strategies_load_through_production_worker() -> None:

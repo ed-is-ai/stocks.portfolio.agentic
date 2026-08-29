@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-08-28 (Issue 369 complete; PR/merge pending)"
+last_updated: "2026-08-29 (Issue 370 code-reviewed and complete)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -92,5 +92,5 @@ development_status:
   epic-4-retrospective: optional
   feature-gh-366-buy-and-hold-top-x-strength: in-progress
   366-1-record-one-initial-ranked-entry-selection: done
-  366-2-rank-and-buy-the-strongest-top-x-basket: backlog
+  366-2-rank-and-buy-the-strongest-top-x-basket: done
   366-3-configure-and-explain-the-top-x-basket: backlog
