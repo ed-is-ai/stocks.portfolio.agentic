@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.services.backtest.regime_filter import entry_signals_permitted
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -152,9 +153,12 @@ class WeinsteinStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
+        universe = _universe(parameters)
+        if not entry_signals_permitted(view, parameters, universe):
+            return []
         signals = [
             self._entry_signal(view, parameters, security_id)
-            for security_id in _universe(parameters)
+            for security_id in universe
         ]
         return [signal for signal in signals if signal is not None]
 

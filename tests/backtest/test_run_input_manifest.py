@@ -335,6 +335,25 @@ def test_execution_contract_digest_ignores_strategy_parameters_and_capital() -> 
     assert baseline.digest() != different_strategy_and_capital.digest()
 
 
+def test_execution_contract_digest_ignores_regime_filter_params() -> None:
+    baseline = _manifest()
+    with_regime_filter = _manifest(
+        parameters={
+            "lookback": 20,
+            "watch": "sec-aapl",
+            "regime_filter_enabled": True,
+            "regime_filter_benchmark_security_id": "sec-spy",
+            "regime_filter_ma_length": 200,
+        },
+    )
+
+    assert (
+        baseline.execution_contract_digest()
+        == with_regime_filter.execution_contract_digest()
+    )
+    assert baseline.digest() != with_regime_filter.digest()
+
+
 def test_execution_contract_digest_changes_with_engine_semantics() -> None:
     baseline = _manifest()
     different_engine = baseline.model_copy(

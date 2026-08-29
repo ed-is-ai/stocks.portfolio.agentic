@@ -6,6 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.services.backtest.regime_filter import entry_signals_permitted
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -81,6 +82,9 @@ class BuyAndHoldStrategy:
         cutoff = _cutoff(parameters)
         if cutoff is None or view.as_of_session < cutoff:
             return []
+        universe = _universe(parameters)
+        if not entry_signals_permitted(view, parameters, universe):
+            return []
         return [
             Signal(
                 security_id=security_id,
@@ -88,7 +92,7 @@ class BuyAndHoldStrategy:
                 session=view.as_of_session,
                 rule_id="buy_and_hold_entry_v1",
             )
-            for security_id in _universe(parameters)
+            for security_id in universe
             if _has_fresh_history(view, security_id)
         ]
 

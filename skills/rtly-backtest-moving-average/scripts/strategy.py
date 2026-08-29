@@ -6,6 +6,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.services.backtest.regime_filter import entry_signals_permitted
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -122,6 +123,9 @@ class MovingAverageStrategy:
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
+        universe = _universe(parameters)
+        if not entry_signals_permitted(view, parameters, universe):
+            return []
         return [
             Signal(
                 security_id=security_id,
@@ -129,7 +133,7 @@ class MovingAverageStrategy:
                 session=view.as_of_session,
                 rule_id="moving_average_bullish_crossover_v1",
             )
-            for security_id in _universe(parameters)
+            for security_id in universe
             if _crossover(view, parameters, security_id) == 1
         ]
 

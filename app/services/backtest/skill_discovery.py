@@ -151,7 +151,51 @@ ALLOWED_RUNTIME_PREFIXES: tuple[str, ...] = (
     "operator",
     "statistics",
     "typing",
+    "app.services.backtest.regime_filter",
     "app.services.backtest.strategy_protocol",
+)
+
+#: Opt-in market-regime entry-filter parameters injected into every
+#: ``kind: backtest-strategy`` descriptor at discovery time (never authored
+#: per skill). One canonical definition keeps the default mapping, the
+#: launch validator, and the six runtimes in lock-step; a SKILL.md that
+#: also declares one of these names fails discovery with the existing
+#: ``duplicate_parameter_declaration`` error. The runtime derivation lives
+#: in ``app/services/backtest/regime_filter.py``.
+COMMON_BACKTEST_STRATEGY_PARAMETERS: tuple[StrategyParameterV1, ...] = (
+    StrategyParameterV1(
+        name="regime_filter_enabled",
+        type="boolean",
+        default=False,
+        description=(
+            "When true, suppress every entry signal on any session where the "
+            "benchmark security closes at or below its regime_filter_ma_length "
+            "simple moving average."
+        ),
+        required=False,
+    ),
+    StrategyParameterV1(
+        name="regime_filter_benchmark_security_id",
+        type="string",
+        default="",
+        description=(
+            "Canonical id of the benchmark security whose trend governs the "
+            "regime filter. Must be one of the Run's selected securities."
+        ),
+        required=False,
+    ),
+    StrategyParameterV1(
+        name="regime_filter_ma_length",
+        type="integer",
+        default=200,
+        description=(
+            "Length in sessions of the benchmark's trailing simple moving "
+            "average used by the regime filter."
+        ),
+        required=False,
+        minimum=2,
+        maximum=400,
+    ),
 )
 
 #: Closed, stable warning-code vocabulary a caller can branch on -- see the
@@ -842,6 +886,24 @@ def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
         schema = _parameter_schema_from_frontmatter(parsed.get("parameters"))
     except ValueError as exc:
         return _warning(name, "invalid_parameter_schema", str(exc), field="parameters")
+
+    if parsed.get("kind") == _STRATEGY_KIND:
+        # Inject the opt-in regime-filter parameters exactly once, before
+        # validation. A SKILL.md that also declares one of these reserved
+        # names is rejected here rather than silently shadowed.
+        declared = {parameter.name for parameter in schema}
+        clash = declared.intersection(
+            parameter.name for parameter in COMMON_BACKTEST_STRATEGY_PARAMETERS
+        )
+        if clash:
+            return _warning(
+                name,
+                "invalid_parameter_schema",
+                f"'parameters' redeclares reserved regime-filter name(s): "
+                f"{', '.join(sorted(clash))}",
+                field="parameters",
+            )
+        schema = schema + COMMON_BACKTEST_STRATEGY_PARAMETERS
 
     try:
         validated_defaults = validate_strategy_parameters(

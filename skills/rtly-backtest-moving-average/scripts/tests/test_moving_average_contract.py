@@ -187,3 +187,97 @@ def test_empty_or_malformed_universe_emits_nothing() -> None:
         == []
     )
     assert strategy.entry_signals(view, without_universe) == []
+
+
+# ---------------------------------------------------------------------------
+# #388 -- opt-in market-regime entry filter
+# ---------------------------------------------------------------------------
+
+from app.services.backtest.regime_filter import (  # noqa: E402
+    REGIME_FILTER_BENCHMARK_PARAM,
+    REGIME_FILTER_ENABLED_PARAM,
+    REGIME_FILTER_MA_LENGTH_PARAM,
+)
+
+_BENCHMARK_ID = "sec-spy"
+
+
+class _RegimeView:
+    """Wrap a contract ``_View`` and serve a crafted benchmark frame."""
+
+    def __init__(self, inner: object, benchmark_closes: list[str]) -> None:
+        self._inner = inner
+        self.as_of_session = inner.as_of_session
+        self._benchmark = pd.DataFrame(
+            {"close": [Decimal(value) for value in benchmark_closes]}
+        )
+
+    def price_history(self, security_id: str) -> pd.DataFrame:
+        if security_id == _BENCHMARK_ID:
+            return self._benchmark.copy()
+        return self._inner.price_history(security_id)
+
+    def scan_result(self, security_id: str) -> object:
+        return self._inner.scan_result(security_id)
+
+
+def _entry_view() -> _View:
+    return _View([Decimal("3"), Decimal("2"), Decimal("1"), Decimal("4")])
+
+
+def _risk_off_params() -> dict[str, object]:
+    return {
+        **PARAMETERS,
+        "selected_securities": ["sec-aapl", _BENCHMARK_ID],
+        REGIME_FILTER_ENABLED_PARAM: True,
+        REGIME_FILTER_BENCHMARK_PARAM: _BENCHMARK_ID,
+        REGIME_FILTER_MA_LENGTH_PARAM: 3,
+    }
+
+
+def test_regime_filter_absent_matches_explicitly_disabled() -> None:
+    strategy = MovingAverageStrategy()
+
+    absent = strategy.entry_signals(_entry_view(), PARAMETERS)
+    disabled = strategy.entry_signals(
+        _entry_view(), {**PARAMETERS, REGIME_FILTER_ENABLED_PARAM: False}
+    )
+
+    assert len(absent) == 1
+    assert absent == disabled
+
+
+def test_regime_filter_suppresses_entries_but_not_exits_when_risk_off() -> None:
+    strategy = MovingAverageStrategy()
+    params = _risk_off_params()
+    gated = _RegimeView(_entry_view(), ["10", "10", "4"])
+
+    assert strategy.entry_signals(gated, params) == []
+    assert validate_exit_signals(
+        strategy.exit_signals(gated, _portfolio("7"), params)
+    ) == validate_exit_signals(
+        strategy.exit_signals(_entry_view(), _portfolio("7"), params)
+    )
+
+
+def test_regime_filter_fails_closed_when_benchmark_not_in_universe() -> None:
+    strategy = MovingAverageStrategy()
+    params = {
+        **PARAMETERS,
+        REGIME_FILTER_ENABLED_PARAM: True,
+        REGIME_FILTER_BENCHMARK_PARAM: _BENCHMARK_ID,
+        REGIME_FILTER_MA_LENGTH_PARAM: 3,
+    }
+
+    assert strategy.entry_signals(_entry_view(), params) == []
+
+
+def test_regime_filter_enabled_risk_on_does_not_alter_entries() -> None:
+    """Gate permits: enabled + risk-on entries match the disabled path."""
+    strategy = MovingAverageStrategy()
+    enabled = _risk_off_params()
+    disabled = {**enabled, REGIME_FILTER_ENABLED_PARAM: False}
+
+    assert strategy.entry_signals(
+        _RegimeView(_entry_view(), ["1", "1", "100"]), enabled
+    ) == strategy.entry_signals(_RegimeView(_entry_view(), ["1", "1", "100"]), disabled)

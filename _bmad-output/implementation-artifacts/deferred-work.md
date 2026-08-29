@@ -317,3 +317,19 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-387-scanner-market-regime.md`
   summary: The existing `#market-narrative` banner sets Bootstrap `.border-0` (`border:0 !important`) alongside an inline non-important `border`, so its intended coloured outline never renders.
   evidence: `_stock_scanner.html` market-narrative div, pre-existing. #387's new `_market_regime.html` avoids the conflict; the narrative block should be brought in line.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-388-market-regime-entry-filter.md`
+  summary: `app/services/backtest/regime_filter.py` is simulation-affecting shared logic (when the filter is enabled) that no semantic digest covers — it is not in `_MARKET_VIEW_ALLOWLIST` or `_LEDGER_ACTION_METRICS_ALLOWLIST`, so editing its SMA math changes enabled-Run output while `execution_contract_digest` stays identical and `is_comparable` still declares two such Runs comparable.
+  evidence: #388 explicitly requires `execution_contract_digest` to stay unchanged (so the pre-#388 result corpus stays comparable). Adding the module to a contract allowlist would move the digest for every Run, filter-on or off. Revisit once the filter sees real use — perhaps a filter-specific contribution to the replay digest only when enabled.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-388-market-regime-entry-filter.md`
+  summary: Enabling the filter with an unset, mistyped, or non-selected benchmark silently produces an all-cash backtest — no launch-time validation that an enabled filter's `regime_filter_benchmark_security_id` is one of the Run's selected securities.
+  evidence: `backtest_launch_service` / `strategy_manager` were out of scope for #388; the "must be one of the Run's selected securities" rule lives only in the parameter description string. Runtime fail-closed is per spec, but the zero-entry outcome is indistinguishable from a genuinely bearish regime.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-388-market-regime-entry-filter.md`
+  summary: An enabled filter whose benchmark has fewer than `regime_filter_ma_length` (default 200) sessions of history — early in a Run, or a persistently-erroring `price_history` — suppresses entries silently, with no diagnostic distinguishing "insufficient warm-up" or "view error" from a real risk-off regime.
+  evidence: strategy-runtime modules cannot log; fail-closed is silent by the codebase's own convention. A run-level warning surface for "regime filter suppressed N sessions for reason X" would help users trust the output.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-388-market-regime-entry-filter.md`
+  summary: A regime-gated Run and an ungated Run are declared comparable by `is_comparable` (params are excluded from `execution_contract_digest` by design), and nothing on the comparison surface flags that one leaderboard row was regime-filtered.
+  evidence: consistent with how every other parameter is treated (AD-19), but the regime filter reshapes the return distribution far more than a lookback tweak. Consider surfacing `regime_filter_enabled` in the compare UI.
