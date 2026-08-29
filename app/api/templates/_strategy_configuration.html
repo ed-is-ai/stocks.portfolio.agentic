@@ -30,7 +30,11 @@
     <input type="hidden" name="activation_seq" value="{{ active_profile.activation_seq if active_profile else 0 }}">
     <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
 
-    <fieldset class="card sm-card"><div class="card-body">
+    <nav class="sm-wizard-indicator mb-3" aria-label="Backtest configuration progress">
+      <span id="wizard-step-indicator" tabindex="-1" aria-live="polite">Step 1 of 3</span>
+    </nav>
+
+    <fieldset class="card sm-card" data-wizard-step="1"><div class="card-body">
       <legend class="h5">Strategy</legend>
       {% if errors.get('strategy_id') %}<div id="strategy_id-error" class="text-danger">{{ errors.strategy_id }}</div>{% endif %}
       {% for strategy in strategies %}
@@ -44,11 +48,11 @@
       {% endfor %}
     </div></fieldset>
 
-    {% if errors.get('security_ids') %}
-    <div class="sm-alert sm-alert-danger mt-2" role="alert">{{ errors.security_ids }}</div>
-    {% endif %}
-    <fieldset class="card sm-card mt-2"><div class="card-body">
+    <fieldset class="card sm-card mt-2" data-wizard-step="2"><div class="card-body">
       <legend class="h5">Universe</legend>
+      {% if errors.get('security_ids') %}
+      <div class="sm-alert sm-alert-danger mb-2" role="alert">{{ errors.security_ids }}</div>
+      {% endif %}
       {% include "_universe_selector.html" %}
     </div></fieldset>
 
@@ -57,7 +61,192 @@
     {% if not coverage or not coverage.snapshot_count or coverage_error %}
     <p class="sm-alert sm-alert-warning mt-3 mb-0">{{ coverage_error or 'Historical monthly snapshots must be initialized before a backtest can run.' }}</p>
     {% endif %}
-    <button class="btn btn-primary mt-3" type="submit" {% if not coverage or not coverage.snapshot_count or coverage_error %}disabled aria-disabled="true"{% endif %}>Run Backtest</button>
+
+    <div data-wizard-step="3">
+      <div id="wizard-summary" class="sm-wizard-summary mb-3"></div>
+      <button class="btn btn-primary mt-3" type="submit" {% if not coverage or not coverage.snapshot_count or coverage_error %}disabled aria-disabled="true"{% endif %}>Run Backtest</button>
+    </div>
+
+    <div class="sm-wizard-controls mt-3">
+      <button type="button" id="wizard-back" class="sm-btn sm-btn-secondary" hidden>Back</button>
+      <button type="button" id="wizard-next" class="sm-btn sm-btn-primary">Next</button>
+    </div>
   </form>
+
+  <script>
+  (function () {
+    var form = document.getElementById('strategy-configuration-form');
+    if (!form) return;
+    var indicator = document.getElementById('wizard-step-indicator');
+    var backBtn = document.getElementById('wizard-back');
+    var nextBtn = document.getElementById('wizard-next');
+    var summary = document.getElementById('wizard-summary');
+    var TOTAL = 3;
+    var current = 1;
+
+    function stepElements() {
+      return Array.prototype.slice.call(
+        form.querySelectorAll('[data-wizard-step]')
+      );
+    }
+
+    // A step "has an error" when it contains a control flagged invalid or a
+    // rendered danger alert (universe/security errors render as an alert,
+    // not an .is-invalid field). #configuration-errors itself carries no
+    // step, so an unattributable error falls back to the first step.
+    function earliestErrorStep() {
+      if (!document.getElementById('configuration-errors')) return 0;
+      var byStep = {};
+      stepElements().forEach(function (el) {
+        var step = parseInt(el.getAttribute('data-wizard-step'), 10);
+        if (
+          el.querySelector('.is-invalid, [aria-invalid="true"], .sm-alert-danger')
+        ) {
+          byStep[step] = true;
+        }
+      });
+      for (var s = 1; s <= TOTAL; s++) {
+        if (byStep[s]) return s;
+      }
+      return 1;
+    }
+
+    function selectedStrategyText() {
+      var radio = form.querySelector('input[name="strategy_id"]:checked');
+      if (!radio) return '(none selected)';
+      var label = form.querySelector('label[for="' + radio.id + '"] strong');
+      return label ? label.textContent.trim() : radio.value;
+    }
+
+    // Show the human label the user actually saw, not the raw wire token
+    // (enum inputs submit an opaque index; booleans submit "true"/"false").
+    function controlDisplayValue(el) {
+      if (el.type === 'radio' || el.type === 'checkbox') {
+        var lbl = form.querySelector('label[for="' + el.id + '"]');
+        if (lbl && lbl.textContent.trim()) return lbl.textContent.trim();
+      }
+      return el.value;
+    }
+
+    function parameterPairs() {
+      var groups = {};
+      form.querySelectorAll('[name^="param__"]').forEach(function (el) {
+        var name = el.name.slice('param__'.length);
+        if (!(name in groups)) groups[name] = null;
+        if (el.type === 'radio' && !el.checked) return;
+        groups[name] = controlDisplayValue(el);
+      });
+      return Object.keys(groups).map(function (name) {
+        return name + ' = ' + (groups[name] === null ? '(unset)' : groups[name]);
+      });
+    }
+
+    function universeText() {
+      var whole = document.getElementById('whole_universe');
+      if (whole && whole.checked) return 'Whole universe';
+      var count = form.querySelectorAll(
+        'input[name="security_ids"]:checked, ' +
+          'input[type="hidden"][name="security_ids"]'
+      ).length;
+      return count + ' selected';
+    }
+
+    // Distinguish "field absent" (period step could not render for lack of
+    // Ready coverage) from "field present but blank".
+    function fieldValue(id) {
+      var el = document.getElementById(id);
+      if (!el) return '(unavailable)';
+      return el.value ? el.value : '(none)';
+    }
+
+    function renderSummary() {
+      if (!summary) return;
+      var dl = document.createElement('dl');
+      function row(term, value) {
+        var dt = document.createElement('dt');
+        dt.textContent = term;
+        var dd = document.createElement('dd');
+        dd.textContent = value;
+        dl.appendChild(dt);
+        dl.appendChild(dd);
+      }
+      row('Strategy', selectedStrategyText());
+      var pairs = parameterPairs();
+      row('Parameters', pairs.length ? pairs.join(', ') : 'none');
+      row('Universe', universeText());
+      row('Period', fieldValue('start_month') + ' – ' + fieldValue('end_month'));
+      row(
+        'Capital',
+        fieldValue('starting_capital') + ' ' + fieldValue('base_currency')
+      );
+      summary.textContent = '';
+      summary.appendChild(dl);
+    }
+
+    function showStep(n, moveFocus) {
+      current = Math.min(Math.max(n, 1), TOTAL);
+      stepElements().forEach(function (el) {
+        var step = parseInt(el.getAttribute('data-wizard-step'), 10);
+        el.hidden = step !== current;
+      });
+      var label = 'Step ' + current + ' of ' + TOTAL;
+      if (indicator && indicator.textContent !== label) {
+        indicator.textContent = label;
+      }
+      if (backBtn) backBtn.hidden = current === 1;
+      if (nextBtn) nextBtn.hidden = current === TOTAL;
+      if (current === TOTAL) renderSummary();
+      // Keep keyboard/SR users oriented: focus would otherwise be lost to
+      // <body> whenever a navigation click hides the button that was
+      // focused (Back on step 1, Next on step 3).
+      if (moveFocus && indicator && typeof indicator.focus === 'function') {
+        indicator.focus();
+      }
+    }
+
+    if (backBtn) {
+      backBtn.addEventListener('click', function () {
+        showStep(current - 1, true);
+      });
+    }
+    if (nextBtn) {
+      nextBtn.addEventListener('click', function () {
+        showStep(current + 1, true);
+      });
+    }
+
+    // The parameter/period/capital partial is swapped wholesale on strategy
+    // change and comes back with no `hidden` attribute -- re-apply the
+    // active step so the newly-inserted step-2 fieldsets don't flash in
+    // while the user is still on step 1.
+    if (!document.body.dataset.smWizardBound) {
+      document.body.dataset.smWizardBound = '1';
+      document.body.addEventListener('htmx:afterSettle', function (event) {
+        var live = document.getElementById('strategy-configuration-form');
+        if (!live) return;
+        var target = event.detail && event.detail.target;
+        var touchesFields =
+          target &&
+          (target.id === 'strategy-fields' ||
+            (target.querySelector && target.querySelector('#strategy-fields')));
+        if (touchesFields && window.__smWizardShowStep) {
+          window.__smWizardShowStep();
+        }
+      });
+    }
+    window.__smWizardShowStep = function () {
+      showStep(current);
+    };
+
+    var errorStep = earliestErrorStep();
+    if (errorStep) {
+      showStep(errorStep);
+      var errorBox = document.getElementById('configuration-errors');
+      if (errorBox) errorBox.focus();
+    } else {
+      showStep(1);
+    }
+  })();
+  </script>
   {% endif %}
 </section>

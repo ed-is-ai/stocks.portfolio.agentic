@@ -333,3 +333,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-388-market-regime-entry-filter.md`
   summary: A regime-gated Run and an ungated Run are declared comparable by `is_comparable` (params are excluded from `execution_contract_digest` by design), and nothing on the comparison surface flags that one leaderboard row was regime-filtered.
   evidence: consistent with how every other parameter is treated (AD-19), but the regime filter reshapes the return distribution far more than a lookback tweak. Consider surfacing `regime_filter_enabled` in the compare UI.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-399-backtest-config-wizard.md`
+  summary: `_universe_selector.html`'s inline script re-binds listeners and re-queries the DOM on every HTMX swap with no idempotency guard.
+  evidence: Same non-idempotent inline-script pattern that was fixed in the wizard script (guarded via `document.body.dataset.smWizardBound`); the universe selector partial swaps frequently (search-as-you-type, whole-universe toggle) so handlers/closures accumulate over a session.

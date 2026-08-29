@@ -180,6 +180,30 @@ table,
   line-height: 1.45rem;
   text-align: center;
 }
+.sm-wizard-indicator {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sm-wizard-indicator > span { display: inline-block; padding: .15rem 0; }
+.sm-wizard-indicator > span:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.sm-wizard-controls { display: flex; gap: .6rem; }
+.sm-wizard-summary dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: .3rem .9rem;
+  margin: 0;
+  padding: .8rem .95rem;
+  border: 1px solid var(--border);
+  background: #f8fafc;
+}
+.sm-wizard-summary dt { font-weight: var(--fw-bold); color: var(--muted); }
+.sm-wizard-summary dd { margin: 0; }
 .sm-table { --bs-table-bg: transparent; }
 .sm-muted-badge { background: #f1f5f9; color: var(--muted); }
 .status-info { background: var(--blue-bg); color: var(--blue); }

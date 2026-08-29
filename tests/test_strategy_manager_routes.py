@@ -1248,6 +1248,95 @@ def test_configuration_post_requires_auth_guard(launch):
 
 
 # ---------------------------------------------------------------------------
+# B1: staged wizard for backtest configuration (gh-399) -- Strategy, then
+# Run setup (Universe/Period/Capital), then Review & Run (3 steps).
+# ---------------------------------------------------------------------------
+
+
+def test_configuration_renders_wizard_shell(launch):
+    response = client.get("/strategy-manager/configuration")
+    assert response.status_code == 200
+    text = response.text
+    assert 'id="wizard-step-indicator"' in text
+    assert "Step 1 of 3" in text
+    assert 'aria-live="polite"' in text
+    assert 'id="wizard-back"' in text
+    assert 'id="wizard-next"' in text
+    assert 'id="wizard-summary"' in text
+    assert 'data-wizard-step="1"' in text
+    assert 'data-wizard-step="2"' in text
+    assert 'data-wizard-step="3"' in text
+
+
+def test_configuration_all_steps_visible_without_js(launch):
+    """Progressive enhancement: the server never marks a step ``hidden`` --
+    step visibility is applied by the wizard script only, so every step and
+    the submit render with JavaScript disabled."""
+    response = client.get("/strategy-manager/configuration?strategy_id=alpha")
+    assert response.status_code == 200
+    text = response.text
+    # No step container is server-rendered hidden (attribute in any spot).
+    for opening in re.findall(r"<[^>]*data-wizard-step=\"\d\"[^>]*>", text):
+        assert "hidden" not in opening
+    assert text.count('data-wizard-step="1"') >= 2  # Strategy + Parameters
+    assert text.count('data-wizard-step="2"') >= 2  # Universe + Period/Capital
+    assert 'data-wizard-step="3"' in text
+    assert "Run Backtest" in text
+
+
+def test_configuration_fields_partial_carries_wizard_steps(launch):
+    response = client.get(
+        "/strategy-manager/configuration/fields",
+        params={"strategy_id": "alpha"},
+    )
+    assert response.status_code == 200
+    assert 'data-wizard-step="1"' in response.text  # Parameters fieldset
+    assert 'data-wizard-step="2"' in response.text  # Period + Capital fieldsets
+
+
+def test_configuration_wizard_script_has_error_detection_selectors(launch):
+    response = client.get("/strategy-manager/configuration")
+    assert response.status_code == 200
+    text = response.text
+    assert ".is-invalid" in text
+    assert 'aria-invalid="true"' in text
+    assert "sm-alert-danger" in text  # universe errors route by alert, not field
+    assert "configuration-errors" in text
+    assert "htmx:afterSettle" in text
+    # afterSettle is bound once for the lifetime of the shell, not per swap.
+    assert "smWizardBound" in text
+
+
+def test_configuration_universe_error_is_inside_the_run_setup_step(launch):
+    """A universe/security validation error must render within the step-2
+    container so the wizard opens the step that actually holds the fault."""
+    response = client.post(
+        "/strategy-manager/configuration",
+        data=_base_form(security_ids="not_in_roster"),
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    universe_fieldset = response.text.split('<legend class="h5">Universe</legend>')[1]
+    universe_fieldset = universe_fieldset.split("</fieldset>")[0]
+    assert "Unknown securities: not_in_roster" in universe_fieldset
+
+
+def test_configuration_422_fragment_keeps_wizard_markup(launch):
+    launch.launch_error = BacktestLaunchValidationError(
+        (LaunchFieldError("starting_capital", "Enter a positive amount."),)
+    )
+    response = client.post(
+        "/strategy-manager/configuration",
+        data=_base_form(starting_capital="10000"),
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    assert 'id="configuration-errors"' in response.text
+    strategy_fieldset = response.text.split('<legend class="h5">Strategy</legend>')[0]
+    assert 'data-wizard-step="1"' in strategy_fieldset
+
+
+# ---------------------------------------------------------------------------
 # Story 2.8: Backtest results list route
 # ---------------------------------------------------------------------------
 
