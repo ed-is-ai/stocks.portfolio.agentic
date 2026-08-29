@@ -1123,6 +1123,53 @@ def test_configuration_selecting_strategy_renders_its_parameters(launch):
     assert 'name="param__mode"' in response.text
 
 
+def test_strategy_radio_label_shows_count_not_default_dump(launch):
+    response = client.get("/strategy-manager/configuration")
+    assert response.status_code == 200
+    text = response.text
+    # No per-parameter default dump in the choosing list.
+    assert "Parameters: lookback" not in text
+    assert "(default 20)" not in text
+    # Just a plain count (alpha declares 5 parameters).
+    assert ">5 parameters</div>" in text
+
+
+def test_configuration_disclosure_splits_required_and_optional(launch):
+    response = client.get("/strategy-manager/configuration?strategy_id=alpha")
+    assert response.status_code == 200
+    text = response.text
+    assert '<details class="sm-param-disclosure"' in text
+    assert '<span id="param-summary" aria-live="polite">5 parameters</span>' in text
+    # lookback is required -> rendered before (outside) the disclosure;
+    # the disclosure closes before the Period step fieldset.
+    before_details, _, rest = text.partition('<details class="sm-param-disclosure"')
+    disclosed, _, after_details = rest.partition("</details>")
+    assert 'name="param__lookback"' in before_details
+    assert 'name="param__threshold"' in disclosed
+    assert 'name="param__mode"' in disclosed
+    assert 'name="param__lookback"' not in disclosed
+    assert "Period" in after_details and 'data-wizard-step="2"' in after_details
+    # Collapsed by default (no error), and the dead data-param-type attr is gone.
+    assert '<details class="sm-param-disclosure">' in text
+    assert "data-param-type" not in text
+    assert 'data-param-default="20"' in before_details  # lookback default, outside
+
+
+def test_configuration_422_on_disclosed_param_opens_disclosure(launch):
+    launch.launch_error = BacktestLaunchValidationError(
+        (LaunchFieldError("param__threshold", "Outside the allowed range."),)
+    )
+    response = client.post(
+        "/strategy-manager/configuration",
+        data=_base_form(),
+        headers={"X-Auth-Token": "s3cret"},
+    )
+    assert response.status_code == 422
+    text = response.text
+    assert '<details class="sm-param-disclosure" open>' in text
+    assert "Outside the allowed range." in text
+
+
 def _base_form(**overrides: str) -> dict[str, str]:
     form = {
         "strategy_id": "alpha",

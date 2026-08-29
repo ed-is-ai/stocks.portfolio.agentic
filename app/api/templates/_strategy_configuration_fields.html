@@ -1,17 +1,19 @@
 {#- Metadata-driven parameter/period section (Story 2.7 AC 2, 4, 5). Swapped
     in full (outerHTML) whenever the selected Strategy radio changes -- no
     Strategy-ID branches, everything driven off the descriptor/coverage the
-    route already resolved. -#}
-<div id="strategy-fields">
-{% if not selected %}
-<p class="text-muted">Choose a Strategy above to configure its parameters.</p>
-{% else %}
-<fieldset class="mt-3" data-wizard-step="1"><legend class="h6">Parameters for {{ selected.display_name }}</legend>
-{% for parameter in selected.parameters %}
+    route already resolved. Non-required parameters collapse behind a
+    <details> disclosure (#400); required ones stay visible above it. -#}
+{%- macro param_default_token(parameter) -%}
+{%- if parameter.type == 'boolean' -%}{{ 'true' if parameter.default else 'false' }}
+{%- elif parameter.type == 'enum' -%}{{ enum_default_tokens.get(parameter.name, '') }}
+{%- else -%}{{ parameter.default }}
+{%- endif -%}
+{%- endmacro -%}
+{%- macro param_field(parameter) -%}
 {% set field_id = 'param__' ~ parameter.name %}
 {% set raw = parameter_values.get(parameter.name) %}
-<div class="mb-3">
-  <label for="{{ field_id }}" class="form-label">{{ parameter.name }}{% if parameter.required %} <span class="text-danger" aria-hidden="true">*</span>{% endif %}</label>
+<div class="mb-3" data-param-default="{{ param_default_token(parameter) }}">
+  <label for="{{ field_id }}" class="form-label">{{ parameter.name }}{% if parameter.required %} <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden">(required)</span>{% endif %}</label>
   <div id="{{ field_id }}-help" class="form-text">{{ parameter.description }}{% if parameter.minimum is not none or parameter.maximum is not none %} (range: {{ parameter.minimum if parameter.minimum is not none else '−∞' }}–{{ parameter.maximum if parameter.maximum is not none else '∞' }}){% endif %} Default: {{ parameter.default }}.</div>
   {% if parameter.type == 'boolean' %}
   {% set current = raw if raw is not none else ('true' if parameter.default else 'false') %}
@@ -33,7 +35,72 @@
   {% endif %}
   {% if errors.get(field_id) %}<div id="{{ field_id }}-error" class="invalid-feedback d-block">{{ errors[field_id] }}</div>{% endif %}
 </div>
-{% endfor %}
+{%- endmacro -%}
+<div id="strategy-fields">
+{% if not selected %}
+<p class="text-muted">Choose a Strategy above to configure its parameters.</p>
+{% else %}
+{% set required_params = selected.parameters | selectattr('required') | list %}
+{% set optional_params = selected.parameters | rejectattr('required') | list %}
+{% set param_count = selected.parameters | length %}
+{% set param_word = 'parameter' if param_count == 1 else 'parameters' %}
+{% set disclosure = namespace(open=false) %}
+{% for parameter in optional_params %}{% if errors.get('param__' ~ parameter.name) %}{% set disclosure.open = true %}{% endif %}{% endfor %}
+<fieldset class="mt-3" data-wizard-step="1"><legend class="h6">Parameters for {{ selected.display_name }}</legend>
+{% if not selected.parameters %}
+<p class="text-muted">No parameters.</p>
+{% endif %}
+{% for parameter in required_params %}{{ param_field(parameter) }}{% endfor %}
+{% if optional_params %}
+<details class="sm-param-disclosure"{% if disclosure.open %} open{% endif %}>
+  <summary><span id="param-summary" aria-live="polite">{{ param_count }} {{ param_word }}</span></summary>
+  {% for parameter in optional_params %}{{ param_field(parameter) }}{% endfor %}
+</details>
+<script>
+(function () {
+  var root = document.getElementById('strategy-fields');
+  if (!root) return;
+  var summary = root.querySelector('#param-summary');
+  if (!summary) return;
+  var containers = Array.prototype.slice.call(
+    root.querySelectorAll('[data-param-default]')
+  );
+  var total = {{ param_count }};
+  var word = total === 1 ? ' parameter' : ' parameters';
+
+  // The current submitted value of one param field. For a radio group
+  // (boolean/enum) that is the checked option's value -- and if nothing
+  // is checked, null (not the first option's value, which would read as a
+  // phantom edit).
+  function currentValue(container) {
+    if (container.querySelector('input[type="radio"]')) {
+      var checked = container.querySelector('input[type="radio"]:checked');
+      return checked ? checked.value : null;
+    }
+    var field = container.querySelector('input, select, textarea');
+    return field ? field.value : null;
+  }
+
+  function refresh() {
+    var changed = 0;
+    containers.forEach(function (container) {
+      var value = currentValue(container);
+      if (value !== null && value !== container.dataset.paramDefault) {
+        changed += 1;
+      }
+    });
+    var suffix = changed === 0 ? ' · all defaults' : ' · ' + changed + ' changed';
+    summary.textContent = total + word + suffix;
+  }
+
+  containers.forEach(function (container) {
+    container.addEventListener('input', refresh);
+    container.addEventListener('change', refresh);
+  });
+  refresh();
+})();
+</script>
+{% endif %}
 </fieldset>
 
 <fieldset class="mt-3" data-wizard-step="2"><legend class="h6">Period</legend>

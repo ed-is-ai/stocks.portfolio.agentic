@@ -42,7 +42,7 @@
         <input class="form-check-input" type="radio" name="strategy_id" id="strategy_id__{{ strategy.strategy_id }}" value="{{ strategy.strategy_id }}" {% if selected and selected.strategy_id == strategy.strategy_id %}checked{% endif %} {% if errors.get('strategy_id') %}aria-describedby="strategy_id-error" aria-invalid="true"{% endif %} hx-get="/strategy-manager/configuration/fields?strategy_id={{ strategy.strategy_id | urlencode }}" hx-include="#start_month, #end_month, #base_currency, #starting_capital" hx-target="#strategy-fields" hx-swap="outerHTML" hx-trigger="change">
         <label class="form-check-label" for="strategy_id__{{ strategy.strategy_id }}">
           <strong>{{ strategy.display_name }}</strong> — {{ strategy.description }}
-          <div class="text-muted small">Parameters: {% for parameter in strategy.parameters %}{{ parameter.name }} (default {{ parameter.default }}){% if not loop.last %}, {% endif %}{% endfor %}{% if not strategy.parameters %}none{% endif %}</div>
+          <div class="text-muted small">{% if strategy.parameters %}{{ strategy.parameters | length }} parameter{{ '' if strategy.parameters | length == 1 else 's' }}{% else %}No parameters{% endif %}</div>
         </label>
       </div>
       {% endfor %}

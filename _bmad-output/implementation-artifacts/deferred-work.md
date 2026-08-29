@@ -337,3 +337,10 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-399-backtest-config-wizard.md`
   summary: `_universe_selector.html`'s inline script re-binds listeners and re-queries the DOM on every HTMX swap with no idempotency guard.
   evidence: Same non-idempotent inline-script pattern that was fixed in the wizard script (guarded via `document.body.dataset.smWizardBound`); the universe selector partial swaps frequently (search-as-you-type, whole-universe toggle) so handlers/closures accumulate over a session.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-400-declutter-strategy-parameters.md`
+  summary: Editing strategy parameters, switching to another strategy, then back (A→B→A) silently discards A's edited parameter values.
+  evidence: The strategy radio's `hx-include` deliberately carries only period/capital, not `param__*`; the fields partial refetches at defaults on every strategy change. Pre-existing, but #400's "N parameters · all defaults" summary now reassures the user nothing changed after the loss.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-400-declutter-strategy-parameters.md`
+  summary: The parameter disclosure `<summary>` shows the total parameter count, but the `<details>` only contains the non-required subset — misleading for strategies with several required params plus the 3 host-injected regime_filter_* optionals.
+  evidence: `_strategy_configuration_fields.html` renders `{{ param_count }} {{ param_word }}` (total) inside `<summary>`; real strategies via `skill_discovery.COMMON_BACKTEST_STRATEGY_PARAMETERS` always have ≥3 optional params. Both review layers flagged the count/contents mismatch; a fix needs a product decision (total vs disclosed count) constrained by the spec's frozen I/O matrix.

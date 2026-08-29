@@ -204,6 +204,21 @@ table,
 }
 .sm-wizard-summary dt { font-weight: var(--fw-bold); color: var(--muted); }
 .sm-wizard-summary dd { margin: 0; }
+.sm-param-disclosure { border-top: 1px solid var(--border); margin-top: .6rem; }
+.sm-param-disclosure > summary {
+  cursor: pointer;
+  padding: .55rem 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: .03em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sm-param-disclosure > summary:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.sm-param-disclosure[open] > summary { margin-bottom: .5rem; }
 .sm-table { --bs-table-bg: transparent; }
 .sm-muted-badge { background: #f1f5f9; color: var(--muted); }
 .status-info { background: var(--blue-bg); color: var(--blue); }
