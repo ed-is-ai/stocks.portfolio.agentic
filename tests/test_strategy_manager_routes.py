@@ -1720,6 +1720,7 @@ def test_backtests_list_renders_rows(services):
                     enqueue_seq=3,
                     status=StrategyJobStatus.COMPLETE,
                     cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
                 ),
             ),
             strategy_id="momentum_v1",
@@ -1736,10 +1737,47 @@ def test_backtests_list_renders_rows(services):
     )
     response = client.get("/strategy-manager/backtests")
     assert response.status_code == 200
-    assert "momentum_v1 attempt 3" in response.text
+    assert "Attempt 3" in response.text
+    assert "momentum_v1 · v1" in response.text
+    assert "badge-status status-ok" in response.text
     assert "lookback=20" in response.text
     assert "12.50%" in response.text
     assert "50.0%" in response.text
+    # Run column: header, a <time> cell with a machine-readable datetime, and
+    # the human relative label rendered from job.created_at.
+    assert '<th scope="col">Run</th>' in response.text
+    assert 'datetime="2024-01-05T09:00:00+00:00"' in response.text
+    assert "2024-01-05 09:00 UTC" in response.text
+
+
+def test_backtests_list_failed_row_renders_error_chip(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        BacktestActivitySummaryV1(
+            job=cast(
+                StrategyJobV1,
+                SimpleNamespace(
+                    id="job-failed",
+                    enqueue_seq=4,
+                    status=StrategyJobStatus.FAILED,
+                    cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            strategy_id="momentum_v1",
+            strategy_api_version=1,
+            parameter_summary="lookback=20",
+            start_month="2024-01",
+            end_month="2024-02",
+            metrics=None,
+            metric_availability=None,
+        ),
+    )
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "badge-status status-error" in response.text
+    assert ">Failed</span>" in response.text
+    assert "status-ok" not in response.text
 
 
 def test_backtests_list_empty_state(services):
@@ -2408,6 +2446,7 @@ def test_backtests_list_links_complete_row_to_result_url(services):
                     enqueue_seq=1,
                     status=StrategyJobStatus.COMPLETE,
                     cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
                 ),
             ),
             strategy_id="momentum_v1",
@@ -2428,6 +2467,7 @@ def test_backtests_list_links_complete_row_to_result_url(services):
                     enqueue_seq=2,
                     status=StrategyJobStatus.RUNNING,
                     cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
                 ),
             ),
             strategy_id="momentum_v1",
