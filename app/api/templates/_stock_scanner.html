@@ -5,6 +5,7 @@
   <span>No analysis results found. Use <strong>Refresh Data</strong> to run the pipeline.</span>
 </div>
 {% else %}
+{% include "_market_regime.html" %}
 {% if market_narrative %}
 <div id="market-narrative" class="alert border-0 mt-1" style="background:#eef2ff;border:1px solid #c7d2fe" role="note" aria-label="Market narrative">
   <div class="d-flex align-items-center justify-content-between gap-2 mb-1">

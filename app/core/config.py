@@ -54,6 +54,9 @@ SECTOR_ALLOCATION_HISTORY_JSON = (
 MARKET_NARRATIVE_JSON = (
     ROOT_DIR / "app" / "agents" / "scanner" / "market_narrative.json"
 )
+# The latest scan's SPY market-regime reading, so the scanner-screen banner
+# renders from the scan's own reading with no second SPY download (#387).
+MARKET_REGIME_JSON = ROOT_DIR / "app" / "agents" / "scanner" / "market_regime.json"
 # Last-known GICS sector per ticker, reused when yfinance throttling drops the
 # sector on a given run (see app.agents.scanner.sector_cache).
 SECTOR_CACHE_JSON = ROOT_DIR / "app" / "agents" / "scanner" / "sector_cache.json"

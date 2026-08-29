@@ -98,7 +98,7 @@ def _sample_records() -> list[StockRecord]:
     return [with_analysis, without_analysis]
 
 
-def _render_stock_scanner(*, market_narrative=None) -> str:
+def _render_stock_scanner(*, market_narrative=None, market_regime=None) -> str:
     from app.core.alerting import build_alert_ui_state
     from app.core.recommendation import classify_recommendation
     from app.services.freshness_service import calculate_freshness
@@ -126,6 +126,7 @@ def _render_stock_scanner(*, market_narrative=None) -> str:
         source_health=[],
         latest_attempt_error=None,
         market_narrative=market_narrative,
+        market_regime=market_regime,
     )
 
 
@@ -188,6 +189,9 @@ def test_scanner_context_batches_alert_reads_for_multi_ticker_records() -> None:
     context = build_stock_scanner_context(trader, portfolio, alerts)
 
     assert context["alert_states"]["AAPL.L"].suppressed is True
+    # The regime banner reads this key; a rename/typo would slip past the
+    # template-only tests otherwise (#387).
+    assert "market_regime" in context
     alerts.states_for_tickers.assert_called_once_with(("AAPL.L", "AAPL.L", "TSLA"))
     alerts.has_watching.assert_not_called()
     alerts.last_alerted_at.assert_not_called()
@@ -352,6 +356,56 @@ def test_market_narrative_renders_accessible_collapsible_details() -> None:
     assert 'id="market-narrative-details"' in html
     assert "Breadth is improving" in html
     assert "Technology leads the current scan." in html
+
+
+def _regime(*, is_degraded=False, spy_uptrend=True, return_52w_pct=18.4):
+    from app.schemas.market_regime import MarketRegimeSnapshotV1
+
+    return MarketRegimeSnapshotV1(
+        spy_uptrend=spy_uptrend,
+        return_52w_pct=return_52w_pct,
+        is_degraded=is_degraded,
+    )
+
+
+def test_market_regime_banner_risk_on() -> None:
+    html = _render_stock_scanner(market_regime=_regime(return_52w_pct=18.4))
+
+    assert 'id="market-regime"' in html
+    assert "S&amp;P 500 in confirmed uptrend" in html
+    assert "#dcfce7" in html
+    assert "+18.4%" in html
+
+
+def test_market_regime_banner_risk_off() -> None:
+    html = _render_stock_scanner(
+        market_regime=_regime(spy_uptrend=False, return_52w_pct=-6.1)
+    )
+
+    assert "S&amp;P 500 below its 200-day average" in html
+    assert "#fee2e2" in html
+    assert "-6.1%" in html
+
+
+def test_market_regime_banner_negative_zero_normalised() -> None:
+    html = _render_stock_scanner(
+        market_regime=_regime(spy_uptrend=False, return_52w_pct=-0.04)
+    )
+
+    assert "SPY 52-wk +0.0%" in html
+
+
+def test_market_regime_banner_degraded() -> None:
+    html = _render_stock_scanner(market_regime=_regime(is_degraded=True))
+
+    assert "Market regime unavailable" in html
+    assert "S&amp;P 500 in confirmed uptrend" not in html
+
+
+def test_market_regime_banner_absent_without_snapshot() -> None:
+    html = _render_stock_scanner(market_regime=None)
+
+    assert 'id="market-regime"' not in html
 
 
 def test_market_narrative_toggle_is_absent_without_narrative() -> None:

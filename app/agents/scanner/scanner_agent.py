@@ -31,7 +31,8 @@ from app.core.config import (
     SKILLS_DIR,
     WW_CONTEXT_JSON,
 )
-from app.core.market_regime import fetch_spy_market_regime
+from app.agents.scanner.market_regime_snapshot import save_market_regime
+from app.core.market_regime import MarketRegimeReadingV1, fetch_spy_market_regime
 from app.core.technical_indicators import compute_live_technicals
 from app.integrations.alpha_vantage import AlphaVantageClient
 from app.integrations.congress import CongressClient
@@ -250,14 +251,30 @@ def fetch_vcp_screener_result() -> SourceResult:
     return SourceResult.from_items(SourceName.VCP_FMP, tickers, started_at=started_at)
 
 
-def _fetch_spy_context() -> tuple[bool, float]:
-    """Return (spy_uptrend, spy_52w_return_pct) from SPY price history.
+def _fetch_spy_context() -> MarketRegimeReadingV1:
+    """Return the scan's full SPY market-regime reading.
 
-    spy_uptrend  — True when SPY's latest close is above its 200-day SMA.
-    spy_52w_return_pct — SPY percentage return over the past ~52 weeks.
+    The per-record use reads ``.spy_uptrend`` / ``.return_52w_pct``; the full
+    reading is also persisted for the scanner-screen banner (#387).
     """
-    reading = fetch_spy_market_regime()
-    return reading.spy_uptrend, reading.return_52w_pct
+    return fetch_spy_market_regime()
+
+
+def _persist_regime_snapshot(reading: MarketRegimeReadingV1) -> None:
+    """Persist *reading* as the scanner-screen banner snapshot (#387).
+
+    Returns early without writing when ``reading.is_degraded`` so a transient
+    SPY outage never overwrites the last-known-good snapshot. The body is
+    wrapped in ``try/except Exception`` and logged so a save failure never
+    aborts the scan (``BaseException`` such as ``KeyboardInterrupt`` is left
+    to propagate).
+    """
+    if reading.is_degraded:
+        return
+    try:
+        save_market_regime(reading)
+    except Exception as exc:  # noqa: BLE001 - save failure must not abort scan
+        print(f"[Scanner] regime snapshot not saved: {exc}")
 
 
 @retry(
@@ -539,7 +556,12 @@ class ScannerAgent(Agent):
             spy_future = pool.submit(_fetch_spy_context)
             vcp_future = pool.submit(fetch_vcp_screener_result)
             tv_future = pool.submit(_fetch_tradingview_sources)
-            spy_uptrend, spy_52w_return = spy_future.result()
+            spy_reading = spy_future.result()
+            spy_uptrend = spy_reading.spy_uptrend
+            spy_52w_return = spy_reading.return_52w_pct
+            # Persist now, before the other .result() calls, so an unrelated
+            # source failure cannot discard a fresh healthy regime reading.
+            _persist_regime_snapshot(spy_reading)
             vcp_result = vcp_future.result()
             tv_result, uk_result = tv_future.result()
 

@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 
 from app.agents.scanner.scanner_agent import ScannerAgent
+from app.core.market_regime import MarketRegimeReadingV1
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
@@ -382,7 +383,15 @@ def test_eligible_scanner_run_adds_and_consumes_complete_profile_roster(
     empty_us = SourceResult.from_items(SourceName.TRADINGVIEW_US, [])
     empty_uk = SourceResult.from_items(SourceName.TRADINGVIEW_UK, [])
     monkeypatch.setattr(
-        "app.agents.scanner.scanner_agent._fetch_spy_context", lambda: (True, 1.0)
+        "app.agents.scanner.scanner_agent._fetch_spy_context",
+        lambda: MarketRegimeReadingV1(
+            spy_uptrend=True,
+            return_52w_pct=1.0,
+            sma_200=1.0,
+            latest_close=1.0,
+            session_count=252,
+            is_degraded=False,
+        ),
     )
     monkeypatch.setattr(
         "app.agents.scanner.scanner_agent.fetch_vcp_screener_result",

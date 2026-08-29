@@ -309,3 +309,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-367-trade-log-security-names.md`
   summary: The Trade Log renders one `<details>/<summary>Audit detail</summary>` disclosure per row; a 200-event backtest produces 200 disclosure widgets in one column, all with the same non-unique accessible name.
   evidence: `_backtest_result.html` and `_comparison.html` Security cells. The `<details>` pattern is mandated by the spec intent-contract; a column-level toggle or per-row `aria-label` would scale better.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-387-scanner-market-regime.md`
+  summary: The market-regime banner has no explicit max-age/"as of" treatment; if the scan cron breaks it keeps asserting a regime state with no visible age.
+  evidence: `load_market_regime()` reads the snapshot with no staleness check; `generated_at` is persisted but never displayed. `market_narrative` enforces `NARRATIVE_MAX_AGE`. Same-run coupling to the analysis artifact (whose freshness IS shown on the /pipeline-status bar, #71) makes this lower priority, but a dedicated cutoff or an "as of {date}" line is a real UX gap.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-387-scanner-market-regime.md`
+  summary: The existing `#market-narrative` banner sets Bootstrap `.border-0` (`border:0 !important`) alongside an inline non-important `border`, so its intended coloured outline never renders.
+  evidence: `_stock_scanner.html` market-narrative div, pre-existing. #387's new `_market_regime.html` avoids the conflict; the narrative block should be brought in line.

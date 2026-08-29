@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.agents.scanner.market_narrative import load_market_narrative
+from app.agents.scanner.market_regime_snapshot import load_market_regime
 from app.core.alerting import AlertUiState, build_alert_ui_state
 from app.core.config import ANALYSIS_JSON, PIPELINE_STATUS_JSON
 from app.core.recommendation import (
@@ -106,6 +107,7 @@ def build_stock_scanner_context(
         "recommendations": recommendations,
         "alert_states": alert_states,
         "market_narrative": load_market_narrative(),
+        "market_regime": load_market_regime(),
     }
     context.update(updates)
     return context

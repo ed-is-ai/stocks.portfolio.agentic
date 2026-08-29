@@ -754,7 +754,7 @@ class TestFetchSpyContext:
             is_degraded=False,
         )
         monkeypatch.setattr(scanner_agent, "fetch_spy_market_regime", lambda: reading)
-        assert scanner_agent._fetch_spy_context() == (False, -3.21)
+        assert scanner_agent._fetch_spy_context() == reading
 
     @patch("yfinance.download")
     def test_parity_with_pre_refactor_inline_formula(self, mock_download):
@@ -772,7 +772,62 @@ class TestFetchSpyContext:
         oldest = float(close.iloc[max(0, len(close) - 252)])
         expected = (latest > sma200, round((latest / oldest - 1) * 100, 2))
 
-        assert _fetch_spy_context() == expected
+        reading = _fetch_spy_context()
+        assert (reading.spy_uptrend, reading.return_52w_pct) == expected
+
+
+class TestPersistRegimeSnapshot:
+    """`_persist_regime_snapshot` keeps the last-known-good snapshot safe."""
+
+    @staticmethod
+    def _reading(*, is_degraded: bool, return_52w_pct: float = 12.3):
+        from app.core.market_regime import MarketRegimeReadingV1
+
+        return MarketRegimeReadingV1(
+            spy_uptrend=True,
+            return_52w_pct=return_52w_pct,
+            sma_200=100.0,
+            latest_close=110.0,
+            session_count=252,
+            is_degraded=is_degraded,
+        )
+
+    def test_healthy_reading_writes_snapshot(self, tmp_path, monkeypatch):
+        import app.agents.scanner.market_regime_snapshot as snap
+        from app.agents.scanner.scanner_agent import _persist_regime_snapshot
+
+        monkeypatch.setattr(snap, "MARKET_REGIME_JSON", tmp_path / "regime.json")
+        _persist_regime_snapshot(self._reading(is_degraded=False))
+
+        loaded = snap.load_market_regime()
+        assert loaded is not None
+        assert loaded.return_52w_pct == 12.3
+        assert loaded.is_degraded is False
+
+    def test_degraded_reading_does_not_overwrite(self, tmp_path, monkeypatch):
+        import app.agents.scanner.market_regime_snapshot as snap
+        from app.agents.scanner.scanner_agent import _persist_regime_snapshot
+
+        monkeypatch.setattr(snap, "MARKET_REGIME_JSON", tmp_path / "regime.json")
+        snap.save_market_regime(self._reading(is_degraded=False, return_52w_pct=9.9))
+
+        _persist_regime_snapshot(self._reading(is_degraded=True, return_52w_pct=1.0))
+
+        loaded = snap.load_market_regime()
+        assert loaded is not None
+        assert loaded.return_52w_pct == 9.9
+        assert loaded.is_degraded is False
+
+    def test_save_failure_does_not_propagate(self, monkeypatch, capsys):
+        from app.agents.scanner import scanner_agent
+
+        def _boom(_reading):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(scanner_agent, "save_market_regime", _boom)
+        scanner_agent._persist_regime_snapshot(self._reading(is_degraded=False))
+
+        assert "[Scanner]" in capsys.readouterr().out
 
 
 class TestSelectValidVcpSymbols:
