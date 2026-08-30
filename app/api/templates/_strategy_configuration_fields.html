@@ -46,7 +46,7 @@
 {% set param_word = 'parameter' if param_count == 1 else 'parameters' %}
 {% set disclosure = namespace(open=false) %}
 {% for parameter in optional_params %}{% if errors.get('param__' ~ parameter.name) %}{% set disclosure.open = true %}{% endif %}{% endfor %}
-<fieldset class="mt-3" data-wizard-step="1"><legend class="h6">Parameters for {{ selected.display_name }}</legend>
+<fieldset class="sm-configuration-section mt-3" data-wizard-step="1"><legend class="h6">Parameters for {{ selected.display_name }}</legend>
 {% if not selected.parameters %}
 <p class="text-muted">No parameters.</p>
 {% endif %}
@@ -103,7 +103,7 @@
 {% endif %}
 </fieldset>
 
-<fieldset class="mt-3" data-wizard-step="2"><legend class="h6">Period</legend>
+<fieldset class="sm-configuration-section mt-3" data-wizard-step="2"><legend class="h6">Period</legend>
 {% if not coverage or not coverage.intervals %}
 <p class="sm-alert sm-alert-info">No backtestable history is available yet.</p>
 {% else %}
@@ -129,14 +129,17 @@
 {% endif %}
 </fieldset>
 
-<fieldset class="mt-3" data-wizard-step="2"><legend class="h6">Capital</legend>
-<div class="row g-3">
-  <div class="col-sm-6"><label for="starting_capital" class="form-label">Starting capital</label>
-    <input type="text" inputmode="decimal" id="starting_capital" name="starting_capital" class="form-control{% if errors.get('starting_capital') %} is-invalid{% endif %}" value="{{ values.starting_capital }}" aria-describedby="starting-capital-help{% if errors.get('starting_capital') %} starting-capital-error{% endif %}" {% if errors.get('starting_capital') %}aria-invalid="true"{% endif %}>
+<fieldset class="sm-configuration-section mt-3" data-wizard-step="2"><legend class="h6">Capital</legend>
+<div class="sm-capital-control">
+  <div class="sm-capital-amount"><label for="starting_capital" class="form-label">Starting capital</label>
+    <div class="input-group">
+      <span id="capital-currency-symbol" class="input-group-text" aria-hidden="true">{{ '$' if values.base_currency == 'USD' else '£' }}</span>
+      <input type="text" inputmode="decimal" id="starting_capital" name="starting_capital" class="form-control{% if errors.get('starting_capital') %} is-invalid{% endif %}" value="{{ values.starting_capital }}" aria-describedby="starting-capital-help{% if errors.get('starting_capital') %} starting-capital-error{% endif %}" {% if errors.get('starting_capital') %}aria-invalid="true"{% endif %}>
+    </div>
     <div id="starting-capital-help" class="form-text">A positive amount, e.g. 10000.00.</div>
     {% if errors.get('starting_capital') %}<div id="starting-capital-error" class="invalid-feedback">{{ errors.starting_capital }}</div>{% endif %}
   </div>
-  <div class="col-sm-6"><label for="base_currency" class="form-label">Base currency</label>
+  <div id="base-currency-control" class="sm-base-currency"><label for="base_currency" class="form-label">Base currency</label>
     <select id="base_currency" name="base_currency" class="form-select{% if errors.get('base_currency') %} is-invalid{% endif %}" aria-describedby="base-currency-help{% if errors.get('base_currency') %} base-currency-error{% endif %}" {% if errors.get('base_currency') %}aria-invalid="true"{% endif %}>
       <option value="GBP" {% if values.base_currency == 'GBP' %}selected{% endif %}>GBP</option>
       <option value="USD" {% if values.base_currency == 'USD' %}selected{% endif %}>USD</option>
@@ -148,3 +151,53 @@
 </fieldset>
 {% endif %}
 </div>
+
+<script>
+(function () {
+  var form = document.getElementById('strategy-configuration-form');
+  if (!form) return;
+
+  function updateCapitalCurrency() {
+    var currencySelect = form.querySelector('#base_currency');
+    var currencyControl = form.querySelector('#base-currency-control');
+    var symbol = form.querySelector('#capital-currency-symbol');
+    if (!currencySelect || !currencyControl || !symbol) return;
+
+    var wholeUniverse = form.querySelector('#whole_universe');
+    var securities = wholeUniverse && wholeUniverse.checked
+      ? form.querySelectorAll('[data-whole-universe-currency]')
+      : form.querySelectorAll('[data-security-currency]:checked, input[type="hidden"][name="security_ids"][data-security-currency]');
+    var currencies = {};
+    Array.prototype.forEach.call(securities, function (security) {
+      var currency = security.getAttribute('data-security-currency');
+      if (currency) currencies[currency] = true;
+    });
+    var represented = Object.keys(currencies);
+    var inferred = represented.length === 1 &&
+      (represented[0] === 'GBP' || represented[0] === 'USD')
+      ? represented[0]
+      : null;
+    if (inferred && !currencySelect.hasAttribute('aria-invalid')) {
+      currencySelect.value = inferred;
+      currencyControl.hidden = true;
+    } else {
+      currencyControl.hidden = false;
+    }
+    symbol.textContent = currencySelect.value === 'USD' ? '$' : '£';
+  }
+
+  window.__smUpdateCapitalCurrency = updateCapitalCurrency;
+  if (!document.body.dataset.smCapitalCurrencyBound) {
+    document.body.dataset.smCapitalCurrencyBound = '1';
+    document.addEventListener(
+      'strategy-manager:universe-currency-change', function () {
+        if (window.__smUpdateCapitalCurrency) {
+          window.__smUpdateCapitalCurrency();
+        }
+      }
+    );
+  }
+  form.querySelector('#base_currency').addEventListener('change', updateCapitalCurrency);
+  updateCapitalCurrency();
+})();
+</script>

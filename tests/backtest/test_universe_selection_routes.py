@@ -109,6 +109,9 @@ def test_universe_selector_shows_symbol_mic_currency(
     assert "XLON" in response.text
     assert "USD" in response.text
     assert "GBP" in response.text
+    assert 'data-security-currency="USD"' in response.text
+    assert 'data-security-currency="GBP"' in response.text
+    assert "strategy-manager:universe-currency-change" in response.text
 
 
 # ---------------------------------------------------------------------------
