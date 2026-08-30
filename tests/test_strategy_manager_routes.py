@@ -23,6 +23,7 @@ from app.api.dependencies import (
 from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
     BacktestIntegrityError,
+    BacktestRepository,
     BacktestResultV1,
     ComparisonCandidateV1,
     ComparisonEligibilityV1,
@@ -73,6 +74,7 @@ from app.api.routes.strategy_manager import (
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
+from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_protocol import (
     EntrySelectionDecisionV1,
     EntrySelectionState,
@@ -350,11 +352,16 @@ def services(monkeypatch):
     # gh-396: the landing now also reads readiness + bootstrap; the real
     # providers are @lru_cache'd against the real repo, so override both
     # with fakes built on this test's FakeRepo.
+    # ``FakeRepo``/``FakeJobs`` are duck-typed stand-ins for the real services;
+    # cast to the declared parameter types, matching this file's convention for
+    # handing fakes to typed constructors.
+    fake_repo = cast(BacktestRepository, repo)
+    fake_jobs = cast(StrategyJobService, jobs)
     app.dependency_overrides[get_readiness_service] = lambda: StrategyReadinessService(
-        repo
+        fake_repo
     )
     app.dependency_overrides[get_bootstrap_service] = lambda: StrategyBootstrapService(
-        repo, jobs
+        fake_repo, fake_jobs
     )
     # gh-396: keep the `discovery` prerequisite deterministic -- the real
     # `discover_strategies(SKILLS_DIR)` walks the repo filesystem.
