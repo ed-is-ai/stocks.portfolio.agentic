@@ -9,6 +9,7 @@ context: []
 warnings: [multiple-goals]
 github_issue: 401
 baseline_revision: 'd3a9eeab'
+final_revision: 'a1e2d5c7d06b547c9cb67234c8ac7157c7e2f8fe'
 ---
 
 <intent-contract>
