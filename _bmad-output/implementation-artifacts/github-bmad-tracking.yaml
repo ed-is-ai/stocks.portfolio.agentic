@@ -1,5 +1,5 @@
 generated: 2026-08-20
-updated: 2026-08-29
+updated: 2026-08-30
 repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
@@ -157,3 +157,25 @@ standalone_issues:
         issue: 371
         status: done
         spec: spec-gh-371-configure-and-explain-top-x-basket.md
+  portfolio-strategy-recommendations:
+    issue: 439
+    status: backlog
+    project:
+      number: 3
+      title: "Link strategy manager to portfolio manager"
+      url: https://github.com/users/ed-is-ai/projects/3
+      verified_items: [439, 440, 441, 442]
+    feature_plan: feature-gh-439-portfolio-strategy-recommendations.md
+    sub_issues: [440, 441, 442]
+    stories:
+      gh-440-assign-one-active-strategy-to-each-portfolio:
+        issue: 440
+        status: backlog
+      gh-441-show-portfolio-specific-recommendations:
+        issue: 441
+        status: backlog
+        prerequisite_issues: [440]
+      gh-442-send-daily-portfolio-recommendation-emails:
+        issue: 442
+        status: backlog
+        prerequisite_issues: [441]
