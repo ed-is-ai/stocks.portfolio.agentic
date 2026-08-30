@@ -82,6 +82,7 @@ from app.services.backtest.strategy_job import (
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1
+from app.services.backtest.strategy_protocol import validate_strategy_parameters
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
@@ -763,6 +764,7 @@ def _configuration_context(
     backtest_repo: BacktestRepository,
     **extra: object,
 ) -> dict[str, object]:
+    recall = bool(extra.pop("recall", False))
     view = launch.configuration()
     selected_id = cast(str | None, extra.get("selected_strategy_id"))
     if selected_id is None and view.strategies:
@@ -775,19 +777,7 @@ def _configuration_context(
     # render; the POST-error re-render path passes the submitted state
     # explicitly via ``extra`` so it round-trips instead of resetting.
     extra.setdefault("whole_universe", True)
-    enum_options: dict[str, tuple[tuple[str, str], ...]] = {}
-    enum_default_tokens: dict[str, str] = {}
-    if selected is not None:
-        for parameter in selected.parameters:
-            if parameter.type != "enum":
-                continue
-            enum_options[parameter.name] = tuple(
-                (str(index), str(candidate))
-                for index, candidate in enumerate(parameter.enum_values or ())
-            )
-            token = _enum_token(parameter, parameter.default)
-            if token is not None:
-                enum_default_tokens[parameter.name] = token
+    enum_options, enum_default_tokens = _enum_form_context(selected)
     period_options: tuple[tuple[object, tuple[str, ...]], ...] = ()
     if view.coverage is not None:
         period_options = tuple(
@@ -804,7 +794,7 @@ def _configuration_context(
     securities: list[tuple[str, str, str, str]] = []
     if active is not None:
         securities = backtest_repo.roster_member_identities(active.profile_hash)
-    return {
+    context: dict[str, object] = {
         "strategies": view.strategies,
         "warnings": view.warnings,
         "coverage": view.coverage,
@@ -826,6 +816,99 @@ def _configuration_context(
         "errors": {},
         **extra,
     }
+    if recall:
+        _apply_recalled_configuration(context, backtest_repo)
+    return context
+
+
+def _recall_parameter_values(
+    strategy: StrategyDescriptorV1, remembered: dict[str, object]
+) -> dict[str, str]:
+    """Project only currently valid persisted parameter values to form text."""
+    recalled: dict[str, str] = {}
+    for parameter in strategy.parameters:
+        if parameter.name not in remembered:
+            continue
+        value = remembered[parameter.name]
+        valid = validate_strategy_parameters(
+            (parameter,), {parameter.name: cast(JsonValue, value)}, apply_defaults=False
+        )
+        if isinstance(valid, tuple):
+            continue
+        if parameter.type == "boolean":
+            recalled[parameter.name] = "true" if value else "false"
+        elif parameter.type == "enum":
+            token = _enum_token(parameter, value)
+            if token is not None:
+                recalled[parameter.name] = token
+        else:
+            recalled[parameter.name] = str(value)
+    return recalled
+
+
+def _enum_form_context(
+    strategy: StrategyDescriptorV1 | None,
+) -> tuple[dict[str, tuple[tuple[str, str], ...]], dict[str, str]]:
+    options: dict[str, tuple[tuple[str, str], ...]] = {}
+    defaults: dict[str, str] = {}
+    if strategy is None:
+        return options, defaults
+    for parameter in strategy.parameters:
+        if parameter.type != "enum":
+            continue
+        options[parameter.name] = tuple(
+            (str(index), str(candidate))
+            for index, candidate in enumerate(parameter.enum_values or ())
+        )
+        token = _enum_token(parameter, parameter.default)
+        if token is not None:
+            defaults[parameter.name] = token
+    return options, defaults
+
+
+def _apply_recalled_configuration(
+    context: dict[str, object], repo: BacktestRepository
+) -> None:
+    """Safely overlay the newest completed Result onto a fresh form context."""
+    result = repo.latest_completed_backtest_result()
+    if result is None:
+        return
+
+    strategies = cast(tuple[StrategyDescriptorV1, ...], context["strategies"])
+    selected = next(
+        (item for item in strategies if item.strategy_id == result.strategy_id), None
+    )
+    values = cast(dict[str, str], context["values"])
+    if result.base_currency in {"GBP", "USD"}:
+        values["base_currency"] = result.base_currency
+    if result.starting_capital > 0:
+        values["starting_capital"] = format(result.starting_capital, "f")
+
+    if selected is None:
+        context["selected"] = None
+        context["selected_strategy_id"] = None
+        context["recall_notice"] = (
+            "Your previous Strategy is no longer available. Choose a Strategy to continue."
+        )
+        return
+
+    context["selected"] = selected
+    context["selected_strategy_id"] = selected.strategy_id
+    context["enum_options"], context["enum_default_tokens"] = _enum_form_context(selected)
+    context["parameter_values"] = _recall_parameter_values(selected, result.parameters)
+    coverage = context["coverage"]
+    intervals = getattr(coverage, "intervals", ()) if coverage is not None else ()
+    if any(
+        interval.start_month <= result.start_month <= result.end_month <= interval.end_month
+        for interval in intervals
+    ):
+        values["start_month"] = result.start_month
+        values["end_month"] = result.end_month
+        context["recall_notice"] = "Previous completed backtest settings restored."
+    else:
+        context["recall_notice"] = (
+            "Previous settings restored, but its period is no longer ready. Choose a new ready period."
+        )
 
 
 def _enum_token(parameter: StrategyParameterV1, value: object) -> str | None:
@@ -985,10 +1068,16 @@ async def strategy_configuration(
     launch: LaunchDep,
     backtest: BacktestDep,
     strategy_id: str | None = None,
+    reset: str | None = None,
 ) -> HTMLResponse:
     """Render the launch form: one fresh discovery + coverage projection
     (Story 2.7 AC 1)."""
-    context = _configuration_context(launch, backtest, selected_strategy_id=strategy_id)
+    context = _configuration_context(
+        launch,
+        backtest,
+        selected_strategy_id=strategy_id,
+        recall=reset != "defaults" and strategy_id is None,
+    )
     return templates.TemplateResponse(request, "_strategy_configuration.html", context)
 
 
@@ -1022,6 +1111,7 @@ async def strategy_configuration_fields(
             "base_currency": base_currency or "GBP",
             "starting_capital": starting_capital,
         },
+        recall=False,
     )
     return templates.TemplateResponse(
         request, "_strategy_configuration_fields.html", context
@@ -1080,6 +1170,7 @@ async def submit_strategy_configuration(
             parameter_values=parameter_raw,
             idempotency_key=form.get("idempotency_key") or str(uuid4()),
             whole_universe=whole_universe,
+            recall=False,
         )
 
     # Story 4.5: validate universe selection
