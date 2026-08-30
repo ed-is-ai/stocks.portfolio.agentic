@@ -490,7 +490,7 @@
     <div class="slbl"><i class="bi bi-graph-up me-1"></i>Market Value</div>
     <div class="sval">£{{ "%.2f"|format(total_value_gbp) }}</div>
   </div>
-  <div class="stat-card">
+  <div class="stat-card pnl-{{ 'positive' if total_pnl_gbp >= 0 else 'negative' }}">
     <div class="slbl"><i class="bi bi-percent me-1"></i>Unrealised P&amp;L</div>
     <div class="sval {% if total_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
       {{ "+" if total_pnl_gbp >= 0 }}£{{ "%.2f"|format(total_pnl_gbp) }}
