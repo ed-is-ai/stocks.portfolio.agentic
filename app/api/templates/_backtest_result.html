@@ -4,8 +4,13 @@
     value here comes from ``repo.backtest_result(run_id)``/
     ``snapshot_coverage(profile_hash=...)`` via the pure presenter in
     ``result_presenter.py`` -- no recomputation happens in this template. -#}
+{% from "_macros.html" import provenance_label %}
 <section id="backtest-result-{{ run_id }}" aria-labelledby="result-heading">
   <h1 id="result-heading" tabindex="-1" class="h3 mb-3">Backtest result</h1>
+  <p class="mt-3 d-flex flex-wrap gap-2">
+    <a class="sm-btn sm-btn-secondary" href="/strategy-manager"
+       hx-get="/strategy-manager" hx-target="#tab-content" hx-swap="innerHTML">Back to Strategy Manager</a>
+  </p>
 
   {% if integrity_error %}
   <div class="sm-alert sm-alert-danger" role="alert">
@@ -29,12 +34,18 @@
       <dd class="col-sm-9">{{ result.completed_at.strftime('%Y-%m-%d %H:%M') }} UTC</dd>
       <dt class="col-sm-3">Parameters</dt>
       <dd class="col-sm-9">{% for key, value in result.parameters|dictsort %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% else %}(defaults){% endfor %}</dd>
+    </dl>
+  </div></article>
+
+  <details id="result-audit-details" class="mb-3">
+    <summary>Audit details</summary>
+    <dl class="row mt-2 mb-0 mono-num">
       <dt class="col-sm-3">Run input manifest</dt>
       <dd class="col-sm-9 text-break">{{ result.run_input_manifest_digest }}</dd>
       <dt class="col-sm-3">Execution contract</dt>
       <dd class="col-sm-9 text-break">{{ result.execution_contract_digest }}</dd>
     </dl>
-  </div></article>
+  </details>
 
   <!-- Initial basket: optional immutable V2 evidence, deliberately shown
        before performance so the Result explains what was bought. -->
@@ -233,7 +244,7 @@
   <p class="text-muted">No provenance evidence is pinned for this run's period.</p>
   {% endif %}
   {% for source in provenance.entries %}
-  <p class="mt-2 mb-0"><strong>{{ source.provenance_quality|replace('_', ' ')|title }}:</strong> {{ source.snapshot_count }} snapshots {% for interval in source.intervals %}({{ interval.start_month }}–{{ interval.end_month }}){% endfor %}</p>
+  <p class="mt-2 mb-0"><strong>{{ provenance_label(source.provenance_quality) }}:</strong> {{ source.snapshot_count }} snapshots {% for interval in source.intervals %}({{ interval.start_month }}–{{ interval.end_month }}){% endfor %}</p>
   {% if source.provenance_quality == 'best_effort_reconstructed' %}
   <p class="text-muted">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>
   {% endif %}
