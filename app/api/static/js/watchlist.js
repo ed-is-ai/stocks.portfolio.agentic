@@ -576,8 +576,17 @@
   else document.addEventListener('DOMContentLoaded', init);
 })();
 
+// Collect matches for a selector *including the root itself*. An out-of-band
+// swap hands us the swapped element, not a container, so a plain
+// querySelectorAll would skip the very node that was just replaced (#418).
+function selfAndDescendants(root, selector) {
+  const found = Array.from(root.querySelectorAll?.(selector) || []);
+  if (root.matches?.(selector)) found.unshift(root);
+  return found;
+}
+
 function renderLocalTimes(root = document) {
-  root.querySelectorAll("time.local-time[datetime]").forEach((element) => {
+  selfAndDescendants(root, "time.local-time[datetime]").forEach((element) => {
     const instant = new Date(element.dateTime);
     if (Number.isNaN(instant.getTime())) return;
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local time";
@@ -598,7 +607,7 @@ document.body.addEventListener("htmx:afterSwap", (event) => renderLocalTimes(eve
 // re-rendered row doesn't accumulate duplicate tooltips.
 function initTooltips(root = document) {
   if (!window.bootstrap) return;
-  root.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((element) => {
+  selfAndDescendants(root, '[data-bs-toggle="tooltip"]').forEach((element) => {
     bootstrap.Tooltip.getInstance(element)?.dispose();
     new bootstrap.Tooltip(element);
   });
@@ -606,3 +615,19 @@ function initTooltips(root = document) {
 
 document.addEventListener("DOMContentLoaded", () => initTooltips());
 document.body.addEventListener("htmx:afterSwap", (event) => initTooltips(event.target));
+
+// Out-of-band swaps never fire htmx:afterSwap, so an OOB-replaced element
+// would otherwise keep a raw UTC timestamp and lose its tooltip entirely —
+// which is exactly how the header freshness affordance is kept current (#418).
+// Dispose before the swap so the outgoing node doesn't strand its popper.
+document.body.addEventListener("htmx:oobBeforeSwap", (event) => {
+  const outgoing = event.detail?.target;
+  if (!outgoing || !window.bootstrap) return;
+  selfAndDescendants(outgoing, '[data-bs-toggle="tooltip"]').forEach((element) => {
+    bootstrap.Tooltip.getInstance(element)?.dispose();
+  });
+});
+document.body.addEventListener("htmx:oobAfterSwap", (event) => {
+  renderLocalTimes(event.target);
+  initTooltips(event.target);
+});
