@@ -2915,6 +2915,35 @@ class BacktestRepository:
             )
         return tuple(summaries)
 
+    def latest_completed_backtest_result(self) -> BacktestResultV1 | None:
+        """Return the newest durable, validated completed Backtest Result.
+
+        Result completion time, with the immutable run ID as a deterministic
+        tie-breaker, is the ordering authority.  Activity recency is not:
+        queued, running, failed, cancelled, and tombstoned jobs are excluded
+        before their Result is read.  Each candidate is reconstructed through
+        :meth:`backtest_result`, so malformed immutable evidence is never
+        returned as recall input.
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT result.run_id
+                   FROM backtest_results AS result
+                   JOIN strategy_jobs AS job ON job.id = result.run_id
+                   WHERE job.job_type='backtest'
+                     AND job.status='complete'
+                     AND job.deleted_at IS NULL
+                   ORDER BY result.completed_at DESC, result.run_id DESC"""
+            ).fetchall()
+        for row in rows:
+            try:
+                return self.backtest_result(str(row[0]))
+            except (BacktestIntegrityError, StrategyJobNotFound):
+                # A damaged historical Result is not safe recall input. A
+                # prior valid immutable Result may still be usable.
+                continue
+        return None
+
     def is_comparable(self, left: str, right: str) -> ComparisonEligibilityV1:
         """Return AD-19's one canonical comparison-eligibility verdict for
         two persisted Backtest Result IDs (Story 3.1 AC 1, 2, 5).

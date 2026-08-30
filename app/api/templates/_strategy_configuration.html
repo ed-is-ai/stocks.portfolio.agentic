@@ -6,6 +6,10 @@
   <h1 id="strategy-configuration-heading" tabindex="-1" class="h3">Configure a Backtest</h1>
   <p class="text-muted">Select a Strategy, review or edit its parameters, then choose a backtestable period and starting capital.</p>
 
+  {% if recall_notice %}
+  <div class="sm-alert sm-alert-info" role="status">{{ recall_notice }}</div>
+  {% endif %}
+
   {% if errors %}
   <div id="configuration-errors" class="sm-alert sm-alert-danger" role="alert" tabindex="-1">
     <strong>Correct the following:</strong>
@@ -29,6 +33,8 @@
     <input type="hidden" name="profile_hash" value="{{ active_profile.profile_hash if active_profile else '' }}">
     <input type="hidden" name="activation_seq" value="{{ active_profile.activation_seq if active_profile else 0 }}">
     <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+
+    <p><a class="sm-btn sm-btn-secondary" href="/strategy-manager/configuration?reset=defaults" hx-get="/strategy-manager/configuration?reset=defaults" hx-target="#tab-content" hx-swap="innerHTML">Reset to defaults</a></p>
 
     <nav class="sm-wizard-indicator mb-3" aria-label="Backtest configuration progress">
       <span id="wizard-step-indicator" tabindex="-1" aria-live="polite">Step 1 of 3</span>
