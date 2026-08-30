@@ -380,12 +380,46 @@ def test_main_renders_coverage_and_canonical_reconstruction_warning(services):
     response = client.get("/partials/strategy-manager")
     assert response.status_code == 200
     assert "Scanner v1" in response.text
+    assert "Reconstructed (approximate)" in response.text
     assert "Best-effort yfinance" in response.text
     assert (
         "Survivorship-biased reconstruction; not a point-in-time market universe."
         in response.text
     )
     assert "source-gap" not in response.text
+
+
+def test_landing_provenance_uses_shared_labels_with_readable_fallback(services):
+    repo, _ = services
+    repo.snapshot_coverage = lambda profile_hash=None: SimpleNamespace(
+        display_version="Scanner v1",
+        earliest_month="2024-01",
+        latest_month="2024-03",
+        snapshot_count=3,
+        intervals=(SimpleNamespace(start_month="2024-01", end_month="2024-03"),),
+        provenance=(
+            SimpleNamespace(
+                provenance_quality="observed_bau",
+                snapshot_count=2,
+                intervals=(
+                    SimpleNamespace(start_month="2024-02", end_month="2024-03"),
+                ),
+            ),
+            SimpleNamespace(
+                provenance_quality="future_data_source",
+                snapshot_count=1,
+                intervals=(
+                    SimpleNamespace(start_month="2024-01", end_month="2024-01"),
+                ),
+            ),
+        ),
+    )
+
+    response = client.get("/strategy-manager")
+
+    assert response.status_code == 200
+    assert "Observed (from live scans)" in response.text
+    assert "Future Data Source" in response.text
 
 
 def test_main_logs_render_timing(services, caplog):
@@ -603,7 +637,9 @@ def test_initialization_uses_plain_copy_and_describes_preparation_history(servic
     assert "Prepared 2024-01 to 2024-03" in response.text
     assert "just now" in response.text
     assert ">Complete: opaque-initialization-id<" not in response.text
-    assert 'href="/strategy-manager/activities/opaque-initialization-id"' in response.text
+    assert (
+        'href="/strategy-manager/activities/opaque-initialization-id"' in response.text
+    )
 
 
 def test_initialization_history_omits_job_when_its_run_cannot_be_loaded(services):
@@ -2185,6 +2221,8 @@ def test_result_page_renders_sections_in_order(services):
     assert text.index("Provenance") < text.index("Decision note")
     assert "momentum_v1 v1" in text
     assert "2024-01 to 2024-01" in text
+    assert 'href="/strategy-manager"' in text
+    assert 'hx-get="/strategy-manager"' in text
     assert "No live-portfolio" not in text  # sanity: no live-import copy leaks in
 
 
@@ -2201,9 +2239,28 @@ def test_result_page_formats_display_only_pnl_and_metric_tones(services):
     assert response.status_code == 200
     assert "£10,000.00" in response.text
     assert "P&amp;L" in response.text
-    assert '-£250.00' in response.text
+    assert "-£250.00" in response.text
     assert '<div class="sval neg">-2.5%</div>' in response.text
     assert '<div class="sval neg">-10.0%</div>' in response.text
+
+
+def test_result_audit_digests_are_collapsed_outside_run_identity(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+
+    assert response.status_code == 200
+    text = response.text
+    assert '<details id="result-audit-details"' in text
+    assert "<summary>Audit details</summary>" in text
+    assert "Run input manifest" in text
+    assert "Execution contract" in text
+    audit_start = text.index('<details id="result-audit-details"')
+    assert text.index("Run input manifest") > audit_start
+    assert text.index("Execution contract") > audit_start
+    assert text.index("Run input manifest") > text.index("</article>")
 
 
 def test_result_initial_basket_is_visible_and_explains_persisted_evidence(services):
@@ -2445,8 +2502,9 @@ def test_result_provenance_shows_reconstructed_and_observed_separately(services)
     response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
     assert response.status_code == 200
     text = response.text
-    assert "Best Effort Reconstructed" in text
-    assert "Observed Bau" in text
+    assert "Reconstructed (approximate)" in text
+    assert "Observed (from live scans)" in text
+    assert "Observed Bau" not in text
     assert "Best-effort yfinance." in text
     # Clipped to the Result's own [2024-01, 2024-03] window, never the
     # whole profile's [2024-01, 2024-06] coverage.
@@ -2492,6 +2550,8 @@ def test_result_integrity_error_renders_no_partial_data(services):
     assert "stored backtest result digest is invalid" in response.text
     assert "Metrics" not in response.text
     assert "Trade Log" not in response.text
+    assert "Back to Strategy Manager" in response.text
+    assert 'hx-get="/strategy-manager"' in response.text
 
 
 # --- Note CAS -----------------------------------------------------------
@@ -3005,8 +3065,40 @@ def test_comparison_happy_path_renders_both_sides(services):
     assert "Provenance" in text
     assert "comparison-equity-chart" in text
     assert "View equity data table" in text
+    assert 'href="/strategy-manager"' in text
+    assert 'hx-get="/strategy-manager"' in text
     # Notes are a standalone-Result concern -- never rendered here.
     assert "Decision note" not in text
+
+
+def test_comparison_provenance_uses_plain_language_labels(services):
+    repo, _ = services
+    repo.result = _result(run_id="run-1")
+    repo.result_b = _result(run_id="run-2")
+    repo.result_coverage = CoverageSummaryV1(
+        profile_hash=RESULT_PROFILE_HASH,
+        display_version="Scanner v1",
+        earliest_month="2024-01",
+        latest_month="2024-01",
+        snapshot_count=1,
+        intervals=(CoverageIntervalV1(start_month="2024-01", end_month="2024-01"),),
+        provenance=(
+            ProvenanceCoverageV1(
+                provenance_quality="observed_bau",
+                snapshot_count=1,
+                intervals=(
+                    CoverageIntervalV1(start_month="2024-01", end_month="2024-01"),
+                ),
+            ),
+        ),
+    )
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+
+    response = client.get("/strategy-manager/comparisons/run-1/run-2")
+
+    assert response.status_code == 200
+    assert "Observed (from live scans)" in response.text
+    assert "Observed Bau" not in response.text
 
 
 def test_comparison_trade_log_resolves_security_labels_on_both_sides(services):
@@ -3097,6 +3189,8 @@ def test_comparison_vanished_side_a_result_renders_integrity_error(services):
     assert "Reload comparison" in text
     assert "View Result A" in text
     assert "View Result B" in text
+    assert "Back to Strategy Manager" in text
+    assert 'hx-get="/strategy-manager"' in text
 
 
 def test_comparison_corrupt_side_b_result_renders_integrity_error(services):

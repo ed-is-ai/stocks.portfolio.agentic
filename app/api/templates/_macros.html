@@ -14,3 +14,7 @@
 </div>
 {% endfor %}
 {% endmacro %}
+
+{% macro provenance_label(quality) -%}
+{{- {'best_effort_reconstructed': 'Reconstructed (approximate)', 'observed_bau': 'Observed (from live scans)'}.get(quality, quality|replace('_', ' ')|title) -}}
+{%- endmacro %}
