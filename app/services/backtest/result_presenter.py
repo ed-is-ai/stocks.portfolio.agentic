@@ -101,6 +101,92 @@ def resolve_security_label(
     return f"{symbol} ({mic})" if mic else symbol
 
 
+#: Universe-cell placeholder for a run with no persisted universe
+#: selection (legacy ``selection_json`` is NULL) -- display-only.
+NO_UNIVERSE_LABEL = "—"
+
+#: ``UniverseViewV1.selection_mode`` values (gh-434). ``None`` means no
+#: persisted selection, so the Universe composition panel is hidden.
+WHOLE_UNIVERSE_MODE = "whole universe"
+SELECTED_SECURITIES_MODE = "selected securities"
+
+
+@dataclass(frozen=True)
+class UniverseViewV1:
+    """Display-only universe summary shared by the results list and the
+    Result page's Run identity card (gh-434).
+
+    ``label`` is the compact cell/row text ("Whole universe (N)", "N
+    securities", a single resolved ticker, or :data:`NO_UNIVERSE_LABEL`);
+    ``tickers`` are the selection's labels resolved via the run's pinned
+    roster (sorted, with :data:`UNRESOLVED_SECURITY_LABEL` for misses);
+    the composition numbers feed the Result page's Universe composition
+    panel -- all ``None`` when there is no persisted selection."""
+
+    label: str
+    tickers: tuple[str, ...]
+    roster_count: int | None = None
+    runnable_count: int | None = None
+    excluded_count: int | None = None
+    selection_mode: str | None = None
+
+
+def build_universe_view(
+    security_ids: tuple[str, ...] | None,
+    identities: Mapping[str, tuple[str, str]],
+    runnable_ids: tuple[str, ...] | None = None,
+) -> UniverseViewV1:
+    """Build the shared universe view-model for one Backtest run (gh-434).
+
+    ``security_ids`` is the run's canonical selection (``None`` for a
+    legacy run without persisted ``selection_json``); ``identities`` is
+    the pinned roster's ``security_id -> (provider_symbol, mic)`` map;
+    ``runnable_ids`` are the ``valid_scan`` member IDs for the run's
+    ``(profile_hash, start_month)`` snapshot -- ``None`` when the snapshot
+    month is unavailable, which suppresses the whole-universe claim and
+    the excluded count rather than guessing. The whole-universe claim
+    requires the selection to equal the runnable set (not merely match
+    its size) so a hand-ticked subset is never mislabelled. Never
+    raises."""
+    if not security_ids:
+        return UniverseViewV1(label=NO_UNIVERSE_LABEL, tickers=())
+    tickers = tuple(
+        sorted(
+            resolve_security_label(security_id, identities)
+            for security_id in security_ids
+        )
+    )
+    count = len(security_ids)
+    roster_count = len(identities)
+    runnable_count = None if runnable_ids is None else len(runnable_ids)
+    excluded_count = (
+        None
+        if runnable_count is None or roster_count < runnable_count
+        else roster_count - runnable_count
+    )
+    if runnable_ids is not None and set(security_ids) == set(runnable_ids):
+        return UniverseViewV1(
+            label=f"Whole universe ({count})",
+            tickers=tickers,
+            roster_count=roster_count,
+            runnable_count=runnable_count,
+            excluded_count=excluded_count,
+            selection_mode=WHOLE_UNIVERSE_MODE,
+        )
+    if count == 1:
+        label = tickers[0]
+    else:
+        label = f"{count} securities"
+    return UniverseViewV1(
+        label=label,
+        tickers=tickers,
+        roster_count=roster_count,
+        runnable_count=runnable_count,
+        excluded_count=excluded_count,
+        selection_mode=SELECTED_SECURITIES_MODE,
+    )
+
+
 @dataclass(frozen=True)
 class MetricsViewV1:
     """One formatted rendering of AD-8's fixed four Metrics (AC 2)."""
@@ -225,7 +311,9 @@ def _unsigned_percent(value: float) -> str:
     return f"{round(value * 100, 1):.1f}%"
 
 
-def _metric_percent(value: float, *, signed: bool, loss_classed: bool = False) -> MetricDisplayV1:
+def _metric_percent(
+    value: float, *, signed: bool, loss_classed: bool = False
+) -> MetricDisplayV1:
     """Present a percentage using the shared one-decimal P&L convention."""
     pct = round(value * 100, 1)
     if pct == 0:
@@ -237,7 +325,9 @@ def _metric_percent(value: float, *, signed: bool, loss_classed: bool = False) -
     return MetricDisplayV1(f"{sign}{pct:.1f}%", css_class)
 
 
-def _currency(value: Decimal, currency: str, *, signed: bool = False) -> MetricDisplayV1:
+def _currency(
+    value: Decimal, currency: str, *, signed: bool = False
+) -> MetricDisplayV1:
     """Format money in the run currency; no persistence/calculation occurs."""
     amount = value.quantize(Decimal("0.01"))
     if amount == 0:
@@ -338,7 +428,9 @@ def metrics_view(result: BacktestResultV1) -> MetricsViewV1:
     )
 
 
-def backtest_metrics_view(metrics: object, availability: object) -> BacktestMetricsDisplayV1:
+def backtest_metrics_view(
+    metrics: object, availability: object
+) -> BacktestMetricsDisplayV1:
     """Format persisted metric values for either Result or results-list views."""
     total_return = getattr(metrics, "total_return")
     max_drawdown = getattr(metrics, "max_drawdown", None)

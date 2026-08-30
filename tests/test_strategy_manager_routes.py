@@ -7,7 +7,7 @@ import html
 from pathlib import Path
 import re
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -50,6 +50,7 @@ from app.services.backtest.metrics import (
     MetricUnavailableReason,
 )
 from app.services.backtest.result_presenter import comparison_equity_payload
+from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
     StrategyUniverseContractV1,
@@ -61,6 +62,7 @@ from app.services.backtest.snapshot_profile import (
     SnapshotProfileV1,
 )
 from app.services.backtest.strategy_job import (
+    RunUniverseSelectionV1,
     StrategyJobConflict,
     StrategyJobNotFound,
     StrategyJobStatus,
@@ -160,11 +162,24 @@ class FakeRepo:
         # Security cells show a readable ticker/exchange label.
         self.roster_identities: list[tuple[str, str, str, str]] = [
             ("sid_001", "AAPL", "XNYS", "USD"),
+            ("sid_002", "MSFT", "XNAS", "USD"),
             ("SEC1", "MSFT", "XNAS", "USD"),
         ]
+        # gh-434: runnable-universe knob for the whole-universe label.
+        # ``None`` models a missing snapshot month (BacktestIntegrityError),
+        # the degraded count-only path.
+        self.snapshot_revisions: tuple[tuple[str, str], ...] | None = None
+        self.snapshot_revisions_error: Exception | None = None
 
     def roster_member_identities(self, profile_hash):
         return self.roster_identities
+
+    def snapshot_member_revisions(self, profile_hash, snapshot_month):
+        if self.snapshot_revisions_error is not None:
+            raise self.snapshot_revisions_error
+        if self.snapshot_revisions is None:
+            raise BacktestIntegrityError("snapshot month does not exist")
+        return self.snapshot_revisions
 
     def roster_manifest_json(self, roster_digest):
         # gh-396: readiness `roster` prerequisite is READY when the active
@@ -1650,7 +1665,12 @@ def test_configuration_recall_falls_back_for_unavailable_strategy_and_period(lau
     assert response.status_code == 200
     assert "previous Strategy is no longer available" in response.text
     assert 'name="strategy_id"' in response.text
-    assert 'checked' not in response.text.split('<fieldset class="sm-configuration-section" data-wizard-step="1">')[1].split('</fieldset>')[0]
+    assert (
+        "checked"
+        not in response.text.split(
+            '<fieldset class="sm-configuration-section" data-wizard-step="1">'
+        )[1].split("</fieldset>")[0]
+    )
     assert 'value="12000"' in response.text
     assert '<option value="2023-01" selected>' not in response.text
 
@@ -1699,7 +1719,7 @@ def test_configuration_switching_strategy_preserves_period_capital_currency(laun
     assert 'value="2024-02" selected' in response.text
     assert '<option value="USD" selected>' in response.text
     assert 'value="5000"' in response.text
-    assert '>$</span>' in response.text
+    assert ">$</span>" in response.text
 
 
 def test_configuration_capital_control_exposes_currency_presentation_hooks(launch):
@@ -2077,6 +2097,7 @@ def test_backtests_list_renders_rows(services):
             strategy_id="momentum_v1",
             strategy_api_version=1,
             parameter_summary="lookback=20",
+            tuning_parameters={"lookback": 20},
             start_month="2024-01",
             end_month="2024-02",
             metrics=cast(
@@ -2122,6 +2143,7 @@ def test_backtests_list_failed_row_renders_error_chip(services):
             strategy_id="momentum_v1",
             strategy_api_version=1,
             parameter_summary="lookback=20",
+            tuning_parameters={"lookback": 20},
             start_month="2024-01",
             end_month="2024-02",
             metrics=None,
@@ -2149,6 +2171,226 @@ def test_backtests_list_integrity_error_alert(services):
     assert response.status_code == 200
     assert "corrupt backtest row" in response.text
     assert "Reload" in response.text
+
+
+# ---------------------------------------------------------------------------
+# gh-434: Universe column on the results list, universe row + composition
+# panel on the Result page.
+# ---------------------------------------------------------------------------
+
+
+def _universe_activity(**overrides: object) -> BacktestActivitySummaryV1:
+    """One complete list row carrying gh-434's universe fields."""
+    defaults: dict[str, Any] = dict(
+        job=cast(
+            StrategyJobV1,
+            SimpleNamespace(
+                id="job-universe",
+                enqueue_seq=5,
+                status=StrategyJobStatus.COMPLETE,
+                cancel_requested_at=None,
+                created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        strategy_id="momentum_v1",
+        strategy_api_version=1,
+        parameter_summary="lookback=20",
+        start_month="2024-01",
+        end_month="2024-02",
+        metrics=cast(
+            BacktestMetricsV1, SimpleNamespace(total_return=0.1, win_rate=0.5)
+        ),
+        metric_availability=cast(MetricAvailabilityV1, SimpleNamespace()),
+        profile_hash=RESULT_PROFILE_HASH,
+        universe_security_ids=None,
+        tuning_parameters={"lookback": 20},
+    )
+    defaults.update(overrides)
+    return BacktestActivitySummaryV1(**defaults)
+
+
+def test_backtests_list_universe_column_lists_resolved_tickers(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        _universe_activity(universe_security_ids=("sid_002", "sid_001")),
+    )
+    repo.snapshot_revisions = (
+        ("sid_001", "r1"),
+        ("sid_002", "r2"),
+        ("sid_003", "r3"),
+    )
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    text = response.text
+    assert '<th scope="col">Universe</th>' in text
+    assert "2 securities" in text
+    assert "View securities" in text
+    assert "AAPL (XNYS)" in text
+    assert "MSFT (XNAS)" in text
+    # Opaque security IDs never render; Parameters shows only tuning knobs.
+    assert "sid_001" not in text
+    assert "lookback=20" in text
+
+
+def test_backtests_list_single_security_shows_the_ticker_itself(services):
+    repo, _ = services
+    repo.backtest_activities = (_universe_activity(universe_security_ids=("sid_001",)),)
+    repo.snapshot_revisions = (("sid_001", "r1"), ("sid_002", "r2"))
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "AAPL (XNYS)" in response.text
+    assert "Whole universe" not in response.text
+    assert "View securities" not in response.text
+
+
+def test_backtests_list_whole_universe_label(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        _universe_activity(universe_security_ids=("sid_001", "sid_002")),
+    )
+    repo.snapshot_revisions = (("sid_001", "r1"), ("sid_002", "r2"))
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "Whole universe (2)" in response.text
+
+
+def test_backtests_list_legacy_run_shows_placeholder(services):
+    repo, _ = services
+    repo.backtest_activities = (_universe_activity(),)
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "Whole universe" not in response.text
+    assert "View securities" not in response.text
+    assert "lookback=20" in response.text
+
+
+def test_backtests_list_unresolvable_security_shows_placeholder(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        _universe_activity(universe_security_ids=("sid_001", "ghost-id")),
+    )
+    repo.snapshot_revisions = (("sid_001", "r1"), ("sid_002", "r2"))
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "Unknown security" in response.text
+    assert "ghost-id" not in response.text
+
+
+def test_backtests_list_missing_snapshot_degrades_to_count_only(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        _universe_activity(universe_security_ids=("sid_001", "sid_002")),
+    )
+    repo.snapshot_revisions_error = BacktestIntegrityError(
+        "snapshot month does not exist"
+    )
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "2 securities" in response.text
+    assert "Whole universe" not in response.text
+
+
+def _universe_selection(
+    security_ids: tuple[str, ...] = ("sid_001", "sid_002"),
+    universe_parameter: str = "security_ids",
+) -> RunUniverseSelectionV1:
+    return RunUniverseSelectionV1(
+        profile_hash=RESULT_PROFILE_HASH,
+        activation_seq=1,
+        universe_parameter=universe_parameter,
+        canonical_security_ids=security_ids,
+        run_universe_digest=run_universe_digest(
+            list(security_ids),
+            parameter=universe_parameter,
+            profile_hash=RESULT_PROFILE_HASH,
+        ),
+    )
+
+
+def test_result_page_universe_row_and_composition_panel(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        parameters={"lookback": 20, "security_ids": ["sid_001", "sid_002"]},
+        universe_selection=_universe_selection(),
+    )
+    repo.snapshot_revisions = (("sid_001", "r1"), ("sid_002", "r2"))
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "Whole universe (2)" in text
+    assert "Selected securities — 2 of 3 roster members (1 excluded)" in text
+    assert "AAPL (XNYS)" in text
+    assert "MSFT (XNAS)" in text
+    assert "Universe composition" in text
+    assert "Runnable (valid_scan)" in text
+    assert "whole universe" in text
+    # The universe key never renders among the parameters, and the raw
+    # security IDs never render anywhere.
+    assert "security_ids" not in text
+    assert "sid_001" not in text
+    assert "lookback=20" in text
+
+
+def test_result_page_missing_snapshot_degrades_without_500(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        parameters={"lookback": 20, "security_ids": ["sid_001", "sid_002"]},
+        universe_selection=_universe_selection(),
+    )
+    repo.snapshot_revisions_error = BacktestIntegrityError(
+        "snapshot month does not exist"
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "2 securities" in text
+    assert "Whole universe" not in text
+    assert "Universe composition" in text
+    assert "Runnable (valid_scan)" in text
+
+
+def test_backtests_list_same_count_different_set_is_not_whole_universe(services):
+    """gh-434 review patch: the whole-universe claim requires set equality
+    -- a hand-ticked selection that merely matches the runnable count is
+    never mislabelled."""
+    repo, _ = services
+    repo.backtest_activities = (
+        _universe_activity(universe_security_ids=("sid_001", "sid_002")),
+    )
+    repo.snapshot_revisions = (("sid_002", "r1"), ("sid_003", "r2"))
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "2 securities" in response.text
+    assert "Whole universe" not in response.text
+
+
+def test_result_page_unresolvable_security_shows_unknown_security(services):
+    """gh-434 review patch: the Result page disclosure resolves tickers via
+    the pinned roster and renders the placeholder for unresolvable IDs."""
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        parameters={"lookback": 20, "security_ids": ["ghost-id", "sid_001"]},
+        universe_selection=_universe_selection(security_ids=("ghost-id", "sid_001")),
+    )
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    text = response.text
+    assert "Unknown security" in text
+    assert "ghost-id" not in text
+
+
+def test_result_page_legacy_run_without_selection(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert response.status_code == 200
+    assert "Universe composition" not in response.text
+    assert "Whole universe" not in response.text
+    assert "lookback=20" in response.text
 
 
 # ---------------------------------------------------------------------------
@@ -2284,6 +2526,8 @@ def _result(
     end_month: str = "2024-01",
     profile_hash: str = RESULT_PROFILE_HASH,
     initial_entry_selection: InitialEntrySelectionV1 | None = None,
+    universe_selection: RunUniverseSelectionV1 | None = None,
+    parameters: dict[str, object] | None = None,
 ) -> BacktestResultV1:
     curve = (
         equity_curve
@@ -2295,7 +2539,7 @@ def _result(
         strategy_id="momentum_v1",
         strategy_api_version=1,
         strategy_source_digest="b" * 64,
-        parameters={"lookback": 20},
+        parameters=parameters if parameters is not None else {"lookback": 20},
         profile_hash=profile_hash,
         start_month=start_month,
         end_month=end_month,
@@ -2313,6 +2557,7 @@ def _result(
         note=note,
         note_version=note_version,
         initial_entry_selection=initial_entry_selection,
+        universe_selection=universe_selection,
     )
 
 
@@ -2849,6 +3094,7 @@ def test_backtests_list_links_complete_row_to_result_url(services):
             strategy_id="momentum_v1",
             strategy_api_version=1,
             parameter_summary="lookback=20",
+            tuning_parameters={"lookback": 20},
             start_month="2024-01",
             end_month="2024-02",
             metrics=cast(
@@ -2870,6 +3116,7 @@ def test_backtests_list_links_complete_row_to_result_url(services):
             strategy_id="momentum_v1",
             strategy_api_version=1,
             parameter_summary="lookback=20",
+            tuning_parameters={"lookback": 20},
             start_month="2024-01",
             end_month="2024-02",
             metrics=None,

@@ -476,13 +476,15 @@ def test_legacy_upgrade_preserves_v1_and_creates_v2_index(tmp_path: Path) -> Non
         index_columns = c.execute(
             "PRAGMA index_info(idx_strategy_runs_source_preparation)"
         ).fetchall()
-        assert [str(row[2]) for row in index_columns] == [
-            "source_preparation_job_id"
-        ]
-        index_sql = c.execute(
-            "SELECT sql FROM sqlite_master "
-            "WHERE type='index' AND name='idx_strategy_runs_source_preparation'"
-        ).fetchone()[0].upper()
+        assert [str(row[2]) for row in index_columns] == ["source_preparation_job_id"]
+        index_sql = (
+            c.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='index' AND name='idx_strategy_runs_source_preparation'"
+            )
+            .fetchone()[0]
+            .upper()
+        )
         assert index_sql.startswith("CREATE UNIQUE INDEX")
         assert "WHERE SOURCE_PREPARATION_JOB_ID IS NOT NULL" in index_sql
         assert c.execute(
@@ -1897,6 +1899,149 @@ def test_list_backtest_activities_parameter_summary_from_persisted_parameters(
     assert activities[0].parameter_summary == "lookback=20"
     assert activities[0].strategy_id == "momentum_v1"
     assert activities[0].strategy_api_version == 1
+
+
+def test_list_backtest_activities_exposes_universe_selection_fields(
+    tmp_path: Path,
+) -> None:
+    """gh-434: a v2 run's summary carries its pinned ``profile_hash``, the
+    canonical security IDs parsed from ``selection_json``, and the
+    tuning-parameters dict with the run's own universe key removed."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    _patch_ready(repo)
+    accepted, claim, submission = _claimed_v2(repo)
+    child = repo.seal_preparation_and_create_backtest(
+        accepted.job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        submission=submission,
+    )
+    _complete_backtest(repo, child.job.id)
+
+    activities = repo.list_backtest_activities()
+
+    assert len(activities) == 1
+    activity = activities[0]
+    assert activity.profile_hash == PROFILE_HASH
+    assert activity.universe_security_ids == ("sec-001",)
+    assert activity.tuning_parameters == {"lookback": 20}
+    # ``_parameter_summary``'s contract is unchanged: the universe key
+    # stays in the persisted-parameters summary (gh-434 boundary).
+    assert "symbols=['sec-001']" in activity.parameter_summary
+
+
+def test_list_backtest_activities_legacy_null_selection_degrades(
+    tmp_path: Path,
+) -> None:
+    """gh-434: a legacy run whose ``selection_json`` is NULL yields no
+    universe IDs and default-key tuning-parameter filtering, never an
+    error."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue_backtest(repo)
+
+    activities = repo.list_backtest_activities()
+
+    assert activities[0].universe_security_ids is None
+    assert activities[0].tuning_parameters == {"lookback": 20}
+    assert activities[0].profile_hash == PROFILE_HASH
+
+
+def test_list_backtest_activities_unparseable_selection_json_degrades(
+    tmp_path: Path,
+) -> None:
+    """gh-434: stored ``selection_json`` that no longer validates degrades
+    to no universe IDs instead of failing the whole list."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue_backtest(repo)
+    # The corrupt row models a legacy/foreign writer; the immutable-update
+    # trigger must be bypassed to seed it (same precedent as
+    # test_scan_reconstruction_cache.py).
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER strategy_run_immutable_update")
+        conn.execute("UPDATE strategy_runs SET selection_json='{not json}'")
+
+    activities = repo.list_backtest_activities()
+
+    assert activities[0].universe_security_ids is None
+    assert activities[0].tuning_parameters == {"lookback": 20}
+
+
+def test_list_backtest_activities_tuning_parameters_exclude_universe_keys(
+    tmp_path: Path,
+) -> None:
+    """gh-434: both the default universe key and the legacy
+    ``selected_securities`` alias are excluded from the tuning-parameters
+    dict, while ``_parameter_summary`` still renders them unchanged."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue_backtest(repo)
+    # Legacy rows carrying the universe keys predate the immutable-update
+    # trigger's contract; drop it to seed the historical shape.
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER strategy_run_immutable_update")
+        conn.execute(
+            "UPDATE strategy_runs SET parameters_json=?",
+            (
+                json.dumps(
+                    {
+                        "lookback": 20,
+                        "security_ids": ["sid-1"],
+                        "selected_securities": ["sid-2"],
+                    }
+                ),
+            ),
+        )
+
+    activities = repo.list_backtest_activities()
+
+    assert activities[0].tuning_parameters == {"lookback": 20}
+    assert activities[0].parameter_summary == (
+        "lookback=20, security_ids=['sid-1'], selected_securities=['sid-2']"
+    )
+
+
+def test_list_backtest_activities_empty_parameters_render_as_defaults(
+    tmp_path: Path,
+) -> None:
+    """gh-434 review patch: ``tuning_parameters`` is ``None`` (rendered as
+    "(defaults)") only when the run had no parameters at all."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue_backtest(repo)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER strategy_run_immutable_update")
+        conn.execute("UPDATE strategy_runs SET parameters_json='{}'")
+
+    activities = repo.list_backtest_activities()
+
+    assert activities[0].tuning_parameters is None
+    assert activities[0].parameter_summary == "(defaults)"
+
+
+def test_list_backtest_activities_universe_only_parameters_render_distinctly(
+    tmp_path: Path,
+) -> None:
+    """gh-434 review patch: a run whose only parameter was the universe
+    key strips to an empty dict -- not "(defaults)" -- so the template can
+    say "(universe selection only)" truthfully."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _enqueue_backtest(repo)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER strategy_run_immutable_update")
+        conn.execute(
+            "UPDATE strategy_runs SET parameters_json=?",
+            (json.dumps({"security_ids": ["sid-1"]}),),
+        )
+
+    activities = repo.list_backtest_activities()
+
+    assert activities[0].tuning_parameters == {}
+    assert activities[0].parameter_summary == "security_ids=['sid-1']"
 
 
 def test_list_backtest_activities_metrics_present_only_for_complete_job(

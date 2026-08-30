@@ -32,10 +32,40 @@
       <dd class="col-sm-9">{{ financials.starting_capital.value }}</dd>
       <dt class="col-sm-3">Completed</dt>
       <dd class="col-sm-9">{{ result.completed_at.strftime('%Y-%m-%d %H:%M') }} UTC</dd>
+      <dt class="col-sm-3">Universe</dt>
+      <dd class="col-sm-9">
+        {{ universe.label }}{% if universe.tickers|length > 1 %}
+        <details class="mt-1">
+          <summary>{% if universe.runnable_count is not none %}Selected securities — {{ universe.tickers|length }} of {{ universe.roster_count }} roster members ({{ universe.excluded_count }} excluded){% else %}View securities{% endif %}</summary>
+          <ul class="mb-0 ps-3">
+            {% for ticker in universe.tickers %}<li>{{ ticker }}</li>{% endfor %}
+          </ul>
+        </details>{% endif %}
+      </dd>
       <dt class="col-sm-3">Parameters</dt>
-      <dd class="col-sm-9">{% for key, value in result.parameters|dictsort %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% else %}(defaults){% endfor %}</dd>
+      <dd class="col-sm-9">{%- if tuning_parameters is none -%}(defaults)
+        {%- else -%}{% for key, value in tuning_parameters|dictsort %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% else %}(universe selection only){% endfor %}
+        {%- endif -%}</dd>
     </dl>
   </div></article>
+
+  {% if universe.selection_mode %}
+  <!-- Universe composition (gh-434): roster vs runnable vs excluded for
+       the run's own start-month snapshot, per the approved mockup. -->
+  <article class="card sm-card mb-3"><div class="card-body">
+    <h2 class="h5">Universe composition</h2>
+    <dl class="row mb-0 mono-num">
+      <dt class="col-sm-3">Roster members</dt>, {{ result.start_month }}
+      <dd class="col-sm-9">{{ universe.roster_count }}</dd>
+      <dt class="col-sm-3">Runnable (valid_scan)</dt>
+      <dd class="col-sm-9">{{ universe.runnable_count if universe.runnable_count is not none else '—' }}</dd>
+      <dt class="col-sm-3">Excluded</dt>
+      <dd class="col-sm-9">{{ universe.excluded_count if universe.excluded_count is not none else '—' }}</dd>
+      <dt class="col-sm-3">Selection mode</dt>
+      <dd class="col-sm-9">{{ universe.selection_mode }}</dd>
+    </dl>
+  </div></article>
+  {% endif %}
 
   <details id="result-audit-details" class="mb-3">
     <summary>Audit details</summary>
