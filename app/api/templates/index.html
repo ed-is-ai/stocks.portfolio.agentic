@@ -1,4 +1,4 @@
-<!doctype html>
+{% import "_macros.html" as macros %}<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -312,7 +312,10 @@
     .form-label { font-size: 0.76rem; font-weight: 600; color: #374151; margin-bottom: 0.3rem; }
     .form-control, .form-select { font-size: 0.85rem; border-color: var(--border); }
     .form-control:focus, .form-select:focus { border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
-    .pipeline-status-bar { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); padding-bottom: env(safe-area-inset-bottom, 0px); }
+    /* The bar only exists while a refresh runs -- .pipeline-status is
+       rendered running-only, so the fixed chrome comes and goes with it.
+       #pipeline-status itself stays put: it also hosts the breakdown toast. */
+    .pipeline-status-bar:has(.pipeline-status) { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); padding-bottom: env(safe-area-inset-bottom, 0px); }
     .pipeline-status { min-height: 2.35rem; display: flex; align-items: center; gap: 1rem; padding: .45rem 1.25rem; font-size: .78rem; color: var(--muted); overflow-x: auto; }
     .pipeline-status-summary, .pipeline-stages, .pipeline-stage { display: flex; align-items: center; gap: .4rem; white-space: nowrap; }
     .pipeline-stages { list-style: none; margin: 0; padding: 0; gap: .75rem; }
@@ -327,14 +330,28 @@
     .pipeline-status.partial, .pipeline-status.skipped { color: var(--amber); background: var(--amber-bg); }
     .pipeline-status-freshness { margin-left: auto; flex-wrap: nowrap; }
     .pipeline-status-freshness .local-time { font-variant-numeric: tabular-nums; }
-    .pipeline-breakdown-toast-container { right: 0; bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); z-index: 30; max-width: min(24rem, 90vw); }
+    /* The toast only renders in terminal states and the bar only while running,
+       so the toast never has to clear the bar -- it sits on the page floor. */
+    .pipeline-breakdown-toast-container { right: 0; bottom: env(safe-area-inset-bottom, 0px); z-index: 30; max-width: min(24rem, 90vw); }
     .pipeline-breakdown-toast .toast-body { font-size: .8rem; display: flex; flex-direction: column; gap: .4rem; }
     @keyframes pipeline-sheen { to { background-position: -220% 0; } }
     @keyframes pipeline-spin { to { transform: rotate(360deg); } }
-    @media (prefers-reduced-motion: reduce) { .pipeline-status.running, .pipeline-status.running .pipeline-status-summary > .bi { animation: none; } }
+    /* The affordance sits on the dark navbar, so it takes light-on-dark ink --
+       --muted/--amber are tuned for the white status bar and fail AA here. */
+    .refresh-freshness { display: inline-flex; align-items: center; gap: .3rem; white-space: nowrap; font-size: .74rem; color: rgba(255,255,255,0.72); cursor: help; }
+    .refresh-freshness:focus-visible { outline: 2px solid rgba(255,255,255,0.8); outline-offset: 2px; border-radius: var(--radius-sm); }
+    .refresh-freshness .local-time { font-variant-numeric: tabular-nums; }
+    .refresh-freshness.freshness-stale { color: #fbbf24; }
+    /* One-shot cue on first paint so the moved affordance is discoverable. The
+       cue class is emitted only by the server render, never by the OOB swap,
+       so a two-second poll cannot restart it. */
+    .refresh-freshness-cue { animation: freshness-cue .9s ease-out 1; }
+    @keyframes freshness-cue { 0% { opacity: 0; transform: translateY(-2px); } 60% { opacity: 1; } 100% { opacity: 1; transform: none; } }
+    @media (prefers-reduced-motion: reduce) { .pipeline-status.running, .pipeline-status.running .pipeline-status-summary > .bi, .refresh-freshness-cue { animation: none; } }
     /* Reserve room for the fixed pipeline status bar (incl. its own
-       safe-area padding) so it never sits over the last table row. */
-    body { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
+       safe-area padding) only while it is on screen -- an idle page pays
+       no permanent dead space at the page foot (#418). */
+    body:has(.pipeline-status-bar .pipeline-status) { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
     .pipeline-confirmation { position: fixed; inset: 0; z-index: 1050; display: grid; place-items: center; background: rgba(15, 23, 42, .42); padding: 1rem; }
     .pipeline-confirmation-card { width: min(32rem, 100%); background: white; border-radius: .65rem; box-shadow: 0 20px 50px rgba(0,0,0,.24); padding: 1.3rem; }
     .pipeline-confirmation h2 { font-size: 1rem; font-weight: 700; color: var(--amber); margin: 0 0 .75rem; }
@@ -475,6 +492,9 @@
             title="Run the full scan and analysis using cached WhaleWisdom / StockTwits data — faster">
       <i class="bi bi-arrow-clockwise"></i> Refresh Data
     </button>
+    {# Freshness lives beside the control that changes it, so an idle page
+       needs no persistent status bar to report it (#418). #}
+    {{ macros.freshness_affordance(freshness, variant='control') }}
     <div class="dropdown d-inline-block">
       <button id="refresh-institutional-button" type="button"
               class="btn btn-sm btn-light btn-refresh dropdown-toggle"

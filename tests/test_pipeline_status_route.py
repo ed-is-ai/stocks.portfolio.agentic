@@ -56,9 +56,10 @@ def test_pipeline_status_terminal_state_stops_polling(monkeypatch, tmp_path) -> 
 
     response = client.get("/pipeline-status")
 
-    assert "Pipeline partially complete" in response.text
+    # The bar is running-only now (#418): a terminal state renders no bar at
+    # all, which is also what stops the poll.
     assert 'hx-trigger="every 2s"' not in response.text
-    assert "One source failed" in response.text
+    assert 'class="pipeline-status ' not in response.text
 
 
 def test_pipeline_status_naive_timestamp_fails_safe_to_idle(
@@ -74,7 +75,10 @@ def test_pipeline_status_naive_timestamp_fails_safe_to_idle(
     response = client.get("/pipeline-status")
 
     assert response.status_code == 200
-    assert "Pipeline idle" in response.text
+    # Idle renders no bar (#418); failing safe therefore means "nothing
+    # running" rather than a bar reading "Pipeline idle".
+    assert 'class="pipeline-status ' not in response.text
+    assert 'hx-trigger="every 2s"' not in response.text
 
 
 def test_pipeline_status_shows_unknown_freshness_when_no_artifact_exists(
@@ -290,3 +294,111 @@ def test_pipeline_status_no_toast_while_running(monkeypatch, tmp_path) -> None:
     response = client.get("/pipeline-status")
 
     assert 'id="pipeline-breakdown-toast"' not in response.text
+
+
+def test_pipeline_status_idle_renders_no_bar_but_keeps_freshness(
+    monkeypatch, tmp_path
+) -> None:
+    """An idle page costs no bar, yet still carries header freshness (#418)."""
+    monkeypatch.setattr(
+        stock_scanner_context_module, "ANALYSIS_JSON", tmp_path / "missing.json"
+    )
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+
+    markup = client.get("/pipeline-status").text
+
+    assert 'class="pipeline-status ' not in markup
+    assert 'id="refresh-freshness"' in markup
+    assert 'hx-swap-oob="true"' in markup
+    assert "Last successful refresh unknown" in markup
+    # The one-shot cue must not restart on every poll swap.
+    assert "refresh-freshness-cue" not in markup
+
+
+def test_pipeline_status_running_renders_bar_and_oob_freshness(
+    monkeypatch, tmp_path
+) -> None:
+    """A run in progress still gets the bar, the poll and an OOB header (#418)."""
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+    repo.start(run_id="live")
+
+    markup = client.get("/pipeline-status").text
+
+    assert 'class="pipeline-status running"' in markup
+    assert 'hx-trigger="every 2s"' in markup
+    assert "Pipeline running" in markup
+    # The header copy still ships out-of-band alongside the bar.
+    assert 'id="refresh-freshness"' in markup
+    assert 'hx-swap-oob="true"' in markup
+
+
+def test_pipeline_status_terminal_failure_keeps_toast_without_bar(
+    monkeypatch, tmp_path
+) -> None:
+    """Dropping the bar must not drop the failure disclosure (#418)."""
+    monkeypatch.setattr(
+        stock_scanner_context_module, "ANALYSIS_JSON", tmp_path / "missing.json"
+    )
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    repo.start(run_id="boom")
+    repo.finish(
+        PipelineState.FAILED,
+        expected_run_id="boom",
+        error_summary="Provider request failed.",
+    )
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+
+    markup = client.get("/pipeline-status").text
+
+    assert 'class="pipeline-status ' not in markup
+    assert 'id="pipeline-breakdown-toast"' in markup
+    assert "Latest refresh failed: Provider request failed." in markup
+
+
+def test_pipeline_status_stale_freshness_copy_and_icon(monkeypatch, tmp_path) -> None:
+    """Stale reads with the caution icon and its screen-reader sentence (#418)."""
+    analysis_path = tmp_path / "analysis_results.json"
+    generated_at = datetime.now(timezone.utc) - timedelta(days=30)
+    analysis_path.write_text(
+        json.dumps(build_analysis_payload([], run_id="old", generated_at=generated_at)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(stock_scanner_context_module, "ANALYSIS_JSON", analysis_path)
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+
+    markup = client.get("/pipeline-status").text
+
+    assert "freshness-stale" in markup
+    assert "bi-exclamation-circle-fill" in markup
+    assert "Analysis data is stale and should be used with caution." in markup
+
+
+def test_pipeline_status_fresh_freshness_copy_and_icon(monkeypatch, tmp_path) -> None:
+    """Fresh reads with the clock icon and a localisable timestamp (#418)."""
+    analysis_path = tmp_path / "analysis_results.json"
+    analysis_path.write_text(
+        json.dumps(
+            build_analysis_payload(
+                [], run_id="new", generated_at=datetime.now(timezone.utc)
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(stock_scanner_context_module, "ANALYSIS_JSON", analysis_path)
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+
+    markup = client.get("/pipeline-status").text
+
+    assert "freshness-fresh" in markup
+    assert "bi-clock-fill" in markup
+    assert "Last successful refresh" in markup
+    assert '<time class="local-time" datetime="' in markup

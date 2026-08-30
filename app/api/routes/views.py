@@ -15,7 +15,10 @@ from app.api.dependencies import (
 )
 from app.api.params import optional_int
 from app.api.templating import templates
-from app.api.stock_scanner_context import build_stock_scanner_context
+from app.api.stock_scanner_context import (
+    build_freshness_context,
+    build_stock_scanner_context,
+)
 from app.core.config import PIPELINE_RUNS_CSV
 from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
@@ -34,7 +37,15 @@ RealisedPnlDep = Annotated[RealisedPnlService, Depends(get_realised_pnl_service)
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(request, "index.html")
+    """Render the shell, with freshness ready for the header affordance (#418).
+
+    The refresh control is now the primary place freshness is discovered, so
+    it is server-rendered on first paint rather than waiting on (or failing
+    with) the load-triggered ``/pipeline-status`` fetch.
+    """
+    return templates.TemplateResponse(
+        request, "index.html", context=build_freshness_context()
+    )
 
 
 @router.get("/partials/stock-scanner", response_class=HTMLResponse)

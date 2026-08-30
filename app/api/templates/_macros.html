@@ -15,6 +15,46 @@
 {% endfor %}
 {% endmacro %}
 
+{% macro freshness_affordance(freshness, variant='bar', oob=false) %}
+{# Single source of truth for the fresh/stale/unknown affordance (#418).
+   ``variant='bar'`` is the in-bar block shown while a refresh runs;
+   ``variant='control'`` is the compact tooltip affordance that sits beside
+   the header refresh control and is the primary way freshness is discovered.
+   Both keep <time class="local-time"> so renderLocalTimes() localises it.
+   The attention cue rides on a class the OOB render omits, so it plays once on
+   first paint rather than restarting on every two-second poll. #}
+{%- set icon = 'exclamation-circle-fill' if freshness.state == 'stale'
+   else ('clock-fill' if freshness.state == 'fresh' else 'question-circle') -%}
+{%- if variant == 'control' -%}
+<span id="refresh-freshness" class="refresh-freshness freshness-{{ freshness.state }}{% if not oob %} refresh-freshness-cue{% endif %}"
+      {% if oob %}hx-swap-oob="true"{% endif %}
+      role="note" tabindex="0"
+      data-bs-toggle="tooltip" aria-label="Analysis freshness"
+      title="{% if freshness.refreshed_at %}Last successful refresh {{ freshness.refreshed_at.strftime('%Y-%m-%d %H:%M UTC') }}{% if freshness.state == 'stale' %} — Analysis data is stale and should be used with caution.{% endif %}{% else %}Last successful refresh unknown{% endif %}">
+  <i class="bi bi-{{ icon }}"></i>
+  {{ freshness_detail(freshness, label_class='visually-hidden') }}
+</span>
+{%- else -%}
+<div class="pipeline-status-freshness freshness-{{ freshness.state }}" aria-label="Analysis freshness">
+  <i class="bi bi-{{ icon }}"></i>
+  {{ freshness_detail(freshness) }}
+</div>
+{%- endif -%}
+{% endmacro %}
+
+{% macro freshness_detail(freshness, label_class='') %}
+{# Freshness copy, preserved verbatim across both variants (#418). In the
+   compact control variant the label is visually hidden so only the icon and
+   the localised timestamp show, while assistive tech still reads it all. #}
+{%- if freshness.refreshed_at -%}
+<span class="{{ label_class }}">Last successful refresh</span>
+<time class="local-time" datetime="{{ freshness.refreshed_at.isoformat() }}" title="{{ freshness.refreshed_at.isoformat() }} (UTC source; displayed locally in browser)">{{ freshness.refreshed_at.strftime('%Y-%m-%d %H:%M UTC') }}</time>
+{%- if freshness.state == 'stale' %}<span class="visually-hidden">Analysis data is stale and should be used with caution.</span>{% endif -%}
+{%- else -%}
+<span class="{{ label_class }}">Last successful refresh unknown</span>
+{%- endif -%}
+{% endmacro %}
+
 {% macro provenance_label(quality) -%}
 {{- {'best_effort_reconstructed': 'Reconstructed (approximate)', 'observed_bau': 'Observed (from live scans)'}.get(quality, quality|replace('_', ' ')|title) -}}
 {%- endmacro %}

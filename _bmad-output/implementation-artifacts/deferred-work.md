@@ -347,3 +347,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-410-declutter-backtest-results-list.md`
   summary: The backtest results list labels each row "Attempt N" from `job.enqueue_seq`, which is a global counter across all strategy-job types, not a per-strategy attempt index — a user's first backtest can render as "Attempt 42".
   evidence: `enqueue_seq` is assigned `COALESCE(MAX(enqueue_seq),0)+1 FROM strategy_jobs` for bootstrap/initialization/preparation/backtest jobs alike (`backtest_repo.py` ~L2119/2220/2337/2393). #410 kept the pre-existing "attempt N" wording and promoted it to the row's primary link label; a true per-strategy attempt number would need a query change that #410's scope forbade.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-418-refresh-freshness-affordance.md`
+  summary: Terminal pipeline runs now give no in-page confirmation — a `partial` run's `status.error_summary`, the "Pipeline complete/skipped" summary line, and the post-run stage breakdown all rendered only in the bar, which is now running-only.
+  evidence: `_pipeline_status.html` gates the whole bar on `status.state == 'running'`; the breakdown toast fires only when `latest_attempt_error` (FAILED only) or an unhealthy source is present, so `complete`, `skipped`, and `partial`-without-source-issues runs surface nothing at all. The spec pinned the toast block as unchanged, so widening it was out of scope.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-418-refresh-freshness-affordance.md`
+  summary: `Freshness.diagnostic` (clock skew / naive-timestamp warnings) is still never rendered, so a future-dated artifact displays as confidently "fresh" from what is now the product's only freshness surface.
+  evidence: `freshness_service.calculate_freshness` computes a diagnostic that no template reads; the spec's "Never" list froze the `calculate_freshness` contract and `build_freshness_context()`'s return shape, and surfacing it needs a copy decision.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-418-refresh-freshness-affordance.md`
+  summary: `GET /` went from a zero-I/O shell render to synchronously parsing the whole `analysis_results.json` plus the status artifact on the event loop, and the load-triggered `/pipeline-status` fetch immediately re-does the same work.
+  evidence: `build_freshness_context()` → `read_analysis_artifact_meta()` does `json.loads(path.read_text())` over every record to pull two fields, called directly inside `async def index`. Consistent with how `build_stock_scanner_context` is already called from async routes, so this is a codebase-wide pattern rather than a #418 defect, but #418 is what put it on the shell route.

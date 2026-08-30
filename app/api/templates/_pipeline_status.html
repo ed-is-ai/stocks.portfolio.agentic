@@ -1,23 +1,21 @@
 {% import "_macros.html" as macros %}
+{# The header affordance is the lasting home of freshness; every poll swaps it
+   out-of-band so a completing run updates it without a reload (#418). #}
+{{ macros.freshness_affordance(freshness, variant='control', oob=true) }}
+
+{# The fixed bar is transient: it exists only while a refresh is running, so an
+   idle page costs no screen space. The failure/partial toast below is a
+   sibling and keeps rendering in terminal states (#418). #}
+{% if status.state == 'running' %}
 <div class="pipeline-status {{ status.state }}"
      data-pipeline-state="{{ status.state }}"
-     {% if status.state == 'running' %}
      hx-get="/pipeline-status" hx-trigger="every 2s"
-     hx-target="#pipeline-status" hx-swap="innerHTML"
-     {% endif %}>
+     hx-target="#pipeline-status" hx-swap="innerHTML">
   <div class="pipeline-status-summary">
-    <i class="bi bi-{% if status.state == 'running' %}arrow-repeat{% elif status.state == 'failed' %}exclamation-triangle-fill{% elif status.state == 'partial' %}exclamation-circle-fill{% elif status.state == 'complete' %}check-circle-fill{% else %}info-circle{% endif %}"></i>
-    <strong>
-      {% if status.state == 'running' %}Pipeline running
-      {% elif status.state == 'complete' %}Pipeline complete
-      {% elif status.state == 'partial' %}Pipeline partially complete
-      {% elif status.state == 'failed' %}Pipeline failed
-      {% elif status.state == 'skipped' %}Pipeline skipped
-      {% else %}Pipeline idle{% endif %}
-    </strong>
-    {% if status.state != 'idle' %}<span>{{ "%.0f"|format(status.elapsed_seconds) }}s</span>{% endif %}
+    <i class="bi bi-arrow-repeat"></i>
+    <strong>Pipeline running</strong>
+    <span>{{ "%.0f"|format(status.elapsed_seconds) }}s</span>
   </div>
-  {% if status.state != 'idle' %}
   <ol class="pipeline-stages" aria-label="Pipeline progress">
     {% for stage in status.stages %}
     <li class="pipeline-stage {{ stage.state }}" {% if stage.state == 'running' %}aria-current="step"{% endif %}>
@@ -29,20 +27,10 @@
     </li>
     {% endfor %}
   </ol>
-  {% endif %}
   {% if status.error_summary %}<span class="pipeline-status-error">{{ status.error_summary }}</span>{% endif %}
-  <div class="pipeline-status-freshness freshness-{{ freshness.state }}" aria-label="Analysis freshness">
-    <i class="bi bi-{% if freshness.state == 'stale' %}exclamation-circle-fill{% elif freshness.state == 'fresh' %}clock-fill{% else %}question-circle{% endif %}"></i>
-    {% if freshness.refreshed_at %}
-      <span>Last successful refresh
-        <time class="local-time" datetime="{{ freshness.refreshed_at.isoformat() }}" title="{{ freshness.refreshed_at.isoformat() }} (UTC source; displayed locally in browser)">{{ freshness.refreshed_at.strftime('%Y-%m-%d %H:%M UTC') }}</time>
-      </span>
-      {% if freshness.state == 'stale' %}<span class="visually-hidden">Analysis data is stale and should be used with caution.</span>{% endif %}
-    {% else %}
-      <span>Last successful refresh unknown</span>
-    {% endif %}
-  </div>
+  {{ macros.freshness_affordance(freshness) }}
 </div>
+{% endif %}
 
 {% set unhealthy_sources = source_health|selectattr('state', 'ne', 'ok')|list if source_health else [] %}
 {% if status.state != 'running' and (latest_attempt_error or unhealthy_sources) %}
