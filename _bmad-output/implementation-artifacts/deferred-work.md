@@ -366,3 +366,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-421-portfolio-chart-range.md`
   summary: `chart_has_history` issues a dedicated `snapshot_history(portfolio_id, limit=2)` query on every portfolio render and every chart-fragment render, on top of the history load already performed.
   evidence: Both reviewers flagged the extra round-trip; it exists because the range-filtered history load cannot answer "does any history exist at all" once the window is empty. Could be folded into a single query returning both the windowed series and an any-rows flag.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-440-assign-portfolio-strategy.md`
+  summary: `StrategyAssignmentService.freshness()` stats/reads `ANALYSIS_JSON` and the assignment repo on every portfolio partial render, even when no assignment exists.
+  evidence: `app/services/portfolio_service.py` calls `assignment_service.freshness()`/`assignment_view()` inside `default_portfolio_context`; the artifact is a small file so the cost is minor today, but it is per-render I/O on the hottest partial — cache by (mtime, portfolio revision) if profiling ever shows it.

@@ -36,11 +36,20 @@ openspec specs.
 | 020  | Unit-test the `require_local_or_token` security guard directly | P2 | S | — | DONE (merged, PR #31) |
 | 021  | Characterize the `POST /trades` action-dispatch route | P3 | S | — | DONE (merged, PR #32) |
 | 022  | Cover `ResultsRepository.latest_scores` for multiple tickers | P3 | S | — | DONE (merged, PR #33) |
+| 023  | Assign one active Strategy to each portfolio (story #440) | P2 | M | — | TODO |
+| 024  | Portfolio-specific Sell/Hold/Buy recommendations screen (story #441) | P2 | L | 023 | TODO |
+| 025  | One daily Strategy recommendation email per assigned portfolio (story #442) | P2 | M | 023, 024 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
 
 ## Dependency notes
 
+- **023 → 024 → 025 are a strict chain** (feature #439, stories #440/#441/#442).
+  023 adds the `portfolio_strategies` table, assignment repository, service
+  seam and account-controls UI; 024 builds the current-scan market-view
+  adapter and recommendations screen on that seam; 025 consumes 024's typed
+  `RecommendationResultV1` for the per-portfolio daily email. Execute in
+  order; each plan's drift check names its predecessors.
 - **002 and 003 depend on 001.** Both modify `agents/trader/trader_agent.py`
   money paths; they need a green, fast test suite to verify against. Today the
   suite is red (6 failing tests) and `test_scanner` hangs on live network, so

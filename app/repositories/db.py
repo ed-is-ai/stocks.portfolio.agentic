@@ -166,6 +166,13 @@ CREATE TABLE IF NOT EXISTS portfolio_import_rows (
     trade_id             INTEGER REFERENCES trades(id) ON DELETE SET NULL,
     cash_flow_id         INTEGER REFERENCES cash_flows(id) ON DELETE SET NULL
 );
+CREATE TABLE IF NOT EXISTS portfolio_strategies (
+    portfolio_id    INTEGER PRIMARY KEY REFERENCES portfolios(id) ON DELETE CASCADE,
+    strategy_id     TEXT NOT NULL,
+    parameters_json TEXT NOT NULL,
+    assigned_at     TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
 """
 
 #: Name of the default portfolio existing single-portfolio data migrates into.

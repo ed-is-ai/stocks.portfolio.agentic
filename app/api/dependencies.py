@@ -16,10 +16,14 @@ from app.repositories.notifications_repo import NotificationsRepository
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.repositories.historical_price_repo import HistoricalPriceRepository
+from app.repositories.portfolio_strategies_repo import (
+    PortfolioStrategiesRepository,
+)
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
+from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.strategy_bootstrap_service import (
@@ -121,9 +125,28 @@ def get_strategy_notification_projector() -> StrategyNotificationProjector:
 
 
 @lru_cache
+def get_portfolio_strategies_repository() -> PortfolioStrategiesRepository:
+    """Return the shared one-Strategy-per-portfolio repository (#440)."""
+    return PortfolioStrategiesRepository(db.make_connect(lambda: str(TRADES_DB)))
+
+
+@lru_cache
+def get_strategy_assignment_service() -> StrategyAssignmentService:
+    """Return the shared Strategy-assignment service seam (#440).
+
+    Routes depend on this service only — never on skill discovery or
+    repositories directly.
+    """
+    return StrategyAssignmentService(get_portfolio_strategies_repository())
+
+
+@lru_cache
 def get_portfolio_service() -> PortfolioService:
     """Return the shared ``PortfolioService`` instance."""
-    return PortfolioService(get_trader_service())
+    return PortfolioService(
+        get_trader_service(),
+        assignment_service=get_strategy_assignment_service(),
+    )
 
 
 @lru_cache

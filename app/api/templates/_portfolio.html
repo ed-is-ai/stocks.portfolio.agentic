@@ -216,6 +216,40 @@
         {% endif %}
       </div>
     </div>
+
+    {% if active_portfolio %}
+    <!-- Strategy assignment (#440) -->
+    {% if strategy_assignment and strategy_assignment.available %}
+    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1">
+      <i class="bi bi-diagram-3"></i>{{ strategy_assignment.display_name }}
+    </span>
+    {% elif strategy_assignment %}
+    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1">
+      <i class="bi bi-diagram-3"></i>{{ strategy_assignment.assignment.strategy_id }}
+      <span class="badge text-bg-danger">unavailable</span>
+    </span>
+    {% else %}
+    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1 text-muted">
+      <i class="bi bi-diagram-3"></i>No Strategy
+    </span>
+    {% endif %}
+    <button
+        class="btn btn-sm btn-outline-secondary"
+        hx-get="/partials/strategy-assign?portfolio_id={{ active_portfolio.id }}"
+        hx-target="#strategy-assign-modal-target" hx-swap="innerHTML"
+        hx-indicator="#spinner">
+      <i class="bi bi-box-arrow-in-right me-1"></i>{% if strategy_assignment and not strategy_assignment.available %}Repair{% elif strategy_assignment %}Change{% else %}Assign{% endif %}
+    </button>
+    {% if strategy_assignment %}
+    <button
+        class="btn btn-sm btn-outline-danger"
+        hx-post="/portfolios/{{ active_portfolio.id }}/strategy/clear"
+        hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+        hx-confirm="Clear the assigned Strategy?">
+      <i class="bi bi-x-lg me-1"></i>Clear
+    </button>
+    {% endif %}
+    {% endif %}
   </div>
 
   <!-- Holding actions -->
@@ -264,6 +298,17 @@
     {% endif %}
   </div>
 </div>
+
+{% if active_portfolio and strategy_freshness and strategy_freshness != 'fresh' %}
+<div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1 mb-3"
+     role="status">
+  <i class="bi bi-exclamation-triangle-fill fs-5"></i>
+  <span>
+    Scan data is {% if strategy_freshness == 'stale' %}more than 24 hours old{% elif strategy_freshness == 'missing' %}missing{% else %}of unknown age{% endif %}.
+    Strategy recommendations may be out of date.
+  </span>
+</div>
+{% endif %}
 
 {% if prices_as_of and positions %}
 <div class="mb-3" style="font-size:0.74rem; color:var(--muted)">

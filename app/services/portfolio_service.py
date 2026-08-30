@@ -33,6 +33,7 @@ from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_import.contract_registry import ContractRegistryError
 from app.services.portfolio_import.registry_loader import get_contract_registry
 from app.services.series_downsample import downsample_last_per_bucket
+from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
@@ -113,12 +114,16 @@ class PortfolioService:
         trader: TraderService,
         evaluator: ExitEvaluator | None = None,
         gbp_valuation: GbpValuationService | None = None,
+        assignment_service: StrategyAssignmentService | None = None,
     ) -> None:
         self._trader = trader
         self._evaluator = evaluator or ExitEvaluator()
         self._gbp_valuation = gbp_valuation or GbpValuationService(
             FxQuoteRepository(db.make_connect(lambda: TRADES_DB))
         )
+        # Optional Strategy-assignment seam (#440). None keeps pre-#440
+        # behaviour exactly: the template's strategy keys render as None.
+        self._assignment_service = assignment_service
 
     # --- analysis + aliases ----------------------------------------------
 
@@ -1124,6 +1129,18 @@ class PortfolioService:
             if portfolio_id is not None
             else set()
         )
+        # Strategy assignment chip + scan-freshness banner (#440). None-safe:
+        # without an assignment service (or with no assignment) both keys are
+        # None and rendering is unchanged apart from the new control.
+        assignment_service = self._assignment_service
+        strategy_assignment = (
+            assignment_service.assignment_view(portfolio_id)
+            if assignment_service is not None and portfolio_id is not None
+            else None
+        )
+        strategy_freshness = (
+            assignment_service.freshness() if assignment_service else None
+        )
         return {
             "positions": positions,
             "portfolio_id": portfolio_id,
@@ -1135,6 +1152,8 @@ class PortfolioService:
             "provider_options": _load_provider_options(),
             "cash_flows": cash_flows,
             "opening_lot_tickers": opening_lot_tickers,
+            "strategy_assignment": strategy_assignment,
+            "strategy_freshness": strategy_freshness,
             "reconciliation_issue_count": reconciliation_issue_count,
             "cash_balances_by_currency": cash_balances_by_currency,
             "positions_with_value": positions_with_value,
@@ -1232,6 +1251,8 @@ class PortfolioService:
                 "portfolio_id": None,
                 "no_portfolios": True,
                 "provider_options": _load_provider_options(),
+                "strategy_assignment": None,
+                "strategy_freshness": None,
             }
         # Resolve the active portfolio: an unknown/None id falls back to the
         # first (migrated SIPP) portfolio.
