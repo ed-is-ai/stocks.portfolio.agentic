@@ -1874,8 +1874,9 @@ def test_backtests_list_renders_rows(services):
     assert "momentum_v1 · v1" in response.text
     assert "badge-status status-ok" in response.text
     assert "lookback=20" in response.text
-    assert "12.50%" in response.text
+    assert "+12.5%" in response.text
     assert "50.0%" in response.text
+    assert '<span class="pos">+12.5%</span>' in response.text
     # Run column: header, a <time> cell with a machine-readable datetime, and
     # the human relative label rendered from job.created_at.
     assert '<th scope="col">Run</th>' in response.text
@@ -2131,6 +2132,24 @@ def test_result_page_renders_sections_in_order(services):
     assert "momentum_v1 v1" in text
     assert "2024-01 to 2024-01" in text
     assert "No live-portfolio" not in text  # sanity: no live-import copy leaks in
+
+
+def test_result_page_formats_display_only_pnl_and_metric_tones(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result(
+        metrics=_metrics(total_return=-0.025, max_drawdown=-0.1, win_rate=0.5),
+        equity_curve=(_equity_point(1, "10000.00", 1), _equity_point(31, "9750.00", 2)),
+    )
+
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+
+    assert response.status_code == 200
+    assert "£10,000.00" in response.text
+    assert "P&amp;L" in response.text
+    assert '-£250.00' in response.text
+    assert '<div class="sval neg">-2.5%</div>' in response.text
+    assert '<div class="sval neg">-10.0%</div>' in response.text
 
 
 def test_result_initial_basket_is_visible_and_explains_persisted_evidence(services):

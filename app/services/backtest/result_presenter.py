@@ -112,6 +112,32 @@ class MetricsViewV1:
 
 
 @dataclass(frozen=True)
+class MetricDisplayV1:
+    """A formatted metric and its optional P&L-like colour class."""
+
+    value: str
+    css_class: str = ""
+
+
+@dataclass(frozen=True)
+class BacktestMetricsDisplayV1:
+    """Shared list/Result metric presentation without changing Metrics."""
+
+    total_return: MetricDisplayV1
+    sharpe_ratio: MetricDisplayV1
+    win_rate: MetricDisplayV1
+    max_drawdown: MetricDisplayV1
+
+
+@dataclass(frozen=True)
+class ResultFinancialsViewV1:
+    """Display-only values derived from an immutable completed Result."""
+
+    starting_capital: MetricDisplayV1
+    pnl: MetricDisplayV1
+
+
+@dataclass(frozen=True)
 class TradeLogRowV1:
     """One Trade Log row in a stable semantic column set (AC 4) -- a cell
     reads "—" when its column does not apply to this row's event kind."""
@@ -195,16 +221,34 @@ class InitialBasketViewV1:
     has_selected: bool
 
 
-def _signed_percent(value: float, *, signed: bool) -> str:
-    pct = round(value * 100, 1)
-    if pct == 0:
-        return "0.0%"
-    sign = "+" if signed and pct > 0 else ""
-    return f"{sign}{pct:.1f}%"
-
-
 def _unsigned_percent(value: float) -> str:
     return f"{round(value * 100, 1):.1f}%"
+
+
+def _metric_percent(value: float, *, signed: bool, loss_classed: bool = False) -> MetricDisplayV1:
+    """Present a percentage using the shared one-decimal P&L convention."""
+    pct = round(value * 100, 1)
+    if pct == 0:
+        return MetricDisplayV1("0.0%")
+    css_class = "pos" if pct > 0 else "neg"
+    if loss_classed:
+        css_class = "neg" if pct < 0 else ""
+    sign = "+" if signed and pct > 0 else ""
+    return MetricDisplayV1(f"{sign}{pct:.1f}%", css_class)
+
+
+def _currency(value: Decimal, currency: str, *, signed: bool = False) -> MetricDisplayV1:
+    """Format money in the run currency; no persistence/calculation occurs."""
+    amount = value.quantize(Decimal("0.01"))
+    if amount == 0:
+        amount = Decimal(0)
+    sign = "+" if signed and amount > 0 else ""
+    body = f"{abs(amount):,.2f}"
+    if amount < 0:
+        sign = "-"
+    display = f"{sign}£{body}" if currency == "GBP" else f"{sign}{body} {currency}"
+    css_class = "pos" if amount > 0 else "neg" if amount < 0 else ""
+    return MetricDisplayV1(display, css_class)
 
 
 def _one_decimal_percent(value: Decimal) -> str:
@@ -285,33 +329,61 @@ def metrics_view(result: BacktestResultV1) -> MetricsViewV1:
     rules. Total Return/Max Drawdown are never ``None`` on a genuine
     complete Result; the ``None`` branch below is a defensive fallback
     only, never a recomputation."""
-    metrics = result.metrics
-    availability = result.metric_availability
-    total_return = (
-        _NOT_APPLICABLE_TEXT
-        if metrics.total_return is None
-        else _signed_percent(metrics.total_return, signed=True)
-    )
-    max_drawdown = (
-        _NOT_APPLICABLE_TEXT
-        if metrics.max_drawdown is None
-        else _signed_percent(metrics.max_drawdown, signed=False)
-    )
-    sharpe = (
-        _null_reason_text(availability.sharpe_unavailable)
-        if metrics.sharpe_ratio is None
-        else f"{metrics.sharpe_ratio:.2f}"
-    )
-    win_rate = (
-        _null_reason_text(availability.win_rate_unavailable)
-        if metrics.win_rate is None
-        else _unsigned_percent(metrics.win_rate)
-    )
+    display = backtest_metrics_view(result.metrics, result.metric_availability)
     return MetricsViewV1(
-        total_return=total_return,
-        sharpe_ratio=sharpe,
-        win_rate=win_rate,
-        max_drawdown=max_drawdown,
+        total_return=display.total_return.value,
+        sharpe_ratio=display.sharpe_ratio.value,
+        win_rate=display.win_rate.value,
+        max_drawdown=display.max_drawdown.value,
+    )
+
+
+def backtest_metrics_view(metrics: object, availability: object) -> BacktestMetricsDisplayV1:
+    """Format persisted metric values for either Result or results-list views."""
+    total_return = getattr(metrics, "total_return")
+    max_drawdown = getattr(metrics, "max_drawdown", None)
+    sharpe_ratio = getattr(metrics, "sharpe_ratio", None)
+    win_rate = getattr(metrics, "win_rate", None)
+    return BacktestMetricsDisplayV1(
+        total_return=(
+            MetricDisplayV1(_NOT_APPLICABLE_TEXT)
+            if total_return is None
+            else _metric_percent(total_return, signed=True)
+        ),
+        sharpe_ratio=(
+            MetricDisplayV1(
+                _null_reason_text(getattr(availability, "sharpe_unavailable", None))
+            )
+            if sharpe_ratio is None
+            else MetricDisplayV1(f"{sharpe_ratio:.2f}")
+        ),
+        win_rate=(
+            MetricDisplayV1(
+                _null_reason_text(getattr(availability, "win_rate_unavailable", None))
+            )
+            if win_rate is None
+            else MetricDisplayV1(_unsigned_percent(win_rate))
+        ),
+        max_drawdown=(
+            MetricDisplayV1(_NOT_APPLICABLE_TEXT)
+            if max_drawdown is None
+            else _metric_percent(max_drawdown, signed=False, loss_classed=True)
+        ),
+    )
+
+
+def result_financials_view(result: BacktestResultV1) -> ResultFinancialsViewV1:
+    """Derive Result-only P&L from final persisted equity, for display only."""
+    starting_capital = _currency(result.starting_capital, result.base_currency)
+    if not result.equity_curve:
+        return ResultFinancialsViewV1(
+            starting_capital=starting_capital,
+            pnl=MetricDisplayV1(_NOT_APPLICABLE_TEXT),
+        )
+    pnl = result.equity_curve[-1].total_equity_base - result.starting_capital
+    return ResultFinancialsViewV1(
+        starting_capital=starting_capital,
+        pnl=_currency(pnl, result.base_currency, signed=True),
     )
 
 

@@ -135,6 +135,10 @@ standalone_issues:
     issue: 301
     status: done
     spec: spec-gh-301-realised-pnl-average-win-loss.md
+  backtest-metric-formatting:
+    issue: 420
+    status: review
+    spec: spec-gh-420-backtest-metric-formatting.md
   buy-and-hold-top-x-strength:
     issue: 366
     status: done

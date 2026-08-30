@@ -7,7 +7,7 @@ GET routes only render repository state.  All lifecycle changes stay behind
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import logging
 import re
@@ -42,12 +42,15 @@ from app.services.backtest.backtest_launch_service import (
     BacktestLaunchValidationError,
 )
 from app.services.backtest.result_presenter import (
+    BacktestMetricsDisplayV1,
+    backtest_metrics_view,
     comparison_equity_payload,
     equity_curve_payload,
     initial_basket_view,
     metrics_view,
     note_view,
     provenance_view,
+    result_financials_view,
     trade_log_view,
 )
 from app.services.backtest.run_universe import (
@@ -249,13 +252,35 @@ def _profile_context(
         }
 
 
+@dataclass(frozen=True)
+class _BacktestActivityView:
+    """A list row plus its presentation-only metrics, never persisted."""
+
+    activity: object
+    metrics: BacktestMetricsDisplayV1 | None
+
+
 def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
     """Return the Backtest results list, or an explicit integrity alert
     (Story 2.8 AC 1, 7) -- a repository/integrity error is not an empty
     list, so the list template must be able to tell the two apart."""
     try:
+        activities = repo.list_backtest_activities()
         return {
-            "backtest_activities": repo.list_backtest_activities(),
+            "backtest_activities": tuple(
+                _BacktestActivityView(
+                    activity=activity,
+                    metrics=(
+                        backtest_metrics_view(
+                            activity.metrics, activity.metric_availability
+                        )
+                        if activity.metrics is not None
+                        and activity.metric_availability is not None
+                        else None
+                    ),
+                )
+                for activity in activities
+            ),
             "backtest_activities_error": None,
         }
     except BacktestIntegrityError as exc:
@@ -1416,6 +1441,10 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         "integrity_error": None,
         "result": result,
         "metrics": metrics_view(result),
+        "metric_display": backtest_metrics_view(
+            result.metrics, result.metric_availability
+        ),
+        "financials": result_financials_view(result),
         "equity_curve_payload": equity_curve_payload(result),
         "initial_basket": initial_basket_view(result, identities),
         "trade_log": trade_log_view(result, identities),

@@ -24,7 +24,7 @@
       <dt class="col-sm-3">Base currency</dt>
       <dd class="col-sm-9">{{ result.base_currency }}</dd>
       <dt class="col-sm-3">Starting capital</dt>
-      <dd class="col-sm-9">{{ '%.2f'|format(result.starting_capital) }} {{ result.base_currency }}</dd>
+      <dd class="col-sm-9">{{ financials.starting_capital.value }}</dd>
       <dt class="col-sm-3">Completed</dt>
       <dd class="col-sm-9">{{ result.completed_at.strftime('%Y-%m-%d %H:%M') }} UTC</dd>
       <dt class="col-sm-3">Parameters</dt>
@@ -85,7 +85,11 @@
   <div class="d-flex flex-wrap gap-3 mb-4">
     <div class="stat-card">
       <div class="slbl">Total Return</div>
-      <div class="sval">{{ metrics.total_return }}</div>
+      <div class="sval{% if metric_display.total_return.css_class %} {{ metric_display.total_return.css_class }}{% endif %}">{{ metrics.total_return }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="slbl">P&amp;L</div>
+      <div class="sval{% if financials.pnl.css_class %} {{ financials.pnl.css_class }}{% endif %}">{{ financials.pnl.value }}</div>
     </div>
     <div class="stat-card">
       <div class="slbl">Sharpe Ratio</div>
@@ -97,7 +101,7 @@
     </div>
     <div class="stat-card">
       <div class="slbl">Max Drawdown</div>
-      <div class="sval">{{ metrics.max_drawdown }}</div>
+      <div class="sval{% if metric_display.max_drawdown.css_class %} {{ metric_display.max_drawdown.css_class }}{% endif %}">{{ metrics.max_drawdown }}</div>
     </div>
   </div>
 

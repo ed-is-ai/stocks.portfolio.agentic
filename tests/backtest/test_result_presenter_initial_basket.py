@@ -6,7 +6,12 @@ from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
 
-from app.services.backtest.result_presenter import initial_basket_view
+from app.services.backtest.metrics import MetricAvailabilityV1
+from app.services.backtest.result_presenter import (
+    backtest_metrics_view,
+    initial_basket_view,
+    result_financials_view,
+)
 from app.services.backtest.strategy_protocol import (
     EntrySelectionDecisionV1,
     EntrySelectionState,
@@ -119,3 +124,64 @@ def test_initial_basket_formats_large_persisted_decimal_scores() -> None:
     assert initial_basket_view(result, {}).rows[0].trailing_return == (
         "1" + "0" * 102 + ".0%"
     )
+
+
+def test_backtest_metric_display_uses_consistent_precision_and_tones() -> None:
+    metrics = SimpleNamespace(
+        total_return=0.1254,
+        sharpe_ratio=1.234,
+        win_rate=0.5,
+        max_drawdown=-0.0354,
+    )
+
+    view = backtest_metrics_view(metrics, MetricAvailabilityV1())
+
+    assert view.total_return.value == "+12.5%"
+    assert view.total_return.css_class == "pos"
+    assert view.win_rate.value == "50.0%"
+    assert view.win_rate.css_class == ""
+    assert view.max_drawdown.value == "-3.5%"
+    assert view.max_drawdown.css_class == "neg"
+
+
+def test_backtest_metric_display_keeps_zero_neutral_and_nulls_unavailable() -> None:
+    metrics = SimpleNamespace(
+        total_return=0.0,
+        sharpe_ratio=None,
+        win_rate=None,
+        max_drawdown=0.0,
+    )
+    availability = MetricAvailabilityV1()
+
+    view = backtest_metrics_view(metrics, availability)
+
+    assert view.total_return.value == "0.0%"
+    assert view.total_return.css_class == ""
+    assert view.max_drawdown.value == "0.0%"
+    assert view.max_drawdown.css_class == ""
+    assert view.win_rate.value == "Not applicable — no closed trades"
+
+
+def test_result_financials_derive_display_only_pnl_and_currency_conventions() -> None:
+    result = SimpleNamespace(
+        base_currency="GBP",
+        starting_capital=Decimal("10000"),
+        equity_curve=(SimpleNamespace(total_equity_base=Decimal("11234.567")),),
+    )
+
+    view = result_financials_view(result)
+
+    assert view.starting_capital.value == "£10,000.00"
+    assert view.pnl.value == "+£1,234.57"
+    assert view.pnl.css_class == "pos"
+
+    usd = result_financials_view(
+        SimpleNamespace(
+            base_currency="USD",
+            starting_capital=Decimal("10000"),
+            equity_curve=(SimpleNamespace(total_equity_base=Decimal("9500")),),
+        )
+    )
+    assert usd.starting_capital.value == "10,000.00 USD"
+    assert usd.pnl.value == "-500.00 USD"
+    assert usd.pnl.css_class == "neg"
