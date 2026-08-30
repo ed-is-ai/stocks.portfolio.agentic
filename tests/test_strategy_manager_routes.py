@@ -418,6 +418,7 @@ def test_landing_cta_is_prepare_data_when_no_coverage(services):
     response = client.get("/strategy-manager")
     assert response.status_code == 200
     assert "Prepare historical data" in response.text
+    assert response.text.count("Prepare historical data") == 1
     assert 'hx-get="/strategy-manager/initialization"' in response.text
     assert "4 of 5 prerequisites ready." in response.text
 
@@ -427,6 +428,7 @@ def test_landing_cta_is_configure_when_all_ready(services):
     assert response.status_code == 200
     assert "Configure a Backtest" in response.text
     assert 'hx-get="/strategy-manager/configuration"' in response.text
+    assert response.text.count("Prepare historical data") == 1
     assert "5 of 5 prerequisites ready." in response.text
 
 

@@ -6,7 +6,7 @@
       <p class="text-muted small mb-0">{{ ready_count }} of 5 prerequisites ready.</p>
       <div class="d-flex gap-2">
         <a class="sm-btn sm-btn-secondary" href="/strategy-manager/readiness" hx-get="/strategy-manager/readiness" hx-target="#tab-content" hx-swap="innerHTML">Readiness</a>
-        <a class="sm-btn sm-btn-secondary" href="/strategy-manager/initialization" hx-get="/strategy-manager/initialization" hx-target="#tab-content" hx-swap="innerHTML">Prepare historical data</a>
+        {% if primary_cta.href != '/strategy-manager/initialization' %}<a class="sm-btn sm-btn-secondary" href="/strategy-manager/initialization" hx-get="/strategy-manager/initialization" hx-target="#tab-content" hx-swap="innerHTML">Prepare historical data</a>{% endif %}
       </div>
     </div>
   </div>
