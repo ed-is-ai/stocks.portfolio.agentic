@@ -91,6 +91,9 @@ class _StubTrader:
     def list_cash_balances(self, portfolio_id=None):
         return []
 
+    def snapshot_history(self, portfolio_id, limit=180, since=None):
+        return []
+
     def get_cached_ticker_currencies(self, tickers):
         return {}
 
@@ -261,7 +264,7 @@ def _make_service(monkeypatch) -> PortfolioService:
     monkeypatch.setattr(
         svc,
         "_load_portfolio_history",
-        lambda portfolio_id=None: {
+        lambda portfolio_id=None, range_key="12M": {
             "labels": [],
             "values": [],
             "costs": [],
@@ -388,7 +391,7 @@ def test_cash_balances_by_currency_carries_a_gbp_valuation_projection_per_row(
     monkeypatch.setattr(
         svc,
         "_load_portfolio_history",
-        lambda portfolio_id=None: {
+        lambda portfolio_id=None, range_key="12M": {
             "labels": [],
             "values": [],
             "costs": [],
@@ -1061,3 +1064,68 @@ def test_warm_cache_pence_holding_keeps_gbp_pence_quote_unit_and_div100() -> Non
     currencies = svc._price_quote_currencies(["WCOG"], {"WCOG": "WCOG"})
     assert currencies == {"WCOG": "GBp"}
     assert svc._price_in_gbp(1416.0, "GBp", 1.25) == 14.16
+
+
+# --- chart range window + downsampling (#421) -----------------------------
+
+
+class _SnapshotTrader(_StubTrader):
+    def __init__(self, rows: list[tuple]) -> None:
+        self._rows = rows
+        self.calls: list[str | None] = []
+
+    def snapshot_history(self, portfolio_id, limit=180, since=None):
+        self.calls.append(since)
+        if since is None:
+            return list(self._rows)
+        return [r for r in self._rows if r[0] >= since]
+
+
+def _svc_with(rows: list[tuple]) -> tuple[PortfolioService, _SnapshotTrader]:
+    trader = _SnapshotTrader(rows)
+    svc = PortfolioService(
+        cast(TraderService, trader), cast(ExitEvaluator, _StubEvaluator())
+    )
+    return svc, trader
+
+
+def test_load_portfolio_history_filters_to_selected_window() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    def iso(days_ago: int) -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+
+    rows = [
+        (iso(400), 100.0, 90.0, 10.0),
+        (iso(200), 200.0, 90.0, 10.0),
+        (iso(10), 300.0, 90.0, 10.0),
+    ]
+    svc, trader = _svc_with(rows)
+
+    twelve = svc._load_portfolio_history(1, "12M")
+    assert twelve["values"] == [200.0, 300.0]
+    assert trader.calls[-1] is not None  # a cutoff was passed
+
+    five = svc._load_portfolio_history(1, "5Y")
+    assert five["values"] == [100.0, 200.0, 300.0]
+
+
+def test_load_portfolio_history_downsamples_to_250() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime.now(timezone.utc) - timedelta(days=1800)
+    rows = [
+        ((start + timedelta(hours=12 * i)).isoformat(), float(i), 1.0, None)
+        for i in range(3600)
+    ]
+    svc, _ = _svc_with(rows)
+    out = svc._load_portfolio_history(1, "5Y")
+    assert 2 <= len(out["values"]) <= 250
+    assert out["values"][0] == 0.0
+    assert out["values"][-1] == 3599.0
+
+
+def test_bad_range_key_uses_12m_cutoff() -> None:
+    a = PortfolioService.chart_cutoff_iso("9Q")
+    b = PortfolioService.chart_cutoff_iso("12M")
+    assert a[:10] == b[:10]
