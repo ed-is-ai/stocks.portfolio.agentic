@@ -1,0 +1,157 @@
+{# Portfolio value-history chart card with a selectable time range (#421). #}
+{# Rendered inline by _portfolio.html (guarded by chart_has_history) and    #}
+{# re-rendered alone by GET /partials/portfolio/chart                       #}
+{# (hx-swap="outerHTML" on #portfolio-chart-card). The card shell and the   #}
+{# range selector ALWAYS render here so an outerHTML swap can never delete  #}
+{# the selector; only the canvas-vs-message inside it is conditional.       #}
+{% set _ranges = ["1M", "3M", "12M", "3Y", "5Y"] %}
+<div id="portfolio-chart-card"
+     style="background:white;border:1px solid var(--border);border-radius:0;padding:1rem 1.25rem;margin-bottom:1.25rem">
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+    <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted)">
+      <i class="bi bi-graph-up me-1"></i>Portfolio Value History
+    </div>
+    <div class="btn-group btn-group-sm" role="group" aria-label="Chart time range">
+      {% for preset in _ranges %}
+      <button type="button"
+              class="btn {% if preset == chart_range %}btn-primary fw-bold{% else %}btn-outline-secondary{% endif %}"
+              aria-pressed="{% if preset == chart_range %}true{% else %}false{% endif %}"
+              hx-get="/partials/portfolio/chart"
+              hx-vals='{"portfolio_id": "{{ portfolio_id if portfolio_id is not none else "" }}", "range": "{{ preset }}"}'
+              hx-target="#portfolio-chart-card" hx-swap="outerHTML" hx-indicator="#spinner"
+              onclick="if (window.setChartRange) setChartRange('{{ preset }}')">
+        {% if preset == chart_range %}<i class="bi bi-check2 me-1"></i>{% endif %}{{ preset }}
+      </button>
+      {% endfor %}
+    </div>
+  </div>
+  {% if chart_points >= 2 %}
+  <canvas id="portfolioChart" style="max-height:200px"></canvas>
+  <script>
+  (function() {
+    const labels   = {{ chart_labels     | safe }};
+    const values   = {{ chart_values     | safe }};
+    const costs    = {{ chart_costs      | safe }};
+    const cashVals = {{ chart_cash       | safe }};
+    const buyVals  = {{ chart_buys       | safe }};
+    const sellVals = {{ chart_sells      | safe }};
+    const buyTips  = {{ chart_buy_tips   | safe }};
+    const sellTips = {{ chart_sell_tips  | safe }};
+
+    const el = document.getElementById('portfolioChart');
+    if (!el) return;
+    // An outerHTML swap of this card can leave the previous Chart instance
+    // bound to a now-detached canvas — tear it down first (#421).
+    window.__portfolioChart?.destroy();
+    window.__portfolioChart = new Chart(el.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [
+          {
+            label: 'Market Value',
+            data: values,
+            borderColor: '#1d4ed8',
+            backgroundColor: 'rgba(29,78,216,0.08)',
+            borderWidth: 2,
+            pointRadius: values.length > 60 ? 0 : 3,
+            pointHoverRadius: 5,
+            fill: true,
+            tension: 0.3,
+            order: 3,
+          },
+          {
+            label: 'Cost Basis',
+            data: costs,
+            borderColor: '#94a3b8',
+            borderWidth: 1.5,
+            borderDash: [5, 4],
+            pointRadius: 0,
+            fill: false,
+            tension: 0,
+            order: 4,
+          },
+          {
+            label: 'Cash',
+            data: cashVals,
+            borderColor: '#16a34a',
+            borderWidth: 1.5,
+            borderDash: [4, 3],
+            pointRadius: 0,
+            fill: false,
+            tension: 0,
+            order: 5,
+          },
+          {
+            label: 'Buy',
+            data: buyVals,
+            showLine: false,
+            pointStyle: 'triangle',
+            pointRadius: 9,
+            pointHoverRadius: 11,
+            backgroundColor: '#16a34a',
+            borderColor: '#16a34a',
+            borderWidth: 1,
+            order: 1,
+          },
+          {
+            label: 'Sell',
+            data: sellVals,
+            showLine: false,
+            pointStyle: 'triangle',
+            rotation: 180,
+            pointRadius: 9,
+            pointHoverRadius: 11,
+            backgroundColor: '#dc2626',
+            borderColor: '#dc2626',
+            borderWidth: 1,
+            order: 2,
+          },
+        ]
+      },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { labels: { font: { size: 11 }, boxWidth: 14, filter: item => item.text !== 'Buy' && item.text !== 'Sell' } },
+          tooltip: {
+            callbacks: {
+              label: function(ctx) {
+                if (ctx.dataset.label === 'Buy') {
+                  const tip = buyTips[ctx.dataIndex];
+                  return tip ? ' ▲ ' + tip : null;
+                }
+                if (ctx.dataset.label === 'Sell') {
+                  const tip = sellTips[ctx.dataIndex];
+                  return tip ? ' ▼ ' + tip : null;
+                }
+                if (ctx.parsed.y === null) return null;
+                return ' ' + ctx.dataset.label + ': £' + ctx.parsed.y.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2});
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { font: { size: 10 }, maxTicksLimit: 10, maxRotation: 0 },
+            grid: { display: false }
+          },
+          y: {
+            ticks: {
+              font: { size: 10 },
+              callback: v => '£' + v.toLocaleString('en-GB', {minimumFractionDigits:0})
+            },
+            grid: { color: '#f1f5f9' }
+          }
+        }
+      }
+    });
+  })();
+  </script>
+  {% else %}
+  <p class="text-muted small mb-0 mt-2" role="status">
+    <i class="bi bi-info-circle me-1"></i>No data in this range.
+  </p>
+  <script>if(window.__portfolioChart){window.__portfolioChart.destroy();window.__portfolioChart=null;}</script>
+  {% endif %}
+</div>

@@ -2239,10 +2239,16 @@ class TraderAgent(Agent):
         )
 
     def snapshot_history(
-        self, portfolio_id: int, limit: int = 180
+        self, portfolio_id: int, limit: int = 180, since: str | None = None
     ) -> list[tuple[Any, ...]]:
-        """Return a portfolio's value-history snapshots, oldest-first."""
-        return self._snapshots.history(portfolio_id, limit)
+        """Return a portfolio's value-history snapshots, oldest-first.
+
+        ``since`` (an ISO timestamp) narrows the series to snapshots at or
+        after it and lifts the ``limit`` count cap (a time window, not a
+        count window); omitting it preserves the legacy count-limited
+        behaviour.
+        """
+        return self._snapshots.history(portfolio_id, limit, since)
 
     def list_reconciliation_issues(
         self, portfolio_id: int | None, limit: int = 200

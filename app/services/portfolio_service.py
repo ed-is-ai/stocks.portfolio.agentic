@@ -14,7 +14,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from functools import lru_cache
 from typing import Any, ClassVar, cast
@@ -32,6 +32,7 @@ from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_import.contract_registry import ContractRegistryError
 from app.services.portfolio_import.registry_loader import get_contract_registry
+from app.services.series_downsample import downsample_last_per_bucket
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,21 @@ _HISTORICAL_FX_PAIR: dict[str, str] = {
 _YFINANCE_SYMBOL_OVERRIDES: dict[str, str] = {"9988": "9988.HK"}
 _PRICE_DOWNLOAD_CHUNK_SIZE = 50
 _CASH_BALANCE_UNSET = object()
+
+# Portfolio value-history chart range presets (#421): preset -> day count
+# cutoff, measured back from now. Any other/absent value resolves to 12M.
+# Values are approximate calendar spans (30d, ~13 weeks, 1 year); the 3Y/5Y
+# presets carry a leap-day allowance (3 * 365 + 1, 5 * 365 + 1) so a full
+# calendar span is never clipped a day short.
+CHART_RANGE_DAYS: dict[str, int] = {
+    "1M": 30,
+    "3M": 91,
+    "12M": 365,
+    "3Y": 1096,
+    "5Y": 1826,
+}
+DEFAULT_CHART_RANGE = "12M"
+_CHART_MAX_POINTS = 250
 
 
 @dataclass(frozen=True)
@@ -272,7 +288,9 @@ class PortfolioService:
             numeric_rate = float(rate)
         except (TypeError, ValueError, OverflowError):
             return None
-        return numeric_rate if math.isfinite(numeric_rate) and numeric_rate > 0 else None
+        return (
+            numeric_rate if math.isfinite(numeric_rate) and numeric_rate > 0 else None
+        )
 
     @staticmethod
     def _is_valid_rate(rate: Any) -> bool:
@@ -790,15 +808,35 @@ class PortfolioService:
 
     # --- chart data -------------------------------------------------------
 
-    def _load_portfolio_history(self, portfolio_id: int | None = None) -> dict:
+    @staticmethod
+    def chart_cutoff_iso(range_key: str) -> str:
+        """Return the ``YYYY-MM-DD`` cutoff for a chart range preset (#421).
+
+        A date-only prefix is deliberate: stored timestamps are compared as
+        strings, and a full ``.isoformat()`` with a ``+00:00`` offset can sort
+        before an equal-second timestamp because ``'+' < '.'``. The presets
+        are day-counts, so a day-granular cutoff is exact.
+        """
+        days = CHART_RANGE_DAYS.get(range_key, CHART_RANGE_DAYS[DEFAULT_CHART_RANGE])
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+        return cutoff.isoformat()
+
+    def _load_portfolio_history(
+        self, portfolio_id: int | None = None, range_key: str = DEFAULT_CHART_RANGE
+    ) -> dict:
         """Return chart-ready dicts with labels, values, costs, and cash.
 
         With a ``portfolio_id`` the series comes from that portfolio's
-        ``portfolio_snapshots`` (#147); without one it falls back to the legacy
-        single-portfolio ``portfolio_value.csv``.
+        ``portfolio_snapshots`` (#147), filtered to the ``range_key`` window
+        and downsampled to ``_CHART_MAX_POINTS`` last-per-bucket points (#421);
+        without one it falls back to the legacy single-portfolio
+        ``portfolio_value.csv`` (unscoped, unranged).
         """
         if portfolio_id is not None:
-            rows = self._trader.snapshot_history(portfolio_id)
+            rows = self._trader.snapshot_history(
+                portfolio_id, since=self.chart_cutoff_iso(range_key)
+            )
+            rows = downsample_last_per_bucket(list(rows), _CHART_MAX_POINTS)
             return {
                 "labels": [str(r[0])[:16].replace("T", " ") for r in rows],
                 "values": [float(r[1]) for r in rows],
@@ -894,8 +932,12 @@ class PortfolioService:
         analysis_records: list[StockRecord] | None = None,
         portfolios: list[Any] | None = None,
         cash_balance: float | None | object = _CASH_BALANCE_UNSET,
+        range_key: str = DEFAULT_CHART_RANGE,
     ) -> PortfolioInputSnapshot:
-        """Read all mutable inputs needed by one portfolio partial once."""
+        """Read all mutable inputs needed by one portfolio partial once.
+
+        ``range_key`` selects the value-history window for the chart (#421).
+        """
         if portfolio_id is None:
             return PortfolioInputSnapshot(
                 analysis_records=analysis_records
@@ -926,7 +968,7 @@ class PortfolioService:
             portfolios=portfolios
             if portfolios is not None
             else self._trader.list_portfolios(),
-            chart_data=self._load_portfolio_history(portfolio_id),
+            chart_data=self._load_portfolio_history(portfolio_id, range_key),
             trades=trades,
             cash_flows=self._trader.get_cash_flows(portfolio_id),
             reconciliation_issue_count=len(
@@ -970,6 +1012,7 @@ class PortfolioService:
         warning_message: str | None = None,
         portfolio_id: int | None = None,
         input_snapshot: PortfolioInputSnapshot | None = None,
+        range_key: str = DEFAULT_CHART_RANGE,
     ) -> dict:
         """Build the template context for the portfolio partial.
 
@@ -977,7 +1020,7 @@ class PortfolioService:
         summary totals, and serialises chart data. Rendering stays in the route.
         """
         snapshot = input_snapshot or self.portfolio_input_snapshot(
-            portfolio_id, cash_balance=cash_balance
+            portfolio_id, cash_balance=cash_balance, range_key=range_key
         )
         # The normal render derives its cash from the same snapshot as the
         # chart, trades, and positions. An explicitly supplied value wins for
@@ -1024,8 +1067,23 @@ class PortfolioService:
         )
 
         chart_data = snapshot.chart_data
+        # A trade older than the selected window shows no marker (#421); an
+        # in-window trade whose snapshot was downsampled out still snaps to
+        # the nearest retained label (existing ``_trade_markers`` behaviour).
+        marker_trades = snapshot.trades
+        if portfolio_id is not None:
+            cutoff_date = self.chart_cutoff_iso(range_key)[:10]
+            marker_trades = [t for t in snapshot.trades if t.date >= cutoff_date]
         buy_vals, sell_vals, buy_tips, sell_tips = self._trade_markers(
-            chart_data, portfolio_id, snapshot.trades
+            chart_data, portfolio_id, marker_trades
+        )
+        chart_range = (
+            range_key if range_key in CHART_RANGE_DAYS else DEFAULT_CHART_RANGE
+        )
+        chart_has_history = (
+            len(self._trader.snapshot_history(portfolio_id, limit=2)) >= 2
+            if portfolio_id is not None
+            else len(chart_data["values"]) >= 2
         )
         # Always attach the account switcher metadata so any render of the
         # partial (trade, import, refresh, quick-add) keeps the selector (#147).
@@ -1098,9 +1156,66 @@ class PortfolioService:
             "chart_sells": json.dumps(sell_vals),
             "chart_buy_tips": json.dumps(buy_tips),
             "chart_sell_tips": json.dumps(sell_tips),
+            "chart_range": chart_range,
+            "chart_has_history": chart_has_history,
         }
 
-    def default_portfolio_context(self, portfolio_id: int | None = None) -> dict:
+    def chart_fragment_context(
+        self, portfolio_id: int | None, range_key: str = DEFAULT_CHART_RANGE
+    ) -> dict:
+        """Build just the chart-card context for ``GET /partials/portfolio/chart``.
+
+        Deliberately lean (#421): a range change re-renders only
+        ``#portfolio-chart-card`` and must not rebuild positions, prices, or
+        cash — so this never calls ``default_portfolio_context`` /
+        ``positions_from_input_snapshot``.
+        """
+        portfolios = self._trader.list_portfolios()
+        active_id = portfolio_id
+        if portfolios and (
+            active_id is None or not any(p.id == active_id for p in portfolios)
+        ):
+            active_id = portfolios[0].id
+
+        chart_data = self._load_portfolio_history(active_id, range_key)
+        chart_range = (
+            range_key if range_key in CHART_RANGE_DAYS else DEFAULT_CHART_RANGE
+        )
+        if active_id is not None:
+            cutoff_date = self.chart_cutoff_iso(range_key)[:10]
+            trades = [
+                t
+                for t in self._trader.get_trade_history(portfolio_id=active_id)
+                if t.date >= cutoff_date
+            ]
+            has_history = len(self._trader.snapshot_history(active_id, limit=2)) >= 2
+        else:
+            # Legacy single-portfolio CSV path: mirror the inline render's
+            # ">= 2 points" check rather than hardcoding False, so the card
+            # shell still renders with real data (#421).
+            trades = []
+            has_history = len(chart_data["values"]) >= 2
+        buy_vals, sell_vals, buy_tips, sell_tips = self._trade_markers(
+            chart_data, active_id, trades
+        )
+        return {
+            "portfolio_id": active_id,
+            "chart_range": chart_range,
+            "chart_has_history": has_history,
+            "chart_labels": json.dumps(chart_data["labels"]),
+            "chart_values": json.dumps(chart_data["values"]),
+            "chart_costs": json.dumps(chart_data["costs"]),
+            "chart_cash": json.dumps(chart_data["cash_values"]),
+            "chart_points": len(chart_data["values"]),
+            "chart_buys": json.dumps(buy_vals),
+            "chart_sells": json.dumps(sell_vals),
+            "chart_buy_tips": json.dumps(buy_tips),
+            "chart_sell_tips": json.dumps(sell_tips),
+        }
+
+    def default_portfolio_context(
+        self, portfolio_id: int | None = None, range_key: str = DEFAULT_CHART_RANGE
+    ) -> dict:
         """Build the portfolio partial context from cached prices + analysis.
 
         Used by ``GET /partials/portfolio`` and after a trade is recorded.
@@ -1124,7 +1239,9 @@ class PortfolioService:
         if active_id is None or not any(p.id == active_id for p in portfolios):
             active_id = portfolios[0].id
 
-        snapshot = self.portfolio_input_snapshot(active_id, portfolios=portfolios)
+        snapshot = self.portfolio_input_snapshot(
+            active_id, portfolios=portfolios, range_key=range_key
+        )
         cached_prices, prices_as_of, display_info = self._trader.load_price_cache()
         analysis_prices = self.current_prices(snapshot.analysis_records)
         prices = {**cached_prices, **analysis_prices}
@@ -1139,4 +1256,5 @@ class PortfolioService:
             cash_balance=snapshot.cash_balance,
             portfolio_id=active_id,
             input_snapshot=snapshot,
+            range_key=range_key,
         )
