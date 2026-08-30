@@ -250,7 +250,7 @@ def test_preparation_redirect_and_completed_child_navigation(universe_env) -> No
     )
     assert (
         response.status_code == 200
-        and "Evidence preparation activity" in response.text
+        and "Evidence preparation run" in response.text
         and "/strategy-manager/activities/child-1" in response.text
         and "last_seen_version=" not in response.text
     )
