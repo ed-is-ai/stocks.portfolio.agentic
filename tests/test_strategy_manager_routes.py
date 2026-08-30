@@ -776,7 +776,7 @@ def test_backtest_activity_renders_a_minimal_status_shell_instead_of_404(service
     )
     response = client.get("/strategy-manager/activities/job-1")
     assert response.status_code == 200
-    assert "Backtest activity" in response.text
+    assert "Backtest run" in response.text
     assert "momentum_v1" in response.text
     assert "2024-01 to 2024-03" in response.text
     assert "Historical initialization" not in response.text
@@ -798,7 +798,7 @@ def test_backtest_activity_status_poll_uses_the_backtest_template(services):
         "/strategy-manager/activities/job-1/status?last_seen_version=4"
     )
     assert response.status_code == 200
-    assert "Backtest activity" in response.text
+    assert "Backtest run" in response.text
 
 
 def test_backtest_progress_uses_inclusive_calendar_boundaries():
@@ -954,7 +954,7 @@ def test_bootstrap_activity_renders_status_stage_and_terminal_polling(
     )
     response = client.get("/strategy-manager/activities/job-1")
     assert response.status_code == 200
-    assert "Strategy Manager setup activity" in response.text
+    assert "Strategy Manager setup run" in response.text
     assert repo.bootstrap_run_calls == 1
     if current_stage:
         assert "Roster Capture" in response.text
@@ -985,7 +985,7 @@ def test_failed_bootstrap_activity_shows_failure_and_legal_action(services):
     assert "Try setup again" in response.text
     assert 'action="/strategy-manager/setup"' in response.text
     assert 'name="idempotency_key"' in response.text
-    assert "Delete setup attempt" in response.text
+    assert "Delete setup run" in response.text
     assert 'data-bs-target="#delete-confirmation-job-1"' in response.text
     assert "hx-trigger=" not in response.text
     assert "/status?last_seen_version" not in response.text
@@ -1205,6 +1205,8 @@ def test_bootstrap_activity_shows_ordered_stage_progress_mid_run(services):
     assert "sm-stage-current" in text
     assert "sm-stage-pending" in text
     assert 'aria-current="step"' in text
+    assert "Running" in text
+    assert "In progress" not in text
 
 
 def test_bootstrap_activity_marks_failed_stage_and_recovery_link(services):
@@ -1917,16 +1919,19 @@ def test_backtests_list_renders_rows(services):
     )
     response = client.get("/strategy-manager/backtests")
     assert response.status_code == 200
-    assert "Attempt 3" in response.text
+    assert "Run 3" in response.text
+    assert "Attempt 3" not in response.text
+    assert 'aria-label="momentum_v1 v1 — attempt 3"' not in response.text
     assert "momentum_v1 · v1" in response.text
     assert "badge-status status-ok" in response.text
     assert "lookback=20" in response.text
     assert "+12.5%" in response.text
     assert "50.0%" in response.text
     assert '<span class="pos">+12.5%</span>' in response.text
-    # Run column: header, a <time> cell with a machine-readable datetime, and
+    # Started column: a <time> cell with a machine-readable datetime, and
     # the human relative label rendered from job.created_at.
     assert '<th scope="col">Run</th>' in response.text
+    assert '<th scope="col">Started</th>' in response.text
     assert 'datetime="2024-01-05T09:00:00+00:00"' in response.text
     assert "2024-01-05 09:00 UTC" in response.text
 
