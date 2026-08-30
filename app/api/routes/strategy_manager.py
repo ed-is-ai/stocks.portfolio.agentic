@@ -1320,7 +1320,7 @@ async def strategy_activity(
             request, _activity_template(job.job_type), context
         )
     except StrategyJobNotFound:
-        return HTMLResponse("Activity no longer available.", status_code=404)
+        return HTMLResponse("Run no longer available.", status_code=404)
 
 
 @router.get("/strategy-manager/activities/{job_id}/status", response_class=HTMLResponse)
@@ -1334,7 +1334,7 @@ async def strategy_activity_status(
     try:
         context = _activity_context(backtest, jobs, job_id)
     except StrategyJobNotFound:
-        return HTMLResponse("Activity no longer available.", status_code=404)
+        return HTMLResponse("Run no longer available.", status_code=404)
     job = cast(StrategyJobV1, context["job"])
     if job.status_version <= last_seen_version:
         return HTMLResponse("", status_code=204)
@@ -1420,10 +1420,10 @@ async def delete_initialization(
         return HTMLResponse(str(exc), status_code=409)
     if job_type is StrategyJobType.BOOTSTRAP:
         return HTMLResponse(
-            '<h2 id="setup-history" tabindex="-1">Setup history</h2><p>Activity deleted.</p><a href="/strategy-manager/setup" hx-get="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML">Set up Strategy Manager</a>'
+            '<h2 id="setup-history" tabindex="-1">Setup history</h2><p>Run deleted.</p><a href="/strategy-manager/setup" hx-get="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML">Set up Strategy Manager</a>'
         )
     return HTMLResponse(
-        '<h2 id="initialization-history" tabindex="-1">Initialization history</h2><p>Activity deleted.</p>'
+        '<h2 id="initialization-history" tabindex="-1">Initialization history</h2><p>Run deleted.</p>'
     )
 
 

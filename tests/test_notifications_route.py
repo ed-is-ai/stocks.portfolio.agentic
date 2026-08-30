@@ -228,8 +228,8 @@ def test_backtest_notification_deep_link_label_and_url(repo, monkeypatch) -> Non
     response = client.get("/partials/notifications")
 
     assert response.status_code == 200
-    assert "Open backtest activity" in response.text
-    assert "Open initialization activity" not in response.text
+    assert "Open backtest run" in response.text
+    assert "Open initialization run" not in response.text
     assert 'href="/strategy-manager/activities/job-1"' in response.text
 
 
@@ -264,8 +264,8 @@ def test_initialization_notification_deep_link_label(repo, monkeypatch) -> None:
 
     response = client.get("/partials/notifications")
 
-    assert "Open initialization activity" in response.text
-    assert "Open backtest activity" not in response.text
+    assert "Open initialization run" in response.text
+    assert "Open backtest run" not in response.text
 
 
 def test_notification_actions_render_only_when_legal(repo, monkeypatch) -> None:
@@ -310,7 +310,7 @@ def test_notification_deleted_target_renders_unavailable_text(
 
     response = client.get("/partials/notifications")
 
-    assert "Activity no longer available." in response.text
+    assert "Run no longer available." in response.text
     assert 'href="/strategy-manager/activities/job-missing"' not in response.text
     # No detail link exists in this branch, so a "Mark read" affordance
     # must be offered directly -- dismiss() never sets read_at, so

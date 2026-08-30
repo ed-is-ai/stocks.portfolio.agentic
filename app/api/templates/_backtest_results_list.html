@@ -17,13 +17,13 @@
   {% else %}
   <div class="tbl-wrap">
     <table class="table table-hover align-middle">
-      <thead><tr><th scope="col">Attempt</th><th scope="col">Run</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
+      <thead><tr><th scope="col">Run</th><th scope="col">Started</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
       <tbody>
         {% for item in backtest_activities %}
         {% set activity = item.activity %}
         {% set detail_url = "/strategy-manager/results/" ~ activity.job.id if activity.job.status.value == 'complete' else "/strategy-manager/activities/" ~ activity.job.id %}
         <tr>
-          <td><a href="{{ detail_url }}" hx-get="{{ detail_url }}" hx-target="#tab-content" hx-swap="innerHTML" aria-label="{{ activity.strategy_id }} v{{ activity.strategy_api_version }} — attempt {{ activity.job.enqueue_seq }}">Attempt {{ activity.job.enqueue_seq }}</a></td>
+          <td><a href="{{ detail_url }}" hx-get="{{ detail_url }}" hx-target="#tab-content" hx-swap="innerHTML" aria-label="{{ activity.strategy_id }} v{{ activity.strategy_api_version }} — run {{ activity.job.enqueue_seq }}">Run {{ activity.job.enqueue_seq }}</a></td>
           <td><time datetime="{{ activity.job.created_at.isoformat() }}" title="{{ activity.job.created_at|absolute_time }}">{{ activity.job.created_at|relative_time }}</time></td>
           <td>
              {% set status_class = {'complete': 'status-ok', 'failed': 'status-error', 'cancelled': 'sm-muted-badge', 'running': 'status-info', 'queued': 'status-info'} %}
