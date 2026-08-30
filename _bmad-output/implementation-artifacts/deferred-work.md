@@ -370,3 +370,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-440-assign-portfolio-strategy.md`
   summary: `StrategyAssignmentService.freshness()` stats/reads `ANALYSIS_JSON` and the assignment repo on every portfolio partial render, even when no assignment exists.
   evidence: `app/services/portfolio_service.py` calls `assignment_service.freshness()`/`assignment_view()` inside `default_portfolio_context`; the artifact is a small file so the cost is minor today, but it is per-render I/O on the hottest partial — cache by (mtime, portfolio revision) if profiling ever shows it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-441-portfolio-recommendations.md`
+  summary: Strategy runtime evaluation runs synchronously inside the async recommendations route with no execution timeout — a slow or looping runtime freezes the event loop.
+  evidence: `portfolio_recommendations()` calls `recommend()` directly, which does filesystem discovery, `spec_from_file_location`/`exec_module` of strategy code, pandas work and SQLite reads on the event-loop thread; contrast plan 012's subprocess timeout for the pipeline. Off-loading to a worker with a bounded timeout is a cross-cutting decision affecting all strategy execution paths.

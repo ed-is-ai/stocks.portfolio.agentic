@@ -1,0 +1,131 @@
+{# Portfolio-specific Strategy recommendations (#441) — read-only partial.
+
+   Renders exactly one of: a full result (Sell → Hold → Buy), the
+   no-assignment info state, or an evaluation-failure alert — never a 500.
+#}
+<div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap">
+  <h2 class="h4 mb-0">Recommendations — {{ portfolio_name }}</h2>
+  {% if result %}
+  <div class="d-flex align-items-center gap-2 flex-wrap">
+    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1">
+      <i class="bi bi-diagram-3"></i>{{ result.strategy_id }}
+    </span>
+    <span class="badge text-bg-light border font-monospace"
+          title="Strategy source digest">digest {{ result.strategy_source_digest[:8] }}</span>
+  </div>
+  {% endif %}
+</div>
+
+{% if result %}
+<div class="text-muted mb-3" style="font-size:0.78rem; line-height:1.8">
+  Run <code>{{ result.analysis_run_id }}</code>
+  &middot; published {{ result.generated_at.strftime('%d %b %Y, %H:%M') }}
+  &middot; market session {{ result.market_session.isoformat() }}
+  {% for key, value in result.parameters.items() %}
+  &middot; <span class="badge text-bg-light border">{{ key }}={{ value }}</span>
+  {% endfor %}
+</div>
+{% endif %}
+
+{% if result and result.freshness != 'fresh' %}
+<div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1 mb-3" role="status">
+  <i class="bi bi-exclamation-triangle"></i>
+  <span>Scan data is {{ result.freshness }} — these recommendations use the
+  last published analysis. You can still act on them or change the Strategy.</span>
+</div>
+{% endif %}
+
+{% if unavailable_freshness and unavailable_freshness != 'fresh' %}
+<div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1 mb-3" role="status">
+  <i class="bi bi-exclamation-triangle"></i>
+  <span>Scan data is {{ unavailable_freshness }} — the last published
+  analysis could not be evaluated.</span>
+</div>
+{% endif %}
+
+{% if no_assignment %}
+<div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1 mb-3">
+  <i class="bi bi-info-circle"></i>
+  <span>No Strategy assigned. This portfolio follows the generic scanner
+  recommendations, exactly as before.
+  <a href="#"
+     hx-get="/partials/strategy-assign?portfolio_id={{ portfolio_id }}"
+     hx-target="#strategy-assign-modal-target" hx-swap="innerHTML">Assign a Strategy &rarr;</a>
+  </span>
+</div>
+{% endif %}
+
+{% if unavailable_reason %}
+<div class="alert alert-danger border-0 d-flex align-items-center gap-2 mt-1 mb-3">
+  <i class="bi bi-exclamation-octagon"></i>
+  <span>Could not evaluate recommendations: {{ unavailable_reason }}
+  This affects only this portfolio.
+  <a href="#"
+     hx-get="/portfolios/{{ portfolio_id }}/recommendations"
+     hx-target="#tab-content" hx-swap="innerHTML">Retry</a>
+  </span>
+</div>
+{% endif %}
+
+{% if result %}
+{% set sell = result.recommendations | selectattr('action', 'equalto', 'sell') | list %}
+{% set hold = result.recommendations | selectattr('action', 'equalto', 'hold') | list %}
+{% set buy = result.recommendations | selectattr('action', 'equalto', 'buy') | list %}
+<div class="d-flex flex-wrap gap-3 mb-4">
+  <div class="card border-0 bg-light"><div class="card-body py-2 px-3">
+    <div class="text-muted" style="font-size:0.72rem">Sell</div>
+    <div class="h5 mb-0 text-danger">{{ sell | length }}</div>
+  </div></div>
+  <div class="card border-0 bg-light"><div class="card-body py-2 px-3">
+    <div class="text-muted" style="font-size:0.72rem">Hold</div>
+    <div class="h5 mb-0 text-warning">{{ hold | length }}</div>
+  </div></div>
+  <div class="card border-0 bg-light"><div class="card-body py-2 px-3">
+    <div class="text-muted" style="font-size:0.72rem">Buy</div>
+    <div class="h5 mb-0 text-success">{{ buy | length }}</div>
+  </div></div>
+</div>
+
+{% if result and result.unresolved %}
+<div class="text-muted mb-2" style="font-size:0.74rem">
+  <i class="bi bi-exclamation-triangle me-1"></i>Not resolvable against the
+  current scan evidence (excluded from evaluation):
+  {% for ticker in result.unresolved %}<code class="me-1">{{ ticker }}</code>{% endfor %}
+</div>
+{% endif %}
+
+{% macro recommendation_table(label, rows, empty_text) %}
+<h3 class="h6 mt-4">{{ label }} ({{ rows | length }})</h3>
+{% if rows %}
+<table class="table table-sm align-middle">
+  <thead>
+    <tr><th>Ticker</th><th>Reason</th><th>Evidence</th></tr>
+  </thead>
+  <tbody>
+    {% for rec in rows %}
+    <tr>
+      <td class="font-monospace">{{ rec.ticker }}</td>
+      <td>
+        {{ rec.reason }}
+        <div class="text-muted" style="font-size:0.72rem">Rule <code>{{ rec.rule_id }}</code></div>
+      </td>
+      <td>
+        {% for warning in rec.evidence_warnings %}
+        <span class="badge text-bg-warning">{{ warning }}</span>
+        {% else %}
+        <span class="badge text-bg-light border">scan</span>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="text-muted mb-2">{{ empty_text }}</p>
+{% endif %}
+{% endmacro %}
+
+{{ recommendation_table('Sell', sell, 'No Sell signals.') }}
+{{ recommendation_table('Hold', hold, 'No Hold signals.') }}
+{{ recommendation_table('Buy', buy, 'No Buy signals.') }}
+{% endif %}
