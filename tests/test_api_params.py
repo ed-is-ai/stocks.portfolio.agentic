@@ -47,16 +47,16 @@ def test_partial_portfolio_accepts_empty_portfolio_id(mocked_portfolio):
     # The regression: an empty ?portfolio_id= must render (200), not 422.
     resp = client.get("/partials/portfolio?portfolio_id=")
     assert resp.status_code == 200
-    mocked_portfolio.default_portfolio_context.assert_called_once_with(None)
+    mocked_portfolio.default_portfolio_context.assert_called_once_with(None, range_key="12M")
 
 
 def test_partial_portfolio_accepts_numeric_portfolio_id(mocked_portfolio):
     resp = client.get("/partials/portfolio?portfolio_id=3")
     assert resp.status_code == 200
-    mocked_portfolio.default_portfolio_context.assert_called_once_with(3)
+    mocked_portfolio.default_portfolio_context.assert_called_once_with(3, range_key="12M")
 
 
 def test_partial_portfolio_accepts_no_portfolio_id(mocked_portfolio):
     resp = client.get("/partials/portfolio")
     assert resp.status_code == 200
-    mocked_portfolio.default_portfolio_context.assert_called_once_with(None)
+    mocked_portfolio.default_portfolio_context.assert_called_once_with(None, range_key="12M")

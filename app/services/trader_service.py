@@ -50,9 +50,15 @@ class TraderService:
         """Hard-delete a portfolio and all its data. Returns True if existed."""
         return self._agent.delete_portfolio(portfolio_id)
 
-    def snapshot_history(self, portfolio_id: int, limit: int = 180) -> list[Any]:
-        """Return a portfolio's value-history snapshots, oldest-first."""
-        return self._agent.snapshot_history(portfolio_id, limit)
+    def snapshot_history(
+        self, portfolio_id: int, limit: int = 180, since: str | None = None
+    ) -> list[Any]:
+        """Return a portfolio's value-history snapshots, oldest-first.
+
+        ``since`` (an ISO timestamp) narrows the series to that window and
+        lifts the ``limit`` count cap (#421).
+        """
+        return self._agent.snapshot_history(portfolio_id, limit, since)
 
     def list_reconciliation_issues(
         self, portfolio_id: int | None, limit: int = 200

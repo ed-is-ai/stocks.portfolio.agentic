@@ -8,6 +8,7 @@ and the portfolio CRUD surface on ``TraderAgent``.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.agents.trader.trader_agent import TraderAgent
@@ -514,3 +515,45 @@ def test_snapshots_are_per_portfolio(tmp_path: Path) -> None:
     agent.update_portfolio_snapshot(500.0, a.id)
     assert len(agent.snapshot_history(a.id)) == 1
     assert agent.snapshot_history(b.id) == []
+
+
+def test_snapshot_history_since_filters_window_and_default_unchanged(
+    tmp_path: Path,
+) -> None:
+    # #421: ``since`` adds ``AND timestamp >= ?``; omitting it is unchanged.
+    agent = _agent(tmp_path)
+    p = agent.create_portfolio("A")
+    for ts, val in [
+        ("2023-01-01T00:00:00+00:00", 100.0),
+        ("2024-06-01T00:00:00+00:00", 200.0),
+        ("2025-01-01T00:00:00+00:00", 300.0),
+    ]:
+        agent._snapshots.append(p.id, ts, val, val, None)
+
+    everything = agent.snapshot_history(p.id)
+    assert [r[1] for r in everything] == [100.0, 200.0, 300.0]  # oldest-first
+
+    windowed = agent.snapshot_history(p.id, since="2024-01-01T00:00:00+00:00")
+    assert [r[1] for r in windowed] == [200.0, 300.0]
+
+    # Explicit None is byte-identical to omitting the argument.
+    assert agent.snapshot_history(p.id, since=None) == everything
+
+
+def test_snapshot_history_since_lifts_the_180_count_cap(tmp_path: Path) -> None:
+    # #421: a ``since`` window is a time window, not a count window — the
+    # default LIMIT 180 must not silently drop the oldest in-range rows.
+    agent = _agent(tmp_path)
+    p = agent.create_portfolio("A")
+    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    for i in range(400):
+        agent._snapshots.append(
+            p.id, (base + timedelta(hours=i)).isoformat(), float(i), float(i), None
+        )
+
+    capped = agent.snapshot_history(p.id)
+    assert len(capped) == 180  # legacy behaviour unchanged
+
+    windowed = agent.snapshot_history(p.id, since="2024-01-01T00:00:00+00:00")
+    assert len(windowed) == 400  # every in-range row, not just the newest 180
+    assert [r[1] for r in windowed] == [float(i) for i in range(400)]

@@ -546,7 +546,7 @@
       <li class="nav-item">
         <a class="nav-link" id="tab-portfolio"
            hx-get="/partials/portfolio" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
-           hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'>
+           hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : ""), range: (typeof activeChartRange === "function" ? activeChartRange() : "12M")}'>
           <i class="bi bi-briefcase"></i>Portfolio
         </a>
       </li>
@@ -762,6 +762,26 @@
       localStorage.removeItem('activePortfolioId');
     } else {
       localStorage.setItem('activePortfolioId', String(id));
+    }
+  }
+
+  // Portfolio value-chart range is per-browser too (#421). Absent -> "12M".
+  function activeChartRange() {
+    try {
+      return localStorage.getItem('activeChartRange') || '12M';
+    } catch (e) {
+      return '12M';
+    }
+  }
+  function setChartRange(range) {
+    try {
+      if (!range) {
+        localStorage.removeItem('activeChartRange');
+      } else {
+        localStorage.setItem('activeChartRange', String(range));
+      }
+    } catch (e) {
+      /* localStorage unavailable (private mode, disabled) — no-op */
     }
   }
 
