@@ -2,6 +2,11 @@
     Deterministic symbol-and-market ordering, keyboard-operable, with
     selected count and removable chips. -#}
 <div id="universe-selector" role="group" aria-labelledby="universe-selector-label">
+  <div hidden aria-hidden="true">
+    {% for security_id, provider_symbol, mic, currency in securities %}
+    <span data-whole-universe-currency="{{ currency }}"></span>
+    {% endfor %}
+  </div>
   <label id="universe-selector-label" class="form-label">Select securities</label>
 
   <div class="form-check mb-2">
@@ -71,6 +76,7 @@
           name="security_ids"
           id="sec_{{ security_id }}"
           value="{{ security_id }}"
+          data-security-currency="{{ currency }}"
           {% if security_id in selected_security_ids %}checked{% endif %}
           role="option"
           aria-label="{{ provider_symbol }} on {{ mic }} ({{ currency }})"
@@ -91,7 +97,13 @@
       {% for sid, provider_symbol, mic, currency in securities %}
         {% if sid == security_id and (search_query|lower in (provider_symbol ~ ' ' ~ mic ~ ' ' ~ currency)|lower or not search_query) %}{% set visible.value = true %}{% endif %}
       {% endfor %}
-      {% if not visible.value %}<input type="hidden" name="security_ids" value="{{ security_id }}">{% endif %}
+      {% if not visible.value %}
+        {% set selected_currency = namespace(value='') %}
+        {% for sid, provider_symbol, mic, currency in securities %}
+          {% if sid == security_id %}{% set selected_currency.value = currency %}{% endif %}
+        {% endfor %}
+        <input type="hidden" name="security_ids" value="{{ security_id }}" data-security-currency="{{ selected_currency.value }}">
+      {% endif %}
     {% endfor %}
     {% endif %}
   </div>
@@ -105,8 +117,13 @@
   function updateCount() {
     var checked = selector.querySelectorAll('input[name="security_ids"]:checked, input[type="hidden"][name="security_ids"]');
     if (countEl) countEl.textContent = checked.length;
+    selector.dispatchEvent(new CustomEvent(
+      'strategy-manager:universe-currency-change', {bubbles: true}
+    ));
   }
   checkboxes.forEach(function(cb) { cb.addEventListener('change', updateCount); });
+  var wholeUniverse = selector.querySelector('#whole_universe');
+  if (wholeUniverse) wholeUniverse.addEventListener('change', updateCount);
   selector.querySelectorAll('[data-remove-security]').forEach(function(button) {
     button.addEventListener('click', function() {
       var id = button.getAttribute('data-remove-security');

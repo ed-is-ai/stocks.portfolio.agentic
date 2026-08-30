@@ -959,7 +959,7 @@ def test_configuration_run_backtest_uses_project_primary_button(launch):
     response = client.get("/strategy-manager/configuration")
 
     assert response.status_code == 200
-    assert 'class="sm-btn sm-btn-primary mt-3" type="submit"' in response.text
+    assert 'class="sm-btn sm-btn-primary" type="submit"' in response.text
     assert ".sm-btn:disabled," in Path("app/api/static/css/theme.css").read_text()
 
 
@@ -1607,6 +1607,47 @@ def test_configuration_switching_strategy_preserves_period_capital_currency(laun
     assert 'value="2024-02" selected' in response.text
     assert '<option value="USD" selected>' in response.text
     assert 'value="5000"' in response.text
+    assert '>$</span>' in response.text
+
+
+def test_configuration_capital_control_exposes_currency_presentation_hooks(launch):
+    """Currency inference is client-side only; the submitted select remains
+    the existing validated ``base_currency`` form field."""
+    response = client.get("/strategy-manager/configuration?strategy_id=alpha")
+    assert response.status_code == 200
+    text = response.text
+    assert 'class="sm-capital-control"' in text
+    assert 'id="capital-currency-symbol"' in text
+    assert 'id="base-currency-control"' in text
+    assert 'name="base_currency"' in text
+    assert "strategy-manager:universe-currency-change" in text
+    assert "currencyControl.hidden" in text
+    assert 'input[type="hidden"][name="security_ids"][data-security-currency]' in text
+
+
+def test_configuration_currency_error_keeps_selector_visible(launch):
+    response = client.post(
+        "/strategy-manager/configuration",
+        data=_base_form(base_currency="EUR"),
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 422
+    assert 'id="base_currency"' in response.text
+    assert 'aria-invalid="true"' in response.text
+    assert "!currencySelect.hasAttribute('aria-invalid')" in response.text
+
+
+def test_configuration_coverage_reason_is_attached_to_disabled_action(launch):
+    launch.coverage = SimpleNamespace(display_version="Scanner v1", intervals=())
+    response = client.get("/strategy-manager/configuration")
+    assert response.status_code == 200
+    text = response.text
+    assert 'class="sm-sticky-actions"' in text
+    assert 'id="coverage-action-help"' in text
+    assert 'aria-describedby="coverage-action-help"' in text
+    assert "Historical monthly snapshots must be initialized" in text
+    assert '<p class="sm-alert sm-alert-warning mt-3 mb-0">' not in text
 
 
 def test_configuration_selecting_strategy_renders_its_parameters(launch):
