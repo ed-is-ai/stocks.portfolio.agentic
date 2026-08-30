@@ -1,7 +1,7 @@
 ---
 title: 'Use consistent run terminology in Strategy Manager'
 type: 'enhancement'
-status: 'in-progress'
+status: 'done'
 github_issue: 415
 baseline_revision: 'e33961f2'
 ---
