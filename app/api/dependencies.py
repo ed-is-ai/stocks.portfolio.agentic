@@ -19,6 +19,7 @@ from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.portfolio_strategies_repo import (
     PortfolioStrategiesRepository,
 )
+from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
@@ -131,6 +132,18 @@ def get_strategy_notification_projector() -> StrategyNotificationProjector:
 def get_portfolio_strategies_repository() -> PortfolioStrategiesRepository:
     """Return the shared one-Strategy-per-portfolio repository (#440)."""
     return PortfolioStrategiesRepository(db.make_connect(lambda: str(TRADES_DB)))
+
+
+@lru_cache
+def get_portfolio_dispatch_repository() -> PortfolioDispatchRepository:
+    """Return the shared recommendation-email dispatch receipt repository (#442).
+
+    The receipt table is the only send-authority for per-portfolio
+    recommendation emails — never a "sent today?" heuristic.
+    """
+    repo = PortfolioDispatchRepository(db.make_connect(lambda: str(TRADES_DB)))
+    repo.ensure_schema()
+    return repo
 
 
 @lru_cache

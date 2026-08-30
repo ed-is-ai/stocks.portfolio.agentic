@@ -173,6 +173,15 @@ CREATE TABLE IF NOT EXISTS portfolio_strategies (
     assigned_at     TEXT NOT NULL,
     updated_at      TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS portfolio_recommendation_dispatches (
+    portfolio_id     INTEGER NOT NULL,
+    analysis_run_id  TEXT NOT NULL,
+    strategy_id      TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'claimed',
+    claimed_at       TEXT NOT NULL,
+    completed_at     TEXT,
+    PRIMARY KEY (portfolio_id, analysis_run_id)
+);
 """
 
 #: Name of the default portfolio existing single-portfolio data migrates into.

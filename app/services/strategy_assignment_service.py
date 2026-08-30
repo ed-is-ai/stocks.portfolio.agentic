@@ -158,6 +158,14 @@ class StrategyAssignmentService:
         """Convenience combining ``get`` + ``enrich`` for one portfolio."""
         return self.get_assignment(portfolio_id)
 
+    def list_assigned(self) -> list[StrategyAssignment]:
+        """Return every assignment, ordered by portfolio id.
+
+        This is the seam the per-portfolio daily-email dispatch loop (#442)
+        consumes — keep the return shape unchanged.
+        """
+        return self._repo.list_assigned()
+
     # --- freshness ---------------------------------------------------------
 
     def freshness(self) -> ScanFreshness:

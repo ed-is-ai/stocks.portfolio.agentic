@@ -16,7 +16,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -855,6 +855,66 @@ def _recover_bau_run_authority(
     return tuple(recovered)
 
 
+def dispatch_recommendation_emails(
+    alerter: Any, trader: Any, run_id: str, market_narrative: object = None
+) -> None:
+    """Send one Strategy recommendation email per assigned portfolio (#442).
+
+    Called after the analysis artifact publish so the evaluation reads THIS
+    run's data and receipts key on this run_id. Total-failure isolated: any
+    exception is logged and recorded to the notification centre, never
+    propagated — the pipeline completion and the consolidated digest above
+    are unaffected.
+    """
+    try:
+        from app.api.dependencies import (  # local import to avoid cycles
+            get_notifications_repository,
+            get_portfolio_dispatch_repository,
+            get_portfolio_recommendation_service,
+            get_strategy_assignment_service,
+        )
+        from app.services.portfolio_recommendation_email_service import (
+            PortfolioRecommendationEmailService,
+        )
+
+        dispatch_service = PortfolioRecommendationEmailService(
+            assignment_service=get_strategy_assignment_service(),
+            recommendation_service=get_portfolio_recommendation_service(),
+            trader=trader,
+            sender=alerter.send_portfolio_recommendation_email,
+            notifications=get_notifications_repository(),
+            repo=get_portfolio_dispatch_repository(),
+            market_narrative=market_narrative,
+        )
+        summary = dispatch_service.dispatch_all(run_id)
+        print(
+            f"      Recommendation emails: {summary.sent} sent, "
+            f"{summary.failed} failed, {summary.skipped} skipped"
+        )
+    except Exception as exc:
+        print(f"[Recommendation email dispatch warning] {exc}")
+        try:
+            from app.api.dependencies import get_notifications_repository as _gnr
+            from app.schemas.notification import (
+                NotificationCategory,
+                NotificationSeverity,
+            )
+
+            _gnr().record(
+                NotificationCategory.ALERT,
+                "recommendation_email_dispatch_failed",
+                "Strategy recommendation email dispatch failed",
+                severity=NotificationSeverity.WARNING,
+                body=str(exc),
+                run_id=run_id,
+            )
+        except Exception:
+            print(
+                "[Recommendation email dispatch warning] could not record "
+                "the failure notification"
+            )
+
+
 def pipeline(
     force: bool = False,
     extract: bool = False,
@@ -1327,6 +1387,13 @@ def pipeline(
         os.replace(scan_temporary, SCAN_OUTPUT)
         os.replace(excel_temporary, EXCEL_OUTPUT)
         os.replace(analysis_temporary, ANALYSIS_OUTPUT)
+
+        # Per-portfolio Strategy recommendation emails (#442) — after the
+        # artifact publish so recommend() reads THIS run's data and receipts
+        # key on this run_id. Failure-isolated: never affects the pipeline
+        # completion or the consolidated digest above.
+        dispatch_recommendation_emails(alerter, _trader, run_id, market_narrative)
+
         status_repo.transition(
             PipelineStage.EXPORT,
             StageState.COMPLETE,

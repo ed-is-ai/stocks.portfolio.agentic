@@ -28,6 +28,7 @@ from app.schemas import (
     StockRecord,
 )
 from app.schemas.notification import NotificationCategory, NotificationSeverity
+from app.schemas.portfolio_recommendation import RecommendationResultV1
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.db import Connect
@@ -1475,6 +1476,96 @@ class AlertAgent(Agent):
         except Exception as error:
             print(f"  [email] error: {error}")
             return False
+
+    @staticmethod
+    def _recommendation_text_body(
+        result: RecommendationResultV1,
+        portfolio_name: str,
+        strategy_display_name: str,
+        today: str,
+    ) -> str:
+        """Build the plain-text equivalent of the recommendation email (#442).
+
+        Sections mirror the HTML template's fixed order: freshness warning →
+        Sell → Hold → Buy → provenance footer.
+        """
+        lines = [
+            f"Portfolio Recommendations — {portfolio_name}",
+            f"Strategy: {strategy_display_name} · {today}",
+            "",
+        ]
+        if result.freshness != "fresh":
+            lines.extend(
+                [
+                    f"WARNING: Scan data is {result.freshness} — recommendations "
+                    "use the last published analysis.",
+                    "",
+                ]
+            )
+        for label in ("SELL", "HOLD", "BUY"):
+            action = label.lower()
+            rows = [r for r in result.recommendations if r.action == action]
+            lines.append(f"{label} ({len(rows)})")
+            if not rows:
+                lines.append(f"  No {action} signals.")
+            for rec in rows:
+                lines.append(f"  {rec.ticker}: {rec.reason} [{rec.rule_id}]")
+                for warning in rec.evidence_warnings:
+                    lines.append(f"    warning: {warning}")
+            lines.append("")
+        lines.append(
+            f"Strategy {result.strategy_id} · "
+            f"digest {result.strategy_source_digest[:8]} · "
+            f"run {result.analysis_run_id}"
+        )
+        lines.append("No trades were placed — this is analysis only.")
+        return "\n".join(lines)
+
+    def send_portfolio_recommendation_email(
+        self,
+        result: RecommendationResultV1,
+        portfolio_name: str,
+        strategy_display_name: str,
+        market_narrative: MarketNarrative | None = None,
+        portfolio_summary: dict[str, str] | None = None,
+    ) -> bool:
+        """Send one portfolio's Strategy recommendation email (#442).
+
+        Renders the already-evaluated ``RecommendationResultV1`` — action
+        rules are never recalculated here — and dispatches via the shared
+        ``send_email`` transport, returning its bool. No
+        ``_buy_alerts``/``_sell_alerts`` mutation.
+        """
+        sells = [r for r in result.recommendations if r.action == "sell"]
+        holds = [r for r in result.recommendations if r.action == "hold"]
+        buys = [r for r in result.recommendations if r.action == "buy"]
+        # Date the email by the run that produced it, not the wall clock —
+        # a delayed retry of an earlier run must not misdate the subject.
+        today = result.generated_at.date().isoformat()
+        # Portfolio/strategy names are user-controlled; strip any embedded
+        # newline before they reach the SMTP Subject header (header injection).
+        clean_portfolio = " ".join(portfolio_name.splitlines())
+        clean_strategy = " ".join(strategy_display_name.splitlines())
+        subject = f"Recommendations — {clean_portfolio} · {clean_strategy} · {today}"
+        html_body = email_templates.get_template("recommendations.html").render(
+            portfolio_name=portfolio_name,
+            strategy_name=strategy_display_name,
+            today=today,
+            freshness=result.freshness,
+            market_narrative=market_narrative,
+            portfolio_summary=portfolio_summary,
+            sells=sells,
+            holds=holds,
+            buys=buys,
+            strategy_id=result.strategy_id,
+            digest=result.strategy_source_digest,
+            run_id=result.analysis_run_id,
+            parameters=result.parameters,
+        )
+        text_body = self._recommendation_text_body(
+            result, portfolio_name, strategy_display_name, today
+        )
+        return self.send_email(subject, html_body, text_body)
 
 
 if __name__ == "__main__":

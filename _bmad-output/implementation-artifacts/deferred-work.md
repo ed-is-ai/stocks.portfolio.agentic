@@ -374,3 +374,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-441-portfolio-recommendations.md`
   summary: Strategy runtime evaluation runs synchronously inside the async recommendations route with no execution timeout — a slow or looping runtime freezes the event loop.
   evidence: `portfolio_recommendations()` calls `recommend()` directly, which does filesystem discovery, `spec_from_file_location`/`exec_module` of strategy code, pandas work and SQLite reads on the event-loop thread; contrast plan 012's subprocess timeout for the pipeline. Off-loading to a worker with a bounded timeout is a cross-cutting decision affecting all strategy execution paths.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-442-portfolio-recommendation-email.md`
+  summary: Per-portfolio recommendation emails are sent synchronously inside the pipeline's EXPORT stage — N portfolios × SMTP round-trips (starttls + login each) sit in the pipeline's critical path.
+  evidence: `dispatch_recommendation_emails` runs inline before `status_repo.transition(EXPORT, COMPLETE)`; a slow SMTP host delays (or via plan 012's subprocess timeout, times out) the whole pipeline run. Bounding this needs the same off-loop/worker decision as the #441 runtime-evaluation deferral.

@@ -1,0 +1,80 @@
+{# Per-portfolio Strategy recommendation email (#442).
+
+   Renders the already-evaluated ``RecommendationResultV1`` — never
+   recalculates action rules. Table-based, inline-styled, matching the
+   summary.html email conventions (Arial, 600px, #1e3a5f headings). #}
+{% from "_market_narrative.html" import market_narrative_card %}
+{% macro action_badge(action, bg, color) -%}
+<span style="display:inline-block;padding:2px 8px;border-radius:3px;background:{{ bg }};color:{{ color }};font-weight:700;font-size:0.75em;letter-spacing:0.05em">{{ action|upper }}</span>
+{%- endmacro %}
+{% macro action_row(rec, bg, color) -%}
+<tr>
+  <td style="padding:10px 0;border-bottom:1px solid #eee">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+      <tr>
+        <td style="width:70px;vertical-align:top;padding-right:8px">{{ action_badge(rec.action, bg, color) }}</td>
+        <td style="vertical-align:top">
+          <div style="font-family:'Courier New',monospace;font-weight:700;font-size:0.95em;color:#1e3a5f">{{ rec.ticker }}</div>
+          <div style="font-size:0.85em;color:#333;margin-top:2px">{{ rec.reason }}</div>
+          <div style="font-size:0.72em;color:#94a3b8;margin-top:2px">{{ rec.rule_id }}</div>
+          {% if rec.evidence_warnings %}
+          <div style="font-size:0.72em;color:#a3560a;margin-top:2px">&#9888; {{ rec.evidence_warnings|join(', ') }}</div>
+          {% endif %}
+        </td>
+      </tr>
+    </table>
+  </td>
+</tr>
+{%- endmacro %}
+{% macro action_section(heading, empty_text, color, rows, bg) -%}
+<div style="margin:20px 0">
+  <h3 style="color:{{ color }};margin-bottom:8px">{{ heading }} ({{ rows|length }})</h3>
+  {% if rows %}
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+    {% for rec in rows %}{{ action_row(rec, bg, color) }}{% endfor %}
+  </table>
+  {% else %}
+  <p style="color:#94a3b8;font-size:0.85em;font-style:italic">{{ empty_text }}</p>
+  {% endif %}
+</div>
+{%- endmacro %}
+<html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head><body style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:20px">
+<h2 style="color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px">
+  &#128200; Portfolio Recommendations &mdash; {{ portfolio_name }}</h2>
+<p style="color:#64748b;font-size:0.9em;margin-top:-4px">
+  Strategy: {{ strategy_name }} &middot; {{ today }}</p>
+
+{% if freshness and freshness != 'fresh' %}
+<div style="margin:16px 0;padding:10px 14px;background:#fdf3e0;border:1px solid #e0b25c;border-radius:6px;color:#a3560a;font-size:0.9em">
+  &#9888; Scan data is {{ freshness }} &mdash; recommendations use the last published analysis.
+</div>
+{% endif %}
+
+{% if market_narrative %}{{ market_narrative_card(market_narrative) }}{% endif %}
+
+{% if portfolio_summary %}
+<div style="margin:20px 0">
+  <h3 style="color:#1e3a5f;margin-bottom:8px">Portfolio summary</h3>
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">
+    {% for label, value in portfolio_summary.items() %}
+    <tr>
+      <td style="padding:5px 8px;background:#f8f8f8;font-weight:600;width:140px;font-size:0.85em;color:#555">{{ label }}</td>
+      <td style="padding:5px 8px;font-size:0.85em;color:#333">{{ value }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
+{{ action_section("&#9888; SELL", "No sell signals.", "#c0392b", sells, "#fbe6e6") }}
+{{ action_section("&#128064; HOLD", "No hold signals.", "#a3560a", holds, "#f7ecd8") }}
+{{ action_section("&#9889; BUY", "No buy signals.", "#0a7d34", buys, "#e3f3e8") }}
+
+<p style="color:#94a3b8;font-size:0.72em;margin-top:24px">
+  Strategy {{ strategy_id }} &middot; digest {{ digest[:8] }} &middot; run {{ run_id }}
+  {% if parameters %}&middot; {% for key, value in parameters.items() %}{% if value is string or value is number %}{{ key }}={{ value }}{% if not loop.last %}, {% endif %}{% endif %}{% endfor %}{% endif %}</p>
+<p style="color:#64748b;font-size:0.8em;font-style:italic">
+  No trades were placed &mdash; this is analysis only.</p>
+</body></html>
