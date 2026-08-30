@@ -162,6 +162,10 @@
       margin-bottom: 0.2rem;
     }
     .stat-card .sval { font-size: var(--fs-lg); font-weight: var(--fw-bold); color: #1e293b; line-height: var(--lh-tight); }
+    /* Directional P&L colour must beat the base `.stat-card .sval` slate above,
+       which the single-class `.pos`/`.neg` rules lose to on specificity. */
+    .stat-card .sval.pos { color: var(--green); }
+    .stat-card .sval.neg { color: var(--red); }
     .stat-card.pnl-positive { border-left: 3px solid var(--green); }
     .stat-card.pnl-negative { border-left: 3px solid var(--red); }
 
