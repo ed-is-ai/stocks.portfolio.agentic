@@ -136,6 +136,21 @@ def test_unrealised_pnl_summary_uses_negative_directional_cue_and_signed_value()
     assert "£-12.50" in html
 
 
+def test_stat_card_pnl_value_colour_beats_the_base_slate_rule() -> None:
+    """The `sval pos`/`sval neg` classes only tint the value if a rule more
+    specific than `.stat-card .sval` (which hard-codes slate) exists. Without
+    this the P&L summary renders grey despite the class (#417)."""
+    from pathlib import Path
+
+    index_css = Path("app/api/templates/index.html").read_text(encoding="utf-8")
+    base = index_css.index(".stat-card .sval {")
+    pos = index_css.index(".stat-card .sval.pos")
+    neg = index_css.index(".stat-card .sval.neg")
+    assert pos > base and neg > base
+    assert "var(--green)" in index_css[pos : pos + 60]
+    assert "var(--red)" in index_css[neg : neg + 60]
+
+
 def test_zero_cash_is_visible_for_cash_only_portfolio() -> None:
     html = _render(0.0)
     row = _cash_row(html)
