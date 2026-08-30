@@ -1,0 +1,473 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mockup — Portfolio-assigned strategies &amp; recommendations (#439)</title>
+<style>
+  /* Self-contained mockup following app/api/static/css/tokens.css
+     (Hallmark "studied-DNA" theme: ink/paper, flat, hairline, zero radius). */
+  :root {
+    --primary: #111418;
+    --primary-2: #1c2126;
+    --surface: #f8f9fa;
+    --card: #ffffff;
+    --border: #dfe3e8;
+    --muted: #5b6470;
+    --accent-2: #2563eb;
+    --green: #0a7d34;  --green-bg: #e3f3e8;
+    --red: #c81e1e;    --red-bg: #fbe6e6;
+    --amber: #a3560a;  --amber-bg: #f7ecd8;
+    --blue: #1d4ed8;   --blue-bg: #e2e9fb;
+    --purple: #7c3aed; --purple-bg: #ece6fb;
+    --radius-sm: 4px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--surface); color: var(--primary);
+    font-family: Inter, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.45;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 24px 20px 80px; }
+
+  .mock-banner {
+    background: #fff3cd; border: 1px solid #e6d9a8; color: #6b5410;
+    padding: 8px 14px; font-size: 12px; font-weight: 600; margin-bottom: 20px;
+  }
+  h1 { font-size: 20px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 20px; }
+
+  /* ── Surface switcher ── */
+  .tabs { display: flex; gap: 0; border-bottom: 2px solid var(--primary); margin-bottom: 24px; }
+  .tabs button {
+    appearance: none; background: none; border: none; cursor: pointer;
+    font: inherit; font-weight: 600; font-size: 13px; color: var(--muted);
+    padding: 10px 16px; border-bottom: 2px solid transparent; margin-bottom: -2px;
+  }
+  .tabs button.active { color: var(--primary); border-bottom-color: var(--primary); }
+  .surface { display: none; }
+  .surface.active { display: block; }
+
+  /* ── Cards & sections ── */
+  .card { background: var(--card); border: 1px solid var(--border); padding: 18px; margin-bottom: 20px; }
+  .card > h2 {
+    font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--muted); margin: 0 0 14px;
+  }
+  .note { color: var(--muted); font-size: 12px; margin: 10px 0 0; }
+  .note b { color: var(--primary); }
+  code, .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-size: 11.5px; }
+
+  /* ── Account controls row (matches _portfolio.html pattern) ── */
+  .controls { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+  .control-group { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+  .ctl-lbl { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
+  select, input[type=text] {
+    font: inherit; font-size: 13px; padding: 6px 8px; border: 1px solid var(--border);
+    border-radius: var(--radius-sm); background: var(--card); color: var(--primary); min-width: 170px;
+  }
+  .btn {
+    display: inline-block; font: inherit; font-size: 13px; font-weight: 600;
+    padding: 6px 14px; border: 1px solid var(--primary); background: var(--card);
+    color: var(--primary); border-radius: var(--radius-sm); cursor: pointer; text-decoration: none;
+  }
+  .btn.primary { background: var(--primary); color: #fff; }
+  .btn.ghost { border-color: var(--border); color: var(--muted); font-weight: 500; }
+  .btn.sm { font-size: 12px; padding: 4px 10px; }
+  .btn.danger { color: var(--red); border-color: var(--red); }
+
+  /* ── Strategy chip in account controls ── */
+  .strategy-chip {
+    display: inline-flex; align-items: center; gap: 8px;
+    border: 1px solid var(--border); background: var(--card);
+    padding: 5px 10px; border-radius: var(--radius-sm); font-size: 13px;
+  }
+  .strategy-chip .dot { width: 8px; height: 8px; background: var(--green); }
+  .strategy-chip.none .dot { background: var(--border); }
+  .strategy-chip.unavailable .dot { background: var(--red); }
+
+  /* ── Stat cards ── */
+  .stat-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat-card { background: var(--card); border: 1px solid var(--border); border-top: 2px solid var(--primary); padding: 12px 14px; }
+  .stat-card .slbl { display: block; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 4px; }
+  .stat-card .sval { font-size: 18px; font-weight: 700; }
+  .stat-card.sell { border-top-color: var(--red); }
+  .stat-card.hold { border-top-color: var(--amber); }
+  .stat-card.buy  { border-top-color: var(--green); }
+
+  /* ── Alerts / warnings ── */
+  .alert { border: 1px solid var(--border); border-left: 3px solid var(--amber); background: var(--amber-bg); padding: 10px 14px; font-size: 13px; margin-bottom: 16px; }
+  .alert .ttl { font-weight: 700; color: var(--amber); }
+  .alert.info { border-left-color: var(--blue); background: var(--blue-bg); }
+  .alert.info .ttl { color: var(--blue); }
+
+  /* ── Tables ── */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    background: var(--primary); color: #fff; text-align: left;
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 8px 10px;
+  }
+  tbody td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:hover { background: #f8fafc; }
+  td .reason { color: var(--muted); font-size: 12px; }
+  td .warn { color: var(--amber); font-size: 11.5px; }
+
+  /* ── Badges ── */
+  .badge { display: inline-block; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; padding: 2px 8px; border-radius: var(--radius-sm); }
+  .badge.sell { background: var(--red-bg); color: var(--red); }
+  .badge.hold { background: var(--amber-bg); color: var(--amber); }
+  .badge.buy  { background: var(--green-bg); color: var(--green); }
+  .badge.neutral { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+  .badge.purple { background: var(--purple-bg); color: var(--purple); }
+
+  .group-head { display: flex; align-items: baseline; gap: 10px; margin: 22px 0 8px; }
+  .group-head h3 { font-size: 13px; font-weight: 700; margin: 0; text-transform: uppercase; letter-spacing: 0.06em; }
+  .group-head .count { color: var(--muted); font-size: 12px; }
+  .group-head.sell h3 { color: var(--red); }
+  .group-head.hold h3 { color: var(--amber); }
+  .group-head.buy h3 { color: var(--green); }
+
+  /* ── Provenance strip ── */
+  .provenance {
+    display: flex; flex-wrap: wrap; gap: 18px; background: var(--card);
+    border: 1px solid var(--border); padding: 10px 14px; font-size: 12px; color: var(--muted); margin-bottom: 16px;
+  }
+  .provenance b { color: var(--primary); font-weight: 600; }
+
+  /* ── Modal mock ── */
+  .modal-backdrop { background: rgba(17,20,24,0.45); padding: 32px; }
+  .modal { background: var(--card); border: 1px solid var(--border); border-top: 2px solid var(--primary); max-width: 640px; margin: 0 auto; padding: 20px; }
+  .modal h3 { margin: 0 0 4px; font-size: 16px; }
+  .modal .msub { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
+  .strategy-option { display: flex; gap: 10px; padding: 12px; border: 1px solid var(--border); margin-bottom: 8px; cursor: pointer; }
+  .strategy-option.selected { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); }
+  .strategy-option .name { font-weight: 700; }
+  .strategy-option .desc { color: var(--muted); font-size: 12.5px; }
+  .param-snapshot { background: var(--surface); border: 1px solid var(--border); padding: 10px 12px; font-size: 12px; margin-top: 10px; }
+  .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+  /* ── Email preview ── */
+  .email-frame { max-width: 600px; margin: 0 auto; background: #ffffff; border: 1px solid var(--border); font-family: Arial, Helvetica, sans-serif; }
+  .email-frame .e-head { background: #1e3a5f; color: #fff; padding: 16px 20px; }
+  .email-frame .e-head h4 { margin: 0; font-size: 15px; }
+  .email-frame .e-head p { margin: 4px 0 0; font-size: 11px; color: #b8c6d9; }
+  .email-section { padding: 14px 20px; border-bottom: 1px solid #e5e7eb; }
+  .email-section h5 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #1e3a5f; }
+  .email-section p { margin: 0 0 6px; font-size: 12.5px; color: #374151; }
+  .e-warn { background: #fef3c7; border-left: 3px solid #b45309; padding: 8px 12px; font-size: 12px; color: #92400e; margin: 0 20px; }
+  .e-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .e-table th { text-align: left; background: #f3f4f6; padding: 6px 10px; font-size: 10px; text-transform: uppercase; color: #4b5563; }
+  .e-table td { padding: 6px 10px; border-bottom: 1px solid #e5e7eb; }
+  .e-badge { font-size: 10px; font-weight: 700; padding: 1px 6px; }
+  .e-badge.sell { background: #fbe6e6; color: #c81e1e; }
+  .e-badge.hold { background: #f7ecd8; color: #a3560a; }
+  .e-badge.buy { background: #e3f3e8; color: #0a7d34; }
+  .e-foot { padding: 12px 20px; font-size: 10.5px; color: #6b7280; }
+
+  /* ── UX notes ── */
+  .ux-notes li { margin-bottom: 6px; font-size: 12.5px; color: var(--muted); }
+  .ux-notes b { color: var(--primary); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="mock-banner">STATIC MOCKUP — Portfolio-assigned strategies, recommendations &amp; daily alerts (feature #439 · stories #440, #441, #442). No data is live; all values illustrative.</div>
+  <h1>Strategy-linked portfolios</h1>
+  <p class="sub">Assign one active Strategy per portfolio → review Sell / Hold / Buy recommendations → receive a per-portfolio daily email. Portfolios without an assignment keep today's behaviour exactly.</p>
+
+  <div class="tabs" role="tablist">
+    <button class="active" data-surface="s1">1 · Portfolio tab — assignment</button>
+    <button data-surface="s2">2 · Recommendations screen</button>
+    <button data-surface="s3">3 · Assign-strategy modal</button>
+    <button data-surface="s4">4 · Daily email preview</button>
+    <button data-surface="s5">5 · Edge states</button>
+  </div>
+
+  <!-- ══════════════ SURFACE 1 · Portfolio tab account controls ══════════════ -->
+  <section class="surface active" id="s1">
+    <div class="card">
+      <h2>Portfolio tab · Account controls row (extends #147 pattern)</h2>
+      <div class="controls">
+        <div class="control-group">
+          <div>
+            <span class="ctl-lbl">Account</span>
+            <select><option>SIPP — Trading Account</option><option>GIA — General Investment</option><option>+ New portfolio…</option></select>
+          </div>
+          <div>
+            <span class="ctl-lbl">Strategy</span>
+            <span class="strategy-chip"><span class="dot"></span> CANSLIM Screener</span>
+            <button class="btn sm ghost">Change</button>
+            <button class="btn sm ghost">Clear</button>
+          </div>
+          <button class="btn sm ghost">Manage ▾</button>
+        </div>
+        <div class="control-group">
+          <button class="btn primary">📋 Recommendations</button>
+          <button class="btn">Add holding ▾</button>
+          <button class="btn">Refresh Prices</button>
+        </div>
+      </div>
+      <p class="note"><b>AC #440.1:</b> the assigned Strategy is always visible beside the account selector, with <i>Change</i> / <i>Clear</i> inline. <b>AC #440.4:</b> changing assignment re-renders this partial immediately — it never launches a backtest, scan, email or trade. <b>AC #441.1:</b> the <i>Recommendations</i> action opens the portfolio-scoped screen for the active account.</p>
+    </div>
+
+    <div class="alert">
+      <span class="ttl">⚠ Scan data is 31 hours old.</span> Published 29 Aug 2026, 14:05 · run <code>scan-2026-08-29T14-05</code>. Recommendations and tonight's email will use this artifact. You can still assign or change the Strategy.
+    </div>
+
+    <div class="stat-cards">
+      <div class="stat-card"><span class="slbl">Cash balance</span><span class="sval">£12,480.55</span></div>
+      <div class="stat-card"><span class="slbl">Holdings value</span><span class="sval">£87,215.10</span></div>
+      <div class="stat-card"><span class="slbl">Total value</span><span class="sval">£99,695.65</span></div>
+      <div class="stat-card"><span class="slbl">Unrealised P&amp;L</span><span class="sval" style="color:var(--green)">+£6,412.30 (+6.9%)</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Open positions</h2>
+      <table>
+        <thead><tr><th>Ticker</th><th>Shares</th><th>Price</th><th>Value</th><th>P&amp;L</th><th>Exit</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">HSFWA</td><td>1,204</td><td>£41.22</td><td>£49,628.88</td><td class="mono" style="color:var(--green)">+£3,120</td><td><span class="badge neutral">—</span></td></tr>
+          <tr><td class="mono">VOD.L</td><td>5,000</td><td>£0.72</td><td>£3,600.00</td><td class="mono" style="color:var(--red)">−£1,400</td><td><span class="badge sell">Stop</span></td></tr>
+        </tbody>
+      </table>
+      <p class="note">Rest of the Portfolio tab (positions, chart, imports) is unchanged by this feature.</p>
+    </div>
+  </section>
+
+  <!-- ══════════════ SURFACE 2 · Recommendations screen ══════════════ -->
+  <section class="surface" id="s2">
+    <div class="card">
+      <h2>Recommendations — SIPP — Trading Account</h2>
+      <div class="controls" style="margin-bottom:14px">
+        <div class="control-group">
+          <span class="strategy-chip"><span class="dot"></span> Strategy: <b>&nbsp;CANSLIM Screener</b></span>
+          <span class="badge purple">StrategyProtocolV1</span>
+          <span class="badge neutral mono">digest a1b2c3d4</span>
+        </div>
+        <div class="control-group">
+          <button class="btn sm">← Back to Portfolio</button>
+          <button class="btn sm ghost">Re-evaluate</button>
+        </div>
+      </div>
+
+      <div class="alert">
+        <span class="ttl">⚠ Scan data is 31 hours old.</span> Analysis published 29 Aug 2026, 14:05 (run <code>scan-2026-08-29T14-05</code>). Freshness authority: <code>generated_at</code>. Non-blocking — results shown below.
+      </div>
+
+      <div class="provenance">
+        <span>Scan run <b class="mono">scan-2026-08-29T14-05</b></span>
+        <span>Generated <b>29 Aug 2026 14:05 UTC</b></span>
+        <span>Market session <b>2026-08-29</b></span>
+        <span>Portfolio revision <b class="mono">r42</b></span>
+        <span>Parameters <b>min_rs=85 · min_eps=18</b></span>
+      </div>
+
+      <div class="stat-cards">
+        <div class="stat-card sell"><span class="slbl">Sell</span><span class="sval">2</span></div>
+        <div class="stat-card hold"><span class="slbl">Hold</span><span class="sval">4</span></div>
+        <div class="stat-card buy"><span class="slbl">Buy</span><span class="sval">3</span></div>
+        <div class="stat-card"><span class="slbl">Evidence warnings</span><span class="sval" style="color:var(--amber)">1</span></div>
+      </div>
+
+      <div class="group-head sell"><h3>Sell</h3><span class="count">2 · exit signals on held securities</span></div>
+      <table>
+        <thead><tr><th>Ticker</th><th>Action</th><th>Reason</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">VOD.L</td><td><span class="badge sell">Sell</span></td><td>Strategy exit: price closed below Darvas box floor for 3 sessions.<div class="reason">Rule <code>exit_box_breakdown</code></div></td><td><span class="badge neutral">scan</span></td></tr>
+          <tr><td class="mono">ITV.L</td><td><span class="badge sell">Sell</span></td><td>Strategy exit: RS rating fell below threshold (72 &lt; 85).<div class="reason">Rule <code>exit_rs_weak</code></div></td><td><span class="badge neutral">scan</span></td></tr>
+        </tbody>
+      </table>
+
+      <div class="group-head hold"><h3>Hold</h3><span class="count">4 · held, no valid exit signal</span></div>
+      <table>
+        <thead><tr><th>Ticker</th><th>Action</th><th>Reason</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">HSFWA</td><td><span class="badge hold">Hold</span></td><td>No exit signal; uptrend intact.<div class="reason">Rule <code>no_exit_signal</code></div></td><td><span class="badge neutral">scan</span></td></tr>
+          <tr><td class="mono">SHEL.L</td><td><span class="badge hold">Hold</span></td><td>No exit signal.<div class="reason">Rule <code>no_exit_signal</code></div></td><td><span class="badge neutral">scan</span></td></tr>
+          <tr><td class="mono">XYZ.L</td><td><span class="badge hold">Hold</span></td><td>Held security not resolvable against current scan / alias authority — fails safe to Hold.<div class="warn">⚠ scan_evidence_missing — never a Sell or Buy without evidence.</div></td><td><span class="badge neutral" style="color:var(--amber);border-color:var(--amber)">missing</span></td></tr>
+        </tbody>
+      </table>
+
+      <div class="group-head buy"><h3>Buy</h3><span class="count">3 · entry signals on unheld securities</span></div>
+      <table>
+        <thead><tr><th>Ticker</th><th>Action</th><th>Reason</th><th>Evidence</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">AUTO.L</td><td><span class="badge buy">Buy</span></td><td>Entry signal: breakout above 50-day high with RS 91.<div class="reason">Rule <code>entry_breakout</code></div></td><td><span class="badge neutral">scan</span></td></tr>
+          <tr><td class="mono">GAW.L</td><td><span class="badge buy">Buy</span></td><td>Entry signal: EPS acceleration + volume confirmation.<div class="reason">Rule <code>entry_canslim</code></div></td><td><span class="badge neutral">scan</span></td></tr>
+        </tbody>
+      </table>
+
+      <p class="note"><b>AC #441.5–6:</b> Sell takes precedence for held securities; unusable evidence never creates a Sell or Buy; non-held securities without entry signals are omitted entirely. <b>AC #441.2–3:</b> no provider/network fetch, no trade placed or staged — the evaluator reads the published <code>ANALYSIS_JSON</code> envelope plus the current portfolio snapshot. <b>AC #441.9:</b> reopening the same inputs returns the same deterministic result.</p>
+    </div>
+  </section>
+
+  <!-- ══════════════ SURFACE 3 · Assign-strategy modal ══════════════ -->
+  <section class="surface" id="s3">
+    <div class="modal-backdrop">
+      <div class="modal">
+        <h3>Assign Strategy — SIPP — Trading Account</h3>
+        <p class="msub">Choices come from Strategy discovery. Unavailable Skills are shown but not selectable. Saving stores the Strategy ID and a snapshot of its validated default parameters.</p>
+
+        <label class="strategy-option selected">
+          <input type="radio" name="strategy" checked>
+          <span><span class="name">CANSLIM Screener</span> <span class="badge neutral mono">canslim-screener</span>
+          <div class="desc">Growth breakout screening on CANSLIM criteria: earnings acceleration, RS leadership, volume confirmation.</div>
+          <div class="param-snapshot"><b>Default parameters (snapshot):</b> <code>min_rs=85 · min_eps=18 · lookback_days=252 · universe=selected_securities</code></div></span>
+        </label>
+
+        <label class="strategy-option">
+          <input type="radio" name="strategy">
+          <span><span class="name">Darvas Box</span> <span class="badge neutral mono">rtly-backtest-darvas-box</span>
+          <div class="desc">Trend-following box breakout strategy with trailing stop exits.</div></span>
+        </label>
+
+        <label class="strategy-option" style="opacity:0.55;cursor:not-allowed">
+          <input type="radio" name="strategy" disabled>
+          <span><span class="name">Buy &amp; Hold</span> <span class="badge neutral mono">rtly-backtest-buy-and-hold</span>
+          <div class="desc">⚠ Incompatible with current-scan evaluation (history-only runtime) — not selectable.</div></span>
+        </label>
+
+        <div class="modal-actions">
+          <button class="btn ghost">Cancel</button>
+          <button class="btn primary">Assign Strategy</button>
+        </div>
+        <p class="note"><b>AC #440.2–3:</b> choices come from the fail-soft <code>discover_strategies</code> result; discovery warnings are visible without breaking other choices; the shared parameter validator runs on save. <b>AC #440.5:</b> if the published analysis is missing or &gt; 24h old, a prominent non-blocking warning shows here too — assignment still succeeds. <b>AC #440.6:</b> an unavailable previously-assigned Strategy is retained and shown with Repair / Clear actions, never silently switched.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════════ SURFACE 4 · Daily email preview ══════════════ -->
+  <section class="surface" id="s4">
+    <div class="card">
+      <h2>Daily Strategy recommendation email — one per assigned portfolio (#442)</h2>
+      <p class="note" style="margin-top:0">Subject: <b>Recommendations — SIPP — Trading Account · CANSLIM Screener · 30 Aug 2026</b>. Sent after the existing consolidated digest, which is unchanged. Hierarchy: market summary → portfolio summary → actions (Sell, Hold, Buy).</p>
+      <div class="email-frame">
+        <div class="e-head">
+          <h4>📈 Portfolio Recommendations — SIPP — Trading Account</h4>
+          <p>Strategy: CANSLIM Screener · Scan run scan-2026-08-29T14-05 · Generated 29 Aug 2026 14:05 UTC</p>
+        </div>
+        <div class="e-warn">⚠ Scan data is 31 hours old — recommendations use the last published analysis.</div>
+        <div class="email-section">
+          <h5>Market summary</h5>
+          <p>FTSE 100 +0.4% · breadth positive · VIX 13.2. Narrative: rotation into cyclicals continues.</p>
+        </div>
+        <div class="email-section">
+          <h5>Portfolio summary — SIPP — Trading Account</h5>
+          <p>Total value <b>£99,695.65</b> · Cash £12,480.55 · Unrealised P&amp;L <b style="color:#0a7d34">+£6,412.30 (+6.9%)</b> · 6 holdings</p>
+        </div>
+        <div class="email-section">
+          <h5>Sell (2)</h5>
+          <table class="e-table">
+            <tr><th>Ticker</th><th>Reason</th></tr>
+            <tr><td><span class="e-badge sell">SELL</span> VOD.L</td><td>Exit: price below box floor 3 sessions</td></tr>
+            <tr><td><span class="e-badge sell">SELL</span> ITV.L</td><td>Exit: RS 72 below threshold 85</td></tr>
+          </table>
+        </div>
+        <div class="email-section">
+          <h5>Hold (4)</h5>
+          <table class="e-table">
+            <tr><th>Ticker</th><th>Reason</th></tr>
+            <tr><td><span class="e-badge hold">HOLD</span> HSFWA</td><td>No exit signal; uptrend intact</td></tr>
+            <tr><td><span class="e-badge hold">HOLD</span> XYZ.L</td><td>⚠ No scan evidence — fails safe to Hold</td></tr>
+          </table>
+        </div>
+        <div class="email-section">
+          <h5>Buy (3)</h5>
+          <table class="e-table">
+            <tr><th>Ticker</th><th>Reason</th></tr>
+            <tr><td><span class="e-badge buy">BUY</span> AUTO.L</td><td>Entry: breakout above 50-day high, RS 91</td></tr>
+            <tr><td><span class="e-badge buy">BUY</span> GAW.L</td><td>Entry: EPS acceleration + volume</td></tr>
+          </table>
+        </div>
+        <div class="e-foot">
+          Provenance: Strategy canslim-screener · source digest a1b2c3d4 · parameters min_rs=85, min_eps=18 · portfolio revision r42.<br>
+          No trades were placed. Dispatch receipt recorded for (portfolio, run) — retries of this scan will not resend.
+        </div>
+      </div>
+      <p class="note"><b>AC #442.1, 7:</b> sent after the existing consolidated email; idempotent per <code>(portfolio_id, analysis_run_id)</code>. <b>AC #442.5:</b> positions and P&amp;L are scoped to this portfolio only. <b>AC #442.6:</b> portfolios with no assignment receive no portfolio-specific email; clearing an assignment stops future sends.</p>
+    </div>
+  </section>
+
+  <!-- ══════════════ SURFACE 5 · Edge states ══════════════ -->
+  <section class="surface" id="s5">
+    <div class="card">
+      <h2>No Strategy assigned (default — today's behaviour)</h2>
+      <div class="controls">
+        <div class="control-group">
+          <div>
+            <span class="ctl-lbl">Account</span>
+            <select><option>GIA — General Investment</option></select>
+          </div>
+          <div>
+            <span class="ctl-lbl">Strategy</span>
+            <span class="strategy-chip none"><span class="dot"></span> No Strategy</span>
+            <button class="btn sm">Assign…</button>
+          </div>
+        </div>
+        <div class="control-group">
+          <button class="btn ghost" disabled style="opacity:0.5">📋 Recommendations</button>
+          <button class="btn">Add holding ▾</button>
+        </div>
+      </div>
+      <div class="alert info" style="margin-top:14px">
+        <span class="ttl">ℹ No Strategy assigned.</span> This portfolio follows the generic scanner recommendations and the consolidated daily email, exactly as before. <a href="#">Assign a Strategy →</a> to get portfolio-specific Sell / Hold / Buy recommendations and its own daily email.
+      </div>
+      <p class="note"><b>AC #440.7 / #441.9 / #442.6:</b> a portfolio with no assignment behaves exactly as it does before this story.</p>
+    </div>
+
+    <div class="card">
+      <h2>Assigned Strategy became unavailable</h2>
+      <div class="controls">
+        <div class="control-group">
+          <div>
+            <span class="ctl-lbl">Account</span>
+            <select><option>SIPP — Trading Account</option></select>
+          </div>
+          <div>
+            <span class="ctl-lbl">Strategy</span>
+            <span class="strategy-chip unavailable"><span class="dot"></span> Buy &amp; Hold <span class="badge neutral" style="color:var(--red);border-color:var(--red)">unavailable</span></span>
+            <button class="btn sm">Repair</button>
+            <button class="btn sm danger">Clear</button>
+          </div>
+        </div>
+      </div>
+      <div class="alert" style="margin-top:14px">
+        <span class="ttl">⚠ Assigned Strategy "Buy &amp; Hold" is no longer discoverable.</span> The stored assignment is retained — it has not been silently switched. Repair re-checks discovery; Clear removes the assignment and restores generic behaviour.
+      </div>
+      <p class="note"><b>AC #440.6:</b> retained assignment shown as unavailable with repair/clear action rather than silently switching Strategy.</p>
+    </div>
+
+    <div class="card">
+      <h2>Recommendations — evaluation failure (isolated, actionable)</h2>
+      <div class="alert">
+        <span class="ttl">⚠ Could not evaluate recommendations.</span> The Strategy runtime for <b>CANSLIM Screener</b> failed while reading the current scan view (run <code>scan-2026-08-29T14-05</code>). This affects only this portfolio. <a href="#">Retry evaluation</a> · <a href="#">View run log</a>
+      </div>
+      <p class="note"><b>AC #441.10:</b> runtime/discovery/evidence failure is isolated to this portfolio and shown as an actionable unavailable state, not a 500.</p>
+    </div>
+
+    <div class="card">
+      <h2>UX decisions recorded during planning (#439)</h2>
+      <ul class="ux-notes">
+        <li><b>V1 stores validated default parameters</b> at assignment time; custom per-portfolio parameter editing is deferred.</li>
+        <li><b>Changing the Strategy recalculates the screen immediately</b> but sends no immediate email — the next successful daily scan uses the then-current assignment.</li>
+        <li><b>Held security without usable evidence fails safe to Hold</b> with an evidence warning; a non-held security without usable evidence is never a Buy.</li>
+        <li><b>Email dispatch is idempotent</b> per (portfolio, published analysis run_id) — retrying the same run cannot send duplicates.</li>
+        <li><b>Group order is fixed:</b> Sell → Hold → Buy, on both the screen and the email, from the same typed recommendation result.</li>
+      </ul>
+    </div>
+  </section>
+</div>
+
+<script>
+  document.querySelectorAll('.tabs button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      document.querySelectorAll('.tabs button').forEach(function (b) { b.classList.remove('active'); });
+      document.querySelectorAll('.surface').forEach(function (s) { s.classList.remove('active'); });
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.surface).classList.add('active');
+    });
+  });
+</script>
+</body>
+</html>
