@@ -93,3 +93,6 @@ softaworks-agent-toolkit/
 # BMad workflow output (local planning/implementation artifacts)
 _bmad/
 _bmad-output/
+
+# Local git worktrees created for parallel feature work (see .worktrees/*)
+.worktrees/
