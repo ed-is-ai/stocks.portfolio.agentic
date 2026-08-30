@@ -40,6 +40,37 @@ def _render(cash_balance: float | None, positions: list[Any] | None = None) -> s
     return templates.get_template("_portfolio.html").render(**context)
 
 
+def _render_with_total_pnl(total_pnl_gbp: float) -> str:
+    """Render one valued position so the unrealised P&L summary is visible."""
+    context = {
+        "positions": [_fake_position()],
+        "cash_balance": 0.0,
+        "cash_flows": [],
+        "positions_with_value": [_fake_position()],
+        "chart_points": 0,
+        "portfolio_id": None,
+        "portfolios": [],
+        "active_portfolio": None,
+        "chart_labels": "[]",
+        "chart_values": "[]",
+        "chart_costs": "[]",
+        "chart_cash": "[]",
+        "chart_buys": "[]",
+        "chart_sells": "[]",
+        "chart_buy_tips": "[]",
+        "chart_sell_tips": "[]",
+        "total_cost_gbp": 100,
+        "total_value_gbp": 100 + total_pnl_gbp,
+        "total_pnl_gbp": total_pnl_gbp,
+        "total_cost_gbp_valued": 100,
+        "prices_as_of": None,
+        "gbpusd_rate": None,
+        "error_message": None,
+        "warning_message": None,
+    }
+    return templates.get_template("_portfolio.html").render(**context)
+
+
 def _cash_row(html: str) -> str | None:
     """Return the CASH table row, or None when it isn't rendered.
 
@@ -79,6 +110,30 @@ def test_zero_cash_is_visible_with_positions() -> None:
 
     assert row is not None
     assert "<td>£0.00</td>" in row
+
+
+def test_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> None:
+    html = _render_with_total_pnl(12.5)
+
+    assert 'class="stat-card pnl-positive"' in html
+    assert 'class="sval pos"' in html
+    assert "+£12.50" in html
+
+
+def test_zero_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> None:
+    html = _render_with_total_pnl(0)
+
+    assert 'class="stat-card pnl-positive"' in html
+    assert 'class="sval pos"' in html
+    assert "+£0.00" in html
+
+
+def test_unrealised_pnl_summary_uses_negative_directional_cue_and_signed_value() -> None:
+    html = _render_with_total_pnl(-12.5)
+
+    assert 'class="stat-card pnl-negative"' in html
+    assert 'class="sval neg"' in html
+    assert "£-12.50" in html
 
 
 def test_zero_cash_is_visible_for_cash_only_portfolio() -> None:
