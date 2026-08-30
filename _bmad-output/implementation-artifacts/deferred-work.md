@@ -359,3 +359,10 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-418-refresh-freshness-affordance.md`
   summary: `GET /` went from a zero-I/O shell render to synchronously parsing the whole `analysis_results.json` plus the status artifact on the event loop, and the load-triggered `/pipeline-status` fetch immediately re-does the same work.
   evidence: `build_freshness_context()` → `read_analysis_artifact_meta()` does `json.loads(path.read_text())` over every record to pull two fields, called directly inside `async def index`. Consistent with how `build_stock_scanner_context` is already called from async routes, so this is a codebase-wide pattern rather than a #418 defect, but #418 is what put it on the shell route.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-421-portfolio-chart-range.md`
+  summary: The portfolio chart range selector renders on the legacy single-portfolio `portfolio_value.csv` view (`_load_portfolio_history` with `portfolio_id is None`), where `range_key` is ignored, so the buttons appear active but never filter.
+  evidence: Post-#147 every UI path resolves an `active_id` so the `None` branch is effectively unreachable from the live app, but the selector markup is unconditional in `_portfolio_chart.html`; a deployment still on the CSV path would show non-functional controls.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-421-portfolio-chart-range.md`
+  summary: `chart_has_history` issues a dedicated `snapshot_history(portfolio_id, limit=2)` query on every portfolio render and every chart-fragment render, on top of the history load already performed.
+  evidence: Both reviewers flagged the extra round-trip; it exists because the range-filtered history load cannot answer "does any history exist at all" once the window is empty. Could be folded into a single query returning both the windowed series and an any-rows flag.

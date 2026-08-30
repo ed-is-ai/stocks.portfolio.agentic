@@ -4,7 +4,7 @@ import csv
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
@@ -13,7 +13,7 @@ from app.api.dependencies import (
     get_realised_pnl_service,
     get_trader_service,
 )
-from app.api.params import optional_int
+from app.api.params import chart_range, optional_int
 from app.api.templating import templates
 from app.api.stock_scanner_context import (
     build_freshness_context,
@@ -61,13 +61,37 @@ async def partial_stock_scanner(
 
 @router.get("/partials/portfolio", response_class=HTMLResponse)
 async def partial_portfolio(
-    request: Request, portfolio: PortfolioDep, portfolio_id: str | None = None
+    request: Request,
+    portfolio: PortfolioDep,
+    portfolio_id: str | None = None,
+    range_key: str | None = Query(None, alias="range"),
 ) -> HTMLResponse:
     # Accept a raw string: the client sends an empty ``portfolio_id=`` when no
     # account is selected, which an ``int | None`` param rejects with 422 and
-    # breaks the tab (#147 regression).
-    context = portfolio.default_portfolio_context(optional_int(portfolio_id))
+    # breaks the tab (#147 regression). ``range`` rides the same request via
+    # ``hx-vals`` so the first paint already honours the stored range (#421).
+    context = portfolio.default_portfolio_context(
+        optional_int(portfolio_id), range_key=chart_range(range_key)
+    )
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+@router.get("/partials/portfolio/chart", response_class=HTMLResponse)
+async def partial_portfolio_chart(
+    request: Request,
+    portfolio: PortfolioDep,
+    portfolio_id: str | None = None,
+    range_key: str | None = Query(None, alias="range"),
+) -> HTMLResponse:
+    """Re-render only the portfolio value-chart card on a range change (#421).
+
+    Lean by design: it does not rebuild positions, prices, or cash — a range
+    switch swaps ``#portfolio-chart-card`` alone.
+    """
+    context = portfolio.chart_fragment_context(
+        optional_int(portfolio_id), chart_range(range_key)
+    )
+    return templates.TemplateResponse(request, "_portfolio_chart.html", context=context)
 
 
 @router.get("/partials/realised-pnl", response_class=HTMLResponse)
