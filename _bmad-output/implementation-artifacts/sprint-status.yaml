@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-08-29 (Issue 370 code-reviewed and complete)"
+last_updated: "2026-08-30 (Feature 439 portfolio Strategy recommendations planned)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -94,3 +94,7 @@ development_status:
   366-1-record-one-initial-ranked-entry-selection: done
   366-2-rank-and-buy-the-strongest-top-x-basket: done
   366-3-configure-and-explain-the-top-x-basket: done
+  feature-gh-439-portfolio-strategy-recommendations: backlog
+  gh-440-assign-one-active-strategy-to-each-portfolio: backlog
+  gh-441-show-portfolio-specific-recommendations: backlog
+  gh-442-send-daily-portfolio-recommendation-emails: backlog
