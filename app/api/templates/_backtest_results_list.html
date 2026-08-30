@@ -17,7 +17,7 @@
   {% else %}
   <div class="tbl-wrap">
     <table class="table table-hover align-middle">
-      <thead><tr><th scope="col">Run</th><th scope="col">Started</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
+      <thead><tr><th scope="col">Run</th><th scope="col">Started</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Universe</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
       <tbody>
         {% for item in backtest_activities %}
         {% set activity = item.activity %}
@@ -30,7 +30,21 @@
              <span class="badge-status {{ status_class.get(activity.job.status.value, 'sm-muted-badge') }}">{{ activity.job.status.value|title }}</span>{% if activity.job.status.value == 'running' and activity.job.cancel_requested_at %} (cancellation requested){% endif %}
            </td>
            <td class="mono-num">{{ activity.strategy_id }} · v{{ activity.strategy_api_version }}</td>
-           <td class="text-wrap">{{ activity.parameter_summary }}</td>
+           <td class="text-wrap" style="max-width: 14rem">
+             {{ item.universe.label }}{% if item.universe.tickers|length > 1 %}
+             <details class="mt-1">
+               <summary>View securities</summary>
+               <ul class="mb-0 ps-3">
+                 {% for ticker in item.universe.tickers %}<li>{{ ticker }}</li>{% endfor %}
+               </ul>
+             </details>{% endif %}
+           </td>
+           <td class="text-wrap" style="max-width: 18rem">
+            {%- if activity.tuning_parameters is none -%}(defaults)
+            {%- else -%}{% for key, value in activity.tuning_parameters|dictsort -%}{{ key }}={{ value }}{%- if not loop.last %}, {% endif -%}
+              {%- else -%}(universe selection only){% endfor -%}
+            {%- endif -%}
+           </td>
            <td class="mono-num">{{ activity.start_month }} to {{ activity.end_month }}</td>
           <td class="mono-num">
             {%- if item.metrics and activity.job.status.value == 'complete' -%}

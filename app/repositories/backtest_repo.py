@@ -16,6 +16,8 @@ from threading import RLock
 from typing import Callable, Literal, Mapping, Protocol, TYPE_CHECKING, cast, overload
 from uuid import uuid4
 
+from pydantic import ValidationError
+
 from app.repositories.db import Connect, session
 from app.services.backtest.historical_scan_record import (
     DetectorFragmentEnvelopeV1,
@@ -1223,7 +1225,13 @@ class BacktestActivitySummaryV1:
     from persisted typed parameters (independent of whether the Skill
     still exists on disk), the normalized period, and Metrics only from a
     verified complete Result -- ``None`` for every non-complete job,
-    never a zero-filled stand-in."""
+    never a zero-filled stand-in.
+
+    gh-434 adds the display-only universe context: the run's pinned
+    ``profile_hash``, the canonical security IDs parsed from the
+    persisted ``selection_json`` (``None`` for legacy runs without one or
+    whose stored JSON no longer validates), and the tuning-parameters
+    dict with the universe-selection keys removed."""
 
     job: StrategyJobV1
     strategy_id: str
@@ -1233,6 +1241,9 @@ class BacktestActivitySummaryV1:
     end_month: str
     metrics: "BacktestMetricsV1 | None"
     metric_availability: "MetricAvailabilityV1 | None"
+    profile_hash: str | None = None
+    universe_security_ids: tuple[str, ...] | None = None
+    tuning_parameters: dict[str, object] | None = None
 
 
 class ComparisonIneligibleReason(StrEnum):
@@ -1396,6 +1407,54 @@ def _parameter_summary(parameters: dict[str, object]) -> str:
     if not parameters:
         return "(defaults)"
     return ", ".join(f"{key}={value!r}" for key, value in sorted(parameters.items()))
+
+
+#: The default parameter key carrying a run's security universe, plus the
+#: pre-gh-434 alias -- both are universe selection, never a tuning knob.
+UNIVERSE_PARAMETER_KEYS = ("security_ids", "selected_securities")
+
+#: ``RunUniverseSelectionV1.universe_parameter``'s schema default, used
+#: when a run has no persisted selection to name its own key.
+DEFAULT_UNIVERSE_PARAMETER = "security_ids"
+
+
+def tuning_parameters(
+    parameters: dict[str, object], universe_parameter: str | None = None
+) -> dict[str, object] | None:
+    """Return ``parameters`` minus the universe-selection keys (gh-434) --
+    the display-only tuning-knob view for the results list and Result
+    page. ``universe_parameter`` names the run's own universe key when a
+    persisted selection exists; :data:`UNIVERSE_PARAMETER_KEYS` (the
+    default key and the legacy alias) are always excluded. ``None`` means
+    the run had no parameters at all (renders as "(defaults)"); an empty
+    dict means every parameter was a universe key (renders as
+    "(universe selection only)"). ``_parameter_summary``'s output
+    contract is untouched."""
+    if not parameters:
+        return None
+    excluded = set(UNIVERSE_PARAMETER_KEYS)
+    if universe_parameter:
+        excluded.add(universe_parameter)
+    return {key: value for key, value in parameters.items() if key not in excluded}
+
+
+def _parse_universe_selection(
+    selection_json: object,
+) -> tuple[tuple[str, ...] | None, str]:
+    """Parse a persisted ``strategy_runs.selection_json`` value into
+    ``(canonical_security_ids, universe_parameter)``.
+
+    A legacy NULL -- or stored JSON that no longer validates against
+    :class:`RunUniverseSelectionV1` -- degrades to ``(None,
+    :data:`DEFAULT_UNIVERSE_PARAMETER`)`` so the display layer renders a
+    placeholder instead of raising; nothing is ever rewritten."""
+    if selection_json is None:
+        return None, DEFAULT_UNIVERSE_PARAMETER
+    try:
+        selection = RunUniverseSelectionV1.model_validate_json(str(selection_json))
+    except ValidationError:
+        return None, DEFAULT_UNIVERSE_PARAMETER
+    return selection.canonical_security_ids, selection.universe_parameter
 
 
 def _row_to_strategy_job(row: sqlite3.Row | tuple[object, ...]) -> StrategyJobV1:
@@ -2863,7 +2922,8 @@ class BacktestRepository:
                 str(row[0]): row
                 for row in conn.execute(
                     "SELECT id, strategy_id, strategy_api_version, "
-                    "parameters_json, start_month, end_month FROM strategy_runs"
+                    "parameters_json, start_month, end_month, "
+                    "profile_hash, selection_json FROM strategy_runs"
                 ).fetchall()
             }
             result_ids = {
@@ -2901,6 +2961,7 @@ class BacktestRepository:
                 result = self.backtest_result(job.id)
                 metrics = result.metrics
                 availability = result.metric_availability
+            universe_ids, universe_parameter = _parse_universe_selection(run_row[7])
             summaries.append(
                 BacktestActivitySummaryV1(
                     job=job,
@@ -2911,6 +2972,9 @@ class BacktestRepository:
                     end_month=str(run_row[5]),
                     metrics=metrics,
                     metric_availability=availability,
+                    profile_hash=str(run_row[6]),
+                    universe_security_ids=universe_ids,
+                    tuning_parameters=tuning_parameters(parameters, universe_parameter),
                 )
             )
         return tuple(summaries)
