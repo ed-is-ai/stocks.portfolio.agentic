@@ -61,6 +61,7 @@ from app.services.backtest.snapshot_profile import (
 )
 from app.services.backtest.strategy_job import (
     StrategyJobConflict,
+    StrategyJobNotFound,
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
@@ -570,6 +571,50 @@ def test_initialization_is_disabled_when_not_qualified(services):
     assert response.status_code == 200
     assert "providers have not passed certification" in response.text
     assert "disabled" in response.text
+
+
+def test_initialization_uses_plain_copy_and_describes_preparation_history(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="opaque-initialization-id",
+        job_type=StrategyJobType.INITIALIZATION,
+        status=StrategyJobStatus.COMPLETE,
+        created_at=datetime.now(timezone.utc),
+    )
+    repo.initialization_run = lambda _job_id: SimpleNamespace(
+        requested_start="2024-01", requested_end="2024-03"
+    )
+
+    response = client.get("/strategy-manager/initialization")
+
+    assert response.status_code == 200
+    assert ">Prepare data</button>" in response.text
+    assert "YYYY-MM;" not in response.text
+    assert "Completed historical months only." in response.text
+    assert "Prepared 2024-01 to 2024-03" in response.text
+    assert "just now" in response.text
+    assert ">Complete: opaque-initialization-id<" not in response.text
+    assert 'href="/strategy-manager/activities/opaque-initialization-id"' in response.text
+
+
+def test_initialization_history_omits_job_when_its_run_cannot_be_loaded(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="missing-run",
+        job_type=StrategyJobType.INITIALIZATION,
+        status=StrategyJobStatus.COMPLETE,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    def missing_run(_job_id):
+        raise StrategyJobNotFound("initialization run is missing")
+
+    repo.initialization_run = missing_run
+    response = client.get("/strategy-manager/initialization")
+
+    assert response.status_code == 200
+    assert "Initialization history" not in response.text
+    assert "missing-run" not in response.text
 
 
 def test_invalid_range_has_linked_errors_and_no_aria_invalid_when_clean(services):

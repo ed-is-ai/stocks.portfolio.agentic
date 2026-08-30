@@ -260,6 +260,35 @@ class _BacktestActivityView:
     metrics: BacktestMetricsDisplayV1 | None
 
 
+@dataclass(frozen=True)
+class _InitializationHistoryView:
+    """One displayable preparation attempt and its persisted request range."""
+
+    job: object
+    initialization: object
+
+
+def _initialization_history(repo: BacktestRepository) -> tuple[_InitializationHistoryView, ...]:
+    """Return only initialization jobs whose immutable request can be read.
+
+    The initialization subtype owns the requested range.  A dangling legacy
+    job is therefore not useful history and must not fall back to displaying
+    its opaque job identifier.
+    """
+    history: list[_InitializationHistoryView] = []
+    for job in repo.list_strategy_jobs():
+        if job.job_type is not StrategyJobType.INITIALIZATION:
+            continue
+        try:
+            initialization = repo.initialization_run(job.id)
+        except (BacktestIntegrityError, StrategyJobNotFound):
+            continue
+        history.append(
+            _InitializationHistoryView(job=job, initialization=initialization)
+        )
+    return tuple(history)
+
+
 def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
     """Return the Backtest results list, or an explicit integrity alert
     (Story 2.8 AC 1, 7) -- a repository/integrity error is not an empty
@@ -290,15 +319,10 @@ def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
 def _initialization_context(
     repo: BacktestRepository, **extra: object
 ) -> dict[str, object]:
-    jobs = tuple(
-        job
-        for job in repo.list_strategy_jobs()
-        if job.job_type is StrategyJobType.INITIALIZATION
-    )
     return {
         **_coverage_context(repo),
         **_profile_context(repo),
-        "jobs": jobs,
+        "initialization_history": _initialization_history(repo),
         "max_month": (date.today().replace(day=1) - timedelta(days=1)).strftime(
             "%Y-%m"
         ),
