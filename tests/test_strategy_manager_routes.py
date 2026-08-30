@@ -130,6 +130,7 @@ class FakeRepo:
         self.backtest_activities_error: BacktestIntegrityError | None = None
         # Story 2.9: Result page + note CAS fakes.
         self.result: BacktestResultV1 | None = None
+        self.latest_result: BacktestResultV1 | None = None
         self.result_error: Exception | None = None
         self.result_coverage: CoverageSummaryV1 | None = None
         # Story 3.3: a second, independently-settable Result/error so
@@ -234,6 +235,9 @@ class FakeRepo:
         if self.result is None or self.result.run_id != run_id:
             raise StrategyJobNotFound(f"missing result: {run_id}")
         return self.result
+
+    def latest_completed_backtest_result(self):
+        return self.latest_result
 
     def update_backtest_result_note(self, run_id, *, expected_note_version, note):
         from app.services.backtest.strategy_job import StrategyJobNotFound
@@ -966,7 +970,7 @@ def test_configuration_run_backtest_uses_project_primary_button(launch):
     response = client.get("/strategy-manager/configuration")
 
     assert response.status_code == 200
-    assert 'class="sm-btn sm-btn-primary mt-3" type="submit"' in response.text
+    assert 'class="sm-btn sm-btn-primary" type="submit"' in response.text
     assert ".sm-btn:disabled," in Path("app/api/static/css/theme.css").read_text()
 
 
@@ -1575,6 +1579,7 @@ class FakeLaunchService:
 def launch(monkeypatch):
     fake = FakeLaunchService()
     repo = FakeRepo()
+    fake.repo = repo
     app.dependency_overrides[get_backtest_launch_service] = lambda: fake
     app.dependency_overrides[get_backtest_repository] = lambda: repo
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
@@ -1583,6 +1588,86 @@ def launch(monkeypatch):
     finally:
         app.dependency_overrides.pop(get_backtest_launch_service, None)
         app.dependency_overrides.pop(get_backtest_repository, None)
+
+
+def test_configuration_recalls_compatible_completed_result(launch):
+    launch.repo.latest_result = replace(
+        _result(),
+        strategy_id="alpha",
+        parameters={
+            "lookback": 30,
+            "threshold": 2.5,
+            "enabled": False,
+            "label": "remembered",
+            "mode": "b",
+            "selected_securities": ["deleted-security"],
+        },
+        start_month="2024-01",
+        end_month="2024-03",
+        base_currency="USD",
+        starting_capital=Decimal("25000.50"),
+    )
+
+    response = client.get("/strategy-manager/configuration")
+
+    assert response.status_code == 200
+    assert "Previous completed backtest settings restored." in response.text
+    assert 'id="strategy_id__alpha" value="alpha" checked' in response.text
+    assert 'value="30"' in response.text
+    assert 'value="2.5"' in response.text
+    assert 'value="remembered"' in response.text
+    assert 'id="param__enabled__false" value="false" checked' in response.text
+    assert 'id="param__mode__1" value="1" checked' in response.text
+    assert '<option value="2024-01" selected>' in response.text
+    assert '<option value="2024-03" selected>' in response.text
+    assert 'value="25000.50"' in response.text
+    assert '<option value="USD" selected>' in response.text
+    assert 'name="idempotency_key" value="' in response.text
+    assert "deleted-security" not in response.text
+    assert 'id="whole_universe"' in response.text and "checked" in response.text
+
+
+def test_configuration_without_completed_history_keeps_first_run_defaults(launch):
+    response = client.get("/strategy-manager/configuration")
+
+    assert response.status_code == 200
+    assert "Previous completed backtest settings restored." not in response.text
+    assert 'value=""' in response.text
+    assert '<option value="GBP" selected>' in response.text
+
+
+def test_configuration_recall_falls_back_for_unavailable_strategy_and_period(launch):
+    launch.repo.latest_result = replace(
+        _result(),
+        strategy_id="removed",
+        start_month="2023-01",
+        end_month="2023-02",
+        starting_capital=Decimal("12000"),
+    )
+
+    response = client.get("/strategy-manager/configuration")
+
+    assert response.status_code == 200
+    assert "previous Strategy is no longer available" in response.text
+    assert 'name="strategy_id"' in response.text
+    assert 'checked' not in response.text.split('<fieldset class="sm-configuration-section" data-wizard-step="1">')[1].split('</fieldset>')[0]
+    assert 'value="12000"' in response.text
+    assert '<option value="2023-01" selected>' not in response.text
+
+
+def test_configuration_recall_stale_period_and_reset_use_first_run_periods(launch):
+    launch.repo.latest_result = replace(
+        _result(), strategy_id="alpha", start_month="2023-01", end_month="2023-02"
+    )
+
+    recalled = client.get("/strategy-manager/configuration")
+    reset = client.get("/strategy-manager/configuration?reset=defaults")
+
+    assert "period is no longer ready" in recalled.text
+    assert '<option value="2023-01" selected>' not in recalled.text
+    assert "Previous completed backtest settings restored." not in reset.text
+    assert "Reset to defaults" in reset.text
+    assert 'value=""' in reset.text
 
 
 def test_configuration_zero_strategies_explains_state(launch):
@@ -1614,6 +1699,47 @@ def test_configuration_switching_strategy_preserves_period_capital_currency(laun
     assert 'value="2024-02" selected' in response.text
     assert '<option value="USD" selected>' in response.text
     assert 'value="5000"' in response.text
+    assert '>$</span>' in response.text
+
+
+def test_configuration_capital_control_exposes_currency_presentation_hooks(launch):
+    """Currency inference is client-side only; the submitted select remains
+    the existing validated ``base_currency`` form field."""
+    response = client.get("/strategy-manager/configuration?strategy_id=alpha")
+    assert response.status_code == 200
+    text = response.text
+    assert 'class="sm-capital-control"' in text
+    assert 'id="capital-currency-symbol"' in text
+    assert 'id="base-currency-control"' in text
+    assert 'name="base_currency"' in text
+    assert "strategy-manager:universe-currency-change" in text
+    assert "currencyControl.hidden" in text
+    assert 'input[type="hidden"][name="security_ids"][data-security-currency]' in text
+
+
+def test_configuration_currency_error_keeps_selector_visible(launch):
+    response = client.post(
+        "/strategy-manager/configuration",
+        data=_base_form(base_currency="EUR"),
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 422
+    assert 'id="base_currency"' in response.text
+    assert 'aria-invalid="true"' in response.text
+    assert "!currencySelect.hasAttribute('aria-invalid')" in response.text
+
+
+def test_configuration_coverage_reason_is_attached_to_disabled_action(launch):
+    launch.coverage = SimpleNamespace(display_version="Scanner v1", intervals=())
+    response = client.get("/strategy-manager/configuration")
+    assert response.status_code == 200
+    text = response.text
+    assert 'class="sm-sticky-actions"' in text
+    assert 'id="coverage-action-help"' in text
+    assert 'aria-describedby="coverage-action-help"' in text
+    assert "Historical monthly snapshots must be initialized" in text
+    assert '<p class="sm-alert sm-alert-warning mt-3 mb-0">' not in text
 
 
 def test_configuration_selecting_strategy_renders_its_parameters(launch):

@@ -119,6 +119,7 @@ def _seed_backtest_run(
     claim_token: str | None = CLAIM_TOKEN,
     status_version: int = 1,
     starting_capital: str = "10000.00000000",
+    enqueue_seq: int = 1,
 ) -> None:
     """Seed one 'backtest' job + its pinned ``strategy_runs`` identity --
     Story 2.6 owns enqueue/claim in production; this story's tests seed
@@ -131,14 +132,10 @@ def _seed_backtest_run(
             """INSERT INTO strategy_jobs (
                    id, job_type, status, enqueue_seq, claim_token, current_month,
                    status_version, cancel_requested_at, created_at, updated_at
-               ) VALUES (?, 'backtest', ?, 1, ?, NULL, ?, NULL, ?, ?)""",
+               ) VALUES (?, 'backtest', ?, ?, ?, NULL, ?, NULL, ?, ?)""",
             (
-                run_id,
-                status,
-                claim_token,
-                status_version,
-                NOW.isoformat(),
-                NOW.isoformat(),
+                run_id, status, enqueue_seq, claim_token, status_version,
+                NOW.isoformat(), NOW.isoformat(),
             ),
         )
         conn.execute(
@@ -723,6 +720,31 @@ def test_completion_promotes_result_trade_log_and_curve_and_deletes_staging(
     assert len(result.equity_curve) == 2
     assert result.note is None
     assert result.note_version == 1
+
+
+def test_latest_completed_backtest_result_uses_valid_durable_result_order(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path, run_id="backtest-run-1", enqueue_seq=2)
+    _write_staging(repo, run_id="backtest-run-1")
+    repo.complete_claimed_backtest_job("backtest-run-1", CLAIM_TOKEN, expected_version=1)
+    _seed_backtest_run(path, run_id="backtest-run-2")
+    _write_staging(repo, run_id="backtest-run-2")
+    repo.complete_claimed_backtest_job("backtest-run-2", CLAIM_TOKEN, expected_version=1)
+
+    assert repo.latest_completed_backtest_result().run_id == "backtest-run-2"  # type: ignore[union-attr]
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """UPDATE strategy_jobs
+               SET deleted_at=?, updated_at=?, status_version=status_version+1
+               WHERE id=?""",
+            (NOW.isoformat(), NOW.isoformat(), "backtest-run-2"),
+        )
+
+    assert repo.latest_completed_backtest_result().run_id == "backtest-run-1"  # type: ignore[union-attr]
 
 
 def test_completion_requires_staging_to_exist(tmp_path: Path) -> None:

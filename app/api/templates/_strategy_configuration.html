@@ -6,6 +6,10 @@
   <h1 id="strategy-configuration-heading" tabindex="-1" class="h3">Configure a Backtest</h1>
   <p class="text-muted">Select a Strategy, review or edit its parameters, then choose a backtestable period and starting capital.</p>
 
+  {% if recall_notice %}
+  <div class="sm-alert sm-alert-info" role="status">{{ recall_notice }}</div>
+  {% endif %}
+
   {% if errors %}
   <div id="configuration-errors" class="sm-alert sm-alert-danger" role="alert" tabindex="-1">
     <strong>Correct the following:</strong>
@@ -30,11 +34,13 @@
     <input type="hidden" name="activation_seq" value="{{ active_profile.activation_seq if active_profile else 0 }}">
     <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
 
+    <p><a class="sm-btn sm-btn-secondary" href="/strategy-manager/configuration?reset=defaults" hx-get="/strategy-manager/configuration?reset=defaults" hx-target="#tab-content" hx-swap="innerHTML">Reset to defaults</a></p>
+
     <nav class="sm-wizard-indicator mb-3" aria-label="Backtest configuration progress">
       <span id="wizard-step-indicator" tabindex="-1" aria-live="polite">Step 1 of 3</span>
     </nav>
 
-    <fieldset class="card sm-card" data-wizard-step="1"><div class="card-body">
+    <fieldset class="sm-configuration-section" data-wizard-step="1">
       <legend class="h5">Strategy</legend>
       {% if errors.get('strategy_id') %}<div id="strategy_id-error" class="text-danger">{{ errors.strategy_id }}</div>{% endif %}
       {% for strategy in strategies %}
@@ -46,25 +52,24 @@
         </label>
       </div>
       {% endfor %}
-    </div></fieldset>
+    </fieldset>
 
-    <fieldset class="card sm-card mt-2" data-wizard-step="2"><div class="card-body">
+    <fieldset class="sm-configuration-section" data-wizard-step="2">
       <legend class="h5">Universe</legend>
       {% if errors.get('security_ids') %}
       <div class="sm-alert sm-alert-danger mb-2" role="alert">{{ errors.security_ids }}</div>
       {% endif %}
       {% include "_universe_selector.html" %}
-    </div></fieldset>
+    </fieldset>
 
     {% include "_strategy_configuration_fields.html" %}
 
-    {% if not coverage or not coverage.snapshot_count or coverage_error %}
-    <p class="sm-alert sm-alert-warning mt-3 mb-0">{{ coverage_error or 'Historical monthly snapshots must be initialized before a backtest can run.' }}</p>
-    {% endif %}
-
-    <div data-wizard-step="3">
+    <div class="sm-sticky-actions" data-wizard-step="3">
       <div id="wizard-summary" class="sm-wizard-summary mb-3"></div>
-      <button class="sm-btn sm-btn-primary mt-3" type="submit" {% if not coverage or not coverage.snapshot_count or coverage_error %}disabled aria-disabled="true"{% endif %}>Run Backtest</button>
+      {% if not coverage or not coverage.snapshot_count or coverage_error %}
+      <p id="coverage-action-help" class="sm-action-help mb-2">{{ coverage_error or 'Historical monthly snapshots must be initialized before a backtest can run.' }}</p>
+      {% endif %}
+      <button class="sm-btn sm-btn-primary" type="submit" {% if not coverage or not coverage.snapshot_count or coverage_error %}disabled aria-disabled="true" aria-describedby="coverage-action-help"{% endif %}>Run Backtest</button>
     </div>
 
     <div class="sm-wizard-controls mt-3">
