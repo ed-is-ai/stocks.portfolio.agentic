@@ -31,10 +31,12 @@ from app.api.dependencies import (
 from app.api.templating import templates
 from app.core.security import require_local_or_token
 from app.repositories.backtest_repo import (
+    BacktestActivitySummaryV1,
     BacktestIntegrityError,
     BacktestRepository,
     BacktestResultV1,
     ComparisonEligibilityV1,
+    tuning_parameters,
 )
 from app.services.backtest.backtest_launch_service import (
     BacktestLaunchCommandV1,
@@ -43,7 +45,9 @@ from app.services.backtest.backtest_launch_service import (
 )
 from app.services.backtest.result_presenter import (
     BacktestMetricsDisplayV1,
+    UniverseViewV1,
     backtest_metrics_view,
+    build_universe_view,
     comparison_equity_payload,
     equity_curve_payload,
     initial_basket_view,
@@ -255,10 +259,12 @@ def _profile_context(
 
 @dataclass(frozen=True)
 class _BacktestActivityView:
-    """A list row plus its presentation-only metrics, never persisted."""
+    """A list row plus its presentation-only metrics and universe view,
+    never persisted."""
 
     activity: object
     metrics: BacktestMetricsDisplayV1 | None
+    universe: UniverseViewV1
 
 
 @dataclass(frozen=True)
@@ -269,7 +275,9 @@ class _InitializationHistoryView:
     initialization: object
 
 
-def _initialization_history(repo: BacktestRepository) -> tuple[_InitializationHistoryView, ...]:
+def _initialization_history(
+    repo: BacktestRepository,
+) -> tuple[_InitializationHistoryView, ...]:
     """Return only initialization jobs whose immutable request can be read.
 
     The initialization subtype owns the requested range.  A dangling legacy
@@ -296,25 +304,66 @@ def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
     list, so the list template must be able to tell the two apart."""
     try:
         activities = repo.list_backtest_activities()
-        return {
-            "backtest_activities": tuple(
-                _BacktestActivityView(
-                    activity=activity,
-                    metrics=(
-                        backtest_metrics_view(
-                            activity.metrics, activity.metric_availability
-                        )
-                        if activity.metrics is not None
-                        and activity.metric_availability is not None
-                        else None
-                    ),
-                )
-                for activity in activities
-            ),
-            "backtest_activities_error": None,
-        }
     except BacktestIntegrityError as exc:
         return {"backtest_activities": (), "backtest_activities_error": str(exc)}
+    # gh-434: universe resolution is memoised per distinct key within this
+    # request -- one roster read per profile_hash, one runnable-universe
+    # read per (profile_hash, start_month). A missing snapshot month only
+    # suppresses the whole-universe claim (count-only label), never the
+    # render.
+    identity_cache: dict[str, dict[str, tuple[str, str]]] = {}
+    runnable_cache: dict[tuple[str, str], tuple[str, ...] | None] = {}
+
+    def _identities(profile_hash: str) -> dict[str, tuple[str, str]]:
+        if profile_hash not in identity_cache:
+            try:
+                identity_cache[profile_hash] = _roster_identity_map(repo, profile_hash)
+            except BacktestIntegrityError:
+                identity_cache[profile_hash] = {}
+        return identity_cache[profile_hash]
+
+    def _runnable_ids(profile_hash: str, start_month: str) -> tuple[str, ...] | None:
+        key = (profile_hash, start_month)
+        if key not in runnable_cache:
+            try:
+                runnable_cache[key] = tuple(
+                    security_id
+                    for security_id, _revision in repo.snapshot_member_revisions(
+                        profile_hash, start_month
+                    )
+                )
+            except BacktestIntegrityError:
+                runnable_cache[key] = None
+        return runnable_cache[key]
+
+    def _universe_view(activity: BacktestActivitySummaryV1) -> UniverseViewV1:
+        security_ids = activity.universe_security_ids
+        if not security_ids or not activity.profile_hash:
+            return build_universe_view(None, {})
+        return build_universe_view(
+            security_ids,
+            _identities(activity.profile_hash),
+            runnable_ids=_runnable_ids(activity.profile_hash, activity.start_month),
+        )
+
+    return {
+        "backtest_activities": tuple(
+            _BacktestActivityView(
+                activity=activity,
+                metrics=(
+                    backtest_metrics_view(
+                        activity.metrics, activity.metric_availability
+                    )
+                    if activity.metrics is not None
+                    and activity.metric_availability is not None
+                    else None
+                ),
+                universe=_universe_view(activity),
+            )
+            for activity in activities
+        ),
+        "backtest_activities_error": None,
+    }
 
 
 def _initialization_context(
@@ -894,12 +943,17 @@ def _apply_recalled_configuration(
 
     context["selected"] = selected
     context["selected_strategy_id"] = selected.strategy_id
-    context["enum_options"], context["enum_default_tokens"] = _enum_form_context(selected)
+    context["enum_options"], context["enum_default_tokens"] = _enum_form_context(
+        selected
+    )
     context["parameter_values"] = _recall_parameter_values(selected, result.parameters)
     coverage = context["coverage"]
     intervals = getattr(coverage, "intervals", ()) if coverage is not None else ()
     if any(
-        interval.start_month <= result.start_month <= result.end_month <= interval.end_month
+        interval.start_month
+        <= result.start_month
+        <= result.end_month
+        <= interval.end_month
         for interval in intervals
     ):
         values["start_month"] = result.start_month
@@ -1551,6 +1605,25 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         ) from exc
     coverage = repo.snapshot_coverage(profile_hash=result.profile_hash)
     identities = _roster_identity_map(repo, result.profile_hash)
+    # gh-434: the whole-universe flag was never persisted -- reconstruct it
+    # by comparing the selection against the runnable universe for the
+    # run's own (profile_hash, start_month). A missing snapshot month only
+    # degrades the label to count-only; it never fails the render.
+    selection = result.universe_selection
+    try:
+        runnable_ids = tuple(
+            security_id
+            for security_id, _revision in repo.snapshot_member_revisions(
+                result.profile_hash, result.start_month
+            )
+        )
+    except BacktestIntegrityError:
+        runnable_ids = None
+    universe = build_universe_view(
+        None if selection is None else selection.canonical_security_ids,
+        identities,
+        runnable_ids=runnable_ids,
+    )
     return {
         "run_id": run_id,
         "integrity_error": None,
@@ -1565,6 +1638,11 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
         "note": note_view(result),
+        "universe": universe,
+        "tuning_parameters": tuning_parameters(
+            result.parameters,
+            None if selection is None else selection.universe_parameter,
+        ),
         "submitted_note_text": None,
         "note_error": None,
         "note_conflict": False,
