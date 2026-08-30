@@ -19,7 +19,7 @@ def _backtest_title(status: str, backtest: dict[str, object] | None) -> str:
         "failed": "Backtest failed",
         "cancelled": "Backtest cancelled",
         "complete": "Backtest complete",
-        "running": "Backtest in progress",
+        "running": "Backtest running",
     }
     return labels.get(status, "Backtest queued") + suffix
 
@@ -39,7 +39,7 @@ def _activity_title(job_type: str, status: str) -> str:
         "failed": "failed",
         "cancelled": "cancelled",
         "complete": "complete",
-        "running": "in progress",
+        "running": "running",
     }
     return f"{label} {suffixes.get(status, 'queued')}"
 
@@ -56,8 +56,8 @@ def _projection(payload: dict[str, object]) -> dict[str, object]:
         return {
             "event_type": "strategy_job_deleted",
             "severity": NotificationSeverity.INFO,
-            "title": "Activity no longer available",
-            "body": "Activity no longer available.",
+            "title": "Run no longer available",
+            "body": "Run no longer available.",
             "target_url": None,
             "actions": (),
         }

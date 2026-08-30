@@ -160,7 +160,7 @@ def test_tombstone_projection_removes_actions_and_target(tmp_path):
     projector = StrategyNotificationProjector(repo, notifications)
     assert projector.project_pending() == 1
     item = notifications.recent(include_dismissed=True)[0]
-    assert item.title == "Activity no longer available"
+    assert item.title == "Run no longer available"
     assert item.target_url is None
     assert item.actions == ()
 
@@ -340,7 +340,7 @@ def test_backtest_tombstone_projection_removes_actions_and_target(tmp_path):
     assert projector.project_pending() == 1
     item = notifications.recent(include_dismissed=True)[0]
 
-    assert item.title == "Activity no longer available"
+    assert item.title == "Run no longer available"
     assert item.target_url is None
     assert item.actions == ()
 
