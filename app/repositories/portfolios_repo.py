@@ -93,6 +93,10 @@ class PortfoliosRepository:
                 (portfolio_id,),
             )
             conn.execute(
+                "DELETE FROM portfolio_strategies WHERE portfolio_id = ?",
+                (portfolio_id,),
+            )
+            conn.execute(
                 "DELETE FROM account_state WHERE key IN (?, ?)",
                 (f"cash_balance:{portfolio_id}", f"cash_balance_date:{portfolio_id}"),
             )

@@ -15,6 +15,30 @@ os.environ.setdefault("STRATEGY_MANAGER_WORKER_ENABLED", "false")
 
 
 @pytest.fixture(autouse=True)
+def isolate_strategy_di_caches():
+    """Clear the Strategy-assignment DI singletons around every test (#440).
+
+    The ``get_*`` providers are ``lru_cache`` singletons bound to real database
+    paths; without clearing, a test that hits a portfolio route without
+    overriding the providers would pin a real-DB-backed service for the rest
+    of the pytest session.
+    """
+    from app.api.dependencies import (
+        get_portfolio_service,
+        get_portfolio_strategies_repository,
+        get_strategy_assignment_service,
+    )
+
+    get_portfolio_service.cache_clear()
+    get_portfolio_strategies_repository.cache_clear()
+    get_strategy_assignment_service.cache_clear()
+    yield
+    get_portfolio_service.cache_clear()
+    get_portfolio_strategies_repository.cache_clear()
+    get_strategy_assignment_service.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def isolate_notifications_db(tmp_path, monkeypatch):
     """Point the notification store at a temp file for every test (#80).
 

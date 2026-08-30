@@ -1,0 +1,119 @@
+{# Assign-Strategy modal (#440, mockup surface 3).
+
+   Loaded by hx-get into #strategy-assign-modal-target. Choices come from
+   fail-soft discovery; discovery warnings and scan-freshness problems are
+   visible but never block assignment. Saving stores the Strategy ID and a
+   snapshot of its validated default parameters — nothing is launched. #}
+<div class="modal fade" id="strategyAssignModal" tabindex="-1"
+     aria-labelledby="strategyAssignModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="strategyAssignModalLabel">
+          <i class="bi bi-diagram-3 me-1"></i>Assign Strategy
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"
+                aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        {% if strategy_freshness and strategy_freshness != 'fresh' %}
+        <div class="alert alert-warning border-0 d-flex align-items-center gap-2 py-2" role="status">
+          <i class="bi bi-exclamation-triangle-fill"></i>
+          <span>
+            {% if strategy_freshness == 'stale' %}
+            &#9888; Scan data is more than 24 hours old.
+            {% elif strategy_freshness == 'missing' %}
+            &#9888; Scan data is missing.
+            {% else %}
+            &#9888; Scan data is of unknown age.
+            {% endif %}
+            Recommendations may be out of date. You can still assign a Strategy.
+          </span>
+        </div>
+        {% endif %}
+        {% if strategy_warnings %}
+        {% for warning in strategy_warnings %}
+        <div class="alert alert-warning border-0 d-flex align-items-center gap-2 py-2" role="status">
+          <i class="bi bi-exclamation-triangle-fill"></i>
+          <span>Skill <code>{{ warning.folder }}</code> could not be loaded: {{ warning.message }}</span>
+        </div>
+        {% endfor %}
+        {% endif %}
+        {% if not portfolio_id %}
+        <div class="alert alert-warning border-0 d-flex align-items-center gap-2 py-2">
+          <i class="bi bi-exclamation-triangle-fill"></i>
+          <span>Select an account first, then assign a Strategy.</span>
+        </div>
+        {% elif not strategy_choices %}
+        <div class="alert alert-info border-0 d-flex align-items-center gap-2 py-2">
+          <i class="bi bi-info-circle-fill"></i>
+          <span>No Strategies are currently discoverable.</span>
+        </div>
+        {% endif %}
+        {% if portfolio_id and strategy_choices %}
+        <form hx-post="/portfolios/{{ portfolio_id }}/strategy"
+              hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+              hx-on::after-request="if (event.detail.successful) { hideStrategyAssignModal(); }">
+          {% if strategy_assignment and not strategy_assignment.available %}
+          <label class="d-flex align-items-start gap-2 border rounded p-2 mb-2"
+                 style="opacity:0.55; background:var(--bs-tertiary-bg, #f8f9fa)">
+            <input type="radio" name="strategy_id"
+                   value="{{ strategy_assignment.assignment.strategy_id }}" disabled>
+            <span>
+              <span class="fw-bold">
+                {{ strategy_assignment.display_name or strategy_assignment.assignment.strategy_id }}
+              </span>
+              <span class="badge text-bg-danger ms-1">unavailable</span>
+              <code class="d-block" style="font-size:0.72rem">{{ strategy_assignment.assignment.strategy_id }}</code>
+              <span class="text-muted d-block" style="font-size:0.74rem">
+                No longer discoverable — assignment will be retained until cleared.
+              </span>
+            </span>
+          </label>
+          {% endif %}
+          {% for choice in strategy_choices %}
+          <label class="d-flex align-items-start gap-2 border rounded p-2 mb-2"
+                 style="cursor:pointer">
+            <input type="radio" name="strategy_id" value="{{ choice.strategy_id }}"
+                   class="mt-1"
+                   {% if strategy_assignment and strategy_assignment.assignment.strategy_id == choice.strategy_id %}checked{% endif %}
+                   required>
+            <span>
+              <span class="fw-bold">{{ choice.display_name }}</span>
+              <code class="ms-1" style="font-size:0.72rem">{{ choice.strategy_id }}</code>
+              <span class="text-muted d-block" style="font-size:0.78rem">{{ choice.description }}</span>
+              <span class="d-flex flex-wrap gap-1 mt-1">
+                {% for key, value in choice.default_parameters.items() %}
+                <span class="badge text-bg-light border" style="font-weight:400">{{ key }}={{ value }}</span>
+                {% endfor %}
+              </span>
+            </span>
+          </label>
+          {% endfor %}
+          <div class="modal-footer px-0 pb-0">
+            <button type="button" class="btn btn-sm btn-outline-secondary"
+                    data-bs-dismiss="modal">Cancel</button>
+            <button type="submit" class="btn btn-sm btn-primary"
+                    {% if not strategy_choices or not portfolio_id %}disabled{% endif %}>
+              <i class="bi bi-check-lg me-1"></i>Assign Strategy
+            </button>
+          </div>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+  (function () {
+    var el = document.getElementById('strategyAssignModal');
+    if (el && window.bootstrap) {
+      bootstrap.Modal.getOrCreateInstance(el).show();
+    }
+    window.hideStrategyAssignModal = function () {
+      if (el && window.bootstrap) {
+        bootstrap.Modal.getOrCreateInstance(el).hide();
+      }
+    };
+  })();
+</script>

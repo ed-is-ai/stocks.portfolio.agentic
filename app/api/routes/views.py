@@ -11,6 +11,7 @@ from app.api.dependencies import (
     get_alerts_repository,
     get_portfolio_service,
     get_realised_pnl_service,
+    get_strategy_assignment_service,
     get_trader_service,
 )
 from app.api.params import chart_range, optional_int
@@ -25,6 +26,7 @@ from app.repositories.alerts_repo import AlertsRepository
 from app.schemas.source_health import SourceHealth
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
+from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 
 router = APIRouter()
@@ -92,6 +94,31 @@ async def partial_portfolio_chart(
         optional_int(portfolio_id), chart_range(range_key)
     )
     return templates.TemplateResponse(request, "_portfolio_chart.html", context=context)
+@router.get("/partials/strategy-assign", response_class=HTMLResponse)
+async def partial_strategy_assign(
+    request: Request,
+    assignment: Annotated[
+        StrategyAssignmentService, Depends(get_strategy_assignment_service)
+    ],
+    portfolio_id: str | None = None,
+) -> HTMLResponse:
+    """Render the assign-Strategy modal partial (#440).
+
+    Read-only: lists discovery choices/warnings and the portfolio's current
+    assignment. Accepts a raw string portfolio_id like /partials/portfolio
+    (an empty value means no account selected).
+    """
+    pid = optional_int(portfolio_id)
+    context = {
+        "portfolio_id": pid,
+        "strategy_choices": assignment.list_choices(),
+        "strategy_warnings": assignment.list_warnings(),
+        "strategy_assignment": (
+            assignment.assignment_view(pid) if pid is not None else None
+        ),
+        "strategy_freshness": assignment.freshness(),
+    }
+    return templates.TemplateResponse(request, "_strategy_assign.html", context=context)
 
 
 @router.get("/partials/realised-pnl", response_class=HTMLResponse)

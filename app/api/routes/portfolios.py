@@ -7,6 +7,7 @@ one; the template exposes its id so the browser can persist the selection.
 """
 
 import logging
+import sqlite3
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -15,6 +16,7 @@ from fastapi.responses import HTMLResponse
 from app.api.dependencies import (
     get_notifications_repository,
     get_portfolio_service,
+    get_strategy_assignment_service,
     get_trader_service,
 )
 from app.api.templating import templates
@@ -22,6 +24,11 @@ from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.services.portfolio_service import PortfolioService
+from app.services.strategy_assignment_service import (
+    IncompatibleStrategyError,
+    StrategyAssignmentService,
+    UnknownStrategyError,
+)
 from app.services.trader_service import TraderService
 
 router = APIRouter()
@@ -32,6 +39,9 @@ PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
 NotificationsDep = Annotated[
     NotificationsRepository, Depends(get_notifications_repository)
 ]
+StrategyAssignmentDep = Annotated[
+    StrategyAssignmentService, Depends(get_strategy_assignment_service)
+]
 
 
 def _render(
@@ -40,6 +50,26 @@ def _render(
     """Render the Portfolio partial scoped to ``portfolio_id``."""
     context = portfolio.default_portfolio_context(portfolio_id)
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
+
+
+def _strategy_warning(
+    request: Request,
+    portfolio: PortfolioService,
+    portfolio_id: int | None,
+    message: str,
+    *,
+    status_code: int = 200,
+) -> HTMLResponse:
+    """Re-render the Portfolio partial with a visible warning (#440).
+
+    Assignment failures are user-visible states, never 500s: the stored
+    assignment is left untouched and the tab re-renders with the message.
+    """
+    context = portfolio.default_portfolio_context(portfolio_id)
+    context["warning_message"] = message
+    return templates.TemplateResponse(
+        request, "_portfolio.html", context=context, status_code=status_code
+    )
 
 
 @router.post(
@@ -133,3 +163,71 @@ async def delete_portfolio(
     logger.info("Deleted portfolio id=%s", portfolio_id)
     # Fall back to the first remaining portfolio (or the empty state).
     return _render(request, portfolio, None)
+
+
+@router.post(
+    "/portfolios/{portfolio_id}/strategy",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def assign_strategy(
+    request: Request,
+    portfolio: PortfolioDep,
+    assignment: StrategyAssignmentDep,
+    portfolio_id: int,
+    strategy_id: Annotated[str | None, Form()] = None,
+) -> HTMLResponse:
+    """Assign one Strategy to the portfolio and re-render the partial.
+
+    Persistence + validation only — never launches a backtest, scan, email,
+    or trade. An unknown/incompatible Strategy, a missing form field, or a
+    portfolio that no longer exists re-renders the partial with a visible
+    warning (200, never 500) and leaves any stored assignment untouched
+    (#440).
+    """
+    if not strategy_id or not strategy_id.strip():
+        return _strategy_warning(
+            request, portfolio, portfolio_id, "No Strategy selected."
+        )
+    try:
+        assignment.assign(portfolio_id, strategy_id.strip())
+    except sqlite3.IntegrityError:
+        logger.warning(
+            "Strategy assignment rejected: portfolio id=%s no longer exists",
+            portfolio_id,
+        )
+        return _strategy_warning(
+            request,
+            portfolio,
+            portfolio_id,
+            "That portfolio no longer exists.",
+            status_code=404,
+        )
+    except (UnknownStrategyError, IncompatibleStrategyError) as exc:
+        logger.warning(
+            "Strategy assignment rejected for portfolio %s: %s", portfolio_id, exc
+        )
+        return _strategy_warning(
+            request, portfolio, portfolio_id, f"Could not assign Strategy: {exc}"
+        )
+    logger.info(
+        "Assigned Strategy %r to portfolio id=%s", strategy_id.strip(), portfolio_id
+    )
+    return _render(request, portfolio, portfolio_id)
+
+
+@router.post(
+    "/portfolios/{portfolio_id}/strategy/clear",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def clear_strategy(
+    request: Request,
+    portfolio: PortfolioDep,
+    assignment: StrategyAssignmentDep,
+    portfolio_id: int,
+) -> HTMLResponse:
+    """Clear the portfolio's Strategy assignment (idempotent) and re-render."""
+    assignment.clear(portfolio_id)
+    logger.info("Cleared Strategy assignment for portfolio id=%s", portfolio_id)
+    return _render(request, portfolio, portfolio_id)
