@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
     get_notifications_repository,
+    get_portfolio_recommendation_service,
     get_portfolio_service,
     get_strategy_assignment_service,
     get_trader_service,
@@ -23,6 +24,14 @@ from app.api.templating import templates
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
+from app.schemas.portfolio_recommendation import (
+    EvaluationUnavailable,
+    NoAssignment,
+    RecommendationResultV1,
+)
+from app.services.portfolio_recommendation_service import (
+    PortfolioRecommendationService,
+)
 from app.services.portfolio_service import PortfolioService
 from app.services.strategy_assignment_service import (
     IncompatibleStrategyError,
@@ -41,6 +50,9 @@ NotificationsDep = Annotated[
 ]
 StrategyAssignmentDep = Annotated[
     StrategyAssignmentService, Depends(get_strategy_assignment_service)
+]
+RecommendationDep = Annotated[
+    PortfolioRecommendationService, Depends(get_portfolio_recommendation_service)
 ]
 
 
@@ -231,3 +243,51 @@ async def clear_strategy(
     assignment.clear(portfolio_id)
     logger.info("Cleared Strategy assignment for portfolio id=%s", portfolio_id)
     return _render(request, portfolio, portfolio_id)
+
+
+@router.get(
+    "/portfolios/{portfolio_id}/recommendations",
+    response_class=HTMLResponse,
+)
+async def portfolio_recommendations(
+    request: Request,
+    recommendations: RecommendationDep,
+    trader: TraderDep,
+    portfolio_id: int,
+) -> HTMLResponse:
+    """Render the portfolio's Strategy recommendations screen (#441).
+
+    Read-only — no ``require_local_or_token`` beyond the read posture of
+    the ``/partials/*`` routes, no trade placement, no network fetch.
+    Every outcome (result, no assignment, evaluation failure) renders the
+    same partial with a 200, never a 500.
+    """
+    meta = trader.get_portfolio_meta(portfolio_id)
+    portfolio_name = meta.name if meta else f"Portfolio {portfolio_id}"
+    try:
+        outcome = recommendations.recommend(portfolio_id)
+    except Exception:
+        # Defense in depth: the typed outcomes cover the known failure
+        # modes; this keeps the never-500 promise even for the unknown ones.
+        logger.exception("Recommendation evaluation failed for %s", portfolio_id)
+        outcome = EvaluationUnavailable(
+            reason="Recommendations could not be evaluated — see the run log."
+        )
+    context: dict[str, object] = {
+        "portfolio_id": portfolio_id,
+        "portfolio_name": portfolio_name,
+        "result": None,
+        "no_assignment": False,
+        "unavailable_reason": None,
+        "unavailable_freshness": None,
+    }
+    if isinstance(outcome, RecommendationResultV1):
+        context["result"] = outcome
+    elif isinstance(outcome, NoAssignment):
+        context["no_assignment"] = True
+    else:
+        context["unavailable_reason"] = outcome.reason
+        context["unavailable_freshness"] = outcome.freshness
+    return templates.TemplateResponse(
+        request, "_portfolio_recommendations.html", context=context
+    )

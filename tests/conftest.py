@@ -24,6 +24,7 @@ def isolate_strategy_di_caches():
     of the pytest session.
     """
     from app.api.dependencies import (
+        get_portfolio_recommendation_service,
         get_portfolio_service,
         get_portfolio_strategies_repository,
         get_strategy_assignment_service,
@@ -32,10 +33,12 @@ def isolate_strategy_di_caches():
     get_portfolio_service.cache_clear()
     get_portfolio_strategies_repository.cache_clear()
     get_strategy_assignment_service.cache_clear()
+    get_portfolio_recommendation_service.cache_clear()
     yield
     get_portfolio_service.cache_clear()
     get_portfolio_strategies_repository.cache_clear()
     get_strategy_assignment_service.cache_clear()
+    get_portfolio_recommendation_service.cache_clear()
 
 
 @pytest.fixture(autouse=True)
