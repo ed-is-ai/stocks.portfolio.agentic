@@ -1,17 +1,15 @@
 """Route and rendered-accessibility tests for Strategy Manager Story 1.9."""
 
+import html
+import re
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
-import html
 from pathlib import Path
-import re
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.api.app import app
 from app.api.dependencies import (
     get_backtest_launch_service,
@@ -19,6 +17,10 @@ from app.api.dependencies import (
     get_bootstrap_service,
     get_readiness_service,
     get_strategy_job_service,
+)
+from app.api.routes.strategy_manager import (
+    _backtest_progress,
+    _bootstrap_stage_progress,
 )
 from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
@@ -35,8 +37,8 @@ from app.services.backtest.backtest_engine import (
     EquityCurvePointV1,
     ExitFillEventV1,
     OpenPositionMarkEventV1,
-    SkipReasonCode,
     SkippedSignalEventV1,
+    SkipReasonCode,
     SplitAppliedEventV1,
 )
 from app.services.backtest.backtest_launch_service import (
@@ -61,6 +63,9 @@ from app.services.backtest.snapshot_profile import (
     ProvenanceCoverageV1,
     SnapshotProfileV1,
 )
+from app.services.backtest.strategy_bootstrap_service import (
+    StrategyBootstrapService,
+)
 from app.services.backtest.strategy_job import (
     RunUniverseSelectionV1,
     StrategyJobConflict,
@@ -68,13 +73,6 @@ from app.services.backtest.strategy_job import (
     StrategyJobStatus,
     StrategyJobType,
     StrategyJobV1,
-)
-from app.api.routes.strategy_manager import (
-    _backtest_progress,
-    _bootstrap_stage_progress,
-)
-from app.services.backtest.strategy_bootstrap_service import (
-    StrategyBootstrapService,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_protocol import (
@@ -88,6 +86,7 @@ from app.services.backtest.strategy_protocol import (
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 
@@ -600,6 +599,56 @@ def test_readiness_page_exposes_advanced_disclosure(services):
     assert '<details id="advanced" class="mt-4">' in response.text
     assert "Advanced / troubleshooting" in response.text
     assert "No recent failures." in response.text
+
+
+@pytest.mark.parametrize(
+    "path,marker",
+    [
+        ("/strategy-manager", "Strategy Manager"),
+        ("/strategy-manager/readiness", "Readiness"),
+        ("/strategy-manager/initialization", "Prepare historical data"),
+    ],
+)
+def test_direct_strategy_pages_render_inside_the_application_shell(
+    services, path, marker
+):
+    response = client.get(path, headers={"Accept": "text/html"})
+
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text
+    assert '<link rel="stylesheet" href="/static/css/theme.css">' in response.text
+    assert marker in response.text
+    assert 'id="tab-strategy-manager"' in response.text
+
+
+def test_direct_strategy_result_pages_render_inside_the_application_shell(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+
+    for path in (
+        "/strategy-manager/backtests",
+        f"/strategy-manager/results/{RESULT_RUN_ID}",
+        f"/strategy-manager/compare?run_id={RESULT_RUN_ID}",
+    ):
+        response = client.get(path, headers={"Accept": "text/html"})
+
+        assert response.status_code == 200
+        assert "<!doctype html>" in response.text
+        assert '<link rel="stylesheet" href="/static/css/theme.css">' in response.text
+        assert 'id="tab-strategy-manager"' in response.text
+
+    repo.result_b = _result(run_id="run-2")
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+    response = client.get(
+        "/strategy-manager/comparisons/run-1/run-2",
+        headers={"Accept": "text/html"},
+    )
+
+    assert response.status_code == 200
+    assert "<!doctype html>" in response.text
+    assert '<link rel="stylesheet" href="/static/css/theme.css">' in response.text
+    assert 'id="tab-strategy-manager"' in response.text
 
 
 def test_readiness_and_landing_use_plain_language(services):
@@ -2005,6 +2054,14 @@ def test_configuration_renders_wizard_shell(launch):
     assert 'data-wizard-step="1"' in text
     assert 'data-wizard-step="2"' in text
     assert 'data-wizard-step="3"' in text
+
+    direct = client.get(
+        "/strategy-manager/configuration", headers={"Accept": "text/html"}
+    )
+    assert direct.status_code == 200
+    assert "<!doctype html>" in direct.text
+    assert '<link rel="stylesheet" href="/static/css/theme.css">' in direct.text
+    assert 'id="tab-strategy-manager"' in direct.text
 
 
 def test_configuration_all_steps_visible_without_js(launch):
