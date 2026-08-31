@@ -378,3 +378,18 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-442-portfolio-recommendation-email.md`
   summary: Per-portfolio recommendation emails are sent synchronously inside the pipeline's EXPORT stage — N portfolios × SMTP round-trips (starttls + login each) sit in the pipeline's critical path.
   evidence: `dispatch_recommendation_emails` runs inline before `status_repo.transition(EXPORT, COMPLETE)`; a slow SMTP host delays (or via plan 012's subprocess timeout, times out) the whole pipeline run. Bounding this needs the same off-loop/worker decision as the #441 runtime-evaluation deferral.
+
+## Deferred from: code review of gh-445 strategy-manager full-page fallback (2026-08-31)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-445-strategy-manager-full-page-fallback.md`
+  summary: `page.html` duplicates index.html's asset tags and `strategy-manager.js?v=` cache-bust version with no sync mechanism, so bumping the version in `index.html` leaves directly-opened pages on stale JS.
+  evidence: `app/api/templates/page.html` head/body asset list is a verbatim copy of `app/api/templates/index.html` lines 5-14/756/1096; the spec's Never clause forbade extracting shared partials in this story.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-445-strategy-manager-full-page-fallback.md`
+  summary: Only strategy-manager routes wrap fragments for direct navigation; sibling `/partials/*` routes in `app/api/routes/views.py` still return bare fragments when opened directly.
+  evidence: Spec Never clause scoped the change to strategy-manager renders; the asymmetry is visible if a user direct-opens e.g. `/partials/portfolio`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-445-strategy-manager-full-page-fallback.md`
+  summary: Pre-existing direct-GET tests in `tests/test_strategy_manager_routes.py` (e.g. `test_initialization_uses_plain_copy_and_describes_preparation_history`) now exercise the wrapped full-page path while being named/read as fragment tests; the bare-fragment htmx path is only covered for 2 of 16+ fragments.
+  evidence: Those tests send no `HX-Request` header and pass via substring assertions that hold inside the wrapped page; updating them all was judged too much churn for this story.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-445-strategy-manager-full-page-fallback.md`
+  summary: Direct-navigation coverage exists for only 2 fragment templates; `_backtest_result.html` (inline parse-time script relying on Chart.js load order) is untested on the wrapped path.
+  evidence: New tests cover `_historical_initialization.html` and `_initialization_activity.html` only; the result-page fixture setup is heavier and was deferred.

@@ -707,6 +707,88 @@ def test_invalid_initialization_htmx_submission_swaps_linked_errors(services):
     assert 'value="28"' in response.text
 
 
+def test_direct_navigation_wraps_initialization_in_full_page(services):
+    response = client.get(
+        "/strategy-manager/initialization", headers={"X-Auth-Token": "s3cret"}
+    )
+
+    assert response.status_code == 200
+    assert "<!doctype html" in response.text
+    assert 'href="/"' in response.text
+    assert 'id="tab-content"' in response.text
+    assert 'id="historical-initialization-heading"' in response.text
+
+
+def test_htmx_request_keeps_bare_fragment_for_initialization(services):
+    response = client.get(
+        "/strategy-manager/initialization",
+        headers={"X-Auth-Token": "s3cret", "HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert "<!doctype html" not in response.text
+    assert 'id="historical-initialization-heading"' in response.text
+
+
+def test_direct_navigation_wraps_activity_in_full_page(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.INITIALIZATION,
+        status=StrategyJobStatus.RUNNING,
+        status_version=4,
+        current_month="2024-02",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+
+    response = client.get(
+        "/strategy-manager/activities/job-1", headers={"X-Auth-Token": "s3cret"}
+    )
+
+    assert response.status_code == 200
+    assert "<!doctype html" in response.text
+    assert 'href="/"' in response.text
+    assert 'id="tab-content"' in response.text
+    assert "Current month:" in response.text
+
+
+def test_htmx_request_keeps_bare_fragment_for_activity(services):
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.INITIALIZATION,
+        status=StrategyJobStatus.RUNNING,
+        status_version=4,
+        current_month="2024-02",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+    )
+
+    response = client.get(
+        "/strategy-manager/activities/job-1",
+        headers={"X-Auth-Token": "s3cret", "HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert "<!doctype html" not in response.text
+    assert "Current month:" in response.text
+
+
+def test_non_htmx_validation_error_keeps_status_and_wraps_page(services):
+    response = client.post(
+        "/strategy-manager/initialization",
+        data={"start_month": "2026-02", "end_month": "2026-01"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 422
+    assert "<!doctype html" in response.text
+    assert 'id="initialization-errors"' in response.text
+
+
 def test_strategy_manager_js_swaps_expected_form_error_responses() -> None:
     root = Path(__file__).resolve().parents[1]
     javascript = (

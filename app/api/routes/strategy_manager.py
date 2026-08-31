@@ -28,7 +28,7 @@ from app.api.dependencies import (
     get_readiness_service,
     get_strategy_job_service,
 )
-from app.api.templating import templates
+from app.api.templating import is_htmx_request, template_response
 from app.core.security import require_local_or_token
 from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
@@ -453,7 +453,7 @@ def _validate_months(start_month: str, end_month: str) -> dict[str, str]:
 
 def _form_error_status(request: Request) -> int:
     """Let HTMX swap validation fragments while preserving HTTP semantics."""
-    return 200 if request.headers.get("HX-Request", "").lower() == "true" else 422
+    return 200 if is_htmx_request(request) else 422
 
 
 @router.get("/partials/strategy-manager", response_class=HTMLResponse)
@@ -500,7 +500,7 @@ async def strategy_manager(
         setup_notice=setup_notice,
         activated_at=activated_at,
     )
-    response = templates.TemplateResponse(request, "_strategy_manager.html", context)
+    response = template_response(request, "_strategy_manager.html", context)
     logger.info(
         "Strategy Manager tab rendered in %.1fms",
         (perf_counter() - started) * 1_000,
@@ -542,7 +542,7 @@ async def strategy_setup(
             )
     if not bootstrap.is_setup_required():
         return RedirectResponse("/strategy-manager?setup=already", status_code=303)
-    return templates.TemplateResponse(
+    return template_response(
         request,
         "_strategy_setup.html",
         {
@@ -565,7 +565,7 @@ async def submit_strategy_setup(
 ) -> Response:
     """Enqueue one bootstrap job, redirect to activity."""
     if idempotency_key is None:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_strategy_setup.html",
             {
@@ -582,7 +582,7 @@ async def submit_strategy_setup(
             BootstrapSubmissionV1(idempotency_key=idempotency_key)
         )
     except ValidationError:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_strategy_setup.html",
             {
@@ -597,7 +597,7 @@ async def submit_strategy_setup(
     except StrategyBootstrapAlreadySetUp:
         return RedirectResponse("/strategy-manager?setup=already", status_code=303)
     except StrategyJobConflict:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_strategy_setup.html",
             {
@@ -629,7 +629,7 @@ async def strategy_readiness(
     ``section=advanced`` (the diagnostics deep link) expands the
     Advanced / troubleshooting disclosure on load."""
     result = readiness.evaluate()
-    return templates.TemplateResponse(
+    return template_response(
         request,
         "_strategy_readiness.html",
         {"readiness": result, "open_advanced": section == "advanced"},
@@ -671,7 +671,7 @@ async def universe_selector(
     securities: list[tuple[str, str, str, str]] = []
     if active is not None:
         securities = backtest.roster_member_identities(active.profile_hash)
-    return templates.TemplateResponse(
+    return template_response(
         request,
         "_universe_selector.html",
         {
@@ -689,7 +689,7 @@ async def universe_selector(
 async def historical_initialization(
     request: Request, backtest: BacktestDep
 ) -> Response:
-    return templates.TemplateResponse(
+    return template_response(
         request, "_historical_initialization.html", _initialization_context(backtest)
     )
 
@@ -716,7 +716,7 @@ async def submit_initialization(
     elif not context["qualification_available"]:
         errors["form"] = str(context["qualification_reason"])
     if errors:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_historical_initialization.html",
             {**context, "errors": errors},
@@ -728,7 +728,7 @@ async def submit_initialization(
             active_profile.profile_hash, start_month, end_month
         )
         if readiness.no_op:
-            return templates.TemplateResponse(
+            return template_response(
                 request,
                 "_historical_initialization.html",
                 {
@@ -745,14 +745,14 @@ async def submit_initialization(
             )
         )
     except (BacktestIntegrityError, StrategyJobConflict, ValueError) as exc:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_historical_initialization.html",
             {**context, "errors": {"form": str(exc)}},
             status_code=_form_error_status(request),
         )
     if result.no_op:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_historical_initialization.html",
             {
@@ -1132,7 +1132,7 @@ async def strategy_configuration(
         selected_strategy_id=strategy_id,
         recall=reset != "defaults" and strategy_id is None,
     )
-    return templates.TemplateResponse(request, "_strategy_configuration.html", context)
+    return template_response(request, "_strategy_configuration.html", context)
 
 
 @router.get("/strategy-manager/configuration/fields", response_class=HTMLResponse)
@@ -1167,9 +1167,7 @@ async def strategy_configuration_fields(
         },
         recall=False,
     )
-    return templates.TemplateResponse(
-        request, "_strategy_configuration_fields.html", context
-    )
+    return template_response(request, "_strategy_configuration_fields.html", context)
 
 
 @router.post(
@@ -1298,7 +1296,7 @@ async def submit_strategy_configuration(
     if not raw_security_ids and "security_ids" not in errors:
         errors.setdefault("security_ids", "Select at least one security.")
     if errors or command is None:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_strategy_configuration.html",
             {**submitted_context(), "errors": errors},
@@ -1308,7 +1306,7 @@ async def submit_strategy_configuration(
     try:
         canonical = canonical_run_universe(raw_security_ids)
     except RunUniverseError as exc:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_strategy_configuration.html",
             {**submitted_context(), "errors": {"security_ids": str(exc)}},
@@ -1341,7 +1339,7 @@ async def submit_strategy_configuration(
         result = launch.launch(command)
     except BacktestLaunchValidationError as exc:
         field_errors = {error.field: error.message for error in exc.errors}
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_strategy_configuration.html",
             {**submitted_context(), "errors": field_errors},
@@ -1355,7 +1353,7 @@ async def submit_strategy_configuration(
 @router.get("/strategy-manager/backtests", response_class=HTMLResponse)
 async def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLResponse:
     """Render the standalone Backtest results list (Story 2.8 AC 2, 7)."""
-    return templates.TemplateResponse(
+    return template_response(
         request, "_backtest_results_list.html", _backtest_activities_context(backtest)
     )
 
@@ -1461,9 +1459,7 @@ async def strategy_activity(
     try:
         context = _activity_context(backtest, jobs, job_id)
         job = cast(StrategyJobV1, context["job"])
-        return templates.TemplateResponse(
-            request, _activity_template(job.job_type), context
-        )
+        return template_response(request, _activity_template(job.job_type), context)
     except StrategyJobNotFound:
         return HTMLResponse("Run no longer available.", status_code=404)
 
@@ -1483,9 +1479,7 @@ async def strategy_activity_status(
     job = cast(StrategyJobV1, context["job"])
     if job.status_version <= last_seen_version:
         return HTMLResponse("", status_code=204)
-    return templates.TemplateResponse(
-        request, _activity_template(job.job_type), context
-    )
+    return template_response(request, _activity_template(job.job_type), context)
 
 
 @router.post(
@@ -1506,9 +1500,7 @@ async def cancel_strategy_job(
         )
         context = _activity_context(backtest, jobs, job_id)
         job = cast(StrategyJobV1, context["job"])
-        return templates.TemplateResponse(
-            request, _activity_template(job.job_type), context
-        )
+        return template_response(request, _activity_template(job.job_type), context)
     except (StrategyJobConflict, StrategyJobNotFound, ValueError) as exc:
         return HTMLResponse(str(exc), status_code=409)
 
@@ -1715,12 +1707,12 @@ async def backtest_result_view(
     try:
         context = _result_context(backtest, run_id)
     except BacktestIntegrityError as exc:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_backtest_result.html",
             {"run_id": run_id, "integrity_error": str(exc)},
         )
-    return templates.TemplateResponse(request, "_backtest_result.html", context)
+    return template_response(request, "_backtest_result.html", context)
 
 
 @router.post(
@@ -1745,14 +1737,14 @@ async def submit_backtest_result_note(
             run_id, expected_note_version=expected_note_version, note=note
         )
     except ValueError as exc:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_backtest_note.html",
             _note_context(backtest, run_id, submitted_text=note, error=str(exc)),
             status_code=422,
         )
     except StrategyJobConflict:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_backtest_note.html",
             _note_context(
@@ -1768,7 +1760,7 @@ async def submit_backtest_result_note(
             status_code=409,
         )
     except StrategyJobNotFound:
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_backtest_note.html",
             _note_context(
@@ -1786,7 +1778,7 @@ async def submit_backtest_result_note(
         # note. Report it explicitly rather than letting it propagate as
         # an unhandled 500 -- the story's own "explicit error, never a
         # false Saved" contract applies here too.
-        return templates.TemplateResponse(
+        return template_response(
             request,
             "_backtest_note.html",
             _note_context(
@@ -1797,7 +1789,7 @@ async def submit_backtest_result_note(
             ),
             status_code=500,
         )
-    return templates.TemplateResponse(
+    return template_response(
         request,
         "_backtest_note.html",
         _note_context(backtest, run_id, result=result, saved=True),
@@ -1824,7 +1816,7 @@ def _compare_integrity_response(
     """Render the Compare picker's explicit integrity-error branch --
     the single call site every corrupt-evidence path in this section
     routes through, so none of them can silently diverge."""
-    return templates.TemplateResponse(
+    return template_response(
         request,
         "_compare_picker.html",
         {"run_id": run_id, "integrity_error": str(exc)},
@@ -1904,7 +1896,7 @@ async def compare_picker(
         return _compare_integrity_response(request, run_id, exc)
     if reason:
         context = {**context, "picker_error": reason}
-    return templates.TemplateResponse(request, "_compare_picker.html", context)
+    return template_response(request, "_compare_picker.html", context)
 
 
 @router.post(
@@ -1941,7 +1933,7 @@ async def submit_compare(
         context = _compare_context(backtest, run_id)
     except BacktestIntegrityError as exc:
         return _compare_integrity_response(request, run_id, exc)
-    return templates.TemplateResponse(
+    return template_response(
         request,
         "_compare_picker.html",
         {**context, "picker_error": eligibility.detail},
@@ -1960,7 +1952,7 @@ def _comparison_integrity_response(
     """Render the Comparison page's explicit integrity-error branch --
     the single call site every corrupt-evidence path in this section
     routes through, mirroring ``_compare_integrity_response``'s shape."""
-    return templates.TemplateResponse(
+    return template_response(
         request,
         "_comparison.html",
         {
@@ -2051,4 +2043,4 @@ async def comparison_view(
         context = _comparison_context(backtest, run_id_a, run_id_b)
     except BacktestIntegrityError as exc:
         return _comparison_integrity_response(request, run_id_a, run_id_b, exc)
-    return templates.TemplateResponse(request, "_comparison.html", context)
+    return template_response(request, "_comparison.html", context)
