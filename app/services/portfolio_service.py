@@ -1043,7 +1043,9 @@ class PortfolioService:
             if stock and stock.analysis:
                 pos.next_pivot = stock.analysis.entry_price
 
-        # Compute GBP-equivalent totals for summary cards (including cash)
+        # Compute GBP-equivalent totals for summary cards. ``total_value_gbp``
+        # remains the authoritative cash-inclusive portfolio total; the
+        # dashboard consumes the separate market-only projection below.
         fx = gbpusd_rate or _DEFAULT_GBPUSD
         valued_costs = [
             self._amount_in_gbp(p.total_cost, p.price_currency, fx) for p in positions
@@ -1056,7 +1058,8 @@ class PortfolioService:
             self._amount_in_gbp(p.current_value, p.price_currency, fx)  # type: ignore[arg-type]
             for p in positions_with_value
         ]
-        total_value_gbp = sum(amount for amount in valued_values if amount is not None)
+        market_value_gbp = sum(amount for amount in valued_values if amount is not None)
+        total_value_gbp = market_value_gbp
         if effective_cash_balance is not None:
             total_value_gbp += effective_cash_balance
         total_cost_gbp_valued = sum(
@@ -1159,6 +1162,7 @@ class PortfolioService:
             "positions_with_value": positions_with_value,
             "total_cost_gbp": total_cost_gbp,
             "total_value_gbp": total_value_gbp,
+            "market_value_gbp": market_value_gbp,
             "total_pnl_gbp": total_pnl_gbp,
             "total_cost_gbp_valued": total_cost_gbp_valued,
             "cash_balance": effective_cash_balance,

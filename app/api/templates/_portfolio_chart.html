@@ -6,7 +6,7 @@
 {# the selector; only the canvas-vs-message inside it is conditional.       #}
 {% set _ranges = ["1M", "3M", "12M", "3Y", "5Y"] %}
 <div id="portfolio-chart-card"
-     style="background:white;border:1px solid var(--border);border-radius:0;padding:1rem 1.25rem;margin-bottom:1.25rem">
+     class="portfolio-chart-card">
   <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
     <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted)">
       <i class="bi bi-graph-up me-1"></i>Portfolio Value History
@@ -26,7 +26,7 @@
     </div>
   </div>
   {% if chart_points >= 2 %}
-  <canvas id="portfolioChart" style="max-height:200px"></canvas>
+  <div class="portfolio-chart-canvas"><canvas id="portfolioChart"></canvas></div>
   <script>
   (function() {
     const labels   = {{ chart_labels     | safe }};

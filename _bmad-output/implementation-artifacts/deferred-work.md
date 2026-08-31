@@ -393,3 +393,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-445-strategy-manager-full-page-fallback.md`
   summary: Direct-navigation coverage exists for only 2 fragment templates; `_backtest_result.html` (inline parse-time script relying on Chart.js load order) is untested on the wrapped path.
   evidence: New tests cover `_historical_initialization.html` and `_initialization_activity.html` only; the result-page fixture setup is heavier and was deferred.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-454-portfolio-dashboard-layout.md`
+  summary: The existing market-value GBP projection uses the default GBP/USD rate whenever a live or cached rate is unavailable, without displaying that fallback provenance on the Portfolio summary card.
+  evidence: `portfolio_partial_context()` retains the pre-existing `gbpusd_rate or _DEFAULT_GBPUSD` conversion contract; #454 separates the market-only projection but does not change FX freshness/valuation semantics.

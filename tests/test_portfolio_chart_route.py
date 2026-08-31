@@ -96,6 +96,18 @@ def test_empty_window_shows_no_data_message(stack) -> None:
     assert 'hx-get="/partials/portfolio/chart"' in resp.text
 
 
+def test_chart_fragment_remains_a_chart_card_without_dashboard_context(stack) -> None:
+    _, pid = stack
+    resp = client.get(
+        "/partials/portfolio/chart", params={"portfolio_id": pid, "range": "12M"}
+    )
+
+    assert resp.status_code == 200
+    assert 'id="portfolio-chart-card"' in resp.text
+    assert 'class="portfolio-dashboard"' not in resp.text
+    assert 'class="portfolio-chart-canvas"' in resp.text
+
+
 def test_out_of_window_trade_has_no_marker(stack) -> None:
     agent, pid = stack
     old_date = (datetime.now(timezone.utc) - timedelta(days=500)).strftime("%Y-%m-%d")

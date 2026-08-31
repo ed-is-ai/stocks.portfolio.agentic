@@ -350,7 +350,54 @@ def test_position_without_current_value_excluded_from_value_totals(
     ctx = svc.portfolio_partial_context(positions, gbpusd_rate=2.0, cash_balance=0.0)
     assert ctx["total_cost_gbp"] == 150.0
     assert ctx["total_value_gbp"] == 120.0
+    assert ctx["market_value_gbp"] == 120.0
     assert ctx["total_pnl_gbp"] == 20.0
+
+
+def test_market_value_summary_excludes_cash_without_changing_total_value(
+    monkeypatch,
+) -> None:
+    svc = _make_service(monkeypatch)
+    positions = [
+        Position(
+            ticker="VALUED",
+            shares=1,
+            avg_cost=100,
+            total_cost=100,
+            current_value=120,
+            price_currency="GBP",
+        )
+    ]
+
+    ctx = svc.portfolio_partial_context(positions, gbpusd_rate=2.0, cash_balance=80.0)
+
+    assert ctx["market_value_gbp"] == 120.0
+    assert ctx["total_value_gbp"] == 200.0
+    assert ctx["cash_balance"] == 80.0
+    assert ctx["total_pnl_gbp"] == 20.0
+
+
+def test_market_value_summary_is_zero_for_unpriced_cash_only_position(
+    monkeypatch,
+) -> None:
+    svc = _make_service(monkeypatch)
+    positions = [
+        Position(
+            ticker="UNPRICED",
+            shares=1,
+            avg_cost=100,
+            total_cost=100,
+            current_value=None,
+            price_currency="GBP",
+        )
+    ]
+
+    ctx = svc.portfolio_partial_context(positions, gbpusd_rate=2.0, cash_balance=80.0)
+
+    assert ctx["market_value_gbp"] == 0.0
+    assert ctx["total_value_gbp"] == 80.0
+    assert ctx["cash_balance"] == 80.0
+    assert ctx["total_pnl_gbp"] == 0.0
 
 
 def test_cash_balances_by_currency_carries_a_gbp_valuation_projection_per_row(

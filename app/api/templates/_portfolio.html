@@ -157,11 +157,23 @@
 </script>
 {% else %}
 
+<section class="portfolio-dashboard" data-active-portfolio="{{ active_portfolio.id if active_portfolio else '' }}">
+  <header class="portfolio-dashboard-heading">
+    <p class="portfolio-dashboard-eyebrow mb-1"><i class="bi bi-briefcase me-1"></i>Portfolio</p>
+    <h1 class="h3 mb-1">{{ active_portfolio.name if active_portfolio else "Portfolio" }}</h1>
+    <p class="portfolio-dashboard-context mb-0">
+      {{ positions|length }} open position{{ '' if positions|length == 1 else 's' }}
+      {% if prices_as_of %}
+      <span aria-hidden="true">&middot;</span> Prices as of {{ prices_as_of }}
+      {% if gbpusd_rate %}<span aria-hidden="true">&middot;</span> £1 = ${{ "%.4f"|format(gbpusd_rate) }}{% endif %}
+      {% endif %}
+    </p>
+  </header>
+
 <!-- Account switcher + management (#147, tidied #156) -->
-<div class="d-flex justify-content-between align-items-center mb-3 gap-2 flex-wrap"
-     data-active-portfolio="{{ active_portfolio.id if active_portfolio else '' }}">
-  <div class="d-flex align-items-center gap-2">
-    <span class="form-label mb-0"><i class="bi bi-briefcase me-1"></i>Account</span>
+<div class="portfolio-dashboard-controls mb-3">
+  <div class="portfolio-context-group" role="group" aria-label="Account and strategy">
+    <span class="portfolio-control-label"><i class="bi bi-briefcase me-1"></i>Account</span>
     <select class="form-select form-select-sm" style="max-width:14rem" id="portfolioSelect"
             name="portfolio_id"
             hx-get="/partials/portfolio" hx-target="#tab-content" hx-swap="innerHTML"
@@ -249,23 +261,24 @@
       <i class="bi bi-x-lg me-1"></i>Clear
     </button>
     {% endif %}
-    <button
-        class="btn btn-sm btn-outline-primary"
-        hx-get="/portfolios/{{ active_portfolio.id }}/recommendations"
-        hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">
-      <i class="bi bi-clipboard-check me-1"></i>Recommendations
-    </button>
     {% endif %}
   </div>
 
   <!-- Holding actions -->
-  <div class="d-flex align-items-center gap-2 flex-wrap">
+  <div class="portfolio-actions" role="group" aria-label="Portfolio actions">
+    {% if active_portfolio %}
+    <button class="btn btn-sm btn-primary"
+            hx-get="/portfolios/{{ active_portfolio.id }}/recommendations"
+            hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">
+      <i class="bi bi-clipboard-check me-1"></i>Recommendations
+    </button>
+    {% endif %}
     <div class="dropdown">
       <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button"
               data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
         <i class="bi bi-plus-lg me-1"></i>Add holding
       </button>
-      <div class="dropdown-menu dropdown-menu-end p-3" style="min-width:21rem">
+      <div class="dropdown-menu dropdown-menu-end p-3 portfolio-add-holding-menu" style="min-width:21rem">
         <div class="fw-semibold mb-2" style="font-size:0.78rem">
           <i class="bi bi-plus-circle me-1"></i>Quick-add by value
         </div>
@@ -313,13 +326,6 @@
     Scan data is {% if strategy_freshness == 'stale' %}more than 24 hours old{% elif strategy_freshness == 'missing' %}missing{% else %}of unknown age{% endif %}.
     Strategy recommendations may be out of date.
   </span>
-</div>
-{% endif %}
-
-{% if prices_as_of and positions %}
-<div class="mb-3" style="font-size:0.74rem; color:var(--muted)">
-  <i class="bi bi-clock me-1"></i>Prices as of {{ prices_as_of }}
-  {% if gbpusd_rate %}&nbsp;&middot;&nbsp;Rate: £1&nbsp;=&nbsp;${{ "%.4f"|format(gbpusd_rate) }}{% endif %}
 </div>
 {% endif %}
 
@@ -401,24 +407,23 @@
   <span>No open positions yet. Use <strong>Add holding</strong> above — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Stock Scanner</strong> and click <strong>Buy</strong>.</span>
 </div>
 {% endif %}
-{% if positions or cash_balance is not none %}
-
-{% if chart_has_history %}{% include "_portfolio_chart.html" %}{% endif %}
+{% if positions or cash_balance is not none or cash_balances_by_currency %}
 
 <!-- Summary strip (all values in GBP) -->
-<div class="d-flex flex-wrap gap-3 mb-4">
+<section class="portfolio-summary-grid" aria-label="Portfolio summary">
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-graph-up me-1"></i>Market Value</div>
+    <div class="sval">£{{ "%.2f"|format(market_value_gbp|default(0)) }}</div>
+    <span class="visually-hidden">Excludes cash.</span>
+  </div>
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Cost</div>
     <div class="sval">£{{ "%.2f"|format(total_cost_gbp) }}</div>
   </div>
-  {% if positions_with_value %}
-  <div class="stat-card">
-    <div class="slbl"><i class="bi bi-graph-up me-1"></i>Market Value</div>
-    <div class="sval">£{{ "%.2f"|format(total_value_gbp) }}</div>
-  </div>
   <div class="stat-card pnl-{{ 'positive' if total_pnl_gbp >= 0 else 'negative' }}">
     <div class="slbl"><i class="bi bi-percent me-1"></i>Unrealised P&amp;L</div>
     <div class="sval {% if total_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+      <span class="portfolio-pnl-direction">{{ "Gain" if total_pnl_gbp >= 0 else "Loss" }}:</span>
       {{ "+" if total_pnl_gbp >= 0 }}£{{ "%.2f"|format(total_pnl_gbp) }}
       {% if total_cost_gbp_valued > 0 %}
       <span style="font-size:0.72rem; font-weight:500; opacity:0.8">
@@ -428,11 +433,18 @@
     </div>
   </div>
   <div class="stat-card">
-    <div class="slbl"><i class="bi bi-collection me-1"></i>Positions</div>
-    <div class="sval">{{ positions|length }}</div>
+    <div class="slbl"><i class="bi bi-wallet2 me-1"></i>Cash</div>
+    <div class="sval">
+      {% if cash_balance is not none %}£{{ "%.2f"|format(cash_balance) }}
+      {% elif cash_balances_by_currency|length == 1 %}
+      {% set cash_entry = cash_balances_by_currency[0] %}{{ cash_entry.currency }} {{ "%.2f"|format(cash_entry.amount) }}
+      {% elif cash_balances_by_currency %}Multiple currencies
+      {% else %}—{% endif %}
+    </div>
   </div>
-  {% endif %}
-</div>
+</section>
+
+{% if chart_has_history %}{% include "_portfolio_chart.html" %}{% endif %}
 
 <div class="tbl-wrap">
   <table class="table table-hover align-middle">
@@ -661,4 +673,5 @@
     }
   })();
 </script>
+</section>
 {% endif %}

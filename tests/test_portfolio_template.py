@@ -30,6 +30,7 @@ def _render(cash_balance: float | None, positions: list[Any] | None = None) -> s
         "chart_sell_tips": "[]",
         "total_cost_gbp": 0,
         "total_value_gbp": 0,
+        "market_value_gbp": 0,
         "total_pnl_gbp": 0,
         "total_cost_gbp_valued": 0,
         "prices_as_of": None,
@@ -61,6 +62,7 @@ def _render_with_total_pnl(total_pnl_gbp: float) -> str:
         "chart_sell_tips": "[]",
         "total_cost_gbp": 100,
         "total_value_gbp": 100 + total_pnl_gbp,
+        "market_value_gbp": 100 + total_pnl_gbp,
         "total_pnl_gbp": total_pnl_gbp,
         "total_cost_gbp_valued": 100,
         "prices_as_of": None,
@@ -112,7 +114,9 @@ def test_zero_cash_is_visible_with_positions() -> None:
     assert "<td>£0.00</td>" in row
 
 
-def test_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> None:
+def test_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> (
+    None
+):
     html = _render_with_total_pnl(12.5)
 
     assert 'class="stat-card pnl-positive"' in html
@@ -120,7 +124,9 @@ def test_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value()
     assert "+£12.50" in html
 
 
-def test_zero_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> None:
+def test_zero_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> (
+    None
+):
     html = _render_with_total_pnl(0)
 
     assert 'class="stat-card pnl-positive"' in html
@@ -128,7 +134,9 @@ def test_zero_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_va
     assert "+£0.00" in html
 
 
-def test_unrealised_pnl_summary_uses_negative_directional_cue_and_signed_value() -> None:
+def test_unrealised_pnl_summary_uses_negative_directional_cue_and_signed_value() -> (
+    None
+):
     html = _render_with_total_pnl(-12.5)
 
     assert 'class="stat-card pnl-negative"' in html
@@ -149,6 +157,51 @@ def test_stat_card_pnl_value_colour_beats_the_base_slate_rule() -> None:
     assert pos > base and neg > base
     assert "var(--green)" in index_css[pos : pos + 60]
     assert "var(--red)" in index_css[neg : neg + 60]
+
+
+def test_summary_cards_have_the_required_market_first_order() -> None:
+    html = _render_with_total_pnl(12.5)
+
+    labels = ["Market Value", "Total Cost", "Unrealised P&amp;L", "Cash"]
+    indices = [html.index(label) for label in labels]
+    assert indices == sorted(indices)
+    assert "Positions</div>" not in html[indices[0] : indices[-1]]
+    assert "Excludes cash." in html
+
+
+def test_dashboard_template_keeps_context_actions_and_chart_fragment_contracts() -> (
+    None
+):
+    from pathlib import Path
+
+    template = Path("app/api/templates/_portfolio.html").read_text(encoding="utf-8")
+    chart = Path("app/api/templates/_portfolio_chart.html").read_text(encoding="utf-8")
+
+    assert 'class="portfolio-dashboard"' in template
+    assert 'aria-label="Account and strategy"' in template
+    assert 'aria-label="Portfolio actions"' in template
+    assert 'class="btn btn-sm btn-primary"' in template
+    assert 'id="portfolioSelect"' in template
+    assert 'id="refreshBtn"' in template
+    assert 'hx-get="/portfolios/{{ active_portfolio.id }}/recommendations"' in template
+    assert 'id="portfolio-chart-card"' in chart
+    assert 'hx-target="#portfolio-chart-card" hx-swap="outerHTML"' in chart
+
+
+def test_dashboard_empty_state_does_not_emit_an_orphan_section_closer() -> None:
+    html = templates.get_template("_portfolio.html").render(no_portfolios=True)
+
+    assert html.count("<section") == html.count("</section>")
+
+
+def test_dashboard_responsive_styles_remain_scoped_and_allow_narrow_reflow() -> None:
+    from pathlib import Path
+
+    css = Path("app/api/templates/index.html").read_text(encoding="utf-8")
+
+    assert "repeat(auto-fit, minmax(min(100%, 10rem), 1fr))" in css
+    assert "#tab-content { padding: 1rem; }" not in css
+    assert "calc(100vw - 2rem)" in css
 
 
 def test_zero_cash_is_visible_for_cash_only_portfolio() -> None:
@@ -226,6 +279,7 @@ def test_partial_refresh_warning_is_visible() -> None:
         "chart_sell_tips": "[]",
         "total_cost_gbp": 0,
         "total_value_gbp": 0,
+        "market_value_gbp": 0,
         "total_pnl_gbp": 0,
         "total_cost_gbp_valued": 0,
         "prices_as_of": None,
