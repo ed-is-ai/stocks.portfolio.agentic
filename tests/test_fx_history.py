@@ -101,6 +101,7 @@ def test_boe_request_targets_xudluss_series_spanning_as_of() -> None:
     assert params["SeriesCodes"] == "XUDLUSS"
     assert params["FD"] == "25" and params["FM"] == "Jan" and params["FY"] == "2000"
     assert params["TD"] == "1" and params["TM"] == "Feb" and params["TY"] == "2000"
+    assert params["html.x"] == "66" and params["html.y"] == "26"
 
 
 def test_boe_definitive_miss_falls_through_to_yahoo() -> None:

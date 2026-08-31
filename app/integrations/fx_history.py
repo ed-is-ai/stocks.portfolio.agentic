@@ -317,6 +317,10 @@ class ChainedFxQuoteFetcher:
             "TY": str(as_of_date.year),
             "FNY": "Y",
             "CSVF": "TT",
+            # Form-submit coordinates the ASP endpoint requires -- without
+            # them it returns a 200 page with an empty results table.
+            "html.x": "66",
+            "html.y": "26",
             "SeriesCodes": boe_series,
             "UsingCodes": "Y",
             "Filter": "N",
