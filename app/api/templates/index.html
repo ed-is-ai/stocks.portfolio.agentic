@@ -542,8 +542,8 @@
   <div class="tab-bar">
     <ul class="nav nav-tabs" id="mainTabs">
       <li class="nav-item">
-        <a class="nav-link{% if initial_tab|default('') != 'strategy-manager' %} active{% endif %}" id="tab-stock-scanner"
-           hx-get="/partials/stock-scanner" hx-target="#tab-content" hx-trigger="click{% if not initial_fragment|default('') %}, load{% endif %}" hx-indicator="#spinner">
+        <a class="nav-link active" id="tab-stock-scanner"
+           hx-get="/partials/stock-scanner" hx-target="#tab-content" hx-trigger="click, load" hx-indicator="#spinner">
           <i class="bi bi-eye"></i>Stock Scanner
         </a>
       </li>
@@ -574,7 +574,7 @@
         </a>
       </li>
       <li class="nav-item">
-        <a class="nav-link{% if initial_tab|default('') == 'strategy-manager' %} active{% endif %}" id="tab-strategy-manager"
+        <a class="nav-link" id="tab-strategy-manager"
            hx-get="/partials/strategy-manager" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
           <i class="bi bi-graph-up-arrow"></i>Strategy Manager
         </a>
@@ -590,13 +590,10 @@
 
   <!-- Tab content -->
   <div id="tab-content">
-    {% if initial_fragment|default('') %}{% include initial_fragment %}
-    {% else %}
     <div class="text-center py-5 text-muted">
       <div class="spinner-border spinner-border-sm mb-2 d-block mx-auto"></div>
       Loading…
     </div>
-    {% endif %}
   </div>
 
   <!-- Assign-Strategy modal target (#440) — lives OUTSIDE #tab-content so an
