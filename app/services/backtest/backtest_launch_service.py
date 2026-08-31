@@ -22,14 +22,24 @@ day -- a deterministic, documented choice, not a per-day rate.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Mapping, cast
 
 from app.core.config import ROOT_DIR, SKILLS_DIR
+from app.integrations.fx_history import (
+    ChainedFxQuoteFetcher,
+    FxProviderUnavailable,
+    FxUnsupportedPair,
+)
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
-from app.repositories.fx_quote_repo import FxQuoteRepository
+from app.repositories.fx_quote_repo import (
+    FxQuote,
+    FxQuoteRepository,
+    FxUnavailableAttempt,
+)
 from app.repositories.historical_price_repo import (
     EvidenceMissingError,
     HistoricalPriceRepository,
@@ -69,6 +79,18 @@ from app.services.backtest.trading_calendar import (
 #: enforce), so exactly one cross-currency pair can ever exist.
 _CURRENCY_PAIR: dict[frozenset[str], str] = {frozenset({"GBP", "USD"}): "GBPUSD=X"}
 
+logger = logging.getLogger(__name__)
+
+#: Provider key under which a definitive all-providers-miss is negatively
+#: cached in ``fx_unavailable_attempts`` -- one key per chain, so a repeat
+#: preparation after a definitive miss never re-walks the providers.
+_FX_BACKFILL_CHAIN_PROVIDER = "backfill_chain"
+
+#: Log/summary caps so a huge roster can neither produce an unbounded log
+#: line nor overflow the worker's 500-char failure_detail budget.
+_MAX_LOGGED_PROBLEMS = 100
+_MAX_SUMMARIES = 3
+
 
 @dataclass(frozen=True)
 class LaunchFieldError:
@@ -103,6 +125,10 @@ class _RosterEvidenceError(ValueError):
     a :class:`BacktestLaunchValidationError` before leaving this module."""
 
     code = "required_data_missing"
+
+    #: The message is composed entirely by this module (never raw
+    #: exception text), so the worker may surface it verbatim.
+    user_safe_message = True
 
 
 @dataclass(frozen=True)
@@ -156,6 +182,7 @@ class BacktestLaunchService:
         jobs: StrategyJobService,
         skills_root: Path = SKILLS_DIR,
         project_root: Path = ROOT_DIR,
+        fx_fetcher: ChainedFxQuoteFetcher | None = None,
     ) -> None:
         self._backtest_repo = backtest_repo
         self._historical_price_repo = historical_price_repo
@@ -163,6 +190,7 @@ class BacktestLaunchService:
         self._jobs = jobs
         self._skills_root = skills_root
         self._project_root = project_root
+        self._fx_fetcher = fx_fetcher or ChainedFxQuoteFetcher()
 
     def discover(self) -> StrategyDiscoveryResultV1:
         """Return one fresh Story 2.2 discovery result -- never cached."""
@@ -450,13 +478,21 @@ class BacktestLaunchService:
             if {item[0] for item in members} != selected:
                 raise _RosterEvidenceError("Selected evidence is unavailable.")
         fx_as_of = f"{snapshot_month}-01"
-        securities: list[PinnedSecurityEvidenceV1] = []
+        revision_by_security = dict(members)
+        # Evidence is emitted in the roster's own order regardless of
+        # which securities needed a backfill -- a cold cache must produce
+        # the same manifest identity as a warm one.
+        evidence_by_security: dict[str, PinnedSecurityEvidenceV1] = {}
         # Collect every problem across the whole roster (never just the
         # first) -- matching BacktestLaunchValidationError's own documented
         # "carries every field-level error at once" contract, so an
         # operator sees every missing security's evidence gap in one pass
         # instead of fixing and resubmitting one security at a time.
         problems: list[str] = []
+        # Unique (pair, as_of) cache misses -> the securities waiting on
+        # each. Backfilled once per miss (never per security), then the
+        # affected members are pinned from the fetched quote below.
+        fx_misses: dict[tuple[str, str], list[str]] = {}
         for security_id, revision in members:
             try:
                 evidence = self._historical_price_repo.get(revision)
@@ -476,23 +512,145 @@ class BacktestLaunchService:
                     continue
                 quote = self._fx_quote_repo.get_for_pair_and_date(pair, fx_as_of)
                 if quote is None:
-                    problems.append(
-                        f"Pinned historical FX evidence is unavailable for "
-                        f"{security_id!r} as of {fx_as_of}."
-                    )
+                    fx_misses.setdefault((pair, fx_as_of), []).append(security_id)
                     continue
                 fx_revision = quote.digest
-            securities.append(
-                PinnedSecurityEvidenceV1(
-                    security_id=security_id,
-                    price_revision=revision,
-                    action_revision=revision,
-                    fx_revision=fx_revision,
-                )
+            evidence_by_security[security_id] = PinnedSecurityEvidenceV1(
+                security_id=security_id,
+                price_revision=revision,
+                action_revision=revision,
+                fx_revision=fx_revision,
             )
+        if fx_misses:
+            backfilled, fx_problems, fx_summaries = self._resolve_fx_misses(
+                fx_misses, revision_by_security
+            )
+            evidence_by_security.update(backfilled)
+            # The full per-security list is for the log only; the raised
+            # error carries one actionable summary per distinct miss.
+            if fx_problems:
+                if len(fx_problems) > _MAX_LOGGED_PROBLEMS:
+                    fx_problems = fx_problems[:_MAX_LOGGED_PROBLEMS] + [
+                        f"... and {len(fx_problems) - _MAX_LOGGED_PROBLEMS} more."
+                    ]
+                logger.warning(
+                    "FX evidence resolution problems: %s", " ".join(fx_problems)
+                )
+            problems.extend(fx_summaries)
         if problems:
             raise _RosterEvidenceError(" ".join(problems))
-        return tuple(securities)
+        return tuple(evidence_by_security[security_id] for security_id, _ in members)
+
+    def _resolve_fx_misses(
+        self,
+        fx_misses: Mapping[tuple[str, str], list[str]],
+        revision_by_security: Mapping[str, str],
+    ) -> tuple[
+        dict[str, PinnedSecurityEvidenceV1], list[str], list[str]
+    ]:
+        """Backfill each unique FX cache miss through the provider chain.
+
+        Returns the newly pinnable securities, per-security problem
+        strings (log only), and one summary message per distinct miss for
+        the raised error -- naming the date, pair, affected-security
+        count, and the mode-specific remedy: (a) fetchable but the fetch
+        failed ("retry preparation"), or (b) no provider has the rate
+        ("choose a later start month").
+        """
+        securities: dict[str, PinnedSecurityEvidenceV1] = {}
+        per_security: list[str] = []
+        summaries: list[str] = []
+        for (pair, as_of), security_ids in fx_misses.items():
+            outcome, quote = self._fetch_or_classify(pair, as_of)
+            if outcome == "fetched" and quote is not None:
+                # Pin the fetched quote's own digest -- never a re-read,
+                # which a concurrent writer could race beneath us.
+                for security_id in security_ids:
+                    revision = revision_by_security[security_id]
+                    securities[security_id] = PinnedSecurityEvidenceV1(
+                        security_id=security_id,
+                        price_revision=revision,
+                        action_revision=revision,
+                        fx_revision=quote.digest,
+                    )
+                continue
+            for security_id in security_ids:
+                per_security.append(
+                    f"Pinned historical FX evidence is unavailable for "
+                    f"{security_id!r} as of {as_of}."
+                )
+            count = len(security_ids)
+            if outcome == "transient":
+                summaries.append(
+                    f"Historical FX evidence for {as_of} ({pair}) could not be "
+                    f"fetched for {count} securities — retry preparation."
+                )
+            elif outcome == "unsupported":
+                summaries.append(
+                    f"Currency pair {pair} is not supported by any configured "
+                    f"FX provider — remove affected securities or extend the "
+                    f"provider mapping."
+                )
+            else:
+                summaries.append(
+                    f"No FX rate is available for {as_of} ({pair}) for {count} "
+                    f"securities — choose a later start month."
+                )
+        # The worker truncates failure_detail at 500 chars -- keep the
+        # remedy-bearing summaries inside that budget.
+        if len(summaries) > _MAX_SUMMARIES:
+            summaries = summaries[:_MAX_SUMMARIES] + [
+                f"... and {len(summaries) - _MAX_SUMMARIES} more distinct FX gaps."
+            ]
+        return securities, per_security, summaries
+
+    def _fetch_or_classify(self, pair: str, as_of: str) -> tuple[str, FxQuote | None]:
+        """Fetch one missed (pair, as_of) and classify the outcome.
+
+        Returns ``(outcome, quote)`` where outcome is ``"fetched"`` (the
+        persisted quote is returned -- pin its digest directly, never a
+        re-read a concurrent writer could race beneath), ``"transient"`
+        (the chain raised -- never negatively cached), ``"unsupported"`
+        (no provider series for the pair), or ``"definitive"`` (no
+        provider has the rate; negatively cached under the
+        ``backfill_chain`` provider key so a repeat preparation fails
+        immediately without any network fetch).
+        """
+        attempt = self._fx_quote_repo.get_unavailable_attempt(
+            _FX_BACKFILL_CHAIN_PROVIDER, pair, as_of
+        )
+        if attempt is not None and attempt.reason == "no_rate":
+            return "definitive", None
+        try:
+            quote = self._fx_fetcher.fetch(pair, as_of)
+        except FxUnsupportedPair as exc:
+            logger.warning("FX pair unsupported: %s", exc)
+            return "unsupported", None
+        except FxProviderUnavailable as exc:
+            logger.warning(
+                "FX backfill chain failed for %s as of %s: %s", pair, as_of, exc
+            )
+            return "transient", None
+        except Exception as exc:  # never let a fetch bug crash the worker
+            logger.warning(
+                "FX backfill chain raised unexpectedly for %s as of %s: %s",
+                pair,
+                as_of,
+                exc,
+            )
+            return "transient", None
+        if quote is None:
+            self._fx_quote_repo.record_unavailable_attempt(
+                FxUnavailableAttempt(
+                    provider=_FX_BACKFILL_CHAIN_PROVIDER,
+                    pair=pair,
+                    requested_date=as_of,
+                    reason="no_rate",
+                )
+            )
+            return "definitive", None
+        self._fx_quote_repo.insert_or_get(quote)
+        return "fetched", quote
 
 
 __all__ = [

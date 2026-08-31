@@ -1233,17 +1233,42 @@ def test_preparation_missing_evidence_uses_required_data_code(
 
     class Missing(ValueError):
         code = "required_data_missing"
+        # Mirrors _RosterEvidenceError's contract: module-composed,
+        # user-safe text that the worker surfaces verbatim.
+        user_safe_message = True
 
+    # The failure detail now surfaces the resolver's own actionable
+    # message (date, pair, remedy) instead of a fixed string (#452).
+    exc_message = (
+        "Historical FX evidence for 2000-02-01 (GBPUSD=X) could not be "
+        "fetched for 1 security — retry preparation."
+    )
     monkeypatch.setattr(
         worker_module.BacktestLaunchService,
         "_resolve_roster_evidence",
-        lambda *_a, **_k: (_ for _ in ()).throw(Missing()),
+        lambda *_a, **_k: (_ for _ in ()).throw(Missing(exc_message)),
     )
     result = worker_module.PreparationStageEngine(
         repo, prices=object(), fx=object()
     ).run(a.job.id, c.claim_token)  # type: ignore[arg-type]
+
+    # A required_data_missing exception WITHOUT the user-safe flag keeps
+    # the generic detail -- raw exception text never reaches the UI.
+    class Unsafe(ValueError):
+        code = "required_data_missing"
+
+    repo2, a2, c2 = _typed_claim(tmp_path, "missing-unsafe")
+    monkeypatch.setattr(
+        worker_module.BacktestLaunchService,
+        "_resolve_roster_evidence",
+        lambda *_a, **_k: (_ for _ in ()).throw(Unsafe("internal /secret/path")),
+    )
+    generic = worker_module.PreparationStageEngine(
+        repo2, prices=object(), fx=object()  # type: ignore[arg-type]
+    ).run(a2.job.id, c2.claim_token)  # type: ignore[arg-type]
+    assert generic.failure_detail == "Required selected evidence is unavailable"
     assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
-    assert result.failure_detail == "Required selected evidence is unavailable"
+    assert result.failure_detail == exc_message
     assert stages == ["evidence_selection"]
 
 

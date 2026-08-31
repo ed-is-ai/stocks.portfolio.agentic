@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Protocol, cast
 
 from app.core import config
+from app.integrations.fx_history import ChainedFxQuoteFetcher
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.historical_price_repo import (
@@ -296,6 +297,9 @@ class PreparationStageEngine(StageWalkEngine):
                 jobs=StrategyJobService(self._repository),
                 skills_root=self._skills_root,
                 project_root=self._project_root,
+                # The worker is a subprocess with no DI container, so the
+                # chained historical FX backfill fetcher is built inline.
+                fx_fetcher=ChainedFxQuoteFetcher(),
             )
             evidence: tuple[PinnedSecurityEvidenceV1, ...] | None = None
             for stage in STAGE_SEQUENCES[StrategyJobType.PREPARATION]:
@@ -403,7 +407,12 @@ class PreparationStageEngine(StageWalkEngine):
                 else JobFailureCode.INTEGRITY_ERROR
             )
             detail = (
-                "Required selected evidence is unavailable"
+                str(exc)[:500]
+                if code is JobFailureCode.REQUIRED_DATA_MISSING
+                and getattr(exc, "user_safe_message", False)
+                # Only module-composed messages are surfaced verbatim;
+                # raw exception text (repo errors, paths) stays generic.
+                else "Required selected evidence is unavailable"
                 if code is JobFailureCode.REQUIRED_DATA_MISSING
                 else "Selected evidence could not be sealed"
             )

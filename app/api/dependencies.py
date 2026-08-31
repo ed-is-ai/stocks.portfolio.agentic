@@ -10,6 +10,7 @@ from functools import lru_cache
 
 from app.core import config
 from app.core.config import ALERTS_DB, TRADES_DB
+from app.integrations.fx_history import ChainedFxQuoteFetcher
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.notifications_repo import NotificationsRepository
@@ -111,6 +112,17 @@ def get_strategy_job_service() -> StrategyJobService:
 
 
 @lru_cache
+def get_fx_history_fetcher() -> ChainedFxQuoteFetcher:
+    """Return the shared chained historical FX quote fetcher (#452).
+
+    Backs ``BacktestLaunchService``'s exact-date FX backfill during
+    preparation -- one process-wide instance, matching the other cached
+    providers in this module.
+    """
+    return ChainedFxQuoteFetcher()
+
+
+@lru_cache
 def get_backtest_launch_service() -> BacktestLaunchService:
     """Return the shared Backtest launch orchestration boundary (Story 2.7)."""
     return BacktestLaunchService(
@@ -118,6 +130,7 @@ def get_backtest_launch_service() -> BacktestLaunchService:
         historical_price_repo=get_historical_price_repository(),
         fx_quote_repo=get_fx_quote_repository(),
         jobs=get_strategy_job_service(),
+        fx_fetcher=get_fx_history_fetcher(),
     )
 
 

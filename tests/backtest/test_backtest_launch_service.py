@@ -18,6 +18,7 @@ proven with two minimal ad-hoc Skill folders instead.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -26,8 +27,12 @@ from typing import cast
 
 import pytest
 
+from app.integrations.fx_history import (
+    ChainedFxQuoteFetcher,
+    FxProviderUnavailable,
+)
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
-from app.repositories.fx_quote_repo import FxQuoteRepository
+from app.repositories.fx_quote_repo import FxQuote, FxQuoteRepository
 from app.repositories.historical_price_repo import (
     EvidenceMissingError,
     HistoricalPriceRepository,
@@ -145,17 +150,68 @@ class FakeHistoricalPriceRepo:
 
 @dataclass
 class FakeFxQuoteRepo:
+    """Cache-backed FX quote store with negative-attempt bookkeeping.
+
+    ``available=False`` models an empty ``fx_quotes`` cache (every exact-
+    date lookup misses) unless a quote was inserted via ``insert_or_get``
+    -- which is exactly the backfill-then-re-read sequence the resolver
+    runs against the real repository.
+    """
+
     available: bool = True
+    stored: dict[tuple[str, str], SimpleNamespace] = field(default_factory=dict)
+    unavailable_attempts: dict[tuple[str, str, str], SimpleNamespace] = field(
+        default_factory=dict
+    )
+    inserted: list[FxQuote] = field(default_factory=list)
 
     def get_for_pair_and_date(self, pair: str, as_of: str):
+        stored = self.stored.get((pair, as_of))
+        if stored is not None:
+            return stored
         if not self.available:
             return None
         return SimpleNamespace(digest=FX_DIGEST)
 
     def get_by_digest(self, digest: str):
-        if not self.available or digest != FX_DIGEST:
-            return None
-        return SimpleNamespace(digest=digest)
+        for quote in self.stored.values():
+            if quote.digest == digest:
+                return SimpleNamespace(digest=digest)
+        if self.available and digest == FX_DIGEST:
+            return SimpleNamespace(digest=digest)
+        return None
+
+    def insert_or_get(self, quote: FxQuote) -> None:
+        self.inserted.append(quote)
+        self.stored[(quote.pair, quote.as_of)] = SimpleNamespace(digest=quote.digest)
+
+    def get_unavailable_attempt(self, provider: str, pair: str, requested_date: str):
+        return self.unavailable_attempts.get((provider, pair, requested_date))
+
+    def record_unavailable_attempt(self, attempt):
+        key = (attempt.provider, attempt.pair, attempt.requested_date)
+        self.unavailable_attempts.setdefault(key, attempt)
+        return attempt
+
+
+@dataclass
+class StubFxFetcher:
+    """Scriptable stand-in for ``ChainedFxQuoteFetcher``.
+
+    ``quotes`` maps ``(pair, as_of)`` to a returned ``FxQuote`` (absent
+    key = definitive miss, ``None``); ``error`` raises instead, modelling
+    a transient chain failure. Every call is recorded in ``calls``.
+    """
+
+    quotes: dict[tuple[str, str], FxQuote | None] = field(default_factory=dict)
+    error: Exception | None = None
+    calls: list[tuple[str, str]] = field(default_factory=list)
+
+    def fetch(self, pair: str, as_of: str) -> FxQuote | None:
+        self.calls.append((pair, as_of))
+        if self.error is not None:
+            raise self.error
+        return self.quotes.get((pair, as_of))
 
 
 class FakeJobs:
@@ -182,8 +238,12 @@ def _service(
     fx_quote_repo: FakeFxQuoteRepo | None = None,
     jobs: FakeJobs | None = None,
     skills_root: Path = DISCOVERY_ROOT,
+    fx_fetcher: StubFxFetcher | None = None,
 ) -> tuple[BacktestLaunchService, FakeJobs]:
     jobs = jobs or FakeJobs()
+    # Default to a definitively-missing stub so no test ever reaches the
+    # real (network-bound) chained fetcher by accident.
+    fetcher = fx_fetcher or StubFxFetcher()
     service = BacktestLaunchService(
         backtest_repo=cast(BacktestRepository, backtest_repo or FakeBacktestRepo()),
         historical_price_repo=cast(
@@ -194,6 +254,7 @@ def _service(
         jobs=cast(StrategyJobService, jobs),
         skills_root=skills_root,
         project_root=PROJECT_ROOT,
+        fx_fetcher=cast(ChainedFxQuoteFetcher, fetcher),
     )
     return service, jobs
 
@@ -558,6 +619,91 @@ def test_launch_rejects_missing_fx_evidence_when_currencies_differ() -> None:
         service.launch(_command(base_currency="GBP"))
 
     assert "form" in _field_errors(excinfo.value)
+    assert "choose a later start month" in _field_errors(excinfo.value)["form"]
+    assert jobs.submissions == []
+
+
+def _backfill_quote(as_of: str = "2026-02-01", rate: str = "1.4") -> FxQuote:
+    """A quote shaped like one the real chained fetcher would return."""
+    provider, pair = "bank_of_england", "GBPUSD=X"
+    digest = hashlib.sha256(
+        f"{provider}|{pair}|{as_of}|{rate}".encode("utf-8")
+    ).hexdigest()
+    return FxQuote(
+        pair=pair,
+        provider=provider,
+        as_of=as_of,
+        rate=Decimal(rate),
+        digest=digest,
+    )
+
+
+def test_launch_backfills_missing_fx_evidence_and_pins() -> None:
+    fx_repo = FakeFxQuoteRepo(available=False)
+    quote = _backfill_quote()
+    fetcher = StubFxFetcher(quotes={("GBPUSD=X", "2026-02-01"): quote})
+    service, jobs = _service(fx_quote_repo=fx_repo, fx_fetcher=fetcher)
+
+    result = service.launch(_command(base_currency="GBP"))
+
+    assert len(jobs.submissions) == 1
+    assert fx_repo.inserted == [quote]
+    assert fetcher.calls == [("GBPUSD=X", "2026-02-01")]
+    assert result.job.id == "job-1"
+
+
+def test_launch_fx_backfill_transient_failure_is_mode_a() -> None:
+    fx_repo = FakeFxQuoteRepo(available=False)
+    fetcher = StubFxFetcher(error=FxProviderUnavailable("BoE unreachable"))
+    service, jobs = _service(fx_quote_repo=fx_repo, fx_fetcher=fetcher)
+
+    with pytest.raises(BacktestLaunchValidationError) as excinfo:
+        service.launch(_command(base_currency="GBP"))
+
+    message = _field_errors(excinfo.value)["form"]
+    assert "could not be fetched" in message
+    assert "retry preparation" in message
+    # Transient failures are never negatively cached.
+    assert fx_repo.unavailable_attempts == {}
+    assert jobs.submissions == []
+
+
+def test_launch_fx_backfill_definitive_miss_is_mode_b() -> None:
+    fx_repo = FakeFxQuoteRepo(available=False)
+    fetcher = StubFxFetcher()  # every (pair, as_of) definitively misses
+    service, jobs = _service(fx_quote_repo=fx_repo, fx_fetcher=fetcher)
+
+    with pytest.raises(BacktestLaunchValidationError) as excinfo:
+        service.launch(_command(base_currency="GBP"))
+
+    message = _field_errors(excinfo.value)["form"]
+    assert "No FX rate is available" in message
+    assert "choose a later start month" in message
+    assert ("backfill_chain", "GBPUSD=X", "2026-02-01") in fx_repo.unavailable_attempts
+    attempt = fx_repo.unavailable_attempts[("backfill_chain", "GBPUSD=X", "2026-02-01")]
+    assert attempt.reason == "no_rate"
+    assert jobs.submissions == []
+
+
+def test_launch_fx_backfill_negative_attempt_short_circuits() -> None:
+    fx_repo = FakeFxQuoteRepo(available=False)
+    fx_repo.unavailable_attempts[("backfill_chain", "GBPUSD=X", "2026-02-01")] = (
+        SimpleNamespace(
+            provider="backfill_chain",
+            pair="GBPUSD=X",
+            requested_date="2026-02-01",
+            reason="no_rate",
+        )
+    )
+    fetcher = StubFxFetcher()
+    service, jobs = _service(fx_quote_repo=fx_repo, fx_fetcher=fetcher)
+
+    with pytest.raises(BacktestLaunchValidationError) as excinfo:
+        service.launch(_command(base_currency="GBP"))
+
+    assert "choose a later start month" in _field_errors(excinfo.value)["form"]
+    # The negative cache means no network fetch is attempted at all.
+    assert fetcher.calls == []
     assert jobs.submissions == []
 
 
