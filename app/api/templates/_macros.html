@@ -15,7 +15,7 @@
 {% endfor %}
 {% endmacro %}
 
-{% macro freshness_affordance(freshness, variant='bar', oob=false) %}
+{% macro freshness_affordance(freshness, latest_attempt_error=None, variant='bar', oob=false) %}
 {# Single source of truth for the fresh/stale/unknown affordance (#418).
    ``variant='bar'`` is the in-bar block shown while a refresh runs;
    ``variant='control'`` is the compact tooltip affordance that sits beside
@@ -23,35 +23,49 @@
    Both keep <time class="local-time"> so renderLocalTimes() localises it.
    The attention cue rides on a class the OOB render omits, so it plays once on
    first paint rather than restarting on every two-second poll. #}
-{%- set icon = 'exclamation-circle-fill' if freshness.state == 'stale'
-   else ('clock-fill' if freshness.state == 'fresh' else 'question-circle') -%}
+{%- set presentation_state = 'failed' if latest_attempt_error else freshness.state -%}
+{%- set icon = 'x-circle-fill' if latest_attempt_error
+   else ('exclamation-triangle-fill' if freshness.state == 'stale'
+   else ('question-circle' if freshness.state == 'unknown' else none)) -%}
 {%- if variant == 'control' -%}
-<span id="refresh-freshness" class="refresh-freshness freshness-{{ freshness.state }}{% if not oob %} refresh-freshness-cue{% endif %}"
+<span id="refresh-freshness" class="refresh-freshness freshness-{{ presentation_state }}{% if not oob and presentation_state != 'fresh' %} refresh-freshness-cue{% endif %}"
       {% if oob %}hx-swap-oob="true"{% endif %}
-      role="note" tabindex="0"
-      data-bs-toggle="tooltip" aria-label="Analysis freshness"
-      title="{% if freshness.refreshed_at %}Last successful refresh {{ freshness.refreshed_at.strftime('%Y-%m-%d %H:%M UTC') }}{% if freshness.state == 'stale' %} — Analysis data is stale and should be used with caution.{% endif %}{% else %}Last successful refresh unknown{% endif %}">
-  <i class="bi bi-{{ icon }}"></i>
-  {{ freshness_detail(freshness, label_class='visually-hidden') }}
+      >
+  {% if icon %}<i class="bi bi-{{ icon }}" aria-hidden="true"></i>{% endif %}
+  <span id="refresh-freshness-description" class="refresh-freshness-description">
+    {{ freshness_detail(freshness, latest_attempt_error) }}
+  </span>
 </span>
 {%- else -%}
-<div class="pipeline-status-freshness freshness-{{ freshness.state }}" aria-label="Analysis freshness">
-  <i class="bi bi-{{ icon }}"></i>
-  {{ freshness_detail(freshness) }}
+<div class="pipeline-status-freshness freshness-{{ presentation_state }}" aria-label="Analysis freshness">
+  {% if icon %}<i class="bi bi-{{ icon }}" aria-hidden="true"></i>{% endif %}
+  {{ freshness_detail(freshness, latest_attempt_error) }}
 </div>
 {%- endif -%}
 {% endmacro %}
 
-{% macro freshness_detail(freshness, label_class='') %}
-{# Freshness copy, preserved verbatim across both variants (#418). In the
-   compact control variant the label is visually hidden so only the icon and
-   the localised timestamp show, while assistive tech still reads it all. #}
-{%- if freshness.refreshed_at -%}
-<span class="{{ label_class }}">Last successful refresh</span>
-<time class="local-time" datetime="{{ freshness.refreshed_at.isoformat() }}" title="{{ freshness.refreshed_at.isoformat() }} (UTC source; displayed locally in browser)">{{ freshness.refreshed_at.strftime('%Y-%m-%d %H:%M UTC') }}</time>
-{%- if freshness.state == 'stale' %}<span class="visually-hidden">Analysis data is stale and should be used with caution.</span>{% endif -%}
+{% macro freshness_detail(freshness, latest_attempt_error=None) %}
+{# One detail block serves pointer/focus disclosure, the open touch menu and
+   assistive technology. Failure is a presentation override: the timestamp
+   remains the last usable artifact and the Freshness model stays unchanged. #}
+{%- if latest_attempt_error -%}
+<strong>Latest refresh failed.</strong> {{ latest_attempt_error }}
+{%- if freshness.state == 'stale' %} Last usable analysis data is stale; use it with caution.{% endif %}
+{%- elif freshness.state == 'stale' -%}
+<strong>Analysis data is stale.</strong> Use it with caution.
+{%- elif freshness.state == 'fresh' -%}
+<strong>Analysis data is fresh.</strong>
 {%- else -%}
-<span class="{{ label_class }}">Last successful refresh unknown</span>
+<strong>Refresh status unknown.</strong>
+{%- endif -%}
+{%- if freshness.refreshed_at -%}
+ Last successful refresh:
+<time class="local-time" datetime="{{ freshness.refreshed_at.isoformat() }}" title="{{ freshness.refreshed_at.isoformat() }} (UTC source; displayed locally in browser)">{{ freshness.refreshed_at.strftime('%Y-%m-%d %H:%M UTC') }}</time>{% if freshness.age_display %} (<span data-refresh-age="{{ freshness.refreshed_at.isoformat() }}">{{ freshness.age_display }}</span>){% endif %}.
+{%- if freshness.state == 'stale' and freshness.stale_at %}
+ Freshness window ended <time class="local-time" datetime="{{ freshness.stale_at.isoformat() }}">{{ freshness.stale_at.strftime('%Y-%m-%d %H:%M UTC') }}</time>.
+{%- endif -%}
+{%- else -%}
+ Last successful refresh unknown.
 {%- endif -%}
 {% endmacro %}
 

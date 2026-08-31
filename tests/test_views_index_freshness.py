@@ -42,17 +42,17 @@ def test_index_renders_fresh_affordance_beside_refresh_control(
 
     assert 'id="refresh-freshness"' in markup
     assert "freshness-fresh" in markup
-    assert "bi-clock-fill" in markup
-    assert 'data-bs-toggle="tooltip"' in markup
-    assert 'aria-label="Analysis freshness"' in markup
-    # Keyboard users must be able to reach the tooltip, and a bare <span> is
-    # role=generic where ARIA forbids naming -- role="note" makes the label
-    # and the descendant copy both exposable.
-    assert 'role="note" tabindex="0"' in markup
-    # The cue plays on the server-rendered first paint only.
-    assert "refresh-freshness-cue" in markup
+    # Fresh is deliberately quiet: detail remains attached to the single
+    # keyboard/touch dropdown target, but there is no persistent icon/time.
+    assert "bi-clock-fill" not in markup
+    assert 'aria-label="Refresh Data"' in markup
+    freshness_tag = markup.split('id="refresh-freshness"', 1)[1].split(">", 1)[0]
+    assert 'aria-live="polite"' not in freshness_tag
+    assert 'aria-describedby="refresh-freshness-description"' in markup
+    assert "freshness-fresh refresh-freshness-cue" not in markup
     assert 'id="refresh-data-button"' in markup
     assert '<time class="local-time" datetime="' in markup
+    assert 'data-refresh-age="' in markup
     assert "Last successful refresh" in markup
 
 
@@ -67,8 +67,10 @@ def test_index_renders_stale_affordance_with_caution_sentence(
     markup = client.get("/").text
 
     assert "freshness-stale" in markup
-    assert "bi-exclamation-circle-fill" in markup
-    assert "Analysis data is stale and should be used with caution." in markup
+    assert "bi-exclamation-triangle-fill" in markup
+    assert "Analysis data is stale." in markup
+    assert "Use it with caution." in markup
+    assert "Freshness window ended" in markup
 
 
 def test_index_renders_unknown_affordance_when_no_artifact(
@@ -82,6 +84,51 @@ def test_index_renders_unknown_affordance_when_no_artifact(
     assert "freshness-unknown" in markup
     assert "bi-question-circle" in markup
     assert "Last successful refresh unknown" in markup
+
+
+def test_index_latest_failure_overrides_fresh_colour_but_keeps_last_success(
+    monkeypatch, tmp_path
+) -> None:
+    generated_at = datetime.now(timezone.utc)
+    _use_artifact(monkeypatch, tmp_path, generated_at)
+    repo = stock_scanner_context_module._status_repository
+    repo.start(run_id="failed")
+    from app.schemas.pipeline_status import PipelineState
+
+    repo.finish(
+        PipelineState.FAILED,
+        expected_run_id="failed",
+        error_summary="Provider timed out.",
+    )
+
+    markup = client.get("/").text
+
+    assert "freshness-failed" in markup
+    assert "bi-x-circle-fill" in markup
+    assert "Latest refresh failed." in markup
+    assert "Provider timed out." in markup
+    assert "Last successful refresh:" in markup
+
+
+def test_index_latest_failure_keeps_stale_caution(monkeypatch, tmp_path) -> None:
+    _use_artifact(
+        monkeypatch, tmp_path, datetime.now(timezone.utc) - timedelta(days=30)
+    )
+    repo = stock_scanner_context_module._status_repository
+    repo.start(run_id="failed-stale")
+    from app.schemas.pipeline_status import PipelineState
+
+    repo.finish(
+        PipelineState.FAILED,
+        expected_run_id="failed-stale",
+        error_summary="Provider timed out.",
+    )
+
+    markup = client.get("/").text
+
+    assert "freshness-failed" in markup
+    assert "Last usable analysis data is stale; use it with caution." in markup
+    assert "Freshness window ended" in markup
 
 
 def test_index_reserves_no_permanent_space_for_the_status_bar(

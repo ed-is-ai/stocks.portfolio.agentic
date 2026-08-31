@@ -30,6 +30,7 @@ def test_freshness_threshold_and_future_clock_skew() -> None:
     assert stale.state is FreshnessState.STALE
     assert future.state is FreshnessState.FRESH
     assert future.age_seconds == 0
+    assert future.age_display == "less than a minute ago"
     assert (
         future.diagnostic
         == "Refresh timestamp is in the future; age was clamped to zero."
@@ -80,6 +81,30 @@ def test_missing_refresh_is_unknown() -> None:
 
     assert result.state is FreshnessState.UNKNOWN
     assert result.refreshed_at is None
+    assert result.age_display is None
+
+
+def test_freshness_age_display_is_deterministic() -> None:
+    refreshed = datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc)
+
+    assert (
+        calculate_freshness(
+            refreshed, now=refreshed + timedelta(minutes=1), stale_after_hours=48
+        ).age_display
+        == "1 minute ago"
+    )
+    assert (
+        calculate_freshness(
+            refreshed, now=refreshed + timedelta(hours=3), stale_after_hours=48
+        ).age_display
+        == "3 hours ago"
+    )
+    assert (
+        calculate_freshness(
+            refreshed, now=refreshed + timedelta(days=2), stale_after_hours=48
+        ).age_display
+        == "2 days ago"
+    )
 
 
 def test_naive_timestamp_is_unknown_with_diagnostic() -> None:

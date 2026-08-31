@@ -32,8 +32,23 @@ class Freshness(BaseModel):
     state: FreshnessState
     refreshed_at: datetime | None = None
     age_seconds: float | None = None
+    age_display: str | None = None
     stale_at: datetime | None = None
     diagnostic: str | None = None
+
+
+def _format_age(age_seconds: float) -> str:
+    """Return a stable, compact age for server-rendered freshness detail."""
+    if age_seconds < 60:
+        return "less than a minute ago"
+    minutes = int(age_seconds // 60)
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+    hours = int(age_seconds // 3600)
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    days = int(age_seconds // 86400)
+    return f"{days} day{'s' if days != 1 else ''} ago"
 
 
 def _weekend_adjusted_boundary(refreshed_at: datetime, boundary: datetime) -> datetime:
@@ -95,6 +110,7 @@ def calculate_freshness(
         state=(FreshnessState.STALE if current >= stale_at else FreshnessState.FRESH),
         refreshed_at=refreshed_at,
         age_seconds=raw_age,
+        age_display=_format_age(raw_age),
         stale_at=stale_at,
         diagnostic=diagnostic,
     )

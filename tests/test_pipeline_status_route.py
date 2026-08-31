@@ -234,6 +234,8 @@ def test_pipeline_status_failed_attempt_keeps_prior_refresh_and_shows_toast(
     assert "Last successful refresh" in markup
     assert 'id="pipeline-breakdown-toast"' in markup
     assert "Latest refresh failed: Latest provider request failed." in markup
+    assert "freshness-failed" in markup
+    assert "bi-x-circle-fill" in markup
 
 
 def test_pipeline_status_no_toast_when_coverage_fully_ok(monkeypatch, tmp_path) -> None:
@@ -376,8 +378,9 @@ def test_pipeline_status_stale_freshness_copy_and_icon(monkeypatch, tmp_path) ->
     markup = client.get("/pipeline-status").text
 
     assert "freshness-stale" in markup
-    assert "bi-exclamation-circle-fill" in markup
-    assert "Analysis data is stale and should be used with caution." in markup
+    assert "bi-exclamation-triangle-fill" in markup
+    assert "Analysis data is stale." in markup
+    assert "Freshness window ended" in markup
 
 
 def test_pipeline_status_fresh_freshness_copy_and_icon(monkeypatch, tmp_path) -> None:
@@ -399,6 +402,6 @@ def test_pipeline_status_fresh_freshness_copy_and_icon(monkeypatch, tmp_path) ->
     markup = client.get("/pipeline-status").text
 
     assert "freshness-fresh" in markup
-    assert "bi-clock-fill" in markup
+    assert "bi-clock-fill" not in markup
     assert "Last successful refresh" in markup
     assert '<time class="local-time" datetime="' in markup

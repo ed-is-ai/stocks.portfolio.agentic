@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -42,10 +43,19 @@ def capture_run_once(monkeypatch: pytest.MonkeyPatch):
 def test_refresh_data_defaults_both_flags_off(
     capture_run_once: list[tuple[Any, ...]],
 ) -> None:
-    response = client.post("/refresh-data", data={"extract": "true"})
+    response = client.post("/refresh-data", data={})
     assert response.status_code == 200
     args, _kwargs = capture_run_once[0]
     # run_once(extract, force_whale_wisdom, force_stocktwits)
+    assert args == (False, False, False)
+
+
+def test_refresh_data_institutional_sets_extract_only(
+    capture_run_once: list[tuple[Any, ...]],
+) -> None:
+    response = client.post("/refresh-data", data={"extract": "true"})
+    assert response.status_code == 200
+    args, _kwargs = capture_run_once[0]
     assert args == (True, False, False)
 
 
@@ -62,6 +72,49 @@ def test_refresh_data_forwards_set_flags(
     )
     args, _kwargs = capture_run_once[0]
     assert args == (True, True, True)
+
+
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        ("force_whale_wisdom", (True, True, False)),
+        ("force_stocktwits", (True, False, True)),
+    ],
+)
+def test_refresh_data_custom_flags_are_independent(
+    capture_run_once: list[tuple[Any, ...]], field: str, expected: tuple[bool, ...]
+) -> None:
+    client.post("/refresh-data", data={"extract": "true", field: "true"})
+    args, _kwargs = capture_run_once[0]
+    assert args == expected
+
+
+def test_confirmation_retains_selected_custom_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    capture_run_once: list[tuple[Any, ...]],
+) -> None:
+    monkeypatch.setattr(
+        PipelineService,
+        "missing_configuration",
+        staticmethod(
+            lambda: [SimpleNamespace(name="Provider", impact="Reduced coverage")]
+        ),
+    )
+
+    response = client.post(
+        "/refresh-data",
+        data={
+            "extract": "true",
+            "force_whale_wisdom": "true",
+            "force_stocktwits": "false",
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"extract": true' in response.text
+    assert '"force_whale_wisdom": true' in response.text
+    assert '"force_stocktwits": false' in response.text
+    assert capture_run_once == []
 
 
 # --------------------------------------------------------------------------- #

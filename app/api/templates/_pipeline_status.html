@@ -1,7 +1,7 @@
 {% import "_macros.html" as macros %}
 {# The header affordance is the lasting home of freshness; every poll swaps it
    out-of-band so a completing run updates it without a reload (#418). #}
-{{ macros.freshness_affordance(freshness, variant='control', oob=true) }}
+{{ macros.freshness_affordance(freshness, latest_attempt_error, variant='control', oob=true) }}
 
 {# The fixed bar is transient: it exists only while a refresh is running, so an
    idle page costs no screen space. The failure/partial toast below is a
@@ -28,7 +28,7 @@
     {% endfor %}
   </ol>
   {% if status.error_summary %}<span class="pipeline-status-error">{{ status.error_summary }}</span>{% endif %}
-  {{ macros.freshness_affordance(freshness) }}
+  {{ macros.freshness_affordance(freshness, latest_attempt_error) }}
 </div>
 {% endif %}
 

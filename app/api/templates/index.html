@@ -387,18 +387,58 @@
     .pipeline-breakdown-toast .toast-body { font-size: .8rem; display: flex; flex-direction: column; gap: .4rem; }
     @keyframes pipeline-sheen { to { background-position: -220% 0; } }
     @keyframes pipeline-spin { to { transform: rotate(360deg); } }
-    /* The affordance sits on the dark navbar, so it takes light-on-dark ink --
-       --muted/--amber are tuned for the white status bar and fail AA here. */
-    .refresh-freshness { display: inline-flex; align-items: center; gap: .3rem; white-space: nowrap; font-size: .74rem; color: rgba(255,255,255,0.72); cursor: help; }
-    .refresh-freshness:focus-visible { outline: 2px solid rgba(255,255,255,0.8); outline-offset: 2px; border-radius: var(--radius-sm); }
-    .refresh-freshness .local-time { font-variant-numeric: tabular-nums; }
-    .refresh-freshness.freshness-stale { color: #fbbf24; }
+    /* Freshness is part of the one Refresh Data target. The nested status is
+       non-interactive; hover/focus reveals its detail and opening the menu
+       keeps that same detail visible for touch users. */
+    .navbar-actions { min-width: 0; }
+    .refresh-dropdown { position: relative; }
+    .refresh-data-toggle { display: inline-flex; align-items: center; gap: .35rem; }
+    .refresh-freshness { display: inline-flex; align-items: center; color: #475569; }
+    .refresh-freshness.freshness-stale { color: #a16207; }
+    .refresh-freshness.freshness-failed { color: #b91c1c; }
+    .refresh-freshness-description {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    .refresh-data-toggle:hover .refresh-freshness-description,
+    .refresh-data-toggle:focus-visible .refresh-freshness-description,
+    .refresh-data-toggle.show .refresh-freshness-description {
+      width: min(23rem, calc(100vw - 1rem)); height: auto; margin: 0;
+      clip: auto; white-space: normal; overflow: visible;
+      position: absolute; top: calc(100% + .25rem); right: 0; z-index: 1001;
+      padding: .65rem .75rem; text-align: left; line-height: 1.35;
+      color: var(--primary); background: white; border: 1px solid var(--border);
+      box-shadow: 0 .35rem 1rem rgba(0,0,0,.16); font-size: var(--fs-sm);
+      max-height: min(40vh, 18rem); overflow-y: auto;
+    }
+    .refresh-data-toggle[aria-disabled="true"] { opacity: .65; cursor: wait; }
+    .refresh-freshness-description .local-time { font-variant-numeric: tabular-nums; }
+    .refresh-menu {
+      width: min(23rem, calc(100vw - 1rem)); max-width: calc(100vw - 1rem);
+      max-height: calc(100vh - 5rem); overflow-y: auto;
+    }
+    .refresh-dropdown.status-open .refresh-menu {
+      padding-top: calc(var(--refresh-status-height, 4rem) + .75rem) !important;
+    }
+    .refresh-action { display: flex; align-items: flex-start; gap: .65rem; }
+    .refresh-action + .refresh-action { border-top: 1px solid var(--border); padding-top: .75rem; margin-top: .75rem; }
+    .refresh-action-copy { flex: 1; min-width: 0; }
+    .refresh-action-title { display: block; font-weight: var(--fw-semibold); color: var(--primary); }
+    .refresh-action-help { display: block; margin-top: .15rem; color: var(--muted); font-size: var(--fs-xs); line-height: 1.35; }
+    .refresh-custom { border-top: 1px solid var(--border); margin-top: .75rem; padding-top: .75rem; }
+    .refresh-guidance { margin: .75rem 0 0; padding-top: .75rem; border-top: 1px solid var(--border); color: var(--muted); font-size: var(--fs-xs); line-height: 1.4; }
     /* One-shot cue on first paint so the moved affordance is discoverable. The
        cue class is emitted only by the server render, never by the OOB swap,
        so a two-second poll cannot restart it. */
     .refresh-freshness-cue { animation: freshness-cue .9s ease-out 1; }
     @keyframes freshness-cue { 0% { opacity: 0; transform: translateY(-2px); } 60% { opacity: 1; } 100% { opacity: 1; transform: none; } }
     @media (prefers-reduced-motion: reduce) { .pipeline-status.running, .pipeline-status.running .pipeline-status-summary > .bi, .refresh-freshness-cue { animation: none; } }
+    @media (max-width: 420px) {
+      .navbar { padding-inline: .6rem; }
+      .navbar-brand { margin-right: 0; }
+      .brand-name { display: none; }
+      .refresh-data-toggle { max-width: 9.5rem; }
+    }
     /* Reserve room for the fixed pipeline status bar (incl. its own
        safe-area padding) only while it is on screen -- an idle page pays
        no permanent dead space at the page foot (#418). */
@@ -516,7 +556,7 @@
       <span class="brand-name">Stock<em>Manager</em></span>
     </span>
   </div>
-  <div class="d-flex align-items-center gap-2">
+  <div class="navbar-actions d-flex align-items-center gap-2">
     <!-- Notification centre (#80) -->
     <div class="nav-bell dropdown">
       <button id="nav-bell-btn" class="btn btn-sm nav-bell-btn" type="button"
@@ -536,47 +576,61 @@
         </div>
       </div>
     </div>
-    <button id="refresh-data-button" class="btn btn-sm btn-light btn-refresh"
-            hx-post="/refresh-data"
-            hx-target="#tab-content" hx-swap="innerHTML"
-            hx-indicator="#spinner"
-            title="Run the full scan and analysis using cached WhaleWisdom / StockTwits data — faster">
-      <i class="bi bi-arrow-clockwise"></i> Refresh Data
-    </button>
-    {# Freshness lives beside the control that changes it, so an idle page
-       needs no persistent status bar to report it (#418). #}
-    {{ macros.freshness_affordance(freshness, variant='control') }}
-    <div class="dropdown d-inline-block">
-      <button id="refresh-institutional-button" type="button"
-              class="btn btn-sm btn-light btn-refresh dropdown-toggle"
+    <div class="dropdown refresh-dropdown">
+      <button id="refresh-data-button" type="button"
+              class="btn btn-sm btn-light btn-refresh dropdown-toggle refresh-data-toggle"
               data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"
-              title="Run the full scan and analysis after refreshing WhaleWisdom / StockTwits from source — slower">
-        <i class="bi bi-bank"></i> Refresh Institutional Data
+              aria-label="Refresh Data"
+              aria-describedby="refresh-freshness-description">
+        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
+        <span>Refresh Data</span>
+        {{ macros.freshness_affordance(freshness, latest_attempt_error, variant='control') }}
       </button>
-      <div class="dropdown-menu p-3" style="min-width: 20rem;">
+      <div class="dropdown-menu dropdown-menu-end refresh-menu p-3">
         <form hx-post="/refresh-data"
               hx-target="#tab-content" hx-swap="innerHTML"
-              hx-indicator="#spinner"
-              hx-on::after-request="bootstrap.Dropdown.getOrCreateInstance(document.getElementById('refresh-institutional-button')).hide()">
+              hx-indicator="#spinner" class="refresh-action">
+          <div class="refresh-action-copy">
+            <span class="refresh-action-title">Standard refresh</span>
+            <span class="refresh-action-help">Run the scan and analysis using locally cached institutional data.</span>
+          </div>
+          <button type="submit" class="btn btn-sm btn-primary" aria-label="Run standard refresh">Run</button>
+        </form>
+        <form hx-post="/refresh-data"
+              hx-target="#tab-content" hx-swap="innerHTML"
+              hx-indicator="#spinner" class="refresh-action">
           <input type="hidden" name="extract" value="true">
+          <div class="refresh-action-copy">
+            <span class="refresh-action-title">Include institutional data</span>
+            <span class="refresh-action-help">Check the institutional sources, then run the scan and analysis.</span>
+          </div>
+          <button type="submit" class="btn btn-sm btn-primary" aria-label="Run refresh including institutional data">Run</button>
+        </form>
+        <form hx-post="/refresh-data"
+              hx-target="#tab-content" hx-swap="innerHTML"
+              hx-indicator="#spinner" class="refresh-custom">
+          <input type="hidden" name="extract" value="true">
+          <span class="refresh-action-title">Custom refresh</span>
+          <span class="refresh-action-help mb-2">Choose which local source checks to bypass.</span>
           <div class="form-check">
             <input class="form-check-input" type="checkbox" value="true"
                    name="force_whale_wisdom" id="force-whale-wisdom">
             <label class="form-check-label" for="force-whale-wisdom">
-              Force-refresh WhaleWisdom heat map
-              <span class="text-muted d-block small">else: reuse &lt; 7-day cache</span>
+              Force-check WhaleWisdom
             </label>
           </div>
           <div class="form-check mt-2">
             <input class="form-check-input" type="checkbox" value="true"
                    name="force_stocktwits" id="force-stocktwits">
             <label class="form-check-label" for="force-stocktwits">
-              Force-refresh StockTwits Top 25
-              <span class="text-muted d-block small">else: newest-email only</span>
+              Force-check StockTwits Top 25
             </label>
           </div>
-          <button type="submit" class="btn btn-sm btn-primary mt-3">Run</button>
+          <button type="submit" class="btn btn-sm btn-primary mt-3">Run custom refresh</button>
         </form>
+        <p class="refresh-guidance">
+          <strong>Source timing:</strong> WhaleWisdom reflects quarterly 13F filings published after quarter end. StockTwits data is refreshed weekly. Force-checking bypasses local reuse; it cannot make upstream data newer.
+        </p>
       </div>
     </div>
     <span id="spinner" class="htmx-indicator spinner-border spinner-border-sm text-light"></span>
@@ -907,10 +961,12 @@
     link.classList.add('active');
   });
 
-  // After a trade form (from a modal) updates #tab-content, activate the Portfolio tab
+  // After a trade form (from a modal) updates #tab-content, activate the Portfolio tab.
+  // Other forms target the same region (including Refresh Data), so match the
+  // trade route rather than treating every form as a trade.
   document.body.addEventListener('htmx:afterSettle', function(e) {
     if (e.detail.target.id !== 'tab-content') return;
-    if (e.detail.elt && e.detail.elt.tagName === 'FORM') {
+    if (e.detail.elt?.getAttribute('hx-post') === '/trades') {
       document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
       document.getElementById('tab-portfolio').classList.add('active');
     }

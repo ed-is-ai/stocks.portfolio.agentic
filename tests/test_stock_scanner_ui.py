@@ -513,29 +513,33 @@ def test_dashboard_has_one_refresh_data_control() -> None:
     assert markup.count('id="refresh-data-button"') == 1
 
 
-def test_refresh_controls_explain_cached_and_fresh_institutional_data() -> None:
+def test_refresh_dropdown_exposes_three_actions_and_source_guidance() -> None:
     markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
-    cached_button = markup.split('id="refresh-data-button"', 1)[1].split(
-        "</button>", 1
-    )[0]
-    # The institutional control is now a Bootstrap dropdown panel; inspect the
-    # toggle button plus the form in its dropdown-menu.
-    fresh_toggle = markup.split('id="refresh-institutional-button"', 1)[1].split(
-        "</button>", 1
-    )[0]
-    fresh_panel = markup.split('id="refresh-institutional-button"', 1)[1].split(
-        "</form>", 1
-    )[0]
+    toggle = markup.split('id="refresh-data-button"', 1)[1].split("</button>", 1)[0]
+    menu = markup.split('class="dropdown-menu dropdown-menu-end refresh-menu', 1)[1]
 
-    assert 'title="Run the full scan and analysis' in cached_button
-    assert "cached WhaleWisdom / StockTwits data" in cached_button
-    assert "refreshing WhaleWisdom / StockTwits from source" in fresh_toggle
-    assert 'hx-post="/refresh-data"' in cached_button
-    assert 'hx-post="/refresh-data"' in fresh_panel
-    assert "hx-vals" not in cached_button
-    assert 'name="extract" value="true"' in fresh_panel
-    assert 'name="force_whale_wisdom"' in fresh_panel
-    assert 'name="force_stocktwits"' in fresh_panel
+    assert 'data-bs-toggle="dropdown"' in toggle
+    assert 'hx-post="/refresh-data"' not in toggle
+    assert 'aria-label="Refresh Data"' in toggle
+    assert menu.count('hx-post="/refresh-data"') == 3
+    assert "Standard refresh" in menu
+    assert "Include institutional data" in menu
+    assert "Custom refresh" in menu
+    assert menu.count('name="extract" value="true"') == 2
+    assert 'name="force_whale_wisdom"' in menu
+    assert 'name="force_stocktwits"' in menu
+    assert "quarterly 13F filings published after quarter end" in menu
+    assert "StockTwits data is refreshed weekly" in menu
+    assert "cannot make upstream data newer" in menu
+    assert 'aria-label="Run standard refresh"' in menu
+    assert 'aria-label="Run refresh including institutional data"' in menu
+
+
+def test_only_trade_forms_activate_portfolio_after_settle() -> None:
+    markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+
+    assert "e.detail.elt?.getAttribute('hx-post') === '/trades'" in markup
+    assert "e.detail.elt && e.detail.elt.tagName === 'FORM'" not in markup
 
 
 def test_removed_scanner_partial_returns_not_found() -> None:
@@ -668,11 +672,11 @@ def test_notif_badge_targets_itself_inside_bell_button() -> None:
     assert 'hx-target="this"' in badge_tag
 
 
-def test_dashboard_has_institutional_refresh_control() -> None:
+def test_dashboard_has_no_second_institutional_refresh_toggle() -> None:
     markup = "\n".join(
         path.read_text(encoding="utf-8") for path in sorted(TEMPLATES.rglob("*.html"))
     )
-    assert markup.count('id="refresh-institutional-button"') == 1
+    assert markup.count('id="refresh-institutional-button"') == 0
 
 
 def test_stock_scanner_frontend_assets_are_served() -> None:
