@@ -511,9 +511,9 @@ class YFinanceHistoricalEvidenceAdapter:
 class FxSeriesFetcher(Protocol):
     """Fetch the daily ``GBPUSD=X`` rate series over one run window.
 
-    ``start``/``end`` are the inclusive-window bounds exactly as they
-    should appear in the produced evidence (``end`` exclusive, matching
-    :class:`HistoricalEvidenceRequest`'s own convention).
+    ``start`` is the inclusive window start and ``end`` the exclusive
+    window end, matching :class:`HistoricalEvidenceRequest`'s own
+    convention; the produced evidence spans exactly ``[start, end)``.
     """
 
     def fetch(self, *, start: date, end: date) -> HistoricalEvidencePayload: ...

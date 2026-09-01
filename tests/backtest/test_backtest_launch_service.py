@@ -38,6 +38,10 @@ from app.repositories.historical_price_repo import (
     EvidenceMissingError,
     HistoricalPriceRepository,
 )
+from app.services.backtest.historical_data_qualification import (
+    FailureCode,
+    ProviderFailure,
+)
 from app.services.backtest.historical_price_evidence import (
     FX_PAIR,
     FX_SERIES_SECURITY_ID,
@@ -66,6 +70,7 @@ ALIAS_DIGEST: str = "c" * 64
 ORDERED_MONTH_DIGEST: str = "d" * 64
 FX_DIGEST: str = "e" * 64
 PRICE_REVISION: str = "1" * 64
+OTHER_REVISION: str = "2" * 64
 FX_SERIES_REVISION: str = "f" * 64
 
 
@@ -848,7 +853,11 @@ def test_launch_fx_series_ingestion_is_idempotent() -> None:
 def test_launch_fx_series_fetch_failure_names_pair_and_window() -> None:
     """A series fetch failure degrades to an actionable preparation
     failure naming the pair and window -- never a worker crash."""
-    series_fetcher = StubFxSeriesFetcher(error=RuntimeError("yfinance down"))
+    series_fetcher = StubFxSeriesFetcher(
+        error=ProviderFailure(
+            FailureCode.REQUIRED_DATA_MISSING, "provider served nothing"
+        )
+    )
     service, jobs = _service(fx_series_fetcher=series_fetcher)
 
     with pytest.raises(BacktestLaunchValidationError) as excinfo:
@@ -858,6 +867,33 @@ def test_launch_fx_series_fetch_failure_names_pair_and_window() -> None:
     assert "GBPUSD=X" in message
     assert "2026-02" in message and "2026-03" in message
     assert "retry preparation" in message
+    assert jobs.submissions == []
+
+
+def test_launch_fx_series_not_fetched_when_problems_exist() -> None:
+    """A roster with any unresolved FX problem (here an unsupported
+    currency pair) must fail without ingesting the series -- no wasted
+    fetch and no partially-mutated cache on a doomed preparation."""
+    price_repo = FakeHistoricalPriceRepo(
+        evidence={PRICE_REVISION: "USD", OTHER_REVISION: "EUR"},
+        security_ids={PRICE_REVISION: "sec-aapl", OTHER_REVISION: "sec-eur"},
+    )
+    backtest_repo = FakeBacktestRepo(
+        member_revisions=(("sec-aapl", PRICE_REVISION), ("sec-eur", OTHER_REVISION))
+    )
+    series_fetcher = StubFxSeriesFetcher()
+    service, jobs = _service(
+        backtest_repo=backtest_repo,
+        historical_price_repo=price_repo,
+        fx_series_fetcher=series_fetcher,
+    )
+
+    with pytest.raises(BacktestLaunchValidationError) as excinfo:
+        service.launch(_command(base_currency="GBP"))
+
+    assert "No supported FX pair" in _field_errors(excinfo.value)["form"]
+    assert series_fetcher.calls == []
+    assert price_repo.committed == []
     assert jobs.submissions == []
 
 

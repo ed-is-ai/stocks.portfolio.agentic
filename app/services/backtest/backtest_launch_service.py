@@ -53,6 +53,7 @@ from app.repositories.historical_price_repo import (
 from app.services.backtest.historical_price_evidence import (
     FX_PAIR,
     FxSeriesFetcher,
+    ProviderFailure,
     YFinanceFxSeriesFetcher,
 )
 from app.services.backtest.run_input_manifest import (
@@ -497,11 +498,12 @@ class BacktestLaunchService:
         ``start_month``/``end_month`` bound the Run window the ingested FX
         series must span (#459). Whenever any security needs FX, the daily
         ``GBPUSD=X`` series over that window is ingested into the
-        historical price cache exactly once per preparation run and its
-        content-addressed revision is pinned as every FX-needing
-        security's ``fx_revision`` -- the engine replays FX through the
-        historical price cache, where a single-day ``fx_quotes`` digest
-        never resolves.
+        historical price cache and its content-addressed revision is
+        pinned as every FX-needing security's ``fx_revision`` -- the
+        engine replays FX through the historical price cache, where a
+        single-day ``fx_quotes`` digest never resolves. Re-ingesting the
+        same window converges to the same ``data_revision`` (content
+        addressing), so repeated preparations stay consistent.
         """
         try:
             members = self._backtest_repo.snapshot_member_revisions(
@@ -603,10 +605,12 @@ class BacktestLaunchService:
         small buffer) through ``end_month``'s boundary via the injectable
         series fetcher and commits it into the historical price cache
         under the ``fx:GBPUSD=X`` pseudo-security. ``commit`` is
-        content-addressed, so re-preparing the same window yields the
-        identical revision and no duplicate rows. Any fetch/commit failure
-        degrades to a preparation failure whose message names the pair and
-        window -- never a worker crash.
+        content-addressed, so re-preparing the same window converges to
+        the identical revision. A provider failure degrades to a
+        preparation failure whose message names the pair and window;
+        anything else (e.g. a repository integrity error) propagates so
+        the worker classifies it on its own merits -- never a silent
+        misclassification.
         """
         window_start = _month_start(start_month) - timedelta(
             days=_FX_SERIES_WINDOW_BUFFER_DAYS
@@ -615,7 +619,7 @@ class BacktestLaunchService:
         try:
             payload = self._fx_series_fetcher.fetch(start=window_start, end=window_end)
             return self._historical_price_repo.commit(payload)
-        except Exception as exc:
+        except ProviderFailure as exc:
             logger.warning(
                 "FX series ingestion failed for %s (%s..%s): %s",
                 FX_PAIR,
