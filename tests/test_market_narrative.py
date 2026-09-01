@@ -135,11 +135,79 @@ class TestBuildDeterministicNarrative:
         cached_narrative = build_deterministic_narrative(_snapshot(), [], cycle, cached)
 
         assert any(
-            "fetched from source" in bullet for bullet in fetched_narrative.bullets
+            "Fetched from source" in bullet for bullet in fetched_narrative.bullets
         )
         assert any(
-            "retrieved from cache" in bullet for bullet in cached_narrative.bullets
+            "Retrieved from cache" in bullet for bullet in cached_narrative.bullets
         )
+
+    def test_breadth_bullet_separates_near_term_from_long_term_trend(self) -> None:
+        cycle = get_market_cycle_context(date(2026, 2, 15))
+        breadth = MarketBreadth(
+            pct_above_200dma=68.0,
+            trend_rising=True,
+            near_term_pct_delta=-6.0,
+            pct_50dma=50.0,
+            near_term_50dma_pct_delta=-4.0,
+            as_of="2026-08-31",
+        )
+        narrative = build_deterministic_narrative(_snapshot(), [], cycle, breadth)
+        bullet = next(b for b in narrative.bullets if b.startswith("S&P 500 breadth"))
+        assert bullet == (
+            "S&P 500 breadth: 68% of members above their 200DMA — narrowing over "
+            "the past week (down ~6.0 pts); 50-day breadth 50% and falling. "
+            "Long-term (200-day-average) breadth trend rising. Fetched from source."
+        )
+        # The lagging long-term trend must never leak out as a bare "(rising)"
+        # or an unqualified "improving" about current breadth.
+        assert "(rising)" not in bullet
+        assert "improving" not in bullet
+        assert "long-term (200-day-average) breadth trend" in bullet.lower()
+
+    def _breadth_bullet_for(self, breadth: MarketBreadth) -> str:
+        cycle = get_market_cycle_context(date(2026, 2, 15))
+        narrative = build_deterministic_narrative(_snapshot(), [], cycle, breadth)
+        return next(b for b in narrative.bullets if b.startswith("S&P 500 breadth"))
+
+    def test_50day_drop_shown_even_when_200day_little_changed(self) -> None:
+        breadth = MarketBreadth(
+            pct_above_200dma=60.0,
+            trend_rising=True,
+            near_term_pct_delta=0.2,
+            pct_50dma=44.0,
+            near_term_50dma_pct_delta=-11.0,
+            as_of="2026-08-31",
+        )
+        bullet = self._breadth_bullet_for(breadth)
+        assert bullet == (
+            "S&P 500 breadth: 60% of members above their 200DMA — little changed "
+            "over the past week; 50-day breadth 44% and falling. "
+            "Long-term (200-day-average) breadth trend rising. Fetched from source."
+        )
+
+    def test_50day_info_present_on_short_200day_feed(self) -> None:
+        breadth = MarketBreadth(
+            pct_above_200dma=60.0,
+            trend_rising=True,
+            near_term_pct_delta=None,
+            pct_50dma=44.0,
+            near_term_50dma_pct_delta=-11.0,
+            as_of="2026-08-31",
+        )
+        bullet = self._breadth_bullet_for(breadth)
+        assert "50-day breadth 44% and falling" in bullet
+        assert "past week" not in bullet
+
+    def test_near_term_bearish_signal_flag_in_bullet(self) -> None:
+        breadth = MarketBreadth(
+            pct_above_200dma=60.0,
+            trend_rising=True,
+            pct_50dma=44.0,
+            near_term_bearish_signal=True,
+            as_of="2026-08-31",
+        )
+        bullet = self._breadth_bullet_for(breadth)
+        assert "50-day breadth-divergence flag set" in bullet
 
     def test_not_advice_note_always_present(self) -> None:
         cycle = get_market_cycle_context(date(2026, 2, 15))

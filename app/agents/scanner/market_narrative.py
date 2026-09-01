@@ -30,7 +30,7 @@ from app.agents.scanner.narrative_guard import validate_against_context
 from app.agents.scanner.news_context import gather_news_context
 from app.core.config import MARKET_NARRATIVE_JSON
 from app.integrations.anthropic_client import AnthropicNarrativeClient
-from app.schemas.market_breadth import MarketBreadth
+from app.schemas.market_breadth import NEAR_TERM_FLAT_BAND, MarketBreadth
 from app.schemas.market_cycle import MarketCycleContext
 from app.schemas.market_narrative import MarketNarrative, MarketNarrativeSource
 from app.schemas.news_context import NewsContext
@@ -43,7 +43,7 @@ from app.schemas.sector_allocation import (
 if TYPE_CHECKING:
     from app.integrations.alpha_vantage import AlphaVantageClient
 
-NARRATIVE_VERSION = "1"
+NARRATIVE_VERSION = "2"
 """Bump whenever the system prompt or either narrative builder changes.
 
 Folded into the hashed digest dict, so a bump invalidates every cached
@@ -126,11 +126,52 @@ def _myb_bullet(snapshot: SectorAllocationSnapshot) -> str | None:
     )
 
 
+def _direction_word(delta: float, up: str, down: str, flat: str) -> str:
+    """Classify a signed points *delta* against the flat band."""
+    if delta > NEAR_TERM_FLAT_BAND:
+        return up
+    if delta < -NEAR_TERM_FLAT_BAND:
+        return down
+    return flat
+
+
+def _near_term_breadth_clause(breadth: MarketBreadth) -> str:
+    """Build the past-week near-term clause, or ``""`` when nothing to say.
+
+    The 200-day part (from ``near_term_pct_delta``) and the 50-day part (from
+    ``pct_50dma``) are independent: either, both, or neither may render.
+    """
+    parts: list[str] = []
+    delta = breadth.near_term_pct_delta
+    if delta is not None:
+        if abs(delta) <= NEAR_TERM_FLAT_BAND:
+            parts.append("little changed over the past week")
+        else:
+            move = f"{'up' if delta > 0 else 'down'} ~{abs(delta):.1f} pts"
+            word = "broadening" if delta > 0 else "narrowing"
+            parts.append(f"{word} over the past week ({move})")
+    if breadth.pct_50dma is not None:
+        fifty = f"50-day breadth {breadth.pct_50dma:.0f}%"
+        delta_50 = breadth.near_term_50dma_pct_delta
+        if delta_50 is not None:
+            fifty += " and " + _direction_word(delta_50, "rising", "falling", "holding")
+        parts.append(fifty)
+    if not parts:
+        return ""
+    return " — " + "; ".join(parts)
+
+
 def _breadth_bullet(breadth: MarketBreadth | None) -> str | None:
-    """Return the S&P 500 market-breadth bullet, or None when unavailable."""
+    """Return the S&P 500 market-breadth bullet, or None when unavailable.
+
+    States three facts separately: the current level, the near-term
+    (past-week) direction from ``near_term_pct_delta``, and the long-term
+    200-day-average trend from ``trend_rising`` (explicitly labelled). Never
+    emits a bare "(rising)".
+    """
     if breadth is None:
         return None
-    trend = (
+    long_term = (
         "rising"
         if breadth.trend_rising
         else "falling"
@@ -138,14 +179,17 @@ def _breadth_bullet(breadth: MarketBreadth | None) -> str | None:
         else "flat"
     )
     divergence = " — breadth-divergence flag set" if breadth.bearish_signal else ""
+    if breadth.near_term_bearish_signal:
+        divergence += " — 50-day breadth-divergence flag set"
     provenance = (
-        "retrieved from cache"
+        "Retrieved from cache"
         if breadth.retrieval_source == "cached"
-        else "fetched from source"
+        else "Fetched from source"
     )
     return (
         f"S&P 500 breadth: {breadth.pct_above_200dma:.0f}% of members above "
-        f"their 200DMA ({trend}){divergence}; {provenance}."
+        f"their 200DMA{_near_term_breadth_clause(breadth)}{divergence}. "
+        f"Long-term (200-day-average) breadth trend {long_term}. {provenance}."
     )
 
 
@@ -360,6 +404,16 @@ def narrative_input_digest(
                 else _quant(breadth.smoothed_8ma, 0),
                 "trend_rising": breadth.trend_rising,
                 "bearish_signal": breadth.bearish_signal,
+                "near_term_pct_delta": None
+                if breadth.near_term_pct_delta is None
+                else _quant(breadth.near_term_pct_delta, 1),
+                "pct_50dma": None
+                if breadth.pct_50dma is None
+                else _quant(breadth.pct_50dma, 0),
+                "near_term_50dma_pct_delta": None
+                if breadth.near_term_50dma_pct_delta is None
+                else _quant(breadth.near_term_50dma_pct_delta, 1),
+                "near_term_bearish_signal": breadth.near_term_bearish_signal,
                 "retrieval_source": breadth.retrieval_source,
             },
             "congress": [

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 from datetime import date, datetime, timezone
 from threading import RLock
 
@@ -35,6 +36,8 @@ _TIMEOUT_SECONDS = 20
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = 2.0
 _FRESH_MAX_DAYS = 7
+_LOOKBACK_ROWS = 5  # ~one trading week (feed publishes on trading days only)
+_NEAR_TERM_MAX_SPAN_DAYS = 21  # beyond this, "past week" deltas would be a lie
 
 # The feed publishes daily, so a process-local cache avoids repeat downloads
 # during one UTC day.  It intentionally has no persistence/lifecycle beyond
@@ -83,19 +86,84 @@ def _parse_latest(text: str) -> MarketBreadth | None:
     rows = list(csv.DictReader(io.StringIO(text)))
     if not rows:
         return None
-    latest = max(rows, key=lambda r: r.get("Date", ""))
+    rows.sort(key=lambda r: r.get("Date") or "")
+    # A duplicate latest Date resolves to the last (most recently appended =
+    # restated) row, since a stable sort preserves original order for ties.
+    latest = rows[-1]
+    prior_idx = len(rows) - 1 - _LOOKBACK_ROWS
+    prior = rows[prior_idx] if prior_idx >= 0 else None
     date_str = latest["Date"].strip()
     reading_date = datetime.strptime(date_str, "%Y-%m-%d").date()
     today = _utc_today()
     days_old = (today - reading_date).days if reading_date <= today else None
     smoothed = latest.get("Breadth_Index_8MA")
     trend = latest.get("Breadth_200MA_Trend")
+    latest_pct = _to_pct(latest["Breadth_Index_Raw"])
+
+    # A stale/gappy prior row (feed outage, holiday cluster) or a negative gap
+    # makes the "past week" deltas meaningless — drop them entirely.
+    if prior is not None:
+        try:
+            prior_date = datetime.strptime(
+                (prior.get("Date") or "").strip(), "%Y-%m-%d"
+            ).date()
+            span = (reading_date - prior_date).days
+            if span < 0 or span > _NEAR_TERM_MAX_SPAN_DAYS:
+                prior = None
+        except (ValueError, TypeError):
+            prior = None
+
+    near_term_pct_delta: float | None = None
+    try:
+        if prior is not None:
+            near_term_pct_delta = round(
+                latest_pct - _to_pct(prior["Breadth_Index_Raw"]), 2
+            )
+    except (KeyError, ValueError, TypeError):
+        near_term_pct_delta = None
+
+    pct_50dma: float | None = None
+    near_term_50dma_pct_delta: float | None = None
+    near_term_bearish_signal = False
+    try:
+        raw_50 = latest.get("Breadth_50_Index_Raw")
+        if raw_50 not in (None, ""):
+            pct_50dma = _to_pct(raw_50)
+            if prior is not None:
+                prior_50 = prior.get("Breadth_50_Index_Raw")
+                if prior_50 not in (None, ""):
+                    near_term_50dma_pct_delta = round(pct_50dma - _to_pct(prior_50), 2)
+        near_term_bearish_signal = str(
+            latest.get("Bearish_Signal_50", "")
+        ).strip().lower() in ("true", "1", "yes")
+    except (KeyError, ValueError, TypeError):
+        pct_50dma = None
+        near_term_50dma_pct_delta = None
+        near_term_bearish_signal = False
+
+    # Feed can emit literal "nan"/"inf" which float() accepts; a non-finite
+    # value here would later abort narrative_input_digest and force an LLM
+    # regen every run. Null the offending field instead.
+    if near_term_pct_delta is not None and not math.isfinite(near_term_pct_delta):
+        near_term_pct_delta = None
+    if pct_50dma is not None and not math.isfinite(pct_50dma):
+        pct_50dma = None
+        near_term_50dma_pct_delta = None
+    if near_term_50dma_pct_delta is not None and not math.isfinite(
+        near_term_50dma_pct_delta
+    ):
+        near_term_50dma_pct_delta = None
+
     return MarketBreadth(
-        pct_above_200dma=_to_pct(latest["Breadth_Index_Raw"]),
+        pct_above_200dma=latest_pct,
         smoothed_8ma=_to_pct(smoothed) if smoothed else None,
         trend_rising=(int(trend) > 0) if trend not in (None, "") else None,
         bearish_signal=str(latest.get("Bearish_Signal", "")).strip().lower()
         in ("true", "1", "yes"),
+        near_term_pct_delta=near_term_pct_delta,
+        pct_50dma=pct_50dma,
+        near_term_50dma_pct_delta=near_term_50dma_pct_delta,
+        near_term_bearish_signal=near_term_bearish_signal,
         as_of=date_str,
         is_fresh=(days_old is not None and days_old <= _FRESH_MAX_DAYS),
         days_old=days_old,

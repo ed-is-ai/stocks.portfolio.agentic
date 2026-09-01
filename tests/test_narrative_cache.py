@@ -97,6 +97,13 @@ def _resolve():
     return mn.resolve_market_narrative(s, w, c, b, g, _AnthropicStub(), None)
 
 
+def test_digest_changes_when_near_term_pct_delta_changes() -> None:
+    s, w, c, b, g = _inputs()
+    base = mn.narrative_input_digest(s, w, c, b, g)
+    moved = b.model_copy(update={"near_term_pct_delta": -6.0})
+    assert base != mn.narrative_input_digest(s, w, c, moved, g)
+
+
 def test_miss_then_hit(wired) -> None:
     first, reused_first = _resolve()
     assert reused_first is False

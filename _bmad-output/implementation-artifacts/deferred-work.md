@@ -401,3 +401,10 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-455-total-portfolio-value-chart.md`
   summary: The chart teardown contract is asserted from rendered JavaScript source but has no browser-level test that performs consecutive htmx fragment replacements with a live Chart.js instance.
   evidence: Existing #421 and #455 tests verify the stable card, fragment endpoints, and destroy-before-create source ordering; none executes Chart.js across repeated swaps, and adding that browser harness is independent of the service-owned total-value projection.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-467-nuanced-breadth-bullet.md`
+  summary: `market_breadth._to_pct` accepts the literal strings "nan"/"inf" for the primary `pct_above_200dma` field, yielding a NaN reading that renders "nan%" and aborts `narrative_input_digest` (regenerating the LLM narrative every run).
+  evidence: `float("nan")`/`float("inf")` parse successfully and are not caught by the existing `ValueError` fail-soft path; `_quant` then raises `_NonFiniteFloat`. Pre-existing — this pattern predates gh-467, which only added `math.isfinite` guards on the new delta paths.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-467-nuanced-breadth-bullet.md`
+  summary: `market_breadth._parse_latest` is not self-contained fail-safe — `latest["Date"]`, `latest["Breadth_Index_Raw"]`, and `datetime.strptime` can all raise; a direct caller not wrapping it (only `fetch_market_breadth` does today) would get an exception instead of `None`.
+  evidence: The module/function docstrings imply "parse … or None"; the actual None-on-bad-data contract lives in the caller's `try/except (KeyError, ValueError, TypeError)`.

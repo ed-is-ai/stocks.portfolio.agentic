@@ -161,3 +161,138 @@ def test_stale_source_data_retains_staleness_when_cached(
     assert fetched.days_old == cached.days_old == 26
     assert fetched.retrieval_source == "fetched"
     assert cached.retrieval_source == "cached"
+
+
+_HEADER_17 = (
+    "Date,S&P500_Price,Breadth_Index_Raw,Breadth_Index_200MA,Breadth_Index_8MA,"
+    "Breadth_200MA_Trend,Bearish_Signal,Is_Peak,Is_Trough,Is_Trough_8MA_Below_04,"
+    "Breadth_50_Index_Raw,Breadth_50_Index_50MA,Breadth_50_Index_8MA,"
+    "Breadth_50_MA_Trend,Bearish_Signal_50,Is_Peak_50,Is_Trough_50\n"
+)
+
+
+def _row_17(date_str: str, raw: str, raw_50: str = "0.50", trend: str = "1") -> str:
+    return (
+        f"{date_str},5000,{raw},0.5,0.6,{trend},False,False,False,False,"
+        f"{raw_50},0.5,0.5,1,False,False,False\n"
+    )
+
+
+_FALLING_DAYS = [
+    ("2026-08-20", "0.74"),
+    ("2026-08-22", "0.72"),
+    ("2026-08-24", "0.71"),
+    ("2026-08-25", "0.70"),
+    ("2026-08-27", "0.69"),
+    ("2026-08-31", "0.68"),
+]
+
+
+def test_falling_week_keeps_positive_long_term_trend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = _HEADER_17 + "".join(_row_17(d, raw) for d, raw in _FALLING_DAYS)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(text))
+
+    breadth = mb.fetch_market_breadth()
+
+    assert breadth is not None
+    assert breadth.pct_above_200dma == 68.0
+    assert breadth.trend_rising is True
+    assert breadth.near_term_pct_delta == pytest.approx(-6.0)
+    assert breadth.pct_50dma == 50.0
+    assert breadth.near_term_50dma_pct_delta == pytest.approx(0.0)
+
+
+def test_short_feed_leaves_near_term_fields_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = _HEADER_17 + "".join(_row_17(d, raw) for d, raw in _FALLING_DAYS[-5:])
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(text))
+
+    breadth = mb.fetch_market_breadth()
+
+    assert breadth is not None
+    assert breadth.near_term_pct_delta is None
+    assert breadth.near_term_50dma_pct_delta is None
+    assert breadth.pct_50dma == 50.0  # latest-row read still works
+
+
+def test_missing_50day_columns_leave_50day_fields_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = "".join(
+        f"{d},5000,{raw},0.5,0.6,1,False,False,False,False\n"
+        for d, raw in _FALLING_DAYS
+    )
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(_csv(rows)))
+
+    breadth = mb.fetch_market_breadth()
+
+    assert breadth is not None
+    assert breadth.pct_50dma is None
+    assert breadth.near_term_50dma_pct_delta is None
+    assert breadth.near_term_bearish_signal is False
+    assert breadth.near_term_pct_delta == pytest.approx(-6.0)
+
+
+def test_wide_prior_gap_nulls_near_term_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    days = [("2026-07-01", "0.74")] + _FALLING_DAYS[1:]
+    text = _HEADER_17 + "".join(_row_17(d, raw) for d, raw in days)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(text))
+
+    breadth = mb.fetch_market_breadth()
+
+    assert breadth is not None
+    assert breadth.pct_above_200dma == 68.0
+    assert breadth.near_term_pct_delta is None  # prior row ~60 days back
+    assert breadth.pct_50dma == 50.0  # latest-row read still works
+
+
+def test_nan_prior_breadth_nulls_delta_not_latest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    days = [("2026-08-20", "nan")] + _FALLING_DAYS[1:]
+    text = _HEADER_17 + "".join(_row_17(d, raw) for d, raw in days)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(text))
+
+    breadth = mb.fetch_market_breadth()
+
+    assert breadth is not None
+    assert breadth.pct_above_200dma == 68.0
+    assert breadth.near_term_pct_delta is None  # not NaN
+    assert breadth.pct_50dma == 50.0
+
+
+def test_row_with_none_date_does_not_crash_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    header = (
+        "Breadth_Index_Raw,S&P500_Price,Breadth_Index_200MA,Breadth_Index_8MA,"
+        "Breadth_200MA_Trend,Bearish_Signal,Is_Peak,Is_Trough,"
+        "Is_Trough_8MA_Below_04,Date\n"
+    )
+    text = header + "0.72\n0.68,5000,0.5,0.6,1,False,False,False,False,2026-08-27\n"
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(text))
+
+    breadth = mb.fetch_market_breadth()
+
+    assert breadth is not None
+    assert breadth.pct_above_200dma == 68.0
+
+
+def test_unparseable_prior_row_nulls_only_near_term_delta(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    days = [("2026-08-20", "bad")] + _FALLING_DAYS[1:]
+    text = _HEADER_17 + "".join(_row_17(d, raw) for d, raw in days)
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _FakeResponse(text))
+
+    breadth = mb.fetch_market_breadth()
+
+    assert breadth is not None
+    assert breadth.pct_above_200dma == 68.0
+    assert breadth.near_term_pct_delta is None
+    assert breadth.pct_50dma == 50.0

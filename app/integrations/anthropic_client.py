@@ -18,7 +18,7 @@ import os
 from typing import Any
 
 from app.schemas.llm_narrative import LlmNarrativeDraft
-from app.schemas.market_breadth import MarketBreadth
+from app.schemas.market_breadth import NEAR_TERM_FLAT_BAND, MarketBreadth
 from app.schemas.market_cycle import MarketCycleContext
 from app.schemas.news_context import NewsContext
 from app.schemas.sector_allocation import (
@@ -55,6 +55,9 @@ _SYSTEM_PROMPT = (
     "framed against breadth and the FOMC position, hedged as 'likely' or "
     "'consistent with', never as certainty; note whether market breadth is "
     "broad or narrow / diverging and what that implies alongside the tilt; "
+    "read whether breadth is improving or deteriorating primarily from the "
+    "near-term (past-week) figures rather than the lagging long-term "
+    "200-day-average trend; "
     "call out which sectors are seeing the most multi-year breakouts; flag "
     "the stocks lawmakers are most heavily buying, if any; and weave in "
     "relevant world-events context to help explain the rotation — but ONLY "
@@ -142,7 +145,7 @@ def _build_user_prompt(
             lines.append(f"- {share.sector}: {share.myb_count}")
 
     if breadth is not None:
-        trend = (
+        long_term = (
             "rising"
             if breadth.trend_rising
             else "falling"
@@ -151,9 +154,29 @@ def _build_user_prompt(
         )
         stale = "" if breadth.is_fresh else " (stale)"
         bearish = "; bearish-divergence flag set" if breadth.bearish_signal else ""
+        if breadth.near_term_bearish_signal:
+            bearish += "; 50-day bearish-divergence flag set"
+        if breadth.near_term_pct_delta is None:
+            near_term = "near-term (past week) direction: unknown (short feed)"
+        else:
+            delta = breadth.near_term_pct_delta + 0.0  # normalise -0.0
+            word = (
+                "broadening"
+                if delta > NEAR_TERM_FLAT_BAND
+                else "narrowing"
+                if delta < -NEAR_TERM_FLAT_BAND
+                else "little changed"
+            )
+            near_term = f"near-term (past week) direction: {word} ({delta:+.1f} pts)"
+        if breadth.pct_50dma is not None:
+            near_term += f"; 50-day breadth {breadth.pct_50dma:.0f}%"
+            if breadth.near_term_50dma_pct_delta is not None:
+                delta_50 = breadth.near_term_50dma_pct_delta + 0.0
+                near_term += f" ({delta_50:+.1f} pts past week)"
         lines.append(
             f"S&P 500 market breadth: {breadth.pct_above_200dma:.0f}% of members "
-            f"above their 200DMA, trend {trend}{bearish} "
+            f"above their 200DMA (current level); {near_term}; long-term "
+            f"200-day-average breadth trend: {long_term}{bearish} "
             f"(as of {breadth.as_of}{stale}; {breadth.retrieval_source} today)."
         )
 
