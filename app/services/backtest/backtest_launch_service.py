@@ -13,17 +13,23 @@ every validation step has passed.
 profile's roster captured for the chosen ``start_month`` (v1 has no
 Strategy-declared watchlist parameter type, so the full roster is the only
 mechanically supportable universe -- Design Notes, spec-2-7-2-8). FX
-evidence is resolved through ``FxQuoteRepository`` (never
-``HistoricalPriceRepository``, and never ``app.services.gbp_valuation_service``,
-which is Story 1.6's live-valuation-only tool and explicitly forbidden
-from any cross-epic import), pinned at the chosen period's first calendar
-day -- a deterministic, documented choice, not a per-day rate.
+evidence is two-stage (#459): the exact-date rate at the chosen period's
+first calendar day must still resolve through ``FxQuoteRepository``
+(never ``app.services.gbp_valuation_service``, which is Story 1.6's
+live-valuation-only tool and explicitly forbidden from any cross-epic
+import), and the daily ``GBPUSD=X`` rate series spanning the run window
+is ingested into ``HistoricalPriceRepository`` under the
+``fx:GBPUSD=X`` pseudo-security -- the series' content-addressed
+``data_revision`` is what the manifest pins, because the engine replays
+FX through the historical price cache, where a single-day
+``fx_quotes`` digest never resolves.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, Mapping, cast
@@ -43,6 +49,11 @@ from app.repositories.fx_quote_repo import (
 from app.repositories.historical_price_repo import (
     EvidenceMissingError,
     HistoricalPriceRepository,
+)
+from app.services.backtest.historical_price_evidence import (
+    FX_PAIR,
+    FxSeriesFetcher,
+    YFinanceFxSeriesFetcher,
 )
 from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
@@ -90,6 +101,22 @@ _FX_BACKFILL_CHAIN_PROVIDER = "backfill_chain"
 #: line nor overflow the worker's 500-char failure_detail budget.
 _MAX_LOGGED_PROBLEMS = 100
 _MAX_SUMMARIES = 3
+
+#: Calendar-day buffer prepended to the ingested FX series window so the
+#: first run session always has an on-or-before close even when the
+#: provider's first row lands mid-week (#459).
+_FX_SERIES_WINDOW_BUFFER_DAYS = 7
+
+
+def _month_start(month: str) -> date:
+    """Return the first calendar day of a ``YYYY-MM`` month string."""
+    return date.fromisoformat(f"{month}-01")
+
+
+def _month_after(month: str) -> date:
+    """Return the first calendar day of the month after ``YYYY-MM``."""
+    year, value = (int(part) for part in month.split("-"))
+    return date(year + (value == 12), value % 12 + 1, 1)
 
 
 @dataclass(frozen=True)
@@ -183,6 +210,7 @@ class BacktestLaunchService:
         skills_root: Path = SKILLS_DIR,
         project_root: Path = ROOT_DIR,
         fx_fetcher: ChainedFxQuoteFetcher | None = None,
+        fx_series_fetcher: FxSeriesFetcher | None = None,
     ) -> None:
         self._backtest_repo = backtest_repo
         self._historical_price_repo = historical_price_repo
@@ -191,6 +219,7 @@ class BacktestLaunchService:
         self._skills_root = skills_root
         self._project_root = project_root
         self._fx_fetcher = fx_fetcher or ChainedFxQuoteFetcher()
+        self._fx_series_fetcher = fx_series_fetcher or YFinanceFxSeriesFetcher()
 
     def discover(self) -> StrategyDiscoveryResultV1:
         """Return one fresh Story 2.2 discovery result -- never cached."""
@@ -355,6 +384,8 @@ class BacktestLaunchService:
                 profile_hash=profile_hash,
                 snapshot_month=command.start_month,
                 base_currency=command.base_currency,
+                start_month=command.start_month,
+                end_month=command.end_month,
             )
         except _RosterEvidenceError as exc:
             raise BacktestLaunchValidationError(
@@ -366,7 +397,6 @@ class BacktestLaunchService:
                 project_root=self._project_root,
                 backtest_repo=self._backtest_repo,
                 historical_price_repo=self._historical_price_repo,
-                fx_quote_repo=self._fx_quote_repo,
                 strategy=strategy,
                 submitted_parameters=cast(
                     Mapping[str, JsonValue], validated_parameters
@@ -453,6 +483,8 @@ class BacktestLaunchService:
         profile_hash: str,
         snapshot_month: str,
         base_currency: Literal["GBP", "USD"],
+        start_month: str,
+        end_month: str,
         selected_security_ids: tuple[str, ...] | None = None,
         pin_fx: bool = True,
     ) -> tuple[PinnedSecurityEvidenceV1, ...]:
@@ -461,6 +493,15 @@ class BacktestLaunchService:
         a deterministic (if necessarily approximate, per Design Notes)
         choice of which month's committed roster represents "the full
         active-profile roster" for the whole Run.
+
+        ``start_month``/``end_month`` bound the Run window the ingested FX
+        series must span (#459). Whenever any security needs FX, the daily
+        ``GBPUSD=X`` series over that window is ingested into the
+        historical price cache exactly once per preparation run and its
+        content-addressed revision is pinned as every FX-needing
+        security's ``fx_revision`` -- the engine replays FX through the
+        historical price cache, where a single-day ``fx_quotes`` digest
+        never resolves.
         """
         try:
             members = self._backtest_repo.snapshot_member_revisions(
@@ -483,6 +524,10 @@ class BacktestLaunchService:
         # which securities needed a backfill -- a cold cache must produce
         # the same manifest identity as a warm one.
         evidence_by_security: dict[str, PinnedSecurityEvidenceV1] = {}
+        # Roster-order ids of every security whose evidence currency
+        # differs from the base -- they all share the one ingested daily
+        # series revision pinned below (#459).
+        fx_security_ids: list[str] = []
         # Collect every problem across the whole roster (never just the
         # first) -- matching BacktestLaunchValidationError's own documented
         # "carries every field-level error at once" contract, so an
@@ -490,8 +535,9 @@ class BacktestLaunchService:
         # instead of fixing and resubmitting one security at a time.
         problems: list[str] = []
         # Unique (pair, as_of) cache misses -> the securities waiting on
-        # each. Backfilled once per miss (never per security), then the
-        # affected members are pinned from the fetched quote below.
+        # each. Backfilled once per miss (never per security); the fetched
+        # quote proves the exact-date rate exists, while the pinned
+        # revision comes from the ingested daily series below.
         fx_misses: dict[tuple[str, str], list[str]] = {}
         for security_id, revision in members:
             try:
@@ -501,7 +547,6 @@ class BacktestLaunchService:
                     f"Pinned historical evidence is missing for {security_id!r}."
                 )
                 continue
-            fx_revision: str | None = None
             if pin_fx and evidence.currency != base_currency:
                 pair = _fx_pair(base_currency, evidence.currency)
                 if pair is None:
@@ -514,18 +559,18 @@ class BacktestLaunchService:
                 if quote is None:
                     fx_misses.setdefault((pair, fx_as_of), []).append(security_id)
                     continue
-                fx_revision = quote.digest
+                fx_security_ids.append(security_id)
             evidence_by_security[security_id] = PinnedSecurityEvidenceV1(
                 security_id=security_id,
                 price_revision=revision,
                 action_revision=revision,
-                fx_revision=fx_revision,
+                fx_revision=None,
             )
         if fx_misses:
-            backfilled, fx_problems, fx_summaries = self._resolve_fx_misses(
-                fx_misses, revision_by_security
+            backfilled_ids, fx_problems, fx_summaries = self._resolve_fx_misses(
+                fx_misses
             )
-            evidence_by_security.update(backfilled)
+            fx_security_ids.extend(backfilled_ids)
             # The full per-security list is for the log only; the raised
             # error carries one actionable summary per distinct miss.
             if fx_problems:
@@ -537,42 +582,79 @@ class BacktestLaunchService:
                     "FX evidence resolution problems: %s", " ".join(fx_problems)
                 )
             problems.extend(fx_summaries)
+        if fx_security_ids and not problems:
+            series_revision = self._ingest_fx_series_revision(start_month, end_month)
+            for security_id in fx_security_ids:
+                revision = revision_by_security[security_id]
+                evidence_by_security[security_id] = PinnedSecurityEvidenceV1(
+                    security_id=security_id,
+                    price_revision=revision,
+                    action_revision=revision,
+                    fx_revision=series_revision,
+                )
         if problems:
             raise _RosterEvidenceError(" ".join(problems))
         return tuple(evidence_by_security[security_id] for security_id, _ in members)
 
+    def _ingest_fx_series_revision(self, start_month: str, end_month: str) -> str:
+        """Ingest the daily ``GBPUSD=X`` series over the Run window (#459).
+
+        Fetches the series spanning ``start_month``'s first day (minus a
+        small buffer) through ``end_month``'s boundary via the injectable
+        series fetcher and commits it into the historical price cache
+        under the ``fx:GBPUSD=X`` pseudo-security. ``commit`` is
+        content-addressed, so re-preparing the same window yields the
+        identical revision and no duplicate rows. Any fetch/commit failure
+        degrades to a preparation failure whose message names the pair and
+        window -- never a worker crash.
+        """
+        window_start = _month_start(start_month) - timedelta(
+            days=_FX_SERIES_WINDOW_BUFFER_DAYS
+        )
+        window_end = _month_after(end_month)
+        try:
+            payload = self._fx_series_fetcher.fetch(start=window_start, end=window_end)
+            return self._historical_price_repo.commit(payload)
+        except Exception as exc:
+            logger.warning(
+                "FX series ingestion failed for %s (%s..%s): %s",
+                FX_PAIR,
+                window_start.isoformat(),
+                window_end.isoformat(),
+                exc,
+            )
+            raise _RosterEvidenceError(
+                f"Historical FX rate series for {FX_PAIR} covering "
+                f"{start_month} to {end_month} could not be ingested -- "
+                f"retry preparation, or choose a later start month if the "
+                f"pair is unavailable for this window."
+            ) from exc
+
     def _resolve_fx_misses(
         self,
         fx_misses: Mapping[tuple[str, str], list[str]],
-        revision_by_security: Mapping[str, str],
-    ) -> tuple[
-        dict[str, PinnedSecurityEvidenceV1], list[str], list[str]
-    ]:
+    ) -> tuple[list[str], list[str], list[str]]:
         """Backfill each unique FX cache miss through the provider chain.
 
-        Returns the newly pinnable securities, per-security problem
-        strings (log only), and one summary message per distinct miss for
-        the raised error -- naming the date, pair, affected-security
-        count, and the mode-specific remedy: (a) fetchable but the fetch
-        failed ("retry preparation"), or (b) no provider has the rate
-        ("choose a later start month").
+        Returns the successfully backfilled security ids (the caller pins
+        the ingested daily series revision for them, #459 -- the fetched
+        quote itself only proves the exact-date rate exists),
+        per-security problem strings (log only), and one summary message
+        per distinct miss for the raised error -- naming the date, pair,
+        affected-security count, and the mode-specific remedy: (a)
+        fetchable but the fetch failed ("retry preparation"), or (b) no
+        provider has the rate ("choose a later start month").
         """
-        securities: dict[str, PinnedSecurityEvidenceV1] = {}
+        backfilled: list[str] = []
         per_security: list[str] = []
         summaries: list[str] = []
         for (pair, as_of), security_ids in fx_misses.items():
             outcome, quote = self._fetch_or_classify(pair, as_of)
             if outcome == "fetched" and quote is not None:
-                # Pin the fetched quote's own digest -- never a re-read,
-                # which a concurrent writer could race beneath us.
-                for security_id in security_ids:
-                    revision = revision_by_security[security_id]
-                    securities[security_id] = PinnedSecurityEvidenceV1(
-                        security_id=security_id,
-                        price_revision=revision,
-                        action_revision=revision,
-                        fx_revision=quote.digest,
-                    )
+                # The quote is persisted and its exact-date rate proven;
+                # the pinned revision still comes from the ingested daily
+                # series, never from the quote's own digest (#459).
+                backfilled.extend(security_ids)
                 continue
             for security_id in security_ids:
                 per_security.append(
@@ -602,14 +684,15 @@ class BacktestLaunchService:
             summaries = summaries[:_MAX_SUMMARIES] + [
                 f"... and {len(summaries) - _MAX_SUMMARIES} more distinct FX gaps."
             ]
-        return securities, per_security, summaries
+        return backfilled, per_security, summaries
 
     def _fetch_or_classify(self, pair: str, as_of: str) -> tuple[str, FxQuote | None]:
         """Fetch one missed (pair, as_of) and classify the outcome.
 
         Returns ``(outcome, quote)`` where outcome is ``"fetched"`` (the
-        persisted quote is returned -- pin its digest directly, never a
-        re-read a concurrent writer could race beneath), ``"transient"`
+        persisted quote is returned -- it proves the exact-date rate
+        exists, while the pinned revision comes from the ingested daily
+        series, #459), ``"transient"``
         (the chain raised -- never negatively cached), ``"unsupported"`
         (no provider series for the pair), or ``"definitive"`` (no
         provider has the rate; negatively cached under the

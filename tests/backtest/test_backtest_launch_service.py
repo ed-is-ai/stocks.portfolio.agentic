@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +37,11 @@ from app.repositories.fx_quote_repo import FxQuote, FxQuoteRepository
 from app.repositories.historical_price_repo import (
     EvidenceMissingError,
     HistoricalPriceRepository,
+)
+from app.services.backtest.historical_price_evidence import (
+    FX_PAIR,
+    FX_SERIES_SECURITY_ID,
+    FxSeriesFetcher,
 )
 from app.services.backtest.backtest_launch_service import (
     BacktestLaunchCommandV1,
@@ -60,6 +66,7 @@ ALIAS_DIGEST: str = "c" * 64
 ORDERED_MONTH_DIGEST: str = "d" * 64
 FX_DIGEST: str = "e" * 64
 PRICE_REVISION: str = "1" * 64
+FX_SERIES_REVISION: str = "f" * 64
 
 
 # ---------------------------------------------------------------------------
@@ -133,14 +140,31 @@ class FakeBacktestRepo:
 
 @dataclass
 class FakeHistoricalPriceRepo:
-    """security_id -> currency for every revision this fake resolves."""
+    """security_id -> currency for every revision this fake resolves.
+
+    Payloads handed to :meth:`commit` (the #459 FX series ingestion path)
+    resolve as the ``fx:GBPUSD=X`` pseudo-security evidence, mirroring the
+    real repository's content-addressed storage.
+    """
 
     evidence: dict[str, str] = field(default_factory=lambda: {PRICE_REVISION: "USD"})
     security_ids: dict[str, str] = field(
         default_factory=lambda: {PRICE_REVISION: "sec-aapl"}
     )
+    committed: list[SimpleNamespace] = field(default_factory=list)
+
+    def commit(self, payload: SimpleNamespace) -> str:
+        self.committed.append(payload)
+        return payload.data_revision
 
     def get(self, revision: str):
+        for payload in self.committed:
+            if payload.data_revision == revision:
+                return SimpleNamespace(
+                    security_id=FX_SERIES_SECURITY_ID,
+                    requested_symbol=FX_PAIR,
+                    currency="USD",
+                )
         if revision not in self.evidence:
             raise EvidenceMissingError(f"no evidence for {revision!r}")
         return SimpleNamespace(
@@ -214,6 +238,27 @@ class StubFxFetcher:
         return self.quotes.get((pair, as_of))
 
 
+@dataclass
+class StubFxSeriesFetcher:
+    """Scriptable stand-in for ``YFinanceFxSeriesFetcher`` (#459).
+
+    Returns one stable payload revision per fetch (the real repository's
+    content addressing makes same-window re-ingestion resolve to the same
+    revision); ``error`` raises instead, modelling a provider outage.
+    Every call is recorded in ``calls`` as ``(start, end)``.
+    """
+
+    revision: str = FX_SERIES_REVISION
+    error: Exception | None = None
+    calls: list[tuple[date, date]] = field(default_factory=list)
+
+    def fetch(self, *, start: date, end: date):
+        self.calls.append((start, end))
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(data_revision=self.revision)
+
+
 class FakeJobs:
     def __init__(self) -> None:
         self.submissions: list[BacktestSubmissionV1] = []
@@ -239,11 +284,13 @@ def _service(
     jobs: FakeJobs | None = None,
     skills_root: Path = DISCOVERY_ROOT,
     fx_fetcher: StubFxFetcher | None = None,
+    fx_series_fetcher: StubFxSeriesFetcher | None = None,
 ) -> tuple[BacktestLaunchService, FakeJobs]:
     jobs = jobs or FakeJobs()
     # Default to a definitively-missing stub so no test ever reaches the
     # real (network-bound) chained fetcher by accident.
     fetcher = fx_fetcher or StubFxFetcher()
+    series_fetcher = fx_series_fetcher or StubFxSeriesFetcher()
     service = BacktestLaunchService(
         backtest_repo=cast(BacktestRepository, backtest_repo or FakeBacktestRepo()),
         historical_price_repo=cast(
@@ -255,6 +302,7 @@ def _service(
         skills_root=skills_root,
         project_root=PROJECT_ROOT,
         fx_fetcher=cast(ChainedFxQuoteFetcher, fetcher),
+        fx_series_fetcher=cast(FxSeriesFetcher, series_fetcher),
     )
     return service, jobs
 
@@ -642,13 +690,24 @@ def test_launch_backfills_missing_fx_evidence_and_pins() -> None:
     fx_repo = FakeFxQuoteRepo(available=False)
     quote = _backfill_quote()
     fetcher = StubFxFetcher(quotes={("GBPUSD=X", "2026-02-01"): quote})
-    service, jobs = _service(fx_quote_repo=fx_repo, fx_fetcher=fetcher)
+    price_repo = FakeHistoricalPriceRepo()
+    series_fetcher = StubFxSeriesFetcher()
+    service, jobs = _service(
+        fx_quote_repo=fx_repo,
+        fx_fetcher=fetcher,
+        historical_price_repo=price_repo,
+        fx_series_fetcher=series_fetcher,
+    )
 
     result = service.launch(_command(base_currency="GBP"))
 
     assert len(jobs.submissions) == 1
     assert fx_repo.inserted == [quote]
     assert fetcher.calls == [("GBPUSD=X", "2026-02-01")]
+    # The backfilled quote only proves the exact-date rate exists; the
+    # pinned revision still comes from the ingested daily series (#459).
+    assert series_fetcher.calls == [(date(2026, 1, 25), date(2026, 4, 1))]
+    assert len(price_repo.committed) == 1
     assert result.job.id == "job-1"
 
 
@@ -704,6 +763,101 @@ def test_launch_fx_backfill_negative_attempt_short_circuits() -> None:
     assert "choose a later start month" in _field_errors(excinfo.value)["form"]
     # The negative cache means no network fetch is attempted at all.
     assert fetcher.calls == []
+    assert jobs.submissions == []
+
+
+# ---------------------------------------------------------------------------
+# launch() -- #459 FX series ingestion (the revision the manifest pins)
+# ---------------------------------------------------------------------------
+
+
+def test_launch_pins_the_ingested_fx_series_revision() -> None:
+    """A cross-currency roster pins the content-addressed revision of the
+    ingested daily ``GBPUSD=X`` series -- never the single-day
+    ``fx_quotes`` digest, which the engine's price-cache resolution can
+    never resolve (#459)."""
+    price_repo = FakeHistoricalPriceRepo()
+    series_fetcher = StubFxSeriesFetcher()
+    service, _ = _service(
+        historical_price_repo=price_repo, fx_series_fetcher=series_fetcher
+    )
+
+    evidence = service._resolve_roster_evidence(
+        profile_hash=PROFILE_HASH,
+        snapshot_month="2026-02",
+        base_currency="GBP",
+        start_month="2026-02",
+        end_month="2026-03",
+    )
+
+    assert len(evidence) == 1
+    assert evidence[0].fx_revision == FX_SERIES_REVISION
+    # One series ingested for the whole run: 2026-02-01 minus the 7-day
+    # buffer through the 2026-04-01 exclusive end.
+    assert series_fetcher.calls == [(date(2026, 1, 25), date(2026, 4, 1))]
+    assert len(price_repo.committed) == 1
+
+
+def test_launch_all_gbp_run_never_fetches_the_fx_series() -> None:
+    """An all-GBP roster must not ingest any FX series -- the sealed
+    manifest stays byte-identical to the pre-#459 behavior."""
+    price_repo = FakeHistoricalPriceRepo(evidence={PRICE_REVISION: "GBP"})
+    series_fetcher = StubFxSeriesFetcher()
+    service, _ = _service(
+        historical_price_repo=price_repo, fx_series_fetcher=series_fetcher
+    )
+
+    evidence = service._resolve_roster_evidence(
+        profile_hash=PROFILE_HASH,
+        snapshot_month="2026-02",
+        base_currency="GBP",
+        start_month="2026-02",
+        end_month="2026-03",
+    )
+
+    assert evidence[0].fx_revision is None
+    assert series_fetcher.calls == []
+    assert price_repo.committed == []
+
+
+def test_launch_fx_series_ingestion_is_idempotent() -> None:
+    """Re-preparing the same window re-ingests the same content-addressed
+    series revision -- the pinned ``fx_revision`` is stable across runs."""
+    series_fetcher = StubFxSeriesFetcher()
+    service, _ = _service(fx_series_fetcher=series_fetcher)
+
+    first = service._resolve_roster_evidence(
+        profile_hash=PROFILE_HASH,
+        snapshot_month="2026-02",
+        base_currency="GBP",
+        start_month="2026-02",
+        end_month="2026-03",
+    )
+    second = service._resolve_roster_evidence(
+        profile_hash=PROFILE_HASH,
+        snapshot_month="2026-02",
+        base_currency="GBP",
+        start_month="2026-02",
+        end_month="2026-03",
+    )
+
+    assert first[0].fx_revision == second[0].fx_revision == FX_SERIES_REVISION
+    assert len(series_fetcher.calls) == 2
+
+
+def test_launch_fx_series_fetch_failure_names_pair_and_window() -> None:
+    """A series fetch failure degrades to an actionable preparation
+    failure naming the pair and window -- never a worker crash."""
+    series_fetcher = StubFxSeriesFetcher(error=RuntimeError("yfinance down"))
+    service, jobs = _service(fx_series_fetcher=series_fetcher)
+
+    with pytest.raises(BacktestLaunchValidationError) as excinfo:
+        service.launch(_command(base_currency="GBP"))
+
+    message = _field_errors(excinfo.value)["form"]
+    assert "GBPUSD=X" in message
+    assert "2026-02" in message and "2026-03" in message
+    assert "retry preparation" in message
     assert jobs.submissions == []
 
 

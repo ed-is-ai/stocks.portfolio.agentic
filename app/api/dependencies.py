@@ -31,6 +31,7 @@ from app.services.portfolio_recommendation_service import (
 )
 from app.services.trader_service import TraderService
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
+from app.services.backtest.historical_price_evidence import YFinanceFxSeriesFetcher
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
@@ -123,6 +124,19 @@ def get_fx_history_fetcher() -> ChainedFxQuoteFetcher:
 
 
 @lru_cache
+def get_fx_series_fetcher() -> YFinanceFxSeriesFetcher:
+    """Return the shared yfinance-backed GBPUSD=X daily series fetcher (#459).
+
+    Backs ``BacktestLaunchService``'s ``fx_pinning`` stage: the daily rate
+    series spanning the Run window is ingested into the historical price
+    cache as the ``fx:GBPUSD=X`` pseudo-security and its revision is what
+    the manifest pins -- one process-wide instance, matching the other
+    cached providers in this module.
+    """
+    return YFinanceFxSeriesFetcher()
+
+
+@lru_cache
 def get_backtest_launch_service() -> BacktestLaunchService:
     """Return the shared Backtest launch orchestration boundary (Story 2.7)."""
     return BacktestLaunchService(
@@ -131,6 +145,7 @@ def get_backtest_launch_service() -> BacktestLaunchService:
         fx_quote_repo=get_fx_quote_repository(),
         jobs=get_strategy_job_service(),
         fx_fetcher=get_fx_history_fetcher(),
+        fx_series_fetcher=get_fx_series_fetcher(),
     )
 
 

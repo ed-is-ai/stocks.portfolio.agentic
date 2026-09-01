@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from typing import Any
 
@@ -14,6 +14,7 @@ from app.services.backtest.historical_data_qualification import (
 )
 from app.services.backtest.historical_price_evidence import (
     HistoricalEvidenceRequest,
+    YFinanceFxSeriesFetcher,
     YFinanceHistoricalEvidenceAdapter,
     rebind_historical_evidence_alias,
 )
@@ -52,12 +53,11 @@ def _request(**overrides: Any) -> HistoricalEvidenceRequest:
     return HistoricalEvidenceRequest(**values)
 
 
-def test_canonical_exchange_policy_filters_non_session_rows_and_allows_old_gaps(
-) -> None:
+def test_canonical_exchange_policy_filters_non_session_rows_and_allows_old_gaps() -> (
+    None
+):
     frame = _frame()
-    frame.index = pd.DatetimeIndex(
-        ["2024-01-01", "2024-01-03"], tz="America/New_York"
-    )
+    frame.index = pd.DatetimeIndex(["2024-01-01", "2024-01-03"], tz="America/New_York")
     request = _request(
         expected_sessions=(
             date(2023, 12, 29),
@@ -278,3 +278,109 @@ def test_invalid_interval_fails_before_provider_access() -> None:
         )
     assert exc_info.value.code is FailureCode.PROVIDER_CONTRACT_ERROR
     assert called is False
+
+
+# ---------------------------------------------------------------------------
+# YFinanceFxSeriesFetcher -- the #459 daily GBPUSD=X series ingestion path
+# ---------------------------------------------------------------------------
+
+
+def _fx_frame(sessions: tuple[date, ...], rate: float = 1.27) -> pd.DataFrame:
+    """A flat daily ``GBPUSD=X`` frame covering exactly ``sessions``."""
+    return pd.DataFrame(
+        {
+            "Open": [rate] * len(sessions),
+            "High": [rate] * len(sessions),
+            "Low": [rate] * len(sessions),
+            "Close": [rate] * len(sessions),
+            "Adj Close": [rate] * len(sessions),
+            "Volume": [0.0] * len(sessions),
+            "Dividends": [0.0] * len(sessions),
+            "Stock Splits": [0.0] * len(sessions),
+        },
+        index=pd.DatetimeIndex([s.isoformat() for s in sessions], tz="UTC"),
+    )
+
+
+def _fx_fetcher(frame: pd.DataFrame) -> Any:
+    class _Ticker:
+        def history(self, **_kwargs: object) -> pd.DataFrame:
+            return frame.copy()
+
+        def get_history_metadata(self, repair: bool = False) -> dict[str, Any]:
+            return {
+                "symbol": "GBPUSD=X",
+                "currency": "USD",
+                "exchangeTimezoneName": "UTC",
+            }
+
+    return YFinanceFxSeriesFetcher(
+        adapter=YFinanceHistoricalEvidenceAdapter(
+            lambda _symbol: _Ticker(),
+            clock=lambda: datetime(2026, 1, 1, tzinfo=timezone.utc),  # noqa: E501
+        )
+    )
+
+
+def test_fx_series_fetcher_produces_engine_contract_payload() -> None:
+    """The ingested payload carries the FX pseudo-security identity and the
+    provider-native shape ``currency.py::_fx_closes`` demands (#459)."""
+    sessions = tuple(date(2026, 1, 5) + timedelta(days=offset) for offset in range(5))
+    fetcher = _fx_fetcher(_fx_frame(sessions))
+
+    payload = fetcher.fetch(start=date(2026, 1, 5), end=date(2026, 1, 10))
+
+    assert payload.security_id == "fx:GBPUSD=X"
+    assert payload.requested_symbol == "GBPUSD=X"
+    assert payload.observed_symbol == "GBPUSD=X"
+    assert payload.provider == "yfinance"
+    assert payload.currency == "USD"
+    assert payload.quote_unit == "USD"
+    assert payload.quote_unit_scale == "1"
+    assert payload.exchange_timezone == "UTC"
+    assert payload.actions == ()
+    assert [row["session"] for row in payload.rows] == [
+        session.isoformat() for session in sessions
+    ]
+    assert len(payload.data_revision) == 64
+
+
+def test_fx_series_fetcher_drops_rows_outside_the_window() -> None:
+    """Provider rows outside the requested window never reach the
+    committed evidence -- the series spans exactly the run window."""
+    sessions = tuple(date(2026, 1, 1) + timedelta(days=offset) for offset in range(10))
+    fetcher = _fx_fetcher(_fx_frame(sessions))
+
+    payload = fetcher.fetch(start=date(2026, 1, 4), end=date(2026, 1, 7))
+
+    assert [row["session"] for row in payload.rows] == [
+        "2026-01-04",
+        "2026-01-05",
+        "2026-01-06",
+    ]
+
+
+def test_fx_series_fetcher_rejects_an_empty_window() -> None:
+    """A degenerate window fails closed before any provider access."""
+    fetcher = _fx_fetcher(_fx_frame((date(2026, 1, 5),)))
+
+    with pytest.raises(ProviderFailure) as exc_info:
+        fetcher.fetch(start=date(2026, 1, 10), end=date(2026, 1, 10))
+
+    assert exc_info.value.code is FailureCode.PROVIDER_CONTRACT_ERROR
+
+
+def test_fx_series_fetcher_fails_when_the_provider_serves_nothing() -> None:
+    """An empty provider frame is a definitive REQUIRED_DATA_MISSING -- the
+    preparation caller turns it into an actionable failure message."""
+    fetcher = _fx_fetcher(
+        pd.DataFrame(
+            {"Close": []},
+            index=pd.DatetimeIndex([], tz="UTC"),
+        )
+    )
+
+    with pytest.raises(ProviderFailure) as exc_info:
+        fetcher.fetch(start=date(2026, 1, 5), end=date(2026, 1, 10))
+
+    assert exc_info.value.code is FailureCode.REQUIRED_DATA_MISSING

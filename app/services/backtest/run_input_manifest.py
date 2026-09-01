@@ -43,9 +43,7 @@ from typing import Annotated, Literal, Mapping, cast
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.repositories.backtest_repo import BacktestRepository
-from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.repositories.historical_price_repo import (
-    EvidenceMissingError,
     HistoricalPriceRepository,
 )
 from app.services.backtest.canonical_manifest import (
@@ -53,6 +51,10 @@ from app.services.backtest.canonical_manifest import (
     manifest_digest,
 )
 from app.services.backtest.detectors import DETECTOR_REGISTRY
+from app.services.backtest.historical_price_evidence import (
+    FX_PAIR,
+    FX_SERIES_SECURITY_ID,
+)
 from app.services.backtest.historical_scan_record import DetectorId, FrozenDict
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
@@ -472,7 +474,6 @@ def _detector_source_digests(project_root: Path) -> tuple[DetectorSourceDigestV1
 
 def _verify_pinned_evidence(
     historical_price_repo: HistoricalPriceRepository,
-    fx_quote_repo: FxQuoteRepository,
     security: PinnedSecurityEvidenceV1,
     base_currency: str,
 ) -> None:
@@ -485,15 +486,15 @@ def _verify_pinned_evidence(
     missing-evidence replay failure, so that raises
     :class:`RunInputManifestError` instead.
 
-    FX evidence lives in ``FxQuoteRepository`` (content-addressed
-    ``fx_quotes``, AD-24), a distinct store from
-    ``HistoricalPriceRepository``'s ``historical_price_revisions`` --
-    resolved by digest via :meth:`FxQuoteRepository.get_by_digest`, never
-    the price/action repository. ``fx_revision`` must be ``None`` exactly
-    when the security's own evidence currency already equals
-    ``base_currency`` (no conversion needed, per
-    ``PinnedSecurityEvidenceV1``'s documented invariant); a mismatch
-    either way is a caller-side pinning bug.
+    FX evidence lives in ``HistoricalPriceRepository`` as the daily
+    ``GBPUSD=X`` series ingested under the ``fx:GBPUSD=X`` pseudo-security
+    (#459) -- the exact artifact the engine replays through
+    ``currency.py``. A pinned ``fx_revision`` that resolves only in the
+    single-day ``fx_quotes`` store (a pre-#459 manifest) is rejected as
+    missing evidence. ``fx_revision`` must be ``None`` exactly when the
+    security's own evidence currency already equals ``base_currency`` (no
+    conversion needed, per ``PinnedSecurityEvidenceV1``'s documented
+    invariant); a mismatch either way is a caller-side pinning bug.
     """
     price_evidence = historical_price_repo.get(security.price_revision)
     if price_evidence.security_id != security.security_id:
@@ -516,8 +517,15 @@ def _verify_pinned_evidence(
             "its evidence currency differs from base_currency",
         )
     if security.fx_revision is not None:
-        if fx_quote_repo.get_by_digest(security.fx_revision) is None:
-            raise EvidenceMissingError("pinned FX evidence is missing")
+        fx_evidence = historical_price_repo.get(security.fx_revision)
+        if (
+            fx_evidence.security_id != FX_SERIES_SECURITY_ID
+            or fx_evidence.requested_symbol != FX_PAIR
+        ):
+            raise RunInputManifestError(
+                "evidence_mismatch",
+                f"pinned fx_revision is not the {FX_PAIR} daily series evidence",
+            )
 
 
 def build_run_input_manifest(
@@ -525,7 +533,6 @@ def build_run_input_manifest(
     project_root: Path,
     backtest_repo: BacktestRepository,
     historical_price_repo: HistoricalPriceRepository,
-    fx_quote_repo: FxQuoteRepository,
     strategy: StrategyDescriptorV1,
     submitted_parameters: Mapping[str, JsonValue],
     profile_hash: str | None,
@@ -537,8 +544,8 @@ def build_run_input_manifest(
 ) -> RunInputManifestV1:
     """Resolve, verify, and canonically bind one Run's complete input identity.
 
-    Pure and read-only against ``backtest_repo``/``historical_price_repo``/
-    ``fx_quote_repo`` -- resolves the active snapshot profile only when
+    Pure and read-only against ``backtest_repo``/``historical_price_repo``
+    -- resolves the active snapshot profile only when
     ``profile_hash`` is
     omitted, requires ``[start_month, end_month]`` to already be fully
     Ready coverage, validates ``submitted_parameters`` against
@@ -604,9 +611,7 @@ def build_run_input_manifest(
         )
 
     for security in securities:
-        _verify_pinned_evidence(
-            historical_price_repo, fx_quote_repo, security, base_currency
-        )
+        _verify_pinned_evidence(historical_price_repo, security, base_currency)
 
     return RunInputManifestV1(
         schema_version=RUN_INPUT_MANIFEST_VERSION,

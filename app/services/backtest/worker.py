@@ -34,6 +34,10 @@ from app.services.backtest.backtest_engine import (
     TradeLogEvent,
     run_simulation,
 )
+from app.services.backtest.historical_price_evidence import (
+    FxSeriesFetcher,
+    YFinanceFxSeriesFetcher,
+)
 from app.services.backtest.historical_initialization_engine import (
     CanonicalSnapshotMonthProcessor,
     HistoricalInitializationEngine,
@@ -260,12 +264,14 @@ class PreparationStageEngine(StageWalkEngine):
         skills_root: Path = config.SKILLS_DIR,
         project_root: Path = config.ROOT_DIR,
         lease: WorkerLeaseFenceV1 | None = None,
+        fx_series_fetcher: FxSeriesFetcher | None = None,
     ) -> None:
         super().__init__(repository, StrategyJobType.PREPARATION, lease=lease)
         self._prices = prices
         self._fx = fx
         self._skills_root = skills_root
         self._project_root = project_root
+        self._fx_series_fetcher = fx_series_fetcher
 
     def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
         job = self._repository.strategy_job(job_id)
@@ -300,6 +306,9 @@ class PreparationStageEngine(StageWalkEngine):
                 # The worker is a subprocess with no DI container, so the
                 # chained historical FX backfill fetcher is built inline.
                 fx_fetcher=ChainedFxQuoteFetcher(),
+                fx_series_fetcher=(
+                    self._fx_series_fetcher or YFinanceFxSeriesFetcher()
+                ),
             )
             evidence: tuple[PinnedSecurityEvidenceV1, ...] | None = None
             for stage in STAGE_SEQUENCES[StrategyJobType.PREPARATION]:
@@ -327,12 +336,17 @@ class PreparationStageEngine(StageWalkEngine):
                         snapshot_month=str(prep.start_month),
                         base_currency=prep.base_currency,
                         selected_security_ids=prep.selection.canonical_security_ids,
+                        start_month=str(prep.start_month),
+                        end_month=str(prep.end_month),
                         pin_fx=False,
                     )
                 elif stage == "fx_pinning":
                     # Price/action revisions are already pinned; add only
                     # the conditional FX revisions at the matching visible
-                    # stage so progress accurately reflects the work.
+                    # stage so progress accurately reflects the work. The
+                    # full run window is passed so the ingested GBPUSD=X
+                    # daily series spans every engine valuation session
+                    # (#459).
                     if evidence is None:
                         raise ValueError("selected evidence was not resolved")
                     evidence = resolver._resolve_roster_evidence(
@@ -340,6 +354,8 @@ class PreparationStageEngine(StageWalkEngine):
                         snapshot_month=str(prep.start_month),
                         base_currency=prep.base_currency,
                         selected_security_ids=s.canonical_security_ids,
+                        start_month=str(prep.start_month),
+                        end_month=str(prep.end_month),
                     )
                 else:
                     # Once this stage is persisted, cancellation requests are
@@ -355,7 +371,6 @@ class PreparationStageEngine(StageWalkEngine):
                 project_root=self._project_root,
                 backtest_repo=self._repository,
                 historical_price_repo=self._prices,
-                fx_quote_repo=self._fx,
                 strategy=desc,
                 submitted_parameters=cast(Mapping[str, JsonValue], generic),
                 profile_hash=s.profile_hash,

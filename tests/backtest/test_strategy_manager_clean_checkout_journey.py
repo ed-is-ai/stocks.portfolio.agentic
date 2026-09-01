@@ -25,6 +25,7 @@ no production/network provider path is exercised.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -37,10 +38,9 @@ from app.core import config
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.fx_quote_repo import FxQuote, FxQuoteRepository
-from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.backtest.historical_data_qualification import QualificationRunner
 from app.services.backtest.historical_price_evidence import (
-    HistoricalEvidenceRequest,
+    YFinanceFxSeriesFetcher,
     YFinanceHistoricalEvidenceAdapter,
 )
 from app.services.backtest.run_universe import (
@@ -165,10 +165,12 @@ def _initialization_evidence_adapter() -> YFinanceHistoricalEvidenceAdapter:
     return YFinanceHistoricalEvidenceAdapter(ticker_factory, clock=lambda: NOW)
 
 
-def _commit_fx_evidence(prices: HistoricalPriceRepository) -> str:
-    """Commit a deterministic GBPUSD=X close for every calendar day around
-    the run month, so the real currency-conversion path (``currency.py``'s
-    ``convert_to_base``) never sees a stale FX quote for any session."""
+def _fx_series_fetcher() -> YFinanceFxSeriesFetcher:
+    """A ``YFinanceFxSeriesFetcher`` whose transport is a stubbed ticker
+    serving a flat daily ``GBPUSD=X`` series spanning the journey's run
+    window. Since #459, preparation's ``fx_pinning`` stage ingests the
+    daily series into the historical price cache itself and pins its
+    content-addressed revision -- no pre-seeded series is needed."""
     sessions = tuple(date(2026, 5, 20) + timedelta(days=i) for i in range(60))
     frame = _flat_frame(sessions, "UTC")
     frame[["Open", "High", "Low", "Close", "Adj Close"]] = 1.27
@@ -185,22 +187,11 @@ def _commit_fx_evidence(prices: HistoricalPriceRepository) -> str:
                 "exchangeTimezoneName": "UTC",
             }
 
-    request = HistoricalEvidenceRequest(
-        security_id="fx-gbpusd",
-        alias_revision=None,
-        symbol=FX_PAIR,
-        start=sessions[0],
-        end=sessions[-1] + timedelta(days=1),
-        expected_currency="USD",
-        expected_quote_unit="USD",
-        expected_timezone="UTC",
-        expected_sessions=sessions,
-        allowed_observed_symbols=(FX_PAIR,),
+    return YFinanceFxSeriesFetcher(
+        adapter=YFinanceHistoricalEvidenceAdapter(
+            lambda _symbol: _FxTicker(), clock=lambda: NOW
+        )
     )
-    payload = YFinanceHistoricalEvidenceAdapter(
-        lambda _symbol: _FxTicker(), clock=lambda: NOW
-    ).fetch(request)
-    return prices.commit(payload)
 
 
 def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
@@ -293,13 +284,11 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
 
     # --- FX evidence: the roster spans USD (AAPL) and GBP (ULVR), so the
     # base-currency mismatch requires pinned historical FX evidence (the
-    # onboarding doc's documented "FX requirement"). Commit it through both
-    # stores the real resolution path reads: HistoricalPriceRepository (the
-    # runtime evidence the worker actually replays) and FxQuoteRepository
-    # (what preparation's fx_pinning stage looks up), sharing one digest.
-    prices = HistoricalPriceRepository(db.make_connect(lambda: str(price_cache)))
-    prices.ensure_schema()
-    fx_revision = _commit_fx_evidence(prices)
+    # onboarding doc's documented "FX requirement"). Since #459 the
+    # manifest pins the daily GBPUSD=X series that preparation's
+    # fx_pinning stage ingests itself (stubbed transport injected into the
+    # preparation engines below); only the exact-date start-of-month quote
+    # must pre-exist in ``fx_quotes``.
     with db.session(db.make_connect(lambda: str(trades_db))) as conn:
         db.init_trades_db(conn)
     fx_quote_repo = FxQuoteRepository(db.make_connect(lambda: str(trades_db)))
@@ -308,7 +297,9 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
             pair=FX_PAIR,
             as_of=f"{INITIALIZATION_MONTH}-01",
             rate=Decimal("1.27"),
-            digest=fx_revision,
+            digest=hashlib.sha256(
+                f"yfinance|{FX_PAIR}|{INITIALIZATION_MONTH}-01|1.27".encode()
+            ).hexdigest(),
         )
     )
 
@@ -338,6 +329,7 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
     preparation_engine = build_stage_walk_engine(
         preparation_claim.job.id, repo, StrategyJobType.PREPARATION
     )
+    preparation_engine._fx_series_fetcher = _fx_series_fetcher()  # type: ignore[attr-defined]  # noqa: E501
     preparation_run_result = preparation_engine.run(
         preparation_claim.job.id, preparation_claim.claim_token
     )
@@ -402,6 +394,9 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
     assert replay_preparation_claim is not None
     replay_preparation_engine = build_stage_walk_engine(
         replay_preparation_claim.job.id, repo, StrategyJobType.PREPARATION
+    )
+    replay_preparation_engine._fx_series_fetcher = (  # type: ignore[attr-defined]
+        _fx_series_fetcher()
     )
     assert (
         replay_preparation_engine.run(

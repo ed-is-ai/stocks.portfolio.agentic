@@ -4,7 +4,7 @@ AD-19/AD-20 scope split, and ``build_run_input_manifest``'s
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -22,6 +22,7 @@ from app.repositories.historical_price_repo import (
 from app.services.backtest.detectors import DETECTOR_REGISTRY
 from app.services.backtest.historical_price_evidence import (
     HistoricalEvidenceRequest,
+    YFinanceFxSeriesFetcher,
     YFinanceHistoricalEvidenceAdapter,
 )
 from app.services.backtest.canonical_manifest import manifest_digest
@@ -266,7 +267,6 @@ def test_build_run_input_manifest_pins_the_real_ledger_action_metrics_digest(
         project_root=PROJECT_ROOT,
         backtest_repo=backtest_repo,
         historical_price_repo=price_repo,
-        fx_quote_repo=_fx_quote_repo(tmp_path),
         strategy=_strategy(),
         submitted_parameters={},
         profile_hash=PROFILE_HASH,
@@ -732,7 +732,6 @@ def test_build_run_input_manifest_resolves_and_binds_a_valid_launch(
         project_root=PROJECT_ROOT,
         backtest_repo=backtest_repo,
         historical_price_repo=price_repo,
-        fx_quote_repo=_fx_quote_repo(tmp_path),
         strategy=_strategy(),
         submitted_parameters={},
         profile_hash=PROFILE_HASH,
@@ -769,7 +768,6 @@ def test_build_run_input_manifest_replay_fails_evidence_missing_when_revision_va
             project_root=PROJECT_ROOT,
             backtest_repo=backtest_repo,
             historical_price_repo=price_repo,
-            fx_quote_repo=_fx_quote_repo(tmp_path),
             strategy=_strategy(),
             submitted_parameters={},
             profile_hash=PROFILE_HASH,
@@ -799,7 +797,6 @@ def test_build_run_input_manifest_rejects_incomplete_coverage(tmp_path) -> None:
             project_root=PROJECT_ROOT,
             backtest_repo=backtest_repo,
             historical_price_repo=price_repo,
-            fx_quote_repo=_fx_quote_repo(tmp_path),
             strategy=_strategy(),
             submitted_parameters={},
             profile_hash=PROFILE_HASH,
@@ -833,7 +830,6 @@ def test_build_run_input_manifest_rejects_invalid_submitted_parameters(
             project_root=PROJECT_ROOT,
             backtest_repo=backtest_repo,
             historical_price_repo=price_repo,
-            fx_quote_repo=_fx_quote_repo(tmp_path),
             strategy=_strategy(),
             submitted_parameters={"fixed_shares": -1},
             profile_hash=PROFILE_HASH,
@@ -854,14 +850,88 @@ def test_build_run_input_manifest_rejects_invalid_submitted_parameters(
     assert exc_info.value.code == "invalid_parameters"
 
 
-def test_build_run_input_manifest_resolves_fx_revision_via_fx_quote_repository(
+def _commit_fx_series_evidence(repo: HistoricalPriceRepository) -> str:
+    """Commit a deterministic daily GBPUSD=X series as the ``fx:GBPUSD=X``
+    pseudo-security through the production ranged fetcher (#459), and
+    return its content-addressed revision."""
+    sessions = tuple(date(2026, 6, 1) + timedelta(days=i) for i in range(30))
+    frame = pd.DataFrame(
+        {
+            "Open": [1.27] * len(sessions),
+            "High": [1.28] * len(sessions),
+            "Low": [1.26] * len(sessions),
+            "Close": [1.27] * len(sessions),
+            "Adj Close": [1.27] * len(sessions),
+            "Volume": [0.0] * len(sessions),
+            "Dividends": [0.0] * len(sessions),
+            "Stock Splits": [0.0] * len(sessions),
+        },
+        index=pd.DatetimeIndex(
+            [pd.Timestamp(session) for session in sessions], tz="UTC"
+        ),
+    )
+
+    class _FxTicker:
+        def history(self, **_kwargs: object) -> pd.DataFrame:
+            return frame.copy()
+
+        def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
+            return {
+                "symbol": "GBPUSD=X",
+                "currency": "USD",
+                "exchangeTimezoneName": "UTC",
+            }
+
+    payload = YFinanceFxSeriesFetcher(lambda _symbol: _FxTicker()).fetch(
+        start=sessions[0], end=sessions[-1] + timedelta(days=1)
+    )
+    repo.commit(payload)
+    return payload.data_revision
+
+
+def test_build_run_input_manifest_resolves_fx_revision_via_historical_price_repo(
     tmp_path,
 ) -> None:
     """A currency-mismatched security's ``fx_revision`` resolves through
-    ``FxQuoteRepository`` -- not ``HistoricalPriceRepository`` (the bug an
-    adversarial review pass on this story caught: the original
-    implementation looked FX revisions up in the wrong evidence store,
-    which would have failed every real cross-currency Run)."""
+    ``HistoricalPriceRepository`` as the ingested ``fx:GBPUSD=X`` daily
+    series (#459) -- the exact artifact the engine replays through
+    ``currency.py``."""
+    backtest_repo = _backtest_repo(tmp_path)
+    _commit_ready_month(backtest_repo)
+    price_repo = _price_repo(tmp_path)
+    revision = _commit_price_evidence(price_repo, security_id="sec-001")
+    fx_revision = _commit_fx_series_evidence(price_repo)
+
+    manifest = build_run_input_manifest(
+        project_root=PROJECT_ROOT,
+        backtest_repo=backtest_repo,
+        historical_price_repo=price_repo,
+        strategy=_strategy(),
+        submitted_parameters={},
+        profile_hash=PROFILE_HASH,
+        start_month="2026-07",
+        end_month="2026-07",
+        base_currency="GBP",
+        starting_capital=Decimal("10000"),
+        securities=(
+            PinnedSecurityEvidenceV1(
+                security_id="sec-001",
+                price_revision=revision,
+                action_revision=revision,
+                fx_revision=fx_revision,
+            ),
+        ),
+    )
+
+    assert manifest.securities[0].fx_revision == fx_revision
+
+
+def test_build_run_input_manifest_rejects_legacy_fx_quotes_only_digest(
+    tmp_path,
+) -> None:
+    """A pre-#459 manifest whose ``fx_revision`` is a single-day
+    ``fx_quotes`` digest is rejected at seal time -- the series evidence
+    in the historical price cache is now mandatory."""
     backtest_repo = _backtest_repo(tmp_path)
     _commit_ready_month(backtest_repo)
     price_repo = _price_repo(tmp_path)
@@ -875,29 +945,27 @@ def test_build_run_input_manifest_resolves_fx_revision_via_fx_quote_repository(
     )
     fx_repo.insert_or_get(quote)
 
-    manifest = build_run_input_manifest(
-        project_root=PROJECT_ROOT,
-        backtest_repo=backtest_repo,
-        historical_price_repo=price_repo,
-        fx_quote_repo=fx_repo,
-        strategy=_strategy(),
-        submitted_parameters={},
-        profile_hash=PROFILE_HASH,
-        start_month="2026-07",
-        end_month="2026-07",
-        base_currency="GBP",
-        starting_capital=Decimal("10000"),
-        securities=(
-            PinnedSecurityEvidenceV1(
-                security_id="sec-001",
-                price_revision=revision,
-                action_revision=revision,
-                fx_revision=quote.digest,
+    with pytest.raises(EvidenceMissingError):
+        build_run_input_manifest(
+            project_root=PROJECT_ROOT,
+            backtest_repo=backtest_repo,
+            historical_price_repo=price_repo,
+            strategy=_strategy(),
+            submitted_parameters={},
+            profile_hash=PROFILE_HASH,
+            start_month="2026-07",
+            end_month="2026-07",
+            base_currency="GBP",
+            starting_capital=Decimal("10000"),
+            securities=(
+                PinnedSecurityEvidenceV1(
+                    security_id="sec-001",
+                    price_revision=revision,
+                    action_revision=revision,
+                    fx_revision=quote.digest,
+                ),
             ),
-        ),
-    )
-
-    assert manifest.securities[0].fx_revision == quote.digest
+        )
 
 
 def test_build_run_input_manifest_rejects_currency_mismatch_without_fx_revision(
@@ -915,7 +983,6 @@ def test_build_run_input_manifest_rejects_currency_mismatch_without_fx_revision(
             project_root=PROJECT_ROOT,
             backtest_repo=backtest_repo,
             historical_price_repo=price_repo,
-            fx_quote_repo=_fx_quote_repo(tmp_path),
             strategy=_strategy(),
             submitted_parameters={},
             profile_hash=PROFILE_HASH,
@@ -947,7 +1014,6 @@ def test_build_run_input_manifest_rejects_unresolvable_fx_revision(tmp_path) -> 
             project_root=PROJECT_ROOT,
             backtest_repo=backtest_repo,
             historical_price_repo=price_repo,
-            fx_quote_repo=_fx_quote_repo(tmp_path),
             strategy=_strategy(),
             submitted_parameters={},
             profile_hash=PROFILE_HASH,
@@ -976,7 +1042,6 @@ def test_build_run_input_manifest_rejects_empty_securities(tmp_path) -> None:
             project_root=PROJECT_ROOT,
             backtest_repo=backtest_repo,
             historical_price_repo=price_repo,
-            fx_quote_repo=_fx_quote_repo(tmp_path),
             strategy=_strategy(),
             submitted_parameters={},
             profile_hash=PROFILE_HASH,

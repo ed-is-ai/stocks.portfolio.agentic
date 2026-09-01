@@ -7,7 +7,7 @@ import time
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from importlib.metadata import version
 from typing import Any, Protocol
 
@@ -26,6 +26,13 @@ from app.services.backtest.historical_data_qualification import (
     _safe_reason,
     deterministic_jitter,
 )
+
+#: The only cross-currency pair v1 needs (``base_currency`` and every
+#: evidence ``currency`` are closed to ``{"GBP", "USD"}``) and the
+#: pseudo-security id under which its daily rate series is ingested into
+#: the historical price cache (#459).
+FX_PAIR = "GBPUSD=X"
+FX_SERIES_SECURITY_ID = "fx:GBPUSD=X"
 
 _REQUIRED_COLUMNS = (
     "Open",
@@ -381,9 +388,7 @@ def normalize_historical_response(
         normalized_metadata = canonical_provider_metadata(metadata)
         canonical_request = dict(request)
         if definition.canonical_exchange_sessions:
-            canonical_request["observation_policy"] = (
-                CANONICAL_EXCHANGE_SESSIONS_POLICY
-            )
+            canonical_request["observation_policy"] = CANONICAL_EXCHANGE_SESSIONS_POLICY
         if not rows:
             raise ProviderFailure(
                 FailureCode.REQUIRED_DATA_MISSING,
@@ -501,3 +506,62 @@ class YFinanceHistoricalEvidenceAdapter:
                 base = 1.0 if attempt == 0 else 2.0
                 self._sleeper(min(2.25, base + self._jitter(request_key, attempt)))
         raise AssertionError("unreachable")
+
+
+class FxSeriesFetcher(Protocol):
+    """Fetch the daily ``GBPUSD=X`` rate series over one run window.
+
+    ``start``/``end`` are the inclusive-window bounds exactly as they
+    should appear in the produced evidence (``end`` exclusive, matching
+    :class:`HistoricalEvidenceRequest`'s own convention).
+    """
+
+    def fetch(self, *, start: date, end: date) -> HistoricalEvidencePayload: ...
+
+
+class YFinanceFxSeriesFetcher:
+    """Production ranged fetch of the daily ``GBPUSD=X`` rate series (#459).
+
+    The engine's currency contract (``currency.py::_fx_closes``) consumes
+    a full daily rate series as ``StoredHistoricalEvidence``; this fetcher
+    produces exactly that payload through the shared
+    :class:`YFinanceHistoricalEvidenceAdapter`, so it passes engine
+    validation unmodified (provider ``yfinance``, symbol ``GBPUSD=X``,
+    USD/USD quote contract, UTC, no corporate actions).
+
+    ``expected_sessions`` covers every calendar day in the window and the
+    canonical observation policy drops non-trading/invalid provider rows,
+    so weekend and holiday gaps degrade to the engine's own
+    <=5-calendar-day staleness guard instead of a hard failure.
+    """
+
+    def __init__(
+        self,
+        ticker_factory: Callable[[str], TickerLike] = yf.Ticker,
+        *,
+        adapter: YFinanceHistoricalEvidenceAdapter | None = None,
+    ) -> None:
+        self._adapter = adapter or YFinanceHistoricalEvidenceAdapter(ticker_factory)
+
+    def fetch(self, *, start: date, end: date) -> HistoricalEvidencePayload:
+        if start >= end:
+            raise ProviderFailure(
+                FailureCode.PROVIDER_CONTRACT_ERROR,
+                _safe_reason(FailureCode.PROVIDER_CONTRACT_ERROR),
+            )
+        request = HistoricalEvidenceRequest(
+            security_id=FX_SERIES_SECURITY_ID,
+            alias_revision=None,
+            symbol=FX_PAIR,
+            start=start,
+            end=end,
+            expected_currency="USD",
+            expected_quote_unit="USD",
+            expected_timezone="UTC",
+            expected_sessions=tuple(
+                start + timedelta(days=offset) for offset in range((end - start).days)
+            ),
+            allowed_observed_symbols=(FX_PAIR,),
+            canonical_exchange_sessions=True,
+        )
+        return self._adapter.fetch(request)
