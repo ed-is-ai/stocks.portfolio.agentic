@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, DecimalException, localcontext
 from functools import lru_cache
 from typing import Any, ClassVar, cast
 
@@ -829,42 +829,145 @@ class PortfolioService:
     def _load_portfolio_history(
         self, portfolio_id: int | None = None, range_key: str = DEFAULT_CHART_RANGE
     ) -> dict:
-        """Return chart-ready dicts with labels, values, costs, and cash.
+        """Return one aligned, chart-ready projection of retained snapshots.
 
         With a ``portfolio_id`` the series comes from that portfolio's
         ``portfolio_snapshots`` (#147), filtered to the ``range_key`` window
         and downsampled to ``_CHART_MAX_POINTS`` last-per-bucket points (#421);
         without one it falls back to the legacy single-portfolio
         ``portfolio_value.csv`` (unscoped, unranged).
+
+        ``total_values`` is deliberately projected here rather than in the
+        template: each point is the same-row holdings market value plus cash.
+        Invalid or unavailable components remain explicit gaps in every
+        series, never fabricated zeroes or non-standard JSON numbers.
         """
         if portfolio_id is not None:
             rows = self._trader.snapshot_history(
                 portfolio_id, since=self.chart_cutoff_iso(range_key)
             )
-            rows = downsample_last_per_bucket(list(rows), _CHART_MAX_POINTS)
-            return {
-                "labels": [str(r[0])[:16].replace("T", " ") for r in rows],
-                "values": [float(r[1]) for r in rows],
-                "costs": [float(r[2]) for r in rows],
-                "cash_values": [
-                    float(r[3]) if r[3] is not None else None for r in rows
-                ],
-            }
+            selected_rows = self._chronological_chart_rows(list(rows))
+            selected_rows = downsample_last_per_bucket(selected_rows, _CHART_MAX_POINTS)
+            return self._project_portfolio_chart_rows(selected_rows)
         if not PORTFOLIO_VALUE_CSV.exists():
-            return {"labels": [], "values": [], "costs": [], "cash_values": []}
+            return self._project_portfolio_chart_rows([])
         with open(PORTFOLIO_VALUE_CSV, newline="", encoding="utf-8") as fh:
             rows = list(csv.DictReader(fh))
-        rows = rows[-180:]
+        legacy_rows = [
+            (
+                row.get("timestamp", ""),
+                row.get("total_value"),
+                row.get("total_cost"),
+                row.get("cash_balance"),
+            )
+            for row in rows
+        ]
+        legacy_rows = self._chronological_chart_rows(legacy_rows)[-180:]
+        legacy_rows = downsample_last_per_bucket(legacy_rows, _CHART_MAX_POINTS)
+        return self._project_portfolio_chart_rows(legacy_rows)
 
-        def _cash(r: dict) -> float | None:
-            v = r.get("cash_balance")
-            return float(v) if v not in (None, "") else None
+    @staticmethod
+    def _chart_timestamp_utc(value: Any) -> datetime | None:
+        """Parse a retained timestamp and normalize the instant to UTC."""
+        try:
+            parsed = (
+                value
+                if isinstance(value, datetime)
+                else datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+            )
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
+    @classmethod
+    def _chronological_chart_rows(
+        cls, rows: list[tuple[Any, ...]]
+    ) -> list[tuple[Any, ...]]:
+        """Return valid timestamped rows in true chronological order.
+
+        A timestamp that cannot be placed on the timeline cannot safely enter
+        date-bucket downsampling, so it is excluded rather than allowing the
+        downsampler to exceed its point ceiling.
+        """
+        normalized: list[tuple[datetime, tuple[Any, ...]]] = []
+        for row in rows:
+            if not row:
+                continue
+            instant = cls._chart_timestamp_utc(row[0])
+            if instant is not None:
+                normalized.append((instant, row))
+        normalized.sort(key=lambda item: item[0])
+        return [(instant.isoformat(), *row[1:]) for instant, row in normalized]
+
+    @staticmethod
+    def _finite_chart_decimal(value: Any) -> Decimal | None:
+        """Normalize one stored chart number without accepting sentinels."""
+        if value is None or isinstance(value, (bool, bytes)):
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        try:
+            numeric = Decimal(str(value))
+        except (DecimalException, TypeError, ValueError):
+            return None
+        return numeric if numeric.is_finite() else None
+
+    @classmethod
+    def _project_portfolio_chart_rows(cls, rows: list[tuple[Any, ...]]) -> dict:
+        """Project aligned finite series and same-row portfolio totals."""
+        values: list[float | None] = []
+        costs: list[float | None] = []
+        cash_values: list[float | None] = []
+        total_values: list[float | None] = []
+
+        def presentation_value(value: Decimal | None) -> float | None:
+            if value is None:
+                return None
+            try:
+                result = float(value)
+            except (OverflowError, ValueError):
+                return None
+            if not math.isfinite(result) or (result == 0.0 and value != 0):
+                return None
+            return result
+
+        for row in rows:
+            market_decimal = cls._finite_chart_decimal(row[1] if len(row) > 1 else None)
+            cost_decimal = cls._finite_chart_decimal(row[2] if len(row) > 2 else None)
+            cash_decimal = cls._finite_chart_decimal(row[3] if len(row) > 3 else None)
+            market_value = presentation_value(market_decimal)
+            cash_value = presentation_value(cash_decimal)
+            values.append(market_value)
+            costs.append(presentation_value(cost_decimal))
+            cash_values.append(cash_value)
+            if market_value is None or cash_value is None:
+                total_values.append(None)
+                continue
+            try:
+                least_exponent = min(
+                    market_decimal.as_tuple().exponent,
+                    cash_decimal.as_tuple().exponent,
+                )
+                highest_digit = max(market_decimal.adjusted(), cash_decimal.adjusted())
+                with localcontext() as context:
+                    context.prec = max(28, highest_digit - least_exponent + 2)
+                    total = presentation_value(market_decimal + cash_decimal)
+            except DecimalException:
+                total = None
+            total_values.append(total)
+
+        has_unavailable_totals = any(value is None for value in total_values)
         return {
-            "labels": [r["timestamp"][:16].replace("T", " ") for r in rows],
-            "values": [float(r["total_value"]) for r in rows],
-            "costs": [float(r["total_cost"]) for r in rows],
-            "cash_values": [_cash(r) for r in rows],
+            "labels": [str(row[0])[:16].replace("T", " ") for row in rows],
+            "total_values": total_values,
+            "values": values,
+            "costs": costs,
+            "cash_values": cash_values,
+            "has_unavailable_totals": has_unavailable_totals,
+            "all_totals_unavailable": bool(total_values)
+            and all(value is None for value in total_values),
         }
 
     def _trade_markers(
@@ -900,9 +1003,7 @@ class PortfolioService:
 
         if trades is None:
             trades = self._trader.get_trade_history(portfolio_id=portfolio_id)
-        trades.sort(key=lambda t: t.date)
-
-        for trade in trades:
+        for trade in sorted(trades, key=lambda t: t.date):
             try:
                 td = datetime.strptime(trade.date, "%Y-%m-%d").date()
             except ValueError:
@@ -1171,9 +1272,12 @@ class PortfolioService:
             "error_message": error_message,
             "warning_message": warning_message,
             "chart_labels": json.dumps(chart_data["labels"]),
+            "chart_total_values": json.dumps(chart_data["total_values"]),
             "chart_values": json.dumps(chart_data["values"]),
             "chart_costs": json.dumps(chart_data["costs"]),
             "chart_cash": json.dumps(chart_data["cash_values"]),
+            "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
+            "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
             "chart_points": len(chart_data["values"]),
             "chart_buys": json.dumps(buy_vals),
             "chart_sells": json.dumps(sell_vals),
@@ -1226,9 +1330,12 @@ class PortfolioService:
             "chart_range": chart_range,
             "chart_has_history": has_history,
             "chart_labels": json.dumps(chart_data["labels"]),
+            "chart_total_values": json.dumps(chart_data["total_values"]),
             "chart_values": json.dumps(chart_data["values"]),
             "chart_costs": json.dumps(chart_data["costs"]),
             "chart_cash": json.dumps(chart_data["cash_values"]),
+            "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
+            "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
             "chart_points": len(chart_data["values"]),
             "chart_buys": json.dumps(buy_vals),
             "chart_sells": json.dumps(sell_vals),

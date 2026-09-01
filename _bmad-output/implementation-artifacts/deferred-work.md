@@ -398,17 +398,6 @@
   summary: The existing market-value GBP projection uses the default GBP/USD rate whenever a live or cached rate is unavailable, without displaying that fallback provenance on the Portfolio summary card.
   evidence: `portfolio_partial_context()` retains the pre-existing `gbpusd_rate or _DEFAULT_GBPUSD` conversion contract; #454 separates the market-only projection but does not change FX freshness/valuation semantics.
 
-## Deferred from: code review of spec-gh-459-fx-series-evidence (2026-08-31)
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-gh-459-fx-series-evidence.md`
-  summary: FX series ingestion re-fetches from the provider on every cross-currency preparation even when the identical revision is already committed; consult `HistoricalPriceRepository.find_compatible_request` before fetching.
-  evidence: `_ingest_fx_series_revision` unconditionally calls the fetcher; `find_compatible_request` exists for cache-first resolution and is never consulted (review finding, 2026-08-31).
-- source_spec: `_bmad-output/implementation-artifacts/spec-gh-459-fx-series-evidence.md`
-  summary: Series ingestion runs synchronously inside the `launch()` HTTP request with retry/backoff, so a slow provider blocks the web request.
-  evidence: `launch()` → `_resolve_roster_evidence` → `_ingest_fx_series_revision` → adapter retry loop with sleeps; same pre-existing pattern deferred in #452's review ("launch() resolves evidence synchronously in the web request").
-- source_spec: `_bmad-output/implementation-artifacts/spec-gh-459-fx-series-evidence.md`
-  summary: Preparation does not validate in-window FX staleness; a >5-calendar-day provider gap passes preparation and fails the backtest later with `fx_stale`.
-  evidence: the canonical observation policy tolerates arbitrary gaps (`sessions_match = bool(sessions)` in `historical_price_evidence.py`); the ≤5-day guard is enforced only at engine replay (`currency.py`).
-- source_spec: `_bmad-output/implementation-artifacts/spec-gh-459-fx-series-evidence.md`
-  summary: Seal-time FX verification does not assert the pinned series covers the run window (defense-in-depth; no current caller can trigger a mismatch).
-  evidence: `_verify_pinned_evidence` checks only `security_id`/`requested_symbol`; `start_month`/`end_month` are known at seal time but unused.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-455-total-portfolio-value-chart.md`
+  summary: The chart teardown contract is asserted from rendered JavaScript source but has no browser-level test that performs consecutive htmx fragment replacements with a live Chart.js instance.
+  evidence: Existing #421 and #455 tests verify the stable card, fragment endpoints, and destroy-before-create source ordering; none executes Chart.js across repeated swaps, and adding that browser harness is independent of the service-owned total-value projection.

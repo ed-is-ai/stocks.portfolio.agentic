@@ -231,27 +231,23 @@
 
     {% if active_portfolio %}
     <!-- Strategy assignment (#440) -->
-    {% if strategy_assignment and strategy_assignment.available %}
-    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1">
-      <i class="bi bi-diagram-3"></i>{{ strategy_assignment.display_name }}
-    </span>
-    {% elif strategy_assignment %}
-    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1">
-      <i class="bi bi-diagram-3"></i>{{ strategy_assignment.assignment.strategy_id }}
-      <span class="badge text-bg-danger">unavailable</span>
-    </span>
-    {% else %}
-    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1 text-muted">
-      <i class="bi bi-diagram-3"></i>No Strategy
-    </span>
-    {% endif %}
     <button
         class="btn btn-sm btn-outline-secondary"
         hx-get="/partials/strategy-assign?portfolio_id={{ active_portfolio.id }}"
         hx-target="#strategy-assign-modal-target" hx-swap="innerHTML"
         hx-indicator="#spinner">
-      <i class="bi bi-box-arrow-in-right me-1"></i>{% if strategy_assignment and not strategy_assignment.available %}Repair{% elif strategy_assignment %}Change{% else %}Assign{% endif %}
+      <i class="bi bi-diagram-3 me-1"></i>{% if strategy_assignment and not strategy_assignment.available %}Repair strategy{% elif strategy_assignment %}Change strategy{% else %}Select strategy{% endif %}
     </button>
+    {% if strategy_assignment and strategy_assignment.available %}
+    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1" aria-label="Selected strategy: {{ strategy_assignment.display_name }}">
+      {{ strategy_assignment.display_name }}
+    </span>
+    {% elif strategy_assignment %}
+    <span class="badge text-bg-light border d-inline-flex align-items-center gap-1" aria-label="Selected strategy unavailable: {{ strategy_assignment.assignment.strategy_id }}">
+      {{ strategy_assignment.assignment.strategy_id }}
+      <span class="badge text-bg-danger">unavailable</span>
+    </span>
+    {% endif %}
     {% if strategy_assignment %}
     <button
         class="btn btn-sm btn-outline-danger"
@@ -267,11 +263,18 @@
   <!-- Holding actions -->
   <div class="portfolio-actions" role="group" aria-label="Portfolio actions">
     {% if active_portfolio %}
+    {% if strategy_assignment and strategy_assignment.available %}
     <button class="btn btn-sm btn-primary"
             hx-get="/portfolios/{{ active_portfolio.id }}/recommendations"
             hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">
       <i class="bi bi-clipboard-check me-1"></i>Recommendations
     </button>
+    {% else %}
+    <button class="btn btn-sm btn-outline-secondary" type="button" disabled
+            aria-disabled="true" title="Select an available strategy to view recommendations">
+      <i class="bi bi-clipboard-check me-1"></i>Recommendations
+    </button>
+    {% endif %}
     {% endif %}
     <div class="dropdown">
       <button class="btn btn-sm btn-outline-primary dropdown-toggle" type="button"
@@ -318,7 +321,7 @@
   </div>
 </div>
 
-{% if active_portfolio and strategy_freshness and strategy_freshness != 'fresh' %}
+{% if active_portfolio and strategy_assignment and strategy_assignment.available and strategy_freshness and strategy_freshness != 'fresh' %}
 <div class="alert alert-warning border-0 d-flex align-items-center gap-2 mt-1 mb-3"
      role="status">
   <i class="bi bi-exclamation-triangle-fill fs-5"></i>
@@ -409,12 +412,14 @@
 {% endif %}
 {% if positions or cash_balance is not none or cash_balances_by_currency %}
 
+{% if chart_has_history %}{% include "_portfolio_chart.html" %}{% endif %}
+
 <!-- Summary strip (all values in GBP) -->
 <section class="portfolio-summary-grid" aria-label="Portfolio summary">
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-graph-up me-1"></i>Market Value</div>
-    <div class="sval">£{{ "%.2f"|format(market_value_gbp|default(0)) }}</div>
-    <span class="visually-hidden">Excludes cash.</span>
+    <div class="sval">£{{ "%.2f"|format(total_value_gbp|default(0)) }}</div>
+    <span class="visually-hidden">Includes cash.</span>
   </div>
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Cost</div>
@@ -443,8 +448,6 @@
     </div>
   </div>
 </section>
-
-{% if chart_has_history %}{% include "_portfolio_chart.html" %}{% endif %}
 
 <div class="tbl-wrap">
   <table class="table table-hover align-middle">

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,6 +47,12 @@ def stack(tmp_path: Path):
 
 
 client = TestClient(app)
+
+
+def _chart_array(body: str, variable: str) -> list[float | None]:
+    match = re.search(rf"const {variable}\s*=\s*(\[[^;]+\]);", body)
+    assert match is not None
+    return json.loads(match.group(1))
 
 
 @pytest.mark.parametrize("preset", ["1M", "3M", "12M", "3Y", "5Y"])
@@ -106,6 +114,37 @@ def test_chart_fragment_remains_a_chart_card_without_dashboard_context(stack) ->
     assert 'id="portfolio-chart-card"' in resp.text
     assert 'class="portfolio-dashboard"' not in resp.text
     assert 'class="portfolio-chart-canvas"' in resp.text
+
+
+def test_chart_fragment_renders_selected_range_portfolio_totals(stack) -> None:
+    _, pid = stack
+    resp = client.get(
+        "/partials/portfolio/chart", params={"portfolio_id": pid, "range": "12M"}
+    )
+
+    assert resp.status_code == 200
+    totals = _chart_array(resp.text, "totals")
+    values = _chart_array(resp.text, "values")
+    cash_values = _chart_array(resp.text, "cashVals")
+    assert totals
+    assert len(totals) == len(values) == len(cash_values)
+    assert totals == [market + cash for market, cash in zip(values, cash_values)]
+
+
+def test_chart_fragment_keeps_markers_and_reports_partial_totals(stack) -> None:
+    agent, pid = stack
+    agent._snapshots.append(pid, _now_iso(5), 1500.0, 900.0, None)
+    recent = (datetime.now(timezone.utc) - timedelta(days=4)).strftime("%Y-%m-%d")
+    agent.record_buy("AAPL", 1, 100, recent, portfolio_id=pid)
+
+    resp = client.get(
+        "/partials/portfolio/chart", params={"portfolio_id": pid, "range": "12M"}
+    )
+
+    assert resp.status_code == 200
+    assert "Some Portfolio Value points are unavailable" in resp.text
+    assert "BUY 1 AAPL" in resp.text
+    assert _chart_array(resp.text, "totals")[-1] is None
 
 
 def test_out_of_window_trade_has_no_marker(stack) -> None:

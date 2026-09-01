@@ -266,9 +266,12 @@ def _make_service(monkeypatch) -> PortfolioService:
         "_load_portfolio_history",
         lambda portfolio_id=None, range_key="12M": {
             "labels": [],
+            "total_values": [],
             "values": [],
             "costs": [],
             "cash_values": [],
+            "has_unavailable_totals": False,
+            "all_totals_unavailable": False,
         },
     )
     return svc
@@ -440,9 +443,12 @@ def test_cash_balances_by_currency_carries_a_gbp_valuation_projection_per_row(
         "_load_portfolio_history",
         lambda portfolio_id=None, range_key="12M": {
             "labels": [],
+            "total_values": [],
             "values": [],
             "costs": [],
             "cash_values": [],
+            "has_unavailable_totals": False,
+            "all_totals_unavailable": False,
         },
     )
 
@@ -1125,7 +1131,12 @@ class _SnapshotTrader(_StubTrader):
         self.calls.append(since)
         if since is None:
             return list(self._rows)
-        return [r for r in self._rows if r[0] >= since]
+        return [
+            row
+            for row in self._rows
+            if (row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]))
+            >= since
+        ]
 
 
 def _svc_with(rows: list[tuple]) -> tuple[PortfolioService, _SnapshotTrader]:
@@ -1168,8 +1179,162 @@ def test_load_portfolio_history_downsamples_to_250() -> None:
     svc, _ = _svc_with(rows)
     out = svc._load_portfolio_history(1, "5Y")
     assert 2 <= len(out["values"]) <= 250
+    assert len(out["labels"]) == len(out["total_values"])
+    assert len(out["values"]) == len(out["costs"]) == len(out["cash_values"])
+    assert len(out["values"]) == len(out["total_values"])
     assert out["values"][0] == 0.0
     assert out["values"][-1] == 3599.0
+
+
+def test_portfolio_history_projects_exact_same_row_total_with_signed_cash() -> None:
+    rows = [
+        ("2026-08-01T12:00:00+00:00", Decimal("0.1"), 0, Decimal("0.2")),
+        ("2026-08-02T12:00:00+00:00", 100, 90, 0),
+        ("2026-08-03T12:00:00+00:00", 100, 90, -25),
+    ]
+    svc, _ = _svc_with(rows)
+
+    out = svc._load_portfolio_history(1, "5Y")
+
+    assert out["total_values"] == [0.3, 100.0, 75.0]
+    assert out["cash_values"] == [0.2, 0.0, -25.0]
+    assert out["has_unavailable_totals"] is False
+
+
+def test_portfolio_history_preserves_invalid_components_as_json_safe_gaps() -> None:
+    rows = [
+        ("2026-08-01T12:00:00+00:00", None, 90, 10),
+        ("2026-08-02T12:00:00+00:00", "bad", float("nan"), 10),
+        ("2026-08-03T12:00:00+00:00", 100, float("inf"), float("inf")),
+        ("2026-08-04T12:00:00+00:00", 100, 90, None),
+    ]
+    svc, _ = _svc_with(rows)
+
+    out = svc._load_portfolio_history(1, "5Y")
+
+    assert out["total_values"] == [None, None, None, None]
+    assert out["values"] == [None, None, 100.0, 100.0]
+    assert out["costs"] == [90.0, None, None, 90.0]
+    assert out["cash_values"] == [10.0, 10.0, None, None]
+    assert out["has_unavailable_totals"] is True
+    # ``allow_nan=False`` proves no NaN/Infinity leaked into chart JSON.
+    import json
+
+    json.dumps(out, allow_nan=False)
+
+
+def test_portfolio_history_sorts_without_mutating_source_rows() -> None:
+    rows = [
+        ("2026-08-03T12:00:00+00:00", 3, 1, 30),
+        ("2026-08-01T12:00:00+00:00", 1, 1, 10),
+        ("2026-08-02T12:00:00+00:00", 2, 1, 20),
+    ]
+    original = list(rows)
+    svc, _ = _svc_with(rows)
+
+    out = svc._load_portfolio_history(1, "5Y")
+
+    assert rows == original
+    assert out["labels"] == [
+        "2026-08-01 12:00",
+        "2026-08-02 12:00",
+        "2026-08-03 12:00",
+    ]
+    assert out["total_values"] == [11.0, 22.0, 33.0]
+
+
+def test_portfolio_history_orders_mixed_timestamp_representations_by_instant() -> None:
+    from datetime import datetime, timezone
+
+    rows = [
+        ("2026-08-01T13:00:00+01:00", 1, 1, 10),
+        (datetime(2026, 8, 1, 11, 30, tzinfo=timezone.utc), 2, 1, 20),
+        ("2026-08-01T07:00:00-05:00", 3, 1, 30),
+    ]
+    svc, _ = _svc_with(rows)
+
+    out = svc._load_portfolio_history(1, "5Y")
+
+    assert out["labels"] == [
+        "2026-08-01 11:30",
+        "2026-08-01 12:00",
+        "2026-08-01 12:00",
+    ]
+    assert out["total_values"] == [22.0, 11.0, 33.0]
+
+
+def test_portfolio_history_rejects_float_underflow_and_preserves_wide_cancellation() -> (
+    None
+):
+    rows = [
+        ("2026-08-01T12:00:00+00:00", Decimal("1e-400"), 0, 1),
+        (
+            "2026-08-02T12:00:00+00:00",
+            Decimal("1e40"),
+            0,
+            Decimal("-9999999999999999999999999999999999999999"),
+        ),
+    ]
+    svc, _ = _svc_with(rows)
+
+    out = svc._load_portfolio_history(1, "5Y")
+
+    assert out["values"] == [None, 1e40]
+    assert out["total_values"] == [None, 1.0]
+    assert out["has_unavailable_totals"] is True
+    assert out["all_totals_unavailable"] is False
+
+
+def test_legacy_csv_total_value_is_treated_as_market_value(
+    monkeypatch, tmp_path
+) -> None:
+    import app.services.portfolio_service as module
+
+    history = tmp_path / "portfolio_value.csv"
+    history.write_text(
+        "timestamp,total_value,total_cost,cash_balance,investments_value\n"
+        "2026-08-01T12:00:00+00:00,100.00,90.00,20.00,90.00\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(module, "PORTFOLIO_VALUE_CSV", history)
+    svc, _ = _svc_with([])
+
+    out = svc._load_portfolio_history()
+
+    assert out["values"] == [100.0]
+    assert out["cash_values"] == [20.0]
+    assert out["total_values"] == [120.0]
+
+
+def test_full_and_fragment_contexts_serialize_the_same_total_projection() -> None:
+    from app.services.portfolio_service import PortfolioInputSnapshot
+
+    rows = [
+        ("2026-08-01T12:00:00+00:00", 100, 90, 10),
+        ("2026-08-02T12:00:00+00:00", 120, 90, None),
+    ]
+    svc, trader = _svc_with(rows)
+    chart_data = svc._load_portfolio_history(1, "5Y")
+    snapshot = PortfolioInputSnapshot(
+        analysis_records=[],
+        portfolios=[],
+        chart_data=chart_data,
+        trades=[],
+        cash_flows=[],
+        reconciliation_issue_count=0,
+        cash_balances=[],
+        cash_balance=0,
+    )
+
+    full = svc.portfolio_partial_context(
+        [], portfolio_id=1, input_snapshot=snapshot, range_key="5Y"
+    )
+    fragment = svc.chart_fragment_context(1, "5Y")
+
+    assert trader.calls
+    assert full["chart_total_values"] == fragment["chart_total_values"]
+    assert full["chart_has_unavailable_totals"] is True
+    assert fragment["chart_has_unavailable_totals"] is True
 
 
 def test_bad_range_key_uses_12m_cutoff() -> None:

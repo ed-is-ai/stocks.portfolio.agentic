@@ -25,11 +25,21 @@
       {% endfor %}
     </div>
   </div>
+  {% if chart_has_unavailable_totals %}
+  <p class="text-muted small mb-2" role="status">
+    <i class="bi bi-info-circle me-1"></i>{% if chart_all_totals_unavailable %}Portfolio Value is unavailable because market value or cash data is missing or invalid.{% else %}Some Portfolio Value points are unavailable because market value or cash data is missing or invalid.{% endif %}
+  </p>
+  {% endif %}
   {% if chart_points >= 2 %}
-  <div class="portfolio-chart-canvas"><canvas id="portfolioChart"></canvas></div>
+  <div class="portfolio-chart-canvas">
+    <canvas id="portfolioChart"
+            role="img"
+            aria-label="Portfolio value history, with supporting market value, cost basis and cash series">Portfolio value history chart. Use the legend and point tooltips to inspect the series.</canvas>
+  </div>
   <script>
   (function() {
     const labels   = {{ chart_labels     | safe }};
+    const totals   = {{ chart_total_values | safe }};
     const values   = {{ chart_values     | safe }};
     const costs    = {{ chart_costs      | safe }};
     const cashVals = {{ chart_cash       | safe }};
@@ -49,38 +59,52 @@
         labels: labels,
         datasets: [
           {
-            label: 'Market Value',
-            data: values,
+            label: 'Portfolio Value',
+            data: totals,
             borderColor: '#1d4ed8',
             backgroundColor: 'rgba(29,78,216,0.08)',
-            borderWidth: 2,
-            pointRadius: values.length > 60 ? 0 : 3,
-            pointHoverRadius: 5,
+            borderWidth: 3,
+            pointRadius: totals.length > 60 ? 0 : 3,
+            pointHoverRadius: 6,
             fill: true,
             tension: 0.3,
             order: 3,
+          },
+          {
+            label: 'Market Value',
+            data: values,
+            borderColor: '#64748b',
+            borderWidth: 1.5,
+            borderDash: [8, 4],
+            pointRadius: 0,
+            fill: false,
+            tension: 0.3,
+            hidden: true,
+            order: 4,
           },
           {
             label: 'Cost Basis',
             data: costs,
             borderColor: '#94a3b8',
             borderWidth: 1.5,
-            borderDash: [5, 4],
+            borderDash: [2, 3],
             pointRadius: 0,
             fill: false,
             tension: 0,
-            order: 4,
+            hidden: true,
+            order: 5,
           },
           {
             label: 'Cash',
             data: cashVals,
             borderColor: '#16a34a',
             borderWidth: 1.5,
-            borderDash: [4, 3],
+            borderDash: [10, 4, 2, 4],
             pointRadius: 0,
             fill: false,
             tension: 0,
-            order: 5,
+            hidden: true,
+            order: 6,
           },
           {
             label: 'Buy',
@@ -111,9 +135,19 @@
       },
       options: {
         responsive: true,
+        maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { labels: { font: { size: 11 }, boxWidth: 14, filter: item => item.text !== 'Buy' && item.text !== 'Sell' } },
+          legend: {
+            position: 'bottom',
+            align: 'start',
+            labels: {
+              font: { size: 11 },
+              boxWidth: 14,
+              usePointStyle: true,
+              filter: item => item.text !== 'Buy' && item.text !== 'Sell'
+            }
+          },
           tooltip: {
             callbacks: {
               label: function(ctx) {

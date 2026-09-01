@@ -198,7 +198,7 @@ def test_strategy_assign_partial_shows_unavailable_assignment(
     assert "retained until cleared" in resp.text
 
 
-def test_portfolio_partial_renders_no_strategy_control(
+def test_portfolio_partial_strategy_control_gates_recommendations(
     monkeypatch: pytest.MonkeyPatch, assignment_service: StrategyAssignmentService
 ) -> None:
     """A portfolio with no assignment renders the new control only (#440.7)."""
@@ -222,15 +222,38 @@ def test_portfolio_partial_renders_no_strategy_control(
         assignment_service
     )
     try:
-        resp = client.get("/partials/portfolio?portfolio_id=7")
+        unassigned = client.get("/partials/portfolio?portfolio_id=7")
+        assignment_service._repo.upsert(7, "alpha", {"lookback": 20})
+        assigned = client.get("/partials/portfolio?portfolio_id=7")
+        assignment_service._repo.upsert(7, "ghost", {"lookback": 20})
+        unavailable = client.get("/partials/portfolio?portfolio_id=7")
     finally:
         app.dependency_overrides.clear()
-    assert resp.status_code == 200
-    assert "No Strategy" in resp.text
-    assert "/partials/strategy-assign?portfolio_id=7" in resp.text
+    assert unassigned.status_code == 200
+    assert "No Strategy" not in unassigned.text
+    assert "Select strategy" in unassigned.text
+    assert "Select an available strategy to view recommendations" in unassigned.text
+    assert 'hx-get="/portfolios/7/recommendations"' not in unassigned.text
+    assert "/partials/strategy-assign?portfolio_id=7" in unassigned.text
+    assert "Scan data is missing" not in unassigned.text
+
+    assert assigned.status_code == 200
+    assert "Change strategy" in assigned.text
+    assert 'aria-label="Selected strategy: Alpha"' in assigned.text
+    assert assigned.text.index("Change strategy") < assigned.text.index(
+        'aria-label="Selected strategy: Alpha"'
+    )
+    assert 'hx-get="/portfolios/7/recommendations"' in assigned.text
+
+    assert unavailable.status_code == 200
+    assert "Repair strategy" in unavailable.text
+    assert 'aria-label="Selected strategy unavailable: ghost"' in unavailable.text
+    assert "Select an available strategy to view recommendations" in unavailable.text
+    assert 'hx-get="/portfolios/7/recommendations"' not in unavailable.text
+    assert "Scan data is missing" not in unavailable.text
     # The tmp analysis artifact is absent, so the non-blocking freshness
     # warning shows while assignment remains available.
-    assert "Scan data is missing" in resp.text
+    assert "Scan data is missing" in assigned.text
 
 
 def test_clear_removes_existing_assignment(
@@ -351,6 +374,7 @@ def test_portfolio_partial_renders_stale_banner(
     stale = datetime.now(UTC) - timedelta(hours=25)
     payload = build_analysis_payload([], run_id="r1", generated_at=stale)
     (tmp_path / "analysis.json").write_text(json.dumps(payload))
+    assignment_service._repo.upsert(7, "alpha", {"lookback": 20})
 
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     mock_trader = MagicMock()
