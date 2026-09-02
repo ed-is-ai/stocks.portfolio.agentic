@@ -31,6 +31,11 @@ from app.schemas.portfolio_recommendation import (
 from app.schemas.trade import Position
 from app.services import portfolio_recommendation_service as svc_module
 from app.services import strategy_assignment_service as assignment_module
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    EvidenceRequirementV1,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -49,11 +54,26 @@ PREVIOUS = date(2026, 8, 27)
 _SESSIONS = (PREVIOUS, SESSION)
 
 
+def _ohlcv_only_requirements(
+    parameters: StrategyParameters,
+) -> StrategyEvidenceRequirementsV1:
+    """The declaration every in-test Strategy shares: OHLCV, no minimum."""
+    del parameters
+    history = EvidenceRequirementV1(kind=EvidenceKind.PRICE_HISTORY, columns=("close",))
+    return StrategyEvidenceRequirementsV1(entry=(history,), exit=(history,))
+
+
 class HistoryOnlyStrategy:
     """Entry/exit from price history alone; never calls ``scan_result``."""
 
     def __init__(self, *, entry_everywhere: bool = False) -> None:
         self._entry_everywhere = entry_everywhere
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare OHLCV-only needs (evidence contract v1)."""
+        return _ohlcv_only_requirements(parameters)
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
@@ -112,6 +132,12 @@ class HistoryOnlyStrategy:
 
 class ScanPlusHistoryStrategy:
     """Reads ``scan_result`` and ``price_history`` — the other shape."""
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare OHLCV-only needs (evidence contract v1)."""
+        return _ohlcv_only_requirements(parameters)
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
@@ -173,6 +199,12 @@ class ScanPlusHistoryStrategy:
 
 class FailingStrategy:
     """Raises from ``exit_signals`` — the runtime-failure shape."""
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare OHLCV-only needs (evidence contract v1)."""
+        return _ohlcv_only_requirements(parameters)
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
@@ -480,6 +512,12 @@ def test_fail_safe_hold_beats_exit_signal_on_missing_evidence(env: Any) -> None:
     class PortfolioOnlyExitStrategy:
         """Emits an exit for every held position without scan evidence."""
 
+        def evidence_requirements(
+            self, parameters: StrategyParameters
+        ) -> StrategyEvidenceRequirementsV1:
+            """Declare OHLCV-only needs (evidence contract v1)."""
+            return _ohlcv_only_requirements(parameters)
+
         def entry_signals(
             self, view: MarketViewV1, parameters: StrategyParameters
         ) -> list[Signal]:
@@ -538,6 +576,12 @@ def test_off_session_and_wrong_side_signals_are_ignored(env: Any) -> None:
     become recommendation rows."""
 
     class OffSessionStrategy:
+        def evidence_requirements(
+            self, parameters: StrategyParameters
+        ) -> StrategyEvidenceRequirementsV1:
+            """Declare OHLCV-only needs (evidence contract v1)."""
+            return _ohlcv_only_requirements(parameters)
+
         def entry_signals(
             self, view: MarketViewV1, parameters: StrategyParameters
         ) -> list[Signal]:

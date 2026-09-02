@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,7 +25,10 @@ from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.repositories.portfolio_strategies_repo import PortfolioStrategiesRepository
 from app.schemas import EmailConfig
 from app.schemas.analysis_artifact import build_analysis_payload
-from app.schemas.portfolio_recommendation import RecommendationResultV1
+from app.schemas.portfolio_recommendation import (
+    EvaluationCoverageV1,
+    RecommendationResultV1,
+)
 from app.services import portfolio_recommendation_service as svc_module
 from app.services import strategy_assignment_service as assignment_module
 from app.services.portfolio_recommendation_email_service import (
@@ -428,3 +431,129 @@ def test_orchestrator_hook_wires_and_isolates(
     dispatch_recommendation_emails(fake_alerter, env.trader, "run-1")
     assert "args" in captured
     assert env.repo.status_of(7, "run-1") == "sent"
+
+
+# --- evidence-incomplete wording (#471) ------------------------------------
+
+
+def _email_result(coverage: EvaluationCoverageV1) -> RecommendationResultV1:
+    """A result with no Sell/Buy rows and the given evidence diagnostics."""
+    return RecommendationResultV1(
+        portfolio_id=7,
+        analysis_run_id="run-1",
+        generated_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+        market_session=date(2026, 8, 28),
+        freshness="fresh",
+        strategy_id="alpha",
+        strategy_source_digest="a" * 64,
+        parameters={"lookback": 20},
+        recommendations=(),
+        coverage=coverage,
+        evaluated_at=datetime.now(UTC),
+    )
+
+
+def _render(coverage: EvaluationCoverageV1, tmp_path: Path) -> tuple[str, str]:
+    """Render the recommendation email, returning ``(html, text)``."""
+    agent = AlertAgent(db_path=str(tmp_path / "alerts.db"), email_config=_EMAIL)
+    captured: list[tuple[str, str, str]] = []
+    with patch.object(
+        AlertAgent,
+        "send_email",
+        side_effect=lambda subject, html, text: (
+            captured.append((subject, html, text)) or True
+        ),
+    ):
+        agent.send_portfolio_recommendation_email(
+            _email_result(coverage), "SIPP", "Alpha"
+        )
+    return captured[0][1], captured[0][2]
+
+
+def test_email_says_signals_unavailable_when_evidence_is_incomplete(
+    tmp_path: Path,
+) -> None:
+    html, text = _render(
+        EvaluationCoverageV1(
+            entry_state="incompatible",
+            exit_state="incompatible",
+            entry_missing_evidence=("scan_stage",),
+            exit_missing_evidence=("scan_stage",),
+            evaluated_securities=2,
+        ),
+        tmp_path,
+    )
+    for body in (html, text):
+        assert "Evidence incomplete" in body
+        assert "scan_stage" in body
+        assert "Signals unavailable" in body
+        assert "No buy signals." not in body
+        assert "No sell signals." not in body
+    # Hold was still evaluated, so its own empty wording stays.
+    assert "No hold signals." in html
+    assert "No hold signals." in text
+
+
+def test_email_keeps_no_signals_wording_on_a_complete_evaluation(
+    tmp_path: Path,
+) -> None:
+    html, text = _render(EvaluationCoverageV1(evaluated_securities=2), tmp_path)
+    for body in (html, text):
+        assert "No buy signals." in body
+        assert "No sell signals." in body
+        assert "Evidence incomplete" not in body
+        assert "Signals unavailable" not in body
+
+
+def test_email_keeps_no_signals_wording_when_only_degraded(tmp_path: Path) -> None:
+    """A degraded path is still invoked — its empty group is honest (#471)."""
+    html, text = _render(
+        EvaluationCoverageV1(
+            entry_state="degraded",
+            exit_state="degraded",
+            evaluated_securities=2,
+            degraded_securities=("AAA", "BBB"),
+        ),
+        tmp_path,
+    )
+    for body in (html, text):
+        assert "Evidence incomplete" in body
+        assert "AAA" in body and "BBB" in body
+        assert "No buy signals." in body
+        assert "No sell signals." in body
+        assert "Signals unavailable" not in body
+
+
+def test_email_scopes_the_wording_to_the_blocked_path(tmp_path: Path) -> None:
+    """Only the incompatible path's consequence is claimed (#471)."""
+    html, text = _render(
+        EvaluationCoverageV1(
+            entry_state="compatible",
+            exit_state="incompatible",
+            exit_missing_evidence=("scan_stage",),
+            evaluated_securities=2,
+        ),
+        tmp_path,
+    )
+    for body in (html, text):
+        assert "Holdings fail safe to Hold." in body
+        assert "No buy signals were produced." not in body
+        assert "Signals unavailable" in body
+        assert "No buy signals." in body
+
+
+def test_email_caps_the_degraded_security_list(tmp_path: Path) -> None:
+    tickers = tuple(f"T{index:02d}" for index in range(12))
+    html, text = _render(
+        EvaluationCoverageV1(
+            entry_state="degraded",
+            exit_state="degraded",
+            evaluated_securities=12,
+            degraded_securities=tickers,
+        ),
+        tmp_path,
+    )
+    for body in (html, text):
+        assert "+2 more" in body
+        assert "T09" in body
+        assert "T10" not in body

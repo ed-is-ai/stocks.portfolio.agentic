@@ -152,6 +152,7 @@ ALLOWED_RUNTIME_PREFIXES: tuple[str, ...] = (
     "statistics",
     "typing",
     "app.services.backtest.regime_filter",
+    "app.services.backtest.strategy_evidence",
     "app.services.backtest.strategy_protocol",
 )
 

@@ -31,6 +31,10 @@ from app.core.ticker_identity import AmbiguousTickerAliasError, canonical_ticker
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.backtest.market_view import PRICE_HISTORY_COLUMNS
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    SecurityEvidenceCoverageV1,
+)
 from app.services.backtest.strategy_protocol import (
     PositionSummaryV1,
     PortfolioView,
@@ -102,6 +106,44 @@ class CurrentScanMarketView:
         return CurrentScanRecordView(
             security_id=security_id, as_of_session_date=self.as_of_session
         )
+
+    @property
+    def evidence_capabilities(self) -> frozenset[EvidenceKind]:
+        """Declare OHLCV only — this view evidences no scan fragments.
+
+        ``scan_result`` deliberately projects no ``stage``/``vcp``/
+        ``technicals`` (see :class:`CurrentScanRecordView`), so declaring
+        those kinds would claim evidence the published artifact does not
+        carry. A Strategy requiring them is reported incompatible here
+        rather than silently evaluated against ``None``.
+        """
+        return frozenset({EvidenceKind.PRICE_HISTORY})
+
+    def evidence_coverage(self, security_id: str) -> SecurityEvidenceCoverageV1:
+        """Return ``security_id``'s real bounded-history coverage.
+
+        Never raises: a security with no evidenced history (unknown, or a
+        holding the scan never saw) answers with zero sessions and no
+        kinds, which the generic preflight reads as degraded rather than
+        as a failure. An empty id answers the same way rather than
+        tripping the model's own non-empty-id validator.
+        """
+        if not security_id:
+            return _NO_COVERAGE
+        frame = self._histories.get(security_id)
+        if frame is None or frame.empty:
+            return SecurityEvidenceCoverageV1(security_id=security_id)
+        return SecurityEvidenceCoverageV1(
+            security_id=security_id,
+            kinds=frozenset({EvidenceKind.PRICE_HISTORY}),
+            sessions=int(len(frame.index)),
+            columns=tuple(str(column) for column in frame.columns),
+        )
+
+
+#: The zero-coverage answer for an unusable security id — evidence
+#: coverage is a diagnostic, so it always answers with a value.
+_NO_COVERAGE = SecurityEvidenceCoverageV1(security_id="unknown")
 
 
 def _empty_price_history() -> pd.DataFrame:

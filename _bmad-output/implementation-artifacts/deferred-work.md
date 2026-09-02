@@ -429,3 +429,10 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-468-incremental-init.md`
   summary: ALTER TABLE migrations cannot attach the fresh schema's CHECK constraints for `adopted_from_profile_hash`/`mode`; migrated DBs rely on application-level validation.
   evidence: migration block only adds the columns (review finding, 2026-09-02).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-471-strategy-evidence-contract.md`
+  summary: Each Strategy's `evidence_requirements` hard-codes its SKILL.md parameter defaults as fallback magic numbers, so a default changed in frontmatter silently desynchronises the declaration from the rule.
+  evidence: e.g. darvas `_plain_int(...) or 20`, turtle `or 20`/`or 10`, moving-average `200`; the authoritative values live only in each SKILL.md frontmatter and nothing asserts they agree.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-471-strategy-evidence-contract.md`
+  summary: The evidence contract expresses structural kinds, session counts and column names, but not history freshness (current-to-session), parameter validity, or value validity, so a rule that fails closed on stale or non-finite prices still reports a "complete" evaluation.
+  evidence: moving-average `_fresh_history` requires `history.index[-1] == view.as_of_session` and buy-and-hold excludes non-finite/non-positive closes — neither condition is visible to `preflight_evidence`.

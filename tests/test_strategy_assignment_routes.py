@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from app.api.app import app
 from app.api.dependencies import (
+    get_portfolio_recommendation_service,
     get_portfolio_service,
     get_strategy_assignment_service,
     get_trader_service,
@@ -401,3 +402,46 @@ def test_portfolio_partial_renders_stale_banner(
         app.dependency_overrides.clear()
     assert resp.status_code == 200
     assert "more than 24 hours old" in resp.text
+
+
+def test_strategy_assign_partial_shows_recommendation_support_badges(
+    monkeypatch: pytest.MonkeyPatch, assignment_service: StrategyAssignmentService
+) -> None:
+    """Each choice carries its current recommendation-support badge (#471)."""
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    support = MagicMock()
+    support.strategy_support.return_value = {
+        "alpha": "supported",
+        "beta": "backtest_only",
+    }
+    app.dependency_overrides[get_strategy_assignment_service] = lambda: (
+        assignment_service
+    )
+    app.dependency_overrides[get_portfolio_recommendation_service] = lambda: support
+    try:
+        resp = client.get("/partials/strategy-assign?portfolio_id=7")
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert "Recommendations: supported" in resp.text
+    assert "Recommendations: backtest only" in resp.text
+
+
+def test_strategy_assign_partial_renders_when_support_lookup_fails(
+    monkeypatch: pytest.MonkeyPatch, assignment_service: StrategyAssignmentService
+) -> None:
+    """Support lookup is fail-soft — the modal still renders (#471)."""
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    support = MagicMock()
+    support.strategy_support.side_effect = RuntimeError("boom")
+    app.dependency_overrides[get_strategy_assignment_service] = lambda: (
+        assignment_service
+    )
+    app.dependency_overrides[get_portfolio_recommendation_service] = lambda: support
+    try:
+        resp = client.get("/partials/strategy-assign?portfolio_id=7")
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert "Alpha" in resp.text
+    assert "Recommendations:" not in resp.text

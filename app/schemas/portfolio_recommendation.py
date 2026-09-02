@@ -21,6 +21,11 @@ from app.schemas.strategy_assignment import ScanFreshness
 #: The closed action vocabulary, in the screen's fixed group order.
 RecommendationAction = Literal["sell", "hold", "buy"]
 
+#: The closed per-path evidence vocabulary: the backtest package's
+#: ``EvidenceCompatibility`` values as plain strings, so this schema stays
+#: independent of that package while still rejecting an unknown state.
+EvidenceState = Literal["compatible", "degraded", "incompatible"]
+
 
 class _RecommendationModel(BaseModel):
     """Frozen, strict, extra-forbidding base for recommendation models.
@@ -41,6 +46,48 @@ class RecommendationV1(_RecommendationModel):
     rule_id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
     evidence_warnings: tuple[str, ...] = ()
+
+
+class EvaluationCoverageV1(_RecommendationModel):
+    """Typed evidence diagnostics for one evaluation (#471).
+
+    Makes an empty group honest: ``Buy 0`` on a complete evaluation means
+    "the Strategy saw everything it needs and found nothing", while
+    ``Buy 0`` with ``entry_state`` other than ``compatible`` means the
+    Strategy could not be asked. States use the closed
+    :data:`EvidenceState` vocabulary, so an unknown state is rejected at
+    construction rather than silently reading as "supported".
+    """
+
+    entry_state: EvidenceState = "compatible"
+    exit_state: EvidenceState = "compatible"
+    entry_missing_evidence: tuple[str, ...] = ()
+    exit_missing_evidence: tuple[str, ...] = ()
+    #: How many securities the preflight *considered* across both paths —
+    #: entry candidates plus holdings — not how many were successfully
+    #: evaluated: a degraded security is counted here and skipped there.
+    evaluated_securities: int = 0
+    degraded_securities: tuple[str, ...] = ()
+
+    @property
+    def complete(self) -> bool:
+        """True only when both paths were fully evidenced."""
+        return self.entry_state == "compatible" and self.exit_state == "compatible"
+
+    @property
+    def entry_supported(self) -> bool:
+        """True when the entry path could be evaluated at all."""
+        return self.entry_state != "incompatible"
+
+    @property
+    def exit_supported(self) -> bool:
+        """True when the exit path could be evaluated at all."""
+        return self.exit_state != "incompatible"
+
+
+#: The default fully-evidenced coverage — a result constructed without
+#: explicit diagnostics reads as a complete evaluation, exactly as before.
+COMPLETE_COVERAGE = EvaluationCoverageV1()
 
 
 class RecommendationResultV1(_RecommendationModel):
@@ -67,6 +114,9 @@ class RecommendationResultV1(_RecommendationModel):
     #: (ambiguous aliases, duplicate canonical ids, stale-evidence
     #: securities) — surfaced, never silently dropped.
     unresolved: tuple[str, ...] = ()
+    #: Evidence diagnostics — distinguishes "no signals" from "could not
+    #: ask the Strategy because the evidence was incomplete" (#471).
+    coverage: EvaluationCoverageV1 = COMPLETE_COVERAGE
     evaluated_at: datetime
 
     @field_validator("generated_at", "evaluated_at")

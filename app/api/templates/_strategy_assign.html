@@ -81,6 +81,16 @@
             <span>
               <span class="fw-bold">{{ choice.display_name }}</span>
               <code class="ms-1" style="font-size:0.72rem">{{ choice.strategy_id }}</code>
+              {% set support = (strategy_support or {}).get(choice.strategy_id) %}
+              {% if support == 'supported' %}
+              <span class="badge text-bg-success ms-1" style="font-weight:400">Recommendations: supported</span>
+              {% elif support == 'degraded' %}
+              <span class="badge text-bg-warning ms-1" style="font-weight:400">Recommendations: limited</span>
+              {% elif support == 'backtest_only' %}
+              <span class="badge text-bg-secondary ms-1" style="font-weight:400">Recommendations: backtest only</span>
+              {% elif support %}
+              <span class="badge text-bg-light border ms-1" style="font-weight:400">Recommendations: unknown</span>
+              {% endif %}
               <span class="text-muted d-block" style="font-size:0.78rem">{{ choice.description }}</span>
               <span class="d-flex flex-wrap gap-1 mt-1">
                 {% for key, value in choice.default_parameters.items() %}

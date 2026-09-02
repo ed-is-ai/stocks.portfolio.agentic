@@ -10,6 +10,11 @@ from types import ModuleType
 
 import pandas as pd
 
+from app.services.backtest.strategy_evidence import (
+    EVIDENCE_CONTRACT_VERSION,
+    EvidenceKind,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     PortfolioView,
     PositionSummaryV1,
@@ -342,3 +347,22 @@ def test_regime_filter_enabled_risk_on_does_not_alter_entries() -> None:
     assert strategy.entry_signals(
         _RegimeView(_entry_view(), ["1", "1", "100"]), enabled
     ) == strategy.entry_signals(_RegimeView(_entry_view(), ["1", "1", "100"]), disabled)
+
+
+def test_evidence_requirements_track_the_box_lookback() -> None:
+    """Both paths need ``box_lookback_sessions + 1`` evidenced sessions."""
+    strategy = MODULE.DarvasBoxStrategy()
+    requirements = strategy.evidence_requirements(
+        {"selected_securities": ["sec-aapl"], "box_lookback_sessions": 5}
+    )
+
+    assert isinstance(requirements, StrategyEvidenceRequirementsV1)
+    assert requirements.contract_version == EVIDENCE_CONTRACT_VERSION
+    assert requirements.entry[0].kind is EvidenceKind.PRICE_HISTORY
+    assert requirements.entry[0].minimum_sessions == 6
+    assert requirements.exit[0].minimum_sessions == 6
+    assert set(requirements.entry[0].columns) == {"high", "low", "close", "volume"}
+    assert set(requirements.exit[0].columns) == {"low", "close"}
+    # A missing/invalid parameter falls back to the declared default.
+    fallback = strategy.evidence_requirements({"selected_securities": []})
+    assert fallback.entry[0].minimum_sessions == 21

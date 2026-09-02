@@ -7,6 +7,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.services.backtest.regime_filter import entry_signals_permitted
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    EvidenceRequirementV1,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -101,6 +106,29 @@ def _channel_values(
 
 class TurtleTrendStrategy:
     """Buy strict high-channel breaks and sell strict low-channel breaches."""
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare each channel's own ``lookback + 1`` session window."""
+        entry_lookback = _plain_int(parameters, "entry_lookback_sessions") or 20
+        exit_lookback = _plain_int(parameters, "exit_lookback_sessions") or 10
+        return StrategyEvidenceRequirementsV1(
+            entry=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=max(entry_lookback, 1) + 1,
+                    columns=("high",),
+                ),
+            ),
+            exit=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=max(exit_lookback, 1) + 1,
+                    columns=("low",),
+                ),
+            ),
+        )
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters

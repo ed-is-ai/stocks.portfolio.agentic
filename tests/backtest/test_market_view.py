@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import pandas as pd
 import pytest
@@ -23,6 +24,10 @@ from app.services.backtest.market_view import (
     MarketViewBoundError,
     PRICE_HISTORY_COLUMNS,
     UnselectedSecurityError,
+)
+from app.services.backtest.strategy_evidence import (
+    EvidenceCapableViewV1,
+    EvidenceKind,
 )
 from app.services.backtest.run_universe import (
     RunUniverseError,
@@ -640,3 +645,146 @@ def test_empty_selected_universe_is_rejected(tmp_path) -> None:
         _universe_view(tmp_path, ())
 
     assert exc_info.value.code is RunUniverseErrorCode.EMPTY_UNIVERSE
+
+
+# ---------------------------------------------------------------------------
+# Evidence capabilities / coverage (#471)
+# ---------------------------------------------------------------------------
+
+
+def test_evidence_capabilities_declare_every_kind(tmp_path) -> None:
+    """A pinned Run evidences price *and* every scan detector fragment."""
+    view = _universe_view(tmp_path, (SECURITY_ID,))
+
+    assert view.evidence_capabilities == frozenset(EvidenceKind)
+    assert isinstance(view, EvidenceCapableViewV1)
+
+
+def test_evidence_coverage_reports_price_and_scan_evidence(tmp_path) -> None:
+    """A security with pinned price and a visible scan reports both."""
+    backtest_repo = _backtest_repo(tmp_path)
+    price_repo = _price_repo(tmp_path)
+    _commit_month(backtest_repo, _profile(), "2026-06")
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2026, 6, 1),
+        end=date(2026, 7, 10),
+        sessions=(date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)),
+        closes=(100.0, 101.0, 102.0),
+    )
+    view = MarketView(
+        as_of_session=date(2026, 6, 30),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=backtest_repo,
+        historical_price_repo=price_repo,
+    )
+
+    coverage = view.evidence_coverage(SECURITY_ID)
+
+    assert coverage.security_id == SECURITY_ID
+    assert coverage.sessions == 3
+    assert coverage.columns == PRICE_HISTORY_COLUMNS
+    assert coverage.kinds == frozenset(EvidenceKind)
+
+
+def test_evidence_coverage_without_price_evidence_reports_scan_only(tmp_path) -> None:
+    """Scan visibility is not gated on price evidence, and vice versa."""
+    backtest_repo = _backtest_repo(tmp_path)
+    _commit_month(backtest_repo, _profile(), "2026-06")
+    view = MarketView(
+        as_of_session=date(2026, 6, 30),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=backtest_repo,
+        historical_price_repo=_price_repo(tmp_path),
+    )
+
+    coverage = view.evidence_coverage(SECURITY_ID)
+
+    assert coverage.sessions == 0
+    assert coverage.columns == ()
+    assert EvidenceKind.PRICE_HISTORY not in coverage.kinds
+    assert EvidenceKind.SCAN_STAGE in coverage.kinds
+
+
+def test_evidence_coverage_of_an_unselected_security_is_zero_not_an_error(
+    tmp_path,
+) -> None:
+    """Preflight is a diagnostic: it answers, it never raises."""
+    view = _universe_view(tmp_path, (SECURITY_ID,))
+
+    with pytest.raises(UnselectedSecurityError):
+        view.price_history("sec-outside")
+
+    coverage = view.evidence_coverage("sec-outside")
+
+    assert coverage.security_id == "sec-outside"
+    assert coverage.sessions == 0
+    assert coverage.kinds == frozenset()
+
+
+def test_evidence_coverage_of_a_bound_violating_security_is_zero_not_an_error(
+    tmp_path,
+) -> None:
+    price_repo = _price_repo(tmp_path)
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=(date(2026, 6, 1), date(2026, 6, 2)),
+        closes=(100.0, 101.0),
+    )
+    view = MarketView(
+        as_of_session=date(2026, 7, 1),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+    )
+
+    with pytest.raises(MarketViewBoundError):
+        view.price_history(SECURITY_ID)
+
+    coverage = view.evidence_coverage(SECURITY_ID)
+
+    assert coverage.sessions == 0
+    assert coverage.kinds == frozenset()
+
+
+def test_evidence_coverage_survives_a_repository_failure(tmp_path) -> None:
+    """Any read failure degrades one security, never the whole evaluation."""
+
+    class _ExplodingPriceRepo:
+        def get(self, revision: str) -> object:
+            raise RuntimeError("evidence store offline")
+
+    view = MarketView(
+        as_of_session=date(2026, 6, 3),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: "d" * 64},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=cast(Any, _ExplodingPriceRepo()),
+    )
+
+    coverage = view.evidence_coverage(SECURITY_ID)
+
+    assert coverage.sessions == 0
+    assert coverage.kinds == frozenset()
+
+
+def test_evidence_coverage_of_an_empty_security_id_answers_rather_than_raises(
+    tmp_path,
+) -> None:
+    coverage = _universe_view(tmp_path, (SECURITY_ID,)).evidence_coverage("")
+
+    assert coverage.sessions == 0
+    assert coverage.kinds == frozenset()

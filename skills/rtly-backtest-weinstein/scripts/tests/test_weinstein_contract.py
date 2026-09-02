@@ -10,6 +10,11 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from app.services.backtest.strategy_evidence import (
+    EVIDENCE_CONTRACT_VERSION,
+    EvidenceKind,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     PortfolioView,
     PositionSummaryV1,
@@ -477,4 +482,35 @@ def test_regime_filter_enabled_risk_on_does_not_alter_entries() -> None:
         _RegimeView(_View(_history(), _scan()), ["1", "1", "100"]), enabled
     ) == strategy.entry_signals(
         _RegimeView(_View(_history(), _scan()), ["1", "1", "100"]), disabled
+    )
+
+
+def test_evidence_requirements_declare_history_and_stage() -> None:
+    """The declaration matches the rules' own guards (evidence contract v1)."""
+    requirements = WeinsteinStrategy().evidence_requirements(PARAMETERS)
+
+    assert isinstance(requirements, StrategyEvidenceRequirementsV1)
+    assert requirements.contract_version == EVIDENCE_CONTRACT_VERSION
+    entry = {item.kind: item for item in requirements.entry}
+    exit_ = {item.kind: item for item in requirements.exit}
+    assert set(entry) == {EvidenceKind.PRICE_HISTORY, EvidenceKind.SCAN_STAGE}
+    assert set(exit_) == {EvidenceKind.PRICE_HISTORY, EvidenceKind.SCAN_STAGE}
+    assert entry[EvidenceKind.PRICE_HISTORY].minimum_sessions == 204
+    assert exit_[EvidenceKind.PRICE_HISTORY].minimum_sessions == 150
+    deeper = WeinsteinStrategy().evidence_requirements(
+        {**PARAMETERS, "breakout_lookback_sessions": 300}
+    )
+    assert deeper.entry[0].minimum_sessions == 301
+
+
+def test_absent_stage_evidence_never_creates_an_exit() -> None:
+    """A scan record carrying no stage is missing evidence, not a failure."""
+    stageless = SimpleNamespace(
+        security_id="sec-aapl", as_of_session_date=date(2026, 7, 31), stage=None
+    )
+    strategy = WeinsteinStrategy()
+
+    assert (
+        strategy.exit_signals(_View(_history(), stageless), _portfolio(), PARAMETERS)
+        == []
     )

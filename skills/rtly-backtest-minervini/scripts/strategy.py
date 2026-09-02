@@ -7,6 +7,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.services.backtest.regime_filter import entry_signals_permitted
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    EvidenceRequirementV1,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -101,6 +106,39 @@ def _integral_quantity(portfolio: PortfolioView, security_id: str) -> int:
 
 class MinerviniStrategy:
     """Apply approved VCP entry and risk-exit rules without mutable state."""
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare the volume window plus the stage and VCP evidence.
+
+        The VCP pattern state (pivot, contractions, execution state) and
+        the Weinstein stage come from committed detector fragments, not
+        from OHLCV, so both are declared for entry *and* exit (#471).
+        """
+        del parameters
+        stage = EvidenceRequirementV1(kind=EvidenceKind.SCAN_STAGE)
+        vcp = EvidenceRequirementV1(kind=EvidenceKind.SCAN_VCP)
+        return StrategyEvidenceRequirementsV1(
+            entry=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=51,
+                    columns=("close", "volume"),
+                ),
+                stage,
+                vcp,
+            ),
+            exit=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=50,
+                    columns=("close",),
+                ),
+                stage,
+                vcp,
+            ),
+        )
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
@@ -308,9 +346,13 @@ class MinerviniStrategy:
         stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
         stage = getattr(getattr(scan, "stage", None), "value", None)
         state = getattr(getattr(scan, "vcp", None), "execution_state", None)
-        scan_failure = scan is not None and (
-            stage != "Stage 2" or state in {"Invalid", "Damaged"}
-        )
+        # Only *evidenced* stage/pattern values can fail: a view carrying
+        # no scan evidence must never be read as a pattern failure, which
+        # would manufacture a Sell out of missing evidence (#471).
+        scan_failure = (stage is not None and stage != "Stage 2") or state in {
+            "Invalid",
+            "Damaged",
+        }
         if not (close <= stop or close < sma50 or scan_failure):
             return None
         return Signal(

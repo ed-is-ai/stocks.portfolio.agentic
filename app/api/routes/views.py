@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
     get_alerts_repository,
+    get_portfolio_recommendation_service,
     get_portfolio_service,
     get_realised_pnl_service,
     get_strategy_assignment_service,
@@ -24,6 +25,9 @@ from app.core.config import PIPELINE_RUNS_CSV
 from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
 from app.schemas.source_health import SourceHealth
+from app.services.portfolio_recommendation_service import (
+    PortfolioRecommendationService,
+)
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.strategy_assignment_service import StrategyAssignmentService
@@ -94,21 +98,36 @@ async def partial_portfolio_chart(
         optional_int(portfolio_id), chart_range(range_key)
     )
     return templates.TemplateResponse(request, "_portfolio_chart.html", context=context)
+
+
 @router.get("/partials/strategy-assign", response_class=HTMLResponse)
-async def partial_strategy_assign(
+def partial_strategy_assign(
     request: Request,
     assignment: Annotated[
         StrategyAssignmentService, Depends(get_strategy_assignment_service)
+    ],
+    recommendations: Annotated[
+        PortfolioRecommendationService, Depends(get_portfolio_recommendation_service)
     ],
     portfolio_id: str | None = None,
 ) -> HTMLResponse:
     """Render the assign-Strategy modal partial (#440).
 
-    Read-only: lists discovery choices/warnings and the portfolio's current
-    assignment. Accepts a raw string portfolio_id like /partials/portfolio
-    (an empty value means no account selected).
+    Read-only: lists discovery choices/warnings, the portfolio's current
+    assignment, and each choice's current recommendation support (#471).
+    Accepts a raw string portfolio_id like /partials/portfolio (an empty
+    value means no account selected). Support lookup is fail-soft — the
+    modal still renders when it cannot be determined.
+
+    Deliberately a plain ``def``: ``strategy_support()`` reads the scan
+    artifact and imports every Strategy runtime, so FastAPI must run this
+    in its threadpool rather than blocking the event loop.
     """
     pid = optional_int(portfolio_id)
+    try:
+        strategy_support = recommendations.strategy_support()
+    except Exception:
+        strategy_support = {}
     context = {
         "portfolio_id": pid,
         "strategy_choices": assignment.list_choices(),
@@ -117,6 +136,7 @@ async def partial_strategy_assign(
             assignment.assignment_view(pid) if pid is not None else None
         ),
         "strategy_freshness": assignment.freshness(),
+        "strategy_support": strategy_support,
     }
     return templates.TemplateResponse(request, "_strategy_assign.html", context=context)
 

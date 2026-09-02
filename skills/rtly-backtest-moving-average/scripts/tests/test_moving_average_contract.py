@@ -9,6 +9,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from app.services.backtest.strategy_evidence import (
+    EVIDENCE_CONTRACT_VERSION,
+    EvidenceKind,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     PortfolioView,
     PositionSummaryV1,
@@ -281,3 +286,20 @@ def test_regime_filter_enabled_risk_on_does_not_alter_entries() -> None:
     assert strategy.entry_signals(
         _RegimeView(_entry_view(), ["1", "1", "100"]), enabled
     ) == strategy.entry_signals(_RegimeView(_entry_view(), ["1", "1", "100"]), disabled)
+
+
+def test_evidence_requirements_track_the_slow_window() -> None:
+    """Both paths need ``slow_window + 1`` evidenced closes."""
+    requirements = MovingAverageStrategy().evidence_requirements(PARAMETERS)
+
+    assert isinstance(requirements, StrategyEvidenceRequirementsV1)
+    assert requirements.contract_version == EVIDENCE_CONTRACT_VERSION
+    for path in (requirements.entry, requirements.exit):
+        assert len(path) == 1
+        assert path[0].kind is EvidenceKind.PRICE_HISTORY
+        assert path[0].minimum_sessions == 4
+        assert path[0].columns == ("close",)
+    wider = MovingAverageStrategy().evidence_requirements(
+        {**PARAMETERS, "fast_window": 50, "slow_window": 200}
+    )
+    assert wider.entry[0].minimum_sessions == 201

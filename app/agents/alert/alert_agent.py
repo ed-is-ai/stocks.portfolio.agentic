@@ -28,7 +28,10 @@ from app.schemas import (
     StockRecord,
 )
 from app.schemas.notification import NotificationCategory, NotificationSeverity
-from app.schemas.portfolio_recommendation import RecommendationResultV1
+from app.schemas.portfolio_recommendation import (
+    EvaluationCoverageV1,
+    RecommendationResultV1,
+)
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.db import Connect
@@ -127,6 +130,55 @@ _BLANK_BREAKOUT_NARRATIVE = {
         "Watchlist setup crossed its configured entry price. " + _ANALYSIS_UNAVAILABLE
     ),
 }
+
+
+#: Most degraded security ids rendered inline before they are summarised —
+#: a wide universe must not turn one diagnostic into an unbounded wall.
+_MAX_RENDERED_DEGRADED = 10
+
+
+def _recommendation_coverage_lines(
+    coverage: EvaluationCoverageV1,
+) -> list[str]:
+    """Return the plain-text evidence warning for one evaluation (#471).
+
+    Each claim is made per path: holdings only fail safe to Hold when the
+    exit path was unsupported, and Buy signals are only reported as
+    withheld when the entry path was.
+    """
+    lines: list[str] = []
+    missing = tuple(
+        dict.fromkeys(coverage.entry_missing_evidence + coverage.exit_missing_evidence)
+    )
+    if not coverage.entry_supported or not coverage.exit_supported:
+        detail = f" ({', '.join(missing)})" if missing else ""
+        blocked = (
+            "entry and exit"
+            if not (coverage.entry_supported or coverage.exit_supported)
+            else "exit"
+            if not coverage.exit_supported
+            else "entry"
+        )
+        sentence = (
+            "WARNING: Evidence incomplete — this Strategy's "
+            f"{blocked} rules could not be evaluated{detail}."
+        )
+        if not coverage.exit_supported:
+            sentence += " Holdings fail safe to Hold."
+        if not coverage.entry_supported:
+            sentence += " No buy signals were produced."
+        lines.append(sentence)
+    if coverage.degraded_securities:
+        shown = coverage.degraded_securities[:_MAX_RENDERED_DEGRADED]
+        extra = len(coverage.degraded_securities) - len(shown)
+        suffix = f", +{extra} more" if extra > 0 else ""
+        lines.append(
+            "WARNING: Evidence incomplete — some securities lacked enough "
+            f"evidenced history and were not evaluated ({', '.join(shown)}"
+            f"{suffix})."
+        )
+    lines.append("")
+    return lines
 
 
 class AlertAgent(Agent):
@@ -1502,12 +1554,27 @@ class AlertAgent(Agent):
                     "",
                 ]
             )
+        coverage = result.coverage
+        if not coverage.complete:
+            lines.extend(_recommendation_coverage_lines(coverage))
+        unavailable = (
+            "  Signals unavailable — the evidence this Strategy needs was incomplete."
+        )
         for label in ("SELL", "HOLD", "BUY"):
             action = label.lower()
             rows = [r for r in result.recommendations if r.action == action]
             lines.append(f"{label} ({len(rows)})")
             if not rows:
-                lines.append(f"  No {action} signals.")
+                # A degraded path is still invoked, so only an
+                # incompatible path replaces the honest wording (#471).
+                supported = (
+                    coverage.exit_supported
+                    if action == "sell"
+                    else coverage.entry_supported
+                    if action == "buy"
+                    else True
+                )
+                lines.append(f"  No {action} signals." if supported else unavailable)
             for rec in rows:
                 lines.append(f"  {rec.ticker}: {rec.reason} [{rec.rule_id}]")
                 for warning in rec.evidence_warnings:
@@ -1561,6 +1628,7 @@ class AlertAgent(Agent):
             digest=result.strategy_source_digest,
             run_id=result.analysis_run_id,
             parameters=result.parameters,
+            coverage=result.coverage,
         )
         text_body = self._recommendation_text_body(
             result, portfolio_name, strategy_display_name, today

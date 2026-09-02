@@ -7,6 +7,11 @@ from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localco
 from typing import Any
 
 from app.services.backtest.regime_filter import entry_signals_permitted
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    EvidenceRequirementV1,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     EntrySelectionDecisionV1,
     EntrySelectionState,
@@ -122,6 +127,28 @@ class BuyAndHoldStrategy:
         """Initial-entry providers have no recurring V1 entry path."""
         del view, parameters
         return []
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare the bounded closes the ranking metric actually reads.
+
+        ``_strength_score`` scores the 253 closes strictly *before*
+        ``as_of_session``, so the selection needs 254 evidenced sessions
+        in total. There is no ordinary exit rule, so the exit path
+        requires nothing at all.
+        """
+        del parameters
+        return StrategyEvidenceRequirementsV1(
+            entry=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=_LOOKBACK_CLOSES + 1,
+                    columns=("close",),
+                ),
+            ),
+            exit=(),
+        )
 
     def initial_entry_selection(
         self, view: MarketViewV1, parameters: StrategyParameters

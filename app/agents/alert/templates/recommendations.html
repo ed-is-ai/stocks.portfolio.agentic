@@ -68,9 +68,41 @@
 </div>
 {% endif %}
 
-{{ action_section("&#9888; SELL", "No sell signals.", "#c0392b", sells, "#fbe6e6") }}
+{# A degraded path IS invoked, so only an incompatible path replaces the
+   honest "no signals" wording. #}
+{% set entry_ok = not coverage or coverage.entry_supported %}
+{% set exit_ok = not coverage or coverage.exit_supported %}
+{% set unavailable_text = 'Signals unavailable \u2014 the evidence this Strategy needs was incomplete.' %}
+{% if coverage and not coverage.complete %}
+{% set entry_blocked = not coverage.entry_supported %}
+{% set exit_blocked = not coverage.exit_supported %}
+{% set missing = (coverage.entry_missing_evidence | list) + (coverage.exit_missing_evidence | list) %}
+{% set shown_degraded = coverage.degraded_securities[:10] %}
+{% set extra_degraded = coverage.degraded_securities | length - shown_degraded | length %}
+<div style="margin:16px 0;padding:10px 14px;background:#fdf3e0;border:1px solid #e0b25c;border-radius:6px;color:#a3560a;font-size:0.9em">
+  &#9888; Evidence incomplete &mdash;
+  {% if entry_blocked or exit_blocked %}
+  this Strategy needs evidence the current scan does not carry
+  {%- if missing %} ({{ missing | unique | join(', ') }}){% endif %},
+  so
+  {%- if entry_blocked and exit_blocked %} its entry and exit rules were
+  {%- elif exit_blocked %} its exit rules were
+  {%- else %} its entry rules were
+  {%- endif %} not evaluated.
+  {%- if exit_blocked %} Holdings fail safe to Hold.{% endif %}
+  {%- if entry_blocked %} No buy signals were produced.{% endif %}
+  {% endif %}
+  {% if coverage.degraded_securities %}
+  Some securities lacked enough evidenced history for this Strategy's rules
+  ({{ shown_degraded | join(', ') }}{% if extra_degraded > 0 %}, +{{ extra_degraded }} more{% endif %})
+  and were not evaluated.
+  {% endif %}
+</div>
+{% endif %}
+
+{{ action_section("&#9888; SELL", "No sell signals." if exit_ok else unavailable_text, "#c0392b", sells, "#fbe6e6") }}
 {{ action_section("&#128064; HOLD", "No hold signals.", "#a3560a", holds, "#f7ecd8") }}
-{{ action_section("&#9889; BUY", "No buy signals.", "#0a7d34", buys, "#e3f3e8") }}
+{{ action_section("&#9889; BUY", "No buy signals." if entry_ok else unavailable_text, "#0a7d34", buys, "#e3f3e8") }}
 
 <p style="color:#94a3b8;font-size:0.72em;margin-top:24px">
   Strategy {{ strategy_id }} &middot; digest {{ digest[:8] }} &middot; run {{ run_id }}

@@ -7,6 +7,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.services.backtest.regime_filter import entry_signals_permitted
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    EvidenceRequirementV1,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -149,6 +154,38 @@ def _classify_stage(
 
 class WeinsteinStrategy:
     """Apply Stage 2 breakout and Stage/risk exit rules without state."""
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare the trend window *and* the Weinstein stage evidence.
+
+        The stage classification is not derivable from OHLCV alone: the
+        entry rule and the stage-failure exit both read the committed
+        monthly scan's ``stage``. Declaring it means a view that cannot
+        evidence a stage is reported incompatible rather than silently
+        read as "not Stage 2" (#471).
+        """
+        lookback = _plain_int(parameters.get("breakout_lookback_sessions")) or 50
+        stage = EvidenceRequirementV1(kind=EvidenceKind.SCAN_STAGE)
+        return StrategyEvidenceRequirementsV1(
+            entry=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=max(204, lookback + 1, 51),
+                    columns=("high", "close", "volume"),
+                ),
+                stage,
+            ),
+            exit=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=150,
+                    columns=("close",),
+                ),
+                stage,
+            ),
+        )
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
@@ -350,7 +387,10 @@ class WeinsteinStrategy:
         sma150 = sum(closes, Decimal(0)) / Decimal(150)
         stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
         scan_stage = getattr(getattr(scan, "stage", None), "value", None)
-        scan_failure = scan is not None and scan_stage != "Stage 2"
+        # Only an *evidenced* stage can fail: a view carrying no stage
+        # evidence at all must never be read as "not Stage 2", which
+        # would manufacture a Sell out of missing evidence (#471).
+        scan_failure = scan_stage is not None and scan_stage != "Stage 2"
         if not (close <= stop or close < sma150 or scan_failure):
             return None
         return Signal(

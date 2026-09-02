@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import logging
 from types import MappingProxyType
 from typing import Mapping
 
@@ -36,11 +37,21 @@ from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.market_planes import HistoricalMarketPlanes
 from app.services.backtest.run_universe import canonical_run_universe
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    SecurityEvidenceCoverageV1,
+)
 
 #: Column order every ``MarketView.price_history`` DataFrame uses, whether
 #: populated or empty -- a Strategy can rely on this shape regardless of
 #: whether ``security_id`` has any evidence.
 PRICE_HISTORY_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
+
+logger = logging.getLogger(__name__)
+
+#: The zero-coverage answer for an unusable security id — evidence
+#: coverage is a diagnostic, so it always answers with a value.
+_NO_COVERAGE = SecurityEvidenceCoverageV1(security_id="unknown")
 
 
 class MarketViewBoundError(LookupError):
@@ -216,6 +227,64 @@ class MarketView:
             profile_hash=self.profile_hash,
             security_id=security_id,
             as_of_session=self.as_of_session,
+        )
+
+    @property
+    def evidence_capabilities(self) -> frozenset[EvidenceKind]:
+        """Declare every evidence kind — the full pinned historical plane.
+
+        A backtest Run pins both split-continuous price evidence and the
+        monthly-scan detector fragments, so a Strategy requiring
+        stage/VCP/technicals is fully supported here (#471). Structural
+        capability only: per-security availability is answered by
+        :meth:`evidence_coverage`.
+        """
+        return frozenset(EvidenceKind)
+
+    def evidence_coverage(self, security_id: str) -> SecurityEvidenceCoverageV1:
+        """Return ``security_id``'s coverage without ever raising (#471).
+
+        Preflight is a read-only capability question, not a Strategy read:
+        *any* failure — an unselected security, a bound violation, a
+        repository or frame error — answers "no coverage" rather than
+        propagating, so one security's problem stays a per-security
+        diagnostic instead of failing the whole evaluation. The view's own
+        bounds and pinned provenance are untouched — this method only
+        observes what the existing bounded reads already return.
+        """
+        if not security_id:
+            # ``SecurityEvidenceCoverageV1`` requires a non-empty id; a
+            # method contracted never to raise must not raise here either.
+            return _NO_COVERAGE
+        try:
+            frame = self.price_history(security_id)
+        except Exception:
+            logger.debug("No price coverage for %r", security_id, exc_info=True)
+            return SecurityEvidenceCoverageV1(security_id=security_id)
+        kinds: set[EvidenceKind] = set()
+        sessions = int(len(frame.index))
+        columns = tuple(str(column) for column in frame.columns)
+        if sessions:
+            kinds.add(EvidenceKind.PRICE_HISTORY)
+        else:
+            columns = ()
+        try:
+            record = self.scan_result(security_id)
+        except Exception:
+            logger.debug("No scan coverage for %r", security_id, exc_info=True)
+            record = None
+        if record is not None:
+            if getattr(record, "stage", None) is not None:
+                kinds.add(EvidenceKind.SCAN_STAGE)
+            if getattr(record, "vcp", None) is not None:
+                kinds.add(EvidenceKind.SCAN_VCP)
+            if getattr(record, "technicals", None) is not None:
+                kinds.add(EvidenceKind.SCAN_TECHNICALS)
+        return SecurityEvidenceCoverageV1(
+            security_id=security_id,
+            kinds=frozenset(kinds),
+            sessions=sessions,
+            columns=columns,
         )
 
 

@@ -10,6 +10,11 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+from app.services.backtest.strategy_evidence import (
+    EVIDENCE_CONTRACT_VERSION,
+    EvidenceKind,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     PortfolioView,
     PositionSummaryV1,
@@ -487,4 +492,38 @@ def test_regime_filter_enabled_risk_on_does_not_alter_entries() -> None:
         _RegimeView(_View(_history(), _scan()), ["1", "1", "100"]), enabled
     ) == strategy.entry_signals(
         _RegimeView(_View(_history(), _scan()), ["1", "1", "100"]), disabled
+    )
+
+
+def test_evidence_requirements_declare_history_stage_and_vcp() -> None:
+    """The declaration matches the rules' own guards (evidence contract v1)."""
+    requirements = MinerviniStrategy().evidence_requirements(PARAMETERS)
+
+    assert isinstance(requirements, StrategyEvidenceRequirementsV1)
+    assert requirements.contract_version == EVIDENCE_CONTRACT_VERSION
+    entry = {item.kind: item for item in requirements.entry}
+    exit_ = {item.kind: item for item in requirements.exit}
+    expected = {
+        EvidenceKind.PRICE_HISTORY,
+        EvidenceKind.SCAN_STAGE,
+        EvidenceKind.SCAN_VCP,
+    }
+    assert set(entry) == expected
+    assert set(exit_) == expected
+    assert entry[EvidenceKind.PRICE_HISTORY].minimum_sessions == 51
+    assert exit_[EvidenceKind.PRICE_HISTORY].minimum_sessions == 50
+
+
+def test_absent_scan_evidence_never_creates_an_exit() -> None:
+    """A scan record carrying no stage/VCP is missing evidence, not a failure."""
+    empty = SimpleNamespace(
+        security_id="sec-aapl",
+        as_of_session_date=date(2026, 7, 31),
+        stage=None,
+        vcp=None,
+    )
+    strategy = MinerviniStrategy()
+
+    assert (
+        strategy.exit_signals(_View(_history(), empty), _portfolio(), PARAMETERS) == []
     )

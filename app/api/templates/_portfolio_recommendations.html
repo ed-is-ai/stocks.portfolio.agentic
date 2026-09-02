@@ -67,7 +67,44 @@
 </div>
 {% endif %}
 
+{% if result and not result.coverage.complete %}
+{% set entry_blocked = not result.coverage.entry_supported %}
+{% set exit_blocked = not result.coverage.exit_supported %}
+{% set missing = (result.coverage.entry_missing_evidence | list) + (result.coverage.exit_missing_evidence | list) %}
+{% set shown_degraded = result.coverage.degraded_securities[:10] %}
+{% set extra_degraded = result.coverage.degraded_securities | length - shown_degraded | length %}
+<div class="alert alert-warning border-0 d-flex align-items-start gap-2 mt-1 mb-3"
+     role="status" id="evidence-incomplete-alert">
+  <i class="bi bi-exclamation-triangle"></i>
+  <span>
+    <strong>Evidence incomplete.</strong>
+    {% if entry_blocked or exit_blocked %}
+    This Strategy needs evidence the current scan does not carry
+    {%- if missing %} ({{ missing | unique | join(', ') }}){% endif %},
+    so
+    {%- if entry_blocked and exit_blocked %} its entry and exit rules were
+    {%- elif exit_blocked %} its exit rules were
+    {%- else %} its entry rules were
+    {%- endif %} not evaluated here. It still backtests normally
+    {%- if exit_blocked %} — holdings fail safe to Hold{% endif %}
+    {%- if entry_blocked %}{% if exit_blocked %} and{% else %} —{% endif %} no Buy signals are produced{% endif %}.
+    {% endif %}
+    {% if result.coverage.degraded_securities %}
+    Some securities do not have enough evidenced history for this
+    Strategy's rules, so they were not evaluated:
+    {% for ticker in shown_degraded %}<code class="me-1">{{ ticker }}</code>{% endfor %}
+    {%- if extra_degraded > 0 %}<span class="text-muted">+{{ extra_degraded }} more</span>{% endif %}.
+    {% endif %}
+  </span>
+</div>
+{% endif %}
+
 {% if result %}
+{# A degraded path IS invoked — well-evidenced securities are evaluated —
+   so only an incompatible path replaces the honest "no signals" wording. #}
+{% set entry_ok = result.coverage.entry_supported %}
+{% set exit_ok = result.coverage.exit_supported %}
+{% set unavailable_text = 'Signals unavailable — the evidence this Strategy needs was incomplete.' %}
 {% set sell = result.recommendations | selectattr('action', 'equalto', 'sell') | list %}
 {% set hold = result.recommendations | selectattr('action', 'equalto', 'hold') | list %}
 {% set buy = result.recommendations | selectattr('action', 'equalto', 'buy') | list %}
@@ -125,7 +162,7 @@
 {% endif %}
 {% endmacro %}
 
-{{ recommendation_table('Sell', sell, 'No Sell signals.') }}
+{{ recommendation_table('Sell', sell, 'No Sell signals.' if exit_ok else unavailable_text) }}
 {{ recommendation_table('Hold', hold, 'No Hold signals.') }}
-{{ recommendation_table('Buy', buy, 'No Buy signals.') }}
+{{ recommendation_table('Buy', buy, 'No Buy signals.' if entry_ok else unavailable_text) }}
 {% endif %}

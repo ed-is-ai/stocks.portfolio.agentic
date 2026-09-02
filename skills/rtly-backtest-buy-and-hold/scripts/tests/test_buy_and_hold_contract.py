@@ -9,6 +9,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from app.services.backtest.strategy_evidence import (
+    EVIDENCE_CONTRACT_VERSION,
+    EvidenceKind,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     InitialEntrySelectionProviderV1,
     PortfolioView,
@@ -423,3 +428,17 @@ def test_regime_filter_enabled_risk_on_does_not_alter_entries() -> None:
     ) == strategy.initial_entry_selection(
         _RegimeView(_View(), ["1", "1", "100"]), disabled
     )
+
+
+def test_evidence_requirements_declare_the_ranking_window() -> None:
+    """Entry needs the 253 scored closes plus today; exit needs nothing."""
+    requirements = BuyAndHoldStrategy().evidence_requirements(PARAMETERS)
+
+    assert isinstance(requirements, StrategyEvidenceRequirementsV1)
+    assert requirements.contract_version == EVIDENCE_CONTRACT_VERSION
+    assert requirements.exit == ()
+    assert len(requirements.entry) == 1
+    entry = requirements.entry[0]
+    assert entry.kind is EvidenceKind.PRICE_HISTORY
+    assert entry.minimum_sessions == 254
+    assert entry.columns == ("close",)

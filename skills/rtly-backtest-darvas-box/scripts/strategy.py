@@ -7,6 +7,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.services.backtest.regime_filter import entry_signals_permitted
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    EvidenceRequirementV1,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -84,6 +89,29 @@ def _held_quantity(portfolio: PortfolioView, security_id: str) -> int:
 
 class DarvasBoxStrategy:
     """Buy strict prior-box breakouts and sell strict box-bottom breaks."""
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare the box window both paths guard on (``lookback + 1``)."""
+        lookback = _plain_int(parameters, "box_lookback_sessions") or 20
+        sessions = max(lookback, 1) + 1
+        return StrategyEvidenceRequirementsV1(
+            entry=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=sessions,
+                    columns=("high", "low", "close", "volume"),
+                ),
+            ),
+            exit=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY,
+                    minimum_sessions=sessions,
+                    columns=("low", "close"),
+                ),
+            ),
+        )
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters

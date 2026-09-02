@@ -19,7 +19,9 @@ from app.api.dependencies import (
     get_trader_service,
 )
 from app.schemas.portfolio_recommendation import (
+    EvaluationCoverageV1,
     EvaluationUnavailable,
+    EvidenceState,
     NoAssignment,
     RecommendationResultV1,
     RecommendationV1,
@@ -135,3 +137,123 @@ def test_all_states_return_200(mocked: dict[str, Any]) -> None:
         mocked["stub"].recommend.return_value = outcome
         resp = client.get("/portfolios/7/recommendations")
         assert resp.status_code == 200
+
+
+def _incomplete_result(
+    entry_state: EvidenceState = "incompatible",
+    exit_state: EvidenceState = "incompatible",
+    missing: tuple[str, ...] = ("scan_stage",),
+) -> RecommendationResultV1:
+    """A result whose evidence was incomplete — no Sell/Buy rows (#471)."""
+    base = _result()
+    return base.model_copy(
+        update={
+            "recommendations": (
+                RecommendationV1(
+                    action="hold",
+                    ticker="AAA",
+                    security_id="AAA",
+                    rule_id="exit_evidence_unsupported",
+                    reason="fails safe to Hold",
+                    evidence_warnings=("exit_evidence_unsupported",) + missing,
+                ),
+            ),
+            "coverage": EvaluationCoverageV1(
+                entry_state=entry_state,
+                exit_state=exit_state,
+                entry_missing_evidence=missing,
+                exit_missing_evidence=missing,
+                evaluated_securities=2,
+            ),
+        }
+    )
+
+
+def test_incomplete_evidence_replaces_no_signals_wording(
+    mocked: dict[str, Any],
+) -> None:
+    mocked["stub"].recommend.return_value = _incomplete_result()
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Evidence incomplete" in html
+    assert "scan_stage" in html
+    assert "Signals unavailable" in html
+    assert "No Buy signals." not in html
+    assert "No Sell signals." not in html
+    # Hold was genuinely evaluated, so its own empty wording is unchanged.
+    assert "Hold (1)" in html
+
+
+def test_degraded_evidence_names_the_affected_securities(
+    mocked: dict[str, Any],
+) -> None:
+    result = _incomplete_result(
+        entry_state="degraded", exit_state="degraded", missing=()
+    ).model_copy(
+        update={
+            "coverage": EvaluationCoverageV1(
+                entry_state="degraded",
+                exit_state="degraded",
+                evaluated_securities=2,
+                degraded_securities=("AAA", "BBB"),
+            )
+        }
+    )
+    mocked["stub"].recommend.return_value = result
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    assert "Evidence incomplete" in resp.text
+    assert "AAA" in resp.text and "BBB" in resp.text
+    # A degraded path IS invoked, so the honest empty wording stays.
+    assert "No Buy signals." in resp.text
+    assert "Signals unavailable" not in resp.text
+
+
+def test_complete_evaluation_keeps_the_no_signals_wording(
+    mocked: dict[str, Any],
+) -> None:
+    empty = _result().model_copy(update={"recommendations": ()})
+    mocked["stub"].recommend.return_value = empty
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    assert "No Buy signals." in resp.text
+    assert "Evidence incomplete" not in resp.text
+    assert "Signals unavailable" not in resp.text
+
+
+def test_one_incompatible_path_scopes_the_wording(mocked: dict[str, Any]) -> None:
+    """Only the blocked path's consequence is claimed (#471)."""
+    result = _incomplete_result(entry_state="compatible", exit_state="incompatible")
+    mocked["stub"].recommend.return_value = result
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "holdings fail safe to Hold" in html
+    assert "no Buy signals are produced" not in html
+    # Sell was never evaluated; Buy was, so only Sell loses its wording.
+    assert "Signals unavailable" in html
+    assert "No Buy signals." in html
+    assert "No Sell signals." not in html
+
+
+def test_degraded_security_list_is_capped(mocked: dict[str, Any]) -> None:
+    """A wide degraded set is summarised rather than dumped (#471)."""
+    tickers = tuple(f"T{index:02d}" for index in range(12))
+    result = _result().model_copy(
+        update={
+            "recommendations": (),
+            "coverage": EvaluationCoverageV1(
+                entry_state="degraded",
+                exit_state="degraded",
+                evaluated_securities=12,
+                degraded_securities=tickers,
+            ),
+        }
+    )
+    mocked["stub"].recommend.return_value = result
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    assert "+2 more" in resp.text
+    assert "T09" in resp.text
+    assert "T10" not in resp.text

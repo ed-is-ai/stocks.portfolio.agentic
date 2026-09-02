@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Mapping, cast
+from typing import Any, Callable, Mapping, cast
 
 from app.core.config import ANALYSIS_JSON, SKILLS_DIR
 from app.core.ticker_identity import (
@@ -28,6 +28,8 @@ from app.schemas.analysis_artifact import (
 )
 from app.schemas.portfolio_recommendation import (
     NO_ASSIGNMENT,
+    EvaluationCoverageV1,
+    EvidenceState,
     EvaluationUnavailable,
     NoAssignment,
     RecommendationResultV1,
@@ -41,6 +43,12 @@ from app.services.backtest.scan_view import (
     build_scan_market_view,
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
+from app.services.backtest.strategy_evidence import (
+    EvidencePreflightV1,
+    StrategyEvidenceRequirementsV1,
+    preflight_evidence,
+    strategy_support_label,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     Signal,
@@ -72,12 +80,65 @@ _RULE_REASONS: dict[str, str] = {
         "Held security is not resolvable against the current scan/alias "
         "evidence — fails safe to Hold."
     ),
+    "exit_evidence_unsupported": (
+        "The assigned Strategy needs evidence the current scan does not "
+        "carry, so its exit rules were not evaluated — fails safe to Hold."
+    ),
+    "evidence_incomplete": (
+        "Not enough evidenced history for the assigned Strategy's rules on "
+        "this security — fails safe to Hold."
+    ),
 }
+
+#: The label used when a Strategy's recommendation support cannot be
+#: determined at all (discovery, runtime load, or scan evidence missing).
+SUPPORT_UNKNOWN = "unknown"
 
 
 def _reason_for(rule_id: str) -> str:
     """Return the plain-language reason for one rule code."""
     return _RULE_REASONS.get(rule_id, f"Strategy rule {rule_id}")
+
+
+def _declared_requirements(
+    strategy: object, parameters: Mapping[str, Any]
+) -> StrategyEvidenceRequirementsV1 | str | None:
+    """Read one Strategy's evidence declaration (#471).
+
+    Returns the validated declaration, ``None`` when the runtime declares
+    nothing at all (never treated as "safe"), or a plain-language failure
+    reason when the declaration raises or is the wrong type.
+    """
+    declare = getattr(strategy, "evidence_requirements", None)
+    if not callable(declare):
+        return None
+    try:
+        declared = declare(parameters)
+    except Exception as exc:
+        logger.exception("Strategy evidence declaration raised")
+        return f"Strategy evidence declaration failed: {exc}"
+    if not isinstance(declared, StrategyEvidenceRequirementsV1):
+        return (
+            "Strategy evidence declaration is not a "
+            "StrategyEvidenceRequirementsV1 (evidence contract v1)."
+        )
+    return declared
+
+
+def _coverage(
+    preflight: EvidencePreflightV1, evaluated_securities: int
+) -> EvaluationCoverageV1:
+    """Project a preflight onto the result's typed diagnostics."""
+    return EvaluationCoverageV1(
+        # ``EvidenceCompatibility`` is a ``StrEnum`` whose members are
+        # exactly the schema's closed ``EvidenceState`` vocabulary.
+        entry_state=cast(EvidenceState, preflight.entry.value),
+        exit_state=cast(EvidenceState, preflight.exit.value),
+        entry_missing_evidence=tuple(kind.value for kind in preflight.entry_missing),
+        exit_missing_evidence=tuple(kind.value for kind in preflight.exit_missing),
+        evaluated_securities=evaluated_securities,
+        degraded_securities=preflight.degraded_securities,
+    )
 
 
 class PortfolioRecommendationService:
@@ -169,6 +230,49 @@ class PortfolioRecommendationService:
             )
         held = self._held_positions(portfolio_id, aliases)
         try:
+            # The stored snapshot must never carry a stale universe: the
+            # host-bound parameter always comes from the current scan.
+            # ``bind_universe`` validates that selection and raises for a
+            # malformed one — a typed state here, never a 500.
+            parameters = {
+                key: value
+                for key, value in assignment.parameters.items()
+                if key != descriptor.universe.parameter
+            } | dict(descriptor.bind_universe(scan_view.selected_universe))
+        except Exception as exc:
+            logger.exception("Universe binding failed for portfolio %s", portfolio_id)
+            return EvaluationUnavailable(
+                reason=f"Strategy universe could not be bound: {exc}",
+                freshness=freshness,
+            )
+        requirements = _declared_requirements(strategy, parameters)
+        if requirements is None:
+            return EvaluationUnavailable(
+                reason=(
+                    f"Strategy {descriptor.strategy_id} does not declare its "
+                    "evidence requirements (evidence contract v1)."
+                ),
+                freshness=freshness,
+            )
+        if isinstance(requirements, str):
+            return EvaluationUnavailable(reason=requirements, freshness=freshness)
+        # Each path is preflighted only against the securities it can act
+        # on: entry considers scan candidates, exit only the holdings. A
+        # thin-history candidate must not degrade the exit path, and a
+        # holding the entry path never looks at must not degrade entry.
+        entry_securities = set(scan_view.selected_universe)
+        exit_securities = set(held)
+        try:
+            preflight = preflight_evidence(
+                requirements, scan_view, entry_securities, exit_securities
+            )
+        except Exception as exc:
+            logger.exception("Evidence preflight failed for portfolio %s", portfolio_id)
+            return EvaluationUnavailable(
+                reason=f"Strategy evidence preflight failed: {exc}",
+                freshness=freshness,
+            )
+        try:
             portfolio_view = build_portfolio_view(
                 [
                     position.model_copy(update={"ticker": security_id})
@@ -177,13 +281,6 @@ class PortfolioRecommendationService:
                 self._trader.get_cash_balance(portfolio_id),
                 scan_view.as_of_session,
             )
-            # The stored snapshot must never carry a stale universe: the
-            # host-bound parameter always comes from the current scan.
-            parameters = {
-                key: value
-                for key, value in assignment.parameters.items()
-                if key != descriptor.universe.parameter
-            } | dict(descriptor.bind_universe(scan_view.selected_universe))
             # The current-scan view deliberately returns an honest, narrower
             # scan projection (no fabricated stage/vcp) rather than a full
             # ``HistoricalScanRecordV1``; runtimes read those fields
@@ -191,11 +288,22 @@ class PortfolioRecommendationService:
             # safe to assert here (plan 024: extend the boundary
             # structurally, never fabricate provenance).
             protocol_view = cast(MarketViewV1, scan_view)
-            exits = validate_exit_signals(
-                strategy.exit_signals(protocol_view, portfolio_view, parameters)
+            # An unsupported path is never invoked: asking a Strategy for
+            # rules it cannot evaluate is exactly how a missing stage
+            # became a false Sell (#471).
+            exits = (
+                validate_exit_signals(
+                    strategy.exit_signals(protocol_view, portfolio_view, parameters)
+                )
+                if preflight.exit_supported
+                else ()
             )
-            entries = validate_entry_signals(
-                strategy.entry_signals(protocol_view, parameters)
+            entries = (
+                validate_entry_signals(
+                    strategy.entry_signals(protocol_view, parameters)
+                )
+                if preflight.entry_supported
+                else ()
             )
         except Exception as exc:
             logger.exception(
@@ -214,12 +322,74 @@ class PortfolioRecommendationService:
             strategy_id=descriptor.strategy_id,
             strategy_source_digest=descriptor.source_digest,
             parameters=parameters,
-            recommendations=self._map_actions(held, scan_view, exits, entries),
+            recommendations=self._map_actions(
+                held, scan_view, exits, entries, preflight
+            ),
             unresolved=tuple(sorted(set(unresolved))),
+            coverage=_coverage(preflight, len(entry_securities | exit_securities)),
             evaluated_at=datetime.now(UTC),
         )
 
+    def strategy_support(self) -> Mapping[str, str]:
+        """Return ``{strategy_id: support label}`` for every discoverable
+        Strategy, evaluated against the current scan evidence (#471).
+
+        Fail-soft by construction: a Strategy whose runtime will not load,
+        whose declaration is missing or invalid, or which cannot be
+        compared because no usable scan artifact exists is labelled
+        ``unknown`` rather than raising. Read-only — no fetch, no trade,
+        no persistence.
+        """
+        try:
+            choices = tuple(self._assignment_service.list_choices())
+        except Exception:
+            logger.exception("Strategy support lookup could not list choices")
+            return {}
+        view = self._support_scan_view()
+        return {
+            descriptor.strategy_id: self._support_for(descriptor, view)
+            for descriptor in choices
+        }
+
     # --- helpers ----------------------------------------------------------
+
+    def _support_scan_view(self) -> CurrentScanMarketView | None:
+        """Build the current-scan view for support labelling, or ``None``."""
+        try:
+            records = self._load_analysis_records()
+            if not records:
+                return None
+            view, _ = build_scan_market_view(records, load_aliases())
+        except Exception:
+            logger.exception("Strategy support lookup could not build a scan view")
+            return None
+        return view if view.selected_universe else None
+
+    def _support_for(
+        self, descriptor: StrategyDescriptorV1, view: CurrentScanMarketView | None
+    ) -> str:
+        """Label one Strategy's current recommendation support, fail-soft."""
+        if view is None:
+            return SUPPORT_UNKNOWN
+        try:
+            strategy = self._loader(self._skills_root / descriptor.runtime_path)
+            parameters = dict(descriptor.default_parameters) | dict(
+                descriptor.bind_universe(view.selected_universe)
+            )
+            requirements = _declared_requirements(strategy, parameters)
+            if not isinstance(requirements, StrategyEvidenceRequirementsV1):
+                return SUPPORT_UNKNOWN
+            # No portfolio is in play for a support label, so the exit
+            # path is judged on the same candidate set as entry.
+            preflight = preflight_evidence(
+                requirements, view, view.selected_universe, view.selected_universe
+            )
+        except Exception:
+            logger.exception(
+                "Strategy support lookup failed for %s", descriptor.strategy_id
+            )
+            return SUPPORT_UNKNOWN
+        return strategy_support_label(preflight)
 
     def _descriptor(self, strategy_id: str) -> StrategyDescriptorV1 | None:
         """Resolve one descriptor from the current discovery choices.
@@ -287,6 +457,7 @@ class PortfolioRecommendationService:
         scan_view: CurrentScanMarketView,
         exits: tuple[Signal, ...],
         entries: tuple[Signal, ...],
+        preflight: EvidencePreflightV1,
     ) -> tuple[RecommendationV1, ...]:
         """Apply the deterministic action mapping (Sell takes precedence).
 
@@ -295,6 +466,12 @@ class PortfolioRecommendationService:
         (never Sell/Buy from missing evidence); unheld + entry → Buy;
         unheld without entry → omitted. Entry signals on held securities
         are ignored — Sell precedence — and recorded as nothing.
+
+        Evidence outranks every signal (#471): a holding whose exit path
+        the current view cannot evidence — structurally unsupported, or
+        supported but under-evidenced for that security — is always a
+        Hold with a typed warning, and an unheld security the entry path
+        could not properly evaluate can never become a Buy.
         """
         exit_by_security = {
             signal.security_id: signal
@@ -325,6 +502,20 @@ class PortfolioRecommendationService:
                     )
                 )
                 continue
+            unsupported = _exit_evidence_gap(preflight, security_id)
+            if unsupported is not None:
+                rule_id, warnings = unsupported
+                recommendations.append(
+                    RecommendationV1(
+                        action="hold",
+                        ticker=position.ticker,
+                        security_id=security_id,
+                        rule_id=rule_id,
+                        reason=_reason_for(rule_id),
+                        evidence_warnings=warnings,
+                    )
+                )
+                continue
             exit_signal = exit_by_security.get(security_id)
             if exit_signal is not None:
                 recommendations.append(
@@ -351,6 +542,12 @@ class PortfolioRecommendationService:
                 continue
             if security_id not in scan_view.selected_universe:
                 continue
+            if not preflight.entry_supported or preflight.entry_degraded_for(
+                security_id
+            ):
+                # Evidence the entry rules needed was absent for this
+                # security — omitted, and surfaced through ``coverage``.
+                continue
             rule_id = entry_rules[security_id]
             recommendations.append(
                 RecommendationV1(
@@ -365,3 +562,23 @@ class PortfolioRecommendationService:
             key=lambda rec: (_ACTION_RANK[rec.action], rec.security_id)
         )
         return tuple(recommendations)
+
+
+def _exit_evidence_gap(
+    preflight: EvidencePreflightV1, security_id: str
+) -> tuple[str, tuple[str, ...]] | None:
+    """Return ``(rule_id, warnings)`` when the exit path lacked evidence.
+
+    ``None`` means the exit rules were genuinely evaluated for this
+    security, so the ordinary Sell/Hold mapping applies.
+    """
+    if not preflight.exit_supported:
+        return "exit_evidence_unsupported", ("exit_evidence_unsupported",) + tuple(
+            kind.value for kind in preflight.exit_missing
+        )
+    missing = preflight.degraded_exit.get(security_id)
+    if missing:
+        return "evidence_incomplete", ("evidence_incomplete",) + tuple(
+            kind.value for kind in missing
+        )
+    return None

@@ -7,6 +7,11 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.services.backtest.regime_filter import entry_signals_permitted
+from app.services.backtest.strategy_evidence import (
+    EvidenceKind,
+    EvidenceRequirementV1,
+    StrategyEvidenceRequirementsV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -119,6 +124,19 @@ def _crossover(
 
 class MovingAverageStrategy:
     """Emit signals only on a true fast/slow SMA crossover."""
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        """Declare ``slow_window + 1`` closes — the crossover's own guard."""
+        windows = _windows(parameters)
+        slow = 200 if windows is None else windows[1]
+        history = EvidenceRequirementV1(
+            kind=EvidenceKind.PRICE_HISTORY,
+            minimum_sessions=slow + 1,
+            columns=("close",),
+        )
+        return StrategyEvidenceRequirementsV1(entry=(history,), exit=(history,))
 
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
