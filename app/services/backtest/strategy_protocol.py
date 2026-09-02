@@ -41,6 +41,14 @@ from typing import (
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.services.backtest.strategy_explanation import (
+    ComparisonOperator,
+    EvidenceUnit,
+    ExplanationFactV1,
+    SignalExplanationV1,
+    SignalReasonV1,
+)
+
 if TYPE_CHECKING:
     import pandas as pd
 
@@ -60,6 +68,7 @@ class StrategyProtocolErrorCode(StrEnum):
     INVALID_POSITION_SIZE_TYPE = "invalid_position_size_type"
     NEGATIVE_POSITION_SIZE = "negative_position_size"
     FUTURE_DATED_OBSERVATION = "future_dated_observation"
+    MISSING_SIGNAL_EXPLANATION = "missing_signal_explanation"
     DUPLICATE_POSITION = "duplicate_position"
     DUPLICATE_VOLATILITY_OBSERVATION = "duplicate_volatility_observation"
     DUPLICATE_PARAMETER_DECLARATION = "duplicate_parameter_declaration"
@@ -138,6 +147,25 @@ class Signal(_StrategyModel):
     side: SignalSide
     session: date
     rule_id: str = Field(min_length=1)
+    #: The Strategy's own structured explanation (#472). Optional so
+    #: existing engine code and tests keep constructing signals unchanged,
+    #: and deliberately absent from ``sort_key`` so adding one can never
+    #: change signal ordering or execution.
+    explanation: SignalExplanationV1 | None = None
+
+    @model_validator(mode="after")
+    def _no_future_dated_evidence(self) -> "Signal":
+        """Reject evidence observed after the session it is cited for."""
+        if self.explanation is None:
+            return self
+        for observed_on in self.explanation.as_of_dates:
+            if observed_on > self.session:
+                raise StrategyProtocolError(
+                    StrategyProtocolErrorCode.FUTURE_DATED_OBSERVATION,
+                    f"explanation fact observed on {observed_on.isoformat()} is "
+                    f"after the signal session {self.session.isoformat()}",
+                )
+        return self
 
     @property
     def sort_key(self) -> tuple[date, str, int, str]:
@@ -427,6 +455,27 @@ def validate_exit_signals(value: object) -> tuple[Signal, ...]:
     return _validate_signal_list(value, method_name="exit_signals")
 
 
+def validate_signal_explanations(
+    signals: Sequence[Signal], *, method_name: str
+) -> tuple[Signal, ...]:
+    """Require a structured explanation on every signal (#472).
+
+    Pure and side-effect-free: returns ``signals`` unchanged when each one
+    carries a :class:`~app.services.backtest.strategy_explanation.SignalExplanationV1`,
+    and raises :class:`StrategyProtocolError` (code
+    ``missing_signal_explanation``) for the first one that does not. Kept
+    opt-in -- ``Signal.explanation`` itself stays optional -- so only the
+    callers holding first-party Strategies to the contract pay for it.
+    """
+    for index, signal in enumerate(signals):
+        if signal.explanation is None:
+            raise StrategyProtocolError(
+                StrategyProtocolErrorCode.MISSING_SIGNAL_EXPLANATION,
+                f"{method_name}[{index}] ({signal.security_id}) carries no explanation",
+            )
+    return tuple(signals)
+
+
 def validate_position_size(value: object) -> int:
     """Validate a ``position_size`` result before any engine mutation.
 
@@ -491,22 +540,22 @@ def validate_initial_entry_selection(
         )
 
     signals = tuple(sorted(value.signals, key=lambda signal: signal.sort_key))
-    expected_signals = tuple(
+    # Compared on identity alone (``sort_key``): a Strategy-owned
+    # explanation (#472) enriches a BUY without changing which BUYs the
+    # ranked decisions require.
+    expected_keys = tuple(
         sorted(
-            (
-                Signal(
-                    security_id=item.security_id,
-                    side=SignalSide.BUY,
-                    session=value.session,
-                    rule_id=value.rule_id,
-                )
-                for item in decisions
-                if item.state is EntrySelectionState.SELECTED
-            ),
-            key=lambda signal: signal.sort_key,
+            Signal(
+                security_id=item.security_id,
+                side=SignalSide.BUY,
+                session=value.session,
+                rule_id=value.rule_id,
+            ).sort_key
+            for item in decisions
+            if item.state is EntrySelectionState.SELECTED
         )
     )
-    if signals != expected_signals:
+    if tuple(signal.sort_key for signal in signals) != expected_keys:
         raise StrategyProtocolError(
             StrategyProtocolErrorCode.INITIAL_SELECTION_SIGNAL_MISMATCH,
             "selected decisions must agree exactly with canonical BUY signals",
@@ -864,12 +913,15 @@ def validate_strategy_parameters(
 
 
 __all__ = [
+    "ComparisonOperator",
     "EntrySelectionDecisionV1",
     "EntrySelectionState",
     "InitialEntrySelectionProviderV1",
     "InitialEntrySelectionV1",
     "JsonScalar",
     "JsonValue",
+    "EvidenceUnit",
+    "ExplanationFactV1",
     "MarketViewV1",
     "PARAMETER_TYPES",
     "ParameterFieldErrorV1",
@@ -878,6 +930,8 @@ __all__ = [
     "PortfolioView",
     "PositionSummaryV1",
     "Signal",
+    "SignalExplanationV1",
+    "SignalReasonV1",
     "SignalSide",
     "StrategyParameterV1",
     "StrategyParameters",
@@ -889,5 +943,6 @@ __all__ = [
     "validate_exit_signals",
     "validate_initial_entry_selection",
     "validate_position_size",
+    "validate_signal_explanations",
     "validate_strategy_parameters",
 ]

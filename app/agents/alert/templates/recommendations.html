@@ -15,7 +15,16 @@
         <td style="width:70px;vertical-align:top;padding-right:8px">{{ action_badge(rec.action, bg, color) }}</td>
         <td style="vertical-align:top">
           <div style="font-family:'Courier New',monospace;font-weight:700;font-size:0.95em;color:#1e3a5f">{{ rec.ticker }}</div>
+          {% if rec.explanation %}
+          {% for reason in rec.explanation %}
+          <div style="font-size:0.85em;color:#333;margin-top:2px">{{ reason.summary }}</div>
+          {% for fact in reason.facts %}
+          <div style="font-size:0.75em;color:#64748b;margin-top:1px;padding-left:10px">{{ fact }}</div>
+          {% endfor %}
+          {% endfor %}
+          {% else %}
           <div style="font-size:0.85em;color:#333;margin-top:2px">{{ rec.reason }}</div>
+          {% endif %}
           <div style="font-size:0.72em;color:#94a3b8;margin-top:2px">{{ rec.rule_id }}</div>
           {% if rec.evidence_warnings %}
           <div style="font-size:0.72em;color:#a3560a;margin-top:2px">&#9888; {{ rec.evidence_warnings|join(', ') }}</div>

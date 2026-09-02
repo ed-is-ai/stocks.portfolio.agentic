@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, cast
@@ -667,3 +668,129 @@ def test_real_discovered_runtime_evaluates_against_adapter(
         pytest.fail(f"real runtime failed against the adapter: {outcome.reason}")
     assert isinstance(outcome, RecommendationResultV1)
     assert outcome.strategy_id == "rtly-backtest-darvas-box"
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy-owned structured explanations reach the result rows
+# ---------------------------------------------------------------------------
+
+from app.services.backtest.strategy_explanation import (  # noqa: E402
+    ComparisonOperator,
+    EvidenceUnit,
+    ExplanationFactV1,
+    SignalExplanationV1,
+    SignalReasonV1,
+)
+
+EXIT_EXPLANATION = SignalExplanationV1(
+    reasons=(
+        SignalReasonV1(
+            code="maximum_loss_stop",
+            summary="Close hit the maximum-loss stop for this position.",
+            facts=(
+                ExplanationFactV1(
+                    label="Close",
+                    observed=Decimal("9.50"),
+                    operator=ComparisonOperator.LTE,
+                    threshold=Decimal("9.90"),
+                    unit=EvidenceUnit.PRICE,
+                ),
+            ),
+        ),
+        SignalReasonV1(
+            code="close_below_sma150",
+            summary="Close fell below the 150-session moving average.",
+        ),
+    )
+)
+ENTRY_EXPLANATION = SignalExplanationV1(
+    reasons=(
+        SignalReasonV1(
+            code="breakout_above_prior_high",
+            summary="Close broke above its prior breakout-window high.",
+            facts=(
+                ExplanationFactV1(
+                    label="Close",
+                    observed=Decimal("12"),
+                    operator=ComparisonOperator.GT,
+                    threshold=Decimal("11"),
+                    unit=EvidenceUnit.PRICE,
+                ),
+            ),
+        ),
+    )
+)
+
+
+class ExplainingStrategy(HistoryOnlyStrategy):
+    """``HistoryOnlyStrategy`` that explains every signal it emits (#472)."""
+
+    def entry_signals(
+        self, view: MarketViewV1, parameters: StrategyParameters
+    ) -> list[Signal]:
+        return [
+            signal.model_copy(update={"explanation": ENTRY_EXPLANATION})
+            for signal in super().entry_signals(view, parameters)
+        ]
+
+    def exit_signals(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+    ) -> list[Signal]:
+        return [
+            signal.model_copy(update={"explanation": EXIT_EXPLANATION})
+            for signal in super().exit_signals(view, portfolio, parameters)
+        ]
+
+
+def test_explained_signals_project_onto_typed_recommendation_rows(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+
+    result = _service(env, ExplainingStrategy(), [_position("AAA")]).recommend(7)
+
+    assert isinstance(result, RecommendationResultV1)
+    sell, buy = result.recommendations
+    assert [(row.code, row.summary, row.facts) for row in sell.explanation] == [
+        (
+            "close_below_sma150",
+            "Close fell below the 150-session moving average.",
+            (),
+        ),
+        (
+            "maximum_loss_stop",
+            "Close hit the maximum-loss stop for this position.",
+            ("Close 9.5 <= 9.9",),
+        ),
+    ]
+    assert sell.reason == (
+        "Close fell below the 150-session moving average. · "
+        "Close hit the maximum-loss stop for this position."
+    )
+    assert sell.rule_id == "exit_history_fall"
+    assert [row.code for row in buy.explanation] == ["breakout_above_prior_high"]
+    assert buy.reason == "Close broke above its prior breakout-window high."
+    assert buy.rule_id == "entry_history_rise"
+
+
+def test_unexplained_signals_keep_the_generic_wording(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+
+    result = _service(env, HistoryOnlyStrategy(), [_position("AAA")]).recommend(7)
+
+    assert isinstance(result, RecommendationResultV1)
+    assert all(rec.explanation == () for rec in result.recommendations)
+    assert result.recommendations[0].reason == "Strategy rule exit_history_fall"
+
+
+def test_host_generated_hold_rows_carry_no_strategy_explanation(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+
+    result = _service(env, ExplainingStrategy(), [_position("BBB")]).recommend(7)
+
+    assert isinstance(result, RecommendationResultV1)
+    hold = result.recommendations[0]
+    assert (hold.action, hold.rule_id) == ("hold", "no_exit_signal")
+    assert hold.explanation == ()
+    assert hold.reason == "No exit signal from the assigned Strategy — position held."

@@ -12,6 +12,13 @@ from app.services.backtest.strategy_evidence import (
     EvidenceRequirementV1,
     StrategyEvidenceRequirementsV1,
 )
+from app.services.backtest.strategy_explanation import (
+    ComparisonOperator,
+    EvidenceUnit,
+    ExplanationFactV1,
+    SignalExplanationV1,
+    SignalReasonV1,
+)
 from app.services.backtest.strategy_protocol import (
     EntrySelectionDecisionV1,
     EntrySelectionState,
@@ -118,6 +125,50 @@ def _cutoff(parameters: StrategyParameters) -> date | None:
         return None
 
 
+def _selection_explanation(
+    *, score: Decimal | None, rank: int, top_x: int, session: date
+) -> SignalExplanationV1:
+    """Explain one selected passive holding: why in, and why never out."""
+    eligibility_facts = [
+        ExplanationFactV1(
+            label="Rank by 252-session return",
+            observed=Decimal(rank),
+            operator=ComparisonOperator.LTE,
+            threshold=Decimal(top_x),
+            unit=EvidenceUnit.COUNT,
+            as_of=session,
+        ),
+    ]
+    if score is not None:
+        eligibility_facts.append(
+            ExplanationFactV1(
+                label="252-session return",
+                observed=score * Decimal(100),
+                unit=EvidenceUnit.PERCENT,
+                as_of=session,
+            )
+        )
+    return SignalExplanationV1(
+        reasons=[
+            SignalReasonV1(
+                code="initial_entry_eligible",
+                summary=(
+                    "Ranked inside the passive basket's top selections by "
+                    "252-session return at the Run's first session."
+                ),
+                facts=eligibility_facts,
+            ),
+            SignalReasonV1(
+                code="no_exit_policy",
+                summary=(
+                    "This Strategy has no exit rule -- the position is held "
+                    "for the whole Run once bought."
+                ),
+            ),
+        ]
+    )
+
+
 class BuyAndHoldStrategy:
     """Select one ranked passive basket and never emit an ordinary exit."""
 
@@ -213,6 +264,12 @@ class BuyAndHoldStrategy:
                 side=SignalSide.BUY,
                 session=view.as_of_session,
                 rule_id=RULE_ID,
+                explanation=_selection_explanation(
+                    score=decision.score,
+                    rank=decision.rank,
+                    top_x=top_x,
+                    session=view.as_of_session,
+                ),
             )
             for decision in decisions
             if decision.state is EntrySelectionState.SELECTED

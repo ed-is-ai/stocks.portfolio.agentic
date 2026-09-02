@@ -27,7 +27,9 @@ from app.schemas import EmailConfig
 from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.portfolio_recommendation import (
     EvaluationCoverageV1,
+    RecommendationReasonV1,
     RecommendationResultV1,
+    RecommendationV1,
 )
 from app.services import portfolio_recommendation_service as svc_module
 from app.services import strategy_assignment_service as assignment_module
@@ -557,3 +559,86 @@ def test_email_caps_the_degraded_security_list(tmp_path: Path) -> None:
         assert "+2 more" in body
         assert "T09" in body
         assert "T10" not in body
+
+
+# ---------------------------------------------------------------------------
+# #472 -- the same typed explanation rows reach HTML and plain-text email
+# ---------------------------------------------------------------------------
+
+
+def _explained_result() -> RecommendationResultV1:
+    """A result whose Sell row carries a Strategy-owned explanation."""
+    return RecommendationResultV1(
+        portfolio_id=7,
+        analysis_run_id="run-1",
+        generated_at=datetime(2026, 8, 28, 12, 0, tzinfo=UTC),
+        market_session=date(2026, 8, 28),
+        freshness="fresh",
+        strategy_id="alpha",
+        strategy_source_digest="a" * 64,
+        parameters={"lookback": 20},
+        recommendations=(
+            RecommendationV1(
+                action="sell",
+                ticker="AAA",
+                security_id="AAA",
+                rule_id="weinstein_stage_exit_v1",
+                reason=(
+                    "Close fell below the 150-session moving average. · "
+                    "The security is no longer in a Stage 2 advance."
+                ),
+                explanation=(
+                    RecommendationReasonV1(
+                        code="close_below_sma150",
+                        summary="Close fell below the 150-session moving average.",
+                        facts=("Close 92.1 < 101.44",),
+                    ),
+                    RecommendationReasonV1(
+                        code="stage_exit",
+                        summary="The security is no longer in a Stage 2 advance.",
+                        facts=("Weinstein stage Stage 3 is not Stage 2",),
+                    ),
+                ),
+            ),
+            RecommendationV1(
+                action="hold",
+                ticker="BBB",
+                security_id="BBB",
+                rule_id="no_exit_signal",
+                reason="No exit signal from the assigned Strategy — position held.",
+            ),
+        ),
+        evaluated_at=datetime.now(UTC),
+    )
+
+
+def _render_result(result: RecommendationResultV1, tmp_path: Path) -> tuple[str, str]:
+    """Render one already-evaluated result, returning ``(html, text)``."""
+    agent = AlertAgent(db_path=str(tmp_path / "alerts.db"), email_config=_EMAIL)
+    captured: list[tuple[str, str, str]] = []
+    with patch.object(
+        AlertAgent,
+        "send_email",
+        side_effect=lambda subject, html, text: (
+            captured.append((subject, html, text)) or True
+        ),
+    ):
+        agent.send_portfolio_recommendation_email(result, "SIPP", "Alpha")
+    return captured[0][1], captured[0][2]
+
+
+def test_email_renders_every_reason_and_fact_with_provenance(tmp_path: Path) -> None:
+    html, text = _render_result(_explained_result(), tmp_path)
+
+    for body in (html, text):
+        assert "Close fell below the 150-session moving average." in body
+        assert "The security is no longer in a Stage 2 advance." in body
+        assert "Weinstein stage Stage 3 is not Stage 2" in body
+        assert "weinstein_stage_exit_v1" in body
+        assert "run-1" in body
+        assert "a" * 8 in body
+    assert "Close 92.1 &lt; 101.44" in html
+    assert "Close 92.1 < 101.44" in text
+    # A host-generated Hold row keeps its own generic wording.
+    assert "No exit signal from the assigned Strategy" in html
+    assert "No exit signal from the assigned Strategy" in text

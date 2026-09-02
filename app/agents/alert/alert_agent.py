@@ -1576,7 +1576,17 @@ class AlertAgent(Agent):
                 )
                 lines.append(f"  No {action} signals." if supported else unavailable)
             for rec in rows:
-                lines.append(f"  {rec.ticker}: {rec.reason} [{rec.rule_id}]")
+                # The same typed Strategy explanation the screen and the
+                # HTML email render, indented under its ticker (#472); a
+                # row without one keeps the single generic reason line.
+                if rec.explanation:
+                    lines.append(f"  {rec.ticker} [{rec.rule_id}]")
+                    for reason in rec.explanation:
+                        lines.append(f"    - {reason.summary}")
+                        for fact in reason.facts:
+                            lines.append(f"      {fact}")
+                else:
+                    lines.append(f"  {rec.ticker}: {rec.reason} [{rec.rule_id}]")
                 for warning in rec.evidence_warnings:
                     lines.append(f"    warning: {warning}")
             lines.append("")

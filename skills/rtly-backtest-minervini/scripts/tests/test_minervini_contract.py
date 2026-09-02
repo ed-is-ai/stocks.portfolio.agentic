@@ -527,3 +527,73 @@ def test_absent_scan_evidence_never_creates_an_exit() -> None:
     assert (
         strategy.exit_signals(_View(_history(), empty), _portfolio(), PARAMETERS) == []
     )
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy-owned structured explanations
+# ---------------------------------------------------------------------------
+
+
+def _codes(signal: Signal) -> tuple[str, ...]:
+    assert signal.explanation is not None
+    return signal.explanation.codes
+
+
+def test_entry_explains_stage_pivot_volume_and_scores() -> None:
+    strategy = MinerviniStrategy()
+
+    entries = validate_entry_signals(
+        strategy.entry_signals(_View(_history(), _scan()), PARAMETERS)
+    )
+
+    assert _codes(entries[0]) == (
+        "stage2_confirmed",
+        "trend_template",
+        "vcp_breakout",
+        "vcp_score",
+        "volume_expansion",
+    )
+
+
+def test_damaged_vcp_exit_is_distinguishable_from_price_risk_exits() -> None:
+    strategy = MinerviniStrategy()
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(
+            _View(_history(), _scan(state="Damaged")), _portfolio(), PARAMETERS
+        )
+    )
+
+    assert _codes(exits[0]) == ("vcp_state_invalidated",)
+
+
+def test_stage_and_stop_loss_exits_carry_their_own_codes() -> None:
+    strategy = MinerviniStrategy()
+
+    stage_only = validate_exit_signals(
+        strategy.exit_signals(
+            _View(_history(), _scan(stage="Stage 3")), _portfolio(), PARAMETERS
+        )
+    )
+    stop_and_sma = validate_exit_signals(
+        strategy.exit_signals(
+            _View(_history(current_close="80"), None), _portfolio(), PARAMETERS
+        )
+    )
+
+    assert _codes(stage_only[0]) == ("stage_exit",)
+    assert _codes(stop_and_sma[0]) == ("close_below_sma50", "maximum_loss_stop")
+
+
+def test_upgrade_exit_explains_the_rotation() -> None:
+    strategy = MinerviniStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history()},
+        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=95)},
+    )
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(view, _held_portfolio(cash="0"), _upgrade_parameters())
+    )
+
+    assert _codes(exits[0]) == ("portfolio_upgrade",)

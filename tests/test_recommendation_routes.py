@@ -23,6 +23,7 @@ from app.schemas.portfolio_recommendation import (
     EvaluationUnavailable,
     EvidenceState,
     NoAssignment,
+    RecommendationReasonV1,
     RecommendationResultV1,
     RecommendationV1,
 )
@@ -257,3 +258,56 @@ def test_degraded_security_list_is_capped(mocked: dict[str, Any]) -> None:
     assert "+2 more" in resp.text
     assert "T09" in resp.text
     assert "T10" not in resp.text
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy explanations render on the screen
+# ---------------------------------------------------------------------------
+
+_EXPLAINED_SELL = RecommendationV1(
+    action="sell",
+    ticker="AAA",
+    security_id="AAA",
+    rule_id="weinstein_stage_exit_v1",
+    reason=(
+        "Close fell below the 150-session moving average. · "
+        "The security is no longer in a Stage 2 advance."
+    ),
+    explanation=(
+        RecommendationReasonV1(
+            code="close_below_sma150",
+            summary="Close fell below the 150-session moving average.",
+            facts=("Close 92.1 < 101.44",),
+        ),
+        RecommendationReasonV1(
+            code="stage_exit",
+            summary="The security is no longer in a Stage 2 advance.",
+            facts=("Weinstein stage Stage 3 is not Stage 2",),
+        ),
+    ),
+)
+
+
+def test_explanation_reasons_and_facts_render_with_rule_provenance(
+    mocked: dict[str, Any],
+) -> None:
+    result = _result().model_copy(update={"recommendations": (_EXPLAINED_SELL,)})
+    mocked["stub"].recommend.return_value = result
+
+    html = client.get("/portfolios/7/recommendations").text
+
+    assert "Close fell below the 150-session moving average." in html
+    assert "The security is no longer in a Stage 2 advance." in html
+    assert "Close 92.1 &lt; 101.44" in html
+    assert "Weinstein stage Stage 3 is not Stage 2" in html
+    assert "weinstein_stage_exit_v1" in html
+
+
+def test_rows_without_an_explanation_keep_the_generic_reason(
+    mocked: dict[str, Any],
+) -> None:
+    mocked["stub"].recommend.return_value = _result()
+
+    html = client.get("/portfolios/7/recommendations").text
+
+    assert "Strategy rule exit_history_fall" in html

@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.services.backtest.regime_filter import entry_signals_permitted
 from app.services.backtest.strategy_evidence import (
     EvidenceKind,
     EvidenceRequirementV1,
     StrategyEvidenceRequirementsV1,
+)
+from app.services.backtest.strategy_explanation import (
+    ComparisonOperator,
+    EvidenceUnit,
+    ExplanationFactV1,
+    SignalExplanationV1,
+    SignalReasonV1,
 )
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
@@ -99,27 +106,133 @@ def _windows(parameters: StrategyParameters) -> tuple[int, int] | None:
     return fast, slow
 
 
+class _CrossoverReading(NamedTuple):
+    """The crossover verdict plus the moving averages that produced it."""
+
+    direction: int
+    fast_window: int
+    slow_window: int
+    previous_fast: Decimal
+    previous_slow: Decimal
+    current_fast: Decimal
+    current_slow: Decimal
+
+
 def _crossover(
     view: MarketViewV1, parameters: StrategyParameters, security_id: str
-) -> int:
+) -> _CrossoverReading | None:
+    """Return today's crossover reading, or ``None`` without enough evidence.
+
+    The decision itself is unchanged; the computed averages ride along so
+    the emitted signal can explain itself (#472).
+    """
     windows = _windows(parameters)
     history = _fresh_history(view, security_id)
     if windows is None or history is None:
-        return 0
+        return None
     fast, slow = windows
     closes = _close_values(history)
     if closes is None or len(closes) < slow + 1:
-        return 0
+        return None
 
     previous_fast = sum(closes[-fast - 1 : -1]) / Decimal(fast)
     previous_slow = sum(closes[-slow - 1 : -1]) / Decimal(slow)
     current_fast = sum(closes[-fast:]) / Decimal(fast)
     current_slow = sum(closes[-slow:]) / Decimal(slow)
     if previous_fast <= previous_slow and current_fast > current_slow:
-        return 1
-    if previous_fast >= previous_slow and current_fast < current_slow:
-        return -1
-    return 0
+        direction = 1
+    elif previous_fast >= previous_slow and current_fast < current_slow:
+        direction = -1
+    else:
+        direction = 0
+    return _CrossoverReading(
+        direction=direction,
+        fast_window=fast,
+        slow_window=slow,
+        previous_fast=previous_fast,
+        previous_slow=previous_slow,
+        current_fast=current_fast,
+        current_slow=current_slow,
+    )
+
+
+def _crossover_explanation(
+    reading: _CrossoverReading, session: date
+) -> SignalExplanationV1:
+    """Explain one bullish/bearish SMA crossover in shared, generic terms."""
+    bullish = reading.direction == 1
+    return SignalExplanationV1(
+        reasons=[
+            SignalReasonV1(
+                code="bullish_ma_crossover" if bullish else "bearish_ma_crossover",
+                summary=(
+                    "The fast moving average crossed above the slow moving average."
+                    if bullish
+                    else "The fast moving average crossed below the slow "
+                    "moving average."
+                ),
+                facts=[
+                    ExplanationFactV1(
+                        label="Fast moving average",
+                        observed=reading.current_fast,
+                        operator=(
+                            ComparisonOperator.CROSSED_ABOVE
+                            if bullish
+                            else ComparisonOperator.CROSSED_BELOW
+                        ),
+                        threshold=reading.current_slow,
+                        unit=EvidenceUnit.PRICE,
+                        as_of=session,
+                    ),
+                    ExplanationFactV1(
+                        label="Previous fast moving average",
+                        observed=reading.previous_fast,
+                        unit=EvidenceUnit.PRICE,
+                    ),
+                    ExplanationFactV1(
+                        label="Previous slow moving average",
+                        observed=reading.previous_slow,
+                        unit=EvidenceUnit.PRICE,
+                    ),
+                    ExplanationFactV1(
+                        label="Fast window",
+                        observed=Decimal(reading.fast_window),
+                        unit=EvidenceUnit.SESSIONS,
+                    ),
+                    ExplanationFactV1(
+                        label="Slow window",
+                        observed=Decimal(reading.slow_window),
+                        unit=EvidenceUnit.SESSIONS,
+                    ),
+                ],
+            ),
+        ]
+    )
+
+
+def _directional_signal(
+    view: MarketViewV1,
+    parameters: StrategyParameters,
+    security_id: str,
+    *,
+    direction: int,
+) -> Signal | None:
+    """Return the crossover signal for ``direction``, or ``None``."""
+    reading = _crossover(view, parameters, security_id)
+    if reading is None or reading.direction != direction:
+        return None
+    bullish = direction == 1
+    return Signal(
+        security_id=security_id,
+        side=SignalSide.BUY if bullish else SignalSide.SELL,
+        session=view.as_of_session,
+        rule_id=(
+            "moving_average_bullish_crossover_v1"
+            if bullish
+            else "moving_average_bearish_crossover_v1"
+        ),
+        explanation=_crossover_explanation(reading, view.as_of_session),
+    )
 
 
 class MovingAverageStrategy:
@@ -144,16 +257,11 @@ class MovingAverageStrategy:
         universe = _universe(parameters)
         if not entry_signals_permitted(view, parameters, universe):
             return []
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.BUY,
-                session=view.as_of_session,
-                rule_id="moving_average_bullish_crossover_v1",
-            )
+        signals = [
+            _directional_signal(view, parameters, security_id, direction=1)
             for security_id in universe
-            if _crossover(view, parameters, security_id) == 1
         ]
+        return [signal for signal in signals if signal is not None]
 
     def exit_signals(
         self,
@@ -166,16 +274,12 @@ class MovingAverageStrategy:
             for position in portfolio.positions
             if position.quantity > 0
         }
-        return [
-            Signal(
-                security_id=security_id,
-                side=SignalSide.SELL,
-                session=view.as_of_session,
-                rule_id="moving_average_bearish_crossover_v1",
-            )
+        signals = [
+            _directional_signal(view, parameters, security_id, direction=-1)
             for security_id in _universe(parameters)
-            if security_id in held and _crossover(view, parameters, security_id) == -1
+            if security_id in held
         ]
+        return [signal for signal in signals if signal is not None]
 
     def position_size(
         self,

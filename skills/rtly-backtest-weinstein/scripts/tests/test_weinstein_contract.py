@@ -514,3 +514,81 @@ def test_absent_stage_evidence_never_creates_an_exit() -> None:
         strategy.exit_signals(_View(_history(), stageless), _portfolio(), PARAMETERS)
         == []
     )
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy-owned structured explanations
+# ---------------------------------------------------------------------------
+
+
+def _codes(signal: Signal) -> tuple[str, ...]:
+    assert signal.explanation is not None
+    return signal.explanation.codes
+
+
+def test_entry_explains_stage_breakout_and_volume() -> None:
+    strategy = WeinsteinStrategy()
+
+    entries = validate_entry_signals(
+        strategy.entry_signals(_View(_history(), _scan()), PARAMETERS)
+    )
+
+    assert _codes(entries[0]) == (
+        "breakout_above_prior_high",
+        "stage2_confirmed",
+        "volume_expansion",
+    )
+
+
+def test_stage_exit_and_stop_loss_exit_are_distinguishable() -> None:
+    strategy = WeinsteinStrategy()
+
+    stage_only = validate_exit_signals(
+        strategy.exit_signals(
+            _View(_history(), _scan("Stage 3")), _portfolio(), PARAMETERS
+        )
+    )
+    stop_only = validate_exit_signals(
+        strategy.exit_signals(
+            _View(_history(current_close="89"), None), _portfolio(), PARAMETERS
+        )
+    )
+
+    assert "stage_exit" in _codes(stage_only[0])
+    assert "maximum_loss_stop" not in _codes(stage_only[0])
+    assert "maximum_loss_stop" in _codes(stop_only[0])
+    assert "stage_exit" not in _codes(stop_only[0])
+
+
+def test_simultaneously_true_exit_conditions_all_appear_once() -> None:
+    strategy = WeinsteinStrategy()
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(
+            _View(_history(current_close="89"), _scan("Stage 3")),
+            _portfolio(),
+            PARAMETERS,
+        )
+    )
+
+    assert _codes(exits[0]) == (
+        "close_below_sma150",
+        "maximum_loss_stop",
+        "stage_exit",
+    )
+
+
+def test_upgrade_exit_explains_the_rotation() -> None:
+    strategy = WeinsteinStrategy()
+    view = _KeyedView(
+        {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
+        {"sec-aapl": _scan(), "sec-msft": _scan()},
+    )
+
+    exits = validate_exit_signals(
+        strategy.exit_signals(view, _held_portfolio(cash="0"), _upgrade_parameters())
+    )
+
+    assert _codes(exits[0]) == ("portfolio_upgrade",)
+    assert exits[0].explanation is not None
+    assert len(exits[0].explanation.reasons[0].facts) == 3

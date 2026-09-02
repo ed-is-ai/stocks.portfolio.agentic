@@ -37,6 +37,21 @@ class _RecommendationModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
 
+class RecommendationReasonV1(_RecommendationModel):
+    """One already-formatted Strategy reason for one recommendation (#472).
+
+    The plain-text projection of a Strategy's own
+    ``SignalReasonV1``: a stable ``code``, its ``summary`` sentence, and
+    its facts rendered by the shared ``strategy_explanation`` formatter.
+    Screen, HTML email, and plain-text email all render these same rows,
+    so no host ever re-derives wording from a ``strategy_id``.
+    """
+
+    code: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    facts: tuple[str, ...] = ()
+
+
 class RecommendationV1(_RecommendationModel):
     """One actionable recommendation row for one security."""
 
@@ -46,6 +61,9 @@ class RecommendationV1(_RecommendationModel):
     rule_id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
     evidence_warnings: tuple[str, ...] = ()
+    #: The assigned Strategy's own structured explanation (#472), empty
+    #: for host-generated hold/fail-safe rows.
+    explanation: tuple[RecommendationReasonV1, ...] = ()
 
 
 class EvaluationCoverageV1(_RecommendationModel):

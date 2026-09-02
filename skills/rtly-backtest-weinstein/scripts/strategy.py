@@ -4,13 +4,20 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.services.backtest.regime_filter import entry_signals_permitted
 from app.services.backtest.strategy_evidence import (
     EvidenceKind,
     EvidenceRequirementV1,
     StrategyEvidenceRequirementsV1,
+)
+from app.services.backtest.strategy_explanation import (
+    ComparisonOperator,
+    EvidenceUnit,
+    ExplanationFactV1,
+    SignalExplanationV1,
+    SignalReasonV1,
 )
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
@@ -152,6 +159,137 @@ def _classify_stage(
     return "Stage 1"
 
 
+class _EntryQualification(NamedTuple):
+    """A qualifying entry's trend score plus the evidence behind it."""
+
+    score: Decimal
+    close: Decimal
+    prior_high: Decimal
+    lookback: int
+    volume: Decimal
+    required_volume: Decimal
+    volume_multiplier: Decimal
+    scan_stage: str
+    daily_stage: str
+
+
+def _entry_explanation(
+    qualification: _EntryQualification, session: date
+) -> SignalExplanationV1:
+    """Explain one Stage 2 breakout entry in provider-neutral terms."""
+    return SignalExplanationV1(
+        reasons=[
+            SignalReasonV1(
+                code="stage2_confirmed",
+                summary=(
+                    "The monthly scan and today's own price structure both "
+                    "read a Stage 2 advance."
+                ),
+                facts=[
+                    ExplanationFactV1(
+                        label="Scan stage",
+                        observed=qualification.scan_stage,
+                        operator=ComparisonOperator.IS,
+                        threshold="Stage 2",
+                    ),
+                    ExplanationFactV1(
+                        label="Daily stage",
+                        observed=qualification.daily_stage,
+                        operator=ComparisonOperator.IS,
+                        threshold="Stage 2",
+                        as_of=session,
+                    ),
+                ],
+            ),
+            SignalReasonV1(
+                code="breakout_above_prior_high",
+                summary="Close broke above its prior breakout-window high.",
+                facts=[
+                    ExplanationFactV1(
+                        label="Close",
+                        observed=qualification.close,
+                        operator=ComparisonOperator.GT,
+                        threshold=qualification.prior_high,
+                        unit=EvidenceUnit.PRICE,
+                        as_of=session,
+                    ),
+                    ExplanationFactV1(
+                        label="Breakout lookback",
+                        observed=Decimal(qualification.lookback),
+                        unit=EvidenceUnit.SESSIONS,
+                    ),
+                ],
+            ),
+            SignalReasonV1(
+                code="volume_expansion",
+                summary="Breakout volume expanded above its 50-session average.",
+                facts=[
+                    ExplanationFactV1(
+                        label="Volume",
+                        observed=qualification.volume,
+                        operator=ComparisonOperator.GTE,
+                        threshold=qualification.required_volume,
+                        unit=EvidenceUnit.COUNT,
+                        as_of=session,
+                    ),
+                    ExplanationFactV1(
+                        label="Required multiple of average volume",
+                        observed=qualification.volume_multiplier,
+                        unit=EvidenceUnit.RATIO,
+                    ),
+                ],
+            ),
+        ]
+    )
+
+
+def _upgrade_explanation(
+    *,
+    candidate_id: str,
+    candidate_score: Decimal,
+    held_score: Decimal,
+    margin: Decimal,
+    session: date,
+) -> SignalExplanationV1:
+    """Explain rotating out of the weakest holding into stronger leadership."""
+    return SignalExplanationV1(
+        reasons=[
+            SignalReasonV1(
+                code="portfolio_upgrade",
+                summary=(
+                    "A stronger Stage 2 candidate outranks this holding by "
+                    "more than the required margin, so capital rotates to it."
+                ),
+                facts=[
+                    # The candidate's identity is a fact *value*, never part
+                    # of the label: a long security id must not be able to
+                    # overflow the label bound and cost the Sell signal.
+                    ExplanationFactV1(label="Upgrade candidate", observed=candidate_id),
+                    ExplanationFactV1(
+                        label="Candidate trend score",
+                        observed=candidate_score,
+                        operator=ComparisonOperator.GTE,
+                        threshold=held_score + margin,
+                        unit=EvidenceUnit.PERCENT,
+                        as_of=session,
+                    ),
+                    ExplanationFactV1(
+                        label="Held trend score",
+                        observed=held_score,
+                        unit=EvidenceUnit.PERCENT,
+                        as_of=session,
+                    ),
+                    ExplanationFactV1(
+                        label="Required upgrade margin",
+                        observed=margin,
+                        unit=EvidenceUnit.PERCENT,
+                    ),
+                ],
+            ),
+        ]
+    )
+
+
 class WeinsteinStrategy:
     """Apply Stage 2 breakout and Stage/risk exit rules without state."""
 
@@ -222,12 +360,14 @@ class WeinsteinStrategy:
 
     def _entry_qualification(
         self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
-    ) -> Decimal | None:
-        """Return this security's trend-strength score -- percent close is
-        above its 150-session SMA -- if it qualifies for entry today, else
-        ``None``. Factored out of :meth:`_entry_signal` so the upgrade-exit
-        ranking (below) can score a would-be candidate using the exact same
-        qualification rules, without duplicating them."""
+    ) -> _EntryQualification | None:
+        """Return this security's qualification -- its trend-strength score
+        (percent close is above its 150-session SMA) plus the observations
+        behind it -- if it qualifies for entry today, else ``None``.
+        Factored out of :meth:`_entry_signal` so the upgrade-exit ranking
+        (below) can score a would-be candidate using the exact same
+        qualification rules, without duplicating them, and so the emitted
+        Signal can explain itself (#472) from the very same numbers."""
         history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
         lookback = _plain_int(parameters["breakout_lookback_sessions"])
@@ -267,18 +407,30 @@ class WeinsteinStrategy:
             or sma150 <= 0
         ):
             return None
-        return (close - sma150) / sma150 * Decimal(100)
+        return _EntryQualification(
+            score=(close - sma150) / sma150 * Decimal(100),
+            close=close,
+            prior_high=prior_high,
+            lookback=lookback,
+            volume=volumes[-1],
+            required_volume=prior_volume_mean * minimum_volume,
+            volume_multiplier=minimum_volume,
+            scan_stage=scan_stage,
+            daily_stage=daily_stage,
+        )
 
     def _entry_signal(
         self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
     ) -> Signal | None:
-        if self._entry_qualification(view, parameters, security_id) is None:
+        qualification = self._entry_qualification(view, parameters, security_id)
+        if qualification is None:
             return None
         return Signal(
             security_id=security_id,
             side=SignalSide.BUY,
             session=view.as_of_session,
             rule_id=_ENTRY_RULE,
+            explanation=_entry_explanation(qualification, view.as_of_session),
         )
 
     def _held_trend_strength(
@@ -342,9 +494,9 @@ class WeinsteinStrategy:
         for security_id in _universe(parameters):
             if security_id in held_ids:
                 continue
-            score = self._entry_qualification(view, parameters, security_id)
-            if score is not None:
-                candidates.append((score, security_id))
+            qualification = self._entry_qualification(view, parameters, security_id)
+            if qualification is not None:
+                candidates.append((qualification.score, security_id))
         if not candidates:
             return None
         best_score, best_security_id = max(candidates, key=lambda item: item)
@@ -365,6 +517,13 @@ class WeinsteinStrategy:
             side=SignalSide.SELL,
             session=view.as_of_session,
             rule_id=_UPGRADE_EXIT_RULE,
+            explanation=_upgrade_explanation(
+                candidate_id=best_security_id,
+                candidate_score=best_score,
+                held_score=weakest_score,
+                margin=margin,
+                session=view.as_of_session,
+            ),
         )
 
     def _exit_signal(
@@ -387,17 +546,77 @@ class WeinsteinStrategy:
         sma150 = sum(closes, Decimal(0)) / Decimal(150)
         stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
         scan_stage = getattr(getattr(scan, "stage", None), "value", None)
+        # The reason list below *is* the exit decision (#472): each rule
+        # appends itself, and the Sell fires exactly when at least one did.
+        # Deriving the decision from the reasons rather than restating both
+        # makes an explained condition and a firing condition impossible to
+        # diverge.
+        reasons: list[SignalReasonV1] = []
+        if close <= stop:
+            reasons.append(
+                SignalReasonV1(
+                    code="maximum_loss_stop",
+                    summary="Close hit the maximum-loss stop for this position.",
+                    facts=[
+                        ExplanationFactV1(
+                            label="Close",
+                            observed=close,
+                            operator=ComparisonOperator.LTE,
+                            threshold=stop,
+                            unit=EvidenceUnit.PRICE,
+                            as_of=view.as_of_session,
+                        ),
+                        ExplanationFactV1(
+                            label="Maximum loss",
+                            observed=maximum_loss,
+                            unit=EvidenceUnit.PERCENT,
+                        ),
+                    ],
+                )
+            )
+        if close < sma150:
+            reasons.append(
+                SignalReasonV1(
+                    code="close_below_sma150",
+                    summary="Close fell below the 150-session moving average.",
+                    facts=[
+                        ExplanationFactV1(
+                            label="Close",
+                            observed=close,
+                            operator=ComparisonOperator.LT,
+                            threshold=sma150,
+                            unit=EvidenceUnit.PRICE,
+                            as_of=view.as_of_session,
+                        ),
+                    ],
+                )
+            )
         # Only an *evidenced* stage can fail: a view carrying no stage
         # evidence at all must never be read as "not Stage 2", which
         # would manufacture a Sell out of missing evidence (#471).
-        scan_failure = scan_stage is not None and scan_stage != "Stage 2"
-        if not (close <= stop or close < sma150 or scan_failure):
+        if scan_stage is not None and scan_stage != "Stage 2":
+            reasons.append(
+                SignalReasonV1(
+                    code="stage_exit",
+                    summary="The security is no longer in a Stage 2 advance.",
+                    facts=[
+                        ExplanationFactV1(
+                            label="Weinstein stage",
+                            observed=scan_stage,
+                            operator=ComparisonOperator.IS_NOT,
+                            threshold="Stage 2",
+                        ),
+                    ],
+                )
+            )
+        if not reasons:
             return None
         return Signal(
             security_id=security_id,
             side=SignalSide.SELL,
             session=view.as_of_session,
             rule_id=_EXIT_RULE,
+            explanation=SignalExplanationV1(reasons=reasons),
         )
 
     def position_size(

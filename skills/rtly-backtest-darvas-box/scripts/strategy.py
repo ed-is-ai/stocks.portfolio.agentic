@@ -12,6 +12,13 @@ from app.services.backtest.strategy_evidence import (
     EvidenceRequirementV1,
     StrategyEvidenceRequirementsV1,
 )
+from app.services.backtest.strategy_explanation import (
+    ComparisonOperator,
+    EvidenceUnit,
+    ExplanationFactV1,
+    SignalExplanationV1,
+    SignalReasonV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -193,6 +200,66 @@ class DarvasBoxStrategy:
             side=SignalSide.BUY,
             session=view.as_of_session,
             rule_id="darvas_box_breakout_v1",
+            explanation=SignalExplanationV1(
+                reasons=[
+                    SignalReasonV1(
+                        code="box_breakout",
+                        summary=("Close broke out above the prior Darvas box top."),
+                        facts=[
+                            ExplanationFactV1(
+                                label="Close",
+                                observed=current_close,
+                                operator=ComparisonOperator.GT,
+                                threshold=box_top,
+                                unit=EvidenceUnit.PRICE,
+                                as_of=view.as_of_session,
+                            ),
+                            ExplanationFactV1(
+                                label="Box window",
+                                observed=Decimal(lookback),
+                                unit=EvidenceUnit.SESSIONS,
+                            ),
+                        ],
+                    ),
+                    SignalReasonV1(
+                        code="box_depth_within_limit",
+                        summary=(
+                            "The box was tight enough to trade -- its depth "
+                            "stayed within the configured limit."
+                        ),
+                        facts=[
+                            ExplanationFactV1(
+                                label="Box depth",
+                                observed=box_depth_pct,
+                                operator=ComparisonOperator.LTE,
+                                threshold=maximum_depth,
+                                unit=EvidenceUnit.PERCENT,
+                            ),
+                        ],
+                    ),
+                    SignalReasonV1(
+                        code="volume_expansion",
+                        summary=(
+                            "Breakout volume expanded above its prior-box average."
+                        ),
+                        facts=[
+                            ExplanationFactV1(
+                                label="Volume",
+                                observed=current_volume,
+                                operator=ComparisonOperator.GTE,
+                                threshold=mean_volume * volume_multiplier,
+                                unit=EvidenceUnit.COUNT,
+                                as_of=view.as_of_session,
+                            ),
+                            ExplanationFactV1(
+                                label="Required multiple of average volume",
+                                observed=volume_multiplier,
+                                unit=EvidenceUnit.RATIO,
+                            ),
+                        ],
+                    ),
+                ]
+            ),
         )
 
     def _exit_signal(
@@ -230,6 +297,29 @@ class DarvasBoxStrategy:
             side=SignalSide.SELL,
             session=view.as_of_session,
             rule_id="darvas_box_breakdown_v1",
+            explanation=SignalExplanationV1(
+                reasons=[
+                    SignalReasonV1(
+                        code="box_bottom_break",
+                        summary=("Close broke below the prior Darvas box bottom."),
+                        facts=[
+                            ExplanationFactV1(
+                                label="Close",
+                                observed=current_close,
+                                operator=ComparisonOperator.LT,
+                                threshold=box_bottom,
+                                unit=EvidenceUnit.PRICE,
+                                as_of=view.as_of_session,
+                            ),
+                            ExplanationFactV1(
+                                label="Box window",
+                                observed=Decimal(lookback),
+                                unit=EvidenceUnit.SESSIONS,
+                            ),
+                        ],
+                    ),
+                ]
+            ),
         )
 
     def position_size(

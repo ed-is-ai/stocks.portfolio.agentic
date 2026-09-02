@@ -442,3 +442,24 @@ def test_evidence_requirements_declare_the_ranking_window() -> None:
     assert entry.kind is EvidenceKind.PRICE_HISTORY
     assert entry.minimum_sessions == 254
     assert entry.columns == ("close",)
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy-owned structured explanations
+# ---------------------------------------------------------------------------
+
+
+def test_selected_buys_explain_eligibility_and_the_absent_exit_policy() -> None:
+    strategy = BuyAndHoldStrategy()
+
+    selection = strategy.initial_entry_selection(_View(), PARAMETERS)
+
+    assert selection.signals
+    for signal in selection.signals:
+        assert signal.explanation is not None
+        assert signal.explanation.codes == ("initial_entry_eligible", "no_exit_policy")
+        eligibility = signal.explanation.reasons[0]
+        assert {fact.label for fact in eligibility.facts} == {
+            "Rank by 252-session return",
+            "252-session return",
+        }

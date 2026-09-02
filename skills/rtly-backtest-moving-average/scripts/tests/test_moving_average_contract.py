@@ -303,3 +303,41 @@ def test_evidence_requirements_track_the_slow_window() -> None:
         {**PARAMETERS, "fast_window": 50, "slow_window": 200}
     )
     assert wider.entry[0].minimum_sessions == 201
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy-owned structured explanations
+# ---------------------------------------------------------------------------
+
+
+def _codes(signal: Signal) -> tuple[str, ...]:
+    assert signal.explanation is not None
+    return signal.explanation.codes
+
+
+def test_crossovers_explain_both_moving_averages() -> None:
+    strategy = MovingAverageStrategy()
+
+    entries = validate_entry_signals(
+        strategy.entry_signals(
+            _View([Decimal("3"), Decimal("2"), Decimal("1"), Decimal("4")]), PARAMETERS
+        )
+    )
+    exits = validate_exit_signals(
+        strategy.exit_signals(
+            _View([Decimal("1"), Decimal("2"), Decimal("3"), Decimal("0")]),
+            _portfolio("7"),
+            PARAMETERS,
+        )
+    )
+
+    assert _codes(entries[0]) == ("bullish_ma_crossover",)
+    assert _codes(exits[0]) == ("bearish_ma_crossover",)
+    labels = {fact.label for fact in entries[0].explanation.reasons[0].facts}
+    assert labels == {
+        "Fast moving average",
+        "Previous fast moving average",
+        "Previous slow moving average",
+        "Fast window",
+        "Slow window",
+    }

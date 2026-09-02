@@ -32,6 +32,7 @@ from app.schemas.portfolio_recommendation import (
     EvidenceState,
     EvaluationUnavailable,
     NoAssignment,
+    RecommendationReasonV1,
     RecommendationResultV1,
     RecommendationV1,
 )
@@ -49,6 +50,7 @@ from app.services.backtest.strategy_evidence import (
     preflight_evidence,
     strategy_support_label,
 )
+from app.services.backtest.strategy_explanation import format_reason
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     Signal,
@@ -98,6 +100,40 @@ SUPPORT_UNKNOWN = "unknown"
 def _reason_for(rule_id: str) -> str:
     """Return the plain-language reason for one rule code."""
     return _RULE_REASONS.get(rule_id, f"Strategy rule {rule_id}")
+
+
+#: Separator between a signal's reason summaries in the one-line reason.
+_REASON_JOIN = " \u00b7 "
+
+
+def _explanation_rows(signal: Signal) -> tuple[RecommendationReasonV1, ...]:
+    """Project one signal's Strategy explanation onto typed screen rows.
+
+    Generic by construction: the rows come from the Strategy's own
+    canonically ordered reasons through the shared
+    ``strategy_explanation`` formatter -- never from a host table keyed on
+    ``strategy_id`` or ``rule_id`` (#472).
+    """
+    if signal.explanation is None:
+        return ()
+    rows: list[RecommendationReasonV1] = []
+    for reason in signal.explanation.reasons:
+        summary, facts = format_reason(reason)
+        rows.append(
+            RecommendationReasonV1(code=reason.code, summary=summary, facts=facts)
+        )
+    return tuple(rows)
+
+
+def _signal_reason(signal: Signal) -> str:
+    """Return the one-line reason text for a Strategy-emitted signal.
+
+    An explained signal reads as its own joined reason summaries; an
+    unexplained one keeps today's generic ``Strategy rule <id>`` wording.
+    """
+    if signal.explanation is None:
+        return _reason_for(signal.rule_id)
+    return _REASON_JOIN.join(reason.summary for reason in signal.explanation.reasons)
 
 
 def _declared_requirements(
@@ -479,8 +515,8 @@ class PortfolioRecommendationService:
             if signal.side == SignalSide.SELL
             and signal.session == scan_view.as_of_session
         }
-        entry_rules = {
-            signal.security_id: signal.rule_id
+        entry_by_security = {
+            signal.security_id: signal
             for signal in entries
             if signal.side == SignalSide.BUY
             and signal.session == scan_view.as_of_session
@@ -524,7 +560,8 @@ class PortfolioRecommendationService:
                         ticker=position.ticker,
                         security_id=security_id,
                         rule_id=exit_signal.rule_id,
-                        reason=_reason_for(exit_signal.rule_id),
+                        reason=_signal_reason(exit_signal),
+                        explanation=_explanation_rows(exit_signal),
                     )
                 )
             else:
@@ -537,7 +574,7 @@ class PortfolioRecommendationService:
                         reason=_reason_for("no_exit_signal"),
                     )
                 )
-        for security_id in sorted(entry_rules):
+        for security_id in sorted(entry_by_security):
             if security_id in held:
                 continue
             if security_id not in scan_view.selected_universe:
@@ -548,14 +585,15 @@ class PortfolioRecommendationService:
                 # Evidence the entry rules needed was absent for this
                 # security — omitted, and surfaced through ``coverage``.
                 continue
-            rule_id = entry_rules[security_id]
+            entry_signal = entry_by_security[security_id]
             recommendations.append(
                 RecommendationV1(
                     action="buy",
                     ticker=security_id,
                     security_id=security_id,
-                    rule_id=rule_id,
-                    reason=_reason_for(rule_id),
+                    rule_id=entry_signal.rule_id,
+                    reason=_signal_reason(entry_signal),
+                    explanation=_explanation_rows(entry_signal),
                 )
             )
         recommendations.sort(

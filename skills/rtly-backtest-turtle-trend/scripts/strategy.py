@@ -12,6 +12,13 @@ from app.services.backtest.strategy_evidence import (
     EvidenceRequirementV1,
     StrategyEvidenceRequirementsV1,
 )
+from app.services.backtest.strategy_explanation import (
+    ComparisonOperator,
+    EvidenceUnit,
+    ExplanationFactV1,
+    SignalExplanationV1,
+    SignalReasonV1,
+)
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
     PortfolioView,
@@ -165,13 +172,40 @@ class TurtleTrendStrategy:
         if values is None:
             return None
         prior_highs, current_high = values
-        if current_high <= max(prior_highs):
+        channel_high = max(prior_highs)
+        if current_high <= channel_high:
             return None
         return Signal(
             security_id=security_id,
             side=SignalSide.BUY,
             session=view.as_of_session,
             rule_id="turtle_entry_channel_breakout_v1",
+            explanation=SignalExplanationV1(
+                reasons=[
+                    SignalReasonV1(
+                        code="channel_breakout",
+                        summary=(
+                            "Today's high broke above the prior entry "
+                            "channel's highest high."
+                        ),
+                        facts=[
+                            ExplanationFactV1(
+                                label="High",
+                                observed=current_high,
+                                operator=ComparisonOperator.GT,
+                                threshold=channel_high,
+                                unit=EvidenceUnit.PRICE,
+                                as_of=view.as_of_session,
+                            ),
+                            ExplanationFactV1(
+                                label="Entry channel lookback",
+                                observed=Decimal(lookback),
+                                unit=EvidenceUnit.SESSIONS,
+                            ),
+                        ],
+                    ),
+                ]
+            ),
         )
 
     def _exit_signal(
@@ -191,13 +225,39 @@ class TurtleTrendStrategy:
         if values is None:
             return None
         prior_lows, current_low = values
-        if current_low >= min(prior_lows):
+        channel_low = min(prior_lows)
+        if current_low >= channel_low:
             return None
         return Signal(
             security_id=security_id,
             side=SignalSide.SELL,
             session=view.as_of_session,
             rule_id="turtle_exit_channel_breach_v1",
+            explanation=SignalExplanationV1(
+                reasons=[
+                    SignalReasonV1(
+                        code="channel_breach",
+                        summary=(
+                            "Today's low breached the prior exit channel's lowest low."
+                        ),
+                        facts=[
+                            ExplanationFactV1(
+                                label="Low",
+                                observed=current_low,
+                                operator=ComparisonOperator.LT,
+                                threshold=channel_low,
+                                unit=EvidenceUnit.PRICE,
+                                as_of=view.as_of_session,
+                            ),
+                            ExplanationFactV1(
+                                label="Exit channel lookback",
+                                observed=Decimal(lookback),
+                                unit=EvidenceUnit.SESSIONS,
+                            ),
+                        ],
+                    ),
+                ]
+            ),
         )
 
     def position_size(

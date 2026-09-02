@@ -365,3 +365,31 @@ def test_evidence_requirements_track_each_channel_lookback() -> None:
     assert requirements.entry[0].columns == ("high",)
     assert requirements.exit[0].minimum_sessions == 11
     assert requirements.exit[0].columns == ("low",)
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy-owned structured explanations
+# ---------------------------------------------------------------------------
+
+
+def _codes(signal: Signal) -> tuple[str, ...]:
+    assert signal.explanation is not None
+    return signal.explanation.codes
+
+
+def test_channel_breakout_and_breach_explain_their_own_channel() -> None:
+    strategy = MODULE.TurtleTrendStrategy()
+    as_of, history = _history()
+    _, breach = _history(current_low="7.99")
+
+    entries = validate_entry_signals(
+        strategy.entry_signals(_View(as_of, history), _parameters())
+    )
+    exits = validate_exit_signals(
+        strategy.exit_signals(_View(as_of, breach), _portfolio("7"), _parameters())
+    )
+
+    assert _codes(entries[0]) == ("channel_breakout",)
+    assert _codes(exits[0]) == ("channel_breach",)
+    entry_facts = {fact.label for fact in entries[0].explanation.reasons[0].facts}
+    assert entry_facts == {"High", "Entry channel lookback"}

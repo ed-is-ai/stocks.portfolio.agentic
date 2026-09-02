@@ -366,3 +366,35 @@ def test_evidence_requirements_track_the_box_lookback() -> None:
     # A missing/invalid parameter falls back to the declared default.
     fallback = strategy.evidence_requirements({"selected_securities": []})
     assert fallback.entry[0].minimum_sessions == 21
+
+
+# ---------------------------------------------------------------------------
+# #472 -- Strategy-owned structured explanations
+# ---------------------------------------------------------------------------
+
+
+def _codes(signal: Signal) -> tuple[str, ...]:
+    assert signal.explanation is not None
+    return signal.explanation.codes
+
+
+def test_breakout_and_breakdown_explain_the_box() -> None:
+    strategy = MODULE.DarvasBoxStrategy()
+    as_of, breakout = _history()
+    _, breach = _history(current_close="89.99")
+
+    entries = validate_entry_signals(
+        strategy.entry_signals(_View(as_of, breakout), _parameters())
+    )
+    exits = validate_exit_signals(
+        strategy.exit_signals(_View(as_of, breach), _portfolio("7"), _parameters())
+    )
+
+    assert _codes(entries[0]) == (
+        "box_breakout",
+        "box_depth_within_limit",
+        "volume_expansion",
+    )
+    assert _codes(exits[0]) == ("box_bottom_break",)
+    assert exits[0].explanation is not None
+    assert "89.99" in exits[0].explanation.reasons[0].facts[0].observed.to_eng_string()
