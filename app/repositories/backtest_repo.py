@@ -300,6 +300,17 @@ CREATE TABLE IF NOT EXISTS active_snapshot_profile (
     activation_seq INTEGER NOT NULL CHECK(activation_seq > 0),
     activated_at TEXT NOT NULL
 );
+-- Additive activation audit (gh-468): every activation writes one row in the
+-- same transaction that overwrites ``active_snapshot_profile``, so the
+-- predecessor of an active profile stays discoverable. Profiles activated
+-- before this table existed fall back to the newest-committed-months
+-- heuristic in ``previous_snapshot_profile``.
+CREATE TABLE IF NOT EXISTS snapshot_profile_activation_history (
+    profile_hash TEXT NOT NULL REFERENCES snapshot_profiles(profile_hash),
+    activation_seq INTEGER NOT NULL CHECK(activation_seq > 0),
+    activated_at TEXT NOT NULL,
+    PRIMARY KEY(profile_hash, activation_seq)
+);
 CREATE TABLE IF NOT EXISTS snapshot_months (
     profile_hash TEXT NOT NULL REFERENCES snapshot_profiles(profile_hash),
     snapshot_month TEXT NOT NULL,
@@ -320,6 +331,10 @@ CREATE TABLE IF NOT EXISTS snapshot_months (
     source_run_id TEXT,
     observed_at TEXT,
     committed_at TEXT NOT NULL,
+    adopted_from_profile_hash TEXT CHECK(
+        adopted_from_profile_hash IS NULL
+        OR length(adopted_from_profile_hash) = 64
+    ),
     PRIMARY KEY(profile_hash, snapshot_month),
     CHECK(expected_count = valid_count + excluded_count)
 );
@@ -613,6 +628,7 @@ CREATE TABLE IF NOT EXISTS initialization_runs (
     ordered_month_digest TEXT CHECK(
         ordered_month_digest IS NULL OR length(ordered_month_digest) = 64
     ),
+    mode TEXT NOT NULL DEFAULT 'rebuild' CHECK(mode IN ('update', 'rebuild')),
     CHECK(requested_start <= requested_end)
 );
 
@@ -711,6 +727,7 @@ WHEN NEW.job_id != OLD.job_id
   OR NEW.requested_end != OLD.requested_end
   OR NEW.requested_months_json != OLD.requested_months_json
   OR NEW.requested_month_digest != OLD.requested_month_digest
+  OR NEW.mode != OLD.mode
   OR NEW.calendar_dataset_version != OLD.calendar_dataset_version
   OR NEW.qualification_contract_digest != OLD.qualification_contract_digest
   OR (OLD.ordered_month_digest IS NOT NULL AND NEW.ordered_month_digest IS NOT OLD.ordered_month_digest)
@@ -1298,6 +1315,23 @@ class ComparisonCandidateV1:
 SnapshotEvidenceV1 = HistoricalEvidenceV1
 
 
+@dataclass(frozen=True)
+class ProfileMemberDeltaV1:
+    """Roster delta between two snapshot profiles (gh-468).
+
+    Members are ``(security_id, provider_symbol, mic, currency)`` tuples in
+    ``roster_member_identities`` order. A member whose identity tuple differs
+    between the two profiles counts as both removed and added: its carried
+    evidence identity is not stable, so it must resolve fresh.
+    """
+
+    previous_profile_hash: str
+    next_profile_hash: str
+    added: tuple[tuple[str, str, str, str], ...]
+    removed: tuple[tuple[str, str, str, str], ...]
+    unchanged: tuple[tuple[str, str, str, str], ...]
+
+
 class HistoricalEvidenceVerifier(Protocol):
     def verify(self, data_revision: str) -> HistoricalEvidenceV1: ...
 
@@ -1499,6 +1533,7 @@ def _row_to_initialization(
         calendar_dataset_version=str(row[6]),
         qualification_contract_digest=str(row[7]),
         ordered_month_digest=None if row[8] is None else str(row[8]),
+        mode="update" if len(row) > 9 and str(row[9]) == "update" else "rebuild",
     )
 
 
@@ -1788,6 +1823,24 @@ class BacktestRepository:
                 conn.execute(
                     "ALTER TABLE backtest_results ADD COLUMN result_schema_version "
                     "TEXT NOT NULL DEFAULT 'backtest_result.v1'"
+                )
+            # gh-468: additive adoption provenance on committed months and the
+            # Update/Rebuild choice on initialization runs. Both are nullable
+            # / defaulted so pre-existing databases migrate in place.
+            month_cols = {
+                str(x[1]) for x in conn.execute("PRAGMA table_info(snapshot_months)")
+            }
+            if "adopted_from_profile_hash" not in month_cols:
+                conn.execute(
+                    "ALTER TABLE snapshot_months ADD COLUMN adopted_from_profile_hash TEXT"
+                )
+            init_cols = {
+                str(x[1])
+                for x in conn.execute("PRAGMA table_info(initialization_runs)")
+            }
+            if "mode" not in init_cols:
+                conn.execute(
+                    "ALTER TABLE initialization_runs ADD COLUMN mode TEXT NOT NULL DEFAULT 'rebuild'"
                 )
             # ``CREATE TRIGGER IF NOT EXISTS`` in the schema script does not
             # replace a pre-selection trigger on an existing database. Rebuild
@@ -2129,15 +2182,23 @@ class BacktestRepository:
         calendar_dataset_version: str,
         qualification_contract_digest: str,
         parent_job_id: str | None = None,
+        mode: str = "rebuild",
     ) -> InitializationEnqueueResultV1:
-        """Atomically enqueue one initialization, or return a verified no-op."""
+        """Atomically enqueue one initialization, or return a verified no-op.
+
+        ``mode`` (gh-468) selects Update (adopt unchanged members from the
+        predecessor data version) or Rebuild; it is part of the run's
+        requested-month digest so restart/replay is deterministic.
+        """
+        if mode not in {"update", "rebuild"}:
+            raise StrategyJobConflict("initialization mode is invalid")
         months = TradingCalendar.months_inclusive(requested_start, requested_end)
         for month in months:
             TradingCalendar.closed_month(month, as_of=self._clock())
         now = self._job_now()
         rendered_months = json.dumps(list(months), separators=(",", ":"))
         month_digest = requested_month_digest(
-            profile_hash, months, calendar_dataset_version
+            profile_hash, months, calendar_dataset_version, mode=mode
         )
         try:
             with session(self._connect) as conn:
@@ -2195,8 +2256,8 @@ class BacktestRepository:
                            job_id, profile_hash, requested_start, requested_end,
                            requested_months_json, requested_month_digest,
                            calendar_dataset_version, qualification_contract_digest,
-                           ordered_month_digest
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                           ordered_month_digest, mode
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
                     (
                         job_id,
                         profile_hash,
@@ -2206,6 +2267,7 @@ class BacktestRepository:
                         month_digest,
                         calendar_dataset_version,
                         qualification_contract_digest,
+                        mode,
                     ),
                 )
                 job = self._load_strategy_job(conn, job_id)
@@ -3578,6 +3640,11 @@ class BacktestRepository:
                             int(current[1]),
                         ),
                     )
+                else:
+                    activation_seq = int(current[1])
+                self._record_activation_history_on_connection(
+                    conn, canonical.profile_hash, activation_seq
+                )
                 cursor = conn.execute(
                     f"""UPDATE strategy_jobs SET status='complete', claim_token=NULL,
                         current_stage=NULL, owner_instance_id=NULL, lease_generation=NULL,
@@ -4880,8 +4947,8 @@ class BacktestRepository:
                      job_id, profile_hash, requested_start, requested_end,
                      requested_months_json, requested_month_digest,
                      calendar_dataset_version, qualification_contract_digest,
-                     ordered_month_digest
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
+                     ordered_month_digest, mode
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
                 (
                     child_id,
                     initialization.profile_hash,
@@ -4893,6 +4960,7 @@ class BacktestRepository:
                     initialization.requested_month_digest,
                     initialization.calendar_dataset_version,
                     initialization.qualification_contract_digest,
+                    initialization.mode,
                 ),
             )
             conn.execute(
@@ -5221,7 +5289,7 @@ class BacktestRepository:
             """SELECT job_id, profile_hash, requested_start, requested_end,
                       requested_months_json, requested_month_digest,
                       calendar_dataset_version, qualification_contract_digest,
-                      ordered_month_digest
+                      ordered_month_digest, mode
                FROM initialization_runs WHERE job_id=?""",
             (job_id,),
         ).fetchone()
@@ -5827,8 +5895,15 @@ class BacktestRepository:
         job_claim: tuple[str, str] | None = None,
         require_active_profile: bool = False,
         lease: WorkerLeaseFenceV1 | None = None,
+        adopted_from_profile_hash: str | None = None,
     ) -> SnapshotMonthManifestV1:
-        """Atomically compare-and-insert one complete Ready snapshot month."""
+        """Atomically compare-and-insert one complete Ready snapshot month.
+
+        ``adopted_from_profile_hash`` records, for Update-mode initialization
+        (gh-468), the predecessor data version whose committed month the
+        unchanged members were adopted from. It is provenance-only: the
+        stored write set is byte-identical to a from-scratch month.
+        """
         try:
             canonical = MonthlySnapshotCommitV1.from_canonical_json(
                 commit.canonical_json_bytes()
@@ -5952,8 +6027,9 @@ class BacktestRepository:
                            provenance_quality, processing_complete, market_complete,
                            roster_digest, expected_digest, input_revision_digest,
                            result_digest, expected_count, valid_count, excluded_count,
-                           content_digest, source_run_id, observed_at, committed_at
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           content_digest, source_run_id, observed_at, committed_at,
+                           adopted_from_profile_hash
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         canonical.profile_hash,
                         manifest.snapshot_month,
@@ -5972,6 +6048,7 @@ class BacktestRepository:
                         manifest.source_run_id,
                         manifest_json["observed_at"],
                         manifest_json["committed_at"],
+                        adopted_from_profile_hash,
                     ),
                 )
                 self._verify_snapshot_rows(conn, canonical)
@@ -6202,6 +6279,50 @@ class BacktestRepository:
             ).fetchall()
         return tuple((str(row[0]), str(row[1])) for row in rows)
 
+    def snapshot_month_write_set(
+        self, profile_hash: str, snapshot_month: str
+    ) -> tuple[tuple[SnapshotMemberV1, ...], tuple[HistoricalScanRecordV1, ...]] | None:
+        """Return one committed month's members + records, read-only.
+
+        The adoption seam for Update-mode initialization (gh-468): the
+        predecessor month's stored write set, exactly as committed. Returns
+        ``None`` when the month is not committed for that profile.
+        """
+        with session(self._connect) as conn:
+            member_rows = conn.execute(
+                """SELECT canonical_member_json FROM snapshot_members
+                    WHERE profile_hash=? AND snapshot_month=?
+                    ORDER BY security_id""",
+                (profile_hash, snapshot_month),
+            ).fetchall()
+            if not member_rows:
+                committed = conn.execute(
+                    """SELECT 1 FROM snapshot_months
+                        WHERE profile_hash=? AND snapshot_month=?""",
+                    (profile_hash, snapshot_month),
+                ).fetchone()
+                if committed is None:
+                    return None
+            result_rows = conn.execute(
+                """SELECT historical_scan_record_json FROM monthly_scan_results
+                    WHERE profile_hash=? AND snapshot_month=?
+                    ORDER BY security_id""",
+                (profile_hash, snapshot_month),
+            ).fetchall()
+        try:
+            members = tuple(
+                SnapshotMemberV1.from_canonical_json(str(row[0])) for row in member_rows
+            )
+            records = tuple(
+                HistoricalScanRecordV1.from_canonical_json(str(row[0]))
+                for row in result_rows
+            )
+        except Exception as exc:
+            raise BacktestIntegrityError(
+                "stored predecessor month write set is invalid"
+            ) from exc
+        return members, records
+
     def _load_verified_snapshot_month(
         self,
         conn: sqlite3.Connection,
@@ -6409,11 +6530,33 @@ class BacktestRepository:
                         raise BacktestIntegrityError(
                             "active snapshot profile changed concurrently"
                         )
+                self._record_activation_history_on_connection(
+                    conn, profile_hash, next_seq
+                )
                 return active
         except BacktestIntegrityError:
             raise
         except Exception as exc:
             raise BacktestIntegrityError("snapshot profile activation failed") from exc
+
+    @staticmethod
+    def _record_activation_history_on_connection(
+        conn: sqlite3.Connection, profile_hash: str, activation_seq: int
+    ) -> None:
+        """Append one activation-audit row beside ``active_snapshot_profile``.
+
+        Same-transaction append keeps the predecessor of an active profile
+        discoverable (gh-468). Idempotent for a re-read of an unchanged
+        pointer, which must not create a duplicate history row.
+        """
+        conn.execute(
+            """INSERT INTO snapshot_profile_activation_history
+                   (profile_hash, activation_seq, activated_at)
+               SELECT ?, ?, activated_at FROM active_snapshot_profile
+                WHERE singleton_id=1 AND profile_hash=? AND activation_seq=?
+               ON CONFLICT(profile_hash, activation_seq) DO NOTHING""",
+            (profile_hash, activation_seq, profile_hash, activation_seq),
+        )
 
     def active_snapshot_profile(self) -> ActiveSnapshotProfileV1 | None:
         with session(self._connect) as conn:
@@ -6431,6 +6574,117 @@ class BacktestRepository:
             )
         except Exception as exc:
             raise BacktestIntegrityError("active snapshot profile is invalid") from exc
+
+    def previous_snapshot_profile(self, profile_hash: str) -> SnapshotProfileV1 | None:
+        """Return the profile activated immediately before ``profile_hash``.
+
+        Resolution order (gh-468): activation history walking backwards to
+        the nearest predecessor that owns committed months; for profiles
+        activated before that table existed (or when history yields no
+        candidate with months), the non-active profile with the most
+        recently committed ``snapshot_months``. Returns ``None`` when no
+        predecessor can be resolved.
+        """
+        with session(self._connect) as conn:
+            current_seq = conn.execute(
+                """SELECT MAX(activation_seq) FROM (
+                       SELECT activation_seq
+                         FROM snapshot_profile_activation_history
+                        WHERE profile_hash=?
+                       UNION ALL
+                       SELECT activation_seq FROM active_snapshot_profile
+                        WHERE singleton_id=1 AND profile_hash=?
+                   )""",
+                (profile_hash, profile_hash),
+            ).fetchone()
+            candidates: list[object] = []
+            if current_seq is not None and current_seq[0] is not None:
+                candidates = conn.execute(
+                    """SELECT profile.canonical_profile_json
+                         FROM snapshot_profile_activation_history history
+                         JOIN snapshot_profiles profile
+                           ON profile.profile_hash = history.profile_hash
+                        WHERE history.activation_seq < ?
+                          AND history.profile_hash != ?
+                        ORDER BY history.activation_seq DESC""",
+                    (int(current_seq[0]), profile_hash),
+                ).fetchall()
+            if not candidates:
+                # Pre-history fallback: the non-active profiles with the most
+                # recently committed snapshot months, newest first (gh-468).
+                candidates = conn.execute(
+                    """SELECT profile.canonical_profile_json
+                         FROM snapshot_months month
+                         JOIN snapshot_profiles profile
+                           ON profile.profile_hash = month.profile_hash
+                        WHERE month.profile_hash != ?
+                          AND month.profile_hash != (
+                              SELECT profile_hash FROM active_snapshot_profile
+                               WHERE singleton_id=1
+                          )
+                        GROUP BY month.profile_hash
+                        ORDER BY MAX(month.committed_at) DESC""",
+                    (profile_hash,),
+                ).fetchall()
+        for row in candidates:
+            try:
+                candidate = SnapshotProfileV1.from_canonical_json(str(row[0]))
+            except Exception as exc:
+                raise BacktestIntegrityError(
+                    "stored predecessor snapshot profile is invalid"
+                ) from exc
+            # Walk back to the nearest predecessor that actually owns
+            # committed months; intermediates initialized nothing (gh-468).
+            if self.profile_has_committed_months(candidate.profile_hash):
+                return candidate
+        return None
+
+    def profile_has_committed_months(self, profile_hash: str) -> bool:
+        """Return whether one profile owns at least one committed month."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM snapshot_months WHERE profile_hash=? LIMIT 1",
+                (profile_hash,),
+            ).fetchone()
+        return row is not None
+
+    def profile_member_delta(
+        self, previous_profile_hash: str, next_profile_hash: str
+    ) -> ProfileMemberDeltaV1 | None:
+        """Return the roster delta between two profiles (gh-468).
+
+        Read-only projection over ``roster_member_identities``; ``None`` when
+        either profile does not exist.
+        """
+        try:
+            previous = self.roster_member_identities(previous_profile_hash)
+            nxt = self.roster_member_identities(next_profile_hash)
+        except BacktestIntegrityError:
+            return None
+        previous_by_id = {item[0]: item for item in previous}
+        next_by_id = {item[0]: item for item in nxt}
+        added = tuple(
+            item
+            for security_id, item in sorted(next_by_id.items())
+            if security_id not in previous_by_id or previous_by_id[security_id] != item
+        )
+        removed = tuple(
+            item
+            for security_id, item in sorted(previous_by_id.items())
+            if security_id not in next_by_id or next_by_id[security_id] != item
+        )
+        unchanged = tuple(
+            item
+            for security_id, item in sorted(next_by_id.items())
+            if security_id in previous_by_id and previous_by_id[security_id] == item
+        )
+        return ProfileMemberDeltaV1(
+            previous_profile_hash=previous_profile_hash,
+            next_profile_hash=next_profile_hash,
+            added=added,
+            removed=removed,
+            unchanged=unchanged,
+        )
 
     def snapshot_coverage(self, profile_hash: str | None = None) -> CoverageSummaryV1:
         with self._snapshot_coverage_lock:

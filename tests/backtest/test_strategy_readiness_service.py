@@ -9,6 +9,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
+from typing import cast
 
 
 from app.repositories import db
@@ -26,9 +28,11 @@ from app.services.backtest.strategy_job import (
     StrategyJobType,
     WorkerState,
 )
+from app.services.backtest.snapshot_profile import SnapshotProfileV1
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
+from app.services.backtest.source_manifest import detector_source_manifests
 from app.services.backtest.trading_calendar import TradingCalendar
 import json
 
@@ -50,6 +54,61 @@ def _qualification_digest() -> str:
             "probe_definition_digest": PROBE_DEFINITION_DIGEST,
         }
     )
+
+
+def _prereq(name: str):
+    """A minimal prerequisite row for diagnostics projection stubs."""
+    from enum import Enum
+
+    class _E(str, Enum):
+        V = "ready"
+
+    return SimpleNamespace(
+        name=name,
+        state=_E.V,
+        reason="ok",
+        recovery_action=SimpleNamespace(value="none"),
+        last_verified_at=None,
+    )
+
+
+def _delta_profile(**overrides):
+    """A minimal-but-valid profile for the gh-468 delta projection tests."""
+    from pathlib import Path
+
+    from app.services.backtest.detectors import DETECTOR_REGISTRY
+    from app.services.backtest.snapshot_profile import ProfileDetectorV1
+
+    project_root = Path(__file__).resolve().parents[2]
+    manifests = detector_source_manifests(project_root)
+    fields: dict[str, object] = dict(
+        schema_version="snapshot_profile.v1",
+        display_version="Scanner data v1",
+        record_schema_version="historical_scan_record.v1",
+        detectors=tuple(
+            ProfileDetectorV1(
+                detector_id=detector.detector_id,
+                detector_api_version=detector.detector_api_version,
+                detector_version=manifests[detector.detector_id].digest,
+            )
+            for detector in DETECTOR_REGISTRY
+        ),
+        roster_policy_version="ReconstructionRosterPolicyV1",
+        roster_digest="b" * 64,
+        identity_registry_version="SecurityIdentityRegistryV1",
+        alias_policy_version="SecurityAliasManifestV1",
+        source_policy_version="FreeHistoricalSourcePolicyV1",
+        calendar_policy_version="PerExchangeMonthEndV1",
+        calendar_dataset_version="exchange-calendars-v1",
+        calendar_dataset_digest="c" * 64,
+        yfinance_request_contract_version="yfinance-daily-v1",
+        yfinance_ingestion_version="ingestion-v1",
+        market_plane_policy_version="HistoricalMarketPlanesV1",
+        reconstructability_policy_version="reconstructability.v1",
+        provenance_vocabulary=("best_effort_reconstructed", "observed_bau"),
+        cadence="per-exchange month_end",
+    )
+    return SnapshotProfileV1.model_validate({**fields, **overrides})
 
 
 def _empty_repo(path: Path) -> BacktestRepository:
@@ -320,3 +379,115 @@ def test_is_fixture_true_in_test(monkeypatch, tmp_path: Path) -> None:
     service = StrategyReadinessService(repo, clock=NOW)
     result = service.evaluate()
     assert result.is_fixture is True
+
+
+# ---------------------------------------------------------------------------
+# gh-468: predecessor-delta projection
+# ---------------------------------------------------------------------------
+
+
+class _DeltaRepo:
+    """Minimal read-only stub for ``profile_delta`` (gh-468)."""
+
+    def __init__(self, previous, delta, current):
+        self._previous = previous
+        self._delta = delta
+        self._current = current
+
+    def previous_snapshot_profile(self, _profile_hash):
+        return self._previous
+
+    def profile_has_committed_months(self, _profile_hash):
+        return True
+
+    def profile_member_delta(self, _previous, _next):
+        return self._delta
+
+    def snapshot_profile(self, _profile_hash):
+        return self._current
+
+    def active_snapshot_profile(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(profile_hash="cur", activation_seq=2)
+
+
+def test_profile_delta_counts_and_update_availability(tmp_path: Path) -> None:
+    previous = _delta_profile(roster_digest="3" * 64)
+    current = _delta_profile(roster_digest="4" * 64)
+    repo = _DeltaRepo(
+        previous,
+        SimpleNamespace(added=("a",), removed=("r", "r2"), unchanged=("u",)),
+        current,
+    )
+    service = StrategyReadinessService(
+        cast(BacktestRepository, repo), clock=lambda: NOW
+    )
+
+    delta = service.profile_delta()
+
+    assert delta is not None
+    assert delta["previous_profile_hash"] == previous.profile_hash
+    assert delta["added"] == 1
+    assert delta["removed"] == 2
+    assert delta["unchanged"] == 1
+    assert delta["update_available"] is True
+    assert delta["update_blocked_reasons"] == []
+
+
+def test_profile_delta_reports_gate_reasons(tmp_path: Path) -> None:
+    previous = _delta_profile(roster_digest="3" * 64)
+    current = _delta_profile(
+        roster_digest="4" * 64, yfinance_ingestion_version="ingestion-v2"
+    )
+    repo = _DeltaRepo(
+        previous, SimpleNamespace(added=(), removed=(), unchanged=()), current
+    )
+    service = StrategyReadinessService(
+        cast(BacktestRepository, repo), clock=lambda: NOW
+    )
+
+    delta = service.profile_delta()
+
+    assert delta is not None
+    assert delta["update_available"] is False
+    assert any("ingestion" in reason for reason in delta["update_blocked_reasons"])
+
+
+def test_profile_delta_none_without_predecessor(tmp_path: Path) -> None:
+    repo = _DeltaRepo(None, None, _delta_profile(roster_digest="4" * 64))
+    service = StrategyReadinessService(
+        cast(BacktestRepository, repo), clock=lambda: NOW
+    )
+
+    assert service.profile_delta() is None
+
+
+def test_diagnostics_includes_profile_delta(tmp_path: Path) -> None:
+    previous = _delta_profile(roster_digest="3" * 64)
+    current = _delta_profile(roster_digest="4" * 64)
+    repo = _DeltaRepo(
+        previous, SimpleNamespace(added=(), removed=(), unchanged=()), current
+    )
+    service = StrategyReadinessService(
+        cast(BacktestRepository, repo), clock=lambda: NOW
+    )
+
+    empty_readiness = SimpleNamespace(
+        is_fixture=False,
+        qualification=_prereq("qualification"),
+        roster=_prereq("roster"),
+        active_profile=_prereq("active_profile"),
+        coverage=_prereq("coverage"),
+        discovery=_prereq("discovery"),
+        prerequisites=(),
+        worker=SimpleNamespace(
+            state=SimpleNamespace(value="ready"),
+            reason="ok",
+            recovery_action=SimpleNamespace(value="none"),
+        ),
+        recent_failures=(),
+    )
+    diagnostics = service.diagnostics(empty_readiness)
+
+    assert diagnostics["profile_delta"] == service.profile_delta()

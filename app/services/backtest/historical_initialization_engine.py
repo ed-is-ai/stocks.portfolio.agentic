@@ -8,10 +8,13 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
-from app.repositories.historical_price_repo import HistoricalPriceRepository
+from app.repositories.historical_price_repo import (
+    HistoricalPriceRepository,
+    StoredHistoricalEvidence,
+)
 from app.services.backtest.detectors import DETECTOR_REGISTRY
 from app.services.backtest.historical_data_qualification import (
     REQUEST_CONTRACT_VERSION,
@@ -43,6 +46,7 @@ from app.services.backtest.snapshot_profile import (
     SnapshotContractError,
     SnapshotMemberV1,
     SnapshotProfileV1,
+    adoption_gate_failures,
     build_before_first_provider_observation,
     build_incomplete_detector_history,
     build_insufficient_detector_history,
@@ -109,9 +113,12 @@ class CanonicalSnapshotMonthProcessor:
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         project_root: Path | None = None,
         lease: WorkerLeaseFenceV1 | None = None,
+        mode: str = "rebuild",
     ) -> None:
         if profile.roster_digest != roster.roster_digest:
             raise ValueError("snapshot profile and reconstruction roster differ")
+        if mode not in {"update", "rebuild"}:
+            raise ValueError("initialization mode is invalid")
         self._job_id = job_id
         self._claim_token = claim_token
         self._profile = profile
@@ -126,6 +133,11 @@ class CanonicalSnapshotMonthProcessor:
         self._clock = clock
         self._project_root = project_root or Path(__file__).resolve().parents[3]
         self._lease = lease
+        # gh-468: Update mode adopts unchanged members from the predecessor
+        # data version's committed months; Rebuild resolves everything fresh.
+        self._mode = mode
+        self._predecessor_resolved = False
+        self._predecessor: SnapshotProfileV1 | None = None
         # Every month in one initialization run asks for the same immutable
         # full-history evidence window. Re-validating and deserializing that
         # payload for each security/month pair dominates long reruns, while
@@ -150,12 +162,35 @@ class CanonicalSnapshotMonthProcessor:
                 snapshot_month,
                 as_of=now.date(),
             )
-            resolved = tuple(
-                self._resolve_member(member, snapshot_month, sessions[member.mic], now)
-                for member in sorted(
-                    self._roster.members, key=lambda item: item.security_id
+            adopted_from: str | None = None
+            resolved: tuple[ResolvedSnapshotMember, ...] | None = None
+            if self._mode == "update":
+                try:
+                    adopted_from, resolved = self._adopt_month(
+                        snapshot_month, sessions, now
+                    )
+                except InitializationMonthError:
+                    raise
+                except Exception:
+                    # Adoption output is byte-identical to a from-scratch
+                    # month by construction, so an unexpected adoption error
+                    # can always degrade to the full path without changing
+                    # what is stored -- but it must be loud (gh-468).
+                    logger.exception(
+                        "Update-mode adoption of %s failed; resolving every "
+                        "member from scratch",
+                        snapshot_month,
+                    )
+                    adopted_from, resolved = None, None
+            if resolved is None:
+                resolved = tuple(
+                    self._resolve_member(
+                        member, snapshot_month, sessions[member.mic], now
+                    )
+                    for member in sorted(
+                        self._roster.members, key=lambda item: item.security_id
+                    )
                 )
-            )
             members = tuple(item.member for item in resolved)
             records = tuple(item.record for item in resolved if item.record is not None)
             commit = MonthlySnapshotCommitV1.build(
@@ -178,6 +213,7 @@ class CanonicalSnapshotMonthProcessor:
                 self._price_repository,
                 job_claim=(self._job_id, self._claim_token),
                 lease=self._lease,
+                adopted_from_profile_hash=adopted_from,
             )
         except InitializationMonthError:
             raise
@@ -218,18 +254,220 @@ class CanonicalSnapshotMonthProcessor:
                 f"Historical month failed ({type(exc).__name__}); see server logs",
             ) from exc
 
-    def _resolve_member(
+    def _predecessor_profile(self) -> SnapshotProfileV1 | None:
+        """Resolve and gate the predecessor data version, once per run (gh-468).
+
+        Returns ``None`` when Update is unavailable: no discoverable
+        predecessor, a rebuild-forcing policy difference (detector versions,
+        ingestion version, calendar dataset, request contract), or a
+        predecessor without committed months to adopt from.
+        """
+        if self._predecessor_resolved:
+            return self._predecessor
+        self._predecessor_resolved = True
+        try:
+            previous = self._backtest_repository.previous_snapshot_profile(
+                self._profile.profile_hash
+            )
+        except BacktestIntegrityError as exc:
+            logger.warning("Predecessor data version unreadable (%s); rebuilding", exc)
+            return None
+        if previous is None:
+            return None
+        failures = adoption_gate_failures(previous, self._profile)
+        if failures:
+            logger.info(
+                "Update unavailable because %s; rebuilding every member",
+                "; ".join(failures),
+            )
+            return None
+        if not self._backtest_repository.profile_has_committed_months(
+            previous.profile_hash
+        ):
+            return None
+        self._predecessor = previous
+        return previous
+
+    def _adopt_month(
+        self,
+        snapshot_month: str,
+        sessions: dict[str, date],
+        now: datetime,
+    ) -> tuple[str | None, tuple[ResolvedSnapshotMember, ...] | None]:
+        """Adopt one closed predecessor month's unchanged members (gh-468).
+
+        Members whose stored predecessor record is a valid scan with an
+        identical identity are re-derived under the new profile via
+        :meth:`HistoricalScanReconstructor.adopted_record` (detector payloads
+        carried, provenance recomputed); everything else -- added or changed
+        members, members removed from the predecessor, and carried exclusion
+        proofs, which embed alias/calendar inputs -- resolves through the
+        deterministic fresh path. Returns ``(None, None)`` when this month
+        cannot be adopted and the caller must resolve every member fresh.
+        """
+        predecessor = self._predecessor_profile()
+        if predecessor is None:
+            return None, None
+        write_set = self._backtest_repository.snapshot_month_write_set(
+            predecessor.profile_hash, snapshot_month
+        )
+        if write_set is None:
+            return None, None
+        previous_members, previous_records = write_set
+        records_by_id = {
+            record.security_id: record for record in previous_records
+        }
+        # Only valid-scan members have records; zip would mispair exclusions.
+        carried = {
+            member.security_id: (member, records_by_id[member.security_id])
+            for member in previous_members
+            if member.resolution == "valid_scan"
+            and member.security_id in records_by_id
+        }
+        resolved: list[ResolvedSnapshotMember] = []
+        adopted: list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]] = []
+        for member in sorted(self._roster.members, key=lambda item: item.security_id):
+            target_session = sessions[member.mic]
+            previous = carried.get(member.security_id)
+            adoptable = previous is not None and self._carried_identity_matches(
+                previous[0], previous[1], member, target_session, snapshot_month
+            )
+            if adoptable:
+                # The carried payloads are only valid for the evidence they
+                # were computed from: if the price store now resolves a
+                # different revision (re-ingestion/correction), the member
+                # must resolve fresh to stay byte-identical to a Rebuild.
+                request = self._evidence_request(
+                    member, snapshot_month, target_session, now
+                )
+                evidence = cast(
+                    StoredHistoricalEvidence, self._evidence_for(member, request)
+                )
+                adoptable = (
+                    evidence.data_revision == previous[0].provider_data_revision
+                )
+            if adoptable:
+                item, request = self._adopt_valid_member(
+                    member, previous[1], snapshot_month, target_session, now
+                )
+                adopted.append((item, request))
+            else:
+                item = self._resolve_member(member, snapshot_month, target_session, now)
+            resolved.append(item)
+        # Bounded determinism self-check: recomputing an adopted record from
+        # the same pinned evidence through the full reconstruction path must
+        # reproduce it byte-for-byte; any divergence means the adoption
+        # rewrite is wrong and the run must not commit partial truth.
+        for item, request in self._self_check_sample(adopted):
+            recomputed = self._reconstructor.reconstruct(request)
+            if recomputed.record != item.record:
+                raise InitializationMonthError(
+                    JobFailureCode.INTEGRITY_ERROR,
+                    f"Adopted record for {item.member.security_id!r} in "
+                    f"{snapshot_month} diverges from its reconstruction",
+                )
+        if not adopted:
+            # Nothing was carried: stamping predecessor provenance on a
+            # 100%-fresh month would mislead adoption audits (gh-468).
+            return None, tuple(resolved)
+        return predecessor.profile_hash, tuple(resolved)
+
+    @staticmethod
+    def _self_check_sample(
+        adopted: list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]],
+    ) -> list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]]:
+        """Bound the self-check to the first and last adopted member."""
+        if not adopted:
+            return []
+        if len(adopted) == 1:
+            return adopted[:1]
+        return [adopted[0], adopted[-1]]
+
+    def _carried_identity_matches(
+        self,
+        previous_member: SnapshotMemberV1,
+        previous_record: HistoricalScanRecordV1,
+        member: CapturedRosterMemberV1,
+        target_session: date,
+        snapshot_month: str,
+    ) -> bool:
+        """Whether one predecessor member may be adopted unchanged (gh-468).
+
+        Identity, exchange, currency, quote unit, and the canonical
+        month-end session must all agree; anything else resolves fresh.
+        """
+        return (
+            previous_member.resolution == "valid_scan"
+            and previous_member.mic == member.mic
+            and previous_member.observed_symbol == member.provider_symbol
+            and previous_member.as_of_session_date == target_session
+            and previous_record.security_id == member.security_id
+            and previous_record.observed_symbol == member.provider_symbol
+            and previous_record.mic == member.mic
+            and previous_record.snapshot_month == snapshot_month
+            and previous_record.as_of_session_date == target_session
+            and previous_record.currency == member.currency
+            and previous_record.quote_unit == member.quote_unit
+        )
+
+    def _adopt_valid_member(
+        self,
+        member: CapturedRosterMemberV1,
+        previous_record: HistoricalScanRecordV1,
+        snapshot_month: str,
+        target_session: date,
+        now: datetime,
+    ) -> tuple[ResolvedSnapshotMember, ReconstructionRequestV1]:
+        """Re-derive one unchanged member's record under the new profile.
+
+        The detector payloads carried from the predecessor record are pure
+        functions of the member's own pinned evidence, so
+        :meth:`HistoricalScanReconstructor.adopted_record` reproduces
+        byte-for-byte what a fresh ``reconstruct`` would produce under the
+        new input manifest (gh-468).
+        """
+        request = self._evidence_request(member, snapshot_month, target_session, now)
+        evidence = cast(
+            StoredHistoricalEvidence,
+            self._evidence_for(member, request),
+        )
+        reconstruction_request = ReconstructionRequestV1(
+            security_id=member.security_id,
+            observed_symbol=evidence.observed_symbol,
+            mic=member.mic,
+            snapshot_month=snapshot_month,
+            as_of_session_date=target_session,
+            identity_candidates=(member.security_id,),
+            roster=self._roster,
+            evidence=evidence,
+            input_manifest=self._input_manifest(
+                member, snapshot_month, target_session, evidence
+            ),
+        )
+        record = self._reconstructor.adopted_record(
+            reconstruction_request,
+            technicals=previous_record.technicals,
+            stage=previous_record.stage,
+            vcp=previous_record.vcp,
+        )
+        return (
+            ResolvedSnapshotMember(SnapshotMemberV1.valid_scan(record), record),
+            reconstruction_request,
+        )
+
+    def _evidence_request(
         self,
         member: CapturedRosterMemberV1,
         snapshot_month: str,
         target_session: date,
         now: datetime,
-    ) -> ResolvedSnapshotMember:
+    ) -> HistoricalEvidenceRequest:
+        """Build the canonical full-history evidence request for one member."""
         end_exclusive = date(now.year, now.month, 1)
         expected_sessions = self._calendar.sessions_in_range(
             member.mic, FULL_HISTORY_START, end_exclusive
         )
-        request = HistoricalEvidenceRequest(
+        return HistoricalEvidenceRequest(
             security_id=member.security_id,
             alias_revision=self._alias_revision,
             symbol=member.provider_symbol,
@@ -243,6 +481,15 @@ class CanonicalSnapshotMonthProcessor:
             allow_missing_prefix=True,
             canonical_exchange_sessions=True,
         )
+
+    def _resolve_member(
+        self,
+        member: CapturedRosterMemberV1,
+        snapshot_month: str,
+        target_session: date,
+        now: datetime,
+    ) -> ResolvedSnapshotMember:
+        request = self._evidence_request(member, snapshot_month, target_session, now)
         try:
             evidence = self._evidence_for(member, request)
         except ProviderFailure as exc:
@@ -262,7 +509,9 @@ class CanonicalSnapshotMonthProcessor:
 
         if (
             target_session < first_observed
-            or tuple(session for session in observed_to_target if session in required_window)
+            or tuple(
+                session for session in observed_to_target if session in required_window
+            )
             != required_window
         ):
             alias_from, alias_to = self._backtest_repository.effective_alias_bounds(

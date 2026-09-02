@@ -408,3 +408,24 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-467-nuanced-breadth-bullet.md`
   summary: `market_breadth._parse_latest` is not self-contained fail-safe — `latest["Date"]`, `latest["Breadth_Index_Raw"]`, and `datetime.strptime` can all raise; a direct caller not wrapping it (only `fetch_market_breadth` does today) would get an exception instead of `None`.
   evidence: The module/function docstrings imply "parse … or None"; the actual None-on-bad-data contract lives in the caller's `try/except (KeyError, ValueError, TypeError)`.
+
+## Deferred from: code review of spec-gh-468-incremental-init (2026-09-02)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-468-incremental-init.md`
+  summary: The adoption self-check samples only the first and last adopted member per month; broaden to deterministic hash-bucket sampling now that the evidence-revision gate removes the common divergence cause.
+  evidence: `_self_check_sample` returns at most two members; middle-member divergence would only surface on a reconstructor bug (review finding, 2026-09-02).
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-468-incremental-init.md`
+  summary: When Update degrades to Rebuild at run time, the effective mode/degrade reason is only logged, not persisted on the initialization run.
+  evidence: `_predecessor_profile` logs and returns None; the run row keeps `mode='update'` with `adopted_from_profile_hash` NULL as the only hint (review finding, 2026-09-02).
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-468-incremental-init.md`
+  summary: The resolved predecessor is not pinned into the run identity, so a replay after another activation may adopt from a different predecessor.
+  evidence: `requested_month_digest` covers mode but not the predecessor hash; months still validate, so the impact is provenance drift only (review finding, 2026-09-02).
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-468-incremental-init.md`
+  summary: `snapshot_month_write_set` skips the cross-checks of the verified month loader; adoption trusts the commit-time validator as the backstop.
+  evidence: read path parses stored JSON without column-vs-canonical verification (review finding, 2026-09-02).
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-468-incremental-init.md`
+  summary: `previous_snapshot_profile` reads history and pointer in separate autocommit statements (theoretical concurrent-activation race).
+  evidence: single connection but no explicit read transaction (review finding, 2026-09-02).
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-468-incremental-init.md`
+  summary: ALTER TABLE migrations cannot attach the fresh schema's CHECK constraints for `adopted_from_profile_hash`/`mode`; migrated DBs rely on application-level validation.
+  evidence: migration block only adds the columns (review finding, 2026-09-02).

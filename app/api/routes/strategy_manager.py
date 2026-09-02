@@ -89,6 +89,7 @@ from app.services.backtest.strategy_protocol import JsonValue, StrategyParameter
 from app.services.backtest.strategy_protocol import validate_strategy_parameters
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
+    profile_delta_projection,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
 
@@ -369,7 +370,7 @@ def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
 def _initialization_context(
     repo: BacktestRepository, **extra: object
 ) -> dict[str, object]:
-    return {
+    context: dict[str, object] = {
         **_coverage_context(repo),
         **_profile_context(repo),
         "initialization_history": _initialization_history(repo),
@@ -379,8 +380,18 @@ def _initialization_context(
         "values": {"start_month": "", "end_month": ""},
         "errors": {},
         "message": None,
+        "profile_delta": None,
         **extra,
     }
+    profile = context.get("profile")
+    if isinstance(profile, SnapshotProfileV1):
+        try:
+            context["profile_delta"] = profile_delta_projection(
+                repo, profile.profile_hash
+            )
+        except BacktestIntegrityError:
+            context["profile_delta"] = None
+    return context
 
 
 def _strategy_manager_context(
@@ -632,7 +643,11 @@ async def strategy_readiness(
     return template_response(
         request,
         "_strategy_readiness.html",
-        {"readiness": result, "open_advanced": section == "advanced"},
+        {
+            "readiness": result,
+            "profile_delta": readiness.profile_delta(),
+            "open_advanced": section == "advanced",
+        },
     )
 
 
@@ -705,7 +720,18 @@ async def submit_initialization(
     jobs: JobsDep,
     start_month: Annotated[str, Form()] = "",
     end_month: Annotated[str, Form()] = "",
+    mode: Annotated[str, Form()] = "rebuild",
 ) -> Response:
+    if mode not in {"update", "rebuild"}:
+        context = _initialization_context(
+            backtest, values={"start_month": start_month, "end_month": end_month}
+        )
+        return template_response(
+            request,
+            "_historical_initialization.html",
+            {**context, "errors": {"form": "Unknown preparation mode."}},
+            status_code=_form_error_status(request),
+        )
     context = _initialization_context(
         backtest, values={"start_month": start_month, "end_month": end_month}
     )
@@ -742,6 +768,7 @@ async def submit_initialization(
                 requested_start=start_month,
                 requested_end=end_month,
                 calendar_dataset_version=active_profile.calendar_dataset_version,
+                mode=mode,
             )
         )
     except (BacktestIntegrityError, StrategyJobConflict, ValueError) as exc:

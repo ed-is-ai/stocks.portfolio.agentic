@@ -246,6 +246,7 @@ def test_member_processing_is_stable_and_stops_at_first_failure() -> None:
         )
 
     processor = object.__new__(CanonicalSnapshotMonthProcessor)
+    setattr(processor, "_mode", "rebuild")
     setattr(
         processor,
         "_roster",

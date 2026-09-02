@@ -127,6 +127,7 @@ def build_initialization_engine(
         backtest_repository=backtest,
         price_repository=prices,
         lease=lease,
+        mode=initialization.mode,
     )
 
     def qualified() -> bool:

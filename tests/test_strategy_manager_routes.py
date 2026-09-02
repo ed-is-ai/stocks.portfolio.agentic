@@ -285,6 +285,17 @@ class FakeRepo:
     def snapshot_profile(self, _hash):
         return self.profile
 
+    def previous_snapshot_profile(self, _hash):
+        # gh-468: route tests have no predecessor data version, so the
+        # Update/Rebuild delta stays hidden in these fixtures.
+        return None
+
+    def profile_has_committed_months(self, _hash):
+        return False
+
+    def profile_member_delta(self, _previous, _next):
+        return None
+
     def current_qualification_contract_digest(self):
         return "b" * 64 if self.qualified else None
 
@@ -3683,3 +3694,112 @@ def test_comparison_equity_date_mismatch_renders_integrity_error(services):
     assert "comparison equity curves diverge" in text
     assert "Metrics" not in text
     assert "Trade Log" not in text
+
+
+# ---------------------------------------------------------------------------
+# gh-468: Update/Rebuild choice on the initialization screen
+# ---------------------------------------------------------------------------
+
+
+def _predecessor_profile():
+    """A real profile for delta projections (exact V1 detector set)."""
+    from pathlib import Path
+
+    from app.services.backtest.detectors import DETECTOR_REGISTRY
+    from app.services.backtest.snapshot_profile import (
+        ProfileDetectorV1,
+        SnapshotProfileV1,
+    )
+    from app.services.backtest.source_manifest import detector_source_manifests
+
+    project_root = Path(__file__).resolve().parents[1]
+    manifests = detector_source_manifests(project_root)
+    detectors = tuple(
+        ProfileDetectorV1(
+            detector_id=detector.detector_id,
+            detector_api_version=detector.detector_api_version,
+            detector_version=manifests[detector.detector_id].digest,
+        )
+        for detector in DETECTOR_REGISTRY
+    )
+
+    fields: dict[str, object] = dict(
+        schema_version="snapshot_profile.v1",
+        display_version="Scanner data v1",
+        record_schema_version="historical_scan_record.v1",
+        detectors=detectors,
+        roster_policy_version="ReconstructionRosterPolicyV1",
+        roster_digest="a" * 64,
+        identity_registry_version="SecurityIdentityRegistryV1",
+        alias_policy_version="SecurityAliasManifestV1",
+        source_policy_version="FreeHistoricalSourcePolicyV1",
+        calendar_policy_version="PerExchangeMonthEndV1",
+        calendar_dataset_version="exchange-calendars-v1",
+        calendar_dataset_digest="c" * 64,
+        yfinance_request_contract_version="yfinance-daily-v1",
+        yfinance_ingestion_version="ingestion-v1",
+        market_plane_policy_version="HistoricalMarketPlanesV1",
+        reconstructability_policy_version="reconstructability.v1",
+        provenance_vocabulary=("best_effort_reconstructed", "observed_bau"),
+        cadence="per-exchange month_end",
+    )
+    return SnapshotProfileV1.model_validate(fields)
+
+
+def _with_predecessor(repo) -> None:
+    previous = _predecessor_profile()
+    repo.previous_snapshot_profile = lambda _hash: previous
+    repo.profile_has_committed_months = lambda _hash: True
+    repo.profile_member_delta = lambda _p, _n: SimpleNamespace(
+        added=(("new", "XNAS", "NEW", "USD"),),
+        removed=(("old", "XNAS", "OLD", "USD"), ("old2", "XNAS", "OLD2", "USD")),
+        unchanged=(("sec", "XNAS", "SEC", "USD"),),
+    )
+    # Identical policies -> the Update path is available.
+    repo.profile = previous
+
+
+def test_initialization_shows_update_choice_when_predecessor_exists(services):
+    repo, _ = services
+    _with_predecessor(repo)
+
+    response = client.get("/strategy-manager/initialization")
+
+    assert response.status_code == 200
+    assert "New data version detected: 1 securities added, 2 removed" in (response.text)
+    assert 'value="update"' in response.text
+    assert "Update (recommended)" in response.text
+    assert "Rebuild from scratch" in response.text
+
+
+def test_initialization_submits_the_chosen_mode(services):
+    repo, jobs = services
+    _with_predecessor(repo)
+
+    response = client.post(
+        "/strategy-manager/initialization",
+        data={
+            "start_month": "2026-07",
+            "end_month": "2026-07",
+            "mode": "update",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code in (200, 303)
+    assert jobs.submissions[0].mode == "update"
+
+
+def test_initialization_defaults_to_rebuild_without_predecessor(services):
+    repo, jobs = services  # FakeRepo resolves no predecessor data version.
+
+    response = client.post(
+        "/strategy-manager/initialization",
+        data={"start_month": "2026-07", "end_month": "2026-07"},
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code in (200, 303)
+    assert jobs.submissions[0].mode == "rebuild"

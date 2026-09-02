@@ -401,6 +401,7 @@ class InitializationRunV1(_LifecycleModel):
     calendar_dataset_version: Annotated[str, Field(min_length=1)]
     qualification_contract_digest: Digest
     ordered_month_digest: Digest | None = None
+    mode: Literal["update", "rebuild"] = "rebuild"
 
     @model_validator(mode="after")
     def _valid_range(self) -> "InitializationRunV1":
@@ -409,13 +410,11 @@ class InitializationRunV1(_LifecycleModel):
         )
         if self.requested_months != expected:
             raise ValueError("initialization requested months do not match its range")
-        digest = manifest_digest(
-            {
-                "schema_version": "initialization_requested_months.v1",
-                "profile_hash": self.profile_hash,
-                "months": expected,
-                "calendar_dataset_version": self.calendar_dataset_version,
-            }
+        digest = requested_month_digest(
+            self.profile_hash,
+            expected,
+            self.calendar_dataset_version,
+            mode=self.mode,
         )
         if self.requested_month_digest != digest:
             raise ValueError("initialization requested-month digest is invalid")
@@ -691,6 +690,10 @@ class InitializationSubmissionV1(_LifecycleModel):
     requested_end: Month
     calendar_dataset_version: Annotated[str, Field(min_length=1)]
     parent_job_id: str | None = None
+    # gh-468: Update adopts unchanged members from the predecessor data
+    # version; Rebuild resolves every member from scratch. The choice is part
+    # of the enqueued job's identity via ``requested_month_digest``.
+    mode: Literal["update", "rebuild"] = "rebuild"
 
     @model_validator(mode="after")
     def _closed_range(self) -> "InitializationSubmissionV1":
@@ -739,16 +742,28 @@ class StrategyJobDeletionV1(_LifecycleModel):
 
 
 def requested_month_digest(
-    profile_hash: str, months: tuple[str, ...], calendar_dataset_version: str
+    profile_hash: str,
+    months: tuple[str, ...],
+    calendar_dataset_version: str,
+    *,
+    mode: str = "rebuild",
 ) -> str:
-    return manifest_digest(
-        {
-            "schema_version": "initialization_requested_months.v1",
-            "profile_hash": profile_hash,
-            "months": months,
-            "calendar_dataset_version": calendar_dataset_version,
-        }
-    )
+    """Return the initialization run's requested-month identity.
+
+    gh-468: Update mode folds the path choice into the digest so restart and
+    replay of an Update job cannot silently degrade into a Rebuild. Rebuild
+    digests keep the pre-gh-468 payload exactly, so stored runs enqueued
+    before the mode column existed still validate on load.
+    """
+    payload: dict[str, object] = {
+        "schema_version": "initialization_requested_months.v1",
+        "profile_hash": profile_hash,
+        "months": months,
+        "calendar_dataset_version": calendar_dataset_version,
+    }
+    if mode != "rebuild":
+        payload["mode"] = mode
+    return manifest_digest(payload)
 
 
 __all__ = [

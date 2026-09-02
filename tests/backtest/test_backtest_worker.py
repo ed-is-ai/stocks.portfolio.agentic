@@ -12,6 +12,10 @@ import pytest
 from app.core import config
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
+from app.services.backtest.canonical_manifest import (
+    canonical_json,
+    manifest_digest,
+)
 from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.backtest.detectors import DETECTOR_REGISTRY
 from app.services.backtest.historical_price_evidence import (
@@ -1264,7 +1268,9 @@ def test_preparation_missing_evidence_uses_required_data_code(
         lambda *_a, **_k: (_ for _ in ()).throw(Unsafe("internal /secret/path")),
     )
     generic = worker_module.PreparationStageEngine(
-        repo2, prices=object(), fx=object()  # type: ignore[arg-type]
+        repo2,
+        prices=object(),
+        fx=object(),  # type: ignore[arg-type]
     ).run(a2.job.id, c2.claim_token)  # type: ignore[arg-type]
     assert generic.failure_detail == "Required selected evidence is unavailable"
     assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
@@ -1380,3 +1386,64 @@ def test_preparation_pins_fx_at_the_fx_stage(
     assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
     assert pin_fx_values == [False, True]
     assert stages == ["evidence_selection", "fx_pinning", "manifest_sealing"]
+
+
+def test_initialization_mode_round_trips_and_reaches_the_engine(tmp_path) -> None:
+    """gh-468: the Update/Rebuild choice survives enqueue -> run -> engine."""
+    from app.services.backtest.historical_initialization_engine import (
+        CanonicalSnapshotMonthProcessor,
+    )
+    from app.services.backtest.reconstruction_roster import CapturedRosterV1
+
+    repo = _repo(tmp_path / "backtest.db")
+    from test_snapshot_coverage_repository import _record_current_qualification
+
+    qualification = _record_current_qualification(repo)
+    result = repo.create_initialization_job(
+        profile_hash=PROFILE_HASH,
+        requested_start="2026-05",
+        requested_end="2026-05",
+        calendar_dataset_version="exchange-calendars-v1",
+        qualification_contract_digest=qualification,
+        mode="update",
+    )
+    assert result.no_op is False
+    run = repo.initialization_run(result.job.id)
+    assert run.mode == "update"
+
+    # The mode folds into the requested-month digest: a rebuild digest over
+    # the same window is different job identity.
+    rebuild = repo.create_initialization_job(
+        profile_hash=PROFILE_HASH,
+        requested_start="2026-05",
+        requested_end="2026-05",
+        calendar_dataset_version="exchange-calendars-v1",
+        qualification_contract_digest=qualification,
+    )
+    assert rebuild.no_op is False
+    assert (
+        repo.initialization_run(rebuild.job.id).requested_month_digest
+        != run.requested_month_digest
+    )
+
+    # The processor keeps the mode: rebuild stays the default everywhere.
+    # A roster manifest carrying alias evidence (the processor reads it).
+    roster_body = {
+        "schema_version": "ReconstructionRosterManifestV1",
+        "alias_revision": "e" * 64,
+    }
+    roster = CapturedRosterV1(
+        manifest_digest(roster_body), canonical_json(roster_body), ()
+    )
+    profile = _profile().model_copy(update={"roster_digest": roster.roster_digest})
+    assert (
+        CanonicalSnapshotMonthProcessor(
+            job_id="j",
+            claim_token="c",
+            profile=profile,
+            roster=roster,
+            backtest_repository=repo,
+            price_repository=object(),
+        )._mode
+        == "rebuild"
+    )

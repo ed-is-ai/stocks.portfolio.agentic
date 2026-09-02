@@ -34,9 +34,11 @@ from app.services.backtest.historical_scan_record import (
     HistoricalScanRecordV1,
     ProvenanceV1,
     StageResultV1,
+    StageV1,
     TechnicalResultV1,
     TechnicalsV1,
     VcpResultV1,
+    VcpV1,
 )
 from app.services.backtest.market_planes import HistoricalMarketPlanes
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
@@ -210,6 +212,49 @@ class HistoricalScanReconstructor:
             raise self._error(
                 request, "integrity_error", "detector registry is incomplete"
             )
+        record = self._compose_record(
+            request,
+            roster_captured_at,
+            planes,
+            technicals,
+            stage_result.stage,
+            vcp_result.vcp,
+        )
+        return ReconstructionResultV1(record=record, fragments=tuple(fragments))
+
+    def adopted_record(
+        self,
+        request: ReconstructionRequestV1,
+        *,
+        technicals: TechnicalsV1,
+        stage: StageV1,
+        vcp: VcpV1,
+    ) -> HistoricalScanRecordV1:
+        """Re-derive one unchanged member's record under a new input manifest.
+
+        gh-468 Update-mode adoption: the detector payloads (technicals, stage,
+        VCP) are carried verbatim from the predecessor data version's record,
+        while every provenance field is recomputed exactly as ``reconstruct``
+        would compute it under the new profile. Because detectors are pure
+        functions of the member's own pinned evidence, the result is
+        byte-identical to a from-scratch reconstruction of the same inputs.
+        """
+        roster_captured_at = self._validate_request(request)
+        planes = HistoricalMarketPlanes.from_evidence(request.evidence)
+        return self._compose_record(
+            request, roster_captured_at, planes, technicals, stage, vcp
+        )
+
+    def _compose_record(
+        self,
+        request: ReconstructionRequestV1,
+        roster_captured_at: datetime,
+        planes: HistoricalMarketPlanes,
+        technicals: TechnicalsV1,
+        stage: StageV1,
+        vcp: VcpV1,
+    ) -> HistoricalScanRecordV1:
+        input_revision = request.input_manifest.digest()
         try:
             provenance = ProvenanceV1.model_validate(
                 {
@@ -239,7 +284,7 @@ class HistoricalScanReconstructor:
                         request.input_manifest.yfinance_ingestion_version
                     ),
                     "input_revision": input_revision,
-                    "detector_versions": detector_versions,
+                    "detector_versions": request.input_manifest.detector_versions,
                 }
             )
             record = HistoricalScanRecordV1.model_validate(
@@ -254,8 +299,8 @@ class HistoricalScanReconstructor:
                     "quote_unit": planes.quote_unit,
                     "provenance_quality": "best_effort_reconstructed",
                     "technicals": technicals,
-                    "stage": stage_result.stage,
-                    "vcp": vcp_result.vcp,
+                    "stage": stage,
+                    "vcp": vcp,
                     "enrichment": EnrichmentV1(),
                     "provenance": provenance,
                 }
@@ -267,7 +312,7 @@ class HistoricalScanReconstructor:
             raise self._error(
                 request, "integrity_error", "historical scan record is invalid"
             ) from exc
-        return ReconstructionResultV1(record=record, fragments=tuple(fragments))
+        return record
 
     def _validate_request(self, request: ReconstructionRequestV1) -> datetime:
         if len(request.identity_candidates) == 0:

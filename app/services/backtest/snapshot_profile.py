@@ -156,6 +156,46 @@ class SnapshotProfileV1(CanonicalModel):
         return {item.detector_id: item.detector_version for item in self.detectors}
 
 
+def adoption_gate_failures(
+    previous: "SnapshotProfileV1", current: "SnapshotProfileV1"
+) -> tuple[str, ...]:
+    """Return the rebuild-forcing policy differences between two profiles.
+
+    gh-468: roster churn alone (``roster_digest``/``alias_revision``) is the
+    adoption case; any difference in the detector set/versions, ingestion
+    version, calendar dataset, request contract, record schema, or roster
+    policy invalidates carried evidence and forces a rebuild. Returned
+    strings are user-facing reasons, empty when Update is allowed.
+    """
+    failures: list[str] = []
+    previous_detectors = {
+        item.detector_id: (item.detector_api_version, item.detector_version)
+        for item in previous.detectors
+    }
+    for item in current.detectors:
+        prior = previous_detectors.get(item.detector_id)
+        if prior != (item.detector_api_version, item.detector_version):
+            failures.append(
+                f"detector {item.detector_id} changed between data versions"
+            )
+    if previous.yfinance_ingestion_version != current.yfinance_ingestion_version:
+        failures.append("the ingestion version changed")
+    if previous.calendar_dataset_version != current.calendar_dataset_version:
+        failures.append("the trading calendar dataset changed")
+    if previous.calendar_dataset_digest != current.calendar_dataset_digest:
+        failures.append("the trading calendar data changed")
+    if (
+        previous.yfinance_request_contract_version
+        != current.yfinance_request_contract_version
+    ):
+        failures.append("the price request contract changed")
+    if previous.record_schema_version != current.record_schema_version:
+        failures.append("the scan record schema changed")
+    if previous.roster_policy_version != current.roster_policy_version:
+        failures.append("the roster policy changed")
+    return tuple(failures)
+
+
 class LegitimateExclusionProofV1(CanonicalModel):
     schema_version: Literal[
         "before_first_provider_observation.v1",
@@ -275,11 +315,14 @@ class SnapshotMemberV1(CanonicalModel):
     provider_evidence_manifest_digest: Digest
     alias_revision: Digest
     record_digest: Digest | None
-    exclusion_reason: Literal[
-        "before_first_provider_observation",
-        "insufficient_detector_history",
-        "incomplete_detector_history",
-    ] | None
+    exclusion_reason: (
+        Literal[
+            "before_first_provider_observation",
+            "insufficient_detector_history",
+            "incomplete_detector_history",
+        ]
+        | None
+    )
     exclusion_evidence: LegitimateExclusionProofV1 | None
     provenance_digest: Digest
 
@@ -1149,7 +1192,9 @@ def build_incomplete_detector_history(
         mic, FULL_HISTORY_START, target_session + timedelta(days=1)
     )[-252:]
     observed_set = set(observed)
-    missing = tuple(session for session in expected_window if session not in observed_set)
+    missing = tuple(
+        session for session in expected_window if session not in observed_set
+    )
     if not missing:
         raise SnapshotContractError("detector window is not incomplete")
     available = len(expected_window) - len(missing)

@@ -15,7 +15,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.core.config import SKILLS_DIR
+from app.repositories.backtest_repo import BacktestIntegrityError
 from app.services.backtest.skill_discovery import discover_strategies
+from app.services.backtest.snapshot_profile import adoption_gate_failures
 from app.services.backtest.strategy_job import (
     PrerequisiteItemV1,
     PrerequisiteState,
@@ -35,6 +37,39 @@ def _is_fixture_environment() -> bool:
     return bool(
         os.environ.get("STRATEGY_FIXTURE") or os.environ.get("PYTEST_CURRENT_TEST")
     )
+
+
+def profile_delta_projection(
+    repository: "BacktestRepository", profile_hash: str
+) -> dict[str, object] | None:
+    """Predecessor-delta projection for one profile, read-only (gh-468).
+
+    Returns ``None`` when there is no discoverable predecessor with
+    committed months; otherwise the added/removed/unchanged member counts
+    versus that predecessor, whether the Update path is available, and the
+    reasons when it is not.
+    """
+    try:
+        previous = repository.previous_snapshot_profile(profile_hash)
+        current = repository.snapshot_profile(profile_hash)
+    except BacktestIntegrityError:
+        return None
+    if previous is None or current is None or not repository.profile_has_committed_months(
+        previous.profile_hash
+    ):
+        return None
+    delta = repository.profile_member_delta(previous.profile_hash, profile_hash)
+    if delta is None:
+        return None
+    failures = list(adoption_gate_failures(previous, current))
+    return {
+        "previous_profile_hash": previous.profile_hash,
+        "added": len(delta.added),
+        "removed": len(delta.removed),
+        "unchanged": len(delta.unchanged),
+        "update_available": not failures,
+        "update_blocked_reasons": failures,
+    }
 
 
 class StrategyReadinessService:
@@ -75,6 +110,13 @@ class StrategyReadinessService:
             is_fixture=_is_fixture_environment(),
         )
 
+    def profile_delta(self) -> dict[str, object] | None:
+        """Predecessor-delta projection for the active profile (gh-468)."""
+        active = self._repository.active_snapshot_profile()
+        if active is None:
+            return None
+        return profile_delta_projection(self._repository, active.profile_hash)
+
     def diagnostics(
         self, readiness: StrategyReadinessV1 | None = None
     ) -> dict[str, object]:
@@ -83,6 +125,7 @@ class StrategyReadinessService:
             readiness = self.evaluate()
         return {
             "is_fixture": readiness.is_fixture,
+            "profile_delta": self.profile_delta(),
             "prerequisites": [
                 {
                     "name": item.name,
