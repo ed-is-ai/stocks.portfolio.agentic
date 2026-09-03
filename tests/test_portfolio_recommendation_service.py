@@ -572,6 +572,71 @@ def test_held_alias_canonicalizes_to_scan_security_id(env: Any) -> None:
     assert result.recommendations[0].security_id == "AAA"
 
 
+def test_held_row_shows_display_symbol_with_canonical_security_id(env: Any) -> None:
+    """GH-473: an aliased holding surfaces its portfolio import spelling as
+    ``ticker`` while ``security_id`` stays the canonical id the exit signal
+    was keyed on -- so the row is still a Sell."""
+    env.assignment.assign(7, "alpha")
+    held = Position(
+        ticker="AAA",
+        shares=100.0,
+        avg_cost=10.0,
+        total_cost=1000.0,
+        display_ticker="HSFWA",
+    )
+    result = _service(env, HistoryOnlyStrategy(), [held]).recommend(7)
+    assert isinstance(result, RecommendationResultV1)
+    sell = result.recommendations[0]
+    assert (sell.action, sell.ticker, sell.security_id) == ("sell", "HSFWA", "AAA")
+
+
+def test_unaliased_held_row_display_symbol_equals_security_id(env: Any) -> None:
+    """A holding with no distinct import spelling shows one symbol only --
+    nothing for the screen to render as secondary canonical text."""
+    env.assignment.assign(7, "alpha")
+    result = _service(env, HistoryOnlyStrategy(), [_position("BBB")]).recommend(7)
+    assert isinstance(result, RecommendationResultV1)
+    hold = result.recommendations[0]
+    assert hold.ticker == hold.security_id == "BBB"
+
+
+def test_buy_candidate_ticker_equals_security_id(env: Any) -> None:
+    """An unheld Buy candidate has no portfolio spelling at all, so its
+    display ticker is simply the canonical scan id."""
+    env.assignment.assign(7, "alpha")
+    result = _service(env, HistoryOnlyStrategy(), [_position("AAA")]).recommend(7)
+    assert isinstance(result, RecommendationResultV1)
+    buy = result.recommendations[1]
+    assert (buy.action, buy.ticker, buy.security_id) == ("buy", "BBB", "BBB")
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_duplicate_canonical_holdings_collapse_deterministically(
+    env: Any, reverse: bool
+) -> None:
+    """Two lots canonicalizing to one id yield exactly one row, and the
+    surviving display symbol is the lexicographically smallest one
+    regardless of the order the trader returns the lots in."""
+    env.assignment.assign(7, "alpha")
+    lots = [
+        Position(
+            ticker="AAA",
+            shares=100.0,
+            avg_cost=10.0,
+            total_cost=1000.0,
+            display_ticker=spelling,
+        )
+        for spelling in ("ZZZ.L", "AAA.L")
+    ]
+    result = _service(
+        env, HistoryOnlyStrategy(), list(reversed(lots)) if reverse else lots
+    ).recommend(7)
+    assert isinstance(result, RecommendationResultV1)
+    held_rows = [rec for rec in result.recommendations if rec.security_id == "AAA"]
+    assert len(held_rows) == 1
+    assert held_rows[0].ticker == "AAA.L"
+
+
 def test_off_session_and_wrong_side_signals_are_ignored(env: Any) -> None:
     """Signals dated off the market session or with the wrong side never
     become recommendation rows."""

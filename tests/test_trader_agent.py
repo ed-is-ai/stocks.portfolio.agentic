@@ -1946,6 +1946,110 @@ def test_replay_trades_cross_spelling_merges_into_one_position(
     assert portfolio[0].shares == 15.0
 
 
+# --- GH-473: display symbol carried alongside the canonical id --------------
+
+
+def test_replay_display_symbol_keeps_aliased_import_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An aliased holding keeps its raw import spelling for display while
+    ``ticker`` stays the canonical id used for matching."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases",
+        lambda: {"HSFWA": "0P00013P6I.L"},
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("HSFWA", "BUY", 1000.0, 3.40, "2026-01-01")
+
+    portfolio = agent.get_portfolio()
+
+    assert portfolio[0].ticker == "0P00013P6I.L"
+    assert portfolio[0].display_symbol == "HSFWA"
+
+
+def test_replay_display_symbol_equals_ticker_when_unaliased(tmp_path: Path) -> None:
+    """With no alias there is no second spelling to show -- display symbol
+    and canonical ticker are the same string."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("WCOG", "BUY", 10.0, 100.0, "2026-01-01")
+
+    portfolio = agent.get_portfolio()
+
+    assert portfolio[0].ticker == "WCOG"
+    assert portfolio[0].display_symbol == "WCOG"
+
+
+def test_replay_display_symbol_survives_chained_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A multi-hop alias chain resolves the canonical id fully, but the
+    display symbol is still the spelling actually imported."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases",
+        lambda: {"ABC.L": "ABC", "ABC": "ABC-NEW"},
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent._trades.insert("ABC.L", "BUY", 10.0, 100.0, "2026-01-01")
+
+    portfolio = agent.get_portfolio()
+
+    assert portfolio[0].ticker == "ABC-NEW"
+    assert portfolio[0].display_symbol == "ABC.L"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_replay_display_symbol_picks_latest_dated_spelling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
+) -> None:
+    """Two spellings folding into one position: the latest-dated one wins,
+    and the choice is identical whichever order the rows are inserted in."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases", lambda: {"ABC.L": "ABC"}
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    inserts = [("ABC.L", "2026-01-02"), ("ABC", "2026-02-03")]
+    for ticker, date in reversed(inserts) if reverse else inserts:
+        agent._trades.insert(ticker, "BUY", 5.0, 100.0, date)
+
+    portfolio = agent.get_portfolio()
+
+    assert len(portfolio) == 1
+    assert portfolio[0].ticker == "ABC"
+    assert portfolio[0].display_symbol == "ABC"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_replay_display_symbol_same_date_tie_breaks_lexicographically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reverse: bool
+) -> None:
+    """Same-dated spellings have no "latest" -- the lexicographically
+    smallest raw spelling breaks the tie, again order-independently."""
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.load_aliases",
+        lambda: {"AAA": "CANON", "BBB": "CANON"},
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    inserts = ["BBB", "AAA"]
+    for ticker in reversed(inserts) if reverse else inserts:
+        agent._trades.insert(ticker, "BUY", 5.0, 100.0, "2026-02-03")
+
+    portfolio = agent.get_portfolio()
+
+    assert len(portfolio) == 1
+    assert portfolio[0].ticker == "CANON"
+    assert portfolio[0].display_symbol == "AAA"
+
+
 # --- Story 2.2: deterministic replay ordering -------------------------------
 
 

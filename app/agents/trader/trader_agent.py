@@ -809,7 +809,13 @@ class TraderAgent(Agent):
         """
         state = TraderAgent._replay_trades(rows)
         return [
-            TraderAgent._build_position(ticker, s, current_prices, display_info)
+            TraderAgent._build_position(
+                ticker,
+                s,
+                current_prices,
+                display_info,
+                display_ticker=s.get("display_ticker"),
+            )
             for ticker, s in state.items()
             if abs(s["shares"]) > QUANTITY_EPSILON
         ]
@@ -828,6 +834,16 @@ class TraderAgent(Agent):
         identity. A cycle or malformed alias file degrades to the raw
         ticker with a logged warning rather than crashing this replay.
 
+        Because canonicalization erases the portfolio's own spelling, each
+        folded position also records a ``display_ticker`` (GH-473): among
+        all raw spellings folding into one canonical position, the display
+        symbol is the spelling of the latest-dated trade, ties broken by
+        the lexicographically smallest raw spelling. That rule is
+        order-independent, so a newest-first and an oldest-first CSV import
+        of the same trades yield the same symbol, and a renamed ticker
+        shows its most recent broker spelling. It is presentation-only --
+        the canonical key remains the sole identity for matching.
+
         A row with an unparseable (non-ISO) ``date`` is skipped (logged,
         not raised) -- Story 2.2, mirroring ``RealisedPnlService.
         _sorted_valid_trades``'s existing FIFO skip so average-cost replay
@@ -845,7 +861,7 @@ class TraderAgent(Agent):
             entry_price,
         ) in rows:
             try:
-                _date.fromisoformat(trade_date)
+                parsed_date = _date.fromisoformat(trade_date)
             except ValueError:
                 logger.warning(
                     "_replay_trades: skipping row for %s with unparseable date %r",
@@ -863,8 +879,24 @@ class TraderAgent(Agent):
                     "entry_date": None,
                     "entry_price": None,
                     "stop_loss": None,
+                    "display_ticker": raw_ticker,
+                    "display_date": parsed_date,
                 }
             s = state[ticker]
+            # Latest-dated raw spelling wins; a same-date tie goes to the
+            # lexicographically smallest spelling. Re-deciding on every row
+            # (rather than trusting replay order) is what makes the choice
+            # independent of how the CSV rows happened to be ordered. The
+            # comparison uses the already-parsed `date`, never the raw
+            # string: `fromisoformat` also accepts the basic ``YYYYMMDD``
+            # spelling, which sorts *after* an extended-format string of a
+            # later day, so a mixed-format table would otherwise pick the
+            # wrong "latest" row.
+            if parsed_date > s["display_date"] or (
+                parsed_date == s["display_date"] and raw_ticker < s["display_ticker"]
+            ):
+                s["display_ticker"] = raw_ticker
+                s["display_date"] = parsed_date
             if action == "BUY":
                 # Story 2.3: `s["shares"]` is kept rounded to the shared 8dp
                 # policy after every update (below), so accumulated float
@@ -924,8 +956,16 @@ class TraderAgent(Agent):
         s: dict[str, Any],
         current_prices: dict[str, float] | None,
         display_info: dict[str, tuple[float, str]] | None = None,
+        display_ticker: str | None = None,
     ) -> Position:
         """Build a Position model from replay state and live prices.
+
+        ``ticker`` is the canonical identity (the ``_replay_trades`` state
+        key) and stays the sole key for matching, pricing, and Strategy
+        input. ``display_ticker`` is the portfolio's raw import spelling
+        chosen by that replay's deterministic rule (GH-473) and is carried
+        through for presentation only; ``None`` leaves ``Position.
+        display_symbol`` equal to the canonical ticker.
 
         For USD stocks, all monetary fields (current_price, current_value,
         unrealised_pnl) are kept in USD so that P&L is self-consistent.
@@ -995,6 +1035,7 @@ class TraderAgent(Agent):
             profit_target_20=pt20,
             profit_target_25=pt25,
             price_currency=currency,
+            display_ticker=display_ticker,
         )
 
     def update_portfolio_snapshot(
@@ -2303,7 +2344,13 @@ class TraderAgent(Agent):
 
         for ticker, s in state.items():
             if abs(s["shares"]) > QUANTITY_EPSILON:
-                pos = self._build_position(ticker, s, current_prices, display_info)
+                pos = self._build_position(
+                    ticker,
+                    s,
+                    current_prices,
+                    display_info,
+                    display_ticker=s.get("display_ticker"),
+                )
                 positions.append(pos)
 
         logger.info(f"Portfolio refresh complete: {len(positions)} positions updated")

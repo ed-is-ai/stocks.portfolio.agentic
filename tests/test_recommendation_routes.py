@@ -311,3 +311,53 @@ def test_rows_without_an_explanation_keep_the_generic_reason(
     html = client.get("/portfolios/7/recommendations").text
 
     assert "Strategy rule exit_history_fall" in html
+
+
+# #473 -- the portfolio's own import spelling leads each row
+
+
+def _aliased_result() -> RecommendationResultV1:
+    """One aliased holding (display ``HSFWA``, canonical ``0P00013P6I.L``)
+    beside one unaliased holding."""
+    base = _result()
+    return base.model_copy(
+        update={
+            "recommendations": (
+                RecommendationV1(
+                    action="sell",
+                    ticker="HSFWA",
+                    security_id="0P00013P6I.L",
+                    rule_id="exit_history_fall",
+                    reason="Strategy rule exit_history_fall",
+                ),
+                RecommendationV1(
+                    action="hold",
+                    ticker="WCOG",
+                    security_id="WCOG",
+                    rule_id="no_exit_signal",
+                    reason="No exit signal from the assigned Strategy.",
+                ),
+            )
+        }
+    )
+
+
+def test_screen_leads_with_import_spelling_and_shows_canonical_id(
+    mocked: dict[str, Any],
+) -> None:
+    """The aliased row renders ``HSFWA`` first with the canonical id as
+    secondary text underneath it."""
+    mocked["stub"].recommend.return_value = _aliased_result()
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "HSFWA" in html
+    assert html.index("HSFWA") < html.index("0P00013P6I.L")
+
+
+def test_screen_omits_canonical_line_for_unaliased_row(
+    mocked: dict[str, Any],
+) -> None:
+    """An unaliased holding has one spelling, so nothing is echoed."""
+    mocked["stub"].recommend.return_value = _aliased_result()
+    assert client.get("/portfolios/7/recommendations").text.count("WCOG") == 1

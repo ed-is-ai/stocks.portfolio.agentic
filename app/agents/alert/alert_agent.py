@@ -1579,14 +1579,23 @@ class AlertAgent(Agent):
                 # The same typed Strategy explanation the screen and the
                 # HTML email render, indented under its ticker (#472); a
                 # row without one keeps the single generic reason line.
+                # The canonical id rides along only when it differs from
+                # the portfolio's display spelling (#473), so the text
+                # projection carries the same two identities as the HTML
+                # one without repeating a symbol for unaliased rows.
+                symbol = (
+                    rec.ticker
+                    if rec.security_id == rec.ticker
+                    else f"{rec.ticker} ({rec.security_id})"
+                )
                 if rec.explanation:
-                    lines.append(f"  {rec.ticker} [{rec.rule_id}]")
+                    lines.append(f"  {symbol} [{rec.rule_id}]")
                     for reason in rec.explanation:
                         lines.append(f"    - {reason.summary}")
                         for fact in reason.facts:
                             lines.append(f"      {fact}")
                 else:
-                    lines.append(f"  {rec.ticker}: {rec.reason} [{rec.rule_id}]")
+                    lines.append(f"  {symbol}: {rec.reason} [{rec.rule_id}]")
                 for warning in rec.evidence_warnings:
                     lines.append(f"    warning: {warning}")
             lines.append("")

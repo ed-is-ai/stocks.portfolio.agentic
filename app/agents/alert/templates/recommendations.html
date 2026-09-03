@@ -14,7 +14,12 @@
       <tr>
         <td style="width:70px;vertical-align:top;padding-right:8px">{{ action_badge(rec.action, bg, color) }}</td>
         <td style="vertical-align:top">
+          {# Import spelling first, canonical id underneath only when it
+             differs (GH-473) -- same rule as the screen row. #}
           <div style="font-family:'Courier New',monospace;font-weight:700;font-size:0.95em;color:#1e3a5f">{{ rec.ticker }}</div>
+          {% if rec.security_id != rec.ticker %}
+          <div style="font-family:'Courier New',monospace;font-size:0.72em;color:#94a3b8;margin-top:1px">{{ rec.security_id }}</div>
+          {% endif %}
           {% if rec.explanation %}
           {% for reason in rec.explanation %}
           <div style="font-size:0.85em;color:#333;margin-top:2px">{{ reason.summary }}</div>

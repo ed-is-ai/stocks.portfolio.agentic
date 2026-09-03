@@ -237,7 +237,10 @@ class PortfolioRecommendationEmailService:
             return None
         rows = [
             {
-                "ticker": position.ticker,
+                # The portfolio's own import spelling (GH-473), so the
+                # summary names holdings the way the user imported them
+                # rather than by an opaque canonical alias id.
+                "ticker": position.display_symbol,
                 "shares": f"{position.shares:g}",
                 "avg_cost": f"£{position.avg_cost:,.2f}",
             }

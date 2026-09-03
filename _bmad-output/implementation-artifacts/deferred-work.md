@@ -436,3 +436,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-471-strategy-evidence-contract.md`
   summary: The evidence contract expresses structural kinds, session counts and column names, but not history freshness (current-to-session), parameter validity, or value validity, so a rule that fails closed on stale or non-finite prices still reports a "complete" evaluation.
   evidence: moving-average `_fresh_history` requires `history.index[-1] == view.as_of_session` and buy-and-hold excludes non-finite/non-positive closes — neither condition is visible to `preflight_evidence`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-473-display-symbol.md`
+  summary: The Portfolio holdings table still shows the canonical alias id, so one holding reads `HSFWA` on the Recommendations screen and `0P00013P6I.L` on the holdings table.
+  evidence: `app/api/templates/_portfolio.html` renders `p.ticker`; `Position.display_symbol` now exists but is only consumed by the recommendation screen/email. Explicitly out of scope for GH-473, but a visible cross-screen inconsistency.

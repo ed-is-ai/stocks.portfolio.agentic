@@ -24,6 +24,7 @@ from app.repositories.notifications_repo import NotificationsRepository
 from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.repositories.portfolio_strategies_repo import PortfolioStrategiesRepository
 from app.schemas import EmailConfig
+from app.schemas.trade import Position
 from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.portfolio_recommendation import (
     EvaluationCoverageV1,
@@ -215,6 +216,42 @@ def test_screen_email_parity(env: Any) -> None:
         assert rec.rule_id in html
     # Fixed Sell → Hold → Buy section order, matching the screen.
     assert html.index("SELL (") < html.index("HOLD (") < html.index("BUY (")
+
+
+def test_email_shows_import_spelling_beside_canonical_id(env: Any) -> None:
+    """GH-473: an aliased holding's email row leads with the portfolio's
+    import spelling and carries the canonical security id alongside it --
+    in the action row and in the holdings summary."""
+    env.assignment.assign(7, "alpha")
+    aliased = Position(
+        ticker="AAA",
+        shares=100.0,
+        avg_cost=10.0,
+        total_cost=1000.0,
+        display_ticker="HSFWA",
+    )
+    env.trader.get_portfolio.side_effect = lambda portfolio_id=None: (
+        [aliased] if portfolio_id == 7 else []
+    )
+    summary, sent = env.dispatch()
+    assert summary.sent == 1
+    html = sent[0][1]
+    assert "HSFWA" in html
+    # The canonical id is still shown, so the row remains traceable to the
+    # identity the exit signal was keyed on.
+    assert "AAA" in html
+    assert html.index("HSFWA") < html.index("AAA")
+
+
+def test_email_does_not_repeat_symbol_for_unaliased_holding(env: Any) -> None:
+    """An unaliased holding has no second spelling, so the secondary
+    canonical line is omitted rather than echoing the same symbol."""
+    env.assignment.assign(8, "alpha")
+    summary, sent = env.dispatch()
+    assert summary.sent == 1
+    # Portfolio 8 holds BBB only: one action row and one summary row, so
+    # the symbol appears exactly twice -- no duplicated canonical line.
+    assert sent[0][1].count("BBB") == 2
 
 
 def test_template_structure(env: Any) -> None:
@@ -642,3 +679,25 @@ def test_email_renders_every_reason_and_fact_with_provenance(tmp_path: Path) -> 
     # A host-generated Hold row keeps its own generic wording.
     assert "No exit signal from the assigned Strategy" in html
     assert "No exit signal from the assigned Strategy" in text
+
+
+def test_text_email_row_carries_both_identities(tmp_path: Path) -> None:
+    """#473: the plain-text projection names the aliased row by its import
+    spelling with the canonical id in parentheses, and leaves an unaliased
+    row's single spelling alone."""
+    aliased = _explained_result().model_copy(
+        update={
+            "recommendations": tuple(
+                rec.model_copy(
+                    update={"ticker": "HSFWA", "security_id": "0P00013P6I.L"}
+                )
+                if rec.action == "sell"
+                else rec
+                for rec in _explained_result().recommendations
+            )
+        }
+    )
+    _, text = _render_result(aliased, tmp_path)
+
+    assert "HSFWA (0P00013P6I.L)" in text
+    assert text.count("BBB") == 1

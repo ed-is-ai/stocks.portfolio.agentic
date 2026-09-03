@@ -141,7 +141,14 @@
   <tbody>
     {% for rec in rows %}
     <tr>
-      <td class="font-monospace">{{ rec.ticker }}</td>
+      {# The portfolio's own import spelling leads (GH-473); the canonical
+         security id follows only when it actually differs, so an unaliased
+         holding shows one symbol and no redundant second line. #}
+      <td class="font-monospace">{{ rec.ticker }}
+        {% if rec.security_id != rec.ticker %}
+        <div class="text-muted" style="font-size:0.7rem">{{ rec.security_id }}</div>
+        {% endif %}
+      </td>
       <td>
         {% if rec.explanation %}
         {% for reason in rec.explanation %}

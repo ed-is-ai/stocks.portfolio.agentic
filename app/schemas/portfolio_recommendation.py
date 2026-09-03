@@ -53,7 +53,17 @@ class RecommendationReasonV1(_RecommendationModel):
 
 
 class RecommendationV1(_RecommendationModel):
-    """One actionable recommendation row for one security."""
+    """One actionable recommendation row for one security.
+
+    Two identities, deliberately (#473): ``security_id`` is the canonical
+    identity every match, dedup, and Strategy signal is keyed on, while
+    ``ticker`` is what the row is *presented* as. For a holding that is
+    the portfolio's own import spelling (e.g. ``HSFWA`` for canonical
+    ``0P00013P6I.L``); for an unheld Buy candidate no portfolio spelling
+    exists, so it is simply the canonical id. Presenters therefore show
+    ``ticker`` first and ``security_id`` alongside it only when the two
+    differ; no consumer may key logic on ``ticker``.
+    """
 
     action: RecommendationAction
     ticker: str = Field(min_length=1)

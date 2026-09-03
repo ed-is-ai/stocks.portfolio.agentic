@@ -466,6 +466,18 @@ class PortfolioRecommendationService:
 
         An ambiguous alias can never match the scan universe, so its raw
         ticker is kept and the fail-safe Hold rule handles it below.
+
+        Two positions canonicalizing to one id still collapse to a single
+        recommendation row, but the survivor is chosen deterministically
+        (GH-473): the lexicographically smallest ``display_symbol`` wins,
+        so neither the row's user-facing spelling nor the lot backing it
+        depends on the order the trader happened to return holdings in.
+        This is a last-resort tie-break, not a second display rule:
+        average-cost replay already folds every spelling of one security
+        into a single position under the canonical id, so reaching here at
+        all means two lots survived that fold. Replay's own
+        latest-dated-spelling rule cannot be reused here — a ``Position``
+        carries no trade dates — hence the one stable key available.
         """
         held: dict[str, Position] = {}
         for position in self._trader.get_portfolio(portfolio_id=portfolio_id):
@@ -475,15 +487,15 @@ class PortfolioRecommendationService:
                 security_id = canonical_ticker(position.ticker, aliases)
             except AmbiguousTickerAliasError:
                 security_id = position.ticker
-            if security_id in held:
-                # Two lots canonicalizing to one id: keep the first, log the
-                # collapse — one recommendation row still covers the holding.
+            existing = held.get(security_id)
+            if existing is not None:
                 logger.warning(
                     "Duplicate canonical holding %r for portfolio %s",
                     security_id,
                     portfolio_id,
                 )
-                continue
+                if existing.display_symbol <= position.display_symbol:
+                    continue
             held[security_id] = position
         return held
 
@@ -530,7 +542,7 @@ class PortfolioRecommendationService:
                 recommendations.append(
                     RecommendationV1(
                         action="hold",
-                        ticker=position.ticker,
+                        ticker=position.display_symbol,
                         security_id=security_id,
                         rule_id="scan_evidence_missing",
                         reason=_reason_for("scan_evidence_missing"),
@@ -544,7 +556,7 @@ class PortfolioRecommendationService:
                 recommendations.append(
                     RecommendationV1(
                         action="hold",
-                        ticker=position.ticker,
+                        ticker=position.display_symbol,
                         security_id=security_id,
                         rule_id=rule_id,
                         reason=_reason_for(rule_id),
@@ -557,7 +569,7 @@ class PortfolioRecommendationService:
                 recommendations.append(
                     RecommendationV1(
                         action="sell",
-                        ticker=position.ticker,
+                        ticker=position.display_symbol,
                         security_id=security_id,
                         rule_id=exit_signal.rule_id,
                         reason=_signal_reason(exit_signal),
@@ -568,7 +580,7 @@ class PortfolioRecommendationService:
                 recommendations.append(
                     RecommendationV1(
                         action="hold",
-                        ticker=position.ticker,
+                        ticker=position.display_symbol,
                         security_id=security_id,
                         rule_id="no_exit_signal",
                         reason=_reason_for("no_exit_signal"),

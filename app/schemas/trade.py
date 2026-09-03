@@ -179,3 +179,26 @@ class Position(BaseModel):
     )
     exit_signal: ExitSignal | None = None  # populated by ExitEvaluator in web layer
     price_currency: str = "GBP"  # ISO currency code for current_price/current_value/pnl
+    # The portfolio's own raw import spelling for this holding (GH-473),
+    # carried alongside the canonical ``ticker`` so presenters can show the
+    # symbol the user actually imported (e.g. ``HSFWA``) instead of the
+    # opaque canonical id it aliases to (``0P00013P6I.L``). Optional and
+    # ``None`` by default so every existing construction site keeps
+    # ``display_symbol == ticker``; never persisted, always derived on
+    # replay. Presentation-only: matching, dedup, and Strategy input keep
+    # using ``ticker``.
+    display_ticker: str | None = None
+
+    @property
+    def display_symbol(self) -> str:
+        """Return the user-facing spelling for this holding.
+
+        The single place every presenter (screen, email, recommendation
+        rows) reads the display identity from, so an unaliased holding —
+        which has no distinct raw spelling — transparently falls back to
+        the canonical ``ticker``. A blank or whitespace-only
+        ``display_ticker`` falls back the same way, so a malformed import
+        row can never render an empty symbol cell. Always read this
+        property, never the raw ``display_ticker`` field.
+        """
+        return (self.display_ticker or "").strip() or self.ticker
