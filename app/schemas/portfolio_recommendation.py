@@ -10,7 +10,7 @@ so a route can always render an actionable partial, never a 500.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from typing import Any, Literal
 
@@ -113,6 +113,13 @@ class EvaluationCoverageV1(_RecommendationModel):
         return self.exit_state != "incompatible"
 
 
+#: Parameter keys that carry a Strategy's *security universe* rather than a
+#: tuning knob. Mirrors ``backtest_repo.UNIVERSE_PARAMETER_KEYS`` (gh-434)
+#: but is kept local because ``app/schemas/*`` is deliberately independent
+#: of repositories and services.
+UNIVERSE_PARAMETER_KEYS: tuple[str, ...] = ("security_ids", "selected_securities")
+
+
 #: The default fully-evidenced coverage — a result constructed without
 #: explicit diagnostics reads as a complete evaluation, exactly as before.
 COMPLETE_COVERAGE = EvaluationCoverageV1()
@@ -146,6 +153,68 @@ class RecommendationResultV1(_RecommendationModel):
     #: ask the Strategy because the evidence was incomplete" (#471).
     coverage: EvaluationCoverageV1 = COMPLETE_COVERAGE
     evaluated_at: datetime
+    #: The parameter key holding the host-bound security universe, named
+    #: by the Strategy descriptor. ``None`` for a legacy result, where
+    #: :data:`UNIVERSE_PARAMETER_KEYS` still identifies the key.
+    universe_parameter: str | None = None
+
+    @property
+    def universe_keys(self) -> tuple[str, ...]:
+        """Candidate universe-selection keys, most authoritative first.
+
+        The descriptor-named key leads: a stale legacy key left in the
+        assignment snapshot must never outrank the key the host actually
+        bound this evaluation's universe into.
+        """
+        legacy = tuple(
+            key for key in UNIVERSE_PARAMETER_KEYS if key != self.universe_parameter
+        )
+        return ((self.universe_parameter,) if self.universe_parameter else ()) + legacy
+
+    @property
+    def selected_universe_key(self) -> str | None:
+        """The parameter key actually carrying this result's universe.
+
+        ``None`` means no universe-selection parameter is present: either
+        no candidate key is in ``parameters``, or its value is a scalar,
+        which is a tuning knob rather than a selection.
+        """
+        for key in self.universe_keys:
+            value = self.parameters.get(key)
+            if isinstance(value, str | bytes) or not isinstance(value, Sequence):
+                continue
+            return key
+        return None
+
+    @property
+    def universe_symbols(self) -> tuple[str, ...]:
+        """The full selected universe as display strings, empty if absent.
+
+        The stored ``parameters`` mapping is never altered — this is a
+        presentation view over the same evaluation inputs.
+        """
+        key = self.selected_universe_key
+        if key is None:
+            return ()
+        return tuple(str(item) for item in self.parameters[key])
+
+    @property
+    def has_universe(self) -> bool:
+        """True when a universe-selection parameter is actually present."""
+        return self.selected_universe_key is not None
+
+    @property
+    def tuning_parameters(self) -> Mapping[str, Any]:
+        """``parameters`` minus the one universe selection — the badge view.
+
+        Only the key that actually carries the universe is removed, so a
+        universe key holding a scalar — a tuning knob, not a selection —
+        and any other parameter still render as badges.
+        """
+        universe_key = self.selected_universe_key
+        return {
+            key: value for key, value in self.parameters.items() if key != universe_key
+        }
 
     @field_validator("generated_at", "evaluated_at")
     @classmethod

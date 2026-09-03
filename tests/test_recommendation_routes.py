@@ -361,3 +361,174 @@ def test_screen_omits_canonical_line_for_unaliased_row(
     """An unaliased holding has one spelling, so nothing is echoed."""
     mocked["stub"].recommend.return_value = _aliased_result()
     assert client.get("/portfolios/7/recommendations").text.count("WCOG") == 1
+
+
+# --- gh-474: the host-bound universe must not overflow the header ---------
+
+#: A realistic large universe — hundreds of symbols, as a live scan binds.
+LARGE_UNIVERSE = tuple(f"SYM{index:04d}" for index in range(612))
+
+
+def _universe_result(
+    parameters: dict[str, Any] | None = None,
+    universe_parameter: str | None = "selected_securities",
+) -> RecommendationResultV1:
+    """A result whose parameters carry a host-bound universe."""
+    base = _result()
+    return base.model_copy(
+        update={
+            "parameters": (
+                {"lookback": 20, "selected_securities": LARGE_UNIVERSE}
+                if parameters is None
+                else parameters
+            ),
+            "universe_parameter": universe_parameter,
+        }
+    )
+
+
+def _header(html: str) -> str:
+    """The provenance block, i.e. everything before the group tables."""
+    return html.partition("<h3")[0]
+
+
+def test_large_universe_is_summarised_not_printed_as_a_tuple(
+    mocked: dict[str, Any],
+) -> None:
+    """AC1: a count plus the scalar badges, never the raw tuple."""
+    mocked["stub"].recommend.return_value = _universe_result()
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    header = _header(resp.text)
+    assert "Selected universe: 612 securities" in header
+    assert "lookback=20" in header
+    # No raw tuple/list rendering of the universe as one parameter value.
+    assert "selected_securities=" not in header
+    assert "&#39;SYM0000&#39;," not in header
+    assert "'SYM0000'," not in header
+
+
+def test_large_universe_lives_in_a_bounded_accessible_disclosure(
+    mocked: dict[str, Any],
+) -> None:
+    """AC2: keyboard-reachable ``<details>``/``<summary>`` with a name,
+    and a body that bounds its height and scrolls internally."""
+    mocked["stub"].recommend.return_value = _universe_result()
+    html = _header(client.get("/portfolios/7/recommendations").text)
+    assert "<details" in html and "</details>" in html
+    summary_at = html.index("<summary")
+    summary_end = html.index("</summary>")
+    summary = html[summary_at:summary_end]
+    # The visible summary text is the disclosure's accessible name.
+    assert "612 selected securities" in summary
+    body_at = html.index('id="selected-universe-list"')
+    body = html[body_at : html.index("</div>", body_at)]
+    assert "max-height:" in body
+    assert "overflow:auto" in body
+    # The clipped region must be reachable and named for keyboard/AT users.
+    assert 'tabindex="0"' in body
+    assert "aria-label=" in body
+    # Every symbol is still exposed inside the bounded container.
+    assert body.count("SYM") == len(LARGE_UNIVERSE)
+
+
+def test_no_element_forces_page_level_horizontal_scroll(
+    mocked: dict[str, Any],
+) -> None:
+    """AC3: long values wrap/scroll locally — no fixed or unbounded width."""
+    mocked["stub"].recommend.return_value = _universe_result(
+        {"lookback": 20, "note": "x" * 4000, "selected_securities": LARGE_UNIVERSE}
+    )
+    header = _header(client.get("/portfolios/7/recommendations").text)
+    assert "overflow-wrap:anywhere" in header
+    assert "min-width:0" in header
+    # Nothing pins a value open: no nowrap, and no fixed pixel/absolute width.
+    assert "white-space:nowrap" not in header
+    assert "text-nowrap" not in header
+
+
+def test_legacy_result_without_universe_parameter_still_summarised(
+    mocked: dict[str, Any],
+) -> None:
+    """Fallback key detection covers a pre-gh-474 stored result."""
+    mocked["stub"].recommend.return_value = _universe_result(
+        {"lookback": 20, "security_ids": list(LARGE_UNIVERSE)},
+        universe_parameter=None,
+    )
+    header = _header(client.get("/portfolios/7/recommendations").text)
+    assert "Selected universe: 612 securities" in header
+    assert "security_ids=" not in header
+
+
+def test_result_without_universe_key_renders_scalar_badges_only(
+    mocked: dict[str, Any],
+) -> None:
+    mocked["stub"].recommend.return_value = _universe_result(
+        {"lookback": 20}, universe_parameter=None
+    )
+    header = _header(client.get("/portfolios/7/recommendations").text)
+    assert "lookback=20" in header
+    assert "Selected universe" not in header
+    assert "<details" not in header
+
+
+def test_empty_universe_shows_zero_and_no_disclosure(
+    mocked: dict[str, Any],
+) -> None:
+    mocked["stub"].recommend.return_value = _universe_result(
+        {"lookback": 20, "selected_securities": ()}
+    )
+    header = _header(client.get("/portfolios/7/recommendations").text)
+    assert "Selected universe: 0 securities" in header
+    assert "<details" not in header
+
+
+def test_scalar_universe_key_renders_as_an_ordinary_badge(
+    mocked: dict[str, Any],
+) -> None:
+    """A string value is a tuning knob, not a selection — no count."""
+    mocked["stub"].recommend.return_value = _universe_result(
+        {"lookback": 20, "selected_securities": "AAA"}
+    )
+    header = _header(client.get("/portfolios/7/recommendations").text)
+    assert "selected_securities=AAA" in header
+    assert "Selected universe" not in header
+
+
+def test_descriptor_named_key_outranks_a_stale_legacy_key(
+    mocked: dict[str, Any],
+) -> None:
+    """The bound universe wins; the stale key still renders as a badge."""
+    mocked["stub"].recommend.return_value = _universe_result(
+        {
+            "lookback": 20,
+            "security_ids": ["STALE1", "STALE2"],
+            "selected_securities": LARGE_UNIVERSE,
+        }
+    )
+    header = _header(client.get("/portfolios/7/recommendations").text)
+    assert "Selected universe: 612 securities" in header
+    # The other key is not silently swallowed — it stays auditable.
+    assert "security_ids=" in header
+    assert "STALE1" in header
+
+
+def test_single_security_universe_is_singular(mocked: dict[str, Any]) -> None:
+    """A one-symbol universe reads "1 security", not "1 securities"."""
+    mocked["stub"].recommend.return_value = _universe_result(
+        {"lookback": 20, "selected_securities": ("AAA",)}
+    )
+    header = _header(client.get("/portfolios/7/recommendations").text)
+    assert "Selected universe: 1 security" in header
+    assert "1 securities" not in header
+
+
+def test_universe_symbols_are_separated_for_copying(
+    mocked: dict[str, Any],
+) -> None:
+    """Symbols must not concatenate when the list is copied as text."""
+    mocked["stub"].recommend.return_value = _universe_result()
+    html = _header(client.get("/portfolios/7/recommendations").text)
+    body_at = html.index('id="selected-universe-list"')
+    body = html[body_at : html.index("</div>", body_at)]
+    assert "SYM0000SYM0001" not in body

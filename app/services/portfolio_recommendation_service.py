@@ -364,6 +364,7 @@ class PortfolioRecommendationService:
             unresolved=tuple(sorted(set(unresolved))),
             coverage=_coverage(preflight, len(entry_securities | exit_securities)),
             evaluated_at=datetime.now(UTC),
+            universe_parameter=descriptor.universe.parameter,
         )
 
     def strategy_support(self) -> Mapping[str, str]:

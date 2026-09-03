@@ -17,13 +17,43 @@
 </div>
 
 {% if result %}
-<div class="text-muted mb-3" style="font-size:0.78rem; line-height:1.8">
+{# Provenance line (#474): scalar tuning knobs render as badges, while the
+   host-bound universe — which can be hundreds of symbols — is summarised as
+   a count with the full list behind a bounded <details> disclosure. Every
+   value wraps inside its own container so the page never scrolls sideways. #}
+<div class="text-muted mb-3" style="font-size:0.78rem; line-height:1.8;
+            min-width:0; overflow-wrap:anywhere; word-break:break-word">
   Run <code>{{ result.analysis_run_id }}</code>
   &middot; published {{ result.generated_at.strftime('%d %b %Y, %H:%M') }}
   &middot; market session {{ result.market_session.isoformat() }}
-  {% for key, value in result.parameters.items() %}
-  &middot; <span class="badge text-bg-light border">{{ key }}={{ value }}</span>
+  {% for key, value in result.tuning_parameters.items() %}
+  &middot; <span class="badge text-bg-light border"
+                 style="max-width:100%; white-space:normal; overflow-wrap:anywhere"
+    >{{ key }}={{ value }}</span>
   {% endfor %}
+  {% set universe = result.universe_symbols %}
+  {% set universe_count = universe | length %}
+  {% set securities = 'security' if universe_count == 1 else 'securities' %}
+  {% if result.has_universe %}
+  &middot; <span class="badge text-bg-light border"
+                 title="Strategy parameter {{ result.selected_universe_key }}"
+    >Selected universe: {{ universe_count }} {{ securities }}</span>
+  {% if universe %}
+  <details class="mt-1" style="min-width:0">
+    <summary class="text-muted" style="cursor:pointer">Show
+      the {{ universe_count }} selected {{ securities }}</summary>
+    {# tabindex keeps the clipped list scrollable by keyboard alone. #}
+    <div class="border rounded p-2 mt-1 font-monospace"
+         id="selected-universe-list" tabindex="0" role="group"
+         aria-label="Selected universe of {{ universe_count }} {{ securities }}"
+         style="max-height:12rem; overflow:auto; overflow-wrap:anywhere;
+                word-break:break-word; min-width:0; font-size:0.72rem">
+      {% for symbol in universe %}<span class="me-2">{{ symbol }}</span>
+      {% endfor %}
+    </div>
+  </details>
+  {% endif %}
+  {% endif %}
 </div>
 {% endif %}
 

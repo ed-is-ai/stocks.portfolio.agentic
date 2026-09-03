@@ -480,6 +480,18 @@ def test_result_carries_provenance(env: Any) -> None:
     assert result.parameters["selected_securities"] == ["AAA", "BBB"]
 
 
+def test_result_names_universe_parameter_and_keeps_full_universe(env: Any) -> None:
+    """gh-474: the display split is typed, the stored universe untouched."""
+    env.assignment.assign(7, "alpha")
+    result = _service(env, HistoryOnlyStrategy(), [_position("AAA")]).recommend(7)
+    assert isinstance(result, RecommendationResultV1)
+    assert result.universe_parameter == "selected_securities"
+    # The complete universe stays verbatim in the typed result.
+    assert result.parameters["selected_securities"] == ["AAA", "BBB"]
+    assert result.universe_symbols == ("AAA", "BBB")
+    assert dict(result.tuning_parameters) == {"lookback": 20}
+
+
 def test_stale_artifact_still_evaluates(env: Any) -> None:
     env.assignment.assign(7, "alpha")
     _write_artifact(
