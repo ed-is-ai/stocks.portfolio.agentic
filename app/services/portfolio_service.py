@@ -65,7 +65,17 @@ _HISTORICAL_FX_PAIR: dict[str, str] = {
 }
 _YFINANCE_SYMBOL_OVERRIDES: dict[str, str] = {"9988": "9988.HK"}
 _PRICE_DOWNLOAD_CHUNK_SIZE = 50
-_CASH_BALANCE_UNSET = object()
+
+
+class _CashBalanceUnset:
+    """Sentinel distinguishing "caller passed no cash_balance" from a real
+    ``float | None`` value -- a plain ``object()`` narrows via ``is`` to
+    itself but not away from the parameter's declared type, so every
+    ``else`` branch below stayed typed as ``float | None | object``.
+    """
+
+
+_CASH_BALANCE_UNSET = _CashBalanceUnset()
 
 # Portfolio value-history chart range presets (#421): preset -> day count
 # cutoff, measured back from now. Any other/absent value resolves to 12M.
@@ -218,6 +228,7 @@ class PortfolioService:
         """Return a single-flight cached live GBP/USD rate or durable fallback."""
         cls = PortfolioService
         use_durable_fallback = False
+        refresh_generation = cls._gbpusd_cache_generation
         with cls._gbpusd_cache_condition:
             cached_rate = self._cached_gbpusd_rate(time.monotonic())
             if cached_rate is not None:
@@ -944,10 +955,18 @@ class PortfolioService:
             if market_value is None or cash_value is None:
                 total_values.append(None)
                 continue
+            # presentation_value only returns non-None for a non-None input,
+            # so both decimals are proven present at this point.
+            assert market_decimal is not None
+            assert cash_decimal is not None
             try:
+                # `.exponent` is `int | Literal['n', 'N', 'F']` in general --
+                # those string sentinels only occur for NaN/Infinity, which
+                # `_finite_chart_decimal` has already excluded from both
+                # operands, so it is always a real `int` here.
                 least_exponent = min(
-                    market_decimal.as_tuple().exponent,
-                    cash_decimal.as_tuple().exponent,
+                    cast(int, market_decimal.as_tuple().exponent),
+                    cast(int, cash_decimal.as_tuple().exponent),
                 )
                 highest_digit = max(market_decimal.adjusted(), cash_decimal.adjusted())
                 with localcontext() as context:
@@ -1039,7 +1058,7 @@ class PortfolioService:
         *,
         analysis_records: list[StockRecord] | None = None,
         portfolios: list[Any] | None = None,
-        cash_balance: float | None | object = _CASH_BALANCE_UNSET,
+        cash_balance: float | None | _CashBalanceUnset = _CASH_BALANCE_UNSET,
         range_key: str = DEFAULT_CHART_RANGE,
     ) -> PortfolioInputSnapshot:
         """Read all mutable inputs needed by one portfolio partial once.
@@ -1063,7 +1082,7 @@ class PortfolioService:
                 cash_balances=[],
                 cash_balance=(
                     self._trader.get_cash_balance()
-                    if cash_balance is _CASH_BALANCE_UNSET
+                    if isinstance(cash_balance, _CashBalanceUnset)
                     else cash_balance
                 ),
             )
@@ -1088,7 +1107,7 @@ class PortfolioService:
             # second mutable-ledger read.
             cash_balance=(
                 self._trader.get_cash_balance(portfolio_id)
-                if cash_balance is _CASH_BALANCE_UNSET
+                if isinstance(cash_balance, _CashBalanceUnset)
                 else cash_balance
             ),
         )
@@ -1115,7 +1134,7 @@ class PortfolioService:
         positions: list[Position],
         prices_as_of: str | None = None,
         gbpusd_rate: float | None = None,
-        cash_balance: float | None | object = _CASH_BALANCE_UNSET,
+        cash_balance: float | None | _CashBalanceUnset = _CASH_BALANCE_UNSET,
         error_message: str | None = None,
         warning_message: str | None = None,
         portfolio_id: int | None = None,
@@ -1135,7 +1154,7 @@ class PortfolioService:
         # backwards-compatible callers such as import responses.
         effective_cash_balance = (
             snapshot.cash_balance
-            if cash_balance is _CASH_BALANCE_UNSET
+            if isinstance(cash_balance, _CashBalanceUnset)
             else cash_balance
         )
         records = snapshot.analysis_records

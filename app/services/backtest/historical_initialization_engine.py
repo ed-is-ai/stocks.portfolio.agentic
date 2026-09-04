@@ -143,7 +143,9 @@ class CanonicalSnapshotMonthProcessor:
         # payload for each security/month pair dominates long reruns, while
         # keeping it in this process-local cache preserves the repository's
         # verification on the first read and does not alter persisted output.
-        self._evidence_cache: dict[tuple[str, str, str, str, str], object] = {}
+        self._evidence_cache: dict[
+            tuple[str, str, str | None, str, str], StoredHistoricalEvidence
+        ] = {}
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
@@ -314,15 +316,12 @@ class CanonicalSnapshotMonthProcessor:
         if write_set is None:
             return None, None
         previous_members, previous_records = write_set
-        records_by_id = {
-            record.security_id: record for record in previous_records
-        }
+        records_by_id = {record.security_id: record for record in previous_records}
         # Only valid-scan members have records; zip would mispair exclusions.
         carried = {
             member.security_id: (member, records_by_id[member.security_id])
             for member in previous_members
-            if member.resolution == "valid_scan"
-            and member.security_id in records_by_id
+            if member.resolution == "valid_scan" and member.security_id in records_by_id
         }
         resolved: list[ResolvedSnapshotMember] = []
         adopted: list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]] = []
@@ -333,6 +332,10 @@ class CanonicalSnapshotMonthProcessor:
                 previous[0], previous[1], member, target_session, snapshot_month
             )
             if adoptable:
+                # ``adoptable`` is True only when the earlier short-circuit
+                # proved ``previous is not None`` -- assert it so the type
+                # checker can see the same invariant.
+                assert previous is not None
                 # The carried payloads are only valid for the evidence they
                 # were computed from: if the price store now resolves a
                 # different revision (re-ingestion/correction), the member
@@ -343,10 +346,9 @@ class CanonicalSnapshotMonthProcessor:
                 evidence = cast(
                     StoredHistoricalEvidence, self._evidence_for(member, request)
                 )
-                adoptable = (
-                    evidence.data_revision == previous[0].provider_data_revision
-                )
+                adoptable = evidence.data_revision == previous[0].provider_data_revision
             if adoptable:
+                assert previous is not None
                 item, request = self._adopt_valid_member(
                     member, previous[1], snapshot_month, target_session, now
                 )
@@ -577,8 +579,10 @@ class CanonicalSnapshotMonthProcessor:
             SnapshotMemberV1.valid_scan(result.record), result.record
         )
 
-    def _evidence_for(self, member, request: HistoricalEvidenceRequest):
-        cache_key = (
+    def _evidence_for(
+        self, member: CapturedRosterMemberV1, request: HistoricalEvidenceRequest
+    ) -> StoredHistoricalEvidence:
+        cache_key: tuple[str, str, str | None, str, str] = (
             member.security_id,
             member.provider_symbol,
             request.alias_revision,

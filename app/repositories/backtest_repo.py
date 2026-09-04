@@ -13,7 +13,16 @@ import json
 import logging
 import sqlite3
 from threading import RLock
-from typing import Callable, Literal, Mapping, Protocol, TYPE_CHECKING, cast, overload
+from typing import (
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Protocol,
+    TYPE_CHECKING,
+    cast,
+    overload,
+)
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -6597,7 +6606,7 @@ class BacktestRepository:
                    )""",
                 (profile_hash, profile_hash),
             ).fetchone()
-            candidates: list[object] = []
+            candidates: list[Any] = []
             if current_seq is not None and current_seq[0] is not None:
                 candidates = conn.execute(
                     """SELECT profile.canonical_profile_json

@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -128,7 +129,15 @@ def test_chart_fragment_renders_selected_range_portfolio_totals(stack) -> None:
     cash_values = _chart_array(resp.text, "cashVals")
     assert totals
     assert len(totals) == len(values) == len(cash_values)
-    assert totals == [market + cash for market, cash in zip(values, cash_values)]
+    # This range has no gaps, so every point is a real value -- assert that
+    # explicitly rather than silently coercing a None to 0, which would
+    # mask a real gap regressing into this "fully covered" fixture.
+    assert None not in values
+    assert None not in cash_values
+    assert totals == [
+        cast(float, market) + cast(float, cash)
+        for market, cash in zip(values, cash_values)
+    ]
 
 
 def test_chart_fragment_keeps_markers_and_reports_partial_totals(stack) -> None:

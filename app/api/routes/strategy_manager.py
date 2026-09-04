@@ -63,7 +63,10 @@ from app.services.backtest.run_universe import (
     run_universe_digest,
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
-from app.services.backtest.snapshot_profile import SnapshotProfileV1
+from app.services.backtest.snapshot_profile import (
+    ActiveSnapshotProfileV1,
+    SnapshotProfileV1,
+)
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapAlreadySetUp,
     StrategyBootstrapService,
@@ -106,7 +109,15 @@ _TERMINAL = {
     StrategyJobStatus.FAILED,
     StrategyJobStatus.CANCELLED,
 }
-_ACTIVE_PROFILE_UNSET = object()
+
+
+class _ActiveProfileUnset:
+    """Sentinel distinguishing "caller passed no active profile" from a real
+    ``ActiveSnapshotProfileV1 | None`` value.
+    """
+
+
+_ACTIVE_PROFILE_UNSET = _ActiveProfileUnset()
 
 #: gh-396: the landing screen's one adaptive primary CTA follows the
 #: Setup -> Initialize -> Configure pipeline stage.
@@ -230,10 +241,14 @@ def _coverage_context(repo: BacktestRepository) -> dict[str, object]:
 
 
 def _profile_context(
-    repo: BacktestRepository, *, active: object = _ACTIVE_PROFILE_UNSET
+    repo: BacktestRepository,
+    *,
+    active: ActiveSnapshotProfileV1 | None | _ActiveProfileUnset = (
+        _ACTIVE_PROFILE_UNSET
+    ),
 ) -> dict[str, object]:
     try:
-        if active is _ACTIVE_PROFILE_UNSET:
+        if isinstance(active, _ActiveProfileUnset):
             active = repo.active_snapshot_profile()
         if active is None:
             return {
@@ -1285,7 +1300,7 @@ async def submit_strategy_configuration(
                 "security_ids",
                 "The active profile has changed. Please reselect securities.",
             )
-        elif whole_universe:
+        elif whole_universe and command is not None:
             # Never trust a client-submitted list of security IDs for
             # whole-universe mode.  A historical snapshot can contain a
             # documented exclusion (for example a newly listed security

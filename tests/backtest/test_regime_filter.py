@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import math
 from datetime import date, timedelta
+from typing import Sequence
 
 import pandas as pd
 
+from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.regime_filter import (
     MIN_MA_LENGTH,
     REGIME_FILTER_BENCHMARK_PARAM,
@@ -18,6 +20,7 @@ from app.services.backtest.regime_filter import (
     REGIME_FILTER_MA_LENGTH_PARAM,
     entry_signals_permitted,
 )
+from app.services.backtest.strategy_protocol import JsonScalar, StrategyParameters
 
 BENCHMARK = "sec-spy"
 UNIVERSE = ("sec-aapl", "sec-spy")
@@ -27,7 +30,9 @@ AS_OF = date(2026, 1, 30)
 class _View:
     """Minimal ``MarketViewV1`` stand-in exposing only ``price_history``."""
 
-    def __init__(self, closes: list[object] | None, *, raises: bool = False) -> None:
+    def __init__(
+        self, closes: Sequence[object] | None, *, raises: bool = False
+    ) -> None:
         self._raises = raises
         if closes is None:
             self._history = pd.DataFrame({"open": []})
@@ -42,9 +47,12 @@ class _View:
             raise RuntimeError("bound violation")
         return self._history.copy()
 
+    def scan_result(self, security_id: str) -> HistoricalScanRecordV1 | None:
+        return None
 
-def _params(**overrides: object) -> dict[str, object]:
-    base: dict[str, object] = {
+
+def _params(**overrides: JsonScalar) -> StrategyParameters:
+    base: dict[str, JsonScalar] = {
         REGIME_FILTER_ENABLED_PARAM: True,
         REGIME_FILTER_BENCHMARK_PARAM: BENCHMARK,
         REGIME_FILTER_MA_LENGTH_PARAM: 3,

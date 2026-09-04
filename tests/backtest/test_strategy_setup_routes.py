@@ -27,6 +27,7 @@ from app.services.backtest.strategy_job import (
     BootstrapRunV1,
     StrategyJobStatus,
     StrategyJobType,
+    StrategyJobV1,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_readiness_service import (
@@ -47,7 +48,7 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
         super().__init__()
         self._has_profile = has_profile
         self._bootstrap_jobs: list[object] = []
-        self._bootstrap_by_key: dict[str, object] = {}
+        self._bootstrap_by_key: dict[str, StrategyJobV1] = {}
 
     def active_snapshot_profile(self):
         if not self._has_profile:
@@ -58,8 +59,6 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
         return None
 
     def create_bootstrap_job(self, submission):
-        from app.services.backtest.strategy_job import StrategyJobV1
-
         existing = self._bootstrap_by_key.get(submission.idempotency_key)
         if existing is not None:
             return BootstrapEnqueueResultV1(
@@ -92,8 +91,8 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
 def setup_env_no_profile(monkeypatch):
     repo = SetupFakeRepo(has_profile=False)
     jobs = StrategyJobService(repo)
-    bootstrap = StrategyBootstrapService(repo, jobs=jobs)
-    readiness = StrategyReadinessService(repo, clock=NOW)
+    bootstrap = StrategyBootstrapService(repo, jobs=jobs)  # type: ignore[arg-type]
+    readiness = StrategyReadinessService(repo, clock=NOW)  # type: ignore[arg-type]
     app.dependency_overrides[get_backtest_repository] = lambda: repo
     app.dependency_overrides[get_strategy_job_service] = lambda: jobs
     app.dependency_overrides[get_bootstrap_service] = lambda: bootstrap
@@ -112,8 +111,8 @@ def setup_env_no_profile(monkeypatch):
 def setup_env_with_profile(monkeypatch):
     repo = SetupFakeRepo(has_profile=True)
     jobs = StrategyJobService(repo)
-    bootstrap = StrategyBootstrapService(repo, jobs=jobs)
-    readiness = StrategyReadinessService(repo, clock=NOW)
+    bootstrap = StrategyBootstrapService(repo, jobs=jobs)  # type: ignore[arg-type]
+    readiness = StrategyReadinessService(repo, clock=NOW)  # type: ignore[arg-type]
     app.dependency_overrides[get_backtest_repository] = lambda: repo
     app.dependency_overrides[get_strategy_job_service] = lambda: jobs
     app.dependency_overrides[get_bootstrap_service] = lambda: bootstrap

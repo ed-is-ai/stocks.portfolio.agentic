@@ -317,7 +317,10 @@ def test_cached_evidence_is_reused_without_provider_access() -> None:
         allow_missing_prefix=True,
     )
 
-    assert processor._evidence_for(roster_member, request) is cached
+    assert (
+        processor._evidence_for(roster_member, request)  # type: ignore[arg-type]
+        is cached
+    )
 
 
 def test_verified_evidence_is_reused_across_month_processor_calls() -> None:
@@ -361,8 +364,14 @@ def test_verified_evidence_is_reused_across_month_processor_calls() -> None:
         allow_missing_prefix=True,
     )
 
-    assert processor._evidence_for(roster_member, request) is cached
-    assert processor._evidence_for(roster_member, request) is cached
+    assert (
+        processor._evidence_for(roster_member, request)  # type: ignore[arg-type]
+        is cached
+    )
+    assert (
+        processor._evidence_for(roster_member, request)  # type: ignore[arg-type]
+        is cached
+    )
     assert prices.calls == 1
 
 
@@ -389,9 +398,7 @@ def test_provider_failure_names_the_blocking_roster_symbol() -> None:
     setattr(
         processor,
         "_calendar",
-        SimpleNamespace(
-            sessions_in_range=lambda *_args: (date(2016, 7, 29),)
-        ),
+        SimpleNamespace(sessions_in_range=lambda *_args: (date(2016, 7, 29),)),
     )
     member = CapturedRosterMemberV1(
         security_id="security-1",

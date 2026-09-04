@@ -12,7 +12,7 @@ figures unchanged.
 
 import inspect
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 
@@ -113,10 +113,12 @@ def test_summary_cache_reuses_revision_and_returns_independent_models(
     original = service._trader.get_trade_history
     calls = 0
 
-    def counted_history(**kwargs: object) -> list[Trade]:
+    def counted_history(
+        ticker: str | None = None, portfolio_id: int | None = None
+    ) -> list[Trade]:
         nonlocal calls
         calls += 1
-        return original(**kwargs)
+        return original(ticker=ticker, portfolio_id=portfolio_id)
 
     monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
     first = service.compute_summary(PORTFOLIO_ID)
@@ -161,10 +163,12 @@ def test_summary_cache_invalidates_for_persisted_fx_and_currency_inputs(
     original = service._trader.get_trade_history
     calls = 0
 
-    def counted_history(**kwargs: object) -> list[Trade]:
+    def counted_history(
+        ticker: str | None = None, portfolio_id: int | None = None
+    ) -> list[Trade]:
         nonlocal calls
         calls += 1
-        return original(**kwargs)
+        return original(ticker=ticker, portfolio_id=portfolio_id)
 
     monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
     assert service.compute_summary(PORTFOLIO_ID).total_realised_pnl_gbp == 50.0
@@ -201,10 +205,12 @@ def test_summary_cache_invalidates_when_ticker_aliases_change(
     original = service._trader.get_trade_history
     calls = 0
 
-    def counted_history(**kwargs: object) -> list[Trade]:
+    def counted_history(
+        ticker: str | None = None, portfolio_id: int | None = None
+    ) -> list[Trade]:
         nonlocal calls
         calls += 1
-        return original(**kwargs)
+        return original(ticker=ticker, portfolio_id=portfolio_id)
 
     monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
     assert service.compute_summary(PORTFOLIO_ID).round_trip_count == 0
@@ -231,10 +237,12 @@ def test_history_cache_is_revision_keyed_and_returns_independent_rows(
     original = service._trader.get_trade_history
     calls = 0
 
-    def counted_history(**kwargs: object) -> list[Trade]:
+    def counted_history(
+        ticker: str | None = None, portfolio_id: int | None = None
+    ) -> list[Trade]:
         nonlocal calls
         calls += 1
-        return original(**kwargs)
+        return original(ticker=ticker, portfolio_id=portfolio_id)
 
     monkeypatch.setattr(service._trader, "get_trade_history", counted_history)
     first_rows, _ = service.get_history_presentation([1, 2])
@@ -267,12 +275,16 @@ def test_history_cache_invalidates_when_ticker_aliases_change(
     original = service._compute_history_presentation_uncached
     calls = 0
 
-    def counted_presentation() -> tuple[list[Trade], dict[int, str]]:
+    def counted_presentation() -> tuple[
+        list[Trade], dict[int, Literal["unconsumed", "consumed"]]
+    ]:
         nonlocal calls
         calls += 1
         return original()
 
-    monkeypatch.setattr(service, "_compute_history_presentation_uncached", counted_presentation)
+    monkeypatch.setattr(
+        service, "_compute_history_presentation_uncached", counted_presentation
+    )
     _rows, statuses = service.get_history_presentation([1])
     assert statuses
     service.get_history_presentation([1])
@@ -297,7 +309,7 @@ def test_alias_file_a_to_b_to_a_change_retries_before_history_cache_store(
     calls = 0
 
     def mutate_alias_file_during_first_compute() -> tuple[
-        list[Trade], dict[int, str]
+        list[Trade], dict[int, Literal["unconsumed", "consumed"]]
     ]:
         nonlocal calls
         calls += 1

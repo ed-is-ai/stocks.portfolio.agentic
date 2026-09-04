@@ -64,7 +64,7 @@ def test_initial_basket_uses_stored_rank_decimal_and_plain_exclusion() -> None:
     )
 
     view = initial_basket_view(
-        result,
+        result,  # type: ignore[arg-type]
         {"selected": ("AAPL", "XNAS"), "not-selected": ("MSFT", "XNAS")},
     )
 
@@ -89,7 +89,10 @@ def test_initial_basket_uses_stored_rank_decimal_and_plain_exclusion() -> None:
 
 
 def test_initial_basket_distinguishes_legacy_and_all_excluded_results() -> None:
-    legacy = initial_basket_view(SimpleNamespace(initial_entry_selection=None), {})
+    legacy = initial_basket_view(
+        SimpleNamespace(initial_entry_selection=None),  # type: ignore[arg-type]
+        {},
+    )
     assert legacy.recorded is False
     assert legacy.rows == ()
 
@@ -103,7 +106,7 @@ def test_initial_basket_distinguishes_legacy_and_all_excluded_results() -> None:
             )
         )
     )
-    all_excluded = initial_basket_view(result, {})
+    all_excluded = initial_basket_view(result, {})  # type: ignore[arg-type]
     assert all_excluded.recorded is True
     assert all_excluded.has_selected is False
     assert all_excluded.rows[0].outcome == "Excluded"
@@ -121,7 +124,7 @@ def test_initial_basket_formats_large_persisted_decimal_scores() -> None:
         )
     )
 
-    assert initial_basket_view(result, {}).rows[0].trailing_return == (
+    assert initial_basket_view(result, {}).rows[0].trailing_return == (  # type: ignore[arg-type]
         "1" + "0" * 102 + ".0%"
     )
 
@@ -169,19 +172,18 @@ def test_result_financials_derive_display_only_pnl_and_currency_conventions() ->
         equity_curve=(SimpleNamespace(total_equity_base=Decimal("11234.567")),),
     )
 
-    view = result_financials_view(result)
+    view = result_financials_view(result)  # type: ignore[arg-type]
 
     assert view.starting_capital.value == "£10,000.00"
     assert view.pnl.value == "+£1,234.57"
     assert view.pnl.css_class == "pos"
 
-    usd = result_financials_view(
-        SimpleNamespace(
-            base_currency="USD",
-            starting_capital=Decimal("10000"),
-            equity_curve=(SimpleNamespace(total_equity_base=Decimal("9500")),),
-        )
+    fake_usd_result = SimpleNamespace(
+        base_currency="USD",
+        starting_capital=Decimal("10000"),
+        equity_curve=(SimpleNamespace(total_equity_base=Decimal("9500")),),
     )
+    usd = result_financials_view(fake_usd_result)  # type: ignore[arg-type]
     assert usd.starting_capital.value == "10,000.00 USD"
     assert usd.pnl.value == "-500.00 USD"
     assert usd.pnl.css_class == "neg"

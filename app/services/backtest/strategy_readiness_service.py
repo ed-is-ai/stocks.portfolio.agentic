@@ -54,8 +54,10 @@ def profile_delta_projection(
         current = repository.snapshot_profile(profile_hash)
     except BacktestIntegrityError:
         return None
-    if previous is None or current is None or not repository.profile_has_committed_months(
-        previous.profile_hash
+    if (
+        previous is None
+        or current is None
+        or not repository.profile_has_committed_months(previous.profile_hash)
     ):
         return None
     delta = repository.profile_member_delta(previous.profile_hash, profile_hash)

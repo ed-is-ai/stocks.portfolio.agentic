@@ -137,7 +137,7 @@ def test_unresolved_id_returns_fallback_constant() -> None:
 
 
 def test_empty_map_returns_fallback_for_every_row() -> None:
-    view = trade_log_view(_result((_entry(), _exit())), {})
+    view = trade_log_view(_result((_entry(), _exit())), {})  # type: ignore[arg-type]
     assert [row.security_label for row in view.rows] == [
         UNRESOLVED_SECURITY_LABEL,
         UNRESOLVED_SECURITY_LABEL,
@@ -166,7 +166,7 @@ def test_duplicate_symbols_render_same_label_distinct_ids() -> None:
 
 def test_every_event_kind_carries_label_and_keeps_id() -> None:
     events = (_skipped(), _entry(), _exit(), _split(), _dividend(), _open_mark())
-    view = trade_log_view(_result(events), {_SID: ("MSFT", "XNAS")})
+    view = trade_log_view(_result(events), {_SID: ("MSFT", "XNAS")})  # type: ignore[arg-type]
     assert len(view.rows) == 6
     for row in view.rows:
         assert row.security_label == "MSFT (XNAS)"

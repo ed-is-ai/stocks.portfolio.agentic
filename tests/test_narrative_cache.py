@@ -94,7 +94,7 @@ def wired(tmp_path, monkeypatch):
 
 def _resolve():
     s, w, c, b, g = _inputs()
-    return mn.resolve_market_narrative(s, w, c, b, g, _AnthropicStub(), None)
+    return mn.resolve_market_narrative(s, w, c, b, g, _AnthropicStub(), None)  # type: ignore[arg-type]
 
 
 def test_digest_changes_when_near_term_pct_delta_changes() -> None:
@@ -177,13 +177,25 @@ def test_non_finite_float_input_persists_but_never_reused(wired, monkeypatch) ->
     bad_breadth = b.model_copy(update={"pct_above_200dma": math.inf})
 
     narrative, reused = mn.resolve_market_narrative(
-        s, w, c, bad_breadth, g, _AnthropicStub(), None
+        s,
+        w,
+        c,
+        bad_breadth,
+        g,
+        _AnthropicStub(),  # type: ignore[arg-type]
+        None,
     )
     assert reused is False
     assert narrative.input_digest == ""
     assert mn.MARKET_NARRATIVE_JSON.exists()
 
     _, reused_again = mn.resolve_market_narrative(
-        s, w, c, bad_breadth, g, _AnthropicStub(), None
+        s,
+        w,
+        c,
+        bad_breadth,
+        g,
+        _AnthropicStub(),  # type: ignore[arg-type]
+        None,
     )
     assert reused_again is False

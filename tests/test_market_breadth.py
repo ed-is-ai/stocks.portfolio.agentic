@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date
 
 import requests
@@ -30,7 +31,7 @@ def _csv(rows: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _reset_cache() -> None:
+def _reset_cache() -> Iterator[None]:
     mb.reset_market_breadth_cache()
     yield
     mb.reset_market_breadth_cache()

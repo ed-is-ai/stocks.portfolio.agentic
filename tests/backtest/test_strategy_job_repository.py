@@ -551,13 +551,14 @@ def test_seal_mismatch_has_zero_mutation(tmp_path: Path, field: str) -> None:
     elif field == "period":
         s = s.model_copy(update={"end_month": "2026-06"})
     elif field == "selection":
+        assert s.universe_selection is not None
         s = s.model_copy(
             update={
                 "universe_selection": s.universe_selection.model_copy(
                     update={"activation_seq": 2}
                 )
             }
-        )  # type: ignore[union-attr]
+        )
     elif field == "execution":
         s = s.model_copy(update={"execution_contract_digest": "f" * 64})
     else:
@@ -655,10 +656,9 @@ def test_v2_result_comparison_and_malformed_run_provenance(tmp_path: Path) -> No
     )
     v1 = _enqueue_backtest(repo, idempotency_key="v1-peer")
     _complete_backtest(repo, v1.job.id)
-    assert (
-        repo.is_comparable(v2.job.id, v1.job.id).reason.value
-        == "manifest_version_mismatch"
-    )
+    comparison = repo.is_comparable(v2.job.id, v1.job.id)
+    assert comparison.reason is not None
+    assert comparison.reason.value == "manifest_version_mismatch"
     with sqlite3.connect(path) as conn:
         conn.execute("DROP TRIGGER strategy_run_immutable_update")
         conn.execute(
@@ -680,7 +680,9 @@ def test_create_bootstrap_job_replays_the_same_persisted_job_at_every_status(
     assert repo.create_bootstrap_job(submission).job == job
     claim = repo.claim_next_strategy_job()
     assert claim is not None
-    assert repo.create_bootstrap_job(submission).job.status is StrategyJobStatus.RUNNING
+    bootstrap_result = repo.create_bootstrap_job(submission)
+    assert bootstrap_result.job is not None
+    assert bootstrap_result.job.status is StrategyJobStatus.RUNNING
     complete = repo.complete_claimed_stage_job(
         job.id, claim.claim_token, expected_version=claim.job.status_version
     )

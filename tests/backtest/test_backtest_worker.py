@@ -1197,12 +1197,12 @@ def test_preparation_strategy_drift_and_cancellation_are_closed(
         "discover_strategies",
         lambda _root: (_ for _ in ()).throw(RuntimeError()),
     )
-    assert (
-        worker_module.PreparationStageEngine(repo2, prices=object(), fx=object())
-        .run(a2.job.id, c2.claim_token)
-        .status
-        is StrategyJobStatus.CANCELLED
-    )  # type: ignore[arg-type]
+    engine = worker_module.PreparationStageEngine(
+        repo2,
+        prices=object(),  # type: ignore[arg-type]
+        fx=object(),  # type: ignore[arg-type]
+    )
+    assert engine.run(a2.job.id, c2.claim_token).status is StrategyJobStatus.CANCELLED
 
 
 def test_preparation_missing_evidence_uses_required_data_code(
@@ -1253,8 +1253,10 @@ def test_preparation_missing_evidence_uses_required_data_code(
         lambda *_a, **_k: (_ for _ in ()).throw(Missing(exc_message)),
     )
     result = worker_module.PreparationStageEngine(
-        repo, prices=object(), fx=object()
-    ).run(a.job.id, c.claim_token)  # type: ignore[arg-type]
+        repo,
+        prices=object(),  # type: ignore[arg-type]
+        fx=object(),  # type: ignore[arg-type]
+    ).run(a.job.id, c.claim_token)
 
     # A required_data_missing exception WITHOUT the user-safe flag keeps
     # the generic detail -- raw exception text never reaches the UI.
@@ -1269,9 +1271,9 @@ def test_preparation_missing_evidence_uses_required_data_code(
     )
     generic = worker_module.PreparationStageEngine(
         repo2,
-        prices=object(),
+        prices=object(),  # type: ignore[arg-type]
         fx=object(),  # type: ignore[arg-type]
-    ).run(a2.job.id, c2.claim_token)  # type: ignore[arg-type]
+    ).run(a2.job.id, c2.claim_token)
     assert generic.failure_detail == "Required selected evidence is unavailable"
     assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
     assert result.failure_detail == exc_message
@@ -1322,8 +1324,10 @@ def test_preparation_cancels_when_cancellation_wins_a_stage_version_race(
     monkeypatch.setattr(repo, "set_strategy_job_current_stage", cancel_before_fx)
 
     result = worker_module.PreparationStageEngine(
-        repo, prices=object(), fx=object()
-    ).run(accepted.job.id, claim.claim_token)  # type: ignore[arg-type]
+        repo,
+        prices=object(),  # type: ignore[arg-type]
+        fx=object(),  # type: ignore[arg-type]
+    ).run(accepted.job.id, claim.claim_token)
 
     assert result.status is StrategyJobStatus.CANCELLED
 
@@ -1380,8 +1384,10 @@ def test_preparation_pins_fx_at_the_fx_stage(
     monkeypatch.setattr(repo, "set_strategy_job_current_stage", record_stage)
 
     result = worker_module.PreparationStageEngine(
-        repo, prices=object(), fx=object()
-    ).run(accepted.job.id, claim.claim_token)  # type: ignore[arg-type]
+        repo,
+        prices=object(),  # type: ignore[arg-type]
+        fx=object(),  # type: ignore[arg-type]
+    ).run(accepted.job.id, claim.claim_token)
 
     assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
     assert pin_fx_values == [False, True]
@@ -1408,6 +1414,7 @@ def test_initialization_mode_round_trips_and_reaches_the_engine(tmp_path) -> Non
         mode="update",
     )
     assert result.no_op is False
+    assert result.job is not None
     run = repo.initialization_run(result.job.id)
     assert run.mode == "update"
 
@@ -1421,6 +1428,7 @@ def test_initialization_mode_round_trips_and_reaches_the_engine(tmp_path) -> Non
         qualification_contract_digest=qualification,
     )
     assert rebuild.no_op is False
+    assert rebuild.job is not None
     assert (
         repo.initialization_run(rebuild.job.id).requested_month_digest
         != run.requested_month_digest
@@ -1443,7 +1451,7 @@ def test_initialization_mode_round_trips_and_reaches_the_engine(tmp_path) -> Non
             profile=profile,
             roster=roster,
             backtest_repository=repo,
-            price_repository=object(),
+            price_repository=object(),  # type: ignore[arg-type]
         )._mode
         == "rebuild"
     )

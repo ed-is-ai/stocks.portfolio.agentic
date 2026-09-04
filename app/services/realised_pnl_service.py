@@ -441,7 +441,11 @@ class RealisedPnlService:
             and trade.id is not None
             and trade.portfolio_id is not None
         ]
-        relevant_portfolio_ids = {trade.portfolio_id for trade in opening_lots}
+        relevant_portfolio_ids = {
+            trade.portfolio_id
+            for trade in opening_lots
+            if trade.portfolio_id is not None
+        }
         statuses: dict[int, Literal["unconsumed", "consumed"]] = {}
         for portfolio_id in relevant_portfolio_ids:
             portfolio_trades = [
@@ -458,6 +462,9 @@ class RealisedPnlService:
             for trade in opening_lots:
                 if trade.portfolio_id != portfolio_id:
                     continue
+                # ``opening_lots`` was already filtered on `trade.id is not
+                # None` above.
+                assert trade.id is not None
                 lot = open_lots_by_trade_id.get(trade.id)
                 statuses[trade.id] = (
                     "unconsumed"

@@ -1663,6 +1663,10 @@ class FakeLaunchService:
         self.launch_error = launch_error
         self.launch_calls: list[object] = []
         self.launch_result = SimpleNamespace(job=SimpleNamespace(id="job-1"))
+        # Attached by the ``launch`` fixture so tests can reach the paired
+        # ``FakeRepo`` (e.g. to mutate ``latest_result``) through the same
+        # object the route's dependency override returns.
+        self.repo: FakeRepo | None = None
 
     def discover(self):
         return SimpleNamespace(strategies=self.strategies, warnings=())

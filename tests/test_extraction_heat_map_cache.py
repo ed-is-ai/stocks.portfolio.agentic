@@ -11,6 +11,7 @@ import pytest
 
 import app.agents.extraction.extraction_agent as extraction_module
 from app.agents.extraction import heat_map_cache
+from app.agents.extraction.heat_map_cache import CacheEntry
 from app.agents.extraction.extraction_agent import ExtractionAgent
 from app.schemas.source_health import SourceName, SourceState
 
@@ -152,22 +153,30 @@ def test_store_round_trip_stamps_period_and_aware_time(cache_path: Path) -> None
 
 def test_is_fresh_window(cache_path: Path) -> None:
     now = datetime(2026, 8, 27, tzinfo=timezone.utc)
-    recent = {
+    recent: CacheEntry = {
         "source_period": "Q",
         "fetched_at": (now - timedelta(days=3)).isoformat(),
         "children": [],
+        "heat_map_id": 1,
     }
-    old = {
+    old: CacheEntry = {
         "source_period": "Q",
         "fetched_at": (now - timedelta(days=8)).isoformat(),
         "children": [],
+        "heat_map_id": 1,
     }
-    future = {
+    future: CacheEntry = {
         "source_period": "Q",
         "fetched_at": (now + timedelta(days=1)).isoformat(),
         "children": [],
+        "heat_map_id": 1,
     }
-    unparseable = {"source_period": "Q", "fetched_at": "nonsense", "children": []}
+    unparseable: CacheEntry = {
+        "source_period": "Q",
+        "fetched_at": "nonsense",
+        "children": [],
+        "heat_map_id": 1,
+    }
     assert heat_map_cache.is_fresh(recent, now) is True
     assert heat_map_cache.is_fresh(old, now) is False
     assert heat_map_cache.is_fresh(future, now) is False

@@ -2,5 +2,10 @@ project-includes = ["app/**/*.py", "tests/**/*.py"]
 search-path = [
     "skills/vcp-screener/scripts",
     "tests/fixtures/backtest-strategies/minimal-strategy/scripts",
+    # tests/backtest has no __init__.py (pytest's implicit-namespace mode),
+    # so sibling test files import each other with bare module names
+    # (e.g. `from test_snapshot_coverage_repository import ...`) relying on
+    # pytest inserting this directory onto sys.path at collection time.
+    "tests/backtest",
 ]
 infer-with-first-use = false

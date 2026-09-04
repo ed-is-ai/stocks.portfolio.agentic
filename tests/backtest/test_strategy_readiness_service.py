@@ -347,8 +347,9 @@ def test_diagnostics_includes_recent_failures(
     )
     service = StrategyReadinessService(repo, clock=NOW)
     diag = service.diagnostics()
-    assert len(diag["recent_failures"]) == 1
-    assert diag["recent_failures"][0]["job_type"] == "bootstrap"
+    recent_failures = cast(list[dict[str, object]], diag["recent_failures"])
+    assert len(recent_failures) == 1
+    assert recent_failures[0]["job_type"] == "bootstrap"
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +421,7 @@ def test_profile_delta_counts_and_update_availability(tmp_path: Path) -> None:
         SimpleNamespace(added=("a",), removed=("r", "r2"), unchanged=("u",)),
         current,
     )
-    service = StrategyReadinessService(
-        cast(BacktestRepository, repo), clock=lambda: NOW
-    )
+    service = StrategyReadinessService(cast(BacktestRepository, repo), clock=NOW)
 
     delta = service.profile_delta()
 
@@ -443,22 +442,19 @@ def test_profile_delta_reports_gate_reasons(tmp_path: Path) -> None:
     repo = _DeltaRepo(
         previous, SimpleNamespace(added=(), removed=(), unchanged=()), current
     )
-    service = StrategyReadinessService(
-        cast(BacktestRepository, repo), clock=lambda: NOW
-    )
+    service = StrategyReadinessService(cast(BacktestRepository, repo), clock=NOW)
 
     delta = service.profile_delta()
 
     assert delta is not None
     assert delta["update_available"] is False
-    assert any("ingestion" in reason for reason in delta["update_blocked_reasons"])
+    blocked_reasons = cast(list[str], delta["update_blocked_reasons"])
+    assert any("ingestion" in reason for reason in blocked_reasons)
 
 
 def test_profile_delta_none_without_predecessor(tmp_path: Path) -> None:
     repo = _DeltaRepo(None, None, _delta_profile(roster_digest="4" * 64))
-    service = StrategyReadinessService(
-        cast(BacktestRepository, repo), clock=lambda: NOW
-    )
+    service = StrategyReadinessService(cast(BacktestRepository, repo), clock=NOW)
 
     assert service.profile_delta() is None
 
@@ -469,9 +465,7 @@ def test_diagnostics_includes_profile_delta(tmp_path: Path) -> None:
     repo = _DeltaRepo(
         previous, SimpleNamespace(added=(), removed=(), unchanged=()), current
     )
-    service = StrategyReadinessService(
-        cast(BacktestRepository, repo), clock=lambda: NOW
-    )
+    service = StrategyReadinessService(cast(BacktestRepository, repo), clock=NOW)
 
     empty_readiness = SimpleNamespace(
         is_fixture=False,
@@ -488,6 +482,6 @@ def test_diagnostics_includes_profile_delta(tmp_path: Path) -> None:
         ),
         recent_failures=(),
     )
-    diagnostics = service.diagnostics(empty_readiness)
+    diagnostics = service.diagnostics(empty_readiness)  # type: ignore[arg-type]
 
     assert diagnostics["profile_delta"] == service.profile_delta()

@@ -182,7 +182,7 @@ def test_gbp_totals_values_hkd_positions_through_the_valuation_service(trader) -
             return type("Projection", (), {"gbp_amount": 12.5})()
 
     service = _service(trader)
-    service._gbp_valuation = _HkdValuation()
+    service._gbp_valuation = _HkdValuation()  # type: ignore[assignment]
     position = Position(
         ticker="9988.HK",
         shares=1,

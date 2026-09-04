@@ -343,7 +343,9 @@ def test_scanner_uses_capture_session_frame_without_a_second_yfinance_fetch(
     )
     scanner = ScannerAgent(name="ScannerAgent", bau_capture_session=Session())
 
-    assert scanner.fetch_stock_data("TEST").equals(frame)
+    fetched = scanner.fetch_stock_data("TEST")
+    assert fetched is not None
+    assert fetched.equals(frame)
 
 
 def test_eligible_scanner_run_adds_and_consumes_complete_profile_roster(
@@ -479,6 +481,8 @@ def test_terminal_pipeline_status_recovers_journaled_prepared_envelope(
     status = PipelineStatusRepository(tmp_path / "pipeline-status.json")
     run_id = str(uuid4())
     prepared = _prepared(run_id)
+    assert prepared.capture is not None
+    assert prepared.capture_digest is not None
     repository.claim_bau_capture_attempt(
         run_id=run_id,
         profile_hash=prepared.capture.profile.profile_hash,
@@ -501,7 +505,9 @@ def test_terminal_pipeline_status_recovers_journaled_prepared_envelope(
 
     assert _recover_bau_run_authority(repository, store, status) == (run_id,)
     assert store.load(run_id).completion_state == "completed"
-    assert repository.bau_run_authority(run_id).state == "completed"
+    authority = repository.bau_run_authority(run_id)
+    assert authority is not None
+    assert authority.state == "completed"
 
 
 def test_failed_pipeline_cannot_recover_a_prepared_envelope_as_success(
@@ -512,6 +518,8 @@ def test_failed_pipeline_cannot_recover_a_prepared_envelope_as_success(
     status = PipelineStatusRepository(tmp_path / "pipeline-status.json")
     run_id = str(uuid4())
     prepared = _prepared(run_id)
+    assert prepared.capture is not None
+    assert prepared.capture_digest is not None
     repository.claim_bau_capture_attempt(
         run_id=run_id,
         profile_hash=prepared.capture.profile.profile_hash,
@@ -530,7 +538,9 @@ def test_failed_pipeline_cannot_recover_a_prepared_envelope_as_success(
 
     assert _recover_bau_run_authority(repository, store, status) == ()
     assert store.load(run_id).completion_state == "failed"
-    assert repository.bau_run_authority(run_id).state == "failed"
+    authority = repository.bau_run_authority(run_id)
+    assert authority is not None
+    assert authority.state == "failed"
 
 
 def test_observed_builder_rejects_partial_scanner_evidence() -> None:
@@ -593,8 +603,8 @@ def test_pin_reconciliation_is_derived_from_snapshot_winner_and_repeatable(
 
     prices = Prices()
     service = BauSnapshotPromotionService(
-        backtest_repository=Backtest(),
-        price_repository=prices,
+        backtest_repository=Backtest(),  # type: ignore[arg-type]
+        price_repository=prices,  # type: ignore[arg-type]
         envelope_directory=tmp_path,
     )
 
@@ -621,6 +631,7 @@ def test_valid_completed_envelope_without_sqlite_authority_is_rejected(
     envelope = store.complete(
         run_id, completed_at=datetime(2026, 8, 3, 12, 3, tzinfo=timezone.utc)
     )
+    assert envelope.capture is not None
 
     decision = repository.is_promotable_bau(
         envelope.capture.profile, envelope, envelope_store=store
@@ -632,8 +643,8 @@ def test_valid_completed_envelope_without_sqlite_authority_is_rejected(
 
 def test_replay_failure_does_not_block_later_envelopes(tmp_path, monkeypatch) -> None:
     service = BauSnapshotPromotionService(
-        backtest_repository=object(),
-        price_repository=object(),
+        backtest_repository=object(),  # type: ignore[arg-type]
+        price_repository=object(),  # type: ignore[arg-type]
         envelope_directory=tmp_path,
     )
     first, second = str(uuid4()), str(uuid4())
@@ -650,7 +661,7 @@ def test_replay_failure_does_not_block_later_envelopes(tmp_path, monkeypatch) ->
             raise RuntimeError("stale profile")
         return True
 
-    service._store = Store()
+    service._store = Store()  # type: ignore[assignment]
     monkeypatch.setattr(service, "promote_run", promote)
 
     with pytest.raises(Exception, match="stale profile"):

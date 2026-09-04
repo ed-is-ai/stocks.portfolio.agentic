@@ -7,6 +7,7 @@ catch markup errors. Every state renders 200 — never a 500.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from collections.abc import Iterator
 from typing import Any, cast
 from unittest.mock import MagicMock
 
@@ -71,7 +72,7 @@ def _result(freshness: str = "fresh") -> RecommendationResultV1:
 
 
 @pytest.fixture
-def mocked(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+def mocked(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]]:
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     stub = MagicMock()
     trader = MagicMock()

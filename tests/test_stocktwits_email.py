@@ -175,6 +175,7 @@ class TestExtractTickers:
 
         assert tickers == ["SNDK", "DELL", "MU"]
         # image is base64-encoded into an image content block
+        assert messages.last_kwargs is not None
         content = messages.last_kwargs["messages"][0]["content"]
         assert content[0]["type"] == "image"
         assert content[0]["source"]["media_type"] == "image/jpeg"
