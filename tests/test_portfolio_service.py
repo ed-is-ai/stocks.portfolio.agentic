@@ -5,10 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, cast
 
 import pandas as pd
+import pytest
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
+from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -255,10 +257,22 @@ class _StubEvaluator:
         return None
 
 
+class _NoFxValuation:
+    """Fail-closed valuation stub: non-GBP amounts are never valued."""
+
+    def value_in_gbp(self, money):
+        from app.services.gbp_valuation_service import GbpValuationProjection
+
+        return GbpValuationProjection(
+            money=money, status="valuation_unavailable", reason="no_quote"
+        )
+
+
 def _make_service(monkeypatch) -> PortfolioService:
     svc = PortfolioService(
         cast(TraderService, _StubTrader()),
         cast(ExitEvaluator, _StubEvaluator()),
+        gbp_valuation=cast(GbpValuationService, _NoFxValuation()),
     )
     monkeypatch.setattr(svc, "load_analysis", lambda: [])
     monkeypatch.setattr(
@@ -303,6 +317,56 @@ def test_portfolio_totals_convert_usd_and_include_cash(monkeypatch) -> None:
     assert ctx["total_cost_gbp_valued"] == 200.0
     assert ctx["total_pnl_gbp"] == 85.0
     assert ctx["cash_balance"] == 1000.0
+    # GH-484: per-position GBP equivalents for the holdings table — only the
+    # non-GBP row gets an entry, using the same rate as the aggregates.
+    # USDCO leaves unrealised_pnl unset (None), so no P&L key is emitted.
+    assert ctx["position_gbp_values"] == {"USDCO": {"market_value_gbp": 135.0}}
+
+
+def test_position_gbp_values_none_when_usd_rate_unavailable(monkeypatch) -> None:
+    """Never fabricate FX: with no usable rate the USD equivalent is None and
+    the template omits the secondary figure (GH-484)."""
+    svc = _make_service(monkeypatch)
+    positions = [
+        Position(
+            ticker="USDCO",
+            shares=1,
+            avg_cost=100,
+            total_cost=100,
+            current_value=200,
+            unrealised_pnl=100,
+            price_currency="USD",
+        )
+    ]
+
+    ctx = svc.portfolio_partial_context(positions, gbpusd_rate=None, cash_balance=0.0)
+
+    entry = ctx["position_gbp_values"]["USDCO"]
+    assert entry["market_value_gbp"] is None
+    assert entry["unrealised_pnl_gbp"] is None
+
+
+def test_position_gbp_values_preserve_negative_pnl_sign(monkeypatch) -> None:
+    """A USD loss converts through the same never-fabricate rule and keeps
+    its sign (GH-484 regression)."""
+    svc = _make_service(monkeypatch)
+    positions = [
+        Position(
+            ticker="USDCO",
+            shares=1,
+            avg_cost=300,
+            total_cost=300,
+            current_value=200,
+            unrealised_pnl=-100,
+            price_currency="USD",
+        )
+    ]
+
+    ctx = svc.portfolio_partial_context(positions, gbpusd_rate=2.0, cash_balance=0.0)
+
+    entry = ctx["position_gbp_values"]["USDCO"]
+    assert entry["market_value_gbp"] == pytest.approx(100.0)
+    assert entry["unrealised_pnl_gbp"] == pytest.approx(-50.0)
 
 
 def test_gbp_totals_not_double_divided_for_pence_holding_priced_in_pounds(

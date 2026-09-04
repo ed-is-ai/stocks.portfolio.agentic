@@ -195,10 +195,25 @@ def test_snapshot_reads_prices_from_the_analysis_envelope(
     assert rows[-1][1] == pytest.approx(200.0)
 
 
-def test_snapshot_with_no_resolvable_prices_persists_null(tmp_path: Path) -> None:
+def test_snapshot_with_no_resolvable_prices_persists_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
     agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    # Isolate from the repo's live analysis artifact and price cache: without
+    # this the real analysis_results.json resolves AAPL and the snapshot is
+    # legitimately valued instead of null (the state this test must force).
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.ANALYSIS_JSON",
+        tmp_path / "missing-analysis.json",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        type(agent),
+        "load_price_cache",
+        lambda self: ({}, None, {}),
+    )
 
     result = agent.update_portfolio_snapshot(1000.0, pf.id, positions=None, gbpusd=None)
     assert result.status == "unavailable"
@@ -243,6 +258,18 @@ def test_legacy_csv_path_writes_blank_cell_when_unavailable(
     csv_path = tmp_path / "portfolio_value.csv"
     monkeypatch.setattr(
         "app.agents.trader.trader_agent.PORTFOLIO_VALUE_CSV", csv_path, raising=False
+    )
+    # Same isolation as the DB snapshot test: no repo analysis artifact or
+    # price cache may leak a real AAPL price into this "unavailable" case.
+    monkeypatch.setattr(
+        "app.agents.trader.trader_agent.ANALYSIS_JSON",
+        tmp_path / "missing-analysis.json",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        type(agent),
+        "load_price_cache",
+        lambda self: ({}, None, {}),
     )
 
     result = agent.update_portfolio_snapshot(250.0)

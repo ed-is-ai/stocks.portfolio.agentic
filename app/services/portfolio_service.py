@@ -284,13 +284,15 @@ class PortfolioService:
         return amount
 
     def _amount_in_gbp(
-        self, amount: float, currency: str, gbpusd: float
+        self, amount: float, currency: str, gbpusd: float | None
     ) -> float | None:
         """Value one native holding amount in GBP, never fabricating FX.
 
         Delegates to :func:`app.services.snapshot_valuation.amount_in_gbp` so
         the live summary cards and the stored value-history snapshots share
-        exactly one conversion rule.
+        exactly one conversion rule. ``gbpusd`` may be ``None`` when no rate
+        was supplied; ``amount_in_gbp`` already treats that as "no USD
+        valuation" rather than guessing.
         """
         return amount_in_gbp(amount, currency, gbpusd, self._gbp_valuation)
 
@@ -1196,6 +1198,34 @@ class PortfolioService:
             total_value_gbp - total_cost_gbp_valued - (effective_cash_balance or 0)
         )
 
+        # GH-484: per-position GBP equivalents for the holdings table. Built
+        # as a parallel dict keyed by ticker — ``Position`` models are never
+        # mutated here. Only non-GBP rows get entries: ``GBp``/``GBX`` are
+        # already normalised to ``"GBP"`` before a ``Position`` is ever built
+        # (``TraderAgent.get_portfolio``), so they never actually reach this
+        # code as anything but ``"GBP"`` — the membership check is defensive,
+        # not doing real work — and a "≈ £" echo for a pounds position would
+        # be noise either way. USD uses the caller's rate verbatim — never
+        # the legacy default the aggregate cards above fall back to — and
+        # other currencies use the same-day GbpValuationService quote;
+        # either way an unavailable conversion yields None and the template
+        # omits the figure rather than fabricating one.
+        position_gbp_values: dict[str, dict[str, float | None]] = {}
+        for pos in positions:
+            if pos.price_currency in {"GBP", "GBp", "GBX"}:
+                continue
+            entry: dict[str, float | None] = {}
+            if pos.current_value is not None:
+                entry["market_value_gbp"] = self._amount_in_gbp(
+                    pos.current_value, pos.price_currency, gbpusd_rate
+                )
+            if pos.unrealised_pnl is not None:
+                entry["unrealised_pnl_gbp"] = self._amount_in_gbp(
+                    pos.unrealised_pnl, pos.price_currency, gbpusd_rate
+                )
+            if entry:
+                position_gbp_values[pos.ticker] = entry
+
         chart_data = snapshot.chart_data
         # A trade older than the selected window shows no marker (#421); an
         # in-window trade whose snapshot was downsampled out still snaps to
@@ -1287,6 +1317,7 @@ class PortfolioService:
             "market_value_gbp": market_value_gbp,
             "total_pnl_gbp": total_pnl_gbp,
             "total_cost_gbp_valued": total_cost_gbp_valued,
+            "position_gbp_values": position_gbp_values,
             "cash_balance": effective_cash_balance,
             "prices_as_of": prices_as_of,
             "gbpusd_rate": gbpusd_rate,
@@ -1300,6 +1331,12 @@ class PortfolioService:
             "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
             "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
             "chart_points": len(chart_data["values"]),
+            # GH-484: usable (non-null) Portfolio Value points — the canvas
+            # gate. Two points render as detached dots, indistinguishable
+            # from a broken chart, so the template needs this count.
+            "chart_usable_total_points": sum(
+                1 for value in chart_data["total_values"] if value is not None
+            ),
             "chart_buys": json.dumps(buy_vals),
             "chart_sells": json.dumps(sell_vals),
             "chart_buy_tips": json.dumps(buy_tips),
@@ -1358,6 +1395,11 @@ class PortfolioService:
             "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
             "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
             "chart_points": len(chart_data["values"]),
+            # Must expose the identical key as ``portfolio_partial_context``
+            # so both render paths gate the canvas the same way (GH-484).
+            "chart_usable_total_points": sum(
+                1 for value in chart_data["total_values"] if value is not None
+            ),
             "chart_buys": json.dumps(buy_vals),
             "chart_sells": json.dumps(sell_vals),
             "chart_buy_tips": json.dumps(buy_tips),

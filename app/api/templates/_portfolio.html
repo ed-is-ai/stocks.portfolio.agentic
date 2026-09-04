@@ -471,9 +471,17 @@
     <tbody>
       {% for p in positions %}
       {% set sym = '$' if p.price_currency == 'USD' else 'HK$' if p.price_currency == 'HKD' else '£' %}
+      {# GH-484: per-position GBP equivalents (non-GBP rows only); absent or
+         None entries mean FX was unavailable — omit, never fabricate. #}
+      {% set gbp_equiv = (position_gbp_values or {}).get(p.ticker, {}) %}
       <tr class="{% if p.exit_signal and p.exit_signal.action == 'EXIT' %}row-exit{% endif %}">
         <td>
-          <span class="fw-bold" style="color:var(--primary); font-size:0.85rem">{{ p.ticker }}</span>
+          {# The portfolio's own import spelling leads (GH-473); the canonical
+             id follows as muted secondary text only when it actually differs. #}
+          <span class="fw-bold" style="color:var(--primary); font-size:0.85rem">{{ p.display_symbol }}</span>
+          {% if p.display_symbol != p.ticker %}
+          <span class="text-muted" style="font-size:0.7rem">{{ p.ticker }}</span>
+          {% endif %}
           {% if opening_lot_tickers and p.ticker in opening_lot_tickers %}
           <span class="badge bg-secondary-subtle text-secondary-emphasis ms-1"
                 style="font-size:0.6rem" title="Includes a manually-entered Opening Lot">
@@ -492,13 +500,16 @@
         </td>
         <td>{{ sym }}{{ "%.2f"|format(p.total_cost) }}</td>
         <td>
-          {% if p.current_value %}{{ sym }}{{ "%.2f"|format(p.current_value) }}{% else %}<span class="text-muted">—</span>{% endif %}
+          {% if p.current_value %}{{ sym }}{{ "%.2f"|format(p.current_value) }}{% if gbp_equiv.get('market_value_gbp') is not none %} <span class="text-muted" style="font-size:0.72rem">&asymp; &pound;{{ "%.2f"|format(gbp_equiv.get('market_value_gbp')) }}</span>{% endif %}{% else %}<span class="text-muted">—</span>{% endif %}
         </td>
         <td>
           {% if p.unrealised_pnl is not none %}
             <span class="{% if p.unrealised_pnl >= 0 %}pos{% else %}neg{% endif %}">
               {{ "+" if p.unrealised_pnl >= 0 }}{{ sym }}{{ "%.2f"|format(p.unrealised_pnl) }}
             </span>
+            {% if gbp_equiv.get('unrealised_pnl_gbp') is not none %}
+            <span class="text-muted" style="font-size:0.72rem">&asymp; &pound;{{ "%.2f"|format(gbp_equiv.get('unrealised_pnl_gbp')) }}</span>
+            {% endif %}
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
@@ -514,21 +525,21 @@
         </td>
         <td>
           {% if p.stop_loss %}
-            <span class="neg">£{{ "%.2f"|format(p.stop_loss) }}</span>
+            <span class="neg">{{ sym }}{{ "%.2f"|format(p.stop_loss) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
         </td>
         <td>
           {% if p.entry_price %}
-            <span class="text-muted">£{{ "%.2f"|format(p.entry_price) }}</span>
+            <span class="text-muted">{{ sym }}{{ "%.2f"|format(p.entry_price) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}
         </td>
         <td>
           {% if p.next_pivot %}
-            <span class="text-muted">£{{ "%.2f"|format(p.next_pivot) }}</span>
+            <span class="text-muted">{{ sym }}{{ "%.2f"|format(p.next_pivot) }}</span>
           {% else %}
             <span class="text-muted">—</span>
           {% endif %}

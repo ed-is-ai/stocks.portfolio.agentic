@@ -27,6 +27,7 @@ def _render(cash_balance: float | None, positions: list[Any] | None = None) -> s
         "chart_cash": "[]",
         "chart_has_unavailable_totals": False,
         "chart_all_totals_unavailable": False,
+        "chart_usable_total_points": 0,
         "chart_buys": "[]",
         "chart_sells": "[]",
         "chart_buy_tips": "[]",
@@ -62,6 +63,7 @@ def _render_with_total_pnl(total_pnl_gbp: float) -> str:
         "chart_cash": "[]",
         "chart_has_unavailable_totals": False,
         "chart_all_totals_unavailable": False,
+        "chart_usable_total_points": 0,
         "chart_buys": "[]",
         "chart_sells": "[]",
         "chart_buy_tips": "[]",
@@ -95,6 +97,7 @@ def _cash_row(html: str) -> str | None:
 def _fake_position() -> SimpleNamespace:
     return SimpleNamespace(
         ticker="AAPL",
+        display_symbol="AAPL",
         shares=1,
         avg_cost=100,
         price_currency="GBP",
@@ -227,18 +230,19 @@ def test_chart_makes_portfolio_value_dominant_and_supporting_lines_distinct() ->
     html = templates.get_template("_portfolio_chart.html").render(
         portfolio_id=1,
         chart_range="12M",
-        chart_points=2,
-        chart_labels='["2026-08-01", "2026-08-02"]',
-        chart_total_values="[110, 125]",
-        chart_values="[100, 120]",
-        chart_costs="[90, 90]",
-        chart_cash="[10, 5]",
+        chart_points=3,
+        chart_usable_total_points=3,
+        chart_labels='["2026-08-01", "2026-08-02", "2026-08-03"]',
+        chart_total_values="[110, 125, 130]",
+        chart_values="[100, 120, 115]",
+        chart_costs="[90, 90, 90]",
+        chart_cash="[10, 5, 8]",
         chart_has_unavailable_totals=False,
         chart_all_totals_unavailable=False,
-        chart_buys="[null, 120]",
-        chart_sells="[null, null]",
-        chart_buy_tips='[null, "BUY 1 AAPL"]',
-        chart_sell_tips="[null, null]",
+        chart_buys="[null, 120, null]",
+        chart_sells="[null, null, null]",
+        chart_buy_tips='[null, "BUY 1 AAPL", null]',
+        chart_sell_tips="[null, null, null]",
     )
 
     labels = ["Portfolio Value", "Market Value", "Cost Basis", "Cash"]
@@ -268,12 +272,13 @@ def test_chart_reports_unavailable_totals_without_hiding_supporting_series() -> 
     html = templates.get_template("_portfolio_chart.html").render(
         portfolio_id=1,
         chart_range="12M",
-        chart_points=2,
-        chart_labels='["2026-08-01", "2026-08-02"]',
-        chart_total_values="[110, null]",
-        chart_values="[100, 120]",
-        chart_costs="[90, 90]",
-        chart_cash="[10, null]",
+        chart_points=4,
+        chart_usable_total_points=3,
+        chart_labels='["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04"]',
+        chart_total_values="[110, null, 120, 130]",
+        chart_values="[100, 120, 110, 120]",
+        chart_costs="[90, 90, 90, 90]",
+        chart_cash="[10, null, 10, 10]",
         chart_has_unavailable_totals=True,
         chart_all_totals_unavailable=False,
         chart_buys="[null, null]",
@@ -283,7 +288,7 @@ def test_chart_reports_unavailable_totals_without_hiding_supporting_series() -> 
     )
 
     assert "Some Portfolio Value points are unavailable" in html
-    assert "const totals" in html and "[110, null]" in html
+    assert "const totals" in html and "[110, null, 120, 130]" in html
     assert "label: 'Market Value'" in html
     assert "label: 'Cost Basis'" in html
     assert "label: 'Cash'" in html
@@ -295,6 +300,7 @@ def test_chart_distinguishes_all_totals_unavailable_from_partial_history() -> No
         portfolio_id=1,
         chart_range="12M",
         chart_points=2,
+        chart_usable_total_points=0,
         chart_labels='["2026-08-01", "2026-08-02"]',
         chart_total_values="[null, null]",
         chart_values="[100, 120]",
@@ -317,6 +323,7 @@ def test_chart_empty_state_preserves_selector_and_tears_down_instance() -> None:
         portfolio_id=1,
         chart_range="1M",
         chart_points=1,
+        chart_usable_total_points=0,
         chart_has_unavailable_totals=False,
         chart_all_totals_unavailable=False,
     )
@@ -325,6 +332,35 @@ def test_chart_empty_state_preserves_selector_and_tears_down_instance() -> None:
     assert 'aria-label="Chart time range"' in html
     assert "window.__portfolioChart.destroy()" in html
     assert "window.__portfolioChart=null" in html
+
+
+def test_chart_sparse_history_collapses_to_building_state() -> None:
+    """GH-484: snapshots exist but <3 carry a usable total — no full-size
+    canvas, just the compact building message, with the selector intact."""
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="12M",
+        chart_points=2,
+        chart_usable_total_points=2,
+        chart_labels='["2026-08-01", "2026-08-02"]',
+        chart_total_values="[110, 125]",
+        chart_values="[100, 120]",
+        chart_costs="[90, 90]",
+        chart_cash="[10, 5]",
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+        chart_buys="[null, null]",
+        chart_sells="[null, null]",
+        chart_buy_tips="[null, null]",
+        chart_sell_tips="[null, null]",
+    )
+
+    assert "Building portfolio value history" in html
+    assert "2 of 2 snapshots valued" in html
+    assert '<canvas id="portfolioChart"' not in html
+    assert 'class="portfolio-chart-canvas"' not in html
+    assert 'aria-label="Chart time range"' in html
+    assert 'hx-get="/partials/portfolio/chart"' in html
 
 
 def test_dashboard_empty_state_does_not_emit_an_orphan_section_closer() -> None:
@@ -416,6 +452,7 @@ def test_partial_refresh_warning_is_visible() -> None:
         "chart_cash": "[]",
         "chart_has_unavailable_totals": False,
         "chart_all_totals_unavailable": False,
+        "chart_usable_total_points": 0,
         "chart_buys": "[]",
         "chart_sells": "[]",
         "chart_buy_tips": "[]",
@@ -433,3 +470,156 @@ def test_partial_refresh_warning_is_visible() -> None:
     html = templates.get_template("_portfolio.html").render(**context)
     assert "alert-warning" in html
     assert "using cached values for: BAD" in html
+
+
+# --- GH-484: currency clarity, display alias, and chart degradation --------
+
+
+def _position_row(html: str, ticker: str) -> str:
+    """Return the table row for ``ticker``, or None when not rendered."""
+    marker = f"openSell('{ticker}'"
+    for row in html.split("<tr"):
+        if marker in row:
+            return row
+    raise AssertionError(f"no row rendered for {ticker!r}")
+
+
+def test_usd_row_leads_with_native_symbol_and_shows_gbp_equivalent() -> None:
+    """A USD holding with a live FX rate shows ``$`` primary plus a muted
+    ``≈ £`` secondary on Mkt Value and Unreal P&L (GH-484)."""
+    usd = _fake_position()
+    usd.ticker = "GOOGL"
+    usd.display_symbol = "GOOGL"
+    usd.price_currency = "USD"
+    usd.current_value = 1000.0
+    usd.unrealised_pnl = 250.0
+    context = {
+        "positions": [usd],
+        "position_gbp_values": {
+            "GOOGL": {"market_value_gbp": 740.74, "unrealised_pnl_gbp": 185.19}
+        },
+        "cash_balance": None,
+        "cash_flows": [],
+        "positions_with_value": [usd],
+        "chart_points": 0,
+        "chart_usable_total_points": 0,
+        "portfolio_id": None,
+        "portfolios": [],
+        "active_portfolio": None,
+        "chart_labels": "[]",
+        "chart_total_values": "[]",
+        "chart_values": "[]",
+        "chart_costs": "[]",
+        "chart_cash": "[]",
+        "chart_has_unavailable_totals": False,
+        "chart_all_totals_unavailable": False,
+        "chart_buys": "[]",
+        "chart_sells": "[]",
+        "chart_buy_tips": "[]",
+        "chart_sell_tips": "[]",
+        "total_cost_gbp": 0,
+        "total_value_gbp": 0,
+        "market_value_gbp": 0,
+        "total_pnl_gbp": 0,
+        "total_cost_gbp_valued": 0,
+        "prices_as_of": None,
+        "gbpusd_rate": 1.35,
+        "error_message": None,
+        "warning_message": None,
+    }
+    html = templates.get_template("_portfolio.html").render(**context)
+    row = _position_row(html, "GOOGL")
+
+    assert "$1000.00" in row
+    assert "&asymp; &pound;740.74" in row
+    assert "+$250.00" in row
+    assert "&asymp; &pound;185.19" in row
+
+
+def test_usd_row_omits_gbp_equivalent_when_fx_unavailable() -> None:
+    """No usable rate means no projection — never a fabricated ``≈ £``."""
+    usd = _fake_position()
+    usd.ticker = "GOOGL"
+    usd.display_symbol = "GOOGL"
+    usd.price_currency = "USD"
+    usd.current_value = 1000.0
+    usd.unrealised_pnl = 250.0
+    context = {
+        "positions": [usd],
+        "position_gbp_values": {},
+        "cash_balance": None,
+        "cash_flows": [],
+        "positions_with_value": [usd],
+        "chart_points": 0,
+        "chart_usable_total_points": 0,
+        "portfolio_id": None,
+        "portfolios": [],
+        "active_portfolio": None,
+        "chart_labels": "[]",
+        "chart_total_values": "[]",
+        "chart_values": "[]",
+        "chart_costs": "[]",
+        "chart_cash": "[]",
+        "chart_has_unavailable_totals": False,
+        "chart_all_totals_unavailable": False,
+        "chart_buys": "[]",
+        "chart_sells": "[]",
+        "chart_buy_tips": "[]",
+        "chart_sell_tips": "[]",
+        "total_cost_gbp": 0,
+        "total_value_gbp": 0,
+        "market_value_gbp": 0,
+        "total_pnl_gbp": 0,
+        "total_cost_gbp_valued": 0,
+        "prices_as_of": None,
+        "gbpusd_rate": None,
+        "error_message": None,
+        "warning_message": None,
+    }
+    html = templates.get_template("_portfolio.html").render(**context)
+    row = _position_row(html, "GOOGL")
+
+    assert "$1000.00" in row
+    assert "&asymp;" not in row
+
+
+def test_stop_and_pivot_cells_use_the_row_currency_symbol() -> None:
+    """Stop/Last Pivot/Next Pivot must show ``$`` for a USD position, not a
+    hardcoded ``£`` (GH-484)."""
+    usd = _fake_position()
+    usd.price_currency = "USD"
+    usd.stop_loss = 90.0
+    usd.entry_price = 95.0
+    usd.next_pivot = 105.0
+    html = _render(None, positions=[usd])
+    row = _position_row(html, "AAPL")
+
+    assert "$90.00" in row
+    assert "$95.00" in row
+    assert "$105.00" in row
+    assert "£90.00" not in row
+
+
+def test_aliased_fund_leads_with_display_symbol_canonical_secondary() -> None:
+    """The import spelling (HSFWA) leads; the canonical id appears only as
+    muted secondary text after it (mirrors the recommendations screen)."""
+    aliased = _fake_position()
+    aliased.ticker = "0P00013P6I.L"
+    aliased.display_symbol = "HSFWA"
+    html = _render(0.0, positions=[aliased])
+
+    assert "HSFWA" in html
+    assert html.index("HSFWA") < html.index("0P00013P6I.L")
+
+
+def test_unaliased_ticker_is_not_echoed_twice() -> None:
+    """An unaliased holding has one spelling, so nothing is echoed."""
+    plain = _fake_position()
+    plain.ticker = "VOD.L"
+    plain.display_symbol = "VOD.L"
+    html = _render(0.0, positions=[plain])
+
+    # The ticker cell must carry exactly one spelling — the Adjust/Sell
+    # onclick handlers legitimately repeat it outside the cell.
+    ticker_cell = _position_row(html, "VOD.L").split("</td>")[0]
+    assert ticker_cell.count("VOD.L") == 1

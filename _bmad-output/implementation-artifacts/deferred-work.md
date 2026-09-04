@@ -484,3 +484,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-482-publish-current-stage-vcp-evidence.md`
   summary: Reconciling the two independent VCP computations (the standalone `vcp-screener` subprocess used for candidate/universe discovery, and the new canonical `vcp_v1` detector used for recommendation evidence) is out of scope here but neither documented nor cross-referenced anywhere.
   evidence: `app/agents/scanner/scanner_agent.py` `_VCP_SCRIPT`/`fetch_vcp_screener_tickers` (candidate selection) vs. `_build_current_evidence`'s `vcp_v1` (evidence); the README's "no separate VCP command... for current portfolio recommendations" claim is accurate as scoped, but a reader could reasonably wonder why two VCP paths exist.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-484-portfolio-ux.md`
+  summary: Pass an explicit gbpusd_rate (or None) on the SIPP-import re-render path (`app/api/routes/portfolio.py:442`) so USD row equivalents and GBP cards share one rate basis instead of the legacy 1.35 default.
+  evidence: The import response calls `portfolio_partial_context` without `gbpusd_rate`; aggregates fall back to `_DEFAULT_GBPUSD` while the new per-row `position_gbp_values` omits its secondary figure entirely — same page, two FX bases. Pre-existing for cards; this story only made rows honest.
+
+## Deferred from: code review of spec-gh-484-portfolio-ux (2026-09-04)
+
+- Negative-PNL sign-preservation test only covers the USD branch of `amount_in_gbp`; the non-USD path through `GbpValuationService.value_in_gbp` is untested. A future regression where non-USD P&L sign flips would pass silently. Add a EUR/HKD negative-P&L case with a fake valuation service returning a negative `gbp_amount`.
