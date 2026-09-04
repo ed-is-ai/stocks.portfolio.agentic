@@ -224,6 +224,14 @@ Write and test your Strategy against `MarketViewV1` alone (never import
 import boundary above); a future engine hands you an already-constructed
 `MarketView` instance, never a way to construct one yourself.
 
+For the current portfolio-recommendation view, the same accessors are backed by
+the one atomically published Refresh Data artifact. When a security has a
+complete, session-aligned canonical detector bundle, `scan_result()` exposes
+the same typed `TechnicalsV1`, `StageV1`, and `VcpV1` shapes as historical
+evaluation. Missing, thin, stale, conflicting, or failed detector evidence is
+reported through generic evidence preflight and must be treated as degraded;
+Strategies must never fetch data or rerun detectors to fill that gap.
+
 ### `PortfolioView`
 
 An immutable, read-only snapshot of simulated portfolio state bounded to one

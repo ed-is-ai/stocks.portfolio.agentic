@@ -210,11 +210,11 @@ def test_missing_stage_evidence_cannot_create_a_sell(env: Any) -> None:
     assert [rec.action for rec in result.recommendations] == ["hold"]
     held = result.recommendations[0]
     assert held.security_id == "AAA"
-    assert held.rule_id == "exit_evidence_unsupported"
-    assert "exit_evidence_unsupported" in held.evidence_warnings
+    assert held.rule_id == "evidence_incomplete"
+    assert "evidence_incomplete" in held.evidence_warnings
     assert "scan_stage" in held.evidence_warnings
-    assert result.coverage.exit_state == "incompatible"
-    assert result.coverage.exit_missing_evidence == ("scan_stage",)
+    assert result.coverage.exit_state == "degraded"
+    assert result.coverage.exit_missing_evidence == ()
 
 
 def test_unsupported_entry_path_yields_no_buys_with_diagnostics(env: Any) -> None:
@@ -223,9 +223,9 @@ def test_unsupported_entry_path_yields_no_buys_with_diagnostics(env: Any) -> Non
     result = _recommend(env, strategy, [])
     assert isinstance(result, RecommendationResultV1)
     assert [rec.action for rec in result.recommendations] == []
-    assert result.coverage.entry_state == "incompatible"
+    assert result.coverage.entry_state == "degraded"
     assert result.coverage.exit_state == "compatible"
-    assert set(result.coverage.entry_missing_evidence) == {"scan_stage", "scan_vcp"}
+    assert result.coverage.entry_missing_evidence == ()
     assert not result.coverage.complete
 
 
@@ -317,7 +317,7 @@ def test_strategy_support_labels_a_history_only_strategy(env: Any) -> None:
 def test_strategy_support_labels_a_scan_dependent_strategy(env: Any) -> None:
     strategy = EagerStrategy(_requirements((_HISTORY, _STAGE), (_HISTORY, _STAGE)))
     support = _service(env, strategy, []).strategy_support()
-    assert support == {"alpha": "backtest_only", "beta": "backtest_only"}
+    assert support == {"alpha": "degraded", "beta": "degraded"}
 
 
 @pytest.mark.parametrize("tickers", [[], ["AAA"], ["ZZZ"]])

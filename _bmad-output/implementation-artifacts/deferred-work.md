@@ -463,3 +463,24 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
   summary: A snapshot's `as_of` is `str(timestamp)[:10]` in UTC while `session_date` is exchange-local, so a snapshot taken just after midnight UTC can miss the session it belongs to.
   evidence: revisions store `exchange_timezone` and the repair pass ignores it; pre-existing in `SnapshotRepairService._holdings_as_of`, and the exact-date contract correctly forbids substituting a neighbouring session either way.
+
+## Deferred from: code review of spec-gh-482-publish-current-stage-vcp-evidence (2026-09-04)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-482-publish-current-stage-vcp-evidence.md`
+  summary: When literally no ticker in a run produces a dated evidence entry (e.g. every security is still short of 252 sessions during rollout), the whole `current_evidence` section is omitted from the artifact rather than published as an explicit all-gap section, because `CurrentAnalysisEvidenceV1.as_of_session` requires a real bound date and there is no completed session to attribute it to.
+  evidence: `orchestrator.py`'s `if scanner.current_evidence_as_of is not None else None` guard; behaviourally this degrades to the same pre-existing "evidence-incomplete" state the spec's own AC already treats as safe, so it is a design question (invent a session-less gap representation, or leave as-is) rather than a clear defect.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-482-publish-current-stage-vcp-evidence.md`
+  summary: `CurrentEvidenceGapV1.reason` declares `"identity_conflict"` as a valid literal, but a duplicate/ambiguous canonical identity in `build_scan_market_view`'s evidence-stitching path is only recorded in the untyped `unresolved` ticker list, never as a typed gap entry in the artifact itself.
+  evidence: `app/services/backtest/scan_view.py` `evidence_quarantined` handling; giving the artifact a typed explanation here (vs. only the caller-side `unresolved` tuple) would need the artifact-build step to see the duplicate, which it currently doesn't.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-482-publish-current-stage-vcp-evidence.md`
+  summary: `_build_current_evidence` and its tests reach into `TradingCalendar`'s private `_calendar()` method and the underlying `exchange_calendars` library's `sessions_window` directly, rather than through a public `TradingCalendar` accessor.
+  evidence: `app/agents/scanner/scanner_agent.py` `_build_current_evidence`; couples production code (and now more tests) to an implementation-private method, with no wrapper insulating the rest of the codebase from that dependency's interface changing.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-482-publish-current-stage-vcp-evidence.md`
+  summary: Widening the scanner's fetch window to `_MARKET_DATA_CALENDAR_DAYS = 430` combined with the strict exchange-calendar equality check (`sessions != expected`) has not been validated against real gap-containing yfinance histories (halts, provider backfill lag, corporate actions); only clean, contiguous synthetic frames are covered by tests.
+  evidence: `app/agents/scanner/scanner_agent.py` `_build_current_evidence`; a first production run may show `incomplete_history` as the common case rather than the exception for thinly-traded or foreign-listed securities. No actionable code fix without observing real data first.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-482-publish-current-stage-vcp-evidence.md`
+  summary: No test exercises the scanner→orchestrator integration glue itself (the `current_evidence_as_of`/`current_evidence_entries` wiring and the `run()`-level stale-session reconciliation), only the unit-level building blocks.
+  evidence: grep for either symbol across `tests/` before this review's patches returned nothing; this review added direct unit coverage for the two logic bugs found, but an end-to-end `run()`-level integration test remains absent.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-482-publish-current-stage-vcp-evidence.md`
+  summary: Reconciling the two independent VCP computations (the standalone `vcp-screener` subprocess used for candidate/universe discovery, and the new canonical `vcp_v1` detector used for recommendation evidence) is out of scope here but neither documented nor cross-referenced anywhere.
+  evidence: `app/agents/scanner/scanner_agent.py` `_VCP_SCRIPT`/`fetch_vcp_screener_tickers` (candidate selection) vs. `_build_current_evidence`'s `vcp_v1` (evidence); the README's "no separate VCP command... for current portfolio recommendations" claim is accurate as scoped, but a reader could reasonably wonder why two VCP paths exist.

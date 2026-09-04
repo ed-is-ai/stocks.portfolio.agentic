@@ -271,6 +271,14 @@ Common generated files include:
 | `logs/pipeline_runs.csv` | Per-run metrics. |
 | `data/portfolio_value.csv` | Portfolio value snapshots. |
 
+An ordinary **Refresh Data** run (or
+`python -m app.orchestration.orchestrator --once`) also places the canonical
+typed Technicals, Weinstein Stage, and VCP detector results in
+`analysis_results.json`. They are published atomically with the run metadata
+and presentation records. Securities without exactly 252 completed OHLCV
+sessions carry an explicit evidence gap; no separate VCP command or historical
+backfill is needed for current portfolio recommendations.
+
 ## Architecture
 
 ```text

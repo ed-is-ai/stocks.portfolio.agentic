@@ -19,7 +19,7 @@ never silently dropped.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from types import MappingProxyType
@@ -29,6 +29,10 @@ import pandas as pd
 
 from app.core.ticker_identity import AmbiguousTickerAliasError, canonical_ticker
 from app.schemas.record import StockRecord
+from app.schemas.analysis_artifact import (
+    CurrentAnalysisEvidenceV1,
+    CurrentEvidenceSuccessV1,
+)
 from app.schemas.trade import Position
 from app.services.backtest.market_view import PRICE_HISTORY_COLUMNS
 from app.services.backtest.strategy_evidence import (
@@ -39,6 +43,7 @@ from app.services.backtest.strategy_protocol import (
     PositionSummaryV1,
     PortfolioView,
 )
+from app.services.backtest.historical_scan_record import StageV1, TechnicalsV1, VcpV1
 
 
 @dataclass(frozen=True)
@@ -55,10 +60,9 @@ class CurrentScanRecordView:
 
     security_id: str
     as_of_session_date: date
-
-    stage = None
-    vcp = None
-    technicals = None
+    technicals: TechnicalsV1 | None = None
+    stage: StageV1 | None = None
+    vcp: VcpV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +77,7 @@ class CurrentScanMarketView:
     as_of_session: date
     selected_universe: tuple[str, ...]
     _histories: Mapping[str, pd.DataFrame]
+    _scan_results: Mapping[str, CurrentScanRecordView] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Detach from caller-supplied collections so later mutation can
@@ -81,6 +86,11 @@ class CurrentScanMarketView:
             self, "selected_universe", tuple(sorted(set(self.selected_universe)))
         )
         object.__setattr__(self, "_histories", MappingProxyType(dict(self._histories)))
+        object.__setattr__(
+            self,
+            "_scan_results",
+            MappingProxyType(dict(self._scan_results or {})),
+        )
 
     def price_history(self, security_id: str) -> pd.DataFrame:
         """Return OHLCV history through ``as_of_session``, oldest first.
@@ -103,8 +113,11 @@ class CurrentScanMarketView:
         """Return the honest scan projection, or ``None`` outside the universe."""
         if security_id not in self.selected_universe:
             return None
-        return CurrentScanRecordView(
-            security_id=security_id, as_of_session_date=self.as_of_session
+        return self._scan_results.get(
+            security_id,
+            CurrentScanRecordView(
+                security_id=security_id, as_of_session_date=self.as_of_session
+            ),
         )
 
     @property
@@ -117,7 +130,7 @@ class CurrentScanMarketView:
         carry. A Strategy requiring them is reported incompatible here
         rather than silently evaluated against ``None``.
         """
-        return frozenset({EvidenceKind.PRICE_HISTORY})
+        return frozenset(EvidenceKind)
 
     def evidence_coverage(self, security_id: str) -> SecurityEvidenceCoverageV1:
         """Return ``security_id``'s real bounded-history coverage.
@@ -133,9 +146,18 @@ class CurrentScanMarketView:
         frame = self._histories.get(security_id)
         if frame is None or frame.empty:
             return SecurityEvidenceCoverageV1(security_id=security_id)
+        kinds = {EvidenceKind.PRICE_HISTORY}
+        scan = self._scan_results.get(security_id)
+        if scan is not None:
+            if scan.technicals is not None:
+                kinds.add(EvidenceKind.SCAN_TECHNICALS)
+            if scan.stage is not None:
+                kinds.add(EvidenceKind.SCAN_STAGE)
+            if scan.vcp is not None:
+                kinds.add(EvidenceKind.SCAN_VCP)
         return SecurityEvidenceCoverageV1(
             security_id=security_id,
-            kinds=frozenset({EvidenceKind.PRICE_HISTORY}),
+            kinds=frozenset(kinds),
             sessions=int(len(frame.index)),
             columns=tuple(str(column) for column in frame.columns),
         )
@@ -206,6 +228,7 @@ def build_scan_market_view(
     records: list[StockRecord],
     aliases: dict[str, str],
     as_of_session: date | None = None,
+    current_evidence: CurrentAnalysisEvidenceV1 | None = None,
 ) -> tuple[CurrentScanMarketView, tuple[str, ...]]:
     """Build the current-scan market view from published scan records.
 
@@ -219,6 +242,8 @@ def build_scan_market_view(
     silently mixing sessions into one view.
     """
     resolved: dict[str, pd.DataFrame] = {}
+    resolved_ticker: dict[str, str] = {}
+    quarantined: set[str] = set()
     unresolved: list[str] = []
     for record in records:
         try:
@@ -227,11 +252,20 @@ def build_scan_market_view(
             unresolved.append(record.ticker)
             continue
         if security_id in resolved:
-            # Two records canonicalizing to one id: keep the first, surface
-            # the duplicate rather than silently overwriting its history.
+            # Two records canonicalizing to one id: quarantine both, and
+            # surface both original spellings -- the first ticker's history
+            # is discarded here too, so its raw string must not silently
+            # disappear from the caller's diagnostics.
+            unresolved.append(resolved_ticker.pop(security_id))
+            unresolved.append(record.ticker)
+            resolved.pop(security_id, None)
+            quarantined.add(security_id)
+            continue
+        if security_id in quarantined:
             unresolved.append(record.ticker)
             continue
         resolved[security_id] = _history_frame(record)
+        resolved_ticker[security_id] = record.ticker
 
     session = as_of_session
     if session is None:
@@ -255,10 +289,41 @@ def build_scan_market_view(
             histories[security_id] = frame
         else:
             unresolved.append(security_id)
+    scan_results: dict[str, CurrentScanRecordView] = {}
+    evidence_quarantined: set[str] = set()
+    if current_evidence is not None and current_evidence.as_of_session == session:
+        for item in current_evidence.entries:
+            if not isinstance(item, CurrentEvidenceSuccessV1):
+                continue
+            try:
+                security_id = canonical_ticker(item.security_id, aliases)
+            except AmbiguousTickerAliasError:
+                unresolved.append(item.security_id)
+                continue
+            if (
+                security_id not in histories
+                or security_id in scan_results
+                or security_id in evidence_quarantined
+            ):
+                unresolved.append(item.security_id)
+                scan_results.pop(security_id, None)
+                evidence_quarantined.add(security_id)
+                continue
+            results = {
+                fragment.detector: fragment.result for fragment in item.fragments
+            }
+            scan_results[security_id] = CurrentScanRecordView(
+                security_id=security_id,
+                as_of_session_date=session,
+                technicals=results["technical_indicators_v1"].technicals,  # type: ignore[union-attr]
+                stage=results["weinstein_stage_v1"].stage,  # type: ignore[union-attr]
+                vcp=results["vcp_v1"].vcp,  # type: ignore[union-attr]
+            )
     view = CurrentScanMarketView(
         as_of_session=session,
         selected_universe=tuple(universe),
         _histories=histories,
+        _scan_results=scan_results,
     )
     return view, tuple(unresolved)
 

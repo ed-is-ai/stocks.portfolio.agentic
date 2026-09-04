@@ -9,7 +9,8 @@ import shutil
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterable, Protocol, cast
 
@@ -41,12 +42,26 @@ from app.integrations.tv_screener import (
     fetch_tv_screener_result_uk,
 )
 from app.schemas import StockRecord
+from app.schemas.analysis_artifact import (
+    CurrentEvidenceEntryV1,
+    CurrentEvidenceGapV1,
+    CurrentEvidenceSuccessV1,
+)
 from app.schemas.source_health import (
     SourceHealth,
     SourceName,
     SourceResult,
     SourceState,
 )
+from app.services.backtest.canonical_manifest import manifest_digest
+from app.services.backtest.detectors import (
+    DETECTOR_REGISTRY,
+    required_history_sessions,
+    run_detector_suite,
+)
+from app.services.backtest.market_planes import SplitContinuousRow
+from app.services.backtest.source_manifest import detector_source_manifests
+from app.services.backtest.trading_calendar import TradingCalendar
 
 _av_client = AlphaVantageClient()
 _congress_client = CongressClient()
@@ -109,6 +124,7 @@ def is_tv_source(source: str) -> bool:
 
 
 PERIOD_DAYS = 252  # ~1 trading year for stage analysis
+_MARKET_DATA_CALENDAR_DAYS = 430
 
 _SKILLS_DIR = SKILLS_DIR
 _VCP_SCRIPT = _SKILLS_DIR / "vcp-screener" / "scripts" / "screen_vcp.py"
@@ -507,6 +523,143 @@ def _inst_count(ticker_obj: yf.Ticker) -> int | None:
         return None
 
 
+class _MalformedHistoryError(ValueError):
+    """Raised when detector input contains a non-finite OHLCV value."""
+
+
+def _safe_last_session(frame: pd.DataFrame) -> date | None:
+    """Return ``frame``'s last session date, or None if it can't be read.
+
+    Used only for the typed-gap fallback: a malformed index entry (e.g. a
+    stray NaT from an upstream provider glitch) must degrade to "no date
+    known" for this one ticker's gap, never escape and abort the whole
+    ticker fetch.
+    """
+    if not len(frame.index):
+        return None
+    try:
+        return pd.Timestamp(frame.index[-1]).date()
+    except Exception:
+        return None
+
+
+def _build_current_evidence(ticker: str, frame: pd.DataFrame) -> CurrentEvidenceEntryV1:
+    """Run the canonical detector suite over an exact unpadded final window."""
+    required = required_history_sessions()
+    try:
+        if len(frame) < required:
+            return CurrentEvidenceGapV1(
+                schema_version="current_scan_evidence_gap.v1",
+                security_id=ticker,
+                reason="insufficient_history",
+                detail=f"{len(frame)} completed sessions; {required} required",
+            )
+        bounded = frame.iloc[-required:]
+        sessions = tuple(pd.Timestamp(value).date() for value in bounded.index)
+        if sessions != tuple(sorted(sessions)) or len(set(sessions)) != required:
+            return CurrentEvidenceGapV1(
+                schema_version="current_scan_evidence_gap.v1",
+                security_id=ticker,
+                as_of_session=sessions[-1] if sessions else None,
+                reason="incomplete_history",
+                detail="detector sessions are duplicate or out of order",
+            )
+        mic = "XLON" if ticker.endswith(".L") else "XNAS"
+        calendar = TradingCalendar()
+        expected = tuple(
+            stamp.date()
+            for stamp in calendar._calendar(mic).sessions_window(
+                sessions[-1], -required
+            )
+        )
+        if sessions != expected:
+            return CurrentEvidenceGapV1(
+                schema_version="current_scan_evidence_gap.v1",
+                security_id=ticker,
+                as_of_session=sessions[-1],
+                reason="incomplete_history",
+                detail="detector history does not contain 252 consecutive sessions",
+            )
+        if (
+            sessions[-1] == datetime.now(timezone.utc).date()
+            and datetime.now(timezone.utc)
+            <= calendar.session_close(mic, sessions[-1]).to_pydatetime()
+        ):
+            return CurrentEvidenceGapV1(
+                schema_version="current_scan_evidence_gap.v1",
+                security_id=ticker,
+                as_of_session=sessions[-1],
+                reason="incomplete_history",
+                detail="latest detector session has not completed",
+            )
+        canonical_rows: list[dict[str, str]] = []
+        for session, (_, row) in zip(sessions, bounded.iterrows(), strict=True):
+            values = {
+                name: Decimal(str(row[name]))
+                for name in ("open", "high", "low", "close", "volume")
+            }
+            if any(not value.is_finite() for value in values.values()):
+                raise _MalformedHistoryError("non-finite OHLCV value")
+            canonical_rows.append(
+                {"session": session.isoformat()}
+                | {name: str(value) for name, value in values.items()}
+            )
+        input_revision = manifest_digest(
+            {
+                "schema_version": "current_detector_input.v1",
+                "security_id": ticker,
+                "as_of_session": sessions[-1].isoformat(),
+                "rows": canonical_rows,
+            }
+        )
+        rows = tuple(
+            SplitContinuousRow(
+                evidence_revision=input_revision,
+                session=session,
+                open=Decimal(item["open"]),
+                high=Decimal(item["high"]),
+                low=Decimal(item["low"]),
+                close=Decimal(item["close"]),
+                volume=Decimal(item["volume"]),
+            )
+            for session, item in zip(sessions, canonical_rows, strict=True)
+        )
+        manifests = detector_source_manifests(Path(__file__).resolve().parents[3])
+        suite = run_detector_suite(
+            rows,
+            security_id=ticker,
+            as_of_session=sessions[-1],
+            detector_versions={
+                item.detector_id: manifests[item.detector_id].digest
+                for item in DETECTOR_REGISTRY
+            },
+            input_revision=input_revision,
+        )
+        return CurrentEvidenceSuccessV1(
+            schema_version="current_scan_evidence.v1",
+            security_id=ticker,
+            as_of_session=sessions[-1],
+            input_revision=input_revision,
+            fragments=suite.fragments,
+        )
+    except _MalformedHistoryError as exc:
+        return CurrentEvidenceGapV1(
+            schema_version="current_scan_evidence_gap.v1",
+            security_id=ticker,
+            as_of_session=_safe_last_session(frame),
+            reason="malformed_history",
+            detail=str(exc),
+        )
+    except Exception as exc:
+        return CurrentEvidenceGapV1(
+            schema_version="current_scan_evidence_gap.v1",
+            security_id=ticker,
+            as_of_session=_safe_last_session(frame),
+            reason="detector_failure",
+            detail=f"canonical detector suite failed: {type(exc).__name__}",
+        )
+
+
 class ScannerAgent(Agent):
     name: str = "ScannerAgent"
     source_health: dict[SourceName, SourceHealth] = {}
@@ -514,6 +667,8 @@ class ScannerAgent(Agent):
     bau_capture_session: Any | None = None
     bau_capture: Any | None = None
     bau_capture_warning: str | None = None
+    current_evidence_entries: tuple[CurrentEvidenceEntryV1, ...] = ()
+    current_evidence_as_of: date | None = None
 
     def _report_progress(
         self, stage: str, state: str, count: int | None = None
@@ -612,6 +767,30 @@ class ScannerAgent(Agent):
         )
         for r in records:
             r.source = ",".join(sources_by_ticker[r.ticker])
+        # Only a validated CurrentEvidenceSuccessV1 date can set the run's
+        # canonical session -- a gap entry's date (e.g. detector_failure's
+        # unvalidated fallback) must never be able to poison every other
+        # ticker's genuinely current evidence into a false stale_session.
+        dated_entries = [
+            item.as_of_session
+            for item in self.current_evidence_entries
+            if isinstance(item, CurrentEvidenceSuccessV1)
+        ]
+        if dated_entries:
+            self.current_evidence_as_of = max(dated_entries)
+            self.current_evidence_entries = tuple(
+                CurrentEvidenceGapV1(
+                    schema_version="current_scan_evidence_gap.v1",
+                    security_id=item.security_id,
+                    as_of_session=item.as_of_session,
+                    reason="stale_session",
+                    detail="detector evidence does not match the run session",
+                )
+                if isinstance(item, CurrentEvidenceSuccessV1)
+                and item.as_of_session != self.current_evidence_as_of
+                else item
+                for item in self.current_evidence_entries
+            )
         if self.bau_capture_session is not None:
             try:
                 self.bau_capture = self.bau_capture_session.complete_capture()
@@ -625,7 +804,7 @@ class ScannerAgent(Agent):
             if captured is not None:
                 return captured.copy() if len(captured) >= 50 else None
         end = datetime.today()
-        start = end - timedelta(days=PERIOD_DAYS + 60)
+        start = end - timedelta(days=_MARKET_DATA_CALENDAR_DAYS)
         df = yf.download(
             ticker,
             start=start,
@@ -680,6 +859,7 @@ class ScannerAgent(Agent):
             if df is None:
                 print(f"  [skip] {ticker}: insufficient data")
                 return None
+            current_evidence = _build_current_evidence(ticker, df)
             technicals = self.compute_technicals(df)
             fundamentals = _fetch_fundamentals_yf(ticker)
             rel_strength = self.compute_rel_strength(
@@ -690,6 +870,7 @@ class ScannerAgent(Agent):
                 "technicals": technicals,
                 "fundamentals": fundamentals,
                 "rel_strength": rel_strength,
+                "current_evidence": current_evidence,
             }
         except Exception as error:
             print(f"  [err]  {ticker}: {error}")
@@ -728,6 +909,9 @@ class ScannerAgent(Agent):
         # two independent, rate-limited providers.  Running them one after the
         # other makes a large watchlist pay both wait budgets end-to-end.
         valid_fetched = [data for data in fetched if data is not None]
+        self.current_evidence_entries = tuple(
+            data["current_evidence"] for data in valid_fetched
+        )
         self._report_progress("market_data", "complete", len(valid_fetched))
         self._report_progress("enrichment", "running", len(valid_fetched))
 

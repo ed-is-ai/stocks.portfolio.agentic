@@ -8,19 +8,14 @@ from typing import Literal, cast
 from app.repositories.historical_price_repo import StoredHistoricalEvidence
 from app.services.backtest.bau_run_envelope import BauCaptureMemberV1
 from app.services.backtest.detectors import (
-    DETECTOR_REGISTRY,
-    DetectorContext,
     required_history_sessions,
+    run_detector_suite,
 )
 from app.services.backtest.historical_scan_record import (
-    DetectorFragmentEnvelopeV1,
     EnrichmentV1,
     HistoricalScanRecordV1,
     ProvenanceV1,
-    StageResultV1,
-    TechnicalResultV1,
-    TechnicalsV1,
-    VcpResultV1,
+    DetectorFragmentEnvelopeV1,
 )
 from app.services.backtest.market_planes import HistoricalMarketPlanes
 from app.services.backtest.trading_calendar import TradingCalendar
@@ -86,37 +81,17 @@ class ObservedBauRecordBuilder:
                 "raw BAU evidence lacks exact canonical history"
             )
 
-        technicals: TechnicalsV1 | None = None
-        stage: StageResultV1 | None = None
-        vcp: VcpResultV1 | None = None
-        fragments: list[DetectorFragmentEnvelopeV1] = []
         manifest = member.input_manifest
-        for detector in DETECTOR_REGISTRY:
-            try:
-                result = detector.run(DetectorContext(rows, technicals))
-            except Exception as exc:
-                raise ObservedBauBuildError(
-                    "BAU detector failed on raw evidence"
-                ) from exc
-            fragment = DetectorFragmentEnvelopeV1(
-                schema_version="scan_detector_fragment.v1",
+        try:
+            suite = run_detector_suite(
+                rows,
                 security_id=member.security_id,
-                date=member.canonical_session,
-                detector=detector.detector_id,
-                detector_version=manifest.detector_versions[detector.detector_id],
-                detector_api_version=detector.detector_api_version,
+                as_of_session=member.canonical_session,
+                detector_versions=manifest.detector_versions,
                 input_revision=manifest.digest(),
-                result=result,
             )
-            fragments.append(fragment)
-            if isinstance(result, TechnicalResultV1):
-                technicals = result.technicals
-            elif isinstance(result, StageResultV1):
-                stage = result
-            elif isinstance(result, VcpResultV1):
-                vcp = result
-        if technicals is None or stage is None or vcp is None:
-            raise ObservedBauBuildError("BAU detector output is incomplete")
+        except Exception as exc:
+            raise ObservedBauBuildError("BAU detector failed on raw evidence") from exc
         record = HistoricalScanRecordV1(
             schema_version="historical_scan_record.v1",
             security_id=member.security_id,
@@ -127,9 +102,9 @@ class ObservedBauRecordBuilder:
             currency=cast(Literal["USD", "GBP"], planes.currency),
             quote_unit=cast(Literal["USD", "GBP", "GBp"], planes.quote_unit),
             provenance_quality="observed_bau",
-            technicals=technicals,
-            stage=stage.stage,
-            vcp=vcp.vcp,
+            technicals=suite.technicals,
+            stage=suite.stage,
+            vcp=suite.vcp,
             enrichment=EnrichmentV1(),
             provenance=ProvenanceV1(
                 price_provider="yfinance",
@@ -151,7 +126,7 @@ class ObservedBauRecordBuilder:
                 detector_versions=manifest.detector_versions,
             ),
         )
-        return ObservedBauBuildResult(record=record, fragments=tuple(fragments))
+        return ObservedBauBuildResult(record=record, fragments=suite.fragments)
 
 
 __all__ = [

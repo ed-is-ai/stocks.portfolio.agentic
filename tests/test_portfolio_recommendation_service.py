@@ -410,8 +410,13 @@ def test_history_only_strategy_never_reads_scan_result(
     env.assignment.assign(7, "alpha")
     real_build = svc_module.build_scan_market_view
 
-    def guarded_build(records: Any, aliases: Any, as_of_session: Any = None) -> Any:
-        view, unresolved = real_build(records, aliases, as_of_session)
+    def guarded_build(
+        records: Any,
+        aliases: Any,
+        as_of_session: Any = None,
+        current_evidence: Any = None,
+    ) -> Any:
+        view, unresolved = real_build(records, aliases, as_of_session, current_evidence)
         return _ScanResultForbiddenView(view), unresolved
 
     monkeypatch.setattr(svc_module, "build_scan_market_view", guarded_build)

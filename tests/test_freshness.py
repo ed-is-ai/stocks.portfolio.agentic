@@ -1,11 +1,15 @@
 """Acceptance contracts for last-usable-run freshness (#42)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+import json
 
 from app.core.config import pipeline_stale_after_hours
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.analysis_artifact import (
+    CurrentAnalysisEvidenceV1,
+    CurrentEvidenceGapV1,
     build_analysis_payload,
+    read_analysis_artifact,
     read_analysis_artifact_meta,
     read_analysis_records,
 )
@@ -162,6 +166,83 @@ def test_missing_or_legacy_artifact_meta_is_none(tmp_path) -> None:
     legacy.write_text('[{"ticker": "AAPL"}]', encoding="utf-8")
     assert read_analysis_artifact_meta(legacy) is None
     assert read_analysis_records(legacy) == [{"ticker": "AAPL"}]
+
+
+def test_current_evidence_gap_roundtrips_in_one_artifact_snapshot(tmp_path) -> None:
+    session = date(2026, 9, 3)
+    evidence = CurrentAnalysisEvidenceV1.build(
+        run_id="run-a",
+        as_of_session=session,
+        entries=(
+            CurrentEvidenceGapV1(
+                schema_version="current_scan_evidence_gap.v1",
+                security_id="AAPL",
+                as_of_session=session,
+                reason="insufficient_history",
+                detail="251 completed sessions; 252 required",
+            ),
+        ),
+    )
+    payload = build_analysis_payload(
+        [{"ticker": "AAPL"}],
+        run_id="run-a",
+        generated_at=datetime.now(timezone.utc),
+        current_evidence=evidence,
+    )
+    path = tmp_path / "analysis.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = read_analysis_artifact(path)
+    assert loaded is not None
+    assert loaded.current_evidence is not None
+    assert loaded.current_evidence == evidence
+    assert loaded.current_evidence.content_digest == evidence.content_digest
+
+
+def test_tampered_current_evidence_digest_rejects_whole_envelope(tmp_path) -> None:
+    evidence = CurrentAnalysisEvidenceV1.build(
+        run_id="run-a",
+        as_of_session=date(2026, 9, 3),
+        entries=(),
+    )
+    payload = build_analysis_payload(
+        [],
+        run_id="run-a",
+        generated_at=datetime.now(timezone.utc),
+        current_evidence=evidence,
+    )
+    payload["current_evidence"]["content_digest"] = "0" * 64
+    path = tmp_path / "analysis.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert read_analysis_artifact(path) is None
+
+
+def test_tampered_current_evidence_does_not_blank_meta(tmp_path) -> None:
+    """A corrupt evidence section must not make an otherwise-healthy run's
+    ownership metadata unreadable -- every freshness consumer reads through
+    ``read_analysis_artifact_meta``, not the full (stricter) artifact model.
+    """
+    evidence = CurrentAnalysisEvidenceV1.build(
+        run_id="run-a",
+        as_of_session=date(2026, 9, 3),
+        entries=(),
+    )
+    generated_at = datetime.now(timezone.utc)
+    payload = build_analysis_payload(
+        [],
+        run_id="run-a",
+        generated_at=generated_at,
+        current_evidence=evidence,
+    )
+    payload["current_evidence"]["content_digest"] = "0" * 64
+    path = tmp_path / "analysis.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert read_analysis_artifact(path) is None
+    meta = read_analysis_artifact_meta(path)
+    assert meta is not None
+    assert meta.run_id == "run-a"
 
 
 def test_find_run_locates_current_and_archived_runs(tmp_path) -> None:

@@ -23,7 +23,7 @@ from app.core.ticker_identity import (
     load_aliases,
 )
 from app.schemas.analysis_artifact import (
-    read_analysis_artifact_meta,
+    read_analysis_artifact,
     read_analysis_records,
 )
 from app.schemas.portfolio_recommendation import (
@@ -87,8 +87,8 @@ _RULE_REASONS: dict[str, str] = {
         "carry, so its exit rules were not evaluated — fails safe to Hold."
     ),
     "evidence_incomplete": (
-        "Not enough evidenced history for the assigned Strategy's rules on "
-        "this security — fails safe to Hold."
+        "Not enough evidenced data — history, Stage, or VCP — for the "
+        "assigned Strategy's rules on this security — fails safe to Hold."
     ),
 }
 
@@ -228,8 +228,11 @@ class PortfolioRecommendationService:
                 )
             )
         freshness = self._assignment_service.freshness()
-        meta = read_analysis_artifact_meta(self._analysis_path)
-        records = self._load_analysis_records()
+        artifact = read_analysis_artifact(self._analysis_path)
+        meta = None if artifact is None else artifact.meta
+        records = self._load_analysis_records(
+            None if artifact is None else artifact.records
+        )
         if not records:
             return EvaluationUnavailable(
                 reason="No published scan artifact to evaluate against.",
@@ -242,7 +245,18 @@ class PortfolioRecommendationService:
             )
         aliases = load_aliases()
         try:
-            scan_view, unresolved = build_scan_market_view(records, aliases)
+            scan_view, unresolved = build_scan_market_view(
+                records,
+                aliases,
+                as_of_session=(
+                    artifact.current_evidence.as_of_session
+                    if artifact and artifact.current_evidence
+                    else None
+                ),
+                current_evidence=(
+                    artifact.current_evidence if artifact is not None else None
+                ),
+            )
         except ValueError:
             # No record carries OHLCV history — no usable evidence.
             return EvaluationUnavailable(
@@ -393,10 +407,22 @@ class PortfolioRecommendationService:
     def _support_scan_view(self) -> CurrentScanMarketView | None:
         """Build the current-scan view for support labelling, or ``None``."""
         try:
-            records = self._load_analysis_records()
+            artifact = read_analysis_artifact(self._analysis_path)
+            records = self._load_analysis_records(
+                None if artifact is None else artifact.records
+            )
             if not records:
                 return None
-            view, _ = build_scan_market_view(records, load_aliases())
+            view, _ = build_scan_market_view(
+                records,
+                load_aliases(),
+                as_of_session=(
+                    artifact.current_evidence.as_of_session
+                    if artifact and artifact.current_evidence
+                    else None
+                ),
+                current_evidence=(artifact.current_evidence if artifact else None),
+            )
         except Exception:
             logger.exception("Strategy support lookup could not build a scan view")
             return None
@@ -440,18 +466,23 @@ class PortfolioRecommendationService:
         }
         return by_id.get(strategy_id)
 
-    def _load_analysis_records(self) -> list[StockRecord]:
+    def _load_analysis_records(
+        self, snapshot_records: list[dict[str, Any]] | None = None
+    ) -> list[StockRecord]:
         """Load published scan records fail-soft, one malformed row skipped.
 
         Mirrors ``PortfolioService.load_analysis``; an injected portfolio
         service reuses its implementation directly.
         """
-        if self._portfolio_service is not None:
+        if self._portfolio_service is not None and snapshot_records is None:
             return self._portfolio_service.load_analysis()
-        try:
-            data = read_analysis_records(self._analysis_path)
-        except Exception:
-            return []
+        if snapshot_records is None:
+            try:
+                data = read_analysis_records(self._analysis_path)
+            except Exception:
+                return []
+        else:
+            data = snapshot_records
         records: list[StockRecord] = []
         for row in data:
             try:

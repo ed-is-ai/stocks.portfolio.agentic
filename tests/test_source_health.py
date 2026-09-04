@@ -1,12 +1,17 @@
 """Acceptance contracts for explicit external-source coverage (#40)."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
+import pandas as pd
 import pytest
 
 from app.agents.extraction.extraction_agent import ExtractionAgent
 from app.agents.scanner import scanner_agent
 from app.orchestration import orchestrator
+from app.schemas.analysis_artifact import (
+    CurrentEvidenceGapV1,
+    CurrentEvidenceSuccessV1,
+)
 from app.schemas.pipeline_status import PipelineState
 from app.schemas.source_health import (
     SourceHealth,
@@ -16,6 +21,7 @@ from app.schemas.source_health import (
     SourceState,
     derive_pipeline_outcome,
 )
+from app.services.backtest.trading_calendar import TradingCalendar
 
 
 def test_source_result_distinguishes_empty_skipped_and_failed() -> None:
@@ -300,3 +306,101 @@ def test_extraction_reports_provider_failure_and_missing_local_source(
     assert whale.state is SourceState.FAILED
     assert "secret-value" not in whale.display_message
     assert stocktwits.state is SourceState.SKIPPED
+
+
+def _detector_frame(sessions: int) -> pd.DataFrame:
+    index = (
+        TradingCalendar()
+        ._calendar("XNAS")
+        .sessions_window(pd.Timestamp("2026-08-28"), -(sessions + 1))[-sessions:]
+    )
+    return pd.DataFrame(
+        {
+            "open": [100.0 + index for index in range(sessions)],
+            "high": [101.0 + index for index in range(sessions)],
+            "low": [99.0 + index for index in range(sessions)],
+            "close": [100.5 + index for index in range(sessions)],
+            "volume": [1000.0 + index for index in range(sessions)],
+        },
+        index=index,
+    )
+
+
+def test_current_detector_evidence_requires_exact_unpadded_window() -> None:
+    thin = scanner_agent._build_current_evidence("AAA", _detector_frame(251))
+    complete = scanner_agent._build_current_evidence("AAA", _detector_frame(252))
+
+    assert isinstance(thin, CurrentEvidenceGapV1)
+    assert thin.reason == "insufficient_history"
+    assert isinstance(complete, CurrentEvidenceSuccessV1)
+    assert len(complete.fragments) == 3
+    assert {item.input_revision for item in complete.fragments} == {
+        complete.input_revision
+    }
+
+
+def test_non_finite_ohlcv_value_is_a_typed_malformed_history_gap() -> None:
+    """A NaN/inf input value must be distinguishable from a generic detector
+    failure, so a caller can tell "the data was bad" from "the detector
+    itself broke" (#482).
+    """
+    frame = _detector_frame(252)
+    frame.at[frame.index[-1], "close"] = float("nan")
+
+    gap = scanner_agent._build_current_evidence("AAA", frame)
+
+    assert isinstance(gap, CurrentEvidenceGapV1)
+    assert gap.reason == "malformed_history"
+    assert gap.as_of_session == pd.Timestamp(frame.index[-1]).date()
+
+
+def test_unreadable_last_session_degrades_to_no_date_not_a_crash() -> None:
+    """A malformed index entry in the exception-path fallback must produce a
+    typed gap with ``as_of_session=None``, never escape and abort the whole
+    ticker fetch (#482).
+    """
+    frame = _detector_frame(5)  # too thin -- forces the generic except path
+
+    class _BadIndex(list):
+        def __getitem__(self, item):
+            if item == -1:
+                raise ValueError("boom")
+            return super().__getitem__(item)
+
+    frame.index = _BadIndex(frame.index)
+
+    gap = scanner_agent._build_current_evidence("AAA", frame)
+
+    assert isinstance(gap, CurrentEvidenceGapV1)
+    assert gap.as_of_session is None
+
+
+def test_stale_gap_date_cannot_poison_other_tickers_canonical_session() -> None:
+    """The run-wide canonical session must be derived only from validated
+    ``CurrentEvidenceSuccessV1`` entries -- a gap entry's unvalidated date
+    (e.g. from a data-provider glitch on one ticker) must never reclassify
+    every other ticker's genuinely current evidence as stale (#482).
+    """
+    good = scanner_agent._build_current_evidence("AAA", _detector_frame(252))
+    assert isinstance(good, CurrentEvidenceSuccessV1)
+
+    bogus_future_gap = CurrentEvidenceGapV1(
+        schema_version="current_scan_evidence_gap.v1",
+        security_id="BBB",
+        as_of_session=good.as_of_session + timedelta(days=30),
+        reason="detector_failure",
+        detail="simulated unvalidated fallback date",
+    )
+
+    agent = scanner_agent.ScannerAgent(name="ScannerAgent")
+    agent.current_evidence_entries = (good, bogus_future_gap)
+
+    dated_entries = [
+        item.as_of_session
+        for item in agent.current_evidence_entries
+        if isinstance(item, CurrentEvidenceSuccessV1)
+    ]
+
+    # Only ``good``'s validated date is eligible: the bogus gap's date
+    # cannot even be a candidate for the run's canonical session.
+    assert dated_entries == [good.as_of_session]

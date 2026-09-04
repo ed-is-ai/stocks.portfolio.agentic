@@ -133,7 +133,7 @@ def test_history_only_strategies_are_compatible_with_the_ohlcv_view(
 @pytest.mark.parametrize(
     ("strategy_id", "missing"), sorted(SCAN_DEPENDENT_STRATEGIES.items())
 )
-def test_scan_dependent_strategies_are_incompatible_with_the_ohlcv_view(
+def test_scan_dependent_strategies_are_degraded_without_current_fragments(
     strategy_id: str, missing: tuple[EvidenceKind, ...]
 ) -> None:
     descriptor = next(
@@ -144,11 +144,11 @@ def test_scan_dependent_strategies_are_incompatible_with_the_ohlcv_view(
     preflight = preflight_evidence(
         _requirements(descriptor), _ohlcv_view(), (SECURITY,), (SECURITY,)
     )
-    assert preflight.entry is EvidenceCompatibility.INCOMPATIBLE
-    assert preflight.exit is EvidenceCompatibility.INCOMPATIBLE
-    assert set(missing) <= set(preflight.entry_missing)
-    assert set(missing) <= set(preflight.exit_missing)
-    assert strategy_support_label(preflight) == "backtest_only"
+    assert preflight.entry is EvidenceCompatibility.DEGRADED
+    assert preflight.exit is EvidenceCompatibility.DEGRADED
+    assert set(missing) <= set(preflight.degraded_entry[SECURITY])
+    assert set(missing) <= set(preflight.degraded_exit[SECURITY])
+    assert strategy_support_label(preflight) == "degraded"
 
 
 def test_thin_history_degrades_rather_than_disqualifies() -> None:

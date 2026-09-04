@@ -86,7 +86,10 @@ from app.repositories.pipeline_status_repo import (
     PipelineRunInactiveError,
     PipelineStatusRepository,
 )
-from app.schemas.analysis_artifact import build_analysis_payload
+from app.schemas.analysis_artifact import (
+    CurrentAnalysisEvidenceV1,
+    build_analysis_payload,
+)
 from app.services.backtest.bau_capture_coordinator import BauCaptureCoordinator
 from app.services.backtest.bau_run_envelope import BauRunEnvelopeStore, BauRunEnvelopeV1
 from app.services.backtest.bau_snapshot_promotion import BauSnapshotPromotionService
@@ -1321,10 +1324,20 @@ def pipeline(
         # to record ownership would leave a crash window where the file is
         # promoted but its owner is unrecorded (or vice versa) — see
         # app.schemas.analysis_artifact for the full rationale.
+        current_evidence = (
+            CurrentAnalysisEvidenceV1.build(
+                run_id=run_id,
+                as_of_session=scanner.current_evidence_as_of,
+                entries=scanner.current_evidence_entries,
+            )
+            if scanner.current_evidence_as_of is not None
+            else None
+        )
         analysis_payload = build_analysis_payload(
             [item.model_dump(mode="json") for item in analysis_results],
             run_id=run_id,
             generated_at=datetime.now(timezone.utc),
+            current_evidence=current_evidence,
         )
         with open(analysis_temporary, "w", encoding="utf-8") as stream:
             json.dump(analysis_payload, stream, indent=2)

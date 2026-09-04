@@ -8,8 +8,14 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pandas as pd
 import pytest
 
+from app.agents.scanner.scanner_agent import _build_current_evidence
+from app.schemas.analysis_artifact import (
+    CurrentAnalysisEvidenceV1,
+    CurrentEvidenceSuccessV1,
+)
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.backtest.market_view import PRICE_HISTORY_COLUMNS
@@ -17,6 +23,8 @@ from app.services.backtest.scan_view import (
     build_portfolio_view,
     build_scan_market_view,
 )
+from app.services.backtest.strategy_evidence import EvidenceKind
+from app.services.backtest.trading_calendar import TradingCalendar
 
 SESSION = date(2026, 8, 28)
 PREVIOUS = date(2026, 8, 27)
@@ -127,6 +135,50 @@ def test_scan_result_projection_has_no_fabricated_fields() -> None:
     assert view.scan_result("BBB") is None
 
 
+def test_complete_current_bundle_exposes_typed_scan_coverage() -> None:
+    sessions = (
+        TradingCalendar()._calendar("XNAS").sessions_window(pd.Timestamp(SESSION), -252)
+    )
+    frame = pd.DataFrame(
+        {
+            "open": [100.0 + index / 10 for index in range(252)],
+            "high": [101.0 + index / 10 for index in range(252)],
+            "low": [99.0 + index / 10 for index in range(252)],
+            "close": [100.5 + index / 10 for index in range(252)],
+            "volume": [1000.0 + index for index in range(252)],
+        },
+        index=sessions,
+    )
+    entry = _build_current_evidence("AAA", frame)
+    assert isinstance(entry, CurrentEvidenceSuccessV1)
+    bars = [
+        {
+            "date": stamp.date().isoformat(),
+            **{
+                name: float(str(frame.loc[stamp, name]))
+                for name in PRICE_HISTORY_COLUMNS
+            },
+        }
+        for stamp in reversed(sessions)
+    ]
+    evidence = CurrentAnalysisEvidenceV1.build(
+        run_id="run-a", as_of_session=SESSION, entries=(entry,)
+    )
+
+    view, unresolved = build_scan_market_view(
+        [_record("AAA", bars)], {}, current_evidence=evidence
+    )
+    result = view.scan_result("AAA")
+
+    assert unresolved == ()
+    assert result is not None
+    assert result.technicals is not None
+    assert result.stage is not None
+    assert result.vcp is not None
+    assert view.evidence_capabilities == frozenset(EvidenceKind)
+    assert view.evidence_coverage("AAA").kinds == frozenset(EvidenceKind)
+
+
 def test_stale_evidence_is_excluded_and_surfaced() -> None:
     older = date(2026, 8, 20)
     view, unresolved = build_scan_market_view(
@@ -207,10 +259,17 @@ def test_out_of_order_sessions_raise_value_error() -> None:
 
 
 def test_duplicate_canonical_records_are_surfaced() -> None:
+    """Both raw spellings that collide on one canonical id must be surfaced.
+
+    Uses two *different* raw tickers aliased to the same canonical id --
+    identical strings would let a bug that only surfaces the second
+    colliding ticker (and silently drops the first) pass unnoticed.
+    """
+    aliases = {"AAA": "CANON", "BBB": "CANON"}
     view, unresolved = build_scan_market_view(
-        [_record("AAA", _bars(SESSION)), _record("AAA", _bars(SESSION))],
-        {},
+        [_record("AAA", _bars(SESSION)), _record("BBB", _bars(SESSION))],
+        aliases,
         as_of_session=SESSION,
     )
-    assert view.selected_universe == ("AAA",)
-    assert unresolved == ("AAA",)
+    assert view.selected_universe == ()
+    assert set(unresolved) == {"AAA", "BBB"}
