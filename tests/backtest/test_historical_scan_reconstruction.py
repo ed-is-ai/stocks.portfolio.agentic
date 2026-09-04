@@ -477,6 +477,95 @@ def test_reconstruction_reuses_exact_cached_fragments_without_rerunning_detector
     assert repo.detector_cache_count() == 3
 
 
+def _roster_with_new_digest() -> CapturedRosterV1:
+    """A distinct roster generation: same members/alias_revision, new digest.
+
+    Mirrors the live-DB shape this fixes -- four roster generations there
+    already share one ``alias_revision`` while each has its own
+    ``roster_digest`` (a new ``identity_registry_revision`` is enough to
+    change the digest without touching anything reconstruct() reads).
+    """
+    body = {
+        "schema_version": "ReconstructionRosterManifestV1",
+        "policy_version": "ReconstructionRosterPolicyV1",
+        "captured_at": ROSTER_CAPTURED_AT,
+        "identity_registry_revision": DIGEST_A,
+        "alias_revision": DIGEST_B,
+        "expected_count": 1,
+        "sources": [],
+        "members": [
+            {
+                "security_id": "sec-001",
+                "mic": "XNAS",
+                "calendar": "XNYS",
+                "provider_symbol": "TEST",
+                "currency": "USD",
+                "quote_unit": "USD",
+                "source_memberships": ["tradingview_us"],
+                "identity_evidence": [
+                    {
+                        "mic": "XNAS",
+                        "currency": "USD",
+                        "quote_unit": "USD",
+                        "evidence_source": "fixture",
+                        "evidence_digest": DIGEST_C,
+                    }
+                ],
+                "evidence_digest": DIGEST_C,
+            }
+        ],
+        "provenance": {
+            "roster_captured_at": ROSTER_CAPTURED_AT,
+            "universe_basis": "captured_configured_roster",
+            "point_in_time_universe": False,
+            "survivorship_bias": "known",
+            "warning": "fixture",
+        },
+    }
+    rendered = canonical_json(body)
+    return CapturedRosterV1.from_json(manifest_digest(body), rendered)
+
+
+def test_reconstruction_reuses_cache_across_a_new_roster_generation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new roster generation must not force detectors to rerun.
+
+    ``roster_digest`` gates evidence lookup and month scope-inclusion --
+    decided before ``reconstruct()`` runs -- not the ``rows`` a detector
+    computes over. Two requests differing only in ``roster``/
+    ``roster_digest`` (same evidence, same alias_revision, same detector
+    versions) must resolve to the same detector-fragment cache row rather
+    than each computing and storing its own copy (#487 follow-up).
+    """
+    repo = BacktestRepository(db.make_connect(lambda: tmp_path / "backtest.db"))
+    repo.ensure_schema()
+    first_request = _request(_evidence())
+    first = HistoricalScanReconstructor(repo).reconstruct(first_request)
+    assert repo.detector_cache_count() == 3
+
+    next_roster = _roster_with_new_digest()
+    assert next_roster.roster_digest != first_request.roster.roster_digest
+    next_generation_request = replace(
+        first_request,
+        roster=next_roster,
+        input_manifest=first_request.input_manifest.model_copy(
+            update={"roster_digest": next_roster.roster_digest}
+        ),
+    )
+
+    def forbidden_run(_self: DetectorSpec, _context: object) -> object:
+        raise AssertionError("cache hit must not rerun detector")
+
+    monkeypatch.setattr(DetectorSpec, "run", forbidden_run)
+    reused = HistoricalScanReconstructor(repo).reconstruct(next_generation_request)
+
+    assert repo.detector_cache_count() == 3
+    assert reused.record.technicals == first.record.technicals
+    assert reused.record.stage == first.record.stage
+    assert reused.record.vcp == first.record.vcp
+
+
 def test_concurrent_complete_reconstruction_converges_on_three_cache_rows(
     tmp_path,
 ) -> None:

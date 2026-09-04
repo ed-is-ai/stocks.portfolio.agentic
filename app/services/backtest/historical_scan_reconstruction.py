@@ -144,7 +144,12 @@ class HistoricalScanReconstructor:
             )
 
         fragments: list[DetectorFragmentEnvelopeV1] = []
-        input_revision = request.input_manifest.digest()
+        # Detector fragments are cached on cache_key_digest(), not digest():
+        # roster_digest/alias_revision never reach the rows a detector
+        # computes over, so two roster generations that resolve the same
+        # security to the same evidence should share this cache entry
+        # rather than each computing and storing their own copy.
+        input_revision = request.input_manifest.cache_key_digest()
         detector_versions = request.input_manifest.detector_versions
         technicals: TechnicalsV1 | None = None
         stage_result: StageResultV1 | None = None

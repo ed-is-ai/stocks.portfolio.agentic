@@ -398,6 +398,13 @@ CREATE TABLE IF NOT EXISTS monthly_scan_results (
         REFERENCES snapshot_members(profile_hash, snapshot_month, security_id)
         DEFERRABLE INITIALLY DEFERRED
 );
+-- latest_committed_scan_result() filters (profile_hash, security_id) and
+-- joins snapshot_month rather than binding it as a literal, so the PK's
+-- leftmost prefix stops at profile_hash -- without this, every lookup
+-- scans all months for the profile instead of seeking straight to the
+-- security's rows.
+CREATE INDEX IF NOT EXISTS idx_monthly_scan_results_profile_security
+ON monthly_scan_results(profile_hash, security_id, snapshot_month DESC);
 
 CREATE TRIGGER IF NOT EXISTS snapshot_profile_immutable_update BEFORE UPDATE ON snapshot_profiles BEGIN SELECT RAISE(ABORT, 'snapshot profile is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS snapshot_profile_immutable_delete BEFORE DELETE ON snapshot_profiles BEGIN SELECT RAISE(ABORT, 'snapshot profile is immutable'); END;

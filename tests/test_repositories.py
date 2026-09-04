@@ -23,6 +23,29 @@ def trades_connect(tmp_path):
     return connect
 
 
+def test_trades_and_cash_flows_seek_by_portfolio_id_rather_than_scanning(
+    trades_connect,
+):
+    """``portfolio_id = ?`` must use an index, not a full table scan.
+
+    The only pre-existing index touching ``portfolio_id`` is a partial
+    unique index keyed on ``ifnull(portfolio_id, -1)``, which SQLite can't
+    use for a plain equality predicate -- so ``TradesRepository.history()``/
+    ``open_rows()`` and ``CashFlowsRepository.history()`` scanned the whole
+    (unboundedly growing, across years of quarterly SIPP imports) table on
+    every call. Asserts the query plan seeks by index instead.
+    """
+    with db.session(trades_connect) as conn:
+        for table in ("trades", "cash_flows"):
+            plan = conn.execute(
+                f"EXPLAIN QUERY PLAN SELECT * FROM {table} WHERE portfolio_id = ?",
+                (1,),
+            ).fetchall()
+            steps = "\n".join(str(row) for row in plan)
+            assert "SCAN" not in steps, steps
+            assert f"idx_{table}_portfolio_id" in steps, steps
+
+
 # --- TradesRepository ------------------------------------------------------
 
 

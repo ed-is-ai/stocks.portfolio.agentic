@@ -301,6 +301,27 @@ class ReconstructionInputManifestV1(_ManifestModel):
     def digest(self) -> str:
         return manifest_digest(self.canonical_payload())
 
+    def cache_key_digest(self) -> str:
+        """Digest of the fields that actually determine detector output.
+
+        Unlike ``digest()``, this excludes ``roster_digest`` and
+        ``alias_revision``: neither reaches the ``rows`` a detector
+        computes over (those come from the already-resolved ``evidence``,
+        identified by ``provider_data_revision``) -- they only ever gate
+        which evidence gets looked up and whether a security is in scope
+        for a month, both decided before reconstruction runs. Two roster
+        generations that resolve the same security to the same evidence
+        on the same date always compute byte-identical fragments, so
+        detector-fragment caching should key on this narrower identity
+        rather than ``digest()``, which changes on every new roster.
+        """
+        payload = {
+            key: value
+            for key, value in self.canonical_payload().items()
+            if key not in {"roster_digest", "alias_revision"}
+        }
+        return manifest_digest(payload)
+
     @property
     def detector_versions(self) -> dict[str, str]:
         versions: dict[str, Any] = {

@@ -143,6 +143,63 @@ def test_reconstruction_input_digest_sorts_detectors_and_changes_materially() ->
     )
 
 
+def test_cache_key_digest_ignores_roster_and_alias_but_not_output_inputs() -> None:
+    """``cache_key_digest()`` must key on what determines detector output.
+
+    Two roster generations that resolve the same security to the same
+    evidence should share one detector-fragment cache entry rather than
+    each computing and storing its own copy, so ``roster_digest``/
+    ``alias_revision`` -- which never reach the ``rows`` a detector
+    computes over -- must not perturb this digest, while every field
+    that does determine output still must.
+    """
+    detectors = (
+        DetectorInputIdentityV1(
+            detector_id="technical_indicators_v1",
+            detector_api_version="1",
+            detector_version=DIGEST_A,
+            configuration={"window": 252},
+        ),
+        DetectorInputIdentityV1(
+            detector_id="weinstein_stage_v1",
+            detector_api_version="1",
+            detector_version=DIGEST_B,
+            configuration={"lookback": 252},
+        ),
+        DetectorInputIdentityV1(
+            detector_id="vcp_v1",
+            detector_api_version="1",
+            detector_version=DIGEST_C,
+            configuration={"b": 2, "a": 1},
+        ),
+    )
+    baseline = _input_manifest(detectors)
+
+    different_roster = baseline.model_copy(
+        update={"roster_digest": "d" * 64, "alias_revision": "e" * 64}
+    )
+    assert baseline.cache_key_digest() == different_roster.cache_key_digest()
+    assert baseline.digest() != different_roster.digest()
+
+    for field, value in (
+        ("provider_data_revision", "f" * 64),
+        ("evidence_start", date(2025, 7, 1)),
+        ("calendar_dataset_digest", "d" * 64),
+    ):
+        changed = baseline.model_copy(update={field: value})
+        assert baseline.cache_key_digest() != changed.cache_key_digest()
+
+    changed_detector = baseline.model_copy(
+        update={
+            "detectors": (
+                detectors[0].model_copy(update={"detector_version": "d" * 64}),
+                *detectors[1:],
+            )
+        }
+    )
+    assert baseline.cache_key_digest() != changed_detector.cache_key_digest()
+
+
 def test_real_detector_manifests_use_exact_closed_allowlists() -> None:
     project_root = Path(__file__).resolve().parents[2]
     manifests = detector_source_manifests(project_root)

@@ -454,6 +454,18 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
         "WHERE idempotency_key IS NOT NULL"
     )
     conn.execute(
+        # The idempotency indexes above are partial and keyed on
+        # ifnull(portfolio_id, -1), so they can't serve a plain
+        # `portfolio_id = ?` predicate. Without this, `history()` and
+        # `open_rows()` (trades_repo.py) full-scan the entire trades table
+        # -- unboundedly large across years of quarterly SIPP imports.
+        "CREATE INDEX IF NOT EXISTS idx_trades_portfolio_id ON trades(portfolio_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cash_flows_portfolio_id "
+        "ON cash_flows(portfolio_id)"
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_snapshots_portfolio "
         "ON portfolio_snapshots(portfolio_id)"
     )
