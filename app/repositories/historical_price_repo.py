@@ -43,6 +43,12 @@ CREATE INDEX IF NOT EXISTS idx_historical_revision_interval
 ON historical_price_revisions(
     security_id, provider, start_date, end_date, request_contract_version
 );
+-- Without this, dated_close's requested_symbol filter has nothing to seek
+-- on, and the query planner chooses to scan the whole (many-million-row)
+-- historical_price_observations table instead of the much smaller
+-- revisions table -- turning one lookup into tens of seconds (#480/#481).
+CREATE INDEX IF NOT EXISTS idx_historical_revisions_requested_symbol
+ON historical_price_revisions(requested_symbol);
 CREATE TABLE IF NOT EXISTS historical_price_observations (
     data_revision TEXT NOT NULL REFERENCES historical_price_revisions(data_revision),
     session_date TEXT NOT NULL,

@@ -319,3 +319,29 @@ def test_an_unreadable_cache_raises_rather_than_reporting_a_gap(
 
     with pytest.raises(sqlite3.DatabaseError):
         repo.dated_close(["LGEN.L"], "2024-06-03")
+
+
+def test_dated_close_seeks_the_revisions_table_rather_than_scanning_observations(
+    tmp_path: Path,
+) -> None:
+    """``dated_close`` must use ``idx_historical_revisions_requested_symbol``.
+
+    Without an index on ``requested_symbol``, SQLite's planner chooses to
+    scan the whole (many-million-row in production) observations table
+    instead of the much smaller revisions table -- turning one lookup into
+    tens of seconds (#480/#481 follow-up). This asserts the query plan
+    seeks both tables by index rather than scanning either.
+    """
+    _seed_lgen(tmp_path)
+    conn = sqlite3.connect(tmp_path / "historical_price_cache.db")
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN "
+        "SELECT r.security_id FROM historical_price_revisions r "
+        "JOIN historical_price_observations o ON o.data_revision = r.data_revision "
+        "WHERE r.requested_symbol = ? AND o.session_date = ? "
+        "ORDER BY r.first_acquired_at DESC, r.data_revision LIMIT 1",
+        ("LGEN.L", "2024-06-03"),
+    ).fetchall()
+    steps = "\n".join(str(row) for row in plan)
+    assert "SCAN" not in steps, steps
+    assert "idx_historical_revisions_requested_symbol" in steps
