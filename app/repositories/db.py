@@ -76,8 +76,10 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     portfolio_id   INTEGER NOT NULL,
     timestamp      TEXT NOT NULL,
-    total_value    REAL NOT NULL,
-    total_cost     REAL NOT NULL,
+    -- Nullable since #466: NULL means "holdings could not be valued at this
+    -- timestamp" -- an honest gap in the chart rather than a fabricated 0.00.
+    total_value    REAL,
+    total_cost     REAL,
     cash_balance   REAL
 );
 CREATE TABLE IF NOT EXISTS price_cache (
@@ -281,6 +283,54 @@ def _migrate_default_portfolio(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_portfolio_snapshots_nullable(conn: sqlite3.Connection) -> None:
+    """Relax ``portfolio_snapshots.total_value``/``total_cost`` to nullable.
+
+    Databases created before #466 declare both columns ``NOT NULL``, which
+    leaves an unvaluable snapshot no way to record "unknown" other than a
+    misleading ``0.00``. SQLite cannot drop a NOT NULL constraint in place, so
+    the table is rebuilt once; every existing row keeps its ``id`` and values.
+    Idempotent: the ``PRAGMA table_info`` notnull flags are inspected first, so
+    an already-migrated (or brand-new) database does no work at all. The
+    rebuild itself runs inside one transaction (mirroring
+    ``_migrate_fx_rate_cache``) so a crash mid-migration cannot strand a
+    half-renamed table or drop the original data.
+    """
+    info = conn.execute("PRAGMA table_info(portfolio_snapshots)").fetchall()
+    notnull = {row[1]: row[3] for row in info}
+    if not notnull.get("total_value") and not notnull.get("total_cost"):
+        return
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute("DROP TABLE IF EXISTS portfolio_snapshots_new")
+        conn.execute(
+            """
+            CREATE TABLE portfolio_snapshots_new (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                portfolio_id   INTEGER NOT NULL,
+                timestamp      TEXT NOT NULL,
+                total_value    REAL,
+                total_cost     REAL,
+                cash_balance   REAL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO portfolio_snapshots_new "
+            "(id, portfolio_id, timestamp, total_value, total_cost, cash_balance) "
+            "SELECT id, portfolio_id, timestamp, total_value, total_cost, cash_balance "
+            "FROM portfolio_snapshots"
+        )
+        conn.execute("DROP TABLE portfolio_snapshots")
+        conn.execute(
+            "ALTER TABLE portfolio_snapshots_new RENAME TO portfolio_snapshots"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+
 def _migrate_fx_rate_cache(conn: sqlite3.Connection) -> None:
     """Atomically upgrade the legacy date-only cache to pair-aware rows."""
     conn.execute("BEGIN IMMEDIATE")
@@ -334,6 +384,7 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     """Create the ``trades.db`` schema and apply additive migrations."""
     conn.executescript(_SCHEMA)
     _migrate_fx_rate_cache(conn)
+    _migrate_portfolio_snapshots_nullable(conn)
     for col_def in (
         "stop_loss REAL",
         "entry_price REAL",

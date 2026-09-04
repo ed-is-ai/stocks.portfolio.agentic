@@ -49,6 +49,7 @@ from app.repositories.import_receipt_repo import (
     ImportRowLineage,
     canonical_row_digest,
 )
+from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.portfolio_trade_revisions_repo import (
     PortfolioTradeRevisionsRepository,
@@ -57,7 +58,9 @@ from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
 from app.repositories.ticker_currency_cache_repo import TickerCurrencyCacheRepository
 from app.repositories.trades_repo import TradesRepository
+from app.schemas.analysis_artifact import read_analysis_records
 from app.schemas.trade import Portfolio
+from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_import.contract_registry import ContractRegistryError
 from app.services.portfolio_import.contract_schema import (
     CanonicalField,
@@ -68,6 +71,11 @@ from app.services.portfolio_import.normalizer import (
     ContractNormalizer,
 )
 from app.services.portfolio_import.registry_loader import get_contract_registry
+from app.services.snapshot_valuation import (
+    SnapshotValuation,
+    valid_rate_or_none,
+    value_positions_gbp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -279,6 +287,7 @@ class TraderAgent(Agent):
     _fx_rates: FxRateCacheRepository = PrivateAttr()
     _ticker_currency_cache: TickerCurrencyCacheRepository = PrivateAttr()
     _trade_revisions: PortfolioTradeRevisionsRepository = PrivateAttr()
+    _gbp_valuation: GbpValuationService | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
         connect: Connect = db.make_connect(lambda: self.db_path)
@@ -1038,49 +1047,103 @@ class TraderAgent(Agent):
             display_ticker=display_ticker,
         )
 
+    def _gbp_valuation_service(self) -> GbpValuationService:
+        """Return this agent's lazily-built GBP valuation service.
+
+        Built on first use (never in ``model_post_init``) so constructing a
+        ``TraderAgent`` stays cheap for the many call sites that never value
+        a non-USD/GBP holding.
+        """
+        if self._gbp_valuation is None:
+            self._gbp_valuation = GbpValuationService(
+                FxQuoteRepository(db.make_connect(lambda: self.db_path))
+            )
+        return self._gbp_valuation
+
+    def _snapshot_prices_from_analysis(self) -> dict[str, float]:
+        """Return ``{ticker: price}`` from the latest analysis artifact.
+
+        Read through the canonical ``read_analysis_records`` reader so the
+        current ``{"meta": ..., "records": [...]}`` envelope and the legacy
+        bare list both resolve (before #466 this parsed the envelope as a
+        list, silently resolving no prices at all).
+        """
+        prices: dict[str, float] = {}
+        for record in read_analysis_records(ANALYSIS_JSON):
+            try:
+                ticker = record["ticker"]
+                price = float(record["price"])
+            except (TypeError, KeyError, ValueError):
+                continue
+            if isinstance(ticker, str) and ticker:
+                prices[ticker] = price
+        return prices
+
+    def _cached_gbpusd_rate(self) -> float | None:
+        """Return the cached GBP/USD rate, or None when none is usable."""
+        cached_prices, _fetched_at, _display = self.load_price_cache()
+        return valid_rate_or_none(cached_prices.get("__GBPUSD__"))
+
     def update_portfolio_snapshot(
-        self, cash_balance: float | None = None, portfolio_id: int | None = None
-    ) -> None:
+        self,
+        cash_balance: float | None = None,
+        portfolio_id: int | None = None,
+        positions: list[Position] | None = None,
+        gbpusd: float | None = None,
+    ) -> SnapshotValuation:
         """Append a value snapshot for the given portfolio (or the legacy CSV).
+
+        ``positions``/``gbpusd`` let the calling workflow hand over the
+        holdings and FX rate it has already resolved, so the stored snapshot
+        and the live summary cards are computed from identical inputs. When
+        omitted, positions are replayed here and priced from the latest
+        analysis artifact, and the rate falls back to the price cache.
+
+        Every holding is valued in GBP via
+        :func:`app.services.snapshot_valuation.value_positions_gbp`. When some
+        or all open positions cannot be valued, ``NULL`` is persisted rather
+        than a partial or fabricated ``0.00``; a portfolio with no open
+        holdings still records a genuine ``0.0``.
 
         When ``portfolio_id`` is given the snapshot is written to the
         per-portfolio ``portfolio_snapshots`` table (#147). With no id the
         legacy single-portfolio ``portfolio_value.csv`` is appended, preserving
         pre-multi-portfolio behaviour.
         """
-        from datetime import datetime, timezone
+        if positions is None:
+            prices = self._snapshot_prices_from_analysis()
+            positions = self.get_portfolio(
+                prices if prices else None, portfolio_id=portfolio_id
+            )
+        rate = valid_rate_or_none(gbpusd)
+        if rate is None:
+            rate = self._cached_gbpusd_rate()
 
-        # Load current prices from analysis results
-        prices = {}
-        data = self._artifacts.read_json(ANALYSIS_JSON, default=None)
-        if data is not None:
-            try:
-                prices = {r["ticker"]: r["price"] for r in data}
-            except (TypeError, KeyError) as exc:
-                logger.warning("price/value computation failed: %s", exc)
-
-        positions = self.get_portfolio(
-            prices if prices else None, portfolio_id=portfolio_id
-        )
-        total_cost = sum(p.total_cost for p in positions if p.total_cost is not None)
-        total_value = sum(
-            p.current_value for p in positions if p.current_value is not None
-        )
-        if total_value is None:
-            total_value = total_cost
+        valuation = value_positions_gbp(positions, rate, self._gbp_valuation_service())
+        if valuation.status != "valued" and valuation.status != "empty":
+            logger.warning(
+                "portfolio snapshot valuation %s for portfolio %s: "
+                "%d valued, %d unvalued -- storing NULL",
+                valuation.status,
+                portfolio_id,
+                valuation.valued_positions,
+                valuation.unvalued_positions,
+            )
+        total_value = valuation.market_value_gbp
+        total_cost = valuation.cost_gbp
+        timestamp = datetime.now(timezone.utc).isoformat()
 
         if portfolio_id is not None:
             if cash_balance is None:
                 cash_balance = self.get_cash_balance(portfolio_id)
-            timestamp = datetime.now(timezone.utc).isoformat()
             self._snapshots.append(
                 portfolio_id,
                 timestamp,
-                round(total_value, 2),
-                round(total_cost, 2),
+                total_value,
+                total_cost,
                 round(cash_balance, 2) if cash_balance is not None else None,
             )
-            return
+            return valuation
 
         if cash_balance is None:
             rows = self._artifacts.read_csv_dicts(PORTFOLIO_VALUE_CSV)
@@ -1092,8 +1155,6 @@ class TraderAgent(Agent):
                 )
                 cash_balance = 0.0
 
-        timestamp = datetime.now(timezone.utc).isoformat()
-        investments_value = total_cost
         fieldnames = [
             "timestamp",
             "total_value",
@@ -1101,17 +1162,24 @@ class TraderAgent(Agent):
             "cash_balance",
             "investments_value",
         ]
+
+        def money_cell(value: float | None) -> str:
+            """Render a CSV money cell, blank when the value is unavailable."""
+            return "" if value is None else f"{value:.2f}"
+
         self._artifacts.append_csv_row(
             PORTFOLIO_VALUE_CSV,
             fieldnames,
             {
                 "timestamp": timestamp,
-                "total_value": f"{total_value:.2f}",
-                "total_cost": f"{total_cost:.2f}",
+                "total_value": money_cell(total_value),
+                "total_cost": money_cell(total_cost),
                 "cash_balance": f"{cash_balance:.2f}",
-                "investments_value": f"{investments_value:.2f}",
+                # The legacy column has always mirrored total_cost.
+                "investments_value": money_cell(total_cost),
             },
         )
+        return valuation
 
     def import_sipp(
         self,

@@ -33,6 +33,7 @@ from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_import.contract_registry import ContractRegistryError
 from app.services.portfolio_import.registry_loader import get_contract_registry
 from app.services.series_downsample import downsample_last_per_bucket
+from app.services.snapshot_valuation import amount_in_gbp
 from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 
@@ -274,15 +275,13 @@ class PortfolioService:
     def _amount_in_gbp(
         self, amount: float, currency: str, gbpusd: float
     ) -> float | None:
-        """Value one native holding amount in GBP, never fabricating HKD FX."""
-        if currency != "HKD":
-            return self._to_gbp(amount, currency, gbpusd)
-        projection = self._gbp_valuation.value_in_gbp(
-            Money(amount=Decimal(str(amount)), currency="HKD")
-        )
-        return (
-            float(projection.gbp_amount) if projection.gbp_amount is not None else None
-        )
+        """Value one native holding amount in GBP, never fabricating FX.
+
+        Delegates to :func:`app.services.snapshot_valuation.amount_in_gbp` so
+        the live summary cards and the stored value-history snapshots share
+        exactly one conversion rule.
+        """
+        return amount_in_gbp(amount, currency, gbpusd, self._gbp_valuation)
 
     @staticmethod
     def _valid_rate_or_none(rate: Any) -> float | None:
@@ -982,7 +981,10 @@ class PortfolioService:
         buy/sell_labels are tooltip strings for each non-None entry.
         """
         labels = chart_data["labels"]
-        values = chart_data["values"]
+        # Anchor markers to the *displayed* Portfolio Value series, not the
+        # hidden Market Value one: a marker must vanish along with the point
+        # it would otherwise float above (#466).
+        values = chart_data["total_values"]
         n = len(labels)
         if n == 0:
             # No value-history snapshots yet (e.g. a freshly created portfolio

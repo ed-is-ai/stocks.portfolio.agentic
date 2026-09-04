@@ -25,11 +25,16 @@ class PortfolioSnapshotsRepository:
         self,
         portfolio_id: int,
         timestamp: str,
-        total_value: float,
-        total_cost: float,
+        total_value: float | None,
+        total_cost: float | None,
         cash_balance: float | None,
     ) -> None:
-        """Append one value snapshot for a portfolio."""
+        """Append one value snapshot for a portfolio.
+
+        ``total_value``/``total_cost`` are None when the holdings could not be
+        valued at this timestamp -- stored as SQL NULL so the chart shows an
+        honest gap instead of a fabricated 0.00 (#466).
+        """
         with session(self._connect) as conn:
             conn.execute(
                 "INSERT INTO portfolio_snapshots "
@@ -43,8 +48,8 @@ class PortfolioSnapshotsRepository:
         conn: Any,
         portfolio_id: int,
         timestamp: str,
-        total_value: float,
-        total_cost: float,
+        total_value: float | None,
+        total_cost: float | None,
         cash_balance: float | None,
     ) -> None:
         """Append one value snapshot on the caller's open connection.
@@ -86,3 +91,33 @@ class PortfolioSnapshotsRepository:
         with session(self._connect) as conn:
             rows = conn.execute(query, params).fetchall()
         return list(reversed(rows))
+
+    def rows_with_ids(self, portfolio_id: int | None = None) -> list[tuple[Any, ...]]:
+        """Return ``(id, portfolio_id, timestamp, total_value, total_cost)``.
+
+        Oldest-first over every stored snapshot (optionally scoped to one
+        portfolio). Used by the historical repair pass, which needs each row's
+        identity to update it in place.
+        """
+        query = (
+            "SELECT id, portfolio_id, timestamp, total_value, total_cost "
+            "FROM portfolio_snapshots"
+        )
+        params: list[Any] = []
+        if portfolio_id is not None:
+            query += " WHERE portfolio_id = ?"
+            params.append(portfolio_id)
+        query += " ORDER BY id ASC"
+        with session(self._connect) as conn:
+            return list(conn.execute(query, params).fetchall())
+
+    def update_valuation(
+        self, row_id: int, total_value: float | None, total_cost: float | None
+    ) -> None:
+        """Overwrite one snapshot's valuation columns, leaving the rest alone."""
+        with session(self._connect) as conn:
+            conn.execute(
+                "UPDATE portfolio_snapshots SET total_value = ?, total_cost = ? "
+                "WHERE id = ?",
+                (total_value, total_cost, row_id),
+            )

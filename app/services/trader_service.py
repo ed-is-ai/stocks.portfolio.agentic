@@ -16,6 +16,7 @@ from app.schemas.trade import (
     SippImportResult,
     Trade,
 )
+from app.services.snapshot_valuation import SnapshotValuation
 
 
 class TraderService:
@@ -174,10 +175,21 @@ class TraderService:
         )
 
     def update_portfolio_snapshot(
-        self, cash_balance: float | None = None, portfolio_id: int | None = None
-    ) -> None:
-        """Append a portfolio value snapshot to the value log."""
-        self._agent.update_portfolio_snapshot(cash_balance, portfolio_id)
+        self,
+        cash_balance: float | None = None,
+        portfolio_id: int | None = None,
+        positions: list[Position] | None = None,
+        gbpusd: float | None = None,
+    ) -> SnapshotValuation:
+        """Append a portfolio value snapshot to the value log.
+
+        ``positions``/``gbpusd`` pass the caller's already-resolved holdings
+        and FX rate straight through, so the stored snapshot matches the live
+        summary exactly (#466).
+        """
+        return self._agent.update_portfolio_snapshot(
+            cash_balance, portfolio_id, positions, gbpusd
+        )
 
     def record_buy(
         self,

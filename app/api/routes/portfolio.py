@@ -212,7 +212,9 @@ async def refresh_portfolio_prices(
         )
         logger.info("Refreshed %d positions successfully", len(updated_positions))
         cash_balance = input_snapshot.cash_balance
-        trader.update_portfolio_snapshot(cash_balance, pid)
+        trader.update_portfolio_snapshot(
+            cash_balance, pid, positions=updated_positions, gbpusd=gbpusd
+        )
         input_snapshot = portfolio.with_current_chart_data(input_snapshot, pid)
         context = portfolio.portfolio_partial_context(
             updated_positions,

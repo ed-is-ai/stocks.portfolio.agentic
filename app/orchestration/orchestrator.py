@@ -1179,7 +1179,12 @@ def pipeline(
         for pf in portfolios:
             pf_positions = _trader.get_portfolio(prices, display_info, pf.id)
             positions.extend(pf_positions)
-            _trader.update_portfolio_snapshot(_trader.get_cash_balance(pf.id), pf.id)
+            _trader.update_portfolio_snapshot(
+                _trader.get_cash_balance(pf.id),
+                pf.id,
+                positions=pf_positions,
+                gbpusd=gbpusd,
+            )
         held = {p.ticker for p in positions}
         gbp_totals = portfolio_service.gbp_totals(positions, gbpusd)
         pf_value, pf_cost, _pf_pnl = gbp_totals
