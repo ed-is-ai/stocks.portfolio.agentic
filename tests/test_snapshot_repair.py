@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import importlib.util
+import os
+import shlex
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from app.agents.trader.trader_agent import TraderAgent
+from app.cli import repair_portfolio_snapshots as repair_cli
 from app.repositories import db
 from app.services.snapshot_repair import (
     NoHistoricalPriceSource,
@@ -108,7 +112,10 @@ def test_repair_is_idempotent(tmp_path: Path) -> None:
     service.repair()
     second = service.repair()
 
-    assert (second.candidates, second.repaired, second.marked_unavailable) == (0, 0, 0)
+    # The nulled row is still offered to the source (evidence may have
+    # arrived since), but leaving it NULL changes nothing, so it is
+    # ``unchanged`` -- not counted as newly marked unavailable.
+    assert (second.candidates, second.repaired, second.marked_unavailable) == (1, 0, 0)
     assert second.unchanged == 1
     assert _values(agent, pf.id) == [None]
 
@@ -123,6 +130,24 @@ def test_dry_run_writes_nothing(tmp_path: Path) -> None:
 
     assert report.marked_unavailable == 1
     assert _values(agent, pf.id) == [0.0]
+
+
+def test_dry_run_with_evidence_reports_the_real_counts(tmp_path: Path) -> None:
+    """A dry run's counts match the write pass exactly, but write nothing."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+    service = _service(agent, _FixedPriceSource({"AAPL": 7.5}))
+
+    dry = service.repair(dry_run=True)
+    assert _values(agent, pf.id) == [0.0]
+
+    wet = service.repair()
+
+    assert dry.model_dump(exclude={"dry_run"}) == wet.model_dump(exclude={"dry_run"})
+    assert (wet.repaired, wet.marked_unavailable) == (1, 0)
+    assert _values(agent, pf.id) == [pytest.approx(75.0)]
 
 
 def test_trades_after_the_snapshot_do_not_make_it_a_candidate(tmp_path: Path) -> None:
@@ -194,14 +219,14 @@ def test_legacy_not_null_schema_is_migrated_preserving_rows(tmp_path: Path) -> N
     conn.close()
 
 
-def test_repair_script_migrates_a_legacy_not_null_database(
+def test_repair_cli_migrates_a_legacy_not_null_database(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The standalone CLI must self-migrate rather than crash on a fresh DB.
 
-    ``scripts/repair_portfolio_snapshots.py`` connects directly, bypassing
+    ``app/cli/repair_portfolio_snapshots.py`` connects directly, bypassing
     ``TraderAgent.model_post_init`` -- the only other place that has ever
-    called ``init_trades_db``. Before this test's fix, running the script
+    called ``init_trades_db``. Before this test's fix, running the CLI
     against a database that predates #466 (columns still ``NOT NULL``) would
     raise ``sqlite3.IntegrityError`` the moment it tried to write ``NULL``.
     """
@@ -241,24 +266,79 @@ def test_repair_script_migrates_a_legacy_not_null_database(
     conn.commit()
     conn.close()
 
-    script_path = (
-        Path(__file__).resolve().parents[1]
-        / "scripts"
-        / "repair_portfolio_snapshots.py"
-    )
-    spec = importlib.util.spec_from_file_location(
-        "repair_portfolio_snapshots", script_path
-    )
-    assert spec is not None and spec.loader is not None
-    repair_script = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(repair_script)
+    monkeypatch.setattr(repair_cli, "TRADES_DB", db_path)
 
-    monkeypatch.setattr(repair_script, "TRADES_DB", db_path)
-
-    repair_script.main([])
+    # --no-historical-evidence keeps this test off the real price cache.
+    repair_cli.main(["--no-historical-evidence"])
 
     conn = sqlite3.connect(db_path)
     assert conn.execute("SELECT total_value FROM portfolio_snapshots").fetchall() == [
         (None,)
     ]
     conn.close()
+
+
+def _documented_invocation() -> list[str]:
+    """Return the CLI's own documented command, parsed from its docstring.
+
+    Parsing the usage line (rather than hard-coding it) is what stops the
+    docstring and the real entry point drifting apart again: GH-480 was
+    exactly that drift, a documented command nobody could run.
+    """
+    docstring = repair_cli.__doc__ or ""
+    usage = next((line for line in docstring.splitlines() if "python -m" in line), "")
+    assert usage, "the CLI docstring no longer documents a python -m invocation"
+    words = shlex.split(usage.strip())
+    return words[: words.index("-m") + 2]
+
+
+def test_documented_invocation_runs_from_a_clean_shell() -> None:
+    """``python -m app.cli.repair_portfolio_snapshots --help`` must work (#480).
+
+    Run as a real subprocess with ``PYTHONPATH`` stripped, because
+    ``pytest.ini``'s ``pythonpath = .`` masks the import failure in-process.
+    ``--help`` is deliberate: argparse exits before any database is opened,
+    so this never touches the developer's real ``trades.db``.
+    """
+    command = _documented_invocation()
+    assert command[-1] == "app.cli.repair_portfolio_snapshots"
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    result = subprocess.run(
+        [sys.executable, *command[command.index("-m") :], "--help"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
+
+
+def test_null_row_is_reconstructed_when_evidence_arrives(tmp_path: Path) -> None:
+    """A gap an earlier pass wrote is repaired once evidence exists (#481)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+    _service(agent, NoHistoricalPriceSource()).repair()
+    assert _values(agent, pf.id) == [None]
+
+    report = _service(agent, _FixedPriceSource({"AAPL": 7.5})).repair()
+
+    assert (report.candidates, report.repaired, report.marked_unavailable) == (1, 1, 0)
+    assert _values(agent, pf.id) == [pytest.approx(75.0)]
+
+
+def test_null_row_without_evidence_stays_unchanged(tmp_path: Path) -> None:
+    """A gap left as a gap is ``unchanged``, never re-``marked_unavailable``."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", None, 50.0, 100.0)
+
+    report = _service(agent, NoHistoricalPriceSource()).repair()
+
+    assert (report.repaired, report.marked_unavailable, report.unchanged) == (0, 0, 1)
+    assert _values(agent, pf.id) == [None]

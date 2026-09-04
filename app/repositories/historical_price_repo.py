@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import sqlite3
-from typing import Mapping
+from typing import Mapping, Sequence
 
 from app.repositories.db import Connect, session
 from app.services.backtest.canonical_manifest import (
@@ -91,6 +91,25 @@ CREATE TRIGGER IF NOT EXISTS historical_reference_immutable_delete BEFORE DELETE
 """
 
 
+#: SQLite's wording for the two ways an evidence-free cache presents itself:
+#: the file (or its directory) does not exist, or it exists without schema.
+_ABSENT_CACHE_ERRORS = ("unable to open database file", "no such table")
+
+
+def _is_absent_cache(error: sqlite3.OperationalError) -> bool:
+    """Return True when the error means "no cache", not "cache unreadable"."""
+    message = str(error).lower()
+    return any(reason in message for reason in _ABSENT_CACHE_ERRORS)
+
+
+def _hex_to_float(value: str) -> float:
+    """Parse a stored C99 hex float, returning NaN for an unparseable one."""
+    try:
+        return float.fromhex(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 class EvidenceMissingError(LookupError):
     code = "evidence_missing"
 
@@ -120,6 +139,25 @@ class StoredHistoricalEvidence:
     canonical_manifest_json: str
     rows: tuple[Mapping[str, object], ...]
     actions: tuple[Mapping[str, object], ...]
+
+
+@dataclass(frozen=True)
+class DatedClose:
+    """One stored close for one symbol on one exact session date.
+
+    ``close`` is the as-traded close (``auto_adjust=false``), expressed in
+    ``quote_unit``; multiply by ``quote_unit_scale`` to reach major units of
+    ``currency``. It can be non-finite: yfinance is fetched with ``keepna``,
+    so a NaN close is stored verbatim and callers must treat it as no
+    evidence at all.
+    """
+
+    security_id: str
+    data_revision: str
+    currency: str
+    quote_unit: str
+    quote_unit_scale: str
+    close: float
 
 
 class HistoricalPriceRepository:
@@ -332,6 +370,58 @@ class HistoricalPriceRepository:
             if row is None:
                 return None
             return self._verify_on_connection(conn, str(row[0]))
+
+    def dated_close(
+        self, symbols: Sequence[str], session_date: str
+    ) -> DatedClose | None:
+        """Return the stored close for one of ``symbols`` on ``session_date``.
+
+        A narrow, read-only lookup for callers that hold a portfolio ticker
+        rather than a backtest ``security_id``: it matches on
+        ``requested_symbol`` (pass every alias spelling of the ticker) and
+        loads exactly one observation, unlike ``find_compatible_request``,
+        which needs a ``security_id`` and re-verifies a whole revision
+        manifest. Overlapping revisions are resolved deterministically --
+        newest ``first_acquired_at``, ties broken by ``data_revision``.
+
+        Returns None when the cache holds no observation for that exact date
+        (never a nearby session) or when the cache database has no schema yet.
+        A database that exists but cannot be read -- locked, corrupt, an I/O
+        error -- raises rather than reporting "no evidence": a caller acting
+        on that answer would erase real valuations on a transient fault.
+        """
+        if not symbols:
+            return None
+        placeholders = ",".join("?" for _ in symbols)
+        query = (
+            "SELECT r.security_id, r.data_revision, r.currency, r.quote_unit, "
+            "r.quote_unit_scale, o.close_hex "
+            "FROM historical_price_revisions r "
+            "JOIN historical_price_observations o "
+            "ON o.data_revision = r.data_revision "
+            f"WHERE r.requested_symbol IN ({placeholders}) AND o.session_date = ? "
+            "ORDER BY r.first_acquired_at DESC, r.data_revision LIMIT 1"
+        )
+        try:
+            with session(self._connect) as conn:
+                row = conn.execute(query, [*symbols, session_date]).fetchone()
+        except sqlite3.OperationalError as exc:
+            # A cache that was never created is simply evidence-free: it
+            # cannot be opened (no directory/file) or has no tables yet.
+            # Anything else -- locked, disk I/O error -- must surface.
+            if not _is_absent_cache(exc):
+                raise
+            return None
+        if row is None:
+            return None
+        return DatedClose(
+            security_id=str(row[0]),
+            data_revision=str(row[1]),
+            currency=str(row[2]),
+            quote_unit=str(row[3]),
+            quote_unit_scale=str(row[4]),
+            close=_hex_to_float(str(row[5])),
+        )
 
     def verify(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:

@@ -2,23 +2,32 @@
 
 Usage::
 
-    uv run python scripts/repair_portfolio_snapshots.py [--portfolio-id N] [--dry-run]
+    uv run python -m app.cli.repair_portfolio_snapshots [--portfolio-id N] [--dry-run] [--no-historical-evidence]
 
-Rows written as a bogus ``0.00`` by the pre-#466 snapshot writer are either
-reconstructed from historical evidence (none ships by default) or rewritten as
+Rows written as a bogus ``0.00`` by the pre-#466 snapshot writer -- and rows
+this pass has previously nulled -- are either reconstructed from dated
+historical evidence in ``historical_price_cache.db`` or left/rewritten as
 ``NULL`` so the value-history chart shows an honest gap. Safe to re-run: a
-second pass reports every row as unchanged.
+second pass leaves every row exactly as it found it (``repaired`` and
+``marked_unavailable`` both ``0``); ``candidates`` stays non-zero because
+each remaining gap is genuinely re-offered to the evidence store.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 
 from app.core.config import TRADES_DB
 from app.repositories import db
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.trades_repo import TradesRepository
-from app.services.snapshot_repair import SnapshotRepairService
+from app.services.snapshot_price_evidence import build_price_source
+from app.services.snapshot_repair import (
+    HistoricalGbpPriceSource,
+    NoHistoricalPriceSource,
+    SnapshotRepairService,
+)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -40,19 +49,38 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Report what would change without writing anything.",
     )
+    parser.add_argument(
+        "--no-historical-evidence",
+        action="store_true",
+        help=(
+            "Skip the historical price cache and null every candidate row "
+            "instead of reconstructing it."
+        ),
+    )
     args = parser.parse_args(argv)
+    # Without this the service's report line and the price source's
+    # per-holding "no evidence" reasons -- the only way to learn *why* a row
+    # stayed a gap -- are swallowed by the root logger's default level.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     connect = db.make_connect(lambda: TRADES_DB)
     conn = connect()
     try:
-        # Ensure the nullable-column migration (#466) has run: this script is
+        # Ensure the nullable-column migration (#466) has run: this module is
         # a standalone entry point, so it cannot assume a TraderAgent has
         # already initialized the schema against this database file.
         db.init_trades_db(conn)
     finally:
         conn.close()
+    price_source: HistoricalGbpPriceSource = (
+        NoHistoricalPriceSource()
+        if args.no_historical_evidence
+        else build_price_source(connect)
+    )
     service = SnapshotRepairService(
-        TradesRepository(connect), PortfolioSnapshotsRepository(connect)
+        TradesRepository(connect),
+        PortfolioSnapshotsRepository(connect),
+        price_source,
     )
     report = service.repair(portfolio_id=args.portfolio_id, dry_run=args.dry_run)
     for field, value in report.model_dump().items():

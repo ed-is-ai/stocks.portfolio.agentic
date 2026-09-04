@@ -2,14 +2,15 @@
 
 Before #466 a snapshot whose holdings could not be priced was persisted as a
 plausible-looking ``total_value = 0.00``, which the value-history chart drew
-as a real crash to zero. This pass finds those rows and either reconstructs
-them from *dated historical evidence* or -- far more usually -- rewrites them
+as a real crash to zero. This pass finds those rows -- and the ``NULL`` rows
+an earlier pass wrote, which new evidence may since have made valuable --
+and either reconstructs them from *dated historical evidence* or leaves them
 as ``NULL``, an honest gap.
 
 It never uses current prices, never guesses an FX rate, and never deletes a
-row. Only stored zeros whose portfolio actually held something at that
-timestamp are candidates: a cash-only portfolio's ``0.00`` is correct and is
-left byte-identical.
+row. Only rows whose portfolio actually held something at that timestamp are
+candidates: a cash-only portfolio's ``0.00`` is correct and is left
+byte-identical.
 """
 
 from __future__ import annotations
@@ -44,13 +45,16 @@ class HistoricalGbpPriceSource(Protocol):
 
 
 class NoHistoricalPriceSource:
-    """The shipped default: no historical evidence for anything.
+    """The deliberate opt-out: reconstruct nothing, null everything.
 
-    The app stores no per-ticker historical closes for portfolio holdings
-    (the ``historical_price_*`` tables are keyed by opaque backtest
-    ``security_id``), so every candidate row honestly becomes a gap. The
-    protocol seam exists so a real evidence source can be injected later
-    without touching the repair logic.
+    Dated per-ticker closes *are* reachable -- ``historical_price_cache.db``
+    keys its revisions by ``requested_symbol``, which the alias map maps a
+    portfolio ticker onto (see
+    :class:`app.services.snapshot_price_evidence.HistoricalCacheGbpPriceSource`,
+    #481). This source is what a caller injects when it wants every
+    candidate row turned into an honest gap regardless of the evidence on
+    hand (the CLI's ``--no-historical-evidence``), and what tests use to
+    exercise the no-evidence path.
     """
 
     def gbp_price(self, ticker: str, as_of: str) -> float | None:
@@ -59,7 +63,16 @@ class NoHistoricalPriceSource:
 
 
 class SnapshotRepairReport(BaseModel):
-    """Counts of what one repair pass did (or, in a dry run, would do)."""
+    """Counts of what one repair pass did (or, in a dry run, would do).
+
+    ``repaired``, ``marked_unavailable`` and ``unchanged`` partition
+    ``scanned``. ``candidates`` cuts across them: it counts every row a
+    reconstruction was attempted for, which includes an already-``NULL``
+    row that stays ``NULL`` -- that row's stored state does not change, so
+    it is reported as ``unchanged``, keeping a second pass a reported
+    no-op. ``marked_unavailable`` counts only a real ``0.00`` -> ``NULL``
+    transition.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -72,7 +85,7 @@ class SnapshotRepairReport(BaseModel):
 
 
 class SnapshotRepairService:
-    """Repairs zero-valued ``portfolio_snapshots`` rows, idempotently."""
+    """Repairs zero-valued and unavailable snapshot rows, idempotently."""
 
     def __init__(
         self,
@@ -89,11 +102,14 @@ class SnapshotRepairService:
     def repair(
         self, portfolio_id: int | None = None, dry_run: bool = False
     ) -> SnapshotRepairReport:
-        """Repair stored-zero snapshots, returning what changed.
+        """Repair stored-zero and unavailable snapshots, returning what changed.
 
-        Scoped to ``portfolio_id`` when given. With ``dry_run`` the counts are
-        computed exactly as they would be applied, but nothing is written.
-        Running the pass a second time reports every row as ``unchanged``.
+        Both a defective ``0.00`` and an already-``NULL`` row are offered to
+        the price source, so evidence acquired after an earlier pass can
+        still restore a gap. Scoped to ``portfolio_id`` when given. With
+        ``dry_run`` the counts are computed exactly as they would be
+        applied, but nothing is written. Running the pass a second time
+        reports every row as ``unchanged``.
         """
         rows = self._snapshots.rows_with_ids(portfolio_id)
         replay_cache: dict[int | None, list[tuple[Any, ...]]] = {}
@@ -107,7 +123,8 @@ class SnapshotRepairService:
                 row[3],
                 row[4],
             )
-            if not self._is_stored_zero(total_value):
+            already_null = total_value is None
+            if not (already_null or self._is_stored_zero(total_value)):
                 unchanged += 1
                 continue
             if pf_id not in replay_cache:
@@ -121,6 +138,10 @@ class SnapshotRepairService:
             candidates += 1
             value = self._reconstruct(holdings, str(timestamp)[:10])
             if value is None:
+                if already_null:
+                    # Still no evidence: the row is exactly as it was.
+                    unchanged += 1
+                    continue
                 marked += 1
                 if not dry_run:
                     self._snapshots.update_valuation(int(row_id), None, total_cost)
@@ -161,7 +182,9 @@ class SnapshotRepairService:
     def _is_stored_zero(total_value: Any) -> bool:
         """Return True for the defective ``0.00`` this pass repairs.
 
-        A NULL (already repaired) or any non-zero number is not a candidate.
+        A NULL is handled separately by the caller (it is a reconstruction
+        candidate too, since evidence may have arrived since it was
+        written); any non-zero number is not a candidate at all.
         """
         if total_value is None:
             return False

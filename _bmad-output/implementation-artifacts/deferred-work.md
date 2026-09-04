@@ -439,3 +439,27 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-473-display-symbol.md`
   summary: The Portfolio holdings table still shows the canonical alias id, so one holding reads `HSFWA` on the Recommendations screen and `0P00013P6I.L` on the holdings table.
   evidence: `app/api/templates/_portfolio.html` renders `p.ticker`; `Position.display_symbol` now exists but is only consumed by the recommendation screen/email. Explicitly out of scope for GH-473, but a visible cross-screen inconsistency.
+
+## Deferred from: code review of spec-gh-480-481-snapshot-repair (2026-09-04)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
+  summary: The repair pass ignores the `fx:GBPUSD=X` pseudo-security in the historical cache, so a USD holding can report "no dated rate" while a dated rate sits in the very file just queried.
+  evidence: `FX_SERIES_SECURITY_ID` at `app/services/backtest/historical_price_evidence.py:35` and the fetcher wired at `app/api/dependencies.py:127` (#459); no such rows exist in the live cache today, so wiring it is a future gain rather than a present miss.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
+  summary: `dated_close` selects a revision without filtering on `request_contract_version`, so a future contract variant (e.g. `auto_adjust=true`) would silently mix adjusted closes into portfolio valuations.
+  evidence: every revision in the cache today carries `auto_adjust=false`, so the `DatedClose` docstring's as-traded claim holds in practice, but nothing enforces it in the `WHERE` clause.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
+  summary: `historical_price_revisions` has no index on `requested_symbol`, so each `dated_close` is a table scan plus a sort.
+  evidence: the only index is `idx_historical_revision_interval(security_id, provider, ...)`; the table is small (5,085 rows) so this is tolerable today, and the spec forbade a migration on the append-only cache.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
+  summary: Each `gbp_price` call opens up to three new SQLite connections and re-scans the alias map; nothing memoizes a `(pair, date)` rate or a `(symbol, date)` close across a pass.
+  evidence: `HistoricalCacheGbpPriceSource.gbp_price` -> `dated_close`, `FxQuoteRepository.get_for_pair_and_date`, `FxRateCacheRepository.get_many([as_of])`, each with its own `session(connect)`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
+  summary: An unparseable `close_hex` — genuine corruption in an append-only, digest-verified store — is folded into the same NaN path as a legitimate `keepna` placeholder and logged only at DEBUG.
+  evidence: `_hex_to_float` in `app/repositories/historical_price_repo.py` returns NaN for both; corruption arguably deserves a warning, but the narrow read deliberately skips manifest verification for cost.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
+  summary: The repair report has no line telling the operator how many candidate rows found no matching symbol in the cache at all, which is the difference between "no evidence exists" and "the ticker spelling never matched".
+  evidence: `SnapshotRepairReport` counts rows, not reasons; per-holding reasons exist only as DEBUG log lines from the price source.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-480-481-snapshot-repair.md`
+  summary: A snapshot's `as_of` is `str(timestamp)[:10]` in UTC while `session_date` is exchange-local, so a snapshot taken just after midnight UTC can miss the session it belongs to.
+  evidence: revisions store `exchange_timezone` and the repair pass ignores it; pre-existing in `SnapshotRepairService._holdings_as_of`, and the exact-date contract correctly forbids substituting a neighbouring session either way.
