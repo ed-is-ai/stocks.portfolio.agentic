@@ -147,7 +147,11 @@ class HistoricalCacheGbpPriceSource:
         Never falls back to a nearby date -- unlike
         ``PortfolioService.historical_fx_rates``, whose seven-day
         nearest-prior-day search would silently price a holding off the
-        wrong day's rate.
+        wrong day's rate. Tries ``fx_quotes`` then ``fx_rate_cache`` (both
+        same-day-opportunistic) and finally ``historical_price_cache`` --
+        the full ``GBPUSD=X`` series backfilled by ``ensure_fx_coverage``
+        (#496); only that one pair is ever backfilled there, so this third
+        tier resolves USD holdings only, same as the other two.
         """
         quote = self._fx_quotes.get_for_pair_and_date(pair, as_of)
         if quote is not None:
@@ -155,7 +159,17 @@ class HistoricalCacheGbpPriceSource:
             if rate is not None:
                 return rate
         cached = self._fx_cache.get_many([as_of], pair)
-        return valid_rate_or_none(cached.get(as_of))
+        rate = valid_rate_or_none(cached.get(as_of))
+        if rate is not None:
+            return rate
+        observed = self._prices.dated_close([pair], as_of)
+        if observed is None:
+            return None
+        scale = _positive_float_or_none(observed.quote_unit_scale)
+        close = _positive_float_or_none(observed.close)
+        if scale is None or close is None:
+            return None
+        return valid_rate_or_none(close * scale)
 
 
 def _positive_float_or_none(value: str | float) -> float | None:

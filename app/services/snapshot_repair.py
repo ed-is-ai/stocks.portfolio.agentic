@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict
 from app.core.quantity import QUANTITY_EPSILON
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.trades_repo import TradesRepository
+from app.services.backtest.historical_price_evidence import FX_PAIR
 from app.services.snapshot_price_backfill import (
     PriceEvidenceBackfillService,
     PriceEvidenceUnavailable,
@@ -228,9 +229,13 @@ class SnapshotRepairService:
 
         fetch_failures: list[str] = []
         newly_unavailable: list[str] = []
+        overall_start: date | None = None
+        overall_end: date | None = None
         for ticker, (start_str, end_str) in spans.items():
             start = date.fromisoformat(start_str)
             end = date.fromisoformat(end_str) + timedelta(days=1)
+            overall_start = start if overall_start is None else min(overall_start, start)
+            overall_end = end if overall_end is None else max(overall_end, end)
             try:
                 self._backfill.ensure_coverage(ticker, start, end)
             except PriceEvidenceUnavailable:
@@ -238,6 +243,20 @@ class SnapshotRepairService:
             except Exception as exc:
                 logger.warning("price evidence backfill failed for %s: %s", ticker, exc)
                 fetch_failures.append(ticker)
+
+        if overall_start is not None and overall_end is not None:
+            # One shared FX fetch per run, spanning every ticker's span --
+            # never per ticker, and never speculative when nothing needs
+            # repair (no span means this is skipped entirely). Isolated the
+            # same way as a per-ticker failure, including the date math
+            # above, so a defect here never aborts the rest of the run.
+            try:
+                self._backfill.ensure_fx_coverage(overall_start, overall_end)
+            except PriceEvidenceUnavailable:
+                newly_unavailable.append(FX_PAIR)
+            except Exception as exc:
+                logger.warning("FX evidence backfill failed: %s", exc)
+                fetch_failures.append(FX_PAIR)
         return tuple(fetch_failures), tuple(newly_unavailable)
 
     @staticmethod

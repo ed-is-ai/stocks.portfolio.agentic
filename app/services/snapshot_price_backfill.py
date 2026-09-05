@@ -26,7 +26,10 @@ from app.services.backtest.historical_data_qualification import (
     ProviderFailure,
 )
 from app.services.backtest.historical_price_evidence import (
+    FX_PAIR,
+    FX_SERIES_SECURITY_ID,
     HistoricalEvidenceRequest,
+    YFinanceFxSeriesFetcher,
     YFinanceHistoricalEvidenceAdapter,
 )
 
@@ -80,10 +83,12 @@ class PriceEvidenceBackfillService:
         prices: HistoricalPriceRepository,
         adapter: YFinanceHistoricalEvidenceAdapter | None = None,
         aliases: dict[str, str] | None = None,
+        fx_fetcher: YFinanceFxSeriesFetcher | None = None,
     ) -> None:
         self._prices = prices
         self._adapter = adapter or YFinanceHistoricalEvidenceAdapter()
         self._aliases = load_aliases() if aliases is None else aliases
+        self._fx_fetcher = fx_fetcher or YFinanceFxSeriesFetcher()
 
     def ensure_coverage(self, ticker: str, start: date, end: date) -> bool:
         """Return True if a fetch happened, False if it was skipped.
@@ -134,6 +139,44 @@ class PriceEvidenceBackfillService:
                 self._prices.record_unavailable_attempt(
                     security_id=security_id,
                     requested_symbol=symbol,
+                    reason=str(exc),
+                )
+                raise PriceEvidenceUnavailable(str(exc)) from exc
+            raise
+        self._prices.commit(payload)
+        return True
+
+    def ensure_fx_coverage(self, start: date, end: date) -> bool:
+        """Return True if the ``GBPUSD=X`` series was fetched, False if skipped.
+
+        Mirrors :meth:`ensure_coverage`'s negative-cache/covering-revision/
+        fetch/commit/classify shape, scoped to the single
+        :data:`FX_SERIES_SECURITY_ID` pair -- one shared FX fetch per
+        repair run, never per ticker. ``[start, end)`` -- ``end`` is
+        exclusive. Raises :class:`PriceEvidenceUnavailable` on a newly
+        recorded permanent failure, or the underlying error for a
+        transient one.
+        """
+        if self._prices.get_unavailable_attempt(FX_SERIES_SECURITY_ID) is not None:
+            return False
+        if (
+            self._prices.covering_revision(
+                security_id=FX_SERIES_SECURITY_ID,
+                requested_symbol=FX_PAIR,
+                start=start.isoformat(),
+                end=end.isoformat(),
+            )
+            is not None
+        ):
+            return False
+
+        try:
+            payload = self._fx_fetcher.fetch(start=start, end=end)
+        except ProviderFailure as exc:
+            if exc.code in _DEFINITIVE_FAILURE_CODES:
+                self._prices.record_unavailable_attempt(
+                    security_id=FX_SERIES_SECURITY_ID,
+                    requested_symbol=FX_PAIR,
                     reason=str(exc),
                 )
                 raise PriceEvidenceUnavailable(str(exc)) from exc

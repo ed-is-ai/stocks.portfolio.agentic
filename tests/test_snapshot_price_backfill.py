@@ -14,6 +14,9 @@ from app.services.backtest.historical_data_qualification import (
     ProviderFailure,
 )
 from app.services.backtest.historical_price_evidence import (
+    FX_PAIR,
+    FX_SERIES_SECURITY_ID,
+    YFinanceFxSeriesFetcher,
     YFinanceHistoricalEvidenceAdapter,
 )
 from app.services.snapshot_price_backfill import (
@@ -217,6 +220,134 @@ def test_delisted_ticker_is_recorded_unavailable_not_retried_forever(tmp_path) -
 
     assert fetched is False
     assert len(calls) == first_run_calls  # no fetch attempted on the next run
+
+
+class FakeFxTicker:
+    """A yfinance-shaped ``GBPUSD=X`` ticker with one session's rate, or none."""
+
+    def __init__(self, has_rows: bool = True) -> None:
+        self._has_rows = has_rows
+
+    def history(self, **_kwargs: object) -> pd.DataFrame:
+        if not self._has_rows:
+            return pd.DataFrame()
+        return pd.DataFrame(
+            {
+                "Open": [1.25],
+                "High": [1.26],
+                "Low": [1.24],
+                "Close": [1.25],
+                "Adj Close": [1.25],
+                "Volume": [0.0],
+                "Dividends": [0.0],
+                "Stock Splits": [0.0],
+            },
+            index=pd.DatetimeIndex(["2024-01-02"], tz="UTC"),
+        )
+
+    def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
+        return {
+            "symbol": "GBPUSD=X",
+            "currency": "USD",
+            "exchangeTimezoneName": "UTC",
+        }
+
+
+def _fx_service(
+    tmp_path, ticker_factory=None
+) -> tuple[PriceEvidenceBackfillService, HistoricalPriceRepository]:
+    repo = HistoricalPriceRepository(
+        db.make_connect(lambda: tmp_path / "historical-prices.db")
+    )
+    repo.ensure_schema()
+    fx_adapter = YFinanceHistoricalEvidenceAdapter(
+        ticker_factory or (lambda _: FakeFxTicker()),
+        sleeper=lambda _: None,
+    )
+    return (
+        PriceEvidenceBackfillService(
+            repo, fx_fetcher=YFinanceFxSeriesFetcher(adapter=fx_adapter)
+        ),
+        repo,
+    )
+
+
+def test_ensure_fx_coverage_fetches_and_commits_on_a_miss(tmp_path) -> None:
+    service, repo = _fx_service(tmp_path)
+
+    fetched = service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3))
+
+    assert fetched is True
+    assert (
+        repo.covering_revision(
+            security_id=FX_SERIES_SECURITY_ID,
+            requested_symbol=FX_PAIR,
+            start="2024-01-01",
+            end="2024-01-03",
+        )
+        is not None
+    )
+
+
+def test_ensure_fx_coverage_skips_when_already_covered(tmp_path) -> None:
+    calls: list[str] = []
+
+    def factory(symbol: str) -> FakeFxTicker:
+        calls.append(symbol)
+        return FakeFxTicker()
+
+    service, _repo = _fx_service(tmp_path, ticker_factory=factory)
+    service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3))
+    assert calls == ["GBPUSD=X"]
+
+    fetched = service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3))
+
+    assert fetched is False
+    assert calls == ["GBPUSD=X"]  # no second fetch
+
+
+def test_ensure_fx_coverage_negative_cache_is_never_retried(tmp_path) -> None:
+    calls: list[str] = []
+
+    def factory(symbol: str) -> FakeFxTicker:
+        calls.append(symbol)
+        return FakeFxTicker(has_rows=False)
+
+    service, repo = _fx_service(tmp_path, ticker_factory=factory)
+    with pytest.raises(PriceEvidenceUnavailable):
+        service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3))
+    assert repo.get_unavailable_attempt(FX_SERIES_SECURITY_ID) is not None
+    assert len(calls) == 1
+
+    fetched = service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3))
+
+    assert fetched is False
+    assert len(calls) == 1
+
+
+def test_ensure_fx_coverage_definitive_failure_is_recorded_and_raised(
+    tmp_path,
+) -> None:
+    service, repo = _fx_service(
+        tmp_path, ticker_factory=lambda _: FakeFxTicker(has_rows=False)
+    )
+
+    with pytest.raises(PriceEvidenceUnavailable):
+        service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3))
+
+    assert repo.get_unavailable_attempt(FX_SERIES_SECURITY_ID) is not None
+
+
+def test_ensure_fx_coverage_transient_failure_is_not_recorded_and_propagates(
+    tmp_path,
+) -> None:
+    service, repo = _fx_service(tmp_path, ticker_factory=lambda _: _RaisingTicker())
+
+    with pytest.raises(ProviderFailure) as excinfo:
+        service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3))
+
+    assert excinfo.value.code is FailureCode.PROVIDER_UNAVAILABLE
+    assert repo.get_unavailable_attempt(FX_SERIES_SECURITY_ID) is None
 
 
 def test_alias_resolution_maps_to_the_canonical_symbol(tmp_path) -> None:

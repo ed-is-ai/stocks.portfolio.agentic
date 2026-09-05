@@ -492,3 +492,12 @@
 ## Deferred from: code review of spec-gh-484-portfolio-ux (2026-09-04)
 
 - Negative-PNL sign-preservation test only covers the USD branch of `amount_in_gbp`; the non-USD path through `GbpValuationService.value_in_gbp` is untested. A future regression where non-USD P&L sign flips would pass silently. Add a EUR/HKD negative-P&L case with a fake valuation service returning a negative `gbp_amount`.
+
+## Deferred from: code review of spec-gh-496-fx-backfill (2026-09-05)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-496-fx-backfill.md`
+  summary: `ensure_fx_coverage`'s negative-cache for `FX_SERIES_SECURITY_ID` is range-blind and permanent, unlike per-ticker delisting where "permanently unavailable" is actually true forever -- a single failed request (e.g. a window predating available `GBPUSD=X` data) would silently block FX backfill for every future repair run across every portfolio, with no re-alerting after the run that first recorded it.
+  evidence: `get_unavailable_attempt`/`record_unavailable_attempt` (`app/repositories/historical_price_repo.py:475-506`) key purely on `security_id`, with no start/end columns at all, so the check can never distinguish "this pair never has data" from "this specific window has no data". The spec's `<intent-contract>` explicitly mandates reusing `_DEFINITIVE_FAILURE_CODES` wholesale from the per-ticker path, so fixing this requires amending the intent contract, not a code patch.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-496-fx-backfill.md`
+  summary: `_prefetch_evidence` fetches the `GBPUSD=X` series on every repair run that has any repair candidate, even when every held ticker is GBP-denominated and would never consult `_dated_rate`'s FX fallback at all -- an avoidable network call and needless exposure to the negative-cache risk above.
+  evidence: `app/services/snapshot_repair.py`'s FX block runs whenever any per-ticker span exists, with no currency-aware filter; the spec's `<intent-contract>` explicitly directs computing the overall span from "the same per-ticker spans `_prefetch_evidence` already computes" (i.e. unfiltered), so a currency-aware skip is a scope change requiring a spec amendment, not a trivial patch.

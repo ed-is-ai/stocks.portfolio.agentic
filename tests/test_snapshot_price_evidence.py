@@ -321,6 +321,35 @@ def test_an_unreadable_cache_raises_rather_than_reporting_a_gap(
         repo.dated_close(["LGEN.L"], "2024-06-03")
 
 
+def test_usd_holding_falls_back_to_the_historical_price_cache(
+    tmp_path: Path,
+) -> None:
+    """A dated rate found only in ``historical_price_cache`` (#496) still
+    converts the holding when both ``fx_quotes`` and ``fx_rate_cache`` miss."""
+    _seed_dell(tmp_path)
+    _add_revision(
+        tmp_path,
+        data_revision="rev-fx",
+        requested_symbol="GBPUSD=X",
+        currency="USD",
+        quote_unit="USD",
+        quote_unit_scale="1",
+    )
+    _add_observation(
+        tmp_path, data_revision="rev-fx", session_date="2024-06-03", close=1.25
+    )
+
+    price = _source(tmp_path).gbp_price("DELL", "2024-06-03")
+
+    assert price == pytest.approx(96.0)
+
+
+def test_all_three_fx_sources_missing_leaves_no_price(tmp_path: Path) -> None:
+    _seed_dell(tmp_path)
+
+    assert _source(tmp_path).gbp_price("DELL", "2024-06-03") is None
+
+
 def test_dated_close_seeks_the_revisions_table_rather_than_scanning_observations(
     tmp_path: Path,
 ) -> None:
