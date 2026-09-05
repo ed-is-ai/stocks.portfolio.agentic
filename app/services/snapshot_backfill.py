@@ -6,14 +6,21 @@ show before then even though trades and priced historical evidence reach back
 years. :class:`SnapshotRepairService` only *repairs* existing rows; this
 service *creates* the missing ones.
 
-Per portfolio it replays trades for every calendar day from the first trade
-date up to (but not including) the earliest existing snapshot -- or up to and
-not including today when no snapshot exists yet, leaving today to the live
+Per portfolio it replays trades for every settled calendar day from the first
+trade date up to (but not including) today -- today is left to the live
 writer -- values the holdings via the same stored-evidence read path the
-repair pass uses, and inserts one daily row per fully-priced day. It never
-uses live prices or a guessed FX rate, never touches an existing row, and
-never raises for a per-ticker or per-portfolio failure: those are isolated
-and surfaced in the report.
+repair pass uses, and inserts one daily row per fully-priced day that has no
+snapshot yet. It never uses live prices or a guessed FX rate, never touches
+an existing row, and never raises for a per-ticker or per-portfolio failure:
+those are isolated and surfaced in the report.
+
+The window deliberately spans *interior* gaps as well as the pre-live-writer
+stretch (#509). Scoping it to "before the earliest existing snapshot" left
+any hole after that snapshot unfillable by anything: this service skipped it
+by contract, and :class:`SnapshotRepairService` only rewrites rows that
+already exist -- it never inserts one. Creating a row for a date with no row
+at all is unambiguously this service's job; the repair pass keeps ownership
+of rows that exist but are ``NULL``/``0.00``.
 
 Backfilled rows carry ``total_value`` (holdings only) with ``total_cost`` and
 ``cash_balance`` left ``NULL`` -- the chart null-guards the combined
@@ -27,7 +34,9 @@ refresh, pipeline) from doing real work or corrupting rows:
 
 * a per-portfolio ``account_state`` marker recording the ``[start, end)`` a
   successful run already covered -- an unchanged range is a fast no-op that
-  never opens the day loop;
+  never opens the day loop. Because ``end`` is today, the marker naturally
+  expires at the next UTC midnight, so a run that found no evidence is
+  retried the following day instead of being blocked forever (#509);
 * a guarded single-statement insert that writes a day's row only when that
   calendar day has no snapshot yet, so two runs racing on the same day (the
   background tasks the routes schedule) cannot both insert it.
@@ -35,6 +44,7 @@ refresh, pipeline) from doing real work or corrupting rows:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 import logging
 from typing import Any
@@ -92,7 +102,7 @@ class SnapshotBackfillReport(BaseModel):
 
 
 class SnapshotBackfillService:
-    """Creates the daily snapshots that predate the live writer, idempotently."""
+    """Creates every missing daily snapshot since the first trade, idempotently."""
 
     def __init__(
         self,
@@ -102,6 +112,7 @@ class SnapshotBackfillService:
         account_state: AccountStateRepository,
         price_source: HistoricalGbpPriceSource | None = None,
         backfill: PriceEvidenceBackfillService | None = None,
+        today: Callable[[], date] | None = None,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
@@ -111,16 +122,21 @@ class SnapshotBackfillService:
             price_source or NoHistoricalPriceSource()
         )
         self._backfill = backfill
+        # Read per run, not frozen at construction, so a long-lived instance
+        # still advances its window across UTC midnight. Injectable so tests
+        # can pin a window instead of one that grows with the wall clock.
+        self._today = today or (lambda: datetime.now(timezone.utc).date())
 
     def backfill(self, portfolio_id: int | None = None) -> SnapshotBackfillReport:
-        """Backfill pre-live-writer daily snapshots, returning what was written.
+        """Backfill missing daily snapshots, returning what was written.
 
-        Scoped to ``portfolio_id`` when given, else every portfolio. Only the
-        contiguous stretch strictly before the earliest existing snapshot is
-        filled (never a gap between or after existing rows -- that is the
-        repair pass's job). A re-run whose ``[start, end)`` range is unchanged
-        from a prior successful run is a fast no-op; a run racing another on
-        the same day cannot double-insert it.
+        Scoped to ``portfolio_id`` when given, else every portfolio. Every
+        settled day from the first trade to yesterday with no snapshot at all
+        is filled, interior gaps included (#509); a day that already has a
+        row -- at any intraday time -- is left exactly as it is. A re-run
+        whose ``[start, end)`` range is unchanged from a prior successful run
+        is a fast no-op; a run racing another on the same day cannot
+        double-insert it.
         """
         if portfolio_id is not None:
             portfolio_ids = [portfolio_id]
@@ -151,20 +167,22 @@ class SnapshotBackfillService:
         return report
 
     def _backfill_one(self, pid: int, totals: _RunTotals) -> None:
-        """Fill one portfolio's pre-live-writer days, accumulating into ``totals``."""
+        """Fill one portfolio's missing days, accumulating into ``totals``."""
         replay_rows = self._trades.open_rows(pid)
         if not replay_rows:
             return
         first_dates = first_trade_dates(replay_rows)
         start = date.fromisoformat(min(first_dates.values()))
 
-        earliest_snapshot = self._snapshots.earliest_timestamp(pid)
-        today = datetime.now(timezone.utc).date()
-        if earliest_snapshot is None:
-            # Leave today to the live writer -- backfill only settled past days.
-            end = today
-        else:
-            end = min(date.fromisoformat(str(earliest_snapshot)[:10]), today)
+        # Every settled day since the first trade is a candidate, not just the
+        # stretch before the earliest existing snapshot (#509). A single stray
+        # row used to act as a floor that permanently blocked every earlier
+        # *and* later gap: the repair pass cannot fill those either, because it
+        # only rewrites rows that already exist and never inserts one. Days
+        # that already have a snapshot are skipped via ``present`` below, so
+        # widening the window cannot disturb them. Today is left to the live
+        # writer.
+        end = self._today()
         if start >= end:
             return
 
