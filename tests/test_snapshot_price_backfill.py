@@ -54,11 +54,25 @@ class FakeTicker:
 
 
 class _RaisingTicker:
-    """Raises an arbitrary (non-data-missing) provider error, e.g. a network
-    fault, so the caller sees it classified as transient."""
+    """Raises a network fault, classified transient (``PROVIDER_UNAVAILABLE``,
+    retryable) -- distinct from a delisted ticker's non-retryable failure."""
 
     def history(self, **_kwargs: object) -> pd.DataFrame:
         raise ConnectionError("boom")
+
+    def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
+        return {}
+
+
+class _DelistedTicker:
+    """Raises the way yfinance actually does for a delisted/never-existed
+    symbol -- not an empty frame, an exception before any frame is parsed
+    (real-world: ``YFTzMissingError: $WCOG: possibly delisted; no timezone
+    found``). Classified ``PROVIDER_CONTRACT_ERROR``, not
+    ``REQUIRED_DATA_MISSING`` (GH-490)."""
+
+    def history(self, **_kwargs: object) -> pd.DataFrame:
+        raise RuntimeError("$WCOG: possibly delisted; no timezone found")
 
     def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
         return {}
@@ -169,8 +183,40 @@ def test_transient_failure_is_not_recorded_and_propagates(tmp_path) -> None:
     with pytest.raises(ProviderFailure) as excinfo:
         service.ensure_coverage("AAPL", date(2024, 1, 1), date(2024, 1, 3))
 
-    assert excinfo.value.code is not FailureCode.REQUIRED_DATA_MISSING
+    assert excinfo.value.code is FailureCode.PROVIDER_UNAVAILABLE
     assert repo.get_unavailable_attempt("portfolio:AAPL") is None
+
+
+def test_delisted_ticker_is_recorded_unavailable_not_retried_forever(tmp_path) -> None:
+    """A raised (not empty-frame) provider error classifies as
+    ``PROVIDER_CONTRACT_ERROR``, which must be treated as definitive just
+    like ``REQUIRED_DATA_MISSING`` -- otherwise a genuinely delisted ticker
+    is retried on every single pipeline run, forever (GH-490 production
+    finding: WCOG)."""
+    calls: list[str] = []
+
+    def factory(symbol: str) -> _DelistedTicker:
+        calls.append(symbol)
+        return _DelistedTicker()
+
+    service, repo = _service(tmp_path, ticker_factory=factory)
+
+    with pytest.raises(PriceEvidenceUnavailable):
+        service.ensure_coverage("WCOG", date(2024, 1, 1), date(2024, 1, 3))
+
+    attempt = repo.get_unavailable_attempt("portfolio:WCOG")
+    assert attempt is not None
+    # The adapter's own bounded retry loop treats PROVIDER_CONTRACT_ERROR as
+    # retryable within one `ensure_coverage` call (3 attempts) -- what must
+    # never happen is a *second* `ensure_coverage` call (i.e. the next
+    # pipeline run) attempting again at all.
+    first_run_calls = len(calls)
+    assert first_run_calls > 0
+
+    fetched = service.ensure_coverage("WCOG", date(2024, 1, 1), date(2024, 1, 3))
+
+    assert fetched is False
+    assert len(calls) == first_run_calls  # no fetch attempted on the next run
 
 
 def test_alias_resolution_maps_to_the_canonical_symbol(tmp_path) -> None:

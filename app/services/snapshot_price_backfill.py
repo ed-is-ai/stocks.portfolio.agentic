@@ -38,6 +38,20 @@ logger = logging.getLogger(__name__)
 #: own real identity) can never match a row this service wrote.
 _SECURITY_ID_PREFIX = "portfolio:"
 
+#: Failure codes that mean "this exact request will never succeed" rather
+#: than "try again later". ``REQUIRED_DATA_MISSING`` is a well-formed but
+#: empty response (the provider understood the request); a delisted or
+#: never-existed symbol instead raises before any response is parsed
+#: (yfinance's ``YFTzMissingError``/"possibly delisted"), which
+#: ``_classify_exception`` maps to ``PROVIDER_CONTRACT_ERROR`` -- the same
+#: shape a genuinely malformed response takes, so both must be treated as
+#: definitive here (verified against a live delisted ticker, GH-490).
+#: ``PROVIDER_UNAVAILABLE``/``PROVIDER_THROTTLED`` are the only codes that
+#: mean a transient, retryable condition (network/rate-limit).
+_DEFINITIVE_FAILURE_CODES = frozenset(
+    {FailureCode.REQUIRED_DATA_MISSING, FailureCode.PROVIDER_CONTRACT_ERROR}
+)
+
 
 class PriceEvidenceUnavailable(RuntimeError):
     """The provider has no rows for this ticker's range -- permanent.
@@ -55,10 +69,10 @@ class PriceEvidenceBackfillService:
 
     ``ensure_coverage`` is the only entry point: it checks the negative
     cache, then an existing covering revision, and only fetches when
-    neither exists. A definitive "provider has no rows" failure
-    (``FailureCode.REQUIRED_DATA_MISSING``) is recorded permanently and
-    raised as :class:`PriceEvidenceUnavailable`; any other failure is
-    transient and propagates as-is, to be retried on the next run.
+    neither exists. A definitive failure (see
+    :data:`_DEFINITIVE_FAILURE_CODES`) is recorded permanently and raised
+    as :class:`PriceEvidenceUnavailable`; any other failure is transient
+    and propagates as-is, to be retried on the next run.
     """
 
     def __init__(
@@ -116,7 +130,7 @@ class PriceEvidenceBackfillService:
         try:
             payload = self._adapter.fetch(request)
         except ProviderFailure as exc:
-            if exc.code is FailureCode.REQUIRED_DATA_MISSING:
+            if exc.code in _DEFINITIVE_FAILURE_CODES:
                 self._prices.record_unavailable_attempt(
                     security_id=security_id,
                     requested_symbol=symbol,
