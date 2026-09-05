@@ -38,6 +38,9 @@ class _FixedPriceSource:
             return None
         return self._prices.get(ticker)
 
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        return 1.0 if currency.strip().upper() == "GBP" else None
+
 
 class _FakeBackfill:
     """Stand-in ``PriceEvidenceBackfillService`` recording every call."""
@@ -131,7 +134,11 @@ def test_first_backfill_writes_one_priced_row_per_day(tmp_path: Path) -> None:
         "2024-01-07",
     ]
     assert all(r[1] == pytest.approx(75.0) for r in backfilled)
-    assert all(r[2] is None and r[3] is None for r in backfilled)
+    # Cost basis is now reconstructed (10 shares bought at 5.0 = 50.00);
+    # cash stays None because this fixture imported no Running Balance
+    # history for the service to read (#514).
+    assert all(r[2] == pytest.approx(50.0) for r in backfilled)
+    assert all(r[3] is None for r in backfilled)
     # The pre-existing live row is untouched.
     assert (999.0, 900.0, 100.0) in [(r[1], r[2], r[3]) for r in rows]
 
@@ -406,8 +413,10 @@ def test_interior_gap_between_existing_snapshots_is_filled(tmp_path: Path) -> No
         "2024-01-05",
         "2024-01-06",
     ]
-    # Both pre-existing rows survive untouched, values and all.
-    preserved = [(r[1], r[2], r[3]) for r in _rows(agent, pf.id) if r[2] is not None]
+    # Both pre-existing rows survive untouched, values and all. Backfilled
+    # rows now carry a reconstructed cost too, so identify the originals by
+    # their cash balance -- the column backfill still leaves None here.
+    preserved = [(r[1], r[2], r[3]) for r in _rows(agent, pf.id) if r[3] is not None]
     assert preserved == [(111.0, 100.0, 10.0), (222.0, 200.0, 20.0)]
 
 
@@ -509,3 +518,111 @@ def test_a_no_op_run_publishes_no_progress(tmp_path: Path) -> None:
     # The marker short-circuits before begin(), so no bar is shown for a
     # trigger that had nothing to do.
     assert fresh.get(pf.id) is None
+
+
+# --- #514: reconstructed cost basis and dated cash balance ------------------
+
+
+def _with_cash_history(agent: TraderAgent, rows: list[tuple[str, str, str]]) -> None:
+    """Seed (currency, as_of, amount) dated balances via the repository."""
+    from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
+    from decimal import Decimal
+
+    repo = CashBalanceHistoryRepository(agent._trades._connect)
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        for currency, as_of, amount in rows:
+            repo.upsert_on_connection(
+                conn,
+                agent._portfolios.list_all()[0].id,
+                currency,
+                as_of,
+                Decimal(amount),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _service_with_cash(agent: TraderAgent, source: object) -> SnapshotBackfillService:
+    from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
+
+    return SnapshotBackfillService(
+        agent._trades,
+        agent._snapshots,
+        agent._portfolios,
+        agent._account,
+        source,  # type: ignore[arg-type]
+        today=lambda: TODAY,
+        cash_history=CashBalanceHistoryRepository(agent._trades._connect),
+    )
+
+
+def test_cost_basis_uses_average_cost_and_survives_a_partial_sell(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 4.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("AAPL", 10, 6.0, "2024-01-02", portfolio_id=pf.id)
+    agent.record_sell("AAPL", 5, 9.0, "2024-01-03", portfolio_id=pf.id)
+
+    _service(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
+
+    costs = {r[0][:10]: r[2] for r in _rows(agent, pf.id)}
+    assert costs["2024-01-01"] == pytest.approx(40.0)  # 10 @ 4.00
+    assert costs["2024-01-02"] == pytest.approx(100.0)  # +10 @ 6.00
+    # Average cost is 5.00; a sell reduces quantity, not the average.
+    assert costs["2024-01-03"] == pytest.approx(75.0)  # 15 remaining @ 5.00
+
+
+def test_cash_balance_is_carried_forward_from_the_last_statement(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1500.00")])
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    # Before the first statement there is nothing to carry forward.
+    assert cash["2024-01-01"] is None
+    # From the statement onward the stated balance holds until superseded.
+    assert cash["2024-01-02"] == pytest.approx(1500.0)
+    assert cash["2024-01-05"] == pytest.approx(1500.0)
+
+
+def test_cash_balance_folds_currencies_through_a_dated_rate(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(
+        agent, [("GBP", "2024-01-01", "1000.00"), ("USD", "2024-01-01", "250.00")]
+    )
+
+    class _RateSource(_FixedPriceSource):
+        def gbp_rate(self, currency: str, as_of: str) -> float | None:
+            return {"GBP": 1.0, "USD": 1.25}.get(currency.upper())
+
+    _service_with_cash(agent, _RateSource({"AAPL": 7.5})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    assert cash["2024-01-01"] == pytest.approx(1200.0)  # 1000 + 250/1.25
+
+
+def test_cash_is_none_when_a_currency_has_no_dated_rate(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(
+        agent, [("GBP", "2024-01-01", "1000.00"), ("USD", "2024-01-01", "250.00")]
+    )
+
+    # _FixedPriceSource resolves GBP only, so the USD leg has no rate.
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    # A partial total would silently understate the portfolio; report nothing.
+    assert all(value is None for value in cash.values())

@@ -68,6 +68,49 @@ def last_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
     return last
 
 
+def cost_basis_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> float:
+    """Return the GBP cost basis of positions open on ``as_of`` (#514).
+
+    Average-cost replay over trades dated on or before ``as_of``, matching
+    ``TraderAgent._compute_positions`` exactly -- a sell reduces the position
+    at the running average and leaves the average untouched, and a fully
+    closed position resets to zero. Trade prices are treated as already in
+    GBP major units, which is the same convention the live snapshot writer
+    uses, so a backfilled row's ``total_cost`` is directly comparable with a
+    live one rather than computed on a different basis.
+    """
+    state: dict[str, dict[str, float]] = {}
+    for row in replay_rows:
+        ticker, action, shares, price, trade_date = (
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+        )
+        if str(trade_date)[:10] > as_of:
+            continue
+        held = state.setdefault(ticker, {"shares": 0.0, "avg_cost": 0.0})
+        quantity = float(shares)
+        if action == "BUY":
+            total = held["avg_cost"] * held["shares"] + float(price) * quantity
+            held["shares"] += quantity
+            held["avg_cost"] = total / held["shares"] if held["shares"] else 0.0
+        else:
+            held["shares"] -= quantity
+            if held["shares"] <= QUANTITY_EPSILON:
+                held["shares"] = 0.0
+                held["avg_cost"] = 0.0
+    return round(
+        sum(
+            held["avg_cost"] * held["shares"]
+            for held in state.values()
+            if held["shares"] > QUANTITY_EPSILON
+        ),
+        2,
+    )
+
+
 def holdings_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> dict[str, float]:
     """Return ``{ticker: net shares}`` from trades dated on/before ``as_of``.
 
@@ -103,6 +146,14 @@ class HistoricalGbpPriceSource(Protocol):
         """Return the GBP close for ``ticker`` on ``as_of`` (YYYY-MM-DD)."""
         ...
 
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        """Return units of ``currency`` per GBP on ``as_of``, or None (#514).
+
+        Same evidence-only contract as :meth:`gbp_price`: an exact-date
+        stored rate or nothing. ``GBP`` is 1.0 by definition.
+        """
+        ...
+
 
 class NoHistoricalPriceSource:
     """The deliberate opt-out: reconstruct nothing, null everything.
@@ -120,6 +171,10 @@ class NoHistoricalPriceSource:
     def gbp_price(self, ticker: str, as_of: str) -> float | None:
         """Return None -- this source has no historical evidence."""
         return None
+
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        """Return 1.0 for GBP, else None -- no evidence to convert with."""
+        return 1.0 if currency.strip().upper() == "GBP" else None
 
 
 class SnapshotRepairReport(BaseModel):

@@ -1514,3 +1514,63 @@ def test_backfill_is_skipped_while_one_is_already_running(mocked_import):
         tracker._entries.clear()
 
     mock_trader.backfill_snapshots.assert_not_called()
+
+
+# --- #514: the import captures the dated Running Balance series ------------
+
+
+def test_import_records_a_dated_balance_per_row(tmp_path):
+    from decimal import Decimal
+
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,"
+        "Debit,Credit,Running Balance\n"
+        "01/02/2024,AAPL,B123,10,5.00,Bought AAPL,REF1,50.00,,1000.00\n"
+        "02/02/2024,AAPL,B123,10,6.00,Bought AAPL,REF2,60.00,,940.00\n"
+        "05/02/2024,n/a,n/a,,,Contribution,REF3,,500.00,1440.00\n"
+    ).encode()
+
+    agent.import_sipp(csv, pf.id, "interactive_investor", "sipp")
+
+    history = CashBalanceHistoryRepository(agent._trades._connect)
+    assert history.count(pf.id) == 3
+    # Each date keeps its own stated balance, not just the latest winner.
+    assert history.balances_as_of(pf.id, "2024-02-01")["GBP"] == Decimal("1000.00")
+    assert history.balances_as_of(pf.id, "2024-02-02")["GBP"] == Decimal("940.00")
+    # A day between statements carries the previous one forward.
+    assert history.balances_as_of(pf.id, "2024-02-04")["GBP"] == Decimal("940.00")
+    assert history.balances_as_of(pf.id, "2024-02-05")["GBP"] == Decimal("1440.00")
+    # Before the first statement there is nothing to report.
+    assert history.balances_as_of(pf.id, "2024-01-31") == {}
+    assert history.earliest_as_of(pf.id) == "2024-02-01"
+
+
+def test_reimporting_the_same_file_restates_rather_than_duplicates(tmp_path):
+    from decimal import Decimal
+
+    from app.agents.trader.trader_agent import TraderAgent
+    from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("SIPP")
+    csv = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,"
+        "Debit,Credit,Running Balance\n"
+        "01/02/2024,AAPL,B123,10,5.00,Bought AAPL,REF1,50.00,,1000.00\n"
+    ).encode()
+
+    agent.import_sipp(csv, pf.id, "interactive_investor", "sipp")
+    agent.import_sipp(csv, pf.id, "interactive_investor", "sipp")
+
+    history = CashBalanceHistoryRepository(agent._trades._connect)
+    assert history.count(pf.id) == 1
+    assert history.balances_as_of(pf.id, "2024-02-01")["GBP"] == Decimal("1000.00")

@@ -52,6 +52,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from app.repositories.account_repo import AccountStateRepository
+from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
 from app.repositories.db import Connect
 from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
@@ -67,6 +68,7 @@ from app.services.snapshot_price_evidence import build_price_source
 from app.services.snapshot_repair import (
     HistoricalGbpPriceSource,
     NoHistoricalPriceSource,
+    cost_basis_as_of,
     first_trade_dates,
     holdings_as_of,
     last_trade_dates,
@@ -115,11 +117,13 @@ class SnapshotBackfillService:
         backfill: PriceEvidenceBackfillService | None = None,
         today: Callable[[], date] | None = None,
         progress: BackfillStatusTracker | None = None,
+        cash_history: CashBalanceHistoryRepository | None = None,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
         self._portfolios = portfolios
         self._account_state = account_state
+        self._cash_history = cash_history
         self._price_source: HistoricalGbpPriceSource = (
             price_source or NoHistoricalPriceSource()
         )
@@ -226,7 +230,12 @@ class SnapshotBackfillService:
             elif (value := self._value(holdings, as_of)) is None:
                 totals.days_skipped_no_evidence += 1
             elif self._snapshots.append_daily_value_if_absent(
-                pid, as_of, f"{as_of}T00:00:00+00:00", value
+                pid,
+                as_of,
+                f"{as_of}T00:00:00+00:00",
+                value,
+                total_cost=cost_basis_as_of(replay_rows, as_of),
+                cash_balance=self._cash_as_of(pid, as_of),
             ):
                 totals.rows_written += 1
             else:
@@ -304,6 +313,32 @@ class SnapshotBackfillService:
             logger.warning("FX evidence backfill failed: %s", exc)
             totals.fetch_failures.add(FX_PAIR)
 
+    def _cash_as_of(self, pid: int, as_of: str) -> float | None:
+        """Return the GBP cash balance in force on ``as_of``, or None (#514).
+
+        Reads the dated Running Balance series the import captured -- the
+        provider's own figure, carried forward from the last statement on or
+        before this day -- and folds each currency into GBP through the same
+        exact-date evidence the valuation uses.
+
+        Returns None rather than a partial total whenever the answer would be
+        a guess: no history at all, a day before the first statement, or a
+        non-GBP balance with no dated rate. A wrong cash figure is worse than
+        an absent one, because it silently shifts the Portfolio Value line.
+        """
+        if self._cash_history is None:
+            return None
+        balances = self._cash_history.balances_as_of(pid, as_of)
+        if not balances:
+            return None
+        total = 0.0
+        for currency, amount in balances.items():
+            rate = self._price_source.gbp_rate(currency, as_of)
+            if rate is None or rate <= 0:
+                return None
+            total += float(amount) / rate
+        return round(total, 2)
+
     def _value(self, holdings: dict[str, float], as_of: str) -> float | None:
         """Return the GBP holdings value at ``as_of``, or None without evidence.
 
@@ -359,4 +394,5 @@ def build_backfill_service(trades_connect: Connect) -> SnapshotBackfillService:
         build_price_source(trades_connect),
         backfill=PriceEvidenceBackfillService(backfill_prices),
         progress=tracker,
+        cash_history=CashBalanceHistoryRepository(trades_connect),
     )

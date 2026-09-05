@@ -108,6 +108,19 @@ CREATE TABLE IF NOT EXISTS cash_balances (
     updated_at   TEXT NOT NULL,
     PRIMARY KEY (portfolio_id, currency)
 );
+CREATE TABLE IF NOT EXISTS cash_balance_history (
+    portfolio_id     INTEGER NOT NULL,
+    currency         TEXT NOT NULL,
+    -- The provider's own Running Balance for this date, captured per row at
+    -- import time (#514). ``cash_balances`` above holds only the current
+    -- winner; this is the dated series the snapshot backfill reads so a
+    -- reconstructed day can carry a real cash balance instead of NULL.
+    as_of            TEXT NOT NULL,
+    amount           TEXT NOT NULL,
+    source_reference TEXT,
+    updated_at       TEXT NOT NULL,
+    PRIMARY KEY (portfolio_id, currency, as_of)
+);
 CREATE TABLE IF NOT EXISTS cash_reconciliation_issues (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     portfolio_id     INTEGER,
@@ -472,6 +485,10 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_reconciliation_portfolio "
         "ON cash_reconciliation_issues(portfolio_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cash_balance_history_lookup "
+        "ON cash_balance_history(portfolio_id, currency, as_of)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_fx_quotes_pair_asof ON fx_quotes(pair, as_of)"

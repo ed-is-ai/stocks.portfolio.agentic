@@ -39,6 +39,7 @@ from app.schemas import CashFlow, Position, SippImportResult, Trade
 from app.repositories import db
 from app.repositories.account_repo import AccountStateRepository
 from app.repositories.artifacts_repo import ArtifactsRepository
+from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
 from app.repositories.cash_balances_repo import CashBalancesRepository
 from app.repositories.cash_reconciliation_repo import CashReconciliationRepository
 from app.repositories.cash_flows_repo import CashFlowsRepository
@@ -281,6 +282,7 @@ class TraderAgent(Agent):
     _trades: TradesRepository = PrivateAttr()
     _cash_flows: CashFlowsRepository = PrivateAttr()
     _cash_balances: CashBalancesRepository = PrivateAttr()
+    _cash_balance_history: CashBalanceHistoryRepository = PrivateAttr()
     _cash_reconciliation: CashReconciliationRepository = PrivateAttr()
     _import_receipts: ImportReceiptRepository = PrivateAttr()
     _price_cache: PriceCacheRepository = PrivateAttr()
@@ -298,6 +300,7 @@ class TraderAgent(Agent):
         self._trades = TradesRepository(connect)
         self._cash_flows = CashFlowsRepository(connect)
         self._cash_balances = CashBalancesRepository(connect)
+        self._cash_balance_history = CashBalanceHistoryRepository(connect)
         self._cash_reconciliation = CashReconciliationRepository(connect)
         self._import_receipts = ImportReceiptRepository(connect)
         self._price_cache = PriceCacheRepository(connect)
@@ -1458,6 +1461,11 @@ class TraderAgent(Agent):
         # parseable dates this degrades to the previous last-row-in-file
         # behaviour.
         cash_balance_rank: dict[str, tuple[int, str, int]] = {}
+        #: (currency, ISO date) -> (rank, amount, reference) for every
+        #: dated Running Balance in this file (#514).
+        dated_cash_balances: dict[
+            tuple[str, str], tuple[tuple[int, str, int], Decimal, str | None]
+        ] = {}
         cash_balance: dict[str, Decimal] = {}
 
         # Story 3.4: a contract with no ``running_balance`` mapping at all
@@ -1786,6 +1794,21 @@ class TraderAgent(Agent):
                 if existing_rank is None or rank > existing_rank:
                     cash_balance_rank[rb_currency] = rank
                     cash_balance[rb_currency] = rb_money.amount
+                # Keep the whole dated series, not just the winner (#514):
+                # the snapshot backfill needs a balance per *day*, and this
+                # is the only place the provider states one. Only an ISO
+                # date can anchor a day, and within one day the same
+                # reverse-chronological tie-break picks that day's closing
+                # figure -- the first-listed row is the most recent.
+                if is_iso:
+                    day_key = (rb_currency, date)
+                    existing_day = dated_cash_balances.get(day_key)
+                    if existing_day is None or rank > existing_day[0]:
+                        dated_cash_balances[day_key] = (
+                            rank,
+                            rb_money.amount,
+                            row.get("reference", "").strip() or None,
+                        )
 
         total_rows = len(rows)
 
@@ -1948,6 +1971,17 @@ class TraderAgent(Agent):
             self._apply_import_cash_balances(
                 conn, portfolio_id, cash_balance, cash_balance_rank
             )
+
+            # The dated series joins the same transaction (#514), so a
+            # rejected plan leaves no partial history behind.
+            if portfolio_id is not None:
+                for (
+                    currency,
+                    as_of,
+                ), (_rank, amount, reference) in dated_cash_balances.items():
+                    self._cash_balance_history.upsert_on_connection(
+                        conn, portfolio_id, currency, as_of, amount, reference
+                    )
 
             # The legacy account_state cash_balance:{pid} mechanism (and
             # SippImportResult.cash_balance) stays scoped to GBP only,

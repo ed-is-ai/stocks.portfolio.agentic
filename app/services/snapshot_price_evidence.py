@@ -131,6 +131,22 @@ class HistoricalCacheGbpPriceSource:
         # Pairs quote units of the foreign currency per 1 GBP.
         return native / rate
 
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        """Return units of ``currency`` per GBP on ``as_of``, or None (#514).
+
+        Reuses the same exact-date, evidence-only lookup that prices a
+        non-GBP holding -- ``fx_quotes``, then ``fx_rate_cache``, then the
+        backfilled ``GBP<CCY>=X`` series. Never a nearby day and never a
+        live rate, so a converted cash balance is as auditable as a
+        converted holding.
+        """
+        code = currency.strip().upper()
+        if not code:
+            return None
+        if code == "GBP":
+            return 1.0
+        return self._dated_rate(f"GBP{code}=X", as_of)
+
     def _symbols_for(self, ticker: str) -> set[str]:
         """Return every provider spelling ``ticker`` could be cached under."""
         canonical = canonicalize_or_fallback(

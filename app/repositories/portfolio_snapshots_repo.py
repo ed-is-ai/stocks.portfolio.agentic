@@ -121,7 +121,13 @@ class PortfolioSnapshotsRepository:
         return {row[0] for row in rows}
 
     def append_daily_value_if_absent(
-        self, portfolio_id: int, day: str, timestamp: str, total_value: float
+        self,
+        portfolio_id: int,
+        day: str,
+        timestamp: str,
+        total_value: float,
+        total_cost: float | None = None,
+        cash_balance: float | None = None,
     ) -> bool:
         """Insert one ``total_value``-only daily row iff that day has no snapshot.
 
@@ -131,17 +137,27 @@ class PortfolioSnapshotsRepository:
         intraday time -- so two backfill runs racing on the same day (the
         background tasks the routes schedule) cannot both insert it. Returns
         True when a row was written, False when the day was already present.
-        ``total_cost``/``cash_balance`` are left NULL by design (#502).
+        ``total_cost``/``cash_balance`` are None when they could not be
+        reconstructed for that day -- an honest gap, never a fabricated zero
+        (#514).
         """
         with session(self._connect) as conn:
             cursor = conn.execute(
                 "INSERT INTO portfolio_snapshots "
                 "(portfolio_id, timestamp, total_value, total_cost, cash_balance) "
-                "SELECT ?, ?, ?, NULL, NULL WHERE NOT EXISTS ("
+                "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ("
                 "  SELECT 1 FROM portfolio_snapshots "
                 "  WHERE portfolio_id = ? AND substr(timestamp, 1, 10) = ?"
                 ")",
-                (portfolio_id, timestamp, total_value, portfolio_id, day),
+                (
+                    portfolio_id,
+                    timestamp,
+                    total_value,
+                    total_cost,
+                    cash_balance,
+                    portfolio_id,
+                    day,
+                ),
             )
         return cursor.rowcount > 0
 
