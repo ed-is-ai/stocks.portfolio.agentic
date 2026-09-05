@@ -31,7 +31,13 @@
       {% endfor %}
     </div>
   </div>
-  {% if chart_has_unavailable_totals %}
+  {% if chart_market_value_extends_further %}
+  <p class="text-muted small mb-2" role="status">
+    <i class="bi bi-info-circle me-1"></i>Portfolio Value needs a cash balance, which
+    reconstructed history doesn't carry yet — <strong>Market Value</strong> (dashed) is
+    shown instead and covers the full range. It excludes cash.
+  </p>
+  {% elif chart_has_unavailable_totals %}
   <p class="text-muted small mb-2" role="status">
     <i class="bi bi-info-circle me-1"></i>{% if chart_all_totals_unavailable %}Portfolio Value is unavailable because market value or cash data is missing or invalid.{% else %}Some Portfolio Value points are unavailable because market value or cash data is missing or invalid.{% endif %}
   </p>
@@ -87,7 +93,13 @@
             fill: false,
             tension: 0.3,
             spanGaps: true,
-            hidden: true,
+            {# Portfolio Value is market + cash, so it is unavailable for every
+               backfilled row (those carry a market value but no cash balance,
+               #502). It is also the only series shown by default -- which left
+               years of real history invisible behind a near-empty line. Reveal
+               Market Value whenever it genuinely covers more of the window
+               (#512). #}
+            hidden: {{ 'false' if chart_market_value_extends_further else 'true' }},
             order: 4,
           },
           {

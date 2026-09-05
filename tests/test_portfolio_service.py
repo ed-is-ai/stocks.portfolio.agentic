@@ -289,6 +289,7 @@ def _make_service(monkeypatch) -> PortfolioService:
             "cash_values": [],
             "has_unavailable_totals": False,
             "all_totals_unavailable": False,
+            "market_value_extends_further": False,
         },
     )
     return svc
@@ -516,6 +517,7 @@ def test_cash_balances_by_currency_carries_a_gbp_valuation_projection_per_row(
             "cash_values": [],
             "has_unavailable_totals": False,
             "all_totals_unavailable": False,
+            "market_value_extends_further": False,
         },
     )
 
@@ -1470,3 +1472,50 @@ def test_bad_range_key_uses_12m_cutoff() -> None:
     a = PortfolioService.chart_cutoff_iso("9Q")
     b = PortfolioService.chart_cutoff_iso("12M")
     assert a[:10] == b[:10]
+
+
+# --- #512: reveal Market Value when Portfolio Value has no history ---------
+
+
+def _rows_with_missing_cash():
+    """Backfilled rows (market value, no cash) then two live rows with cash."""
+    return [
+        ("2024-01-01T00:00:00+00:00", 100.0, None, None),
+        ("2024-01-02T00:00:00+00:00", 110.0, None, None),
+        ("2024-01-03T00:00:00+00:00", 120.0, None, None),
+        ("2024-01-04T09:00:00+00:00", 130.0, 90.0, 10.0),
+        ("2024-01-05T09:00:00+00:00", 140.0, 90.0, 10.0),
+    ]
+
+
+def test_market_value_extends_further_when_backfilled_rows_lack_cash():
+    projected = PortfolioService._project_portfolio_chart_rows(
+        _rows_with_missing_cash()
+    )
+
+    # Portfolio Value is market + cash, so it is None wherever cash is None.
+    assert projected["total_values"].count(None) == 3
+    assert all(value is not None for value in projected["values"])
+    assert projected["market_value_extends_further"] is True
+
+
+def test_market_value_stays_hidden_when_every_row_has_cash():
+    rows = [
+        ("2024-01-01T09:00:00+00:00", 100.0, 90.0, 10.0),
+        ("2024-01-02T09:00:00+00:00", 110.0, 90.0, 10.0),
+    ]
+
+    projected = PortfolioService._project_portfolio_chart_rows(rows)
+
+    assert projected["market_value_extends_further"] is False
+
+
+def test_market_value_flag_is_false_when_neither_series_has_data():
+    rows = [
+        ("2024-01-01T09:00:00+00:00", None, None, None),
+        ("2024-01-02T09:00:00+00:00", None, None, None),
+    ]
+
+    projected = PortfolioService._project_portfolio_chart_rows(rows)
+
+    assert projected["market_value_extends_further"] is False

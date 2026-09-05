@@ -860,9 +860,7 @@ class PortfolioService:
         availability: dict[str, bool] = {}
         fully_covers = False
         for preset in CHART_RANGE_DAYS:
-            availability[preset] = (
-                preset in ("1M", active_range) or not fully_covers
-            )
+            availability[preset] = preset in ("1M", active_range) or not fully_covers
             if self.chart_cutoff_iso(preset) <= earliest:
                 fully_covers = True
         return availability
@@ -1008,6 +1006,8 @@ class PortfolioService:
             total_values.append(total)
 
         has_unavailable_totals = any(value is None for value in total_values)
+        usable_totals = sum(1 for value in total_values if value is not None)
+        usable_values = sum(1 for value in values if value is not None)
         return {
             "labels": [str(row[0])[:16].replace("T", " ") for row in rows],
             "total_values": total_values,
@@ -1017,6 +1017,13 @@ class PortfolioService:
             "has_unavailable_totals": has_unavailable_totals,
             "all_totals_unavailable": bool(total_values)
             and all(value is None for value in total_values),
+            # Backfilled rows (#502) carry a market value but no cash balance,
+            # and Portfolio Value is market + cash -- so it is None for every
+            # one of them while Market Value is populated. Portfolio Value is
+            # the chart's only non-hidden series, so without this the user
+            # sees a near-empty chart sitting on top of years of real data
+            # (#512). Signals the template to reveal Market Value too.
+            "market_value_extends_further": usable_values > usable_totals,
         }
 
     def _trade_markers(
@@ -1359,12 +1366,22 @@ class PortfolioService:
             "chart_cash": json.dumps(chart_data["cash_values"]),
             "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
             "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
+            "chart_market_value_extends_further": chart_data[
+                "market_value_extends_further"
+            ],
             "chart_points": len(chart_data["values"]),
             # GH-484: usable (non-null) Portfolio Value points — the canvas
             # gate. Two points render as detached dots, indistinguishable
             # from a broken chart, so the template needs this count.
-            "chart_usable_total_points": sum(
-                1 for value in chart_data["total_values"] if value is not None
+            # Counts whichever series will actually be drawn: Portfolio Value
+            # normally, but Market Value when that is the one with history
+            # (#512). Gating purely on totals hid the canvas entirely on a
+            # range whose real data lives in the market-value series.
+            "chart_usable_total_points": max(
+                sum(1 for value in chart_data["total_values"] if value is not None),
+                sum(1 for value in chart_data["values"] if value is not None)
+                if chart_data["market_value_extends_further"]
+                else 0,
             ),
             "chart_buys": json.dumps(buy_vals),
             "chart_sells": json.dumps(sell_vals),
@@ -1429,11 +1446,21 @@ class PortfolioService:
             "chart_cash": json.dumps(chart_data["cash_values"]),
             "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
             "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
+            "chart_market_value_extends_further": chart_data[
+                "market_value_extends_further"
+            ],
             "chart_points": len(chart_data["values"]),
             # Must expose the identical key as ``portfolio_partial_context``
             # so both render paths gate the canvas the same way (GH-484).
-            "chart_usable_total_points": sum(
-                1 for value in chart_data["total_values"] if value is not None
+            # Counts whichever series will actually be drawn: Portfolio Value
+            # normally, but Market Value when that is the one with history
+            # (#512). Gating purely on totals hid the canvas entirely on a
+            # range whose real data lives in the market-value series.
+            "chart_usable_total_points": max(
+                sum(1 for value in chart_data["total_values"] if value is not None),
+                sum(1 for value in chart_data["values"] if value is not None)
+                if chart_data["market_value_extends_further"]
+                else 0,
             ),
             "chart_buys": json.dumps(buy_vals),
             "chart_sells": json.dumps(sell_vals),
