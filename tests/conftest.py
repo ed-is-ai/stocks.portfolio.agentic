@@ -15,6 +15,26 @@ os.environ.setdefault("STRATEGY_MANAGER_WORKER_ENABLED", "false")
 
 
 @pytest.fixture(autouse=True)
+def isolate_ticker_aliases(tmp_path, monkeypatch):
+    """Point the ticker-alias map at an absent file for every test.
+
+    ``config/ticker_aliases.json`` is gitignored local state that grows as a
+    developer imports their real holdings, and canonicalization reads it at
+    call time. Without this, a test whose expectations depend on ticker
+    identity passes on a fresh checkout (no file) and fails on the machine
+    that has one -- an environment-dependent suite, not a red one. Tests
+    that want a specific alias map monkeypatch these same attributes
+    themselves, which still wins over this fixture.
+    """
+    from app.core import ticker_identity
+    from app.services import realised_pnl_service
+
+    absent = tmp_path / "no-ticker-aliases.json"
+    monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", absent)
+    monkeypatch.setattr(realised_pnl_service, "TICKER_ALIASES_JSON", absent)
+
+
+@pytest.fixture(autouse=True)
 def isolate_strategy_di_caches():
     """Clear the Strategy-assignment DI singletons around every test (#440).
 

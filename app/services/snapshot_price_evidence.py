@@ -165,9 +165,9 @@ class HistoricalCacheGbpPriceSource:
         nearest-prior-day search would silently price a holding off the
         wrong day's rate. Tries ``fx_quotes`` then ``fx_rate_cache`` (both
         same-day-opportunistic) and finally ``historical_price_cache`` --
-        the full ``GBPUSD=X`` series backfilled by ``ensure_fx_coverage``
-        (#496); only that one pair is ever backfilled there, so this third
-        tier resolves USD holdings only, same as the other two.
+        the full ``GBP<CCY>=X`` series backfilled by ``ensure_fx_coverage``
+        (#496), which since #516 covers every currency the portfolio's own
+        evidence is quoted in, not USD alone.
         """
         quote = self._fx_quotes.get_for_pair_and_date(pair, as_of)
         if quote is not None:
