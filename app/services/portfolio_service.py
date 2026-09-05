@@ -838,6 +838,35 @@ class PortfolioService:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).date()
         return cutoff.isoformat()
 
+    def chart_range_availability(
+        self, portfolio_id: int | None, active_range: str
+    ) -> dict[str, bool]:
+        """Return ``{preset: has_more_data_than_a_narrower_preset}`` (#498).
+
+        Walks presets narrowest to widest: once a preset's cutoff reaches
+        back to (or past) the oldest snapshot, its window already contains
+        every stored point, so it "fully covers" the history -- and every
+        wider preset after it would render that exact same complete
+        series, making it redundant. ``1M`` and whichever preset is
+        currently selected always stay available; everything else (no
+        portfolio, or no stored snapshots yet) is available too, so the
+        selector never looks broken before the fact is known.
+        """
+        if portfolio_id is None:
+            return dict.fromkeys(CHART_RANGE_DAYS, True)
+        earliest = self._trader.earliest_snapshot_timestamp(portfolio_id)
+        if not isinstance(earliest, str):
+            return dict.fromkeys(CHART_RANGE_DAYS, True)
+        availability: dict[str, bool] = {}
+        fully_covers = False
+        for preset in CHART_RANGE_DAYS:
+            availability[preset] = (
+                preset in ("1M", active_range) or not fully_covers
+            )
+            if self.chart_cutoff_iso(preset) <= earliest:
+                fully_covers = True
+        return availability
+
     def _load_portfolio_history(
         self, portfolio_id: int | None = None, range_key: str = DEFAULT_CHART_RANGE
     ) -> dict:
@@ -1343,6 +1372,9 @@ class PortfolioService:
             "chart_sell_tips": json.dumps(sell_tips),
             "chart_range": chart_range,
             "chart_has_history": chart_has_history,
+            "chart_range_availability": self.chart_range_availability(
+                portfolio_id, chart_range
+            ),
         }
 
     def chart_fragment_context(
@@ -1387,6 +1419,9 @@ class PortfolioService:
             "portfolio_id": active_id,
             "chart_range": chart_range,
             "chart_has_history": has_history,
+            "chart_range_availability": self.chart_range_availability(
+                active_id, chart_range
+            ),
             "chart_labels": json.dumps(chart_data["labels"]),
             "chart_total_values": json.dumps(chart_data["total_values"]),
             "chart_values": json.dumps(chart_data["values"]),

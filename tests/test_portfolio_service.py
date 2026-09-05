@@ -96,6 +96,9 @@ class _StubTrader:
     def snapshot_history(self, portfolio_id, limit=180, since=None):
         return []
 
+    def earliest_snapshot_timestamp(self, portfolio_id) -> str | None:
+        return None
+
     def get_cached_ticker_currencies(self, tickers):
         return {}
 
@@ -1202,6 +1205,15 @@ class _SnapshotTrader(_StubTrader):
             >= since
         ]
 
+    def earliest_snapshot_timestamp(self, portfolio_id):
+        if not self._rows:
+            return None
+        stamps = [
+            row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0])
+            for row in self._rows
+        ]
+        return min(stamps)
+
 
 def _svc_with(rows: list[tuple]) -> tuple[PortfolioService, _SnapshotTrader]:
     trader = _SnapshotTrader(rows)
@@ -1209,6 +1221,59 @@ def _svc_with(rows: list[tuple]) -> tuple[PortfolioService, _SnapshotTrader]:
         cast(TraderService, trader), cast(ExitEvaluator, _StubEvaluator())
     )
     return svc, trader
+
+
+def test_chart_range_availability_disables_presets_with_no_extra_history() -> None:
+    """A portfolio with only 3 weeks of snapshots (#498): 1M genuinely
+    covers everything, so every wider preset would show identical data and
+    is disabled -- except whichever preset is currently selected."""
+    from datetime import datetime, timedelta, timezone
+
+    recent = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+    svc, _trader = _svc_with([(recent, 100.0, 90.0, 10.0)])
+
+    availability = svc.chart_range_availability(portfolio_id=1, active_range="1M")
+
+    assert availability["1M"] is True
+    assert availability["3M"] is False
+    assert availability["12M"] is False
+    assert availability["3Y"] is False
+    assert availability["5Y"] is False
+
+
+def test_chart_range_availability_never_disables_the_active_preset() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    recent = (datetime.now(timezone.utc) - timedelta(days=20)).isoformat()
+    svc, _trader = _svc_with([(recent, 100.0, 90.0, 10.0)])
+
+    availability = svc.chart_range_availability(portfolio_id=1, active_range="5Y")
+
+    assert availability["5Y"] is True
+    assert availability["3M"] is False
+
+
+def test_chart_range_availability_enables_wider_presets_with_real_history() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    old = (datetime.now(timezone.utc) - timedelta(days=800)).isoformat()
+    svc, _trader = _svc_with([(old, 100.0, 90.0, 10.0)])
+
+    availability = svc.chart_range_availability(portfolio_id=1, active_range="1M")
+
+    assert availability["1M"] is True
+    assert availability["3M"] is True
+    assert availability["12M"] is True
+    assert availability["3Y"] is True
+    assert availability["5Y"] is False
+
+
+def test_chart_range_availability_all_true_with_no_snapshots() -> None:
+    svc, _trader = _svc_with([])
+
+    availability = svc.chart_range_availability(portfolio_id=1, active_range="1M")
+
+    assert all(availability.values())
 
 
 def test_load_portfolio_history_filters_to_selected_window() -> None:

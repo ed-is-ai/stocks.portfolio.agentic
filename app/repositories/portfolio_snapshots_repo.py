@@ -92,6 +92,19 @@ class PortfolioSnapshotsRepository:
             rows = conn.execute(query, params).fetchall()
         return list(reversed(rows))
 
+    def earliest_timestamp(self, portfolio_id: int) -> str | None:
+        """Return the oldest stored snapshot timestamp, or None if none exist.
+
+        Used to grey out a chart-range preset that couldn't show anything a
+        narrower preset doesn't already (#498).
+        """
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT MIN(timestamp) FROM portfolio_snapshots WHERE portfolio_id = ?",
+                (portfolio_id,),
+            ).fetchone()
+        return None if row is None else row[0]
+
     def rows_with_ids(self, portfolio_id: int | None = None) -> list[tuple[Any, ...]]:
         """Return ``(id, portfolio_id, timestamp, total_value, total_cost)``.
 

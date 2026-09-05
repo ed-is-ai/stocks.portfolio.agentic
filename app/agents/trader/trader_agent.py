@@ -2359,6 +2359,10 @@ class TraderAgent(Agent):
         """
         return self._snapshots.history(portfolio_id, limit, since)
 
+    def earliest_snapshot_timestamp(self, portfolio_id: int) -> str | None:
+        """Return a portfolio's oldest stored snapshot timestamp, or None."""
+        return self._snapshots.earliest_timestamp(portfolio_id)
+
     def list_reconciliation_issues(
         self, portfolio_id: int | None, limit: int = 200
     ) -> list[tuple[Any, ...]]:

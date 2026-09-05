@@ -3317,3 +3317,27 @@ def test_build_position_gbp_lse_reads_current_prices_not_display_info() -> None:
     )
     assert pos.current_price == 7.30
     assert pos.price_currency == "GBP"
+
+
+def test_earliest_snapshot_timestamp_returns_the_oldest_row(tmp_path: Path) -> None:
+    """Backs the chart-range availability check (#498): the oldest stored
+    snapshot, regardless of insertion order."""
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test")
+
+    agent._snapshots.append(pf.id, "2026-08-20T00:00:00+00:00", 100.0, 90.0, 10.0)
+    agent._snapshots.append(pf.id, "2026-08-10T00:00:00+00:00", 100.0, 90.0, 10.0)
+    agent._snapshots.append(pf.id, "2026-08-30T00:00:00+00:00", 100.0, 90.0, 10.0)
+
+    assert agent.earliest_snapshot_timestamp(pf.id) == "2026-08-10T00:00:00+00:00"
+
+
+def test_earliest_snapshot_timestamp_none_when_no_snapshots(tmp_path: Path) -> None:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    pf = agent.create_portfolio("Test")
+
+    assert agent.earliest_snapshot_timestamp(pf.id) is None

@@ -198,9 +198,10 @@ def test_chart_fragment_keeps_card_shell_with_unknown_id(stack) -> None:
     )
     assert resp.status_code == 200
     assert 'id="portfolio-chart-card"' in resp.text
-    # All five range buttons are present.
+    # All five range buttons are present (enabled ones carry hx-vals,
+    # disabled ones only the label).
     for preset in ("1M", "3M", "12M", "3Y", "5Y"):
-        assert f'"range": "{preset}"' in resp.text
+        assert re.search(rf">\s*(?:<i[^>]*></i>)?\s*{preset}\s*</button>", resp.text)
 
 
 def test_full_portfolio_render_accepts_range_param(stack) -> None:

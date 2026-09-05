@@ -261,11 +261,59 @@ def test_chart_makes_portfolio_value_dominant_and_supporting_lines_distinct() ->
     assert "hidden: true" in market_dataset[:400]
     assert "hidden: true" in cost_dataset[:400]
     assert "hidden: true" in cash_dataset[:400]
+    # Every line series spans a null (no-evidence) point with a smoothed
+    # curve rather than breaking the line there.
+    assert "spanGaps: true" in portfolio_dataset[:400]
+    assert "spanGaps: true" in market_dataset[:400]
+    assert "spanGaps: true" in cost_dataset[:400]
+    assert "spanGaps: true" in cash_dataset[:400]
     assert "maintainAspectRatio: false" in html
     assert "position: 'bottom'" in html
     assert 'role="img"' in html
     assert 'aria-label="Portfolio value history' in html
     assert "Portfolio value history chart." in html
+
+
+def test_chart_range_buttons_disable_when_availability_says_no(  # noqa: E501
+) -> None:
+    """A preset marked unavailable (#498) renders disabled with no hx-get,
+    so clicking it can't fetch a range that would look identical to 1M;
+    the currently-active preset and any range not covered by the map at
+    all stay clickable."""
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="1M",
+        chart_points=3,
+        chart_usable_total_points=3,
+        chart_labels='["2026-08-01", "2026-08-02", "2026-08-03"]',
+        chart_total_values="[110, 125, 130]",
+        chart_values="[100, 120, 115]",
+        chart_costs="[90, 90, 90]",
+        chart_cash="[10, 5, 8]",
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+        chart_buys="[null, null, null]",
+        chart_sells="[null, null, null]",
+        chart_buy_tips="[null, null, null]",
+        chart_sell_tips="[null, null, null]",
+        chart_range_availability={
+            "1M": True,
+            "3M": False,
+            "12M": False,
+            "3Y": False,
+            "5Y": False,
+        },
+    )
+
+    def button(preset: str) -> str:
+        start = html.index(f"{preset}\n      </button>")
+        return html[max(0, start - 400) : start]
+
+    assert "disabled" not in button("1M")
+    assert "hx-get" in button("1M")
+    for preset in ("3M", "12M", "3Y", "5Y"):
+        assert "disabled" in button(preset)
+        assert "hx-get" not in button(preset)
 
 
 def test_chart_reports_unavailable_totals_without_hiding_supporting_series() -> None:

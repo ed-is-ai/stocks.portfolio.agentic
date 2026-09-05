@@ -13,13 +13,19 @@
     </div>
     <div class="btn-group btn-group-sm" role="group" aria-label="Chart time range">
       {% for preset in _ranges %}
+      {% set available = chart_range_availability[preset] if chart_range_availability is defined and preset in chart_range_availability else true %}
       <button type="button"
               class="btn {% if preset == chart_range %}btn-primary fw-bold{% else %}btn-outline-secondary{% endif %}"
               aria-pressed="{% if preset == chart_range %}true{% else %}false{% endif %}"
+              {% if available %}
               hx-get="/partials/portfolio/chart"
               hx-vals='{"portfolio_id": "{{ portfolio_id if portfolio_id is not none else "" }}", "range": "{{ preset }}"}'
               hx-target="#portfolio-chart-card" hx-swap="outerHTML" hx-indicator="#spinner"
-              onclick="if (window.setChartRange) setChartRange('{{ preset }}')">
+              onclick="if (window.setChartRange) setChartRange('{{ preset }}')"
+              {% else %}
+              disabled
+              title="No history older than 1M yet -- this range would show the same data"
+              {% endif %}>
         {% if preset == chart_range %}<i class="bi bi-check2 me-1"></i>{% endif %}{{ preset }}
       </button>
       {% endfor %}
@@ -68,6 +74,7 @@
             pointHoverRadius: 6,
             fill: true,
             tension: 0.3,
+            spanGaps: true,
             order: 3,
           },
           {
@@ -79,6 +86,7 @@
             pointRadius: 0,
             fill: false,
             tension: 0.3,
+            spanGaps: true,
             hidden: true,
             order: 4,
           },
@@ -91,6 +99,7 @@
             pointRadius: 0,
             fill: false,
             tension: 0,
+            spanGaps: true,
             hidden: true,
             order: 5,
           },
@@ -103,6 +112,7 @@
             pointRadius: 0,
             fill: false,
             tension: 0,
+            spanGaps: true,
             hidden: true,
             order: 6,
           },
