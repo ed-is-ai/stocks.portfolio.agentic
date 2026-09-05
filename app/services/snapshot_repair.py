@@ -15,6 +15,7 @@ byte-identical.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 import logging
 from typing import Any, Protocol
 
@@ -23,6 +24,10 @@ from pydantic import BaseModel, ConfigDict
 from app.core.quantity import QUANTITY_EPSILON
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.trades_repo import TradesRepository
+from app.services.snapshot_price_backfill import (
+    PriceEvidenceBackfillService,
+    PriceEvidenceUnavailable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,8 @@ class SnapshotRepairReport(BaseModel):
     marked_unavailable: int
     unchanged: int
     dry_run: bool
+    fetch_failures: tuple[str, ...] = ()
+    newly_unavailable: tuple[str, ...] = ()
 
 
 class SnapshotRepairService:
@@ -92,12 +99,14 @@ class SnapshotRepairService:
         trades: TradesRepository,
         snapshots: PortfolioSnapshotsRepository,
         price_source: HistoricalGbpPriceSource | None = None,
+        backfill: PriceEvidenceBackfillService | None = None,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
         self._price_source: HistoricalGbpPriceSource = (
             price_source or NoHistoricalPriceSource()
         )
+        self._backfill = backfill
 
     def repair(
         self, portfolio_id: int | None = None, dry_run: bool = False
@@ -112,6 +121,11 @@ class SnapshotRepairService:
         reports every row as ``unchanged``.
         """
         rows = self._snapshots.rows_with_ids(portfolio_id)
+        fetch_failures: tuple[str, ...] = ()
+        newly_unavailable: tuple[str, ...] = ()
+        if self._backfill is not None and not dry_run:
+            fetch_failures, newly_unavailable = self._prefetch_evidence(rows)
+
         replay_cache: dict[int | None, list[tuple[Any, ...]]] = {}
         repaired = marked = unchanged = candidates = 0
 
@@ -157,9 +171,88 @@ class SnapshotRepairService:
             marked_unavailable=marked,
             unchanged=unchanged,
             dry_run=dry_run,
+            fetch_failures=fetch_failures,
+            newly_unavailable=newly_unavailable,
         )
         logger.info("snapshot repair: %s", report.model_dump())
         return report
+
+    def _prefetch_evidence(
+        self, rows: list[tuple[Any, ...]]
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """Backfill historical evidence for every candidate row's tickers.
+
+        One bulk fetch per distinct ticker across every row in ``rows``
+        (never per portfolio -- two portfolios holding the same ticker
+        share one fetch), spanning that ticker's earliest trade date
+        through the latest candidate-snapshot date needing repair. Runs
+        before the reconstruction loop below so freshly committed evidence
+        is available to it in the same pass. One ticker's failure never
+        stops another's attempt -- including a failure just building that
+        ticker's span (e.g. one portfolio's trade replay erroring), which
+        must not abort every other portfolio's contribution either.
+        """
+        assert self._backfill is not None
+        replay_cache: dict[int | None, list[tuple[Any, ...]]] = {}
+        first_trade_cache: dict[int | None, dict[str, str]] = {}
+        spans: dict[str, tuple[str, str]] = {}
+        for row in rows:
+            _row_id, pf_id, timestamp, total_value = row[0], row[1], row[2], row[3]
+            if not (total_value is None or self._is_stored_zero(total_value)):
+                continue
+            try:
+                if pf_id not in replay_cache:
+                    replay_cache[pf_id] = self._trades.open_rows(pf_id)
+                    first_trade_cache[pf_id] = self._first_trade_dates(
+                        replay_cache[pf_id]
+                    )
+                as_of = str(timestamp)[:10]
+                holdings = self._holdings_as_of(replay_cache[pf_id], as_of)
+                for ticker in holdings:
+                    first_trade = first_trade_cache[pf_id].get(ticker)
+                    if first_trade is None:
+                        continue
+                    existing = spans.get(ticker)
+                    spans[ticker] = (
+                        (min(existing[0], first_trade), max(existing[1], as_of))
+                        if existing is not None
+                        else (first_trade, as_of)
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "prefetch: could not build evidence span for portfolio %s: %s",
+                    pf_id,
+                    exc,
+                )
+                continue
+
+        fetch_failures: list[str] = []
+        newly_unavailable: list[str] = []
+        for ticker, (start_str, end_str) in spans.items():
+            start = date.fromisoformat(start_str)
+            end = date.fromisoformat(end_str) + timedelta(days=1)
+            try:
+                self._backfill.ensure_coverage(ticker, start, end)
+            except PriceEvidenceUnavailable:
+                newly_unavailable.append(ticker)
+            except Exception as exc:
+                logger.warning("price evidence backfill failed for %s: %s", ticker, exc)
+                fetch_failures.append(ticker)
+        return tuple(fetch_failures), tuple(newly_unavailable)
+
+    @staticmethod
+    def _first_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
+        """Return ``{ticker: earliest replay date}`` in one pass over the rows.
+
+        An opening-lot row is a trade row like any other, dated at its own
+        entry date -- there is no earlier "real" purchase to prefer over it.
+        """
+        first: dict[str, str] = {}
+        for row in replay_rows:
+            ticker, trade_date = row[0], str(row[4])[:10]
+            if ticker not in first or trade_date < first[ticker]:
+                first[ticker] = trade_date
+        return first
 
     def _reconstruct(self, holdings: dict[str, float], as_of: str) -> float | None:
         """Return the GBP holdings value at ``as_of``, or None without evidence.

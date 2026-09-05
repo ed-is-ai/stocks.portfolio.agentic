@@ -76,6 +76,7 @@ from app.core.config import (
     PIPELINE_STATUS_JSON,
     PORTFOLIO_VALUE_CSV,
     SCAN_RESULTS_JSON,
+    TRADES_DB,
 )
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
@@ -86,14 +87,12 @@ from app.repositories.pipeline_status_repo import (
     PipelineRunInactiveError,
     PipelineStatusRepository,
 )
+from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
+from app.repositories.trades_repo import TradesRepository
 from app.schemas.analysis_artifact import (
     CurrentAnalysisEvidenceV1,
     build_analysis_payload,
 )
-from app.services.backtest.bau_capture_coordinator import BauCaptureCoordinator
-from app.services.backtest.bau_run_envelope import BauRunEnvelopeStore, BauRunEnvelopeV1
-from app.services.backtest.bau_snapshot_promotion import BauSnapshotPromotionService
-from app.services.backtest.canonical_manifest import manifest_digest
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
 from app.schemas.source_health import (
@@ -102,6 +101,13 @@ from app.schemas.source_health import (
     SourceState,
     derive_pipeline_outcome,
 )
+from app.services.backtest.bau_capture_coordinator import BauCaptureCoordinator
+from app.services.backtest.bau_run_envelope import BauRunEnvelopeStore, BauRunEnvelopeV1
+from app.services.backtest.bau_snapshot_promotion import BauSnapshotPromotionService
+from app.services.backtest.canonical_manifest import manifest_digest
+from app.services.snapshot_price_backfill import PriceEvidenceBackfillService
+from app.services.snapshot_price_evidence import build_price_source
+from app.services.snapshot_repair import SnapshotRepairService
 from app.workflows.pipeline import PipelineStepEvent
 
 
@@ -1500,6 +1506,38 @@ def pipeline(
                 run_id=run_id,
                 severity=NotificationSeverity.WARNING,
                 title="Historical BAU promotion needs attention",
+                body=str(exc),
+            )
+        try:
+            trades_connect = db.make_connect(lambda: TRADES_DB)
+            backfill_prices = HistoricalPriceRepository(
+                db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
+            )
+            backfill_prices.ensure_schema()
+            repair_service = SnapshotRepairService(
+                TradesRepository(trades_connect),
+                PortfolioSnapshotsRepository(trades_connect),
+                build_price_source(trades_connect),
+                backfill=PriceEvidenceBackfillService(backfill_prices),
+            )
+            repair_report = repair_service.repair()
+            if repair_report.fetch_failures or repair_report.newly_unavailable:
+                _emit_bau_notification(
+                    run_id=run_id,
+                    severity=NotificationSeverity.WARNING,
+                    title="Portfolio price evidence backfill needs attention",
+                    body=(
+                        f"Fetch failures: {', '.join(repair_report.fetch_failures) or 'none'}. "
+                        "Newly unavailable: "
+                        f"{', '.join(repair_report.newly_unavailable) or 'none'}."
+                    ),
+                )
+        except Exception as exc:
+            print(f"[snapshot repair warning] {exc}")
+            _emit_bau_notification(
+                run_id=run_id,
+                severity=NotificationSeverity.WARNING,
+                title="Portfolio snapshot repair needs attention",
                 body=str(exc),
             )
         print(f"\nPipeline {terminal_state.value}.")

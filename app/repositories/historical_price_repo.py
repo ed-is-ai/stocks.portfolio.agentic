@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import sqlite3
 from typing import Mapping, Sequence
@@ -94,6 +95,13 @@ CREATE TRIGGER IF NOT EXISTS historical_acquisition_immutable_update BEFORE UPDA
 CREATE TRIGGER IF NOT EXISTS historical_acquisition_immutable_delete BEFORE DELETE ON historical_price_acquisitions BEGIN SELECT RAISE(ABORT, 'historical acquisition is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS historical_reference_immutable_update BEFORE UPDATE ON historical_evidence_references BEGIN SELECT RAISE(ABORT, 'historical reference is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS historical_reference_immutable_delete BEFORE DELETE ON historical_evidence_references BEGIN SELECT RAISE(ABORT, 'historical reference is immutable'); END;
+
+CREATE TABLE IF NOT EXISTS price_evidence_unavailable_attempts (
+    security_id      TEXT PRIMARY KEY,
+    requested_symbol TEXT NOT NULL,
+    reason           TEXT NOT NULL,
+    attempted_at     TEXT NOT NULL
+);
 """
 
 
@@ -164,6 +172,18 @@ class DatedClose:
     quote_unit: str
     quote_unit_scale: str
     close: float
+
+
+@dataclass(frozen=True)
+class PriceEvidenceUnavailableAttempt:
+    """A durable failed backfill attempt for one ``portfolio:``-namespaced
+    security -- never retried once recorded (mirrors
+    ``FxUnavailableAttempt``, but keyed by ``security_id`` alone since this
+    is a single bulk range fetch, not a date-keyed lookup)."""
+
+    security_id: str
+    requested_symbol: str
+    reason: str
 
 
 class HistoricalPriceRepository:
@@ -428,6 +448,62 @@ class HistoricalPriceRepository:
             quote_unit_scale=str(row[4]),
             close=_hex_to_float(str(row[5])),
         )
+
+    def covering_revision(
+        self, *, security_id: str, requested_symbol: str, start: str, end: str
+    ) -> str | None:
+        """Return a ``data_revision`` whose stored interval contains
+        ``[start, end)``, or None.
+
+        Unlike ``find_request``/``find_compatible_request``, which match an
+        *exact* interval for a known roster identity, this matches any
+        revision whose interval *contains* the requested one -- repair's
+        range only grows as new snapshots appear, so an earlier, wider
+        fetch already covers a later, narrower request. Ties (more than one
+        covering revision) resolve to the newest ``first_acquired_at``.
+        """
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT data_revision FROM historical_price_revisions
+                   WHERE security_id=? AND requested_symbol=?
+                     AND start_date<=? AND end_date>=?
+                   ORDER BY first_acquired_at DESC, data_revision LIMIT 1""",
+                (security_id, requested_symbol, start, end),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def get_unavailable_attempt(
+        self, security_id: str
+    ) -> PriceEvidenceUnavailableAttempt | None:
+        """Return the recorded permanent failure for ``security_id``, or None."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT security_id, requested_symbol, reason "
+                "FROM price_evidence_unavailable_attempts WHERE security_id=?",
+                (security_id,),
+            ).fetchone()
+        return (
+            None
+            if row is None
+            else PriceEvidenceUnavailableAttempt(
+                security_id=str(row[0]),
+                requested_symbol=str(row[1]),
+                reason=str(row[2]),
+            )
+        )
+
+    def record_unavailable_attempt(
+        self, *, security_id: str, requested_symbol: str, reason: str
+    ) -> None:
+        """Persist a permanent backfill failure, idempotently."""
+        attempted_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        with session(self._connect) as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO price_evidence_unavailable_attempts "
+                "(security_id, requested_symbol, reason, attempted_at) "
+                "VALUES (?, ?, ?, ?)",
+                (security_id, requested_symbol, reason, attempted_at),
+            )
 
     def verify(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:

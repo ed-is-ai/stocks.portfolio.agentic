@@ -14,6 +14,7 @@ import pytest
 from app.agents.trader.trader_agent import TraderAgent
 from app.cli import repair_portfolio_snapshots as repair_cli
 from app.repositories import db
+from app.services.snapshot_price_backfill import PriceEvidenceUnavailable
 from app.services.snapshot_repair import (
     NoHistoricalPriceSource,
     SnapshotRepairService,
@@ -329,6 +330,169 @@ def test_null_row_is_reconstructed_when_evidence_arrives(tmp_path: Path) -> None
 
     assert (report.candidates, report.repaired, report.marked_unavailable) == (1, 1, 0)
     assert _values(agent, pf.id) == [pytest.approx(75.0)]
+
+
+class _FakeBackfill:
+    """A stand-in ``PriceEvidenceBackfillService`` recording every call."""
+
+    def __init__(
+        self,
+        unavailable: set[str] | None = None,
+        failing: set[str] | None = None,
+    ) -> None:
+        self.calls: list[tuple[str, str, str]] = []
+        self._unavailable = unavailable or set()
+        self._failing = failing or set()
+
+    def ensure_coverage(self, ticker: str, start, end) -> bool:
+        self.calls.append((ticker, start.isoformat(), end.isoformat()))
+        if ticker in self._unavailable:
+            raise PriceEvidenceUnavailable(f"no rows for {ticker}")
+        if ticker in self._failing:
+            raise RuntimeError(f"transient failure for {ticker}")
+        return True
+
+
+def test_prefetch_runs_once_per_ticker_across_two_portfolios(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    a = agent.create_portfolio("A")
+    b = agent.create_portfolio("B")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=a.id)
+    agent.record_buy("AAPL", 5, 5.0, "2024-01-10", portfolio_id=b.id)
+    agent._snapshots.append(a.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+    agent._snapshots.append(b.id, "2024-03-01T00:00:00+00:00", 0.0, 25.0, 100.0)
+    backfill = _FakeBackfill()
+    service = SnapshotRepairService(
+        agent._trades,
+        agent._snapshots,
+        NoHistoricalPriceSource(),
+        backfill=backfill,  # type: ignore[arg-type]
+    )
+
+    service.repair()
+
+    # One fetch total for the shared ticker, spanning the earliest trade
+    # date across both portfolios through the latest candidate date (+1 day
+    # exclusive), never one fetch per portfolio.
+    assert backfill.calls == [("AAPL", "2024-01-01", "2024-03-02")]
+
+
+def test_prefetch_skips_when_no_backfill_wired(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+
+    report = _service(agent, NoHistoricalPriceSource()).repair()
+
+    assert report.fetch_failures == ()
+    assert report.newly_unavailable == ()
+
+
+def test_prefetch_does_not_run_on_a_dry_run(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+    backfill = _FakeBackfill()
+    service = SnapshotRepairService(
+        agent._trades,
+        agent._snapshots,
+        NoHistoricalPriceSource(),
+        backfill=backfill,  # type: ignore[arg-type]
+    )
+
+    service.repair(dry_run=True)
+
+    assert backfill.calls == []
+
+
+def test_one_tickers_definitive_failure_does_not_block_another(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("HSFWA", 3, 5.0, "2024-01-02", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+    backfill = _FakeBackfill(unavailable={"HSFWA"})
+    service = SnapshotRepairService(
+        agent._trades,
+        agent._snapshots,
+        NoHistoricalPriceSource(),
+        backfill=backfill,  # type: ignore[arg-type]
+    )
+
+    report = service.repair()
+
+    assert set(t for t, _, _ in backfill.calls) == {"AAPL", "HSFWA"}
+    assert report.newly_unavailable == ("HSFWA",)
+    assert report.fetch_failures == ()
+
+
+def test_one_portfolios_broken_replay_does_not_abort_the_whole_prefetch(
+    tmp_path: Path,
+) -> None:
+    """A crash while building one portfolio's span must not take out every
+    other portfolio's evidence prefetch (#490). Scoped to ``_prefetch_evidence``
+    itself -- the main reconstruction loop's own resilience to a broken
+    portfolio replay is a separate, pre-existing concern this story doesn't
+    touch."""
+    agent = _agent(tmp_path)
+    broken = agent.create_portfolio("BROKEN")
+    healthy = agent.create_portfolio("HEALTHY")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=broken.id)
+    agent.record_buy("MSFT", 3, 5.0, "2024-01-02", portfolio_id=healthy.id)
+    agent._snapshots.append(broken.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+    agent._snapshots.append(healthy.id, "2024-02-01T00:00:00+00:00", 0.0, 15.0, 100.0)
+    rows = agent._snapshots.rows_with_ids()
+    backfill = _FakeBackfill()
+
+    real_open_rows = agent._trades.open_rows
+
+    def flaky_open_rows(portfolio_id=None):
+        if portfolio_id == broken.id:
+            raise sqlite3.OperationalError("database is locked")
+        return real_open_rows(portfolio_id)
+
+    agent._trades.open_rows = flaky_open_rows  # type: ignore[method-assign]
+    service = SnapshotRepairService(
+        agent._trades,
+        agent._snapshots,
+        NoHistoricalPriceSource(),
+        backfill=backfill,  # type: ignore[arg-type]
+    )
+
+    fetch_failures, newly_unavailable = service._prefetch_evidence(
+        rows
+    )  # must not raise
+
+    assert [t for t, _, _ in backfill.calls] == ["MSFT"]
+    assert fetch_failures == ()
+    assert newly_unavailable == ()
+
+
+def test_transient_failure_is_reported_but_does_not_abort_the_run(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("MSFT", 3, 5.0, "2024-01-02", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 50.0, 100.0)
+    backfill = _FakeBackfill(failing={"MSFT"})
+    service = SnapshotRepairService(
+        agent._trades,
+        agent._snapshots,
+        NoHistoricalPriceSource(),
+        backfill=backfill,  # type: ignore[arg-type]
+    )
+
+    report = service.repair()
+
+    assert set(t for t, _, _ in backfill.calls) == {"AAPL", "MSFT"}
+    assert report.fetch_failures == ("MSFT",)
+    assert report.newly_unavailable == ()
 
 
 def test_null_row_without_evidence_stays_unchanged(tmp_path: Path) -> None:

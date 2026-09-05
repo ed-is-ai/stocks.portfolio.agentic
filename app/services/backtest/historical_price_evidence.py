@@ -63,11 +63,11 @@ class HistoricalEvidenceRequest:
     symbol: str
     start: date
     end: date
-    expected_currency: str
-    expected_quote_unit: str
-    expected_timezone: str
     expected_sessions: tuple[date, ...]
     allowed_observed_symbols: tuple[str, ...]
+    expected_currency: str | None = None
+    expected_quote_unit: str | None = None
+    expected_timezone: str | None = None
     allow_missing_prefix: bool = False
     canonical_exchange_sessions: bool = False
 
@@ -276,9 +276,18 @@ def normalize_historical_response(
             )
         currency, quote_unit, quote_scale = _quote_contract(provider_unit)
         if (
-            currency != definition.expected_currency
-            or quote_unit != definition.expected_quote_unit
-            or exchange_timezone != definition.expected_timezone
+            (
+                definition.expected_currency is not None
+                and currency != definition.expected_currency
+            )
+            or (
+                definition.expected_quote_unit is not None
+                and quote_unit != definition.expected_quote_unit
+            )
+            or (
+                definition.expected_timezone is not None
+                and exchange_timezone != definition.expected_timezone
+            )
         ):
             raise ProviderFailure(
                 FailureCode.PROVIDER_CONTRACT_ERROR,

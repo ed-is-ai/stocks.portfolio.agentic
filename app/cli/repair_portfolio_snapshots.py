@@ -18,10 +18,12 @@ from __future__ import annotations
 import argparse
 import logging
 
-from app.core.config import TRADES_DB
+from app.core.config import HISTORICAL_PRICE_CACHE, TRADES_DB
 from app.repositories import db
+from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.trades_repo import TradesRepository
+from app.services.snapshot_price_backfill import PriceEvidenceBackfillService
 from app.services.snapshot_price_evidence import build_price_source
 from app.services.snapshot_repair import (
     HistoricalGbpPriceSource,
@@ -57,6 +59,15 @@ def main(argv: list[str] | None = None) -> None:
             "instead of reconstructing it."
         ),
     )
+    parser.add_argument(
+        "--with-backfill",
+        action="store_true",
+        help=(
+            "Also fetch-on-miss historical evidence for held tickers with no "
+            "coverage (#490). Off by default -- this manual tool otherwise "
+            "makes no network calls; the automatic path is the orchestrator."
+        ),
+    )
     args = parser.parse_args(argv)
     # Without this the service's report line and the price source's
     # per-holding "no evidence" reasons -- the only way to learn *why* a row
@@ -77,10 +88,17 @@ def main(argv: list[str] | None = None) -> None:
         if args.no_historical_evidence
         else build_price_source(connect)
     )
+    backfill = None
+    if args.with_backfill:
+        price_cache_connect = db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
+        price_repo = HistoricalPriceRepository(price_cache_connect)
+        price_repo.ensure_schema()
+        backfill = PriceEvidenceBackfillService(price_repo)
     service = SnapshotRepairService(
         TradesRepository(connect),
         PortfolioSnapshotsRepository(connect),
         price_source,
+        backfill=backfill,
     )
     report = service.repair(portfolio_id=args.portfolio_id, dry_run=args.dry_run)
     for field, value in report.model_dump().items():
