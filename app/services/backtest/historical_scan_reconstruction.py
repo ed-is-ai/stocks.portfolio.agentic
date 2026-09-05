@@ -117,10 +117,11 @@ class HistoricalScanReconstructor:
 
     def __init__(self, cache: BacktestRepository | None = None) -> None:
         self._cache = cache
+        self._planes_cache: dict[tuple[str, str], HistoricalMarketPlanes] = {}
 
     def reconstruct(self, request: ReconstructionRequestV1) -> ReconstructionResultV1:
         roster_captured_at = self._validate_request(request)
-        planes = HistoricalMarketPlanes.from_evidence(request.evidence)
+        planes = self._planes_for(request)
         bounded = planes.split_continuous_as_of(request.as_of_session_date)
         required = required_history_sessions()
         if len(bounded) < required or bounded[-1].session != request.as_of_session_date:
@@ -245,10 +246,18 @@ class HistoricalScanReconstructor:
         byte-identical to a from-scratch reconstruction of the same inputs.
         """
         roster_captured_at = self._validate_request(request)
-        planes = HistoricalMarketPlanes.from_evidence(request.evidence)
+        planes = self._planes_for(request)
         return self._compose_record(
             request, roster_captured_at, planes, technicals, stage, vcp
         )
+
+    def _planes_for(self, request: ReconstructionRequestV1) -> HistoricalMarketPlanes:
+        cache_key = (request.security_id, request.evidence.data_revision)
+        planes = self._planes_cache.get(cache_key)
+        if planes is None:
+            planes = HistoricalMarketPlanes.from_evidence(request.evidence)
+            self._planes_cache[cache_key] = planes
+        return planes
 
     def _compose_record(
         self,
@@ -392,6 +401,7 @@ class HistoricalScanReconstructor:
             != evidence.data_revision
             or evidence_manifest.get("rows") != list(evidence.rows)
             or evidence_manifest.get("actions") != list(evidence.actions)
+            or evidence_manifest.get("provider") != evidence.provider
             or evidence_manifest.get("security_id") != evidence.security_id
             or evidence_manifest.get("requested_symbol") != evidence.requested_symbol
             or evidence_manifest.get("observed_symbol") != evidence.observed_symbol

@@ -302,6 +302,7 @@ def test_cached_evidence_is_reused_without_provider_access() -> None:
     setattr(processor, "_evidence_adapter", Provider())
     setattr(processor, "_alias_revision", "b" * 64)
     setattr(processor, "_evidence_cache", {})
+    setattr(processor, "_validated_evidence_cache", set())
     roster_member = SimpleNamespace(security_id="security-1", provider_symbol="AAPL")
     request = HistoricalEvidenceRequest(
         security_id="security-1",
@@ -349,6 +350,7 @@ def test_verified_evidence_is_reused_across_month_processor_calls() -> None:
     setattr(processor, "_evidence_adapter", SimpleNamespace())
     setattr(processor, "_alias_revision", "b" * 64)
     setattr(processor, "_evidence_cache", {})
+    setattr(processor, "_validated_evidence_cache", set())
     roster_member = SimpleNamespace(security_id="security-1", provider_symbol="AAPL")
     request = HistoricalEvidenceRequest(
         security_id="security-1",
@@ -373,6 +375,58 @@ def test_verified_evidence_is_reused_across_month_processor_calls() -> None:
         is cached
     )
     assert prices.calls == 1
+
+
+def test_cached_evidence_is_validated_once_per_run() -> None:
+    cached = SimpleNamespace(
+        security_id="security-1",
+        alias_revision="b" * 64,
+        requested_symbol="AAPL",
+        observed_symbol="AAPL",
+        currency="USD",
+        quote_unit="USD",
+        exchange_timezone="America/New_York",
+        rows=({"session": "2026-07-31"},),
+    )
+
+    class Prices:
+        def find_request(self, **_kwargs):
+            return cached
+
+    processor = object.__new__(CanonicalSnapshotMonthProcessor)
+    setattr(processor, "_price_repository", Prices())
+    setattr(processor, "_evidence_adapter", SimpleNamespace())
+    setattr(processor, "_alias_revision", "b" * 64)
+    setattr(processor, "_evidence_cache", {})
+    setattr(processor, "_validated_evidence_cache", set())
+    validations = 0
+    original_validate = processor._validate_cached_evidence
+
+    def validate_once(evidence, request) -> None:
+        nonlocal validations
+        validations += 1
+        original_validate(evidence, request)
+
+    setattr(processor, "_validate_cached_evidence", validate_once)
+    roster_member = SimpleNamespace(security_id="security-1", provider_symbol="AAPL")
+    request = HistoricalEvidenceRequest(
+        security_id="security-1",
+        alias_revision="b" * 64,
+        symbol="AAPL",
+        start=date(1970, 1, 1),
+        end=date(2026, 8, 1),
+        expected_currency="USD",
+        expected_quote_unit="USD",
+        expected_timezone="America/New_York",
+        expected_sessions=(date(2026, 7, 31),),
+        allowed_observed_symbols=("AAPL",),
+        allow_missing_prefix=True,
+    )
+
+    processor._evidence_for(roster_member, request)  # type: ignore[arg-type]
+    processor._evidence_for(roster_member, request)  # type: ignore[arg-type]
+
+    assert validations == 1
 
 
 def test_provider_failure_names_the_blocking_roster_symbol() -> None:
