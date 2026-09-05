@@ -407,7 +407,7 @@
 {% if not positions and cash_balance is none %}
 <div class="alert alert-info border-0 d-flex align-items-center gap-2 mt-1">
   <i class="bi bi-info-circle-fill fs-5"></i>
-  <span>No open positions yet. Use <strong>Add holding</strong> above — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Stock Scanner</strong> and click <strong>Buy</strong>.</span>
+  <span>No open positions yet. Use <strong>Add holding</strong> above — <strong>quick-add by value</strong> or <strong>import a SIPP CSV</strong> — or go to the <strong>Stock Scanner</strong> and click <strong>Record Buy</strong>.</span>
 </div>
 {% endif %}
 {% if positions or cash_balance is not none or cash_balances_by_currency %}
@@ -564,7 +564,7 @@
           </button>
           <button class="btn-sell-sm"
                   onclick="openSell('{{ p.ticker }}', {{ p.shares if p.shares > 0 else 0 }}, {% if p.current_price %}{{ p.current_price }}{% else %}''{% endif %})">
-            Sell
+            Record Sell
           </button>
         </td>
       </tr>
