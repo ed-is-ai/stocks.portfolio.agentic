@@ -409,3 +409,103 @@ def test_interior_gap_between_existing_snapshots_is_filled(tmp_path: Path) -> No
     # Both pre-existing rows survive untouched, values and all.
     preserved = [(r[1], r[2], r[3]) for r in _rows(agent, pf.id) if r[2] is not None]
     assert preserved == [(111.0, 100.0, 10.0), (222.0, 200.0, 20.0)]
+
+
+# --- #508: progress is published as the run proceeds -----------------------
+
+
+def test_progress_is_published_through_the_phases(tmp_path: Path) -> None:
+    from app.services.backfill_status import BackfillStatusTracker
+
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("MSFT", 5, 5.0, "2024-01-01", portfolio_id=pf.id)
+    progress = BackfillStatusTracker()
+    service = SnapshotBackfillService(
+        agent._trades,
+        agent._snapshots,
+        agent._portfolios,
+        agent._account,
+        _FixedPriceSource({"AAPL": 7.5, "MSFT": 3.0}),
+        backfill=_FakeBackfill(),  # type: ignore[arg-type]
+        today=lambda: TODAY,
+        progress=progress,
+    )
+
+    service.backfill(pf.id)
+
+    final = progress.get(pf.id)
+    assert final is not None
+    assert final.phase == "done"
+    assert final.running is False
+    assert final.days_total == 7  # 2024-01-01 .. 2024-01-07
+    assert final.days_done == 7
+    assert final.rows_written == 7
+    assert (final.tickers_done, final.tickers_total) == (2, 2)
+    assert final.first_day == "2024-01-01"
+    assert final.last_day == "2024-01-07"
+
+
+def test_progress_records_a_failure_for_a_broken_portfolio(tmp_path: Path) -> None:
+    from app.services.backfill_status import BackfillStatusTracker
+
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    progress = BackfillStatusTracker()
+
+    def boom(portfolio_id: int | None = None) -> list[tuple[object, ...]]:
+        raise sqlite3.OperationalError("database is locked")
+
+    agent._trades.open_rows = boom  # type: ignore[method-assign]
+    service = SnapshotBackfillService(
+        agent._trades,
+        agent._snapshots,
+        agent._portfolios,
+        agent._account,
+        _FixedPriceSource({"AAPL": 7.5}),
+        today=lambda: TODAY,
+        progress=progress,
+    )
+
+    report = service.backfill(pf.id)
+
+    assert report.portfolios_failed == 1
+    # begin() never ran, so there is no half-built entry to render.
+    assert progress.get(pf.id) is None
+
+
+def test_a_no_op_run_publishes_no_progress(tmp_path: Path) -> None:
+    from app.services.backfill_status import BackfillStatusTracker
+
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    progress = BackfillStatusTracker()
+    kwargs = dict(today=lambda: TODAY, progress=progress)
+    first = SnapshotBackfillService(
+        agent._trades,
+        agent._snapshots,
+        agent._portfolios,
+        agent._account,
+        _FixedPriceSource({"AAPL": 7.5}),
+        **kwargs,  # type: ignore[arg-type]
+    )
+    first.backfill(pf.id)
+
+    fresh = BackfillStatusTracker()
+    second = SnapshotBackfillService(
+        agent._trades,
+        agent._snapshots,
+        agent._portfolios,
+        agent._account,
+        _FixedPriceSource({"AAPL": 7.5}),
+        today=lambda: TODAY,
+        progress=fresh,
+    )
+    second.backfill(pf.id)
+
+    # The marker short-circuits before begin(), so no bar is shown for a
+    # trigger that had nothing to do.
+    assert fresh.get(pf.id) is None

@@ -37,6 +37,7 @@ from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.trade import Trade
 from app.services.portfolio_import.contract_registry import ContractRegistryError
+from app.services.backfill_status import tracker as backfill_tracker
 from app.services.portfolio_import.registry_loader import get_contract_registry
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
@@ -59,7 +60,18 @@ def _run_snapshot_backfill(trader: TraderService, portfolio_id: int) -> None:
     Scheduled via ``BackgroundTasks`` after a SIPP import or a price refresh so
     the primary response is never blocked, and an exception here is logged
     only -- it must never change the HTTP status the user already received.
+
+    Skips outright when a run for this portfolio is already in flight (#508):
+    the guarded insert already makes a concurrent run safe, but a second full
+    multi-year replay is pure waste, and letting it through would also reset
+    the progress the status bar is currently rendering.
     """
+    if backfill_tracker.is_running(portfolio_id):
+        logger.info(
+            "Snapshot backfill already running for portfolio %s; skipping",
+            portfolio_id,
+        )
+        return
     try:
         report = trader.backfill_snapshots(portfolio_id)
     except Exception:
@@ -73,6 +85,27 @@ def _run_snapshot_backfill(trader: TraderService, portfolio_id: int) -> None:
             report.fetch_failures,
             report.newly_unavailable,
         )
+
+
+@router.get("/api/portfolio/backfill-status", response_class=HTMLResponse)
+async def backfill_status(
+    request: Request, portfolio_id: str | None = None
+) -> HTMLResponse:
+    """Render live snapshot-backfill progress for one portfolio (#508).
+
+    Returns an empty body when nothing is known for the portfolio, which is
+    what clears the bar once a finished run ages out of the tracker. Progress
+    is per-process: with ``uvicorn --workers >1`` a poll could reach a worker
+    that never ran the backfill (single-process today -- see
+    ``app.services.backfill_status``).
+    """
+    pid = optional_int(portfolio_id)
+    progress = None if pid is None else backfill_tracker.get(pid)
+    return templates.TemplateResponse(
+        request,
+        "_portfolio_backfill_status.html",
+        context={"progress": progress},
+    )
 
 
 #: Cap on how many individual row/value issues to spell out in the import

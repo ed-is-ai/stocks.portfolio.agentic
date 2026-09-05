@@ -57,6 +57,7 @@ from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
 from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.trades_repo import TradesRepository
+from app.services.backfill_status import BackfillStatusTracker
 from app.services.backtest.historical_price_evidence import FX_PAIR
 from app.services.snapshot_price_backfill import (
     PriceEvidenceBackfillService,
@@ -113,6 +114,7 @@ class SnapshotBackfillService:
         price_source: HistoricalGbpPriceSource | None = None,
         backfill: PriceEvidenceBackfillService | None = None,
         today: Callable[[], date] | None = None,
+        progress: BackfillStatusTracker | None = None,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
@@ -126,6 +128,10 @@ class SnapshotBackfillService:
         # still advances its window across UTC midnight. Injectable so tests
         # can pin a window instead of one that grows with the wall clock.
         self._today = today or (lambda: datetime.now(timezone.utc).date())
+        # A throwaway tracker for standalone/CLI use is harmless -- nothing
+        # reads it. The web path passes the process-wide singleton so the
+        # status route can render live progress (#508).
+        self._progress = progress if progress is not None else BackfillStatusTracker()
 
     def backfill(self, portfolio_id: int | None = None) -> SnapshotBackfillReport:
         """Backfill missing daily snapshots, returning what was written.
@@ -148,9 +154,10 @@ class SnapshotBackfillService:
         for pid in portfolio_ids:
             try:
                 self._backfill_one(pid, totals)
-            except Exception:
+            except Exception as exc:
                 failed += 1
                 logger.exception("snapshot backfill failed for portfolio %s", pid)
+                self._progress.fail(pid, str(exc))
 
         report = SnapshotBackfillReport(
             portfolios_scanned=len(portfolio_ids),
@@ -192,35 +199,55 @@ class SnapshotBackfillService:
             return
 
         last_day = end - timedelta(days=1)
+        self._progress.begin(
+            pid,
+            days_total=(end - start).days,
+            first_day=start.isoformat(),
+            last_day=last_day.isoformat(),
+        )
+        rows_before = totals.rows_written
         present = self._snapshots.dates_present(
             pid, start.isoformat(), last_day.isoformat()
         )
-        self._prefetch_evidence(replay_rows, first_dates, start, end, totals)
+        self._prefetch_evidence(replay_rows, first_dates, start, end, totals, pid)
+        self._progress.enter_valuing(pid)
 
         day = start
+        days_done = 0
         while day < end:
             totals.days_considered += 1
+            days_done += 1
             as_of = day.isoformat()
             day += timedelta(days=1)
             if as_of in present:
                 totals.days_already_present += 1
-                continue
-            holdings = holdings_as_of(replay_rows, as_of)
-            if not holdings:
+            elif not (holdings := holdings_as_of(replay_rows, as_of)):
                 totals.days_skipped_no_holdings += 1
-                continue
-            value = self._value(holdings, as_of)
-            if value is None:
+            elif (value := self._value(holdings, as_of)) is None:
                 totals.days_skipped_no_evidence += 1
-                continue
-            if self._snapshots.append_daily_value_if_absent(
+            elif self._snapshots.append_daily_value_if_absent(
                 pid, as_of, f"{as_of}T00:00:00+00:00", value
             ):
                 totals.rows_written += 1
             else:
                 totals.days_already_present += 1
+            # Publish a few dozen times over a multi-year window rather than
+            # once per day -- cheap enough, smooth enough for a 2s poll.
+            if days_done % 25 == 0:
+                self._progress.advance(
+                    pid,
+                    days_done=days_done,
+                    rows_written=totals.rows_written - rows_before,
+                )
 
         self._account_state.set(marker_key, signature)
+        self._progress.complete(
+            pid,
+            rows_written=totals.rows_written - rows_before,
+            days_done=days_done,
+            fetch_failures=tuple(sorted(totals.fetch_failures)),
+            newly_unavailable=tuple(sorted(totals.newly_unavailable)),
+        )
 
     def _prefetch_evidence(
         self,
@@ -229,6 +256,7 @@ class SnapshotBackfillService:
         start: date,
         end: date,
         totals: _RunTotals,
+        pid: int,
     ) -> None:
         """Acquire price + FX evidence spanning the fill range, one fetch per ticker.
 
@@ -245,9 +273,12 @@ class SnapshotBackfillService:
             return
         last_dates = last_trade_dates(replay_rows)
         still_held = holdings_as_of(replay_rows, (end - timedelta(days=1)).isoformat())
-        for ticker in sorted({row[0] for row in replay_rows}):
+        tickers = sorted({row[0] for row in replay_rows})
+        self._progress.set_evidence(pid, 0, len(tickers))
+        for done, ticker in enumerate(tickers, start=1):
             first_trade = first_dates.get(ticker)
             if first_trade is None:
+                self._progress.set_evidence(pid, done, len(tickers))
                 continue
             span_start = date.fromisoformat(first_trade)
             span_end = end
@@ -255,6 +286,7 @@ class SnapshotBackfillService:
             if ticker not in still_held and last_trade is not None:
                 span_end = min(end, date.fromisoformat(last_trade) + timedelta(days=1))
             if span_start >= span_end:
+                self._progress.set_evidence(pid, done, len(tickers))
                 continue
             try:
                 self._backfill.ensure_coverage(ticker, span_start, span_end)
@@ -263,6 +295,7 @@ class SnapshotBackfillService:
             except Exception as exc:
                 logger.warning("price evidence backfill failed for %s: %s", ticker, exc)
                 totals.fetch_failures.add(ticker)
+            self._progress.set_evidence(pid, done, len(tickers))
         try:
             self._backfill.ensure_fx_coverage(start, end)
         except PriceEvidenceUnavailable:
@@ -312,6 +345,8 @@ def build_backfill_service(trades_connect: Connect) -> SnapshotBackfillService:
     from app.core.config import HISTORICAL_PRICE_CACHE
     from app.repositories import db
 
+    from app.services.backfill_status import tracker
+
     backfill_prices = HistoricalPriceRepository(
         db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
     )
@@ -323,4 +358,5 @@ def build_backfill_service(trades_connect: Connect) -> SnapshotBackfillService:
         AccountStateRepository(trades_connect),
         build_price_source(trades_connect),
         backfill=PriceEvidenceBackfillService(backfill_prices),
+        progress=tracker,
     )

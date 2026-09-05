@@ -702,6 +702,10 @@
 
 <div id="pipeline-status" class="pipeline-status-bar"
      hx-get="/pipeline-status" hx-trigger="load" hx-swap="innerHTML"></div>
+{# Snapshot-backfill progress (#508). Lives outside #tab-content so a
+   portfolio partial swap can never remove it mid-run; the partial it loads
+   owns its own 2s polling and clears itself when the run ages out. #}
+<div id="portfolio-backfill-status" class="pipeline-status-bar"></div>
 <div id="pipeline-confirmation"></div>
 
 <!-- Buy Modal -->
@@ -988,6 +992,11 @@
       });
       const html = await response.text();
       document.getElementById('tab-content').innerHTML = html;
+      // The price fetch is done, but the snapshot backfill it scheduled runs
+      // on after the response. Hand the button over to the status bar rather
+      // than declaring victory here (#508); pollBackfillStatus restores it.
+      if (text) { text.textContent = 'Filling history...'; }
+      startBackfillWatch(pid);
     } catch (error) {
       if (btn) { btn.disabled = false; }
       if (icon) { icon.classList.remove('spin'); }
@@ -995,6 +1004,47 @@
       alert('Failed to fetch prices: ' + error.message);
     }
   }
+
+  // Give the background task a moment to register with the tracker, then let
+  // the status partial own its own polling lifecycle (same handover the
+  // pipeline bar uses in pipeline-refresh.js).
+  function startBackfillWatch(portfolioId) {
+    const target = document.getElementById('portfolio-backfill-status');
+    if (!target || !window.htmx) { resetRefreshButton(); return; }
+    const query = portfolioId ? '?portfolio_id=' + encodeURIComponent(portfolioId) : '';
+    window.setTimeout(function () {
+      htmx.ajax('GET', '/api/portfolio/backfill-status' + query,
+                { target: '#portfolio-backfill-status', swap: 'innerHTML' });
+    }, 300);
+  }
+
+  function resetRefreshButton() {
+    const btn = document.getElementById('refreshBtn');
+    const icon = document.getElementById('refreshIcon');
+    const text = document.getElementById('refreshText');
+    if (btn) { btn.disabled = false; }
+    if (icon) { icon.classList.remove('spin'); }
+    if (text) { text.textContent = 'Refresh Prices'; }
+  }
+
+  // The bar re-swaps itself every 2s while running; each swap tells us
+  // whether to keep the button spinning. An empty swap (run finished and
+  // aged out, or nothing scheduled) also releases the button.
+  document.body.addEventListener('htmx:afterSwap', function (event) {
+    if (event.detail.target.id !== 'portfolio-backfill-status') return;
+    const state = event.detail.target
+      .querySelector('[data-backfill-state]')?.dataset.backfillState;
+    if (state === 'evidence' || state === 'valuing') {
+      const btn = document.getElementById('refreshBtn');
+      const icon = document.getElementById('refreshIcon');
+      const text = document.getElementById('refreshText');
+      if (btn) { btn.disabled = true; }
+      if (icon) { icon.classList.add('spin'); }
+      if (text) { text.textContent = 'Filling history...'; }
+    } else {
+      resetRefreshButton();
+    }
+  });
 
   function escapeHtml(s) {
     const div = document.createElement('div');
@@ -1158,6 +1208,11 @@
       return false;
     }
     document.getElementById('tab-content').innerHTML = displayHtml;
+
+    // A committed import can move the first trade date backwards, so the
+    // route schedules a backfill after the last queued file. Watch it the
+    // same way Refresh Prices does (#508).
+    startBackfillWatch(portfolioId);
 
     // AC6: move focus to the outcome banner (success or error) so
     // keyboard/AT users land on the result without hunting for it.

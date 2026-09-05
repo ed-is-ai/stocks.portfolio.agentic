@@ -6,6 +6,28 @@ Usage:
 """
 
 import argparse
+import logging
+import os
+
+
+def _configure_logging() -> None:
+    """Route application ``INFO`` logs to the console (#508).
+
+    Nothing configured the root logger, so it sat at the default ``WARNING``
+    and every ``logger.info`` in the app -- including the snapshot backfill's
+    end-of-run report -- was silently dropped. That made a background job
+    that was working indistinguishable from one that never ran. Uvicorn
+    configures its own handlers, so this only adds the application's.
+
+    ``LOG_LEVEL`` overrides the default for a quieter or noisier run.
+    """
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    )
+    # yfinance logs an ERROR line per delisted/missing symbol; the backfill
+    # already reports those as unavailable, so keep them out of the console.
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
 
 def main() -> None:
@@ -24,6 +46,7 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    _configure_logging()
 
     if args.command == "serve":
         import uvicorn

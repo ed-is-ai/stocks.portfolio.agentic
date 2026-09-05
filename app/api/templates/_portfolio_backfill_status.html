@@ -1,0 +1,72 @@
+{# Live progress for the portfolio snapshot backfill (#508).
+
+   Renders nothing when no run is known, so an idle page costs no screen
+   space. While running it polls itself every 2s and carries
+   data-backfill-state, which index.html reads to keep the Refresh Prices
+   button spinning past the price fetch. Reuses the .pipeline-status* styles
+   the scanner's status bar already defines -- same visual language, no new
+   CSS. #}
+{% if progress %}
+<div class="pipeline-status {% if progress.running %}running{% elif progress.phase == 'failed' %}failed{% else %}complete{% endif %}"
+     data-backfill-state="{{ progress.phase }}"
+     data-backfill-portfolio="{{ progress.portfolio_id }}"
+     {% if progress.running %}
+     hx-get="/api/portfolio/backfill-status?portfolio_id={{ progress.portfolio_id }}"
+     hx-trigger="every 2s"
+     hx-target="#portfolio-backfill-status" hx-swap="innerHTML"
+     {% else %}
+     hx-get="/api/portfolio/backfill-status?portfolio_id={{ progress.portfolio_id }}"
+     hx-trigger="load delay:8s"
+     hx-target="#portfolio-backfill-status" hx-swap="innerHTML"
+     {% endif %}>
+  <div class="pipeline-status-summary">
+    <i class="bi bi-{% if progress.running %}arrow-repeat{% elif progress.phase == 'failed' %}x-circle-fill{% else %}check-circle-fill{% endif %}"></i>
+    <strong>
+      {%- if progress.phase == 'evidence' %}Fetching price history
+      {%- elif progress.phase == 'valuing' %}Filling chart history
+      {%- elif progress.phase == 'failed' %}Chart backfill failed
+      {%- else %}Chart history updated{% endif -%}
+    </strong>
+    <span>{{ "%.0f"|format(progress.elapsed_seconds) }}s</span>
+  </div>
+
+  <ol class="pipeline-stages" aria-label="Backfill progress">
+    <li class="pipeline-stage {% if progress.phase == 'evidence' %}running{% else %}complete{% endif %}"
+        {% if progress.phase == 'evidence' %}aria-current="step"{% endif %}>
+      <i class="bi bi-{% if progress.phase == 'evidence' %}circle-fill{% else %}check-circle-fill{% endif %}"></i>
+      <span>Evidence</span>
+      {% if progress.tickers_total %}
+      <span class="pipeline-stage-count">{{ progress.tickers_done }}/{{ progress.tickers_total }}</span>
+      {% endif %}
+    </li>
+    <li class="pipeline-stage {% if progress.phase == 'valuing' %}running{% elif progress.phase == 'evidence' %}pending{% else %}complete{% endif %}"
+        {% if progress.phase == 'valuing' %}aria-current="step"{% endif %}>
+      <i class="bi bi-{% if progress.phase == 'valuing' %}circle-fill{% elif progress.phase == 'evidence' %}circle{% else %}check-circle-fill{% endif %}"></i>
+      <span>Valuing days</span>
+      {% if progress.days_total %}
+      <span class="pipeline-stage-count">{{ "{:,}".format(progress.days_done) }}/{{ "{:,}".format(progress.days_total) }}</span>
+      {% endif %}
+    </li>
+  </ol>
+
+  {# Calendar days advance faster than rows (weekends, holidays and
+     evidence gaps produce no row), so both are shown -- a slow stretch
+     never reads as stuck. #}
+  <span>
+    {{ "{:,}".format(progress.rows_written) }}
+    day{{ '' if progress.rows_written == 1 else 's' }} added
+    {%- if progress.first_day and progress.last_day %}
+    <span class="text-muted">({{ progress.first_day }} → {{ progress.last_day }})</span>
+    {%- endif %}
+  </span>
+
+  {% if progress.error %}
+  <span class="pipeline-status-error">{{ progress.error }}</span>
+  {% elif progress.has_gaps %}
+  <span class="pipeline-status-error">
+    No price history for:
+    {{ (progress.fetch_failures + progress.newly_unavailable)|join(', ') }}
+  </span>
+  {% endif %}
+</div>
+{% endif %}

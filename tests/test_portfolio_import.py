@@ -1451,3 +1451,66 @@ def test_refresh_without_portfolio_id_does_not_schedule_backfill(mocked_import):
 
     assert resp.status_code == 200
     mock_trader.backfill_snapshots.assert_not_called()
+
+
+# --- #508: backfill status endpoint + concurrency guard --------------------
+
+
+def test_backfill_status_is_empty_when_nothing_is_running():
+    from app.services.backfill_status import tracker
+
+    tracker._entries.clear()
+
+    resp = client.get("/api/portfolio/backfill-status?portfolio_id=19")
+
+    assert resp.status_code == 200
+    assert resp.text.strip() == ""
+
+
+def test_backfill_status_renders_a_running_bar_with_the_day_counter():
+    from app.services.backfill_status import tracker
+
+    tracker._entries.clear()
+    tracker.begin(19, days_total=2172, first_day="2020-09-24", last_day="2026-09-04")
+    tracker.enter_valuing(19)
+    tracker.advance(19, days_done=1240, rows_written=373)
+    try:
+        resp = client.get("/api/portfolio/backfill-status?portfolio_id=19")
+    finally:
+        tracker._entries.clear()
+
+    assert resp.status_code == 200
+    assert 'data-backfill-state="valuing"' in resp.text
+    assert "1,240/2,172" in resp.text  # live day counter
+    assert "373" in resp.text  # rows added so far
+    assert "every 2s" in resp.text  # keeps polling itself
+
+
+def test_backfill_status_reports_evidence_gaps_on_completion():
+    from app.services.backfill_status import tracker
+
+    tracker._entries.clear()
+    tracker.begin(19, days_total=10, first_day="2024-01-01", last_day="2024-01-10")
+    tracker.complete(19, rows_written=4, days_done=10, newly_unavailable=("TR28",))
+    try:
+        resp = client.get("/api/portfolio/backfill-status?portfolio_id=19")
+    finally:
+        tracker._entries.clear()
+
+    assert 'data-backfill-state="done"' in resp.text
+    assert "TR28" in resp.text
+
+
+def test_backfill_is_skipped_while_one_is_already_running(mocked_import):
+    from app.api.routes.portfolio import _run_snapshot_backfill
+    from app.services.backfill_status import tracker
+
+    mock_trader, _, _, _ = mocked_import
+    tracker._entries.clear()
+    tracker.begin(19, days_total=5, first_day="2024-01-01", last_day="2024-01-05")
+    try:
+        _run_snapshot_backfill(mock_trader, 19)
+    finally:
+        tracker._entries.clear()
+
+    mock_trader.backfill_snapshots.assert_not_called()
