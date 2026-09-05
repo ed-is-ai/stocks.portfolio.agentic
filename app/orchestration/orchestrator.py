@@ -106,6 +106,7 @@ from app.services.backtest.bau_run_envelope import BauRunEnvelopeStore, BauRunEn
 from app.services.backtest.bau_snapshot_promotion import BauSnapshotPromotionService
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.snapshot_price_backfill import PriceEvidenceBackfillService
+from app.services.snapshot_backfill import build_backfill_service
 from app.services.snapshot_price_evidence import build_price_source
 from app.services.snapshot_repair import SnapshotRepairService
 from app.workflows.pipeline import PipelineStepEvent
@@ -1538,6 +1539,30 @@ def pipeline(
                 run_id=run_id,
                 severity=NotificationSeverity.WARNING,
                 title="Portfolio snapshot repair needs attention",
+                body=str(exc),
+            )
+        try:
+            backfill_report = build_backfill_service(
+                db.make_connect(lambda: TRADES_DB)
+            ).backfill()
+            if backfill_report.fetch_failures or backfill_report.newly_unavailable:
+                _emit_bau_notification(
+                    run_id=run_id,
+                    severity=NotificationSeverity.WARNING,
+                    title="Portfolio snapshot backfill needs attention",
+                    body=(
+                        "Fetch failures: "
+                        f"{', '.join(backfill_report.fetch_failures) or 'none'}. "
+                        "Newly unavailable: "
+                        f"{', '.join(backfill_report.newly_unavailable) or 'none'}."
+                    ),
+                )
+        except Exception as exc:
+            print(f"[snapshot backfill warning] {exc}")
+            _emit_bau_notification(
+                run_id=run_id,
+                severity=NotificationSeverity.WARNING,
+                title="Portfolio snapshot backfill needs attention",
                 body=str(exc),
             )
         print(f"\nPipeline {terminal_state.value}.")

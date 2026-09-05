@@ -1371,3 +1371,83 @@ def test_route_conformance_succeeds_for_every_provider(
         app.dependency_overrides.clear()
 
     assert resp.status_code == 200
+
+
+# --- #502: snapshot backfill scheduled off the request path --------------
+
+
+def test_import_success_schedules_snapshot_backfill(mocked_import):
+    mock_trader, _, _, _ = mocked_import
+
+    resp = _upload()
+
+    assert resp.status_code == 200
+    mock_trader.backfill_snapshots.assert_called_once_with(1)
+
+
+def test_import_rejected_plan_does_not_schedule_backfill(mocked_import):
+    mock_trader, mock_portfolio, _, _ = mocked_import
+    mock_trader.import_sipp.return_value = SippImportResult(
+        cash_balance=0.0, status="rejected", failed_rows=["row 1: bad"]
+    )
+    mock_portfolio.default_portfolio_context.return_value = {}
+
+    resp = _upload()
+
+    assert resp.status_code == 400
+    mock_trader.backfill_snapshots.assert_not_called()
+
+
+def test_import_backfill_exception_does_not_change_status(mocked_import):
+    mock_trader, _, _, _ = mocked_import
+    mock_trader.backfill_snapshots.side_effect = RuntimeError("boom")
+
+    resp = _upload()
+
+    assert resp.status_code == 200
+    mock_trader.backfill_snapshots.assert_called_once_with(1)
+
+
+def test_refresh_success_schedules_backfill_for_that_portfolio(mocked_import):
+    mock_trader, mock_portfolio, _, _ = mocked_import
+    snapshot = MagicMock(cash_balance=0.0)
+    positions = [SimpleNamespace(ticker="AAPL")]
+    mock_portfolio.portfolio_input_snapshot.return_value = snapshot
+    mock_portfolio.positions_from_input_snapshot.side_effect = [positions, positions]
+    mock_portfolio.gbpusd_rate.return_value = 1.25
+    mock_portfolio.load_ticker_aliases.return_value = {}
+    mock_portfolio.fetch_all_prices_with_failures.return_value = (
+        {"AAPL": 1.0},
+        {},
+        set(),
+    )
+    mock_trader.load_price_cache.return_value = ({"AAPL": 1.0}, "now", {})
+    mock_trader.backfill_snapshots.side_effect = RuntimeError("boom")
+
+    resp = client.post(
+        "/api/portfolio/refresh?portfolio_id=7", headers={"X-Auth-Token": "s3cret"}
+    )
+
+    assert resp.status_code == 200
+    mock_trader.backfill_snapshots.assert_called_once_with(7)
+
+
+def test_refresh_without_portfolio_id_does_not_schedule_backfill(mocked_import):
+    mock_trader, mock_portfolio, _, _ = mocked_import
+    snapshot = MagicMock(cash_balance=0.0)
+    positions = [SimpleNamespace(ticker="AAPL")]
+    mock_portfolio.portfolio_input_snapshot.return_value = snapshot
+    mock_portfolio.positions_from_input_snapshot.side_effect = [positions, positions]
+    mock_portfolio.gbpusd_rate.return_value = 1.25
+    mock_portfolio.load_ticker_aliases.return_value = {}
+    mock_portfolio.fetch_all_prices_with_failures.return_value = (
+        {"AAPL": 1.0},
+        {},
+        set(),
+    )
+    mock_trader.load_price_cache.return_value = ({"AAPL": 1.0}, "now", {})
+
+    resp = client.post("/api/portfolio/refresh", headers={"X-Auth-Token": "s3cret"})
+
+    assert resp.status_code == 200
+    mock_trader.backfill_snapshots.assert_not_called()

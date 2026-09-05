@@ -16,6 +16,7 @@ from app.schemas.trade import (
     SippImportResult,
     Trade,
 )
+from app.services.snapshot_backfill import SnapshotBackfillReport
 from app.services.snapshot_valuation import SnapshotValuation
 
 
@@ -64,6 +65,12 @@ class TraderService:
     def earliest_snapshot_timestamp(self, portfolio_id: int) -> str | None:
         """Return a portfolio's oldest stored snapshot timestamp, or None."""
         return self._agent.earliest_snapshot_timestamp(portfolio_id)
+
+    def backfill_snapshots(
+        self, portfolio_id: int | None = None
+    ) -> SnapshotBackfillReport:
+        """Backfill daily value snapshots for the full trade history (#502)."""
+        return self._agent.backfill_snapshots(portfolio_id)
 
     def list_reconciliation_issues(
         self, portfolio_id: int | None, limit: int = 200

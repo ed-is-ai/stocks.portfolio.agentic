@@ -7,7 +7,15 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import HTMLResponse
 
 from app.agents.trader.trader_agent import OpeningLotDuplicateError, SippImportError
@@ -43,6 +51,29 @@ RealisedPnlDep = Annotated[RealisedPnlService, Depends(get_realised_pnl_service)
 NotificationsDep = Annotated[
     NotificationsRepository, Depends(get_notifications_repository)
 ]
+
+
+def _run_snapshot_backfill(trader: TraderService, portfolio_id: int) -> None:
+    """Run the pre-live-writer snapshot backfill, swallowing every failure (#502).
+
+    Scheduled via ``BackgroundTasks`` after a SIPP import or a price refresh so
+    the primary response is never blocked, and an exception here is logged
+    only -- it must never change the HTTP status the user already received.
+    """
+    try:
+        report = trader.backfill_snapshots(portfolio_id)
+    except Exception:
+        logger.exception("Snapshot backfill after portfolio update failed")
+        return
+    if report.fetch_failures or report.newly_unavailable:
+        logger.warning(
+            "Snapshot backfill left evidence gaps for portfolio %s: "
+            "fetch_failures=%s newly_unavailable=%s",
+            portfolio_id,
+            report.fetch_failures,
+            report.newly_unavailable,
+        )
+
 
 #: Cap on how many individual row/value issues to spell out in the import
 #: message and notification body before falling back to "(+N more)".
@@ -148,6 +179,7 @@ async def refresh_portfolio_prices(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
+    background: BackgroundTasks,
     portfolio_id: str | None = None,
 ) -> HTMLResponse:
     """Fetch live prices from yfinance and return the updated portfolio partial."""
@@ -215,6 +247,8 @@ async def refresh_portfolio_prices(
         trader.update_portfolio_snapshot(
             cash_balance, pid, positions=updated_positions, gbpusd=gbpusd
         )
+        if pid is not None:
+            background.add_task(_run_snapshot_backfill, trader, pid)
         input_snapshot = portfolio.with_current_chart_data(input_snapshot, pid)
         context = portfolio.portfolio_partial_context(
             updated_positions,
@@ -269,6 +303,7 @@ async def import_sipp(
     trader: TraderDep,
     portfolio: PortfolioDep,
     notifications: NotificationsDep,
+    background: BackgroundTasks,
     file: Annotated[UploadFile, File()],
     portfolio_id: Annotated[str | None, Form()] = None,
     provider_id: Annotated[str | None, Form()] = None,
@@ -372,6 +407,12 @@ async def import_sipp(
     # persisted) skips archiving (AC1/AC2).
     if result.status != "rejected":
         _archive_upload(filename, content)
+        # The plan committed ("ok" or the row-accounting-mismatch "error"):
+        # backfill the pre-live-writer daily snapshots off the request path so
+        # this import's new trade history extends the chart's long-range
+        # presets. Best-effort -- a failure here never touches the response
+        # (#502).
+        background.add_task(_run_snapshot_backfill, trader, pid)
 
     if result.status == "rejected":
         # All-or-nothing commit (#210 follow-up): at least one row failed,

@@ -71,6 +71,10 @@ from app.services.portfolio_import.normalizer import (
     ContractNormalizer,
 )
 from app.services.portfolio_import.registry_loader import get_contract_registry
+from app.services.snapshot_backfill import (
+    SnapshotBackfillReport,
+    build_backfill_service,
+)
 from app.services.snapshot_valuation import (
     SnapshotValuation,
     valid_rate_or_none,
@@ -2362,6 +2366,20 @@ class TraderAgent(Agent):
     def earliest_snapshot_timestamp(self, portfolio_id: int) -> str | None:
         """Return a portfolio's oldest stored snapshot timestamp, or None."""
         return self._snapshots.earliest_timestamp(portfolio_id)
+
+    def backfill_snapshots(
+        self, portfolio_id: int | None = None
+    ) -> SnapshotBackfillReport:
+        """Backfill daily value snapshots for the full trade history (#502).
+
+        Builds :class:`SnapshotBackfillService` against this agent's
+        ``trades.db`` and the historical price cache, then runs it (scoped to
+        ``portfolio_id`` when given). The service isolates per-ticker and
+        per-portfolio failures into the returned report and never raises for
+        them; the caller decides whether to swallow anything else.
+        """
+        connect = db.make_connect(lambda: self.db_path)
+        return build_backfill_service(connect).backfill(portfolio_id)
 
     def list_reconciliation_issues(
         self, portfolio_id: int | None, limit: int = 200

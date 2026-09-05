@@ -37,6 +37,60 @@ logger = logging.getLogger(__name__)
 _ZERO_TOLERANCE = 0.005
 
 
+def first_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
+    """Return ``{ticker: earliest replay date}`` in one pass over the rows.
+
+    An opening-lot row is a trade row like any other, dated at its own
+    entry date -- there is no earlier "real" purchase to prefer over it.
+    Shared by :class:`SnapshotRepairService` and the snapshot backfill
+    service so both replay trades identically (#502).
+    """
+    first: dict[str, str] = {}
+    for row in replay_rows:
+        ticker, trade_date = row[0], str(row[4])[:10]
+        if ticker not in first or trade_date < first[ticker]:
+            first[ticker] = trade_date
+    return first
+
+
+def last_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
+    """Return ``{ticker: latest replay date}`` in one pass over the rows.
+
+    The mirror of :func:`first_trade_dates`, used by the snapshot backfill to
+    cap a sold-and-gone position's evidence prefetch at the day it was last
+    traded instead of chasing it to the fill window's end (#502).
+    """
+    last: dict[str, str] = {}
+    for row in replay_rows:
+        ticker, trade_date = row[0], str(row[4])[:10]
+        if ticker not in last or trade_date > last[ticker]:
+            last[ticker] = trade_date
+    return last
+
+
+def holdings_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> dict[str, float]:
+    """Return ``{ticker: net shares}`` from trades dated on/before ``as_of``.
+
+    Replay columns are ``(ticker, action, shares, price, date, ...)``.
+    Tickers whose net position is flat (or short) are omitted. Shared by
+    :class:`SnapshotRepairService` and the snapshot backfill service (#502).
+    """
+    net: dict[str, float] = {}
+    for row in replay_rows:
+        ticker, action, shares, _price, trade_date = (
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            row[4],
+        )
+        if str(trade_date)[:10] > as_of:
+            continue
+        delta = float(shares) if action == "BUY" else -float(shares)
+        net[ticker] = net.get(ticker, 0.0) + delta
+    return {t: s for t, s in net.items() if s > QUANTITY_EPSILON}
+
+
 class HistoricalGbpPriceSource(Protocol):
     """Supplies a dated, GBP-denominated close for one holding.
 
@@ -234,7 +288,9 @@ class SnapshotRepairService:
         for ticker, (start_str, end_str) in spans.items():
             start = date.fromisoformat(start_str)
             end = date.fromisoformat(end_str) + timedelta(days=1)
-            overall_start = start if overall_start is None else min(overall_start, start)
+            overall_start = (
+                start if overall_start is None else min(overall_start, start)
+            )
             overall_end = end if overall_end is None else max(overall_end, end)
             try:
                 self._backfill.ensure_coverage(ticker, start, end)
@@ -261,17 +317,8 @@ class SnapshotRepairService:
 
     @staticmethod
     def _first_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
-        """Return ``{ticker: earliest replay date}`` in one pass over the rows.
-
-        An opening-lot row is a trade row like any other, dated at its own
-        entry date -- there is no earlier "real" purchase to prefer over it.
-        """
-        first: dict[str, str] = {}
-        for row in replay_rows:
-            ticker, trade_date = row[0], str(row[4])[:10]
-            if ticker not in first or trade_date < first[ticker]:
-                first[ticker] = trade_date
-        return first
+        """Delegate to the module-level :func:`first_trade_dates` (#502)."""
+        return first_trade_dates(replay_rows)
 
     def _reconstruct(self, holdings: dict[str, float], as_of: str) -> float | None:
         """Return the GBP holdings value at ``as_of``, or None without evidence.
@@ -309,22 +356,5 @@ class SnapshotRepairService:
     def _holdings_as_of(
         replay_rows: list[tuple[Any, ...]], as_of: str
     ) -> dict[str, float]:
-        """Return ``{ticker: net shares}`` from trades dated on/before ``as_of``.
-
-        Replay columns are ``(ticker, action, shares, price, date, ...)``.
-        Tickers whose net position is flat (or short) are omitted.
-        """
-        net: dict[str, float] = {}
-        for row in replay_rows:
-            ticker, action, shares, _price, trade_date = (
-                row[0],
-                row[1],
-                row[2],
-                row[3],
-                row[4],
-            )
-            if str(trade_date)[:10] > as_of:
-                continue
-            delta = float(shares) if action == "BUY" else -float(shares)
-            net[ticker] = net.get(ticker, 0.0) + delta
-        return {t: s for t, s in net.items() if s > QUANTITY_EPSILON}
+        """Delegate to the module-level :func:`holdings_as_of` (#502)."""
+        return holdings_as_of(replay_rows, as_of)

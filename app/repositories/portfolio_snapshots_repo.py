@@ -105,6 +105,46 @@ class PortfolioSnapshotsRepository:
             ).fetchone()
         return None if row is None else row[0]
 
+    def dates_present(self, portfolio_id: int, start: str, end: str) -> set[str]:
+        """Return the ``YYYY-MM-DD`` date prefixes already stored in ``[start, end]``.
+
+        Both bounds are inclusive ``YYYY-MM-DD`` strings. Powers the snapshot
+        backfill's idempotency: a calendar day already represented by any
+        stored snapshot (whatever its intraday time) is skipped (#502).
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT substr(timestamp, 1, 10) FROM portfolio_snapshots "
+                "WHERE portfolio_id = ? AND substr(timestamp, 1, 10) BETWEEN ? AND ?",
+                (portfolio_id, start, end),
+            ).fetchall()
+        return {row[0] for row in rows}
+
+    def append_daily_value_if_absent(
+        self, portfolio_id: int, day: str, timestamp: str, total_value: float
+    ) -> bool:
+        """Insert one ``total_value``-only daily row iff that day has no snapshot.
+
+        ``day`` is the ``YYYY-MM-DD`` the row represents; ``timestamp`` is the
+        full value written to the column. The insert is guarded, in a single
+        statement, on *no* existing snapshot for ``(portfolio_id, day)`` at any
+        intraday time -- so two backfill runs racing on the same day (the
+        background tasks the routes schedule) cannot both insert it. Returns
+        True when a row was written, False when the day was already present.
+        ``total_cost``/``cash_balance`` are left NULL by design (#502).
+        """
+        with session(self._connect) as conn:
+            cursor = conn.execute(
+                "INSERT INTO portfolio_snapshots "
+                "(portfolio_id, timestamp, total_value, total_cost, cash_balance) "
+                "SELECT ?, ?, ?, NULL, NULL WHERE NOT EXISTS ("
+                "  SELECT 1 FROM portfolio_snapshots "
+                "  WHERE portfolio_id = ? AND substr(timestamp, 1, 10) = ?"
+                ")",
+                (portfolio_id, timestamp, total_value, portfolio_id, day),
+            )
+        return cursor.rowcount > 0
+
     def rows_with_ids(self, portfolio_id: int | None = None) -> list[tuple[Any, ...]]:
         """Return ``(id, portfolio_id, timestamp, total_value, total_cost)``.
 
