@@ -566,7 +566,11 @@ class YFinanceFxSeriesFetcher:
             end=end,
             expected_currency="USD",
             expected_quote_unit="USD",
-            expected_timezone="UTC",
+            # yfinance reports GBPUSD=X's exchange timezone as its FX-session
+            # home, "Europe/London" -- not "UTC" (confirmed live; the prior
+            # "UTC" expectation always mismatched, so this path had never
+            # actually succeeded in production, #496).
+            expected_timezone="Europe/London",
             expected_sessions=tuple(
                 start + timedelta(days=offset) for offset in range((end - start).days)
             ),

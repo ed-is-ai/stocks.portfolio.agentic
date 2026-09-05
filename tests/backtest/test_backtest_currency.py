@@ -33,7 +33,7 @@ def _fx_evidence(
         "currency": "USD",
         "quote_unit": "USD",
         "quote_unit_scale": "1",
-        "exchange_timezone": "UTC",
+        "exchange_timezone": "Europe/London",
         "start": "2024-01-01",
         "end": "2024-02-01",
         "request_contract": {

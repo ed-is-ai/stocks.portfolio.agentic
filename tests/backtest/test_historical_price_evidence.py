@@ -311,7 +311,7 @@ def _fx_fetcher(frame: pd.DataFrame) -> Any:
             return {
                 "symbol": "GBPUSD=X",
                 "currency": "USD",
-                "exchangeTimezoneName": "UTC",
+                "exchangeTimezoneName": "Europe/London",
             }
 
     return YFinanceFxSeriesFetcher(
@@ -337,7 +337,7 @@ def test_fx_series_fetcher_produces_engine_contract_payload() -> None:
     assert payload.currency == "USD"
     assert payload.quote_unit == "USD"
     assert payload.quote_unit_scale == "1"
-    assert payload.exchange_timezone == "UTC"
+    assert payload.exchange_timezone == "Europe/London"
     assert payload.actions == ()
     assert [row["session"] for row in payload.rows] == [
         session.isoformat() for session in sessions

@@ -879,7 +879,7 @@ def _commit_fx_series_evidence(repo: HistoricalPriceRepository) -> str:
             return {
                 "symbol": "GBPUSD=X",
                 "currency": "USD",
-                "exchangeTimezoneName": "UTC",
+                "exchangeTimezoneName": "Europe/London",
             }
 
     payload = YFinanceFxSeriesFetcher(lambda _symbol: _FxTicker()).fetch(

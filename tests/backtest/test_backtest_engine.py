@@ -212,7 +212,7 @@ def _fx_evidence(
         currency="USD",
         quote_unit="USD",
         quote_unit_scale="1",
-        exchange_timezone="UTC",
+        exchange_timezone="Europe/London",
         start=start.isoformat(),
         end=end.isoformat(),
         request_contract=_request_contract(start, end),

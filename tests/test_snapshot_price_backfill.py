@@ -249,7 +249,7 @@ class FakeFxTicker:
         return {
             "symbol": "GBPUSD=X",
             "currency": "USD",
-            "exchangeTimezoneName": "UTC",
+            "exchangeTimezoneName": "Europe/London",
         }
 
 

@@ -184,7 +184,7 @@ def _fx_series_fetcher() -> YFinanceFxSeriesFetcher:
             return {
                 "symbol": FX_PAIR,
                 "currency": "USD",
-                "exchangeTimezoneName": "UTC",
+                "exchangeTimezoneName": "Europe/London",
             }
 
     return YFinanceFxSeriesFetcher(

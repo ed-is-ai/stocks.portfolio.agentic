@@ -80,7 +80,7 @@ def _fx_closes(
         or evidence.currency != "USD"
         or evidence.quote_unit != "USD"
         or evidence.quote_unit_scale != "1"
-        or evidence.exchange_timezone != "UTC"
+        or evidence.exchange_timezone != "Europe/London"
         or evidence.actions
     ):
         raise CurrencyPolicyError(
