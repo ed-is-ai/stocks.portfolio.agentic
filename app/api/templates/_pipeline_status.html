@@ -32,29 +32,13 @@
 </div>
 {% endif %}
 
-{% set unhealthy_sources = source_health|selectattr('state', 'ne', 'ok')|list if source_health else [] %}
-{% if status.state != 'running' and (latest_attempt_error or unhealthy_sources) %}
+{% if status.state != 'running' and latest_attempt_error %}
 <div class="toast-container pipeline-breakdown-toast-container position-fixed p-3">
   <div class="toast align-items-center border-0 pipeline-breakdown-toast" id="pipeline-breakdown-toast"
        role="status" aria-live="polite" aria-atomic="true" data-bs-autohide="true" data-bs-delay="15000">
     <div class="d-flex">
       <div class="toast-body">
-        {% if latest_attempt_error %}
         <div class="latest-attempt-warning"><i class="bi bi-exclamation-triangle-fill"></i> Latest refresh failed: {{ latest_attempt_error }}</div>
-        {% endif %}
-        {% if source_health %}
-        <div class="source-health" aria-label="Source coverage">
-          {% call(source) macros.source_stage_groups(source_health) %}
-          {% set is_stale = source.detail_code == 'stale_cache' %}
-          {% set is_cached = source.detail_code in ('cached_input', 'cache_hit', 'stale_cache') %}
-          <span class="source-badge source-{{ source.state }}{% if is_cached %} source-cached{% endif %}" title="{{ source.display_message }}">
-            <i class="bi bi-{% if source.state == 'ok' and not is_cached %}check-circle-fill{% elif source.state == 'empty' %}dash-circle{% elif is_cached %}clock-history{% elif source.state == 'skipped' %}skip-forward-circle{% else %}x-circle-fill{% endif %}"></i>
-            {{ source.label }}: {% if is_stale %}Stale{% elif is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
-            <span class="source-count{% if is_cached %} source-count-stale{% endif %}">&middot; {{ source.count }}</span>
-          </span>
-          {% endcall %}
-        </div>
-        {% endif %}
       </div>
       <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
     </div>

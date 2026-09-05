@@ -387,9 +387,10 @@
     .pipeline-breakdown-toast .toast-body { font-size: .8rem; display: flex; flex-direction: column; gap: .4rem; }
     @keyframes pipeline-sheen { to { background-position: -220% 0; } }
     @keyframes pipeline-spin { to { transform: rotate(360deg); } }
-    /* Freshness is part of the one Refresh Data target. The nested status is
-       non-interactive; hover/focus reveals its detail and opening the menu
-       keeps that same detail visible for touch users. */
+    /* Freshness is part of the one Refresh Data target. The button carries
+       only a compact colour/icon cue (sr-only description for a11y); the
+       full detail is static text at the top of the opened menu, visible
+       to every input method alike -- no hover, no separate reveal. */
     .navbar-actions { min-width: 0; }
     .refresh-dropdown { position: relative; }
     .refresh-data-toggle { display: inline-flex; align-items: center; gap: .35rem; }
@@ -400,23 +401,16 @@
       position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
       overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
     }
-    .refresh-data-toggle:hover .refresh-freshness-description,
-    .refresh-data-toggle:focus-visible .refresh-freshness-description,
-    .refresh-data-toggle.show .refresh-freshness-description {
-      width: min(23rem, calc(100vw - 1rem)); height: auto; margin: 0;
-      clip: auto; white-space: normal; overflow: visible;
-      position: absolute; top: calc(100% + .25rem); right: 0; z-index: 1001;
-      padding: .65rem .75rem; text-align: left; line-height: 1.35;
-      color: var(--primary); background: white; border: 1px solid var(--border);
-      box-shadow: 0 .35rem 1rem rgba(0,0,0,.16); font-size: var(--fs-sm);
-      max-height: min(40vh, 18rem); overflow-y: auto;
-    }
     .refresh-data-toggle[aria-disabled="true"] { opacity: .65; cursor: wait; }
-    .refresh-freshness-description .local-time { font-variant-numeric: tabular-nums; }
     .refresh-menu {
       width: min(23rem, calc(100vw - 1rem)); max-width: calc(100vw - 1rem);
       max-height: calc(100vh - 5rem); overflow-y: auto;
     }
+    .refresh-menu-freshness {
+      color: var(--muted); font-size: var(--fs-xs); line-height: 1.4;
+      padding-bottom: .75rem; margin-bottom: .75rem; border-bottom: 1px solid var(--border);
+    }
+    .refresh-menu-freshness .local-time { font-variant-numeric: tabular-nums; }
     .refresh-dropdown.status-open .refresh-menu {
       padding-top: calc(var(--refresh-status-height, 4rem) + .75rem) !important;
     }
@@ -587,6 +581,9 @@
         {{ macros.freshness_affordance(freshness, latest_attempt_error, variant='control') }}
       </button>
       <div class="dropdown-menu dropdown-menu-end refresh-menu p-3">
+        <div class="refresh-menu-freshness">
+          {{ macros.freshness_detail(freshness, latest_attempt_error) }}
+        </div>
         <form hx-post="/refresh-data"
               hx-target="#tab-content" hx-swap="innerHTML"
               hx-indicator="#spinner" class="refresh-action">

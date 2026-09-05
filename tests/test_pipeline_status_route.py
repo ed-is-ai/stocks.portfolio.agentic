@@ -97,10 +97,12 @@ def test_pipeline_status_shows_unknown_freshness_when_no_artifact_exists(
     assert "Last successful refresh unknown" in response.text
 
 
-def test_pipeline_status_shows_freshness_and_toast_for_owning_run(
+def test_pipeline_status_shows_freshness_but_no_toast_for_non_error_run(
     monkeypatch, tmp_path
 ) -> None:
-    """Freshness and a breakdown toast reflect the run owning the artifact (#71)."""
+    """Freshness reflects the run owning the artifact; non-error source states
+    (empty/skipped) never surface a breakdown toast -- only a genuine
+    ``latest_attempt_error`` does."""
     analysis_path = tmp_path / "analysis_results.json"
     generated_at = datetime.now(timezone.utc) - timedelta(hours=1)
     analysis_path.write_text(
@@ -140,17 +142,17 @@ def test_pipeline_status_shows_freshness_and_toast_for_owning_run(
 
     assert "Last successful refresh" in markup
     assert 'datetime="' in markup
-    assert 'id="pipeline-breakdown-toast"' in markup
-    assert 'role="status"' in markup
-    assert "TradingView US" in markup
-    assert "Empty" in markup
-    assert "Skipped" in markup
+    assert 'id="pipeline-breakdown-toast"' not in markup
+    assert "TradingView US" not in markup
 
 
-def test_pipeline_status_cached_source_labelled_cached_not_skipped(
+def test_pipeline_status_no_toast_for_cached_or_skipped_sources(
     monkeypatch, tmp_path
 ) -> None:
-    """A cached_input source reads 'Cached' inline, not bare 'Skipped' (#103)."""
+    """Cached/skipped-but-not-erroring sources never surface a breakdown
+    toast on this route -- that noisy per-refresh popup was removed; the
+    Cached/Stale/Skipped labelling logic itself still lives in the run
+    log's own source-health rendering (``_runlog.html``)."""
     analysis_path = tmp_path / "analysis_results.json"
     generated_at = datetime.now(timezone.utc) - timedelta(hours=1)
     analysis_path.write_text(
@@ -188,16 +190,8 @@ def test_pipeline_status_cached_source_labelled_cached_not_skipped(
 
     markup = client.get("/pipeline-status").text
 
-    # The cached source names its state and de-emphasises the count.
-    assert "WhaleWisdom: Cached" in markup
-    assert "source-cached" in markup
-    assert "source-count-stale" in markup
-    # A genuinely skipped (non-cached) source keeps the "Skipped" label.
-    assert "Skipped" in markup
-    # Both sources here are Discovery-stage; the funnel heading groups them
-    # under a single "Discovery" subheading (#108).
-    assert "source-stage-label" in markup
-    assert "Discovery" in markup
+    assert 'id="pipeline-breakdown-toast"' not in markup
+    assert "WhaleWisdom" not in markup
 
 
 def test_pipeline_status_failed_attempt_keeps_prior_refresh_and_shows_toast(
