@@ -3795,7 +3795,7 @@ def test_initialization_submits_the_chosen_mode(services):
     assert jobs.submissions[0].mode == "update"
 
 
-def test_initialization_defaults_to_rebuild_without_predecessor(services):
+def test_initialization_defaults_to_update_without_predecessor(services):
     repo, jobs = services  # FakeRepo resolves no predecessor data version.
 
     response = client.post(
@@ -3806,4 +3806,4 @@ def test_initialization_defaults_to_rebuild_without_predecessor(services):
     )
 
     assert response.status_code in (200, 303)
-    assert jobs.submissions[0].mode == "rebuild"
+    assert jobs.submissions[0].mode == "update"

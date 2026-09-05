@@ -735,7 +735,7 @@ async def submit_initialization(
     jobs: JobsDep,
     start_month: Annotated[str, Form()] = "",
     end_month: Annotated[str, Form()] = "",
-    mode: Annotated[str, Form()] = "rebuild",
+    mode: Annotated[str, Form()] = "update",
 ) -> Response:
     if mode not in {"update", "rebuild"}:
         context = _initialization_context(
