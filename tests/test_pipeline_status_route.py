@@ -40,6 +40,7 @@ def test_pipeline_status_renders_stages_progress_and_active_polling(
     assert response.status_code == 200
     assert "Sources" in response.text
     assert "Analysis" in response.text
+    assert "Price Backfill" in response.text
     assert "3/9" in response.text
     assert 'hx-trigger="every 2s"' in response.text
 

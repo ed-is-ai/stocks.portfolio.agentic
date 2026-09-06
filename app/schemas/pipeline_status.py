@@ -22,6 +22,7 @@ class PipelineStage(StrEnum):
     ANALYSIS = "analysis"
     ALERTS = "alerts"
     EXPORT = "export"
+    PRICE_BACKFILL = "price_backfill"
 
     @property
     def label(self) -> str:

@@ -98,6 +98,40 @@ def test_structurally_incomplete_stage_list_returns_full_idle_model(tmp_path) ->
     assert [stage.stage for stage in loaded.stages] == list(PipelineStage)
 
 
+def test_pre_price_backfill_stage_status_resets_safely_to_idle(tmp_path) -> None:
+    path = tmp_path / "pipeline_status.json"
+    payload = (
+        PipelineStatusRepository(path).start(run_id="six-stage").model_dump(mode="json")
+    )
+    payload["stages"] = payload["stages"][:-1]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = PipelineStatusRepository(path).load()
+
+    assert loaded.state is PipelineState.IDLE
+    assert [stage.stage for stage in loaded.stages] == list(PipelineStage)
+
+
+def test_failed_price_backfill_does_not_change_pipeline_outcome(tmp_path) -> None:
+    repo = PipelineStatusRepository(tmp_path / "pipeline_status.json")
+    repo.start(run_id="backfill-failure")
+    repo.transition(
+        PipelineStage.PRICE_BACKFILL,
+        StageState.RUNNING,
+        expected_run_id="backfill-failure",
+    )
+    repo.transition(
+        PipelineStage.PRICE_BACKFILL,
+        StageState.FAILED,
+        expected_run_id="backfill-failure",
+    )
+
+    finished = repo.finish(PipelineState.PARTIAL, expected_run_id="backfill-failure")
+
+    assert finished.state is PipelineState.PARTIAL
+    assert finished.stage(PipelineStage.PRICE_BACKFILL).state is StageState.FAILED
+
+
 def test_older_writer_cannot_mutate_or_finish_newer_run(tmp_path) -> None:
     repo = PipelineStatusRepository(tmp_path / "pipeline_status.json")
     repo.start(run_id="run-a")
