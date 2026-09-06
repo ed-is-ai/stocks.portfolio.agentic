@@ -23,6 +23,7 @@ from typing import (
     cast,
     overload,
 )
+from collections.abc import Iterable
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -5334,57 +5335,123 @@ class BacktestRepository:
     def compare_and_insert_detector_fragment(
         self, key: DetectorCacheKey, canonical_json: str | bytes
     ) -> DetectorFragmentEnvelopeV1:
-        raw = (
-            canonical_json.encode("utf-8")
-            if isinstance(canonical_json, str)
-            else bytes(canonical_json)
-        )
-        try:
-            envelope = DetectorFragmentEnvelopeV1.from_canonical_json(raw)
-        except HistoricalScanContractError as exc:
-            raise BacktestIntegrityError("detector fragment is not canonical") from exc
-        self._verify_fragment_key(key, envelope)
-        rendered = raw.decode("utf-8")
-        digest = sha256(raw).hexdigest()
-        with session(self._connect) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                """INSERT OR IGNORE INTO scan_reconstruction_cache (
-                       security_id, date, detector, detector_version, input_revision,
-                       scan_result_json, scan_result_digest
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (*key.sql_values(), rendered, digest),
-            )
-            row = conn.execute(
-                """SELECT scan_result_json, scan_result_digest
-                   FROM scan_reconstruction_cache
-                   WHERE security_id=? AND date=? AND detector=?
-                     AND detector_version=? AND input_revision=?""",
-                key.sql_values(),
-            ).fetchone()
-            if row is None:
-                raise BacktestIntegrityError("detector cache write was not visible")
-            stored = self._validated_stored_fragment(key, str(row[0]), str(row[1]))
-            if str(row[0]) != rendered or str(row[1]) != digest:
-                raise BacktestIntegrityError(
-                    "immutable detector cache key has conflicting content"
-                )
-            return stored
+        return self.compare_and_insert_detector_fragments(((key, canonical_json),))[key]
 
     def detector_fragment(
         self, key: DetectorCacheKey
     ) -> DetectorFragmentEnvelopeV1 | None:
+        return self.detector_fragments((key,)).get(key)
+
+    def detector_fragments(
+        self, keys: Iterable[DetectorCacheKey]
+    ) -> dict[DetectorCacheKey, DetectorFragmentEnvelopeV1]:
+        """Return all validated immutable cache hits in one set-based query."""
+        unique = tuple(dict.fromkeys(keys))
+        if not unique:
+            return {}
         with session(self._connect) as conn:
-            row = conn.execute(
-                """SELECT scan_result_json, scan_result_digest
-                   FROM scan_reconstruction_cache
-                   WHERE security_id=? AND date=? AND detector=?
-                     AND detector_version=? AND input_revision=?""",
-                key.sql_values(),
-            ).fetchone()
-        if row is None:
-            return None
-        return self._validated_stored_fragment(key, str(row[0]), str(row[1]))
+            self._populate_detector_cache_keys(conn, unique)
+            rows = conn.execute(
+                """SELECT c.security_id, c.date, c.detector, c.detector_version,
+                          c.input_revision, c.scan_result_json, c.scan_result_digest
+                   FROM scan_reconstruction_cache AS c
+                   JOIN temp.detector_cache_keys AS k
+                     ON (k.security_id, k.date, k.detector, k.detector_version,
+                         k.input_revision) = (c.security_id, c.date, c.detector,
+                         c.detector_version, c.input_revision)"""
+            ).fetchall()
+        by_values = {key.sql_values(): key for key in unique}
+        return {
+            key: self._validated_stored_fragment(key, str(row[5]), str(row[6]))
+            for row in rows
+            if (
+                key := by_values[
+                    (str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]))
+                ]
+            )
+        }
+
+    def compare_and_insert_detector_fragments(
+        self, items: Iterable[tuple[DetectorCacheKey, str | bytes]]
+    ) -> dict[DetectorCacheKey, DetectorFragmentEnvelopeV1]:
+        """Atomically insert or verify a batch of immutable detector fragments."""
+        candidates: dict[DetectorCacheKey, tuple[str, str]] = {}
+        for key, canonical_json in items:
+            raw = (
+                canonical_json.encode("utf-8")
+                if isinstance(canonical_json, str)
+                else bytes(canonical_json)
+            )
+            try:
+                envelope = DetectorFragmentEnvelopeV1.from_canonical_json(raw)
+            except HistoricalScanContractError as exc:
+                raise BacktestIntegrityError(
+                    "detector fragment is not canonical"
+                ) from exc
+            self._verify_fragment_key(key, envelope)
+            candidate = (raw.decode("utf-8"), sha256(raw).hexdigest())
+            prior = candidates.setdefault(key, candidate)
+            if prior != candidate:
+                raise BacktestIntegrityError(
+                    "duplicate detector cache key has conflicting content"
+                )
+        if not candidates:
+            return {}
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.executemany(
+                """INSERT OR IGNORE INTO scan_reconstruction_cache (
+                       security_id, date, detector, detector_version, input_revision,
+                       scan_result_json, scan_result_digest
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [
+                    (*key.sql_values(), rendered, digest)
+                    for key, (rendered, digest) in candidates.items()
+                ],
+            )
+            self._populate_detector_cache_keys(conn, tuple(candidates))
+            rows = conn.execute(
+                """SELECT c.security_id, c.date, c.detector, c.detector_version,
+                          c.input_revision, c.scan_result_json, c.scan_result_digest
+                   FROM scan_reconstruction_cache AS c
+                   JOIN temp.detector_cache_keys AS k
+                     ON (k.security_id, k.date, k.detector, k.detector_version,
+                         k.input_revision) = (c.security_id, c.date, c.detector,
+                         c.detector_version, c.input_revision)"""
+            ).fetchall()
+            winners: dict[DetectorCacheKey, DetectorFragmentEnvelopeV1] = {}
+            by_values = {key.sql_values(): key for key in candidates}
+            for row in rows:
+                key = by_values[
+                    (str(row[0]), str(row[1]), str(row[2]), str(row[3]), str(row[4]))
+                ]
+                rendered, digest = candidates[key]
+                stored = self._validated_stored_fragment(key, str(row[5]), str(row[6]))
+                if str(row[5]) != rendered or str(row[6]) != digest:
+                    raise BacktestIntegrityError(
+                        "immutable detector cache key has conflicting content"
+                    )
+                winners[key] = stored
+            if len(winners) != len(candidates):
+                raise BacktestIntegrityError("detector cache write was not visible")
+            return winners
+
+    @staticmethod
+    def _populate_detector_cache_keys(
+        conn: sqlite3.Connection, keys: tuple[DetectorCacheKey, ...]
+    ) -> None:
+        conn.execute("DROP TABLE IF EXISTS temp.detector_cache_keys")
+        conn.execute(
+            """CREATE TEMP TABLE detector_cache_keys (
+                   security_id TEXT, date TEXT, detector TEXT, detector_version TEXT,
+                   input_revision TEXT,
+                   PRIMARY KEY (security_id, date, detector, detector_version, input_revision)
+               ) WITHOUT ROWID"""
+        )
+        conn.executemany(
+            "INSERT INTO temp.detector_cache_keys VALUES (?, ?, ?, ?, ?)",
+            (key.sql_values() for key in keys),
+        )
 
     def detector_cache_count(self) -> int:
         with session(self._connect) as conn:

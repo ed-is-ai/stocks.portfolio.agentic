@@ -18,9 +18,11 @@ from app.services.backtest.canonical_manifest import canonical_json, manifest_di
 from app.services.backtest.detectors import DETECTOR_REGISTRY, DetectorSpec
 from app.services.backtest.historical_scan_reconstruction import (
     CALENDAR_DATASET_VERSION,
+    DetectorComputeTask,
     HistoricalScanReconstructor,
     ReconstructionError,
     ReconstructionRequestV1,
+    _compute_detector_fragments,
     canonical_calendar_digest,
 )
 from app.services.backtest.market_planes import (
@@ -230,7 +232,7 @@ def _request(
         roster_digest=roster.roster_digest,
         calendar_dataset_version=CALENDAR_DATASET_VERSION,
         calendar_dataset_digest=canonical_calendar_digest(),
-    yfinance_ingestion_version=yfinance_ingestion_source_manifest(
+        yfinance_ingestion_version=yfinance_ingestion_source_manifest(
             PROJECT_ROOT
         ).digest,
         record_schema_version="historical_scan_record.v1",
@@ -261,6 +263,31 @@ def _request(
     }
     values.update(overrides)
     return ReconstructionRequestV1(**values)  # type: ignore[arg-type]
+
+
+def test_reconstruct_many_preserves_order_and_matches_single_request_records() -> None:
+    request = _request(_evidence())
+    reconstructor = HistoricalScanReconstructor()
+    expected = reconstructor.reconstruct(request)
+
+    assert reconstructor.reconstruct_many((request, request)) == (expected, expected)
+
+
+def test_detector_worker_returns_a_serializable_failure_outcome() -> None:
+    request = _request(_evidence())
+    task = DetectorComputeTask(
+        security_id=request.security_id,
+        as_of_session_date=request.as_of_session_date,
+        rows=(),
+        keys=HistoricalScanReconstructor._detector_keys(request),
+        detector_versions=dict(request.input_manifest.detector_versions),
+    )
+
+    outcome = _compute_detector_fragments(task)
+
+    assert outcome.fragments == ()
+    assert outcome.error_code == "required_data_missing"
+    assert outcome.error_detector == "technical_indicators_v1"
 
 
 def test_reconstructs_complete_record_and_fragments_without_network_or_subprocess(

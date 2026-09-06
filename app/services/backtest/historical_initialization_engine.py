@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -102,6 +103,8 @@ class CanonicalSnapshotMonthProcessor:
         "XLON": "Europe/London",
     }
 
+    _DETECTOR_WORKERS = max(4, min(os.cpu_count() or 4, 8))
+
     def __init__(
         self,
         *,
@@ -186,13 +189,11 @@ class CanonicalSnapshotMonthProcessor:
                     )
                     adopted_from, resolved = None, None
             if resolved is None:
-                resolved = tuple(
-                    self._resolve_member(
-                        member, snapshot_month, sessions[member.mic], now
-                    )
-                    for member in sorted(
-                        self._roster.members, key=lambda item: item.security_id
-                    )
+                resolved = self._resolve_fresh_members(
+                    sorted(self._roster.members, key=lambda item: item.security_id),
+                    snapshot_month,
+                    sessions,
+                    now,
                 )
             members = tuple(item.member for item in resolved)
             records = tuple(item.record for item in resolved if item.record is not None)
@@ -324,8 +325,9 @@ class CanonicalSnapshotMonthProcessor:
             for member in previous_members
             if member.resolution == "valid_scan" and member.security_id in records_by_id
         }
-        resolved: list[ResolvedSnapshotMember] = []
+        resolved: dict[str, ResolvedSnapshotMember] = {}
         adopted: list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]] = []
+        fresh_requests: list[ReconstructionRequestV1] = []
         for member in sorted(self._roster.members, key=lambda item: item.security_id):
             target_session = sessions[member.mic]
             previous = carried.get(member.security_id)
@@ -355,8 +357,16 @@ class CanonicalSnapshotMonthProcessor:
                 )
                 adopted.append((item, request))
             else:
-                item = self._resolve_member(member, snapshot_month, target_session, now)
-            resolved.append(item)
+                prepared = self._prepare_member(
+                    member, snapshot_month, target_session, now
+                )
+                if isinstance(prepared, ReconstructionRequestV1):
+                    fresh_requests.append(prepared)
+                    continue
+                item = prepared
+            resolved[member.security_id] = item
+        for item in self._reconstruct_requests(fresh_requests):
+            resolved[item.member.security_id] = item
         # Bounded determinism self-check: recomputing an adopted record from
         # the same pinned evidence through the full reconstruction path must
         # reproduce it byte-for-byte; any divergence means the adoption
@@ -372,8 +382,18 @@ class CanonicalSnapshotMonthProcessor:
         if not adopted:
             # Nothing was carried: stamping predecessor provenance on a
             # 100%-fresh month would mislead adoption audits (gh-468).
-            return None, tuple(resolved)
-        return predecessor.profile_hash, tuple(resolved)
+            return None, tuple(
+                resolved[member.security_id]
+                for member in sorted(
+                    self._roster.members, key=lambda item: item.security_id
+                )
+            )
+        return predecessor.profile_hash, tuple(
+            resolved[member.security_id]
+            for member in sorted(
+                self._roster.members, key=lambda item: item.security_id
+            )
+        )
 
     @staticmethod
     def _self_check_sample(
@@ -492,6 +512,56 @@ class CanonicalSnapshotMonthProcessor:
         target_session: date,
         now: datetime,
     ) -> ResolvedSnapshotMember:
+        prepared = self._prepare_member(member, snapshot_month, target_session, now)
+        if not isinstance(prepared, ReconstructionRequestV1):
+            return prepared
+        return self._reconstruct_requests((prepared,))[0]
+
+    def _resolve_fresh_members(
+        self,
+        members: list[CapturedRosterMemberV1],
+        snapshot_month: str,
+        sessions: dict[str, date],
+        now: datetime,
+    ) -> tuple[ResolvedSnapshotMember, ...]:
+        resolved: dict[str, ResolvedSnapshotMember] = {}
+        requests: list[ReconstructionRequestV1] = []
+        for member in members:
+            prepared = self._prepare_member(
+                member, snapshot_month, sessions[member.mic], now
+            )
+            if isinstance(prepared, ReconstructionRequestV1):
+                requests.append(prepared)
+            else:
+                resolved[member.security_id] = prepared
+        for item in self._reconstruct_requests(requests):
+            resolved[item.member.security_id] = item
+        return tuple(resolved[member.security_id] for member in members)
+
+    def _reconstruct_requests(
+        self,
+        requests: tuple[ReconstructionRequestV1, ...] | list[ReconstructionRequestV1],
+    ) -> tuple[ResolvedSnapshotMember, ...]:
+        if not requests:
+            return ()
+        results = self._reconstructor.reconstruct_many(
+            requests,
+            parallel_workers=self._DETECTOR_WORKERS,
+        )
+        return tuple(
+            ResolvedSnapshotMember(
+                SnapshotMemberV1.valid_scan(result.record), result.record
+            )
+            for result in results
+        )
+
+    def _prepare_member(
+        self,
+        member: CapturedRosterMemberV1,
+        snapshot_month: str,
+        target_session: date,
+        now: datetime,
+    ) -> ResolvedSnapshotMember | ReconstructionRequestV1:
         request = self._evidence_request(member, snapshot_month, target_session, now)
         try:
             evidence = self._evidence_for(member, request)
@@ -560,24 +630,18 @@ class CanonicalSnapshotMonthProcessor:
                 SnapshotMemberV1.legitimate_exclusion(proof), None
             )
 
-        input_manifest = self._input_manifest(
-            member, snapshot_month, target_session, evidence
-        )
-        result = self._reconstructor.reconstruct(
-            ReconstructionRequestV1(
-                security_id=member.security_id,
-                observed_symbol=evidence.observed_symbol,
-                mic=member.mic,
-                snapshot_month=snapshot_month,
-                as_of_session_date=target_session,
-                identity_candidates=(member.security_id,),
-                roster=self._roster,
-                evidence=evidence,
-                input_manifest=input_manifest,
-            )
-        )
-        return ResolvedSnapshotMember(
-            SnapshotMemberV1.valid_scan(result.record), result.record
+        return ReconstructionRequestV1(
+            security_id=member.security_id,
+            observed_symbol=evidence.observed_symbol,
+            mic=member.mic,
+            snapshot_month=snapshot_month,
+            as_of_session_date=target_session,
+            identity_candidates=(member.security_id,),
+            roster=self._roster,
+            evidence=evidence,
+            input_manifest=self._input_manifest(
+                member, snapshot_month, target_session, evidence
+            ),
         )
 
     def _evidence_for(
