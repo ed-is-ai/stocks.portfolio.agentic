@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, cast
 
 from app.repositories.historical_price_repo import StoredHistoricalEvidence
@@ -18,6 +19,7 @@ from app.services.backtest.historical_scan_record import (
     DetectorFragmentEnvelopeV1,
 )
 from app.services.backtest.market_planes import HistoricalMarketPlanes
+from app.services.backtest.source_manifest import record_composition_source_manifest
 from app.services.backtest.trading_calendar import TradingCalendar
 
 
@@ -82,6 +84,16 @@ class ObservedBauRecordBuilder:
             )
 
         manifest = member.input_manifest
+        current_composition = record_composition_source_manifest(
+            Path(__file__).resolve().parents[3]
+        ).digest
+        if manifest.record_composition_version is None:
+            # Legacy envelopes seal evidence, so promotion records today's composer.
+            manifest = manifest.model_copy(
+                update={"record_composition_version": current_composition}
+            )
+        elif manifest.record_composition_version != current_composition:
+            raise ObservedBauBuildError("BAU composition identity is stale")
         try:
             suite = run_detector_suite(
                 rows,

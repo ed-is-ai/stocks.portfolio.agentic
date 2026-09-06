@@ -567,6 +567,35 @@ def test_observed_builder_emits_truthful_survivorship_provenance() -> None:
     assert record.provenance.historical_tradingview_screen_available is False
 
 
+def test_observed_builder_assigns_legacy_composition_identity_at_promotion() -> None:
+    capture = _capture(str(uuid4()), _full_payload())
+    result = ObservedBauRecordBuilder().build(
+        capture.members[0], roster_captured_at=capture.roster_captured_at
+    )
+
+    assert capture.members[0].input_manifest.record_composition_version is None
+    assert (
+        result.record.provenance.input_revision
+        != capture.members[0].input_manifest.digest()
+    )
+
+
+def test_observed_builder_rejects_a_stale_captured_composition_identity() -> None:
+    capture = _capture(str(uuid4()), _full_payload())
+    member = capture.members[0].model_copy(
+        update={
+            "input_manifest": capture.members[0].input_manifest.model_copy(
+                update={"record_composition_version": "f" * 64}
+            )
+        }
+    )
+
+    with pytest.raises(ObservedBauBuildError, match="composition identity is stale"):
+        ObservedBauRecordBuilder().build(
+            member, roster_captured_at=capture.roster_captured_at
+        )
+
+
 def test_raw_evidence_rejects_fields_not_owned_by_its_manifest() -> None:
     payload = _payload()
     payload.observed_symbol = "OTHER"

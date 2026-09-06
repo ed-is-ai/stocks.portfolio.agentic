@@ -29,6 +29,7 @@ from app.services.backtest.source_manifest import (
     DetectorInputIdentityV1,
     ReconstructionInputManifestV1,
     detector_source_manifests,
+    record_composition_source_manifest,
     yfinance_ingestion_source_manifest,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
@@ -284,6 +285,9 @@ def _input_manifest(
         ).digest,
         record_schema_version="historical_scan_record.v1",
         reconstructability_policy_version="reconstructability.v1",
+        record_composition_version=record_composition_source_manifest(
+            project_root
+        ).digest,
         detectors=tuple(
             DetectorInputIdentityV1(
                 detector_id=item.detector_id,

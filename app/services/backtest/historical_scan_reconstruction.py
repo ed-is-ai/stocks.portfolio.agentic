@@ -49,6 +49,7 @@ from app.services.backtest.reconstruction_roster import (
 from app.services.backtest.source_manifest import (
     ReconstructionInputManifestV1,
     detector_source_manifests,
+    record_composition_source_manifest,
     yfinance_ingestion_source_manifest,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
@@ -145,17 +146,14 @@ class HistoricalScanReconstructor:
             )
 
         fragments: list[DetectorFragmentEnvelopeV1] = []
-        # Detector fragments are cached on cache_key_digest(), not digest():
-        # roster_digest/alias_revision never reach the rows a detector
-        # computes over, so two roster generations that resolve the same
-        # security to the same evidence should share this cache entry
-        # rather than each computing and storing their own copy.
-        input_revision = request.input_manifest.cache_key_digest()
         detector_versions = request.input_manifest.detector_versions
         technicals: TechnicalsV1 | None = None
         stage_result: StageResultV1 | None = None
         vcp_result: VcpResultV1 | None = None
         for detector in DETECTOR_REGISTRY:
+            input_revision = request.input_manifest.cache_key_digest_for(
+                detector.detector_id
+            )
             key = DetectorCacheKey(
                 security_id=request.security_id,
                 date=request.as_of_session_date,
@@ -441,6 +439,8 @@ class HistoricalScanReconstructor:
             or manifest.calendar_dataset_digest != canonical_calendar_digest()
             or manifest.yfinance_ingestion_version
             != yfinance_ingestion_source_manifest(_PROJECT_ROOT).digest
+            or manifest.record_composition_version
+            != record_composition_source_manifest(_PROJECT_ROOT).digest
         ):
             raise self._error(
                 request, "integrity_error", "input manifest does not bind request"
