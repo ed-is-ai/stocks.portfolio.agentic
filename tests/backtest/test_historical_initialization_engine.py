@@ -260,7 +260,7 @@ def test_member_processing_is_stable_and_stops_at_first_failure() -> None:
     )
     visited: list[str] = []
 
-    def resolve(_self, roster_member, *_args):
+    def prepare(_self, roster_member, *_args):
         visited.append(roster_member.security_id)
         if roster_member.security_id == "b":
             raise InitializationMonthError(
@@ -269,7 +269,7 @@ def test_member_processing_is_stable_and_stops_at_first_failure() -> None:
             )
         return SimpleNamespace(member=None, record=None)
 
-    setattr(processor, "_resolve_member", MethodType(resolve, processor))
+    setattr(processor, "_prepare_member", MethodType(prepare, processor))
 
     with pytest.raises(InitializationMonthError):
         processor("2026-07")

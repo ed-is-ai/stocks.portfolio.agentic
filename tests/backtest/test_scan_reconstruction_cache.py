@@ -200,3 +200,30 @@ def test_concurrent_identical_writers_use_independent_connections_and_converge(
 
     assert results == (fragment,) * 8
     assert repo.detector_cache_count() == 1
+
+
+def test_bulk_cache_write_is_atomic_and_bulk_read_returns_only_hits(tmp_path) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    first = _fragment(price="100")
+    second = first.model_copy(update={"security_id": "sec-002"})
+    second_key = _key(second)
+    winners = repo.compare_and_insert_detector_fragments(
+        (
+            (_key(first), first.canonical_json_bytes()),
+            (second_key, second.canonical_json_bytes()),
+        )
+    )
+
+    assert winners == {_key(first): first, second_key: second}
+    assert repo.detector_fragments((_key(first), second_key)) == winners
+
+    conflict = _fragment(price="101")
+    third = first.model_copy(update={"security_id": "sec-003"})
+    with pytest.raises(BacktestIntegrityError):
+        repo.compare_and_insert_detector_fragments(
+            (
+                (_key(first), conflict.canonical_json_bytes()),
+                (_key(third), third.canonical_json_bytes()),
+            )
+        )
+    assert repo.detector_fragment(_key(third)) is None

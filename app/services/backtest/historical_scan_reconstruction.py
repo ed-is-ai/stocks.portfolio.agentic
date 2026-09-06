@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from functools import lru_cache
 import json
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -113,6 +115,62 @@ class ReconstructionResultV1:
     fragments: tuple[DetectorFragmentEnvelopeV1, ...]
 
 
+@dataclass(frozen=True)
+class DetectorComputeTask:
+    """Picklable, database-free input for one complete detector suite."""
+
+    security_id: str
+    as_of_session_date: date
+    rows: tuple
+    keys: tuple[DetectorCacheKey, ...]
+    detector_versions: dict[str, str]
+
+
+@dataclass(frozen=True)
+class DetectorComputeOutcome:
+    fragments: tuple[DetectorFragmentEnvelopeV1, ...] = ()
+    error_code: str | None = None
+    error_detector: str | None = None
+    error_detail: str | None = None
+
+
+def _compute_detector_fragments(
+    task: DetectorComputeTask,
+) -> DetectorComputeOutcome:
+    """Run only pure detector code; this function is safe in a spawned child."""
+    try:
+        technicals: TechnicalsV1 | None = None
+        fragments: list[DetectorFragmentEnvelopeV1] = []
+        for detector, key in zip(DETECTOR_REGISTRY, task.keys, strict=True):
+            result = detector.run(DetectorContext(task.rows, technicals))
+            fragments.append(
+                DetectorFragmentEnvelopeV1(
+                    schema_version="scan_detector_fragment.v1",
+                    security_id=task.security_id,
+                    date=task.as_of_session_date,
+                    detector=detector.detector_id,
+                    detector_version=task.detector_versions[detector.detector_id],
+                    detector_api_version=detector.detector_api_version,
+                    input_revision=key.input_revision,
+                    result=result,
+                )
+            )
+            if isinstance(result, TechnicalResultV1):
+                technicals = result.technicals
+        return DetectorComputeOutcome(fragments=tuple(fragments))
+    except DetectorExecutionError as exc:
+        return DetectorComputeOutcome(
+            error_code=exc.code,
+            error_detector=exc.detector,
+            error_detail=exc.detail,
+        )
+    except Exception as exc:
+        return DetectorComputeOutcome(
+            error_code="integrity_error",
+            error_detail=f"detector worker failed ({type(exc).__name__})",
+        )
+
+
 class HistoricalScanReconstructor:
     """Replay all supported detectors over one exact evidence revision."""
 
@@ -121,110 +179,210 @@ class HistoricalScanReconstructor:
         self._planes_cache: dict[tuple[str, str], HistoricalMarketPlanes] = {}
 
     def reconstruct(self, request: ReconstructionRequestV1) -> ReconstructionResultV1:
-        roster_captured_at = self._validate_request(request)
-        planes = self._planes_for(request)
-        bounded = planes.split_continuous_as_of(request.as_of_session_date)
-        required = required_history_sessions()
-        if len(bounded) < required or bounded[-1].session != request.as_of_session_date:
-            raise self._error(
-                request,
-                "required_data_missing",
-                "252 completed sessions ending on the target session are required",
-            )
-        rows = tuple(bounded[-required:])
-        if tuple(row.session for row in rows) != _required_calendar_sessions(
-            request.mic, request.as_of_session_date, required
-        ):
-            raise self._error(
-                request,
-                "required_data_missing",
-                "required exchange-calendar sessions are missing",
-            )
-        if any(row.session > request.as_of_session_date for row in rows):
-            raise self._error(
-                request, "integrity_error", "detector view exceeds its as-of bound"
-            )
+        return self.reconstruct_many((request,))[0]
 
-        fragments: list[DetectorFragmentEnvelopeV1] = []
-        detector_versions = request.input_manifest.detector_versions
-        technicals: TechnicalsV1 | None = None
-        stage_result: StageResultV1 | None = None
-        vcp_result: VcpResultV1 | None = None
-        for detector in DETECTOR_REGISTRY:
-            input_revision = request.input_manifest.cache_key_digest_for(
-                detector.detector_id
-            )
-            key = DetectorCacheKey(
-                security_id=request.security_id,
-                date=request.as_of_session_date,
-                detector=detector.detector_id,
-                detector_version=detector_versions[detector.detector_id],
-                input_revision=input_revision,
-            )
-            try:
-                fragment = (
-                    None if self._cache is None else self._cache.detector_fragment(key)
+    def reconstruct_many(
+        self,
+        requests: tuple[ReconstructionRequestV1, ...] | list[ReconstructionRequestV1],
+        *,
+        parallel_workers: int | None = None,
+    ) -> tuple[ReconstructionResultV1, ...]:
+        """Reconstruct requests in caller order with one cache read and write batch."""
+        prepared: list[
+            tuple[ReconstructionRequestV1, datetime, HistoricalMarketPlanes, tuple]
+        ] = []
+        keys: list[DetectorCacheKey] = []
+        for request in requests:
+            captured_at = self._validate_request(request)
+            planes = self._planes_for(request)
+            bounded = planes.split_continuous_as_of(request.as_of_session_date)
+            required = required_history_sessions()
+            if (
+                len(bounded) < required
+                or bounded[-1].session != request.as_of_session_date
+            ):
+                raise self._error(
+                    request,
+                    "required_data_missing",
+                    "252 completed sessions ending on the target session are required",
                 )
-                if fragment is None:
-                    result = detector.run(DetectorContext(rows, technicals))
-                    fragment = DetectorFragmentEnvelopeV1(
-                        schema_version="scan_detector_fragment.v1",
-                        security_id=request.security_id,
-                        date=request.as_of_session_date,
-                        detector=detector.detector_id,
-                        detector_version=detector_versions[detector.detector_id],
-                        detector_api_version=detector.detector_api_version,
-                        input_revision=input_revision,
-                        result=result,
-                    )
-                    if self._cache is not None:
-                        fragment = self._cache.compare_and_insert_detector_fragment(
-                            key, fragment.canonical_json_bytes()
+            rows = tuple(bounded[-required:])
+            if tuple(row.session for row in rows) != _required_calendar_sessions(
+                request.mic, request.as_of_session_date, required
+            ):
+                raise self._error(
+                    request,
+                    "required_data_missing",
+                    "required exchange-calendar sessions are missing",
+                )
+            if any(row.session > request.as_of_session_date for row in rows):
+                raise self._error(
+                    request, "integrity_error", "detector view exceeds its as-of bound"
+                )
+            prepared.append((request, captured_at, planes, rows))
+            keys.extend(self._detector_keys(request))
+        cached = {} if self._cache is None else self._cache.detector_fragments(keys)
+        parallel: dict[int, tuple[DetectorFragmentEnvelopeV1, ...]] = {}
+        if parallel_workers and parallel_workers > 1:
+            tasks = [
+                (
+                    index,
+                    DetectorComputeTask(
+                        request.security_id,
+                        request.as_of_session_date,
+                        rows,
+                        self._detector_keys(request),
+                        dict(request.input_manifest.detector_versions),
+                    ),
+                )
+                for index, (request, _captured_at, _planes, rows) in enumerate(prepared)
+                if not any(key in cached for key in self._detector_keys(request))
+            ]
+            if tasks:
+                with ProcessPoolExecutor(
+                    max_workers=parallel_workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                ) as pool:
+                    for (index, _task), outcome in zip(
+                        tasks,
+                        pool.map(
+                            _compute_detector_fragments, (task for _, task in tasks)
+                        ),
+                        strict=True,
+                    ):
+                        if outcome.error_code is not None:
+                            request = prepared[index][0]
+                            raise self._error(
+                                request,
+                                outcome.error_code,
+                                outcome.error_detail or "detector worker failed",
+                                detector=outcome.error_detector,
+                            )
+                        parallel[index] = outcome.fragments
+        computed: dict[DetectorCacheKey, DetectorFragmentEnvelopeV1] = {}
+        assembled: list[
+            tuple[
+                ReconstructionRequestV1,
+                datetime,
+                HistoricalMarketPlanes,
+                list[tuple[DetectorCacheKey, DetectorFragmentEnvelopeV1]],
+            ]
+        ] = []
+        for index, (request, captured_at, planes, rows) in enumerate(prepared):
+            fragments: list[tuple[DetectorCacheKey, DetectorFragmentEnvelopeV1]] = []
+            technicals: TechnicalsV1 | None = None
+            stage_result: StageResultV1 | None = None
+            vcp_result: VcpResultV1 | None = None
+            worker_fragments = parallel.get(index)
+            for detector, key in zip(
+                DETECTOR_REGISTRY, self._detector_keys(request), strict=True
+            ):
+                try:
+                    fragment = cached.get(key) or computed.get(key)
+                    if fragment is None and worker_fragments is not None:
+                        fragment = worker_fragments[len(fragments)]
+                        computed[key] = fragment
+                    if fragment is None:
+                        result = detector.run(DetectorContext(rows, technicals))
+                        fragment = DetectorFragmentEnvelopeV1(
+                            schema_version="scan_detector_fragment.v1",
+                            security_id=request.security_id,
+                            date=request.as_of_session_date,
+                            detector=detector.detector_id,
+                            detector_version=request.input_manifest.detector_versions[
+                                detector.detector_id
+                            ],
+                            detector_api_version=detector.detector_api_version,
+                            input_revision=key.input_revision,
+                            result=result,
                         )
-                elif fragment.detector_api_version != detector.detector_api_version:
-                    raise BacktestIntegrityError(
-                        "cached detector API version does not match registry"
-                    )
-                result = fragment.result
-            except DetectorExecutionError as exc:
+                        computed[key] = fragment
+                    elif fragment.detector_api_version != detector.detector_api_version:
+                        raise BacktestIntegrityError(
+                            "cached detector API version does not match registry"
+                        )
+                    result = fragment.result
+                except DetectorExecutionError as exc:
+                    raise self._error(
+                        request, exc.code, exc.detail, detector=exc.detector
+                    ) from exc
+                except (KeyError, ValidationError, HistoricalScanContractError) as exc:
+                    raise self._error(
+                        request,
+                        "integrity_error",
+                        "detector fragment is invalid",
+                        detector=detector.detector_id,
+                    ) from exc
+                except BacktestIntegrityError as exc:
+                    raise self._error(
+                        request,
+                        "integrity_error",
+                        "detector cache integrity failure",
+                        detector=detector.detector_id,
+                    ) from exc
+                fragments.append((key, fragment))
+                if isinstance(result, TechnicalResultV1):
+                    technicals = result.technicals
+                elif isinstance(result, StageResultV1):
+                    stage_result = result
+                elif isinstance(result, VcpResultV1):
+                    vcp_result = result
+            if technicals is None or stage_result is None or vcp_result is None:
                 raise self._error(
-                    request, exc.code, exc.detail, detector=exc.detector
-                ) from exc
-            except (KeyError, ValidationError, HistoricalScanContractError) as exc:
-                raise self._error(
-                    request,
-                    "integrity_error",
-                    "detector fragment is invalid",
-                    detector=detector.detector_id,
-                ) from exc
-            except BacktestIntegrityError as exc:
-                raise self._error(
-                    request,
-                    "integrity_error",
-                    "detector cache integrity failure",
-                    detector=detector.detector_id,
-                ) from exc
-            fragments.append(fragment)
-            if isinstance(result, TechnicalResultV1):
-                technicals = result.technicals
-            elif isinstance(result, StageResultV1):
-                stage_result = result
-            elif isinstance(result, VcpResultV1):
-                vcp_result = result
-
-        if technicals is None or stage_result is None or vcp_result is None:
-            raise self._error(
-                request, "integrity_error", "detector registry is incomplete"
+                    request, "integrity_error", "detector registry is incomplete"
+                )
+            assembled.append((request, captured_at, planes, fragments))
+        winners = (
+            {}
+            if self._cache is None
+            else self._cache.compare_and_insert_detector_fragments(
+                (key, fragment.canonical_json_bytes())
+                for key, fragment in computed.items()
             )
-        record = self._compose_record(
-            request,
-            roster_captured_at,
-            planes,
-            technicals,
-            stage_result.stage,
-            vcp_result.vcp,
         )
-        return ReconstructionResultV1(record=record, fragments=tuple(fragments))
+        results: list[ReconstructionResultV1] = []
+        for request, captured_at, planes, fragments in assembled:
+            final = tuple(winners.get(key, fragment) for key, fragment in fragments)
+            technicals = next(
+                fragment.result.technicals
+                for fragment in final
+                if isinstance(fragment.result, TechnicalResultV1)
+            )
+            stage = next(
+                fragment.result.stage
+                for fragment in final
+                if isinstance(fragment.result, StageResultV1)
+            )
+            vcp = next(
+                fragment.result.vcp
+                for fragment in final
+                if isinstance(fragment.result, VcpResultV1)
+            )
+            results.append(
+                ReconstructionResultV1(
+                    self._compose_record(
+                        request, captured_at, planes, technicals, stage, vcp
+                    ),
+                    final,
+                )
+            )
+        return tuple(results)
+
+    @staticmethod
+    def _detector_keys(
+        request: ReconstructionRequestV1,
+    ) -> tuple[DetectorCacheKey, ...]:
+        versions = request.input_manifest.detector_versions
+        return tuple(
+            DetectorCacheKey(
+                request.security_id,
+                request.as_of_session_date,
+                detector.detector_id,
+                versions[detector.detector_id],
+                request.input_manifest.cache_key_digest_for(detector.detector_id),
+            )
+            for detector in DETECTOR_REGISTRY
+        )
 
     def adopted_record(
         self,
