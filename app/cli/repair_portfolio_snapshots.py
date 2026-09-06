@@ -56,7 +56,9 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help=(
             "Skip the historical price cache and null every candidate row "
-            "instead of reconstructing it."
+            "instead of reconstructing it. Also disables the carrying-cost "
+            "estimate for an unpriceable holding (#519), so no row is "
+            "written as estimated."
         ),
     )
     parser.add_argument(
@@ -99,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
         PortfolioSnapshotsRepository(connect),
         price_source,
         backfill=backfill,
+        estimate_unpriceable=not args.no_historical_evidence,
     )
     report = service.repair(portfolio_id=args.portfolio_id, dry_run=args.dry_run)
     for field, value in report.model_dump().items():

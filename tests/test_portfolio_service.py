@@ -290,6 +290,8 @@ def _make_service(monkeypatch) -> PortfolioService:
             "has_unavailable_totals": False,
             "all_totals_unavailable": False,
             "market_value_extends_further": False,
+            "estimated": [],
+            "has_estimated_values": False,
         },
     )
     return svc
@@ -518,6 +520,8 @@ def test_cash_balances_by_currency_carries_a_gbp_valuation_projection_per_row(
             "has_unavailable_totals": False,
             "all_totals_unavailable": False,
             "market_value_extends_further": False,
+            "estimated": [],
+            "has_estimated_values": False,
         },
     )
 
@@ -1519,3 +1523,31 @@ def test_market_value_flag_is_false_when_neither_series_has_data():
     projected = PortfolioService._project_portfolio_chart_rows(rows)
 
     assert projected["market_value_extends_further"] is False
+
+
+def test_estimated_series_is_aligned_and_summarised():
+    """#519: the flag rides alongside ``labels``, absent means observed."""
+    rows = [
+        ("2024-01-01T09:00:00+00:00", 100.0, 90.0, 10.0, 0),
+        ("2024-01-02T09:00:00+00:00", 110.0, 90.0, 10.0, 1),
+        # A pre-#519 row has no flag column at all.
+        ("2024-01-03T09:00:00+00:00", 120.0, 90.0, 10.0),
+    ]
+
+    projected = PortfolioService._project_portfolio_chart_rows(rows)
+
+    assert projected["estimated"] == [False, True, False]
+    assert len(projected["estimated"]) == len(projected["labels"])
+    assert projected["has_estimated_values"] is True
+
+
+def test_has_estimated_values_is_false_without_any_estimate():
+    rows = [
+        ("2024-01-01T09:00:00+00:00", 100.0, 90.0, 10.0, 0),
+        ("2024-01-02T09:00:00+00:00", 110.0, 90.0, 10.0, 0),
+    ]
+
+    projected = PortfolioService._project_portfolio_chart_rows(rows)
+
+    assert projected["has_estimated_values"] is False
+    assert projected["estimated"] == [False, False]

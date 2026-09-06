@@ -249,24 +249,28 @@ def test_chart_makes_portfolio_value_dominant_and_supporting_lines_distinct() ->
     assert [html.index(f"label: '{label}'") for label in labels] == sorted(
         html.index(f"label: '{label}'") for label in labels
     )
-    portfolio_dataset = html[html.index("label: 'Portfolio Value'") :]
-    market_dataset = html[html.index("label: 'Market Value'") :]
-    cost_dataset = html[html.index("label: 'Cost Basis'") :]
-    cash_dataset = html[html.index("label: 'Cash'") :]
-    assert "borderWidth: 3" in portfolio_dataset[:400]
-    assert "borderDash" not in portfolio_dataset[:400]
-    assert "borderDash: [8, 4]" in market_dataset[:400]
-    assert "borderDash: [2, 3]" in cost_dataset[:400]
-    assert "borderDash: [10, 4, 2, 4]" in cash_dataset[:400]
-    assert "hidden: true" in market_dataset[:400]
-    assert "hidden: true" in cost_dataset[:400]
-    assert "hidden: true" in cash_dataset[:400]
+    # Each dataset is sliced to the next dataset's label rather than a fixed
+    # character count, so adding an option to one series cannot make an
+    # assertion about it silently read into the next one.
+    bounds = [html.index(f"label: '{label}'") for label in [*labels, "Buy"]]
+    portfolio_dataset = html[bounds[0] : bounds[1]]
+    market_dataset = html[bounds[1] : bounds[2]]
+    cost_dataset = html[bounds[2] : bounds[3]]
+    cash_dataset = html[bounds[3] : bounds[4]]
+    assert "borderWidth: 3" in portfolio_dataset
+    assert "borderDash" not in portfolio_dataset
+    assert "borderDash: [8, 4]" in market_dataset
+    assert "borderDash: [2, 3]" in cost_dataset
+    assert "borderDash: [10, 4, 2, 4]" in cash_dataset
+    assert "hidden: true" in market_dataset
+    assert "hidden: true" in cost_dataset
+    assert "hidden: true" in cash_dataset
     # Every line series spans a null (no-evidence) point with a smoothed
     # curve rather than breaking the line there.
-    assert "spanGaps: true" in portfolio_dataset[:400]
-    assert "spanGaps: true" in market_dataset[:400]
-    assert "spanGaps: true" in cost_dataset[:400]
-    assert "spanGaps: true" in cash_dataset[:400]
+    assert "spanGaps: true" in portfolio_dataset
+    assert "spanGaps: true" in market_dataset
+    assert "spanGaps: true" in cost_dataset
+    assert "spanGaps: true" in cash_dataset
     assert "maintainAspectRatio: false" in html
     assert "position: 'bottom'" in html
     assert 'role="img"' in html

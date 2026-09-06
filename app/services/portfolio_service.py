@@ -960,6 +960,7 @@ class PortfolioService:
         costs: list[float | None] = []
         cash_values: list[float | None] = []
         total_values: list[float | None] = []
+        estimated: list[bool] = []
 
         def presentation_value(value: Decimal | None) -> float | None:
             if value is None:
@@ -976,6 +977,9 @@ class PortfolioService:
             market_decimal = cls._finite_chart_decimal(row[1] if len(row) > 1 else None)
             cost_decimal = cls._finite_chart_decimal(row[2] if len(row) > 2 else None)
             cash_decimal = cls._finite_chart_decimal(row[3] if len(row) > 3 else None)
+            # A row from before #519 (or a stub without the column) has no
+            # flag at all -- absent means observed, never estimated.
+            estimated.append(bool(row[4]) if len(row) > 4 else False)
             market_value = presentation_value(market_decimal)
             cash_value = presentation_value(cash_decimal)
             values.append(market_value)
@@ -1024,6 +1028,11 @@ class PortfolioService:
             # sees a near-empty chart sitting on top of years of real data
             # (#512). Signals the template to reveal Market Value too.
             "market_value_extends_further": usable_values > usable_totals,
+            # Aligned with ``labels``: True where at least one holding in that
+            # snapshot was carried at cost rather than priced (#519), so the
+            # chart can mark the point instead of presenting it as observed.
+            "estimated": estimated,
+            "has_estimated_values": any(estimated),
         }
 
     def _trade_markers(
@@ -1366,6 +1375,8 @@ class PortfolioService:
             "chart_cash": json.dumps(chart_data["cash_values"]),
             "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
             "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
+            "chart_estimated": json.dumps(chart_data["estimated"]),
+            "chart_has_estimated_values": chart_data["has_estimated_values"],
             "chart_market_value_extends_further": chart_data[
                 "market_value_extends_further"
             ],
@@ -1446,6 +1457,8 @@ class PortfolioService:
             "chart_cash": json.dumps(chart_data["cash_values"]),
             "chart_has_unavailable_totals": chart_data["has_unavailable_totals"],
             "chart_all_totals_unavailable": chart_data["all_totals_unavailable"],
+            "chart_estimated": json.dumps(chart_data["estimated"]),
+            "chart_has_estimated_values": chart_data["has_estimated_values"],
             "chart_market_value_extends_further": chart_data[
                 "market_value_extends_further"
             ],
