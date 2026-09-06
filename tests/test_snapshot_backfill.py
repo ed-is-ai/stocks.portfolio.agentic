@@ -87,7 +87,14 @@ def _service(
     source: object | None = None,
     backfill: object | None = None,
     today: date = TODAY,
+    estimate_unpriceable: bool = False,
 ) -> SnapshotBackfillService:
+    """Build the service; estimation is off by default (#519).
+
+    These tests were written against the pre-#519 all-or-nothing rule and
+    keep asserting it; the tests that opt into carrying-cost estimation pass
+    ``estimate_unpriceable=True`` explicitly.
+    """
     return SnapshotBackfillService(
         agent._trades,
         agent._snapshots,
@@ -96,6 +103,7 @@ def _service(
         source,  # type: ignore[arg-type]
         backfill=backfill,  # type: ignore[arg-type]
         today=lambda: today,
+        estimate_unpriceable=estimate_unpriceable,
     )
 
 
@@ -626,3 +634,99 @@ def test_cash_is_none_when_a_currency_has_no_dated_rate(tmp_path: Path) -> None:
     cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
     # A partial total would silently understate the portfolio; report nothing.
     assert all(value is None for value in cash.values())
+
+
+# --- #519: unpriceable holdings carried at cost, flagged estimated ---------
+
+
+def _estimated_rows(agent: TraderAgent, portfolio_id: int) -> list[Any]:
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        return conn.execute(
+            "SELECT substr(timestamp, 1, 10), total_value, value_is_estimated "
+            "FROM portfolio_snapshots WHERE portfolio_id = ? ORDER BY timestamp",
+            (portfolio_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def test_a_day_with_one_unpriceable_holding_is_written_as_estimated(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+
+    report = _service(
+        agent, _FixedPriceSource({"AAPL": 7.5}), estimate_unpriceable=True
+    ).backfill(pf.id)
+
+    # Previously no row was written at all for any of these days.
+    assert report.rows_written == 7
+    assert report.days_skipped_no_evidence == 0
+    assert report.days_valued_with_estimates == 7
+    # 10 x 7.50 priced + 100 x 0.90 carried at cost.
+    assert _estimated_rows(agent, pf.id) == [
+        (f"2024-01-0{d}", pytest.approx(165.0), 1) for d in range(1, 8)
+    ]
+
+
+def test_a_fully_priced_day_is_not_flagged_estimated(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+
+    report = _service(
+        agent, _FixedPriceSource({"AAPL": 7.5}), estimate_unpriceable=True
+    ).backfill(pf.id)
+
+    assert report.days_valued_with_estimates == 0
+    assert {row[2] for row in _estimated_rows(agent, pf.id)} == {0}
+
+
+def test_estimation_disabled_still_skips_the_unpriceable_day(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+
+    report = _service(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
+
+    assert (report.rows_written, report.days_skipped_no_evidence) == (0, 7)
+    assert report.days_valued_with_estimates == 0
+    assert _estimated_rows(agent, pf.id) == []
+
+
+def test_zero_carrying_cost_day_is_still_skipped(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    # 100 x 0.00004 = 0.004, which rounds to 0.00 -- unavailable, not a row.
+    agent.record_buy("TR28", 100, 0.00004, "2024-01-01", portfolio_id=pf.id)
+
+    report = _service(
+        agent, NoHistoricalPriceSource(), estimate_unpriceable=True
+    ).backfill(pf.id)
+
+    assert (report.rows_written, report.days_skipped_no_evidence) == (0, 7)
+    assert _estimated_rows(agent, pf.id) == []
+
+
+def test_every_held_ticker_unpriceable_values_the_day_at_total_cost(
+    tmp_path: Path,
+) -> None:
+    """No holding has evidence -- the whole day is carried at cost basis."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+
+    report = _service(
+        agent, NoHistoricalPriceSource(), estimate_unpriceable=True
+    ).backfill(pf.id)
+
+    assert report.rows_written == 7
+    assert report.days_valued_with_estimates == 7
+    assert _estimated_rows(agent, pf.id) == [
+        (f"2024-01-0{d}", pytest.approx(90.0), 1) for d in range(1, 8)
+    ]

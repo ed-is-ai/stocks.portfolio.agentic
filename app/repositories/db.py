@@ -80,7 +80,10 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     -- timestamp" -- an honest gap in the chart rather than a fabricated 0.00.
     total_value    REAL,
     total_cost     REAL,
-    cash_balance   REAL
+    cash_balance   REAL,
+    -- 1 since #519: at least one holding in this snapshot was valued at its
+    -- carrying cost because no dated price evidence covered it.
+    value_is_estimated INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS price_cache (
     ticker          TEXT PRIMARY KEY,
@@ -398,6 +401,17 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA)
     _migrate_fx_rate_cache(conn)
     _migrate_portfolio_snapshots_nullable(conn)
+    # Additive and guarded, and deliberately *after* the rebuild above: that
+    # rebuild reconstructs the table from an explicit pre-#519 column list, so
+    # running it second would drop the column again. Re-running is a no-op --
+    # SQLite raises "duplicate column name", which is swallowed here (#519).
+    try:
+        conn.execute(
+            "ALTER TABLE portfolio_snapshots "
+            "ADD COLUMN value_is_estimated INTEGER NOT NULL DEFAULT 0"
+        )
+    except sqlite3.OperationalError as exc:
+        logger.debug("schema migration step skipped: %s", exc)
     for col_def in (
         "stop_loss REAL",
         "entry_price REAL",

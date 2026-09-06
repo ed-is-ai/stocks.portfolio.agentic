@@ -68,16 +68,21 @@ def last_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
     return last
 
 
-def cost_basis_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> float:
-    """Return the GBP cost basis of positions open on ``as_of`` (#514).
+def position_cost_basis_as_of(
+    replay_rows: list[tuple[Any, ...]], as_of: str
+) -> dict[str, float]:
+    """Return ``{ticker: GBP carrying cost}`` for positions open on ``as_of`` (#519).
 
     Average-cost replay over trades dated on or before ``as_of``, matching
     ``TraderAgent._compute_positions`` exactly -- a sell reduces the position
     at the running average and leaves the average untouched, and a fully
     closed position resets to zero. Trade prices are treated as already in
-    GBP major units, which is the same convention the live snapshot writer
-    uses, so a backfilled row's ``total_cost`` is directly comparable with a
-    live one rather than computed on a different basis.
+    GBP major units, the same convention the live snapshot writer uses.
+
+    This is the single replay both the total cost basis (:func:`cost_basis_as_of`,
+    its sum) and the estimated valuation of an unpriceable holding are built
+    from, so a snapshot's ``total_cost`` and its estimated legs cannot drift
+    apart. Values are unrounded; callers round their own aggregate.
     """
     state: dict[str, dict[str, float]] = {}
     for row in replay_rows:
@@ -101,14 +106,22 @@ def cost_basis_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> float:
             if held["shares"] <= QUANTITY_EPSILON:
                 held["shares"] = 0.0
                 held["avg_cost"] = 0.0
-    return round(
-        sum(
-            held["avg_cost"] * held["shares"]
-            for held in state.values()
-            if held["shares"] > QUANTITY_EPSILON
-        ),
-        2,
-    )
+    return {
+        ticker: held["avg_cost"] * held["shares"]
+        for ticker, held in state.items()
+        if held["shares"] > QUANTITY_EPSILON
+    }
+
+
+def cost_basis_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> float:
+    """Return the GBP cost basis of positions open on ``as_of`` (#514).
+
+    The sum of :func:`position_cost_basis_as_of`, so a backfilled row's
+    ``total_cost`` is computed on exactly the same basis as a live one, and
+    on the same basis as the carrying-cost fallback used for an unpriceable
+    holding (#519).
+    """
+    return round(sum(position_cost_basis_as_of(replay_rows, as_of).values()), 2)
 
 
 def holdings_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> dict[str, float]:
@@ -132,6 +145,43 @@ def holdings_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> dict[str, 
         delta = float(shares) if action == "BUY" else -float(shares)
         net[ticker] = net.get(ticker, 0.0) + delta
     return {t: s for t, s in net.items() if s > QUANTITY_EPSILON}
+
+
+def value_holdings(
+    source: "HistoricalGbpPriceSource",
+    holdings: dict[str, float],
+    as_of: str,
+    carrying: dict[str, float],
+) -> tuple[float | None, bool]:
+    """Value ``holdings`` at ``as_of``, returning ``(value, is_estimated)`` (#519).
+
+    A holding with a dated GBP close is always valued from that evidence. A
+    holding with none falls back to its carrying cost from ``carrying``
+    (``{ticker: GBP cost}``, from :func:`position_cost_basis_as_of`), and the
+    result is flagged estimated. Passing an empty ``carrying`` disables
+    estimation and restores the pre-#519 all-or-nothing rule: one unpriced
+    holding makes the whole point unavailable.
+
+    A value that rounds to ``0.00`` is reported as unavailable either way --
+    writing it back would recreate the very row the repair pass exists to
+    remove, and would stop a re-run being a no-op.
+
+    Shared by :class:`SnapshotRepairService` and the snapshot backfill service
+    so the two cannot drift apart.
+    """
+    total = 0.0
+    estimated = False
+    for ticker, shares in holdings.items():
+        price = source.gbp_price(ticker, as_of)
+        if price is None:
+            if ticker not in carrying:
+                return None, False
+            total += carrying[ticker]
+            estimated = True
+            continue
+        total += shares * price
+    value = round(total, 2)
+    return (None, False) if value == 0.0 else (value, estimated)
 
 
 class HistoricalGbpPriceSource(Protocol):
@@ -197,6 +247,9 @@ class SnapshotRepairReport(BaseModel):
     marked_unavailable: int
     unchanged: int
     dry_run: bool
+    #: How many of ``repaired`` were valued with at least one holding taken at
+    #: its carrying cost rather than dated evidence (#519).
+    estimated: int = 0
     fetch_failures: tuple[str, ...] = ()
     newly_unavailable: tuple[str, ...] = ()
 
@@ -210,6 +263,7 @@ class SnapshotRepairService:
         snapshots: PortfolioSnapshotsRepository,
         price_source: HistoricalGbpPriceSource | None = None,
         backfill: PriceEvidenceBackfillService | None = None,
+        estimate_unpriceable: bool = True,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
@@ -217,6 +271,9 @@ class SnapshotRepairService:
             price_source or NoHistoricalPriceSource()
         )
         self._backfill = backfill
+        # False restores the pre-#519 all-or-nothing rule: a holding with no
+        # dated evidence nulls the whole row instead of being carried at cost.
+        self._estimate_unpriceable = estimate_unpriceable
 
     def repair(
         self, portfolio_id: int | None = None, dry_run: bool = False
@@ -237,7 +294,7 @@ class SnapshotRepairService:
             fetch_failures, newly_unavailable = self._prefetch_evidence(rows)
 
         replay_cache: dict[int | None, list[tuple[Any, ...]]] = {}
-        repaired = marked = unchanged = candidates = 0
+        repaired = marked = unchanged = candidates = estimated = 0
 
         for row in rows:
             row_id, pf_id, timestamp, total_value, total_cost = (
@@ -260,7 +317,9 @@ class SnapshotRepairService:
                 continue
 
             candidates += 1
-            value = self._reconstruct(holdings, str(timestamp)[:10])
+            value, is_estimated = self._reconstruct(
+                replay_cache[pf_id], holdings, str(timestamp)[:10]
+            )
             if value is None:
                 if already_null:
                     # Still no evidence: the row is exactly as it was.
@@ -271,8 +330,11 @@ class SnapshotRepairService:
                     self._snapshots.update_valuation(int(row_id), None, total_cost)
                 continue
             repaired += 1
+            estimated += int(is_estimated)
             if not dry_run:
-                self._snapshots.update_valuation(int(row_id), value, total_cost)
+                self._snapshots.update_valuation(
+                    int(row_id), value, total_cost, is_estimated
+                )
 
         report = SnapshotRepairReport(
             scanned=len(rows),
@@ -281,6 +343,7 @@ class SnapshotRepairService:
             marked_unavailable=marked,
             unchanged=unchanged,
             dry_run=dry_run,
+            estimated=estimated,
             fetch_failures=fetch_failures,
             newly_unavailable=newly_unavailable,
         )
@@ -375,22 +438,26 @@ class SnapshotRepairService:
         """Delegate to the module-level :func:`first_trade_dates` (#502)."""
         return first_trade_dates(replay_rows)
 
-    def _reconstruct(self, holdings: dict[str, float], as_of: str) -> float | None:
-        """Return the GBP holdings value at ``as_of``, or None without evidence.
+    def _reconstruct(
+        self,
+        replay_rows: list[tuple[Any, ...]],
+        holdings: dict[str, float],
+        as_of: str,
+    ) -> tuple[float | None, bool]:
+        """Return ``(value, is_estimated)`` for ``holdings`` at ``as_of`` (#519).
 
-        All-or-nothing: one unpriced holding makes the whole point unavailable.
-        A reconstruction that rounds to ``0.00`` is also reported as
-        unavailable -- writing it back would recreate the very row this pass
-        exists to remove, and would stop a re-run being a no-op.
+        Delegates to the shared :func:`value_holdings`, supplying per-ticker
+        carrying costs from the same trade replay ``total_cost`` uses -- or an
+        empty mapping when ``estimate_unpriceable`` is off, which keeps the
+        pre-#519 all-or-nothing behaviour (the CLI's
+        ``--no-historical-evidence``) exactly as it was.
         """
-        total = 0.0
-        for ticker, shares in holdings.items():
-            price = self._price_source.gbp_price(ticker, as_of)
-            if price is None:
-                return None
-            total += shares * price
-        value = round(total, 2)
-        return None if value == 0.0 else value
+        carrying = (
+            position_cost_basis_as_of(replay_rows, as_of)
+            if self._estimate_unpriceable
+            else {}
+        )
+        return value_holdings(self._price_source, holdings, as_of, carrying)
 
     @staticmethod
     def _is_stored_zero(total_value: Any) -> bool:

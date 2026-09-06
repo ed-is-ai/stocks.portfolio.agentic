@@ -31,6 +31,15 @@
       {% endfor %}
     </div>
   </div>
+  {# Gated on the same canvas threshold as below (#519) -- otherwise this can
+     reference a diamond marker on a chart that never renders. #}
+  {% if chart_has_estimated_values and chart_usable_total_points is defined and chart_usable_total_points >= 3 %}
+  <p class="text-muted small mb-2" role="status">
+    <i class="bi bi-exclamation-circle me-1"></i>Points marked with a
+    <span style="color:#b45309">&#9670;</span> are <strong>estimated</strong>: at least
+    one holding had no price for that day and is carried at its cost.
+  </p>
+  {% endif %}
   {% if chart_market_value_extends_further %}
   <p class="text-muted small mb-2" role="status">
     <i class="bi bi-info-circle me-1"></i>Portfolio Value needs a cash balance, which
@@ -59,6 +68,16 @@
     const sellVals = {{ chart_sells      | safe }};
     const buyTips  = {{ chart_buy_tips   | safe }};
     const sellTips = {{ chart_sell_tips  | safe }};
+    // True where that day's value carried an unpriceable holding at cost
+    // (#519) -- drawn as a distinct point rather than passed off as observed.
+    const estimated = {{ chart_estimated | default('[]', true) | safe }};
+
+    // Per-point overrides, or the plain scalar when nothing is estimated --
+    // an empty array would tell Chart.js to draw no points at all.
+    const estAny = estimated.some(Boolean);
+    const estPointRadius = base => estAny ? estimated.map(e => e ? 5 : base) : base;
+    const estPointStyle  = () => estAny ? estimated.map(e => e ? 'rectRot' : 'circle') : 'circle';
+    const estPointColor  = c => estAny ? estimated.map(e => e ? '#b45309' : c) : c;
 
     const el = document.getElementById('portfolioChart');
     if (!el) return;
@@ -76,7 +95,10 @@
             borderColor: '#1d4ed8',
             backgroundColor: 'rgba(29,78,216,0.08)',
             borderWidth: 3,
-            pointRadius: totals.length > 60 ? 0 : 3,
+            pointRadius: estPointRadius(totals.length > 60 ? 0 : 3),
+            pointStyle: estPointStyle(),
+            pointBackgroundColor: estPointColor('#1d4ed8'),
+            pointBorderColor: estPointColor('#1d4ed8'),
             pointHoverRadius: 6,
             fill: true,
             tension: 0.3,
@@ -89,7 +111,10 @@
             borderColor: '#64748b',
             borderWidth: 1.5,
             borderDash: [8, 4],
-            pointRadius: 0,
+            pointRadius: estPointRadius(0),
+            pointStyle: estPointStyle(),
+            pointBackgroundColor: estPointColor('#64748b'),
+            pointBorderColor: estPointColor('#64748b'),
             fill: false,
             tension: 0.3,
             spanGaps: true,
@@ -182,7 +207,14 @@
                   return tip ? ' ▼ ' + tip : null;
                 }
                 if (ctx.parsed.y === null) return null;
-                return ' ' + ctx.dataset.label + ': £' + ctx.parsed.y.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2});
+                // Only Portfolio Value / Market Value are ever carried at
+                // cost (#519) -- Cost Basis literally *is* the cost, and
+                // Cash is unrelated to holding prices, so neither is ever
+                // "estimated" in this sense.
+                const isPriceSeries = ctx.dataset.label === 'Portfolio Value'
+                  || ctx.dataset.label === 'Market Value';
+                const suffix = isPriceSeries && estimated[ctx.dataIndex] ? ' (estimated)' : '';
+                return ' ' + ctx.dataset.label + ': £' + ctx.parsed.y.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2}) + suffix;
               }
             }
           }

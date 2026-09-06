@@ -23,7 +23,10 @@ from app.services.backtest.historical_scan_reconstruction import (
     ReconstructionRequestV1,
     canonical_calendar_digest,
 )
-from app.services.backtest.market_planes import MarketDataPolicyError
+from app.services.backtest.market_planes import (
+    HistoricalMarketPlanes,
+    MarketDataPolicyError,
+)
 from app.services.backtest.reconstruction_roster import CapturedRosterV1
 from app.services.backtest.source_manifest import (
     DetectorInputIdentityV1,
@@ -289,6 +292,47 @@ def test_reconstructs_complete_record_and_fragments_without_network_or_subproces
         for fragment in result.fragments
     )
     assert result.record.vcp.valid_vcp in {True, False}
+
+
+def test_reuses_market_planes_for_the_same_evidence_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = _evidence()
+    request = _request(evidence)
+    reconstructor = HistoricalScanReconstructor()
+    calls = 0
+    original_from_evidence = HistoricalMarketPlanes.from_evidence
+
+    def count_plane_builds(cls, candidate):
+        nonlocal calls
+        calls += 1
+        return original_from_evidence(candidate)
+
+    monkeypatch.setattr(
+        HistoricalMarketPlanes, "from_evidence", classmethod(count_plane_builds)
+    )
+
+    first = reconstructor.reconstruct(request)
+    reconstructor.reconstruct(request)
+    reconstructor.adopted_record(
+        request,
+        technicals=first.record.technicals,
+        stage=first.record.stage,
+        vcp=first.record.vcp,
+    )
+
+    assert calls == 1
+
+
+def test_cached_planes_reject_evidence_with_a_tampered_provider() -> None:
+    evidence = _evidence()
+    reconstructor = HistoricalScanReconstructor()
+    reconstructor.reconstruct(_request(evidence))
+
+    with pytest.raises(ReconstructionError) as caught:
+        reconstructor.reconstruct(_request(replace(evidence, provider="other")))
+
+    assert caught.value.code == "integrity_error"
 
 
 def test_future_rows_cannot_change_earlier_detector_outputs() -> None:

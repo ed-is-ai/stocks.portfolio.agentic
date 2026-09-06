@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import sqlite3
 
 import pandas as pd
 import pytest
@@ -223,10 +224,11 @@ def test_delisted_ticker_is_recorded_unavailable_not_retried_forever(tmp_path) -
 
 
 class FakeFxTicker:
-    """A yfinance-shaped ``GBPUSD=X`` ticker with one session's rate, or none."""
+    """A yfinance-shaped ``GBP<CCY>=X`` ticker with one session's rate, or none."""
 
-    def __init__(self, has_rows: bool = True) -> None:
+    def __init__(self, has_rows: bool = True, pair: str = "GBPUSD=X") -> None:
         self._has_rows = has_rows
+        self._pair = pair
 
     def history(self, **_kwargs: object) -> pd.DataFrame:
         if not self._has_rows:
@@ -247,9 +249,35 @@ class FakeFxTicker:
 
     def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
         return {
-            "symbol": "GBPUSD=X",
-            "currency": "USD",
+            "symbol": self._pair,
+            "currency": self._pair[3:6],
             "exchangeTimezoneName": "Europe/London",
+        }
+
+
+class FakeEuroTicker:
+    """A EUR-quoted Euronext line -- the shape #516 was blanking outright."""
+
+    def history(self, **_kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "Open": [600.0],
+                "High": [610.0],
+                "Low": [595.0],
+                "Close": [605.0],
+                "Adj Close": [605.0],
+                "Volume": [1_000.0],
+                "Dividends": [0.0],
+                "Stock Splits": [0.0],
+            },
+            index=pd.DatetimeIndex(["2024-01-02"], tz="Europe/Amsterdam"),
+        )
+
+    def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
+        return {
+            "symbol": "ASML.AS",
+            "currency": "EUR",
+            "exchangeTimezoneName": "Europe/Amsterdam",
         }
 
 
@@ -369,3 +397,92 @@ def test_alias_resolution_maps_to_the_canonical_symbol(tmp_path) -> None:
         )
         is not None
     )
+
+
+def test_ensure_fx_coverage_covers_every_held_currency(tmp_path) -> None:
+    """A EUR holding must get its own ``GBPEUR=X`` series, not just USD (#516)."""
+    repo = HistoricalPriceRepository(
+        db.make_connect(lambda: tmp_path / "historical-prices.db")
+    )
+    repo.ensure_schema()
+    pairs: list[str] = []
+
+    def fx_factory(symbol: str) -> FakeFxTicker:
+        pairs.append(symbol)
+        return FakeFxTicker(pair=symbol)
+
+    service = PriceEvidenceBackfillService(
+        repo,
+        YFinanceHistoricalEvidenceAdapter(
+            lambda _: FakeEuroTicker(), sleeper=lambda _: None
+        ),
+        aliases={},
+        fx_fetcher=YFinanceFxSeriesFetcher(
+            adapter=YFinanceHistoricalEvidenceAdapter(
+                fx_factory, sleeper=lambda _: None
+            )
+        ),
+    )
+    service.ensure_coverage("ASML.AS", date(2024, 1, 1), date(2024, 1, 3))
+
+    assert service.ensure_fx_coverage(date(2024, 1, 1), date(2024, 1, 3)) is True
+
+    assert pairs == ["GBPEUR=X", "GBPUSD=X"]
+    assert (
+        repo.covering_revision(
+            security_id="fx:GBPEUR=X",
+            requested_symbol="GBPEUR=X",
+            start="2024-01-01",
+            end="2024-01-03",
+        )
+        is not None
+    )
+
+
+def test_negative_cache_from_an_older_contract_is_ignored(tmp_path) -> None:
+    """A refusal decided under old rules must not block the widened ones (#516)."""
+    service, repo = _service(tmp_path)
+    repo.record_unavailable_attempt(
+        security_id="portfolio:AAPL",
+        requested_symbol="AAPL",
+        reason="refused by the GBP/USD-only currency gate",
+        contract_version="PreviousContractV0",
+    )
+
+    assert repo.get_unavailable_attempt("portfolio:AAPL") is None
+    assert service.ensure_coverage("AAPL", date(2024, 1, 1), date(2024, 1, 3)) is True
+
+
+def test_a_fresh_refusal_replaces_the_stale_one(tmp_path) -> None:
+    service, repo = _service(tmp_path, ticker_factory=lambda _: _DelistedTicker())
+    repo.record_unavailable_attempt(
+        security_id="portfolio:WCOG",
+        requested_symbol="WCOG",
+        reason="old rules",
+        contract_version="PreviousContractV0",
+    )
+
+    with pytest.raises(PriceEvidenceUnavailable):
+        service.ensure_coverage("WCOG", date(2024, 1, 1), date(2024, 1, 3))
+
+    attempt = repo.get_unavailable_attempt("portfolio:WCOG")
+    assert attempt is not None and "old rules" not in attempt.reason
+
+
+def test_ensure_schema_adds_the_contract_version_to_a_pre_516_table(tmp_path) -> None:
+    path = tmp_path / "historical-prices.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE price_evidence_unavailable_attempts ("
+            "security_id TEXT PRIMARY KEY, requested_symbol TEXT NOT NULL, "
+            "reason TEXT NOT NULL, attempted_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO price_evidence_unavailable_attempts VALUES (?, ?, ?, ?)",
+            ("portfolio:LIGHT.AS", "LIGHT.AS", "old rules", "2026-01-01 00:00 UTC"),
+        )
+    repo = HistoricalPriceRepository(db.make_connect(lambda: path))
+    repo.ensure_schema()
+    repo.ensure_schema()  # idempotent: the column is added at most once
+
+    assert repo.get_unavailable_attempt("portfolio:LIGHT.AS") is None

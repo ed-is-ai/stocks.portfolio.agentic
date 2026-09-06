@@ -72,6 +72,8 @@ from app.services.snapshot_repair import (
     first_trade_dates,
     holdings_as_of,
     last_trade_dates,
+    position_cost_basis_as_of,
+    value_holdings,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,6 +102,9 @@ class SnapshotBackfillReport(BaseModel):
     days_skipped_no_holdings: int
     days_skipped_no_evidence: int
     days_already_present: int
+    #: How many of ``rows_written`` carried at least one holding at its cost
+    #: basis because no dated price covered it (#519).
+    days_valued_with_estimates: int = 0
     fetch_failures: tuple[str, ...] = ()
     newly_unavailable: tuple[str, ...] = ()
 
@@ -118,6 +123,7 @@ class SnapshotBackfillService:
         today: Callable[[], date] | None = None,
         progress: BackfillStatusTracker | None = None,
         cash_history: CashBalanceHistoryRepository | None = None,
+        estimate_unpriceable: bool = True,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
@@ -128,6 +134,9 @@ class SnapshotBackfillService:
             price_source or NoHistoricalPriceSource()
         )
         self._backfill = backfill
+        # False restores the pre-#519 all-or-nothing rule: a holding with no
+        # dated evidence skips the whole day instead of being carried at cost.
+        self._estimate_unpriceable = estimate_unpriceable
         # Read per run, not frozen at construction, so a long-lived instance
         # still advances its window across UTC midnight. Injectable so tests
         # can pin a window instead of one that grows with the wall clock.
@@ -171,6 +180,7 @@ class SnapshotBackfillService:
             days_skipped_no_holdings=totals.days_skipped_no_holdings,
             days_skipped_no_evidence=totals.days_skipped_no_evidence,
             days_already_present=totals.days_already_present,
+            days_valued_with_estimates=totals.days_valued_with_estimates,
             fetch_failures=tuple(sorted(totals.fetch_failures)),
             newly_unavailable=tuple(sorted(totals.newly_unavailable)),
         )
@@ -227,19 +237,24 @@ class SnapshotBackfillService:
                 totals.days_already_present += 1
             elif not (holdings := holdings_as_of(replay_rows, as_of)):
                 totals.days_skipped_no_holdings += 1
-            elif (value := self._value(holdings, as_of)) is None:
+            elif (valued := self._value(replay_rows, holdings, as_of))[0] is None:
                 totals.days_skipped_no_evidence += 1
-            elif self._snapshots.append_daily_value_if_absent(
-                pid,
-                as_of,
-                f"{as_of}T00:00:00+00:00",
-                value,
-                total_cost=cost_basis_as_of(replay_rows, as_of),
-                cash_balance=self._cash_as_of(pid, as_of),
-            ):
-                totals.rows_written += 1
             else:
-                totals.days_already_present += 1
+                value, is_estimated = valued
+                assert value is not None  # narrowed by the branch above
+                if self._snapshots.append_daily_value_if_absent(
+                    pid,
+                    as_of,
+                    f"{as_of}T00:00:00+00:00",
+                    value,
+                    total_cost=cost_basis_as_of(replay_rows, as_of),
+                    cash_balance=self._cash_as_of(pid, as_of),
+                    value_is_estimated=is_estimated,
+                ):
+                    totals.rows_written += 1
+                    totals.days_valued_with_estimates += int(is_estimated)
+                else:
+                    totals.days_already_present += 1
             # Publish a few dozen times over a multi-year window rather than
             # once per day -- cheap enough, smooth enough for a 2s poll.
             if days_done % 25 == 0:
@@ -339,21 +354,26 @@ class SnapshotBackfillService:
             total += float(amount) / rate
         return round(total, 2)
 
-    def _value(self, holdings: dict[str, float], as_of: str) -> float | None:
-        """Return the GBP holdings value at ``as_of``, or None without evidence.
+    def _value(
+        self,
+        replay_rows: list[tuple[Any, ...]],
+        holdings: dict[str, float],
+        as_of: str,
+    ) -> tuple[float | None, bool]:
+        """Return ``(value, is_estimated)`` for ``holdings`` at ``as_of`` (#519).
 
-        All-or-nothing: one unpriced holding makes the whole day unavailable,
-        and a value that rounds to ``0.00`` is reported as unavailable too --
-        same policy as ``SnapshotRepairService._reconstruct``.
+        The same shared :func:`value_holdings` the repair pass uses, fed the
+        per-ticker carrying costs from the very replay this day's
+        ``total_cost`` comes from -- or an empty mapping when
+        ``estimate_unpriceable`` is off, which keeps the pre-#519
+        all-or-nothing rule exactly as it was.
         """
-        total = 0.0
-        for ticker, shares in holdings.items():
-            price = self._price_source.gbp_price(ticker, as_of)
-            if price is None:
-                return None
-            total += shares * price
-        value = round(total, 2)
-        return None if value == 0.0 else value
+        carrying = (
+            position_cost_basis_as_of(replay_rows, as_of)
+            if self._estimate_unpriceable
+            else {}
+        )
+        return value_holdings(self._price_source, holdings, as_of, carrying)
 
 
 class _RunTotals:
@@ -365,6 +385,7 @@ class _RunTotals:
         self.days_skipped_no_holdings = 0
         self.days_skipped_no_evidence = 0
         self.days_already_present = 0
+        self.days_valued_with_estimates = 0
         self.fetch_failures: set[str] = set()
         self.newly_unavailable: set[str] = set()
 

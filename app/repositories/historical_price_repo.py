@@ -13,7 +13,10 @@ from app.services.backtest.canonical_manifest import (
     canonical_json_digest,
     manifest_digest,
 )
-from app.services.backtest.historical_price_evidence import HistoricalEvidencePayload
+from app.services.backtest.historical_price_evidence import (
+    EVIDENCE_CONTRACT_VERSION,
+    HistoricalEvidencePayload,
+)
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -100,9 +103,18 @@ CREATE TABLE IF NOT EXISTS price_evidence_unavailable_attempts (
     security_id      TEXT PRIMARY KEY,
     requested_symbol TEXT NOT NULL,
     reason           TEXT NOT NULL,
-    attempted_at     TEXT NOT NULL
+    attempted_at     TEXT NOT NULL,
+    contract_version TEXT NOT NULL DEFAULT ''
 );
 """
+
+#: Databases written before #516 have the table without its version column;
+#: their rows then default to ``''``, which no current contract version can
+#: equal -- exactly the "recorded under older rules, ignore it" outcome.
+_ADD_CONTRACT_VERSION = (
+    "ALTER TABLE price_evidence_unavailable_attempts "
+    "ADD COLUMN contract_version TEXT NOT NULL DEFAULT ''"
+)
 
 
 #: SQLite's wording for the two ways an evidence-free cache presents itself:
@@ -195,6 +207,11 @@ class HistoricalPriceRepository:
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
             conn.executescript(_SCHEMA)
+            try:
+                conn.execute(_ADD_CONTRACT_VERSION)
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
 
     def commit(self, payload: HistoricalEvidencePayload) -> str:
         try:
@@ -473,14 +490,25 @@ class HistoricalPriceRepository:
         return None if row is None else str(row[0])
 
     def get_unavailable_attempt(
-        self, security_id: str
+        self,
+        security_id: str,
+        *,
+        contract_version: str = EVIDENCE_CONTRACT_VERSION,
     ) -> PriceEvidenceUnavailableAttempt | None:
-        """Return the recorded permanent failure for ``security_id``, or None."""
+        """Return the permanent failure recorded for ``security_id``, or None.
+
+        A row recorded under a *different* contract version is not a verdict
+        on the current rules and is ignored (#516): without this, a refusal
+        decided by the old GBP/USD-only currency gate would keep blocking the
+        very securities that widening the gate was meant to admit -- and every
+        future widening would be self-blocking in the same way.
+        """
         with session(self._connect) as conn:
             row = conn.execute(
                 "SELECT security_id, requested_symbol, reason "
-                "FROM price_evidence_unavailable_attempts WHERE security_id=?",
-                (security_id,),
+                "FROM price_evidence_unavailable_attempts "
+                "WHERE security_id=? AND contract_version=?",
+                (security_id, contract_version),
             ).fetchone()
         return (
             None
@@ -493,17 +521,56 @@ class HistoricalPriceRepository:
         )
 
     def record_unavailable_attempt(
-        self, *, security_id: str, requested_symbol: str, reason: str
+        self,
+        *,
+        security_id: str,
+        requested_symbol: str,
+        reason: str,
+        contract_version: str = EVIDENCE_CONTRACT_VERSION,
     ) -> None:
-        """Persist a permanent backfill failure, idempotently."""
+        """Persist a permanent backfill failure under the rules that decided it.
+
+        ``REPLACE`` rather than ``IGNORE``: a fresh refusal supersedes one
+        recorded under an older contract version, which the reader ignores
+        anyway -- keeping the stale row would leave the ticker permanently
+        re-fetched on every run.
+        """
         attempted_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         with session(self._connect) as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO price_evidence_unavailable_attempts "
-                "(security_id, requested_symbol, reason, attempted_at) "
-                "VALUES (?, ?, ?, ?)",
-                (security_id, requested_symbol, reason, attempted_at),
+                "INSERT OR REPLACE INTO price_evidence_unavailable_attempts "
+                "(security_id, requested_symbol, reason, attempted_at, "
+                "contract_version) VALUES (?, ?, ?, ?, ?)",
+                (
+                    security_id,
+                    requested_symbol,
+                    reason,
+                    attempted_at,
+                    contract_version,
+                ),
             )
+
+    def quoted_currencies(self, security_id_prefix: str) -> frozenset[str]:
+        """Return every currency stored evidence under ``prefix`` is quoted in.
+
+        The only way to know which FX pairs a portfolio actually needs (#516):
+        a holding's currency is not derivable from its ticker, it is what the
+        provider reported when its price evidence was committed. An absent
+        cache is evidence-free, not an error -- same contract as
+        :meth:`dated_close`.
+        """
+        try:
+            with session(self._connect) as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT currency FROM historical_price_revisions "
+                    "WHERE security_id LIKE ?",
+                    (f"{security_id_prefix}%",),
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if not _is_absent_cache(exc):
+                raise
+            return frozenset()
+        return frozenset(str(row[0]).strip().upper() for row in rows)
 
     def verify(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:

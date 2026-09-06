@@ -70,7 +70,9 @@ class PortfolioSnapshotsRepository:
     ) -> list[tuple[Any, ...]]:
         """Return snapshots oldest-first, optionally windowed by ``since``.
 
-        Columns: ``(timestamp, total_value, total_cost, cash_balance)``. When
+        Columns: ``(timestamp, total_value, total_cost, cash_balance,
+        value_is_estimated)`` -- the last is 1 when at least one holding in
+        that snapshot was carried at cost rather than priced (#519). When
         ``since`` is given (an ISO timestamp) the result is a *time* window:
         only snapshots at or after it are returned and the ``limit`` count cap
         is replaced by a high safety ceiling so a wide range is never silently
@@ -78,7 +80,8 @@ class PortfolioSnapshotsRepository:
         ``ORDER BY id DESC LIMIT ?`` behaviour is byte-identical (#421).
         """
         query = (
-            "SELECT timestamp, total_value, total_cost, cash_balance "
+            "SELECT timestamp, total_value, total_cost, cash_balance, "
+            "value_is_estimated "
             "FROM portfolio_snapshots WHERE portfolio_id = ? "
         )
         params: list[Any] = [portfolio_id]
@@ -128,6 +131,7 @@ class PortfolioSnapshotsRepository:
         total_value: float,
         total_cost: float | None = None,
         cash_balance: float | None = None,
+        value_is_estimated: bool = False,
     ) -> bool:
         """Insert one ``total_value``-only daily row iff that day has no snapshot.
 
@@ -139,13 +143,16 @@ class PortfolioSnapshotsRepository:
         True when a row was written, False when the day was already present.
         ``total_cost``/``cash_balance`` are None when they could not be
         reconstructed for that day -- an honest gap, never a fabricated zero
-        (#514).
+        (#514). ``value_is_estimated`` marks a day whose value includes at
+        least one holding carried at cost because no dated price covered it
+        (#519); it defaults to False, so an existing caller is unchanged.
         """
         with session(self._connect) as conn:
             cursor = conn.execute(
                 "INSERT INTO portfolio_snapshots "
-                "(portfolio_id, timestamp, total_value, total_cost, cash_balance) "
-                "SELECT ?, ?, ?, ?, ? WHERE NOT EXISTS ("
+                "(portfolio_id, timestamp, total_value, total_cost, "
+                "cash_balance, value_is_estimated) "
+                "SELECT ?, ?, ?, ?, ?, ? WHERE NOT EXISTS ("
                 "  SELECT 1 FROM portfolio_snapshots "
                 "  WHERE portfolio_id = ? AND substr(timestamp, 1, 10) = ?"
                 ")",
@@ -155,6 +162,7 @@ class PortfolioSnapshotsRepository:
                     total_value,
                     total_cost,
                     cash_balance,
+                    int(value_is_estimated),
                     portfolio_id,
                     day,
                 ),
@@ -181,12 +189,21 @@ class PortfolioSnapshotsRepository:
             return list(conn.execute(query, params).fetchall())
 
     def update_valuation(
-        self, row_id: int, total_value: float | None, total_cost: float | None
+        self,
+        row_id: int,
+        total_value: float | None,
+        total_cost: float | None,
+        value_is_estimated: bool = False,
     ) -> None:
-        """Overwrite one snapshot's valuation columns, leaving the rest alone."""
+        """Overwrite one snapshot's valuation columns, leaving the rest alone.
+
+        ``value_is_estimated`` records whether the written ``total_value``
+        includes a holding carried at cost for want of dated evidence (#519);
+        it defaults to False, so an existing caller is unchanged.
+        """
         with session(self._connect) as conn:
             conn.execute(
-                "UPDATE portfolio_snapshots SET total_value = ?, total_cost = ? "
-                "WHERE id = ?",
-                (total_value, total_cost, row_id),
+                "UPDATE portfolio_snapshots SET total_value = ?, total_cost = ?, "
+                "value_is_estimated = ? WHERE id = ?",
+                (total_value, total_cost, int(value_is_estimated), row_id),
             )

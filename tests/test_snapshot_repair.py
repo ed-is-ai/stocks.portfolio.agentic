@@ -41,11 +41,22 @@ def _agent(tmp_path: Path) -> TraderAgent:
     return agent
 
 
-def _service(agent: TraderAgent, source: object | None = None) -> SnapshotRepairService:
+def _service(
+    agent: TraderAgent,
+    source: object | None = None,
+    estimate_unpriceable: bool = False,
+) -> SnapshotRepairService:
+    """Build the service; estimation is off by default (#519).
+
+    These tests were written against the pre-#519 all-or-nothing rule and
+    keep asserting it; the tests that opt into carrying-cost estimation pass
+    ``estimate_unpriceable=True`` explicitly.
+    """
     return SnapshotRepairService(
         agent._trades,
         agent._snapshots,
         source,  # type: ignore[arg-type]
+        estimate_unpriceable=estimate_unpriceable,
     )
 
 
@@ -630,3 +641,153 @@ def test_null_row_without_evidence_stays_unchanged(tmp_path: Path) -> None:
 
     assert (report.repaired, report.marked_unavailable, report.unchanged) == (0, 0, 1)
     assert _values(agent, pf.id) == [None]
+
+
+# --- #519: unpriceable holdings carried at cost, flagged estimated ---------
+
+
+def _estimated_flags(agent: TraderAgent, portfolio_id: int) -> list[object]:
+    return [row[4] for row in agent.snapshot_history(portfolio_id)]
+
+
+def test_partial_evidence_values_the_gilt_at_carrying_cost(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", None, 140.0, 100.0)
+
+    report = _service(
+        agent, _FixedPriceSource({"AAPL": 7.5}), estimate_unpriceable=True
+    ).repair()
+
+    # 10 x 7.50 priced + 100 x 0.90 carried at cost.
+    assert (report.repaired, report.estimated) == (1, 1)
+    assert _values(agent, pf.id) == [pytest.approx(165.0)]
+    assert _estimated_flags(agent, pf.id) == [1]
+
+
+def test_no_evidence_at_all_falls_back_to_total_carrying_cost(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", None, 90.0, 100.0)
+
+    report = _service(
+        agent, NoHistoricalPriceSource(), estimate_unpriceable=True
+    ).repair()
+
+    assert (report.repaired, report.estimated) == (1, 1)
+    assert _values(agent, pf.id) == [pytest.approx(90.0)]
+
+
+def test_priced_holding_is_never_replaced_by_its_carrying_cost(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", None, 50.0, 100.0)
+
+    report = _service(
+        agent, _FixedPriceSource({"AAPL": 7.5}), estimate_unpriceable=True
+    ).repair()
+
+    assert (report.repaired, report.estimated) == (1, 0)
+    assert _values(agent, pf.id) == [pytest.approx(75.0)]
+    assert _estimated_flags(agent, pf.id) == [0]
+
+
+def test_zero_carrying_cost_stays_unavailable(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    # A position whose carrying cost rounds to 0.00 (100 x 0.00004 = 0.004):
+    # writing it back would recreate the very zero row this pass removes.
+    agent.record_buy("TR28", 100, 0.00004, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 0.0, 100.0)
+
+    report = _service(
+        agent, NoHistoricalPriceSource(), estimate_unpriceable=True
+    ).repair()
+
+    assert (report.repaired, report.marked_unavailable) == (0, 1)
+    assert _values(agent, pf.id) == [None]
+
+
+def test_estimated_repair_is_idempotent(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", None, 90.0, 100.0)
+    service = _service(agent, NoHistoricalPriceSource(), estimate_unpriceable=True)
+
+    service.repair()
+    second = service.repair()
+
+    # The row now carries a real (estimated) value, so it is no longer a
+    # candidate at all: the second pass reports it unchanged.
+    assert (second.candidates, second.repaired, second.unchanged) == (0, 0, 1)
+    assert _values(agent, pf.id) == [pytest.approx(90.0)]
+
+
+def test_estimation_disabled_keeps_the_honest_gap(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 90.0, 100.0)
+
+    report = _service(agent, NoHistoricalPriceSource()).repair()
+
+    assert (report.repaired, report.estimated, report.marked_unavailable) == (0, 0, 1)
+    assert _values(agent, pf.id) == [None]
+
+
+def test_repair_cli_no_historical_evidence_estimates_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--no-historical-evidence`` still nulls every candidate row (#519)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("TR28", 100, 0.9, "2024-01-01", portfolio_id=pf.id)
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 90.0, 100.0)
+    monkeypatch.setattr(repair_cli, "TRADES_DB", agent.db_path)
+
+    repair_cli.main(["--no-historical-evidence"])
+
+    assert _values(agent, pf.id) == [None]
+    assert _estimated_flags(agent, pf.id) == [0]
+
+
+def test_legacy_database_gains_the_estimated_column_idempotently(
+    tmp_path: Path,
+) -> None:
+    """A pre-#519 table shape gains ``value_is_estimated`` exactly once."""
+    conn = sqlite3.connect(tmp_path / "trades.db")
+    conn.executescript(
+        """
+        CREATE TABLE portfolio_snapshots (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            portfolio_id   INTEGER NOT NULL,
+            timestamp      TEXT NOT NULL,
+            total_value    REAL NOT NULL,
+            total_cost     REAL NOT NULL,
+            cash_balance   REAL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO portfolio_snapshots "
+        "(id, portfolio_id, timestamp, total_value, total_cost, cash_balance) "
+        "VALUES (7, 1, '2024-01-01T00:00:00+00:00', 100.0, 90.0, 10.0)"
+    )
+    conn.commit()
+
+    db.init_trades_db(conn)
+    db.init_trades_db(conn)
+    conn.commit()
+
+    columns = [row[1] for row in conn.execute("PRAGMA table_info(portfolio_snapshots)")]
+    assert columns.count("value_is_estimated") == 1
+    assert conn.execute(
+        "SELECT id, total_value, total_cost, cash_balance, value_is_estimated "
+        "FROM portfolio_snapshots"
+    ).fetchall() == [(7, 100.0, 90.0, 10.0, 0)]
+    conn.close()

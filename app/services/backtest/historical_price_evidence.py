@@ -34,6 +34,26 @@ from app.services.backtest.historical_data_qualification import (
 FX_PAIR = "GBPUSD=X"
 FX_SERIES_SECURITY_ID = "fx:GBPUSD=X"
 
+
+def fx_pair_for(currency: str) -> str:
+    """Return the ``GBP<CCY>=X`` pair that prices ``currency`` in GBP (#516)."""
+    return f"GBP{currency.strip().upper()}=X"
+
+
+def fx_security_id_for(currency: str) -> str:
+    """Return the pseudo-security id the FX series for ``currency`` commits under."""
+    return f"fx:{fx_pair_for(currency)}"
+
+
+#: The acceptance rules a refusal was decided under, stamped on every
+#: negative-cache row (#516). ``REQUEST_CONTRACT_VERSION`` covers the request
+#: shape; the suffix covers what this module *accepts back* -- currently the
+#: currency gate. Bump the suffix whenever a widening should make previously
+#: refused securities eligible again: a "permanent" verdict recorded under
+#: the old rules is then ignored rather than blocking the fix that outlives
+#: it. Existing rows carry no version, so they are stale by construction.
+EVIDENCE_CONTRACT_VERSION = f"{REQUEST_CONTRACT_VERSION}+ccy2"
+
 _REQUIRED_COLUMNS = (
     "Open",
     "High",
@@ -164,10 +184,18 @@ def _number(value: Any, *, nullable: bool = False) -> str | None:
     return number.hex()
 
 
+#: Currencies quoted in whole major units, with no pence-style subunit to
+#: rescale. GBp is the only subunit quoting this pipeline has ever seen, and
+#: it stays special-cased below. Widened beyond GBP/USD for #516: a portfolio
+#: holding a Euronext, Xetra or HKEX line was refused entry to the evidence
+#: store entirely, which blanked every day that holding was held.
+_MAJOR_UNIT_CURRENCIES = frozenset({"GBP", "USD", "EUR", "HKD"})
+
+
 def _quote_contract(provider_unit: str) -> tuple[str, str, str]:
     if provider_unit == "GBp":
         return "GBP", "GBp", "0.01"
-    if provider_unit in {"GBP", "USD"}:
+    if provider_unit in _MAJOR_UNIT_CURRENCIES:
         return provider_unit, provider_unit, "1"
     raise ProviderFailure(
         FailureCode.PROVIDER_CONTRACT_ERROR,
@@ -525,7 +553,9 @@ class FxSeriesFetcher(Protocol):
     convention; the produced evidence spans exactly ``[start, end)``.
     """
 
-    def fetch(self, *, start: date, end: date) -> HistoricalEvidencePayload: ...
+    def fetch(
+        self, *, start: date, end: date, currency: str = "USD"
+    ) -> HistoricalEvidencePayload: ...
 
 
 class YFinanceFxSeriesFetcher:
@@ -552,29 +582,35 @@ class YFinanceFxSeriesFetcher:
     ) -> None:
         self._adapter = adapter or YFinanceHistoricalEvidenceAdapter(ticker_factory)
 
-    def fetch(self, *, start: date, end: date) -> HistoricalEvidencePayload:
+    def fetch(
+        self, *, start: date, end: date, currency: str = "USD"
+    ) -> HistoricalEvidencePayload:
         if start >= end:
             raise ProviderFailure(
                 FailureCode.PROVIDER_CONTRACT_ERROR,
                 _safe_reason(FailureCode.PROVIDER_CONTRACT_ERROR),
             )
+        code = currency.strip().upper()
+        pair = fx_pair_for(code)
         request = HistoricalEvidenceRequest(
-            security_id=FX_SERIES_SECURITY_ID,
+            security_id=fx_security_id_for(code),
             alias_revision=None,
-            symbol=FX_PAIR,
+            symbol=pair,
             start=start,
             end=end,
-            expected_currency="USD",
-            expected_quote_unit="USD",
+            expected_currency=code,
+            expected_quote_unit=code,
             # yfinance reports GBPUSD=X's exchange timezone as its FX-session
             # home, "Europe/London" -- not "UTC" (confirmed live; the prior
             # "UTC" expectation always mismatched, so this path had never
-            # actually succeeded in production, #496).
-            expected_timezone="Europe/London",
+            # actually succeeded in production, #496). Only that one pair has
+            # been confirmed live, so every other pair is left unpinned rather
+            # than pinned to a guess that would refuse good data (#516).
+            expected_timezone="Europe/London" if code == "USD" else None,
             expected_sessions=tuple(
                 start + timedelta(days=offset) for offset in range((end - start).days)
             ),
-            allowed_observed_symbols=(FX_PAIR,),
+            allowed_observed_symbols=(pair,),
             canonical_exchange_sessions=True,
         )
         return self._adapter.fetch(request)

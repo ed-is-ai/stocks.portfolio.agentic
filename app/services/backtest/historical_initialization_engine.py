@@ -89,6 +89,9 @@ class ResolvedSnapshotMember:
     record: HistoricalScanRecordV1 | None
 
 
+type EvidenceCacheKey = tuple[str, str, str | None, str, str]
+
+
 class CanonicalSnapshotMonthProcessor:
     """Compose existing evidence/reconstruction APIs into one Ready month."""
 
@@ -140,13 +143,10 @@ class CanonicalSnapshotMonthProcessor:
         self._predecessor_resolved = False
         self._predecessor: SnapshotProfileV1 | None = None
         # Every month in one initialization run asks for the same immutable
-        # full-history evidence window. Re-validating and deserializing that
-        # payload for each security/month pair dominates long reruns, while
-        # keeping it in this process-local cache preserves the repository's
-        # verification on the first read and does not alter persisted output.
-        self._evidence_cache: dict[
-            tuple[str, str, str | None, str, str], StoredHistoricalEvidence
-        ] = {}
+        # full-history evidence window. Retain both the verified evidence and
+        # its successful validation, so later months do not reparse its rows.
+        self._evidence_cache: dict[EvidenceCacheKey, StoredHistoricalEvidence] = {}
+        self._validated_evidence_cache: set[EvidenceCacheKey] = set()
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
@@ -583,7 +583,7 @@ class CanonicalSnapshotMonthProcessor:
     def _evidence_for(
         self, member: CapturedRosterMemberV1, request: HistoricalEvidenceRequest
     ) -> StoredHistoricalEvidence:
-        cache_key: tuple[str, str, str | None, str, str] = (
+        cache_key: EvidenceCacheKey = (
             member.security_id,
             member.provider_symbol,
             request.alias_revision,
@@ -592,7 +592,9 @@ class CanonicalSnapshotMonthProcessor:
         )
         cached = self._evidence_cache.get(cache_key)
         if cached is not None:
-            self._validate_cached_evidence(cached, request)
+            if cache_key not in self._validated_evidence_cache:
+                self._validate_cached_evidence(cached, request)
+                self._validated_evidence_cache.add(cache_key)
             return cached
         evidence = self._price_repository.find_request(
             security_id=member.security_id,
@@ -632,6 +634,7 @@ class CanonicalSnapshotMonthProcessor:
             evidence = self._price_repository.verify(revision)
         self._validate_cached_evidence(evidence, request)
         self._evidence_cache[cache_key] = evidence
+        self._validated_evidence_cache.add(cache_key)
         return evidence
 
     @staticmethod
