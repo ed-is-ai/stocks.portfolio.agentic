@@ -12,6 +12,7 @@ from app.services.backtest.source_manifest import (
     build_source_manifest,
     build_strategy_source_manifest,
     detector_source_manifests,
+    record_composition_source_manifest,
     yfinance_ingestion_source_manifest,
 )
 
@@ -200,6 +201,65 @@ def test_cache_key_digest_ignores_roster_and_alias_but_not_output_inputs() -> No
     assert baseline.cache_key_digest() != changed_detector.cache_key_digest()
 
 
+def test_detector_cache_keys_include_only_declared_detector_dependencies() -> None:
+    detectors = (
+        DetectorInputIdentityV1(
+            detector_id="technical_indicators_v1",
+            detector_api_version="1",
+            detector_version=DIGEST_A,
+            configuration={"window": 252},
+        ),
+        DetectorInputIdentityV1(
+            detector_id="weinstein_stage_v1",
+            detector_api_version="1",
+            detector_version=DIGEST_B,
+            configuration={"lookback": 252},
+        ),
+        DetectorInputIdentityV1(
+            detector_id="vcp_v1",
+            detector_api_version="1",
+            detector_version=DIGEST_C,
+            configuration={"lookback": 120},
+        ),
+    )
+    baseline = _input_manifest(detectors)
+    changed_technical = baseline.model_copy(
+        update={
+            "detectors": (
+                detectors[0].model_copy(update={"detector_version": "d" * 64}),
+                *detectors[1:],
+            )
+        }
+    )
+    changed_vcp = baseline.model_copy(
+        update={
+            "detectors": (
+                *detectors[:2],
+                detectors[2].model_copy(update={"detector_version": "e" * 64}),
+            )
+        }
+    )
+
+    assert baseline.cache_key_digest_for(
+        "technical_indicators_v1"
+    ) != changed_technical.cache_key_digest_for("technical_indicators_v1")
+    assert baseline.cache_key_digest_for(
+        "weinstein_stage_v1"
+    ) != changed_technical.cache_key_digest_for("weinstein_stage_v1")
+    assert baseline.cache_key_digest_for(
+        "vcp_v1"
+    ) == changed_technical.cache_key_digest_for("vcp_v1")
+    assert baseline.cache_key_digest_for(
+        "technical_indicators_v1"
+    ) == changed_vcp.cache_key_digest_for("technical_indicators_v1")
+    assert baseline.cache_key_digest_for(
+        "weinstein_stage_v1"
+    ) == changed_vcp.cache_key_digest_for("weinstein_stage_v1")
+    assert baseline.cache_key_digest_for("vcp_v1") != changed_vcp.cache_key_digest_for(
+        "vcp_v1"
+    )
+
+
 def test_real_detector_manifests_use_exact_closed_allowlists() -> None:
     project_root = Path(__file__).resolve().parents[2]
     manifests = detector_source_manifests(project_root)
@@ -218,6 +278,21 @@ def test_real_detector_manifests_use_exact_closed_allowlists() -> None:
         for item in manifests.values()
         for entry in item.manifest["files"]
     )
+    assert {
+        path
+        for item in manifests.values()
+        for path in (entry["path"] for entry in item.manifest["files"])
+        if path.endswith("_detector.py")
+    } == {
+        "app/services/backtest/technical_detector.py",
+        "app/services/backtest/stage_detector.py",
+        "app/services/backtest/vcp_detector.py",
+    }
+    composition_paths = {
+        entry["path"]
+        for entry in record_composition_source_manifest(project_root).manifest["files"]
+    }
+    assert "app/services/backtest/source_manifest.py" in composition_paths
 
 
 def test_manifest_views_and_detector_configurations_are_immutable() -> None:

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-import app.services.backtest.detectors as detector_module
+import app.services.backtest.vcp_detector as detector_module
 from app.core.stage_classification import classify_weinstein_stage, sma_slope
 from app.core.technical_indicators import compute_live_technicals
 from app.services.backtest.detectors import (
@@ -193,6 +193,24 @@ def test_registered_detectors_run_in_process_over_fractional_bounded_rows() -> N
         "Breakout",
         "Pre-breakout",
     }
+
+
+def test_vcp_quote_is_derived_from_bounded_rows_not_technicals() -> None:
+    rows = _historical_rows()
+    technical = DETECTOR_REGISTRY[0].run(DetectorContext(rows))
+    assert isinstance(technical, TechnicalResultV1)
+    altered = technical.technicals.model_copy(
+        update={
+            "price": Decimal("1"),
+            "high_52w": Decimal("1"),
+            "low_52w": Decimal("1"),
+        }
+    )
+
+    direct = DETECTOR_REGISTRY[2].run(DetectorContext(rows))
+    with_unrelated_technicals = DETECTOR_REGISTRY[2].run(DetectorContext(rows, altered))
+
+    assert with_unrelated_technicals == direct
 
 
 def test_well_formed_no_pattern_is_a_valid_false_vcp_result() -> None:

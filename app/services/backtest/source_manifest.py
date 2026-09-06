@@ -37,20 +37,21 @@ RECONSTRUCTION_INPUT_MANIFEST_VERSION = "reconstruction_input_manifest.v1"
 _EXCLUDED_PARTS = frozenset(
     {"tests", "test", "__pycache__", "logs", "_bmad-output", ".pytest_cache"}
 )
-_COMMON_ALLOWLIST = (
-    "app/services/backtest/source_manifest.py",
-    "app/services/backtest/historical_scan_record.py",
-    "app/services/backtest/historical_scan_reconstruction.py",
-    "app/services/backtest/observed_bau_record_builder.py",
-    "app/services/backtest/detectors.py",
-)
 _DETECTOR_ALLOWLISTS: dict[str, tuple[str, ...]] = {
-    "technical_indicators_v1": _COMMON_ALLOWLIST
-    + ("app/core/technical_indicators.py",),
-    "weinstein_stage_v1": _COMMON_ALLOWLIST
-    + ("app/core/stage_classification.py", "app/core/technical_indicators.py"),
-    "vcp_v1": _COMMON_ALLOWLIST
-    + (
+    "technical_indicators_v1": (
+        "app/services/backtest/detector_contracts.py",
+        "app/services/backtest/technical_detector.py",
+        "app/core/technical_indicators.py",
+    ),
+    "weinstein_stage_v1": (
+        "app/services/backtest/detector_contracts.py",
+        "app/services/backtest/stage_detector.py",
+        "app/core/stage_classification.py",
+        "app/core/technical_indicators.py",
+    ),
+    "vcp_v1": (
+        "app/services/backtest/detector_contracts.py",
+        "app/services/backtest/vcp_detector.py",
         "skills/vcp-screener/scripts/calculators/execution_state.py",
         "skills/vcp-screener/scripts/calculators/pivot_proximity_calculator.py",
         "skills/vcp-screener/scripts/calculators/trend_template_calculator.py",
@@ -58,6 +59,13 @@ _DETECTOR_ALLOWLISTS: dict[str, tuple[str, ...]] = {
         "skills/vcp-screener/scripts/calculators/volume_pattern_calculator.py",
     ),
 }
+_RECORD_COMPOSITION_ALLOWLIST = (
+    "app/services/backtest/canonical_manifest.py",
+    "app/services/backtest/historical_scan_reconstruction.py",
+    "app/services/backtest/observed_bau_record_builder.py",
+    "app/services/backtest/historical_scan_record.py",
+    "app/services/backtest/source_manifest.py",
+)
 _YFINANCE_INGESTION_ALLOWLIST = (
     "app/agents/scanner/scanner_agent.py",
     "app/services/backtest/canonical_manifest.py",
@@ -198,6 +206,12 @@ def detector_source_manifests(
         "pydantic": _installed_version("pydantic"),
     }
     runtime = f"{sys.version_info.major}.{sys.version_info.minor}"
+    for detector in DETECTOR_REGISTRY:
+        runner_path = f"{detector.runner.__module__.replace('.', '/')}.py"
+        if runner_path not in _DETECTOR_ALLOWLISTS[detector.detector_id]:
+            raise ValueError(
+                f"detector runner is not allowlisted: {detector.detector_id}"
+            )
     return cast(
         Mapping[str, SourceManifestArtifact],
         frozen_dict(
@@ -234,6 +248,20 @@ def yfinance_ingestion_source_manifest(project_root: Path) -> SourceManifestArti
             "pandas": _installed_version("pandas"),
             "yfinance": _installed_version("yfinance"),
         },
+    )
+
+
+@lru_cache(maxsize=None)
+def record_composition_source_manifest(project_root: Path) -> SourceManifestArtifact:
+    """Return the source identity for record assembly, not detector math."""
+    return build_source_manifest(
+        project_root=project_root,
+        producer_id="historical_scan_record_composition_v1",
+        api_version="1",
+        allowlist=_RECORD_COMPOSITION_ALLOWLIST,
+        defaults={},
+        python_runtime=f"{sys.version_info.major}.{sys.version_info.minor}",
+        dependency_versions={"pydantic": _installed_version("pydantic")},
     )
 
 
@@ -274,6 +302,9 @@ class ReconstructionInputManifestV1(_ManifestModel):
     yfinance_ingestion_version: str = Field(min_length=1)
     record_schema_version: Literal["historical_scan_record.v1"]
     reconstructability_policy_version: Literal["reconstructability.v1"]
+    record_composition_version: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     detectors: tuple[DetectorInputIdentityV1, ...]
 
     @field_validator("detectors")
@@ -318,8 +349,43 @@ class ReconstructionInputManifestV1(_ManifestModel):
         payload = {
             key: value
             for key, value in self.canonical_payload().items()
-            if key not in {"roster_digest", "alias_revision"}
+            if key
+            not in {
+                "roster_digest",
+                "alias_revision",
+                "record_composition_version",
+            }
         }
+        return manifest_digest(payload)
+
+    def cache_key_digest_for(self, detector_id: str) -> str:
+        """Return the fragment identity for one detector's actual inputs."""
+        dependencies = {
+            "technical_indicators_v1": {"technical_indicators_v1"},
+            "weinstein_stage_v1": {"technical_indicators_v1", "weinstein_stage_v1"},
+            # VCP derives its quote directly from bounded rows, never TechnicalsV1.
+            "vcp_v1": {"vcp_v1"},
+        }
+        try:
+            required = dependencies[detector_id]
+        except KeyError as exc:
+            raise ValueError(f"unsupported detector: {detector_id}") from exc
+        payload = {
+            key: value
+            for key, value in self.canonical_payload().items()
+            if key
+            not in {
+                "roster_digest",
+                "alias_revision",
+                "record_composition_version",
+                "detectors",
+            }
+        }
+        payload["detectors"] = [
+            detector.model_dump(mode="python")
+            for detector in self.detectors
+            if detector.detector_id in required
+        ]
         return manifest_digest(payload)
 
     @property
@@ -343,5 +409,6 @@ __all__ = [
     "build_source_manifest",
     "build_strategy_source_manifest",
     "detector_source_manifests",
+    "record_composition_source_manifest",
     "yfinance_ingestion_source_manifest",
 ]
