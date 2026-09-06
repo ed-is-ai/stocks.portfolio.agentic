@@ -189,10 +189,15 @@ class TestSmokeTests:
                     "analysis",
                     "alerts",
                     "export",
+                    "price_backfill",
                 ]
                 assert all(
-                    stage["state"] == "complete" for stage in status_data["stages"]
+                    stage["state"] == "complete" for stage in status_data["stages"][:-1]
                 )
+                # This fixture can have either no repair candidates or no
+                # evidence database. Both outcomes stay isolated from the
+                # otherwise-derived partial pipeline result.
+                assert status_data["stages"][-1]["state"] in {"failed", "skipped"}
                 for previous, current in zip(
                     status_data["stages"], status_data["stages"][1:], strict=False
                 ):

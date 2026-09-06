@@ -34,6 +34,7 @@ from apscheduler.triggers.cron import CronTrigger
 from app.agents.analyst.analyst_agent import AnalystAgent, recommendation
 from app.agents.alert.alert_agent import AlertAgent
 from app.agents.extraction.extraction_agent import ExtractionAgent
+from app.agents.price_backfill import PriceBackfillAgent, PriceBackfillPayload
 from app.agents.trader.trader_agent import TraderAgent
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
@@ -1424,6 +1425,63 @@ def pipeline(
             StageState.COMPLETE,
             expected_run_id=run_id,
         )
+        status_repo.transition(
+            PipelineStage.PRICE_BACKFILL,
+            StageState.RUNNING,
+            expected_run_id=run_id,
+        )
+        try:
+            trades_connect = db.make_connect(lambda: TRADES_DB)
+            backfill_prices = HistoricalPriceRepository(
+                db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
+            )
+            backfill_prices.ensure_schema()
+            agent = PriceBackfillAgent(
+                name="PriceBackfillAgent",
+                repair_service=SnapshotRepairService(
+                    TradesRepository(trades_connect),
+                    PortfolioSnapshotsRepository(trades_connect),
+                    build_price_source(trades_connect),
+                    backfill=PriceEvidenceBackfillService(backfill_prices),
+                ),
+            )
+            repair_report = agent.run(PriceBackfillPayload())
+            stage_state = (
+                StageState.FAILED
+                if repair_report.fetch_failures or repair_report.newly_unavailable
+                else StageState.COMPLETE
+                if repair_report.candidates
+                else StageState.SKIPPED
+            )
+            status_repo.transition(
+                PipelineStage.PRICE_BACKFILL,
+                stage_state,
+                expected_run_id=run_id,
+            )
+            if stage_state is StageState.FAILED:
+                _emit_bau_notification(
+                    run_id=run_id,
+                    severity=NotificationSeverity.WARNING,
+                    title="Portfolio price evidence backfill needs attention",
+                    body=(
+                        f"Fetch failures: {', '.join(repair_report.fetch_failures) or 'none'}. "
+                        "Newly unavailable: "
+                        f"{', '.join(repair_report.newly_unavailable) or 'none'}."
+                    ),
+                )
+        except Exception as exc:
+            print(f"[snapshot repair warning] {exc}")
+            status_repo.transition(
+                PipelineStage.PRICE_BACKFILL,
+                StageState.FAILED,
+                expected_run_id=run_id,
+            )
+            _emit_bau_notification(
+                run_id=run_id,
+                severity=NotificationSeverity.WARNING,
+                title="Portfolio snapshot repair needs attention",
+                body=str(exc),
+            )
         terminal_state = candidate_terminal_state
         status_repo.finish(
             terminal_state,
@@ -1507,38 +1565,6 @@ def pipeline(
                 run_id=run_id,
                 severity=NotificationSeverity.WARNING,
                 title="Historical BAU promotion needs attention",
-                body=str(exc),
-            )
-        try:
-            trades_connect = db.make_connect(lambda: TRADES_DB)
-            backfill_prices = HistoricalPriceRepository(
-                db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
-            )
-            backfill_prices.ensure_schema()
-            repair_service = SnapshotRepairService(
-                TradesRepository(trades_connect),
-                PortfolioSnapshotsRepository(trades_connect),
-                build_price_source(trades_connect),
-                backfill=PriceEvidenceBackfillService(backfill_prices),
-            )
-            repair_report = repair_service.repair()
-            if repair_report.fetch_failures or repair_report.newly_unavailable:
-                _emit_bau_notification(
-                    run_id=run_id,
-                    severity=NotificationSeverity.WARNING,
-                    title="Portfolio price evidence backfill needs attention",
-                    body=(
-                        f"Fetch failures: {', '.join(repair_report.fetch_failures) or 'none'}. "
-                        "Newly unavailable: "
-                        f"{', '.join(repair_report.newly_unavailable) or 'none'}."
-                    ),
-                )
-        except Exception as exc:
-            print(f"[snapshot repair warning] {exc}")
-            _emit_bau_notification(
-                run_id=run_id,
-                severity=NotificationSeverity.WARNING,
-                title="Portfolio snapshot repair needs attention",
                 body=str(exc),
             )
         try:
