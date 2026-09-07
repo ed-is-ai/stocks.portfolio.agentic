@@ -22,12 +22,9 @@ already exist -- it never inserts one. Creating a row for a date with no row
 at all is unambiguously this service's job; the repair pass keeps ownership
 of rows that exist but are ``NULL``/``0.00``.
 
-Backfilled rows carry ``total_value`` (holdings only) with ``total_cost`` and
-``cash_balance`` left ``NULL`` -- the chart null-guards the combined
-"Portfolio Value" line when cash is absent, so the "Market Value" line
-extends back honestly while the total/cash lines stay a gap (a faithful
-per-day cost basis and cash balance need their own dated-FX reconstructions,
-deferred -- see the issue).
+Backfilled rows carry reconstructed ``total_value`` and ``total_cost``. Cash
+is filled from dated provider statements when available; rows before the
+first statement stay ``NULL`` so the chart does not invent a balance.
 
 Two cheap idempotency guards keep the repeated triggers (import, price
 refresh, pipeline) from doing real work or corrupting rows:
@@ -207,12 +204,20 @@ class SnapshotBackfillService:
         if start >= end:
             return
 
+        last_day = end - timedelta(days=1)
         marker_key = f"{_MARKER_PREFIX}{pid}"
         signature = f"{start.isoformat()}..{end.isoformat()}"
-        if self._account_state.get(marker_key) == signature:
+        cash_start = (
+            self._cash_history.earliest_as_of(pid)
+            if self._cash_history is not None
+            else None
+        )
+        needs_cash_repair = cash_start is not None and self._snapshots.has_missing_cash(
+            pid, max(start.isoformat(), cash_start), last_day.isoformat()
+        )
+        if self._account_state.get(marker_key) == signature and not needs_cash_repair:
             return
 
-        last_day = end - timedelta(days=1)
         self._progress.begin(
             pid,
             days_total=(end - start).days,
@@ -234,6 +239,11 @@ class SnapshotBackfillService:
             as_of = day.isoformat()
             day += timedelta(days=1)
             if as_of in present:
+                cash = self._cash_as_of(pid, as_of)
+                if cash is not None and self._snapshots.fill_missing_cash(
+                    pid, as_of, cash
+                ):
+                    totals.rows_written += 1
                 totals.days_already_present += 1
             elif not (holdings := holdings_as_of(replay_rows, as_of)):
                 totals.days_skipped_no_holdings += 1
