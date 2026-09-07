@@ -121,7 +121,30 @@ class PortfolioSnapshotsRepository:
                 "WHERE portfolio_id = ? AND substr(timestamp, 1, 10) BETWEEN ? AND ?",
                 (portfolio_id, start, end),
             ).fetchall()
-        return {row[0] for row in rows}
+            return {row[0] for row in rows}
+
+    def has_missing_cash(self, portfolio_id: int, start: str, end: str) -> bool:
+        with session(self._connect) as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM portfolio_snapshots WHERE portfolio_id=? "
+                    "AND substr(timestamp, 1, 10) BETWEEN ? AND ? "
+                    "AND cash_balance IS NULL LIMIT 1",
+                    (portfolio_id, start, end),
+                ).fetchone()
+                is not None
+            )
+
+    def fill_missing_cash(
+        self, portfolio_id: int, day: str, cash_balance: float
+    ) -> bool:
+        with session(self._connect) as conn:
+            cursor = conn.execute(
+                "UPDATE portfolio_snapshots SET cash_balance=? WHERE portfolio_id=? "
+                "AND substr(timestamp, 1, 10)=? AND cash_balance IS NULL",
+                (cash_balance, portfolio_id, day),
+            )
+        return cursor.rowcount > 0
 
     def append_daily_value_if_absent(
         self,

@@ -1604,13 +1604,12 @@ class TraderAgent(Agent):
             price_marker = False
 
             if qty and qty != "n/a":
-                raw_identity = next(
-                    (
-                        value.upper()
-                        for value in (symbol, sedol)
-                        if value and value.lower() != "n/a"
-                    ),
-                    None,
+                raw_identity = (
+                    symbol.upper()
+                    if symbol and symbol.lower() != "n/a"
+                    else sedol.upper()
+                    if sedol.upper() in aliases
+                    else None
                 )
 
                 if raw_identity is not None:
@@ -1696,6 +1695,13 @@ class TraderAgent(Agent):
                                     "debit/credit amount"
                                 )
                 else:
+                    # A SEDOL identifies an instrument but is not a market
+                    # symbol. II uses it for delisted SPAC/redemption history;
+                    # importing it as a ticker creates a phantom position.
+                    if sedol and sedol.lower() != "n/a":
+                        skipped_row_idxs.append(idx)
+                        benign_empty_count += 1
+                        continue
                     amount_money = credit_money if credit > 0 else debit_money
                     amount = credit if credit > 0 else debit
                     if amount > 0:

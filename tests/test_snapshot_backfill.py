@@ -602,6 +602,23 @@ def test_cash_balance_is_carried_forward_from_the_last_statement(
     assert cash["2024-01-05"] == pytest.approx(1500.0)
 
 
+def test_re_run_fills_missing_cash_after_statement_import(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+
+    # The initial backfill completes before the statement import.
+    _service(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1500.00")])
+
+    repair = _service_with_cash(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    assert repair.rows_written == 6
+    assert cash["2024-01-01"] is None
+    assert all(cash[f"2024-01-0{day}"] == pytest.approx(1500.0) for day in range(2, 8))
+
+
 def test_cash_balance_folds_currencies_through_a_dated_rate(tmp_path: Path) -> None:
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
