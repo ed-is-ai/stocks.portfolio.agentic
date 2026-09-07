@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import os
+from time import monotonic
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -93,6 +94,12 @@ class ResolvedSnapshotMember:
 type EvidenceCacheKey = tuple[str, str, str | None, str, str]
 
 
+@dataclass(frozen=True)
+class InitializationMonthOutcome:
+    reused_securities: int
+    fetched_securities: int
+
+
 class CanonicalSnapshotMonthProcessor:
     """Compose existing evidence/reconstruction APIs into one Ready month."""
 
@@ -150,13 +157,15 @@ class CanonicalSnapshotMonthProcessor:
         # its successful validation, so later months do not reparse its rows.
         self._evidence_cache: dict[EvidenceCacheKey, StoredHistoricalEvidence] = {}
         self._validated_evidence_cache: set[EvidenceCacheKey] = set()
+        self._fetched_security_ids: set[str] = set()
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("reconstruction roster alias evidence is invalid") from exc
 
-    def __call__(self, snapshot_month: str) -> None:
+    def __call__(self, snapshot_month: str) -> InitializationMonthOutcome:
+        self._fetched_security_ids = set()
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise InitializationMonthError(
@@ -218,6 +227,10 @@ class CanonicalSnapshotMonthProcessor:
                 job_claim=(self._job_id, self._claim_token),
                 lease=self._lease,
                 adopted_from_profile_hash=adopted_from,
+            )
+            fetched = len(self._fetched_security_ids)
+            return InitializationMonthOutcome(
+                len(self._roster.members) - fetched, fetched
             )
         except InitializationMonthError:
             raise
@@ -680,6 +693,7 @@ class CanonicalSnapshotMonthProcessor:
             )
             if compatible is None:
                 payload = self._evidence_adapter.fetch(request)
+                self._fetched_security_ids.add(member.security_id)
             else:
                 acquired = self._price_repository.acquisition_times(
                     compatible.data_revision
@@ -789,6 +803,18 @@ class InitializationRepository(Protocol):
         lease: WorkerLeaseFenceV1 | None = None,
     ) -> StrategyJobV1: ...
 
+    def record_initialization_month_commit(
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        month: str,
+        reused_securities: int,
+        fetched_securities: int,
+        fresh_elapsed_seconds: float,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> object: ...
+
     def fail_claimed_strategy_job(
         self,
         job_id: str,
@@ -831,17 +857,19 @@ class HistoricalInitializationEngine:
     def __init__(
         self,
         repository: InitializationRepository,
-        month_processor: Callable[[str], None],
+        month_processor: Callable[[str], InitializationMonthOutcome | None],
         *,
         qualification_check: Callable[[], bool] = lambda: True,
         profile_check: Callable[[str], bool] = lambda _profile_hash: True,
         lease: WorkerLeaseFenceV1 | None = None,
+        security_count: int = 0,
     ) -> None:
         self._repository = repository
         self._month_processor = month_processor
         self._qualification_check = qualification_check
         self._profile_check = profile_check
         self._lease = lease
+        self._security_count = security_count
 
     def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
         job = self._repository.strategy_job(job_id)
@@ -905,11 +933,31 @@ class HistoricalInitializationEngine:
                     )
                 return current
             try:
+                started = monotonic()
                 readiness = self._repository.interval_readiness(
                     initialization.profile_hash, month, month
                 )
-                if not readiness.ready:
-                    self._month_processor(month)
+                outcome = (
+                    InitializationMonthOutcome(self._security_count, 0)
+                    if readiness.ready
+                    else self._month_processor(month)
+                    or InitializationMonthOutcome(0, self._security_count)
+                )
+                recorder = getattr(
+                    self._repository, "record_initialization_month_commit", None
+                )
+                if recorder is not None:
+                    recorder(
+                        job_id,
+                        claim_token,
+                        month=month,
+                        reused_securities=outcome.reused_securities,
+                        fetched_securities=outcome.fetched_securities,
+                        fresh_elapsed_seconds=(
+                            monotonic() - started if outcome.fetched_securities else 0
+                        ),
+                        lease=self._lease,
+                    )
             except InitializationMonthError as exc:
                 current = self._repository.strategy_job(job_id)
                 if not self._owns(current, claim_token):

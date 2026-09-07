@@ -6,7 +6,7 @@ GET routes only render repository state.  All lifecycle changes stay behind
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import logging
@@ -1434,6 +1434,46 @@ def _backtest_progress(
     }
 
 
+def _initialization_progress(
+    run: object, progress: object | None, created_at: object
+) -> dict[str, object] | None:
+    start, end = (
+        getattr(run, "requested_start", None),
+        getattr(run, "requested_end", None),
+    )
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    try:
+        total = len(TradingCalendar.months_inclusive(start, end))
+    except ValueError:
+        return None
+    committed = int(getattr(progress, "committed_months", 0))
+    last_at = getattr(progress, "last_committed_at", None) or created_at
+    age = None
+    if isinstance(last_at, datetime):
+        age = max(0, int((datetime.now(timezone.utc) - last_at).total_seconds()))
+    fresh_months = int(getattr(progress, "fresh_months", 0))
+    fresh_seconds = float(getattr(progress, "fresh_elapsed_seconds", 0))
+    eta = (
+        None
+        if not fresh_months
+        else int(fresh_seconds / fresh_months * max(0, total - committed))
+    )
+    return {
+        "committed": min(committed, total),
+        "total": total,
+        "percentage": min(committed, total) / total * 100,
+        "last_month": getattr(progress, "last_committed_month", None),
+        "last_age": age if age is not None else 0,
+        "eta": eta,
+        "reused_months": int(getattr(progress, "reused_months", 0)),
+        "fetched_months": int(getattr(progress, "fetched_months", 0)),
+        "partial_months": int(getattr(progress, "partial_months", 0)),
+        "reused_securities": int(getattr(progress, "reused_securities", 0)),
+        "fetched_securities": int(getattr(progress, "fetched_securities", 0)),
+    }
+
+
 def _activity_context(
     repo: BacktestRepository, service: StrategyJobService, job_id: str
 ) -> dict[str, object]:
@@ -1463,6 +1503,14 @@ def _activity_context(
         if job.job_type is StrategyJobType.PREPARATION
         else None
     )
+    initialization_progress = (
+        _initialization_progress(
+            run, repo.initialization_progress(job_id), job.created_at
+        )
+        if job.job_type is StrategyJobType.INITIALIZATION
+        and hasattr(repo, "initialization_progress")
+        else None
+    )
     return {
         "job": job,
         "run": run,
@@ -1487,6 +1535,7 @@ def _activity_context(
             and job.status is StrategyJobStatus.RUNNING
             else None
         ),
+        "initialization_progress": initialization_progress,
     }
 
 
@@ -1519,7 +1568,13 @@ async def strategy_activity_status(
     except StrategyJobNotFound:
         return HTMLResponse("Run no longer available.", status_code=404)
     job = cast(StrategyJobV1, context["job"])
-    if job.status_version <= last_seen_version:
+    if (
+        not (
+            job.job_type is StrategyJobType.INITIALIZATION
+            and job.status is StrategyJobStatus.RUNNING
+        )
+        and job.status_version <= last_seen_version
+    ):
         return HTMLResponse("", status_code=204)
     return template_response(request, _activity_template(job.job_type), context)
 
