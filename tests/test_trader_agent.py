@@ -942,6 +942,26 @@ def test_sipp_imports_dividend_row_that_has_symbol_but_no_quantity(
     assert agent.get_portfolio() == []
 
 
+def test_sipp_skips_sedol_only_trade_without_creating_a_phantom_position(
+    tmp_path: Path,
+) -> None:
+    csv_text = (
+        "Date,Symbol,Sedol,Quantity,Price,Description,Reference,Debit,Credit,"
+        "Running Balance\n"
+        "09/03/2021,n/a,BMC5RR2,30,16.14,30 ARCT CLEA Del,REF,484.20,,1000.00\n"
+    )
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+
+    result = agent.import_sipp(csv_text.encode(), account_type_id="sipp")
+
+    assert result.buy_count == 0
+    assert result.cash_flow_count == 0
+    assert result.skipped_count == 1
+    assert agent.get_portfolio() == []
+
+
 def test_sipp_issue_detail_falls_back_to_csv_row_when_reference_is_na(
     tmp_path: Path,
 ) -> None:
@@ -1859,10 +1879,10 @@ def test_sipp_uses_sedol_when_symbol_is_unavailable(
     assert trades == [("REAL.L", 10.0, 100.0, "GBP")]
 
 
-def test_sipp_unconfigured_sedol_imports_as_raw_identity(
+def test_sipp_skips_unconfigured_sedol_only_trade(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without an alias, SEDOL remains a usable generic raw identity."""
+    """An unknown SEDOL is not a quoteable holding identity."""
     monkeypatch.setattr("app.agents.trader.trader_agent.load_aliases", lambda: {})
     csv_text = _SIPP_HEADER + _sipp_row(
         "01/02/2024", "n/a", "REF-A", description="Fund purchase", sedol="BMJJJF9"
@@ -1874,11 +1894,8 @@ def test_sipp_unconfigured_sedol_imports_as_raw_identity(
     result = agent.import_sipp(csv_text.encode("utf-8"), account_type_id="sipp")
 
     assert result.status == "ok"
-    with sqlite3.connect(agent.db_path) as conn:
-        trades = conn.execute(
-            "SELECT ticker, shares, price, currency FROM trades"
-        ).fetchall()
-    assert trades == [("BMJJJF9", 10.0, 100.0, "GBP")]
+    assert result.skipped_count == 1
+    assert agent.get_portfolio() == []
 
 
 def test_replay_trades_degrades_to_raw_ticker_on_ambiguous_alias(
