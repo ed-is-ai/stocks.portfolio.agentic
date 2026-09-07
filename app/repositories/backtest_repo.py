@@ -62,6 +62,7 @@ from app.services.backtest.strategy_job import (
     BootstrapRunV1,
     ClaimedStrategyJobV1,
     InitializationEnqueueResultV1,
+    InitializationProgressV1,
     InitializationRunV1,
     JobFailureCode,
     PreparationRunV1,
@@ -647,6 +648,21 @@ CREATE TABLE IF NOT EXISTS initialization_runs (
     ),
     mode TEXT NOT NULL DEFAULT 'rebuild' CHECK(mode IN ('update', 'rebuild')),
     CHECK(requested_start <= requested_end)
+);
+
+CREATE TABLE IF NOT EXISTS initialization_progress (
+    job_id TEXT PRIMARY KEY REFERENCES initialization_runs(job_id),
+    committed_months INTEGER NOT NULL CHECK(committed_months >= 0),
+    reused_months INTEGER NOT NULL CHECK(reused_months >= 0),
+    fetched_months INTEGER NOT NULL CHECK(fetched_months >= 0),
+    partial_months INTEGER NOT NULL CHECK(partial_months >= 0),
+    reused_securities INTEGER NOT NULL CHECK(reused_securities >= 0),
+    fetched_securities INTEGER NOT NULL CHECK(fetched_securities >= 0),
+    fresh_elapsed_seconds REAL NOT NULL CHECK(fresh_elapsed_seconds >= 0),
+    fresh_months INTEGER NOT NULL CHECK(fresh_months >= 0),
+    last_committed_month TEXT NOT NULL,
+    last_committed_at TEXT NOT NULL,
+    CHECK(committed_months = reused_months + fetched_months + partial_months)
 );
 
 CREATE TRIGGER IF NOT EXISTS strategy_job_identity_immutable
@@ -1551,6 +1567,24 @@ def _row_to_initialization(
         qualification_contract_digest=str(row[7]),
         ordered_month_digest=None if row[8] is None else str(row[8]),
         mode="update" if len(row) > 9 and str(row[9]) == "update" else "rebuild",
+    )
+
+
+def _row_to_initialization_progress(
+    row: sqlite3.Row | tuple[object, ...],
+) -> InitializationProgressV1:
+    return InitializationProgressV1(
+        job_id=str(row[0]),
+        committed_months=int(str(row[1])),
+        reused_months=int(str(row[2])),
+        fetched_months=int(str(row[3])),
+        partial_months=int(str(row[4])),
+        reused_securities=int(str(row[5])),
+        fetched_securities=int(str(row[6])),
+        fresh_elapsed_seconds=float(str(row[7])),
+        fresh_months=int(str(row[8])),
+        last_committed_month=str(row[9]),
+        last_committed_at=datetime.fromisoformat(str(row[10])),
     )
 
 
@@ -2929,6 +2963,17 @@ class BacktestRepository:
         with session(self._connect) as conn:
             return self._load_initialization(conn, job_id)
 
+    def initialization_progress(self, job_id: str) -> InitializationProgressV1 | None:
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT job_id, committed_months, reused_months, fetched_months,
+                          partial_months, reused_securities, fetched_securities,
+                          fresh_elapsed_seconds, fresh_months, last_committed_month,
+                          last_committed_at FROM initialization_progress WHERE job_id=?""",
+                (job_id,),
+            ).fetchone()
+            return None if row is None else _row_to_initialization_progress(row)
+
     def bootstrap_run(self, job_id: str) -> BootstrapRunV1:
         """Return one ``bootstrap`` job's subtype identity row."""
         with session(self._connect) as conn:
@@ -3511,6 +3556,75 @@ class BacktestRepository:
             job = self._load_strategy_job(conn, job_id)
             self._upsert_notification_outbox_on_connection(conn, job)
             return job
+
+    def record_initialization_month_commit(
+        self,
+        job_id: str,
+        claim_token: str,
+        *,
+        month: str,
+        reused_securities: int,
+        fetched_securities: int,
+        fresh_elapsed_seconds: float,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> InitializationProgressV1:
+        if min(reused_securities, fetched_securities, fresh_elapsed_seconds) < 0:
+            raise ValueError("initialization progress counts must be non-negative")
+        outcome = (
+            "partial_months"
+            if reused_securities and fetched_securities
+            else "fetched_months"
+            if fetched_securities
+            else "reused_months"
+        )
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            initialization = self._load_initialization(conn, job_id)
+            if month not in initialization.requested_months:
+                raise StrategyJobConflict("progress month is outside requested range")
+            fence = _lease_fence_params(lease)
+            owned = conn.execute(
+                f"SELECT 1 FROM strategy_jobs WHERE id=? AND status='running' AND claim_token=? {_LEASE_FENCE_SQL}",
+                (job_id, claim_token, *fence),
+            ).fetchone()
+            if owned is None:
+                raise StrategyJobConflict("worker progress ownership is stale")
+            now = self._job_now()
+            conn.execute(
+                f"""INSERT INTO initialization_progress (
+                       job_id, committed_months, reused_months, fetched_months,
+                       partial_months, reused_securities, fetched_securities,
+                       fresh_elapsed_seconds, fresh_months, last_committed_month,
+                       last_committed_at
+                   ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(job_id) DO UPDATE SET
+                       committed_months=committed_months+1,
+                       {outcome}={outcome}+1,
+                       reused_securities=reused_securities+excluded.reused_securities,
+                       fetched_securities=fetched_securities+excluded.fetched_securities,
+                       fresh_elapsed_seconds=fresh_elapsed_seconds+excluded.fresh_elapsed_seconds,
+                       fresh_months=fresh_months+excluded.fresh_months,
+                       last_committed_month=excluded.last_committed_month,
+                       last_committed_at=excluded.last_committed_at""",
+                (
+                    job_id,
+                    int(outcome == "reused_months"),
+                    int(outcome == "fetched_months"),
+                    int(outcome == "partial_months"),
+                    reused_securities,
+                    fetched_securities,
+                    fresh_elapsed_seconds,
+                    int(fetched_securities > 0),
+                    month,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT job_id, committed_months, reused_months, fetched_months, partial_months, reused_securities, fetched_securities, fresh_elapsed_seconds, fresh_months, last_committed_month, last_committed_at FROM initialization_progress WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+            assert row is not None
+            return _row_to_initialization_progress(row)
 
     def set_strategy_job_current_stage(
         self,

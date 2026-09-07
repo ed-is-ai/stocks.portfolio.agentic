@@ -115,6 +115,9 @@ class FakeRepository:
         self.job = replace(self.job, status=StrategyJobStatus.COMPLETE)
         return self.job
 
+    def record_initialization_month_commit(self, _job_id, _token, **kwargs):
+        self.commits = getattr(self, "commits", []) + [kwargs]
+
 
 def test_engine_processes_months_ascending_and_reuses_ready_months() -> None:
     repo = FakeRepository(ready={"2026-05"})
@@ -128,6 +131,8 @@ def test_engine_processes_months_ascending_and_reuses_ready_months() -> None:
     assert repo.progress == ["2026-05", "2026-06", "2026-07"]
     assert processed == ["2026-06", "2026-07"]
     assert result.status is StrategyJobStatus.COMPLETE
+    assert repo.commits[0]["reused_securities"] == 0
+    assert repo.commits[1]["fetched_securities"] == 0
 
 
 def test_engine_propagates_worker_lease_to_lifecycle_writes() -> None:

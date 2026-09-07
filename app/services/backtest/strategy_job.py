@@ -714,6 +714,31 @@ class StrategyJobProgressV1(_LifecycleModel):
     month: Month
 
 
+class InitializationProgressV1(_LifecycleModel):
+    """Durable completed-month liveness data; independent of in-flight state."""
+
+    job_id: Annotated[str, Field(min_length=1)]
+    committed_months: Annotated[int, Field(ge=0)]
+    reused_months: Annotated[int, Field(ge=0)]
+    fetched_months: Annotated[int, Field(ge=0)]
+    partial_months: Annotated[int, Field(ge=0)]
+    reused_securities: Annotated[int, Field(ge=0)]
+    fetched_securities: Annotated[int, Field(ge=0)]
+    fresh_elapsed_seconds: Annotated[float, Field(ge=0)]
+    fresh_months: Annotated[int, Field(ge=0)]
+    last_committed_month: Month | None = None
+    last_committed_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def _counts_match(self) -> "InitializationProgressV1":
+        if (
+            self.committed_months
+            != self.reused_months + self.fetched_months + self.partial_months
+        ):
+            raise ValueError("initialization month counts are inconsistent")
+        return self
+
+
 class StrategyJobFailureV1(_LifecycleModel):
     job_id: Annotated[str, Field(min_length=1)]
     claim_token: Annotated[str, Field(min_length=1)]

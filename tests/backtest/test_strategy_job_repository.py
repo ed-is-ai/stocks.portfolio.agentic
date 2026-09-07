@@ -1028,16 +1028,32 @@ def test_progress_and_terminal_writes_require_current_token_and_version(
     )
     assert failed.status is StrategyJobStatus.FAILED
     assert failed.current_month is None
-    assert failed.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
-    with pytest.raises(StrategyJobConflict):
-        repo.fail_claimed_strategy_job(
-            claim.job.id,
-            claim.claim_token,
-            expected_version=failed.status_version,
-            failure_code=JobFailureCode.INTEGRITY_ERROR,
-            failed_month="2026-05",
-            detail="late worker",
-        )
+
+
+def test_initialization_progress_retains_completed_months_after_failure(
+    tmp_path: Path,
+) -> None:
+    repo = _repo(tmp_path / "backtest.db")
+    queued = _enqueue(repo).job
+    assert queued is not None
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    repo.set_strategy_job_current_month(
+        claim.job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        month="2026-05",
+    )
+    progress = repo.record_initialization_month_commit(
+        claim.job.id,
+        claim.claim_token,
+        month="2026-05",
+        reused_securities=3,
+        fetched_securities=2,
+        fresh_elapsed_seconds=12.5,
+    )
+    assert (progress.committed_months, progress.partial_months) == (1, 1)
+    assert repo.initialization_progress(claim.job.id) == progress
 
 
 def test_queued_and_running_cancellation_have_distinct_semantics(

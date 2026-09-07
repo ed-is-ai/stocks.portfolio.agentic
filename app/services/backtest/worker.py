@@ -153,6 +153,7 @@ def build_initialization_engine(
         qualification_check=qualified,
         profile_check=profile_is_current,
         lease=lease,
+        security_count=len(roster.members),
     )
 
 
