@@ -123,6 +123,28 @@ class PortfolioSnapshotsRepository:
             ).fetchall()
             return {row[0] for row in rows}
 
+    def daily_rows_between(
+        self, portfolio_id: int, start: str, end: str
+    ) -> dict[str, tuple[float | None, float | None, float | None, bool]]:
+        """Return ``{day: (total_value, total_cost, cash_balance, estimated)}``.
+
+        Both bounds are inclusive ``YYYY-MM-DD``. The same "already present"
+        answer :meth:`dates_present` gives, with the row's figures attached
+        so the backfill can carry a closed market's day forward from the
+        trading day before it (#547) without a second query per day. Where a
+        day holds more than one snapshot the latest by timestamp wins, which
+        is the one a reader would see as that day's closing position.
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT substr(timestamp, 1, 10) AS day, total_value, total_cost, "
+                "cash_balance, value_is_estimated FROM portfolio_snapshots "
+                "WHERE portfolio_id = ? AND substr(timestamp, 1, 10) BETWEEN ? AND ? "
+                "ORDER BY day ASC, timestamp ASC",
+                (portfolio_id, start, end),
+            ).fetchall()
+        return {r[0]: (r[1], r[2], r[3], bool(r[4])) for r in rows}
+
     def has_missing_cash(self, portfolio_id: int, start: str, end: str) -> bool:
         with session(self._connect) as conn:
             return (

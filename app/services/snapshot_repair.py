@@ -176,6 +176,39 @@ def holdings_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> dict[str, 
     return {t: s for t, s in net.items() if s > QUANTITY_EPSILON}
 
 
+def market_was_closed(
+    source: "HistoricalGbpPriceSource",
+    holdings: dict[str, float],
+    as_of: str,
+    trading_days: frozenset[str],
+) -> bool:
+    """True when the market was shut on ``as_of``, so nothing could move (#547).
+
+    Two independent evidence failures are required, because either alone is
+    ambiguous:
+
+    * ``as_of`` is not in ``trading_days`` -- the FX calendar, which the app
+      already maintains across the whole window, published nothing that day;
+    * and *no* held ticker has a dated close.
+
+    One holding missing a close on a trading day is a genuine data gap, not
+    a closure: that day still gets valued with the unpriceable holding
+    carried at cost and flagged estimated (#519), and silencing it here
+    would hide the very gap that flag exists to show. Conversely a thin FX
+    calendar alone must not freeze a real trading day's valuation.
+
+    An empty ``trading_days`` means the calendar is unknown, so this always
+    returns False -- a checkout with no FX evidence writes honest gaps
+    exactly as it did before, rather than declaring every day a holiday.
+
+    The ticker scan short-circuits on the first priced holding, and only
+    runs at all on a day the calendar has already flagged.
+    """
+    if not holdings or not trading_days or as_of in trading_days:
+        return False
+    return not any(source.gbp_price(ticker, as_of) is not None for ticker in holdings)
+
+
 def value_holdings(
     source: "HistoricalGbpPriceSource",
     holdings: dict[str, float],
@@ -233,6 +266,14 @@ class HistoricalGbpPriceSource(Protocol):
         """
         ...
 
+    def trading_days(self, start: str, end: str) -> frozenset[str]:
+        """Return the days in ``[start, end]`` known to be trading days (#547).
+
+        An empty set means "cannot tell", never "the market never opened":
+        a caller must not conclude a market was closed from silence here.
+        """
+        ...
+
 
 class NoHistoricalPriceSource:
     """The deliberate opt-out: reconstruct nothing, null everything.
@@ -254,6 +295,10 @@ class NoHistoricalPriceSource:
     def gbp_rate(self, currency: str, as_of: str) -> float | None:
         """Return 1.0 for GBP, else None -- no evidence to convert with."""
         return 1.0 if currency.strip().upper() == "GBP" else None
+
+    def trading_days(self, start: str, end: str) -> frozenset[str]:
+        """Return an empty set -- this source knows no market calendar."""
+        return frozenset()
 
 
 class SnapshotRepairReport(BaseModel):
