@@ -1187,14 +1187,24 @@ def pipeline(
         # the aggregate value log. Each portfolio also gets its own snapshot.
         portfolios = _trader.list_portfolios()
         positions = []
+        portfolio_snapshots = []
         for pf in portfolios:
             pf_positions = _trader.get_portfolio(prices, display_info, pf.id)
             positions.extend(pf_positions)
+            cash = _trader.get_cash_balance(pf.id)
             _trader.update_portfolio_snapshot(
-                _trader.get_cash_balance(pf.id),
+                cash,
                 pf.id,
                 positions=pf_positions,
                 gbpusd=gbpusd,
+            )
+            portfolio_snapshots.append(
+                {
+                    "name": pf.name,
+                    "positions": pf_positions,
+                    "gbp_totals": portfolio_service.gbp_totals(pf_positions, gbpusd),
+                    "cash": cash,
+                }
             )
         held = {p.ticker for p in positions}
         gbp_totals = portfolio_service.gbp_totals(positions, gbpusd)
@@ -1260,7 +1270,10 @@ def pipeline(
         )
 
         alerter.send_summary_email(
-            positions, gbp_totals=gbp_totals, market_narrative=market_narrative
+            positions,
+            gbp_totals=gbp_totals,
+            market_narrative=market_narrative,
+            portfolio_snapshots=portfolio_snapshots,
         )
 
         status_repo.transition(
