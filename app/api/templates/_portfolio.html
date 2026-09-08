@@ -417,13 +417,17 @@
 <!-- Summary strip (all values in GBP) -->
 <section class="portfolio-summary-grid" aria-label="Portfolio summary">
   <div class="stat-card">
-    <div class="slbl"><i class="bi bi-graph-up me-1"></i>Market Value</div>
+    <div class="slbl"><i class="bi bi-graph-up me-1"></i>Portfolio Value</div>
     <div class="sval">£{{ "%.2f"|format(total_value_gbp|default(0)) }}</div>
-    <span class="visually-hidden">Includes cash.</span>
+    {# Both totals fold in cash only when a GBP cash balance is known; a
+       multi-currency-only portfolio (cash_balance is none) excludes it, so
+       the screen-reader hint must not claim otherwise. #}
+    {% if cash_balance is not none %}<span class="visually-hidden">Includes cash.</span>{% endif %}
   </div>
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Cost</div>
     <div class="sval">£{{ "%.2f"|format(total_cost_gbp) }}</div>
+    {% if cash_balance is not none %}<span class="visually-hidden">Includes cash.</span>{% endif %}
   </div>
   <div class="stat-card pnl-{{ 'positive' if total_pnl_gbp >= 0 else 'negative' }}">
     <div class="slbl"><i class="bi bi-percent me-1"></i>Unrealised P&amp;L</div>

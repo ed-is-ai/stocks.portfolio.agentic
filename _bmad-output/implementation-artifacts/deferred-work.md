@@ -513,3 +513,43 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-519-estimated-snapshot-valuation.md`
   summary: `value_holdings` combines the net share count from `holdings_as_of` (a plain running sum) with the carrying cost from `position_cost_basis_as_of` (an average-cost replay that resets to zero on any dip to/below `QUANTITY_EPSILON`, including a negative excursion from an over-sell). For a position with an uncorrected over-sell in its history, the two functions can disagree on effective share count after the anomaly, so the carrying-cost fallback can silently value the wrong quantity. Pre-existing divergence between the two replay helpers (this repo's own CLAUDE.md already names over-sells as a known data-quality issue to correct manually); this story is the first caller to use `position_cost_basis_as_of`'s output as a per-ticker fallback value rather than only a portfolio-wide total, so the mismatch becomes visible on the chart for the first time.
   evidence: `app/services/snapshot_repair.py` `holdings_as_of` vs. `position_cost_basis_as_of` -- no reconciliation between the two on an over-sold ticker.
+
+## Deferred from: planning of spec-gh-527-valuation-terminology (2026-09-08)
+
+Issue #527 section 2 -- "reconstructed value-history chart shows implausible
+swings" -- is descoped from `spec-gh-527-valuation-terminology.md` (which
+handles only section 1, the terminology clash). Investigation with the live
+databases disproves the issue's own hypothesis:
+
+- `historical_price_cache.db` `0P00013P6I.L` (HSFWA fund): currency GBP,
+  `quote_unit_scale` 1, smooth GBP 2.84 (2024-04) -> GBP 4.19 (2026-09), no spikes.
+- `WCOG.L`: `quote_unit` GBp, scale 0.01 (correct); price coverage only
+  from 2026-05-11.
+- SIPP `portfolio_snapshots` monthly-average market value: ~GBP 52k (2022) ->
+  ~GBP 150k (2026-01..03) -> ~GBP 64k (2026-08). This tracks a real composition
+  change: 11 holdings worth ~GBP 160k as of 2026-01-15 (AZN, RIO, NWG, SMT,
+  INTC, SGLN, 9988, EL, NKE, B39RMM8, HSFWA), liquidated to 5 holdings
+  (GOOGL, HSFWA, INTC, SMT, WCOG) + ~GBP 95k cash by 2026-07-15.
+
+So the proposed "5x carrying-cost guard in `value_holdings`" is the wrong
+fix and would misfire (e.g. on US tickers stored with `currency='GBP'`).
+Genuine follow-ups, each needing product direction:
+
+1. Show the cash-inclusive Portfolio Value across the full chart range
+   (reconstructed history carries no cash, so only the cash-excluding
+   Market Value spans it today -- a liquidation-into-cash then reads as a
+   crash). Ties into #502 / #512 / #519.
+2. De-duplicate `portfolio_snapshots` per day before plotting -- a repair
+   run wrote 778 rows in 2026-08 alone; the chart plots the lot.
+3. Reconsider the visual alarm of the estimated-point (diamond) markers:
+   for pre-2024 history essentially every point is carried-at-cost.
+4. Separate concern: many `trades` rows for US stocks (JPM, DIS, GOOGL,
+   NKE, INTC...) carry `currency='GBP'`, so their USD prices are valued as
+   GBP in historical reconstruction. Needs its own issue.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-527-valuation-terminology.md`
+  summary: The alert-agent snapshot surface still carries the old valuation terminology -- `app/agents/alert/templates/_snapshot.html` renders a "Market Value" headline and `app/agents/alert/alert_agent.py` (~L1151) prints the cash-inclusive `total_value` under a "Mkt Value :" label -- so the emailed/CLI snapshot now disagrees with the web dashboard's "Portfolio Value" and mislabels a cash-inclusive figure as market value.
+  evidence: `grep -n "Market Value\|Mkt Value" app/agents/alert/templates/_snapshot.html app/agents/alert/alert_agent.py`; GH-527 spec deliberately scoped itself to `_portfolio.html`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-527-valuation-terminology.md`
+  summary: The "Total Cost" summary card binds `total_cost_gbp`, which sums the historical purchase cost of holdings with the *current* cash balance (`portfolio_service.py` L1222-1224) -- a mixed-basis figure. It is arithmetically paired with the cash-inclusive "Portfolio Value" card (cash cancels in the P&L), but "Total Cost = holdings cost + today's cash" is not a coherent single quantity; consider showing holdings cost only.
+  evidence: `app/services/portfolio_service.py:1222` -- `total_cost_gbp = sum(valued_costs) + effective_cash_balance`.

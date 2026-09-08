@@ -168,17 +168,31 @@ def test_stat_card_pnl_value_colour_beats_the_base_slate_rule() -> None:
     assert "var(--red)" in index_css[neg : neg + 60]
 
 
-def test_summary_cards_have_the_required_market_first_order() -> None:
+def _card(html: str, title: str) -> str:
+    """Return the ``stat-card`` div whose label is ``title``."""
+    for card in html.split('<div class="stat-card'):
+        if f">{title}</div>" in card:
+            return card
+    raise AssertionError(f"no stat-card titled {title!r}")
+
+
+def test_summary_cards_have_the_required_portfolio_value_first_order() -> None:
     html = _render_with_total_pnl(12.5)
 
-    labels = ["Market Value", "Total Cost", "Unrealised P&amp;L", "Cash"]
+    labels = ["Portfolio Value", "Total Cost", "Unrealised P&amp;L", "Cash"]
     indices = [html.index(label) for label in labels]
     assert indices == sorted(indices)
     assert "Positions</div>" not in html[indices[0] : indices[-1]]
-    assert "Includes cash." in html
+    # "Market Value" is holdings-only everywhere: never a summary-card title,
+    # still the holdings-table column header.
+    assert "Market Value</div>" not in html
+    assert "Mkt Value" in html
+    # The two cash-inclusive cards each carry the screen-reader hint.
+    assert "Includes cash." in _card(html, "Portfolio Value")
+    assert "Includes cash." in _card(html, "Total Cost")
 
 
-def test_market_value_headline_uses_total_value_including_cash() -> None:
+def test_portfolio_value_headline_uses_total_value_including_cash() -> None:
     html = templates.get_template("_portfolio.html").render(
         positions=[_fake_position()],
         cash_balance=50,
@@ -199,9 +213,18 @@ def test_market_value_headline_uses_total_value_including_cash() -> None:
         warning_message=None,
     )
 
-    market_card = html.split("Market Value", 1)[1].split("</div>", 2)[1]
-    assert "£150.00" in market_card
-    assert "£100.00" not in market_card
+    value_card = html.split("Portfolio Value", 1)[1].split("</div>", 2)[1]
+    assert "£150.00" in value_card
+    assert "£100.00" not in value_card
+
+
+def test_includes_cash_hint_is_suppressed_when_no_gbp_cash_balance() -> None:
+    """A multi-currency-only portfolio has ``cash_balance is none`` and its
+    totals exclude cash, so neither card may claim "Includes cash."."""
+    html = _render(None, positions=[_fake_position()])
+
+    assert "Portfolio Value</div>" in html
+    assert "Includes cash." not in html
 
 
 def test_dashboard_template_keeps_context_actions_and_chart_fragment_contracts() -> (
