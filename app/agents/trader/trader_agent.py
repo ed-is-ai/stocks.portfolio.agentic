@@ -1859,12 +1859,7 @@ class TraderAgent(Agent):
         # lock window for concurrent imports without any correctness benefit.
         prices: dict[str, float] = {}
         if portfolio_id is not None:
-            data = self._artifacts.read_json(ANALYSIS_JSON, default=None)
-            if data is not None:
-                try:
-                    prices = {r["ticker"]: r["price"] for r in data}
-                except (TypeError, KeyError) as exc:
-                    logger.warning("price/value computation failed: %s", exc)
+            prices = self._snapshot_prices_from_analysis()
 
         conn = self._conn()
         try:
@@ -2371,23 +2366,27 @@ class TraderAgent(Agent):
         see the database's last *committed* state and silently miss them,
         producing a snapshot that is atomically committed but numerically
         wrong (the "read-your-own-writes hazard"). Does not commit.
+
+        Valued through :func:`value_positions_gbp`, exactly as the live
+        writer values a snapshot. Summing ``current_value`` directly adds
+        native currencies together -- a USD holding and a GBp holding
+        counted as though both were GBP -- so an import wrote a snapshot in
+        no currency at all, and the chart it feeds stepped whenever a
+        non-GBP position moved.
         """
         rows = self._trades.open_rows_on_connection(conn, portfolio_id)
         positions = self._compute_positions(rows, prices if prices else None, None)
-        total_cost = sum(p.total_cost for p in positions if p.total_cost is not None)
-        total_value = sum(
-            p.current_value for p in positions if p.current_value is not None
+        valuation = value_positions_gbp(
+            positions, self._cached_gbpusd_rate(), self._gbp_valuation_service()
         )
-        if total_value is None:
-            total_value = total_cost
 
         timestamp = datetime.now(timezone.utc).isoformat()
         self._snapshots.append_on_connection(
             conn,
             portfolio_id,
             timestamp,
-            round(total_value, 2),
-            round(total_cost, 2),
+            valuation.market_value_gbp,
+            valuation.cost_gbp,
             round(cash_balance, 2) if cash_balance is not None else None,
         )
 
