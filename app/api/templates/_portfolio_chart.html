@@ -25,7 +25,14 @@
     <div class="btn-group btn-group-sm" role="group" aria-label="Chart time range">
       {% for preset in _ranges %}
       {% set available = chart_range_availability[preset] if chart_range_availability is defined and preset in chart_range_availability else true %}
+      {# The id is load-bearing, not decoration. These buttons swap the card
+         they live in (outerHTML), so the clicked button destroys itself.
+         htmx restores focus across a swap only by looking up the previously
+         focused element's id in the new content -- with no id it silently
+         gives up and focus falls back to <body>, so Tab restarts from the
+         top of the page after every range change. #}
       <button type="button"
+              id="chartRange{{ preset }}"
               class="btn {% if preset == chart_range %}btn-primary fw-bold{% else %}btn-outline-secondary{% endif %}"
               aria-pressed="{% if preset == chart_range %}true{% else %}false{% endif %}"
               {% if available %}

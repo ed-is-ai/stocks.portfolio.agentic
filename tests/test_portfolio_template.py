@@ -811,3 +811,35 @@ def test_unaliased_ticker_is_not_echoed_twice() -> None:
     # onclick handlers legitimately repeat it outside the cell.
     ticker_cell = _position_row(html, "VOD.L").split("</td>")[0]
     assert ticker_cell.count("VOD.L") == 1
+
+
+def test_range_buttons_carry_ids_so_htmx_can_restore_focus() -> None:
+    """A range button swaps away the card it lives in, taking itself with it.
+
+    htmx restores focus across a swap only by looking the previously focused
+    element up *by id* in the new content; with no id it silently gives up
+    and focus falls back to ``<body>``, so Tab restarts from the top of the
+    page after every range change (WCAG 3.2.1).
+    """
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="12M",
+        chart_points=1,
+        chart_usable_total_points=0,
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+    )
+
+    for preset in ["1M", "3M", "12M", "3Y", "5Y"]:
+        assert f'id="chartRange{preset}"' in html
+    # The ids must be stable across a swap, or the lookup finds nothing:
+    # the same preset renders the same id whether or not it is the active one.
+    other = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="1M",
+        chart_points=1,
+        chart_usable_total_points=0,
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+    )
+    assert 'id="chartRange12M"' in other
