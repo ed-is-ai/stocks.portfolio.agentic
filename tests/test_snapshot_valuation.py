@@ -249,6 +249,32 @@ def test_supplied_positions_and_rate_are_used_verbatim(tmp_path: Path) -> None:
     assert rows[-1][3] == pytest.approx(500.0)
 
 
+def test_import_snapshot_converts_native_values_to_gbp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SIPP import must not add USD and GBp together as if both were GBP."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    positions = [
+        _position("AAPL", cost=100.0, value=200.0, currency="USD"),
+        _position("WCOG", cost=50.0, value=10000.0, currency="GBp"),
+    ]
+    monkeypatch.setattr(agent, "_compute_positions", lambda *args: positions)
+    monkeypatch.setattr(agent, "_cached_gbpusd_rate", lambda: 2.0)
+
+    conn = agent._conn()
+    conn.execute("BEGIN IMMEDIATE")
+    agent._write_import_snapshot(conn, pf.id, 500.0, {})
+    conn.commit()
+    conn.close()
+
+    row = agent.snapshot_history(pf.id)[-1]
+    # USD 200 / 2.0 = 100, GBp 10000 = 100 -> 200, not the naive 10200.
+    assert row[1] == pytest.approx(200.0)
+    # USD 100 / 2.0 = 50, GBp 50 = 0.50 -> 50.50, not the naive 150.
+    assert row[2] == pytest.approx(50.5)
+
+
 def test_legacy_csv_path_writes_blank_cell_when_unavailable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
