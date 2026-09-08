@@ -317,16 +317,16 @@ def test_trade_marker_toggle_renders_in_the_always_present_card_shell() -> None:
     )
 
     assert "No data in this range" in html
-    assert 'id="tradeMarkerToggle"' in html
+    assert 'id="chartMarkerToggle"' in html
     assert 'aria-pressed="false"' in html
-    assert "Show trades" in html
-    assert "toggleTradeMarkers()" in html
+    assert "Show markers" in html
+    assert "toggleChartMarkers()" in html
     # The shell restates the persisted choice on the freshly-swapped button.
-    assert "syncTradeMarkerButton()" in html
+    assert "syncChartMarkerButton()" in html
 
 
 def test_trade_marker_datasets_take_their_hidden_state_from_the_saved_toggle() -> None:
-    """#542: markers default to hidden and follow ``showTradeMarkers()``."""
+    """#542: markers default to hidden and follow ``showChartMarkers()``."""
     html = templates.get_template("_portfolio_chart.html").render(
         portfolio_id=1,
         chart_range="12M",
@@ -350,12 +350,68 @@ def test_trade_marker_datasets_take_their_hidden_state_from_the_saved_toggle() -
     # Matched loosely: the point is that the flag is derived from the guarded
     # helper, not the exact spelling of the line that does it.
     assert "markersOn" in html
-    assert "window.showTradeMarkers" in html
+    assert "window.showChartMarkers" in html
     bounds = [html.index(f"label: '{label}'") for label in ["Buy", "Sell"]]
     buy_dataset = html[bounds[0] : bounds[1]]
     sell_dataset = html[bounds[1] :]
     assert "hidden: !markersOn" in buy_dataset
     assert "hidden: !markersOn" in sell_dataset
+
+
+def test_marker_toggle_sits_beside_the_range_selector() -> None:
+    """The toggle groups with the range buttons on the right, not the title."""
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="1M",
+        chart_points=1,
+        chart_usable_total_points=0,
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+    )
+
+    toggle = html.index('id="chartMarkerToggle"')
+    ranges = html.index('aria-label="Chart time range"')
+    title = html.index("Portfolio Value History")
+    assert title < toggle < ranges
+
+
+def test_estimated_points_are_owned_by_the_marker_toggle() -> None:
+    """The amber diamonds and their explanatory note follow the same switch.
+
+    They are the noise the toggle exists to remove, so a chart with markers
+    off must render plain circles and keep the note hidden until asked for.
+    """
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="12M",
+        chart_points=3,
+        chart_usable_total_points=3,
+        chart_labels='["2026-08-01", "2026-08-02", "2026-08-03"]',
+        chart_total_values="[110, 125, 130]",
+        chart_values="[100, 120, 115]",
+        chart_costs="[90, 90, 90]",
+        chart_cash="[10, 5, 8]",
+        chart_estimated="[false, true, false]",
+        chart_has_estimated_values=True,
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+        chart_buys="[null, null, null]",
+        chart_sells="[null, null, null]",
+        chart_buy_tips="[null, null, null]",
+        chart_sell_tips="[null, null, null]",
+    )
+
+    # The note renders but starts hidden; applyMarkers reveals it.
+    assert 'id="chartEstimatedNote"' in html
+    assert "are <strong>estimated</strong>" in html
+    note = html.index('id="chartEstimatedNote"')
+    assert "hidden" in html[note : note + 120]
+    # The diamond overlay is gated on the toggle, not on the data alone.
+    assert "const overlay = on && estimated.some(Boolean);" in html
+    assert "window.__portfolioApplyMarkers(markersOn);" in html
+    # No dataset hard-codes the estimate styling any more.
+    assert "estPointStyle" not in html
+    assert "estPointColor" not in html
 
 
 def test_chart_range_buttons_disable_when_availability_says_no(  # noqa: E501
