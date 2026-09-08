@@ -13,6 +13,7 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Query,
     Request,
     UploadFile,
 )
@@ -25,7 +26,7 @@ from app.api.dependencies import (
     get_realised_pnl_service,
     get_trader_service,
 )
-from app.api.params import optional_int
+from app.api.params import chart_range, optional_int
 from app.api.templating import templates
 from app.core.config import (
     IMPORTED_FILES_DIR,
@@ -214,12 +215,21 @@ async def refresh_portfolio_prices(
     portfolio: PortfolioDep,
     background: BackgroundTasks,
     portfolio_id: str | None = None,
+    range_key: str | None = Query(None, alias="range"),
 ) -> HTMLResponse:
-    """Fetch live prices from yfinance and return the updated portfolio partial."""
+    """Fetch live prices from yfinance and return the updated portfolio partial.
+
+    ``range`` carries the chart window the browser is currently showing, so
+    the re-rendered partial comes back on that range instead of snapping to
+    the default (#541). Unknown or absent resolves to ``DEFAULT_CHART_RANGE``.
+    """
     pid = optional_int(portfolio_id)
+    selected_range = chart_range(range_key)
     input_snapshot = None
     try:
-        input_snapshot = portfolio.portfolio_input_snapshot(pid)
+        input_snapshot = portfolio.portfolio_input_snapshot(
+            pid, range_key=selected_range
+        )
         positions = portfolio.positions_from_input_snapshot(input_snapshot)
         logger.info("Refreshing %d positions", len(positions))
         if not positions:
@@ -228,6 +238,7 @@ async def refresh_portfolio_prices(
                 error_message="No positions to refresh",
                 portfolio_id=pid,
                 input_snapshot=input_snapshot,
+                range_key=selected_range,
             )
             return templates.TemplateResponse(
                 request, "_portfolio.html", context=context, status_code=400
@@ -282,7 +293,9 @@ async def refresh_portfolio_prices(
         )
         if pid is not None:
             background.add_task(_run_snapshot_backfill, trader, pid)
-        input_snapshot = portfolio.with_current_chart_data(input_snapshot, pid)
+        input_snapshot = portfolio.with_current_chart_data(
+            input_snapshot, pid, selected_range
+        )
         context = portfolio.portfolio_partial_context(
             updated_positions,
             prices_as_of=prices_as_of,
@@ -295,6 +308,7 @@ async def refresh_portfolio_prices(
             ),
             portfolio_id=pid,
             input_snapshot=input_snapshot,
+            range_key=selected_range,
         )
         return templates.TemplateResponse(request, "_portfolio.html", context=context)
     except Exception as e:
@@ -320,6 +334,7 @@ async def refresh_portfolio_prices(
             error_message=f"Failed to fetch prices: {e}",
             portfolio_id=pid,
             input_snapshot=input_snapshot,
+            range_key=selected_range,
         )
         return templates.TemplateResponse(
             request, "_portfolio.html", context=context, status_code=500

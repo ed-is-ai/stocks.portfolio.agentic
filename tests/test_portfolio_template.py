@@ -301,6 +301,63 @@ def test_chart_makes_portfolio_value_dominant_and_supporting_lines_distinct() ->
     assert "Portfolio value history chart." in html
 
 
+def test_trade_marker_toggle_renders_in_the_always_present_card_shell() -> None:
+    """#542: the toggle survives an outerHTML swap into an empty range.
+
+    Putting it inside the canvas gate would delete the only control that
+    turns markers back on whenever a range happens to hold no data.
+    """
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="1M",
+        chart_points=1,
+        chart_usable_total_points=0,
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+    )
+
+    assert "No data in this range" in html
+    assert 'id="tradeMarkerToggle"' in html
+    assert 'aria-pressed="false"' in html
+    assert "Show trades" in html
+    assert "toggleTradeMarkers()" in html
+    # The shell restates the persisted choice on the freshly-swapped button.
+    assert "syncTradeMarkerButton()" in html
+
+
+def test_trade_marker_datasets_take_their_hidden_state_from_the_saved_toggle() -> None:
+    """#542: markers default to hidden and follow ``showTradeMarkers()``."""
+    html = templates.get_template("_portfolio_chart.html").render(
+        portfolio_id=1,
+        chart_range="12M",
+        chart_points=3,
+        chart_usable_total_points=3,
+        chart_labels='["2026-08-01", "2026-08-02", "2026-08-03"]',
+        chart_total_values="[110, 125, 130]",
+        chart_values="[100, 120, 115]",
+        chart_costs="[90, 90, 90]",
+        chart_cash="[10, 5, 8]",
+        chart_has_unavailable_totals=False,
+        chart_all_totals_unavailable=False,
+        chart_buys="[null, 120, null]",
+        chart_sells="[null, null, null]",
+        chart_buy_tips='[null, "BUY 1 AAPL", null]',
+        chart_sell_tips="[null, null, null]",
+    )
+
+    # Guarded so the fragment still renders outside index.html's page scope,
+    # where the helper is undefined -- and defaults to hidden there too.
+    # Matched loosely: the point is that the flag is derived from the guarded
+    # helper, not the exact spelling of the line that does it.
+    assert "markersOn" in html
+    assert "window.showTradeMarkers" in html
+    bounds = [html.index(f"label: '{label}'") for label in ["Buy", "Sell"]]
+    buy_dataset = html[bounds[0] : bounds[1]]
+    sell_dataset = html[bounds[1] :]
+    assert "hidden: !markersOn" in buy_dataset
+    assert "hidden: !markersOn" in sell_dataset
+
+
 def test_chart_range_buttons_disable_when_availability_says_no(  # noqa: E501
 ) -> None:
     """A preset marked unavailable (#498) renders disabled with no hx-get,

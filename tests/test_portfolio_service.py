@@ -1503,6 +1503,30 @@ def test_market_value_extends_further_when_backfilled_rows_lack_cash():
     assert projected["market_value_extends_further"] is True
 
 
+def test_a_reconstructed_sell_day_keeps_the_total_continuous():
+    """#543: a sale moves value into cash, so the total must not step down.
+
+    These are the rows the backfill now writes: market value drops by the
+    sale, reconstructed cash rises by exactly the proceeds. Under the old
+    carry-forward semantics cash was flat, the total stepped down by £50,
+    and the pre-statement row's NULL cash pushed the whole chart onto the
+    Market-Value-only fallback.
+    """
+    rows = [
+        ("2024-01-01T00:00:00+00:00", 200.0, 180.0, 1000.0),
+        ("2024-01-02T00:00:00+00:00", 200.0, 180.0, 1000.0),
+        ("2024-01-03T00:00:00+00:00", 150.0, 135.0, 1050.0),
+        ("2024-01-04T00:00:00+00:00", 150.0, 135.0, 1050.0),
+    ]
+
+    projected = PortfolioService._project_portfolio_chart_rows(rows)
+
+    assert projected["total_values"] == [1200.0, 1200.0, 1200.0, 1200.0]
+    assert projected["has_unavailable_totals"] is False
+    # Every row carries cash now, so the fallback banner stays away.
+    assert projected["market_value_extends_further"] is False
+
+
 def test_market_value_stays_hidden_when_every_row_has_cash():
     rows = [
         ("2024-01-01T09:00:00+00:00", 100.0, 90.0, 10.0),

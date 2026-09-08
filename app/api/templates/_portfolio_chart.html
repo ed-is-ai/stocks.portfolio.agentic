@@ -11,6 +11,16 @@
     <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted)">
       <i class="bi bi-graph-up me-1"></i>Portfolio Value History
     </div>
+    {# Lives in the ALWAYS-rendered shell, not inside the canvas gate below:  #}
+    {# an outerHTML swap into an empty range would otherwise delete the       #}
+    {# control the user needs to turn markers back on (#542).                 #}
+    <button type="button"
+            id="tradeMarkerToggle"
+            class="btn btn-sm btn-outline-secondary"
+            aria-pressed="false"
+            onclick="toggleTradeMarkers()">
+      <i class="bi bi-triangle-fill me-1"></i><span data-marker-label>Show trades</span>
+    </button>
     <div class="btn-group btn-group-sm" role="group" aria-label="Chart time range">
       {% for preset in _ranges %}
       {% set available = chart_range_availability[preset] if chart_range_availability is defined and preset in chart_range_availability else true %}
@@ -78,6 +88,10 @@
     const estPointRadius = base => estAny ? estimated.map(e => e ? 5 : base) : base;
     const estPointStyle  = () => estAny ? estimated.map(e => e ? 'rectRot' : 'circle') : 'circle';
     const estPointColor  = c => estAny ? estimated.map(e => e ? '#b45309' : c) : c;
+
+    // Hidden unless the user has opted in (#542). Guarded so the fragment
+    // still renders if it is ever loaded without index.html's page scope.
+    const markersOn = !!(window.showTradeMarkers && showTradeMarkers());
 
     const el = document.getElementById('portfolioChart');
     if (!el) return;
@@ -163,6 +177,7 @@
             backgroundColor: '#16a34a',
             borderColor: '#16a34a',
             borderWidth: 1,
+            hidden: !markersOn,
             order: 1,
           },
           {
@@ -176,6 +191,7 @@
             backgroundColor: '#dc2626',
             borderColor: '#dc2626',
             borderWidth: 1,
+            hidden: !markersOn,
             order: 2,
           },
         ]
@@ -251,4 +267,6 @@
   </p>
   <script>if(window.__portfolioChart){window.__portfolioChart.destroy();window.__portfolioChart=null;}</script>
   {% endif %}
+  {# Restate the persisted marker choice on the freshly-swapped button (#542). #}
+  <script>if(window.syncTradeMarkerButton)syncTradeMarkerButton();</script>
 </div>

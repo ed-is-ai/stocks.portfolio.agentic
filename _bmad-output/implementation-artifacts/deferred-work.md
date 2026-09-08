@@ -553,3 +553,9 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-527-valuation-terminology.md`
   summary: The "Total Cost" summary card binds `total_cost_gbp`, which sums the historical purchase cost of holdings with the *current* cash balance (`portfolio_service.py` L1222-1224) -- a mixed-basis figure. It is arithmetically paired with the cash-inclusive "Portfolio Value" card (cash cancels in the P&L), but "Total Cost = holdings cost + today's cash" is not a coherent single quantity; consider showing holdings cost only.
   evidence: `app/services/portfolio_service.py:1222` -- `total_cost_gbp = sum(valued_costs) + effective_cash_balance`.
+- source_spec: `spec-gh-541-542-543-portfolio-chart.md`
+  summary: `net_trade_cash` books every trade's `shares * price` as GBP, but the SIPP import stores a per-trade currency, so a non-GBP trade corrupts the reconstructed GBP cash delta.
+  evidence: `trades.currency` exists (`db.py` migration) and is populated at import (`trader_agent.py` ~1684), but `TradesRepository._REPLAY_COLUMNS` omits it, so every replay consumer — `position_cost_basis_as_of`, `cost_basis_as_of` and now `net_trade_cash` — treats prices as GBP major units. Pre-existing convention, widened by #543 from cost basis to cash.
+- source_spec: `spec-gh-541-542-543-portfolio-chart.md`
+  summary: The new trade-marker toggle button is not covered by the mobile wrap rule for the chart-card header, which targets `.portfolio-chart-card .btn-group` only.
+  evidence: The toggle is a standalone `<button>` beside the range `btn-group` in `_portfolio_chart.html`; the narrow-viewport CSS in `index.html` selects `.btn-group` alone, so the header now carries an extra uncovered control.

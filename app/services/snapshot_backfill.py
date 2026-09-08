@@ -23,14 +23,19 @@ at all is unambiguously this service's job; the repair pass keeps ownership
 of rows that exist but are ``NULL``/``0.00``.
 
 Backfilled rows carry reconstructed ``total_value`` and ``total_cost``. Cash
-is filled from dated provider statements when available; rows before the
-first statement stay ``NULL`` so the chart does not invent a balance.
+comes from :class:`~app.services.cash_reconstruction.CashReconstruction`:
+the nearest dated statement anchor plus the signed cash flows and trade
+proceeds between it and the day, rolled either direction (#543). A portfolio
+with no stated balance at all still leaves ``NULL`` -- the chart never
+invents a balance -- but a day merely *before* the first statement no longer
+does, because the reconstruction can unwind back to it.
 
 Two cheap idempotency guards keep the repeated triggers (import, price
 refresh, pipeline) from doing real work or corrupting rows:
 
 * a per-portfolio ``account_state`` marker recording the ``[start, end)`` a
-  successful run already covered -- an unchanged range is a fast no-op that
+  successful run already covered, prefixed with the cash semantics that run
+  used -- an unchanged range is a fast no-op that
   never opens the day loop. Because ``end`` is today, the marker naturally
   expires at the next UTC midnight, so a run that found no evidence is
   retried the following day instead of being blocked forever (#509);
@@ -43,6 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 import logging
 from typing import Any
 
@@ -50,6 +56,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.repositories.account_repo import AccountStateRepository
 from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
+from app.repositories.cash_flows_repo import CashFlowsRepository
 from app.repositories.db import Connect
 from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
@@ -57,6 +64,7 @@ from app.repositories.portfolios_repo import PortfoliosRepository
 from app.repositories.trades_repo import TradesRepository
 from app.services.backfill_status import BackfillStatusTracker
 from app.services.backtest.historical_price_evidence import FX_PAIR
+from app.services.cash_reconstruction import CashReconstruction
 from app.services.snapshot_price_backfill import (
     PriceEvidenceBackfillService,
     PriceEvidenceUnavailable,
@@ -78,6 +86,11 @@ logger = logging.getLogger(__name__)
 #: ``account_state`` key prefix for the per-portfolio "already backfilled this
 #: range" marker (see the module docstring).
 _MARKER_PREFIX = "snapshot_backfill:"
+
+#: Version stamp on that marker's *value*, bumped when the cash semantics
+#: change so every existing install re-runs once and recomputes the rows it
+#: wrote under the old last-stated-balance carry-forward (#543).
+_CASH_SEMANTICS = "v2:"
 
 
 class SnapshotBackfillReport(BaseModel):
@@ -121,12 +134,16 @@ class SnapshotBackfillService:
         progress: BackfillStatusTracker | None = None,
         cash_history: CashBalanceHistoryRepository | None = None,
         estimate_unpriceable: bool = True,
+        cash_flows: CashFlowsRepository | None = None,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
         self._portfolios = portfolios
         self._account_state = account_state
         self._cash_history = cash_history
+        # Optional: without it the reconstruction still works off anchors and
+        # trades, it simply attributes nothing to contributions or dividends.
+        self._cash_flows = cash_flows
         self._price_source: HistoricalGbpPriceSource = (
             price_source or NoHistoricalPriceSource()
         )
@@ -206,17 +223,28 @@ class SnapshotBackfillService:
 
         last_day = end - timedelta(days=1)
         marker_key = f"{_MARKER_PREFIX}{pid}"
-        signature = f"{start.isoformat()}..{end.isoformat()}"
-        cash_start = (
-            self._cash_history.earliest_as_of(pid)
-            if self._cash_history is not None
-            else None
+        # The marker records the cash *inputs* alongside the date range, so an
+        # imported statement reopens the loop to recompute every reconstructed
+        # balance it moves (#543). Asking the rows themselves whether any cash
+        # is still NULL cannot do that job: a day whose cash is unresolvable --
+        # a currency with no dated rate -- would answer "still missing" on
+        # every trigger forever and reopen the whole day loop, evidence
+        # prefetch included, without ever converging. A row left NULL for a
+        # reason that later resolves is picked up when ``end`` rolls over at
+        # the next UTC midnight, which is soon enough.
+        anchors = (
+            self._cash_history.series(pid) if self._cash_history is not None else []
         )
-        needs_cash_repair = cash_start is not None and self._snapshots.has_missing_cash(
-            pid, max(start.isoformat(), cash_start), last_day.isoformat()
+        cash_stamp = f"{len(anchors)}@{anchors[-1][0][:10] if anchors else '-'}"
+        signature = (
+            f"{_CASH_SEMANTICS}{start.isoformat()}..{end.isoformat()}:{cash_stamp}"
         )
-        if self._account_state.get(marker_key) == signature and not needs_cash_repair:
+        # A marker written before #543 carries neither the ``v2:`` stamp nor
+        # the cash inputs, so it can never match and every existing install
+        # recomputes its carry-forward rows exactly once.
+        if self._account_state.get(marker_key) == signature:
             return
+        reconstruction = self._cash_reconstruction(pid, anchors, replay_rows)
 
         self._progress.begin(
             pid,
@@ -239,9 +267,15 @@ class SnapshotBackfillService:
             as_of = day.isoformat()
             day += timedelta(days=1)
             if as_of in present:
-                cash = self._cash_as_of(pid, as_of)
-                if cash is not None and self._snapshots.fill_missing_cash(
-                    pid, as_of, cash
+                cash = self._cash_as_of(reconstruction, as_of)
+                # Rewrite this backfill's own row (its cash may have been
+                # computed under the old carry-forward semantics, #543);
+                # fall back to filling a NULL on a row written by anything
+                # else. A live snapshot's stated cash is authoritative and
+                # neither call can overwrite it.
+                if cash is not None and (
+                    self._snapshots.update_backfilled_cash(pid, as_of, cash)
+                    or self._snapshots.fill_missing_cash(pid, as_of, cash)
                 ):
                     totals.rows_written += 1
                 totals.days_already_present += 1
@@ -258,7 +292,7 @@ class SnapshotBackfillService:
                     f"{as_of}T00:00:00+00:00",
                     value,
                     total_cost=cost_basis_as_of(replay_rows, as_of),
-                    cash_balance=self._cash_as_of(pid, as_of),
+                    cash_balance=self._cash_as_of(reconstruction, as_of),
                     value_is_estimated=is_estimated,
                 ):
                     totals.rows_written += 1
@@ -338,23 +372,51 @@ class SnapshotBackfillService:
             logger.warning("FX evidence backfill failed: %s", exc)
             totals.fetch_failures.add(FX_PAIR)
 
-    def _cash_as_of(self, pid: int, as_of: str) -> float | None:
-        """Return the GBP cash balance in force on ``as_of``, or None (#514).
+    def _cash_reconstruction(
+        self,
+        pid: int,
+        anchors: list[tuple[str, str, Decimal]],
+        replay_rows: list[tuple[Any, ...]],
+    ) -> CashReconstruction | None:
+        """Build this portfolio's anchor-plus-delta cash model, or None (#543).
 
-        Reads the dated Running Balance series the import captured -- the
-        provider's own figure, carried forward from the last statement on or
-        before this day -- and folds each currency into GBP through the same
-        exact-date evidence the valuation uses.
-
-        Returns None rather than a partial total whenever the answer would be
-        a guess: no history at all, a day before the first statement, or a
-        non-GBP balance with no dated rate. A wrong cash figure is worse than
-        an absent one, because it silently shifts the Portfolio Value line.
+        One construction per portfolio, not per day: the dated statement
+        ``anchors`` are already in hand (the idempotency marker is stamped
+        with them) and the whole ``cash_flows`` ledger is read once here, so
+        the day loop then answers every balance from memory. None when no
+        cash history repository is wired at all -- the deliberate opt-out
+        that leaves every backfilled row's cash ``NULL``.
         """
         if self._cash_history is None:
             return None
-        balances = self._cash_history.balances_as_of(pid, as_of)
-        if not balances:
+        flows = (
+            self._cash_flows.dated_flows(pid) if self._cash_flows is not None else []
+        )
+        return CashReconstruction(anchors, flows, replay_rows)
+
+    def _cash_as_of(
+        self, reconstruction: CashReconstruction | None, as_of: str
+    ) -> float | None:
+        """Return the GBP cash balance in force on ``as_of``, or None (#514).
+
+        Takes the per-currency balances the reconstruction derives for this
+        day -- the nearest dated statement anchor rolled forward or backward
+        over signed cash flows and trade proceeds (#543) -- and folds each
+        currency into GBP through the same exact-date evidence the valuation
+        uses.
+
+        Returns None rather than a partial total whenever the answer would be
+        a guess: no stated balance anywhere in the portfolio's history, or a
+        non-GBP balance with no dated rate. A wrong cash figure is worse than
+        an absent one, because it silently shifts the Portfolio Value line.
+        """
+        if reconstruction is None:
+            return None
+        balances = reconstruction.balances_at(as_of)
+        # ``None`` is "no stated balance anywhere" -- the only case worth a
+        # NULL. An *empty* mapping is every currency reconstructing to zero,
+        # which is a real answer: the account genuinely held no cash.
+        if balances is None:
             return None
         total = 0.0
         for currency, amount in balances.items():
@@ -426,4 +488,5 @@ def build_backfill_service(trades_connect: Connect) -> SnapshotBackfillService:
         backfill=PriceEvidenceBackfillService(backfill_prices),
         progress=tracker,
         cash_history=CashBalanceHistoryRepository(trades_connect),
+        cash_flows=CashFlowsRepository(trades_connect),
     )

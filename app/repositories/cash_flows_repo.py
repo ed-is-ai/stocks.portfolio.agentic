@@ -44,6 +44,26 @@ class CashFlowsRepository:
             rows = conn.execute(base, params).fetchall()
         return [_row_to_cash_flow(r) for r in rows]
 
+    def dated_flows(self, portfolio_id: int) -> list[tuple[str, str, float, str]]:
+        """Return every ``(date, flow_type, amount, currency)`` oldest-first (#543).
+
+        Unlike :meth:`history` this is neither limited nor newest-first and
+        returns plain tuples rather than models: the cash reconstruction
+        loads a portfolio's whole flow ledger once and then answers a
+        balance for every backfilled day from it, so a 200-row cap or a
+        per-day query would both be wrong.
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT date, flow_type, amount, currency FROM cash_flows "
+                "WHERE portfolio_id = ? ORDER BY date ASC, id ASC",
+                (portfolio_id,),
+            ).fetchall()
+        return [
+            (str(row[0]), str(row[1]), float(row[2]), str(row[3] or "GBP"))
+            for row in rows
+        ]
+
     def insert_ignore(
         self,
         conn: Any,

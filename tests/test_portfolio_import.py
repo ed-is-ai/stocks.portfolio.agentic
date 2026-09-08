@@ -124,7 +124,9 @@ def test_refresh_uses_one_public_input_snapshot_for_positions_and_context(
     response = client.post("/api/portfolio/refresh", headers={"X-Auth-Token": "s3cret"})
 
     assert response.status_code == 200
-    mock_portfolio.portfolio_input_snapshot.assert_called_once_with(None)
+    mock_portfolio.portfolio_input_snapshot.assert_called_once_with(
+        None, range_key="12M"
+    )
     assert mock_portfolio.positions_from_input_snapshot.call_args_list == [
         ((snapshot,), {}),
         ((snapshot, {"AAPL": 100.0}, {}), {}),
@@ -137,8 +139,11 @@ def test_refresh_uses_one_public_input_snapshot_for_positions_and_context(
         warning_message=None,
         portfolio_id=None,
         input_snapshot=chart_snapshot,
+        range_key="12M",
     )
-    mock_portfolio.with_current_chart_data.assert_called_once_with(snapshot, None)
+    mock_portfolio.with_current_chart_data.assert_called_once_with(
+        snapshot, None, "12M"
+    )
     mock_trader.get_portfolio.assert_not_called()
     mock_trader.refresh_portfolio_prices.assert_not_called()
 
