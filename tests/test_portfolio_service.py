@@ -1551,3 +1551,66 @@ def test_has_estimated_values_is_false_without_any_estimate():
 
     assert projected["has_estimated_values"] is False
     assert projected["estimated"] == [False, False]
+
+
+# --- GH-531: alias-load failure must not poison snapshot pricing -------------
+
+
+class _PriceCacheTrader(_StubTrader):
+    """Serves a fixed price cache and records ``save_price_cache`` calls."""
+
+    def __init__(self, cache: dict[str, float]) -> None:
+        self._cache = cache
+        self.saved: list[Any] = []
+
+    def load_price_cache(self):
+        display = {k: (v, "GBP") for k, v in self._cache.items()}
+        return dict(self._cache), None, display
+
+    def save_price_cache(self, prices, display_info=None):
+        self.saved.append((prices, display_info))
+
+
+def test_get_prices_for_holdings_ignores_stale_alias_source_row(monkeypatch) -> None:
+    """A ``price_cache`` row keyed by a now-aliased raw spelling (HSFWA,
+    written before the alias existed) must never value the holding; only
+    the canonical row (0P00013P6I.L) is consulted."""
+    trader = _PriceCacheTrader({"HSFWA": 109.90, "0P00013P6I.L": 4.19})
+    svc = PortfolioService(
+        cast(TraderService, trader),
+        cast(ExitEvaluator, _StubEvaluator()),
+        gbp_valuation=cast(GbpValuationService, _NoFxValuation()),
+    )
+    monkeypatch.setattr(svc, "load_ticker_aliases", lambda: {"HSFWA": "0P00013P6I.L"})
+
+    prices, _display, _gbpusd = svc.get_prices_for_holdings(["0P00013P6I.L"])
+
+    assert prices["0P00013P6I.L"] == 4.19
+    assert 109.90 not in prices.values()
+    assert "HSFWA" not in prices
+    assert trader.saved == []
+
+
+def test_get_prices_for_holdings_raises_when_alias_file_unreadable(
+    monkeypatch,
+) -> None:
+    """No last-good alias map: an unreadable alias file aborts pricing
+    before any price-cache write."""
+    from app.core.ticker_identity import AliasFileUnreadableError
+
+    trader = _PriceCacheTrader({"AAA": 1.0})
+    svc = PortfolioService(
+        cast(TraderService, trader),
+        cast(ExitEvaluator, _StubEvaluator()),
+        gbp_valuation=cast(GbpValuationService, _NoFxValuation()),
+    )
+
+    def _boom() -> dict[str, str]:
+        raise AliasFileUnreadableError("config/ticker_aliases.json unreadable")
+
+    monkeypatch.setattr(svc, "load_ticker_aliases", _boom)
+
+    with pytest.raises(AliasFileUnreadableError):
+        svc.get_prices_for_holdings(["ZZZ"])
+
+    assert trader.saved == []
