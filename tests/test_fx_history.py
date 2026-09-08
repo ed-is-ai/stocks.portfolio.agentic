@@ -161,6 +161,32 @@ def test_yahoo_never_substitutes_a_nearest_earlier_rate() -> None:
     assert fetcher.fetch("GBPUSD=X", AS_OF) is None
 
 
+def test_lookback_returns_nearest_prior_quote_with_its_actual_date() -> None:
+    requested = "2000-02-06"
+    prior = "2000-02-02"
+
+    fetcher = ChainedFxQuoteFetcher(
+        request_get=lambda *_args: _response(text=BOE_HTML),
+        yahoo_exact=lambda _pair, _as_of: None,
+    )
+
+    quote = fetcher.fetch_on_or_before("GBPUSD=X", requested)
+
+    assert quote is not None
+    assert quote.provider == "bank_of_england"
+    assert quote.as_of == prior
+    assert quote.rate == Decimal("1.6180")
+
+
+def test_lookback_does_not_accept_a_quote_beyond_the_freshness_window() -> None:
+    fetcher = ChainedFxQuoteFetcher(
+        request_get=_fred_only_response,
+        yahoo_exact=lambda _pair, _as_of: None,
+    )
+
+    assert fetcher.fetch_on_or_before("GBPUSD=X", "2000-02-08") is None
+
+
 def test_boe_page_without_any_date_cells_is_transient() -> None:
     """A layout change must degrade to mode (a), never to a permanent
     negative cache of "no rate exists"."""
@@ -304,3 +330,5 @@ def test_unsupported_pair_raises_without_any_fetch() -> None:
 
     with pytest.raises(FxUnsupportedPair, match="EURUSD=X"):
         fetcher.fetch("EURUSD=X", AS_OF)
+    with pytest.raises(FxUnsupportedPair, match="EURUSD=X"):
+        fetcher.fetch_on_or_before("EURUSD=X", AS_OF)
