@@ -895,59 +895,55 @@
     }
   }
 
-  // Trade markers on the value chart are per-browser too, and default to
-  // HIDDEN: a busy portfolio draws a triangle on nearly every point, which
-  // buries the value line the chart exists to show (#542). Same try/catch
-  // shape as activeChartRange -- private mode must fall back to the default,
-  // never throw out of the chart's init script.
-  function showTradeMarkers() {
+  // Chart markers are per-browser too, and default to HIDDEN: on a busy
+  // portfolio the buy/sell triangles and the amber estimate diamonds land on
+  // nearly every point and bury the value line the chart exists to show
+  // (#542). One preference covers both kinds -- they are the same visual
+  // noise to the reader. Same try/catch shape as activeChartRange: private
+  // mode must fall back to the default, never throw out of the chart's init.
+  function showChartMarkers() {
     try {
-      return localStorage.getItem('showTradeMarkers') === '1';
+      return localStorage.getItem('showChartMarkers') === '1';
     } catch (e) {
       return false;
     }
   }
-  function setTradeMarkers(on) {
+  function setChartMarkers(on) {
     try {
       if (on) {
-        localStorage.setItem('showTradeMarkers', '1');
+        localStorage.setItem('showChartMarkers', '1');
       } else {
-        localStorage.removeItem('showTradeMarkers');
+        localStorage.removeItem('showChartMarkers');
       }
     } catch (e) {
       /* localStorage unavailable (private mode, disabled) — no-op */
     }
   }
 
-  // Pure client-side (#542): the Buy/Sell datasets are already in the chart,
-  // so flipping them needs no server round-trip and no new route.
-  function toggleTradeMarkers() {
-    const on = !showTradeMarkers();
-    setTradeMarkers(on);
-    const chart = window.__portfolioChart;
-    if (chart) {
-      chart.data.datasets.forEach(function (ds, i) {
-        if (ds.label !== 'Buy' && ds.label !== 'Sell') return;
-        ds.hidden = !on;
-        chart.setDatasetVisibility(i, on);
-      });
-      chart.update();
-    }
-    syncTradeMarkerButton();
+  // Pure client-side (#542): every marker is already in the chart, so
+  // flipping them needs no server round-trip and no new route. What "on"
+  // actually means to the chart lives with the chart, in
+  // __portfolioApplyMarkers -- only that fragment knows which points are
+  // estimated. Here we just move the preference and ask.
+  function toggleChartMarkers() {
+    const on = !showChartMarkers();
+    setChartMarkers(on);
+    if (window.__portfolioApplyMarkers) window.__portfolioApplyMarkers(on);
+    syncChartMarkerButton();
   }
 
   // The toggle lives in the always-rendered card shell, so every render of
   // that shell (page load, range swap, backfill re-render) has to restate
   // the persisted choice on it.
-  function syncTradeMarkerButton() {
-    const btn = document.getElementById('tradeMarkerToggle');
+  function syncChartMarkerButton() {
+    const btn = document.getElementById('chartMarkerToggle');
     if (!btn) return;
-    const on = showTradeMarkers();
+    const on = showChartMarkers();
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
     btn.classList.toggle('btn-primary', on);
     btn.classList.toggle('btn-outline-secondary', !on);
     const label = btn.querySelector('[data-marker-label]');
-    if (label) label.textContent = on ? 'Hide trades' : 'Show trades';
+    if (label) label.textContent = on ? 'Hide markers' : 'Show markers';
   }
 
   // Swap a full-page partial into #tab-content *through htmx* (#541).
