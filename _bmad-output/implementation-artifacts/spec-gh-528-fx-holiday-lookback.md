@@ -6,7 +6,7 @@ status: 'done'
 baseline_revision: 'add484a2'
 review_loop_iteration: 0
 followup_review_recommended: false
-final_revision: 'cf6d036'
+final_revision: '300a41d'
 context: []
 warnings: []
 ---
