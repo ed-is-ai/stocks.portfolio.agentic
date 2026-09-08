@@ -2,10 +2,11 @@
 title: 'FX evidence lookback for non-trading snapshot dates'
 type: 'bugfix'
 created: '2026-09-08'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'add484a2'
 review_loop_iteration: 0
 followup_review_recommended: false
+final_revision: 'cf6d036'
 context: []
 warnings: []
 ---
