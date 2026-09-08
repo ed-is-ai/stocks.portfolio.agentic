@@ -1,16 +1,15 @@
-{% macro snapshot_card(rows, total_value, total_cost, total_pnl, pnl_pct, pnl_color, margin="margin:16px 0;") %}
+{% macro snapshot_card(snapshot, margin="margin:16px 0;") %}
 <div style="{{ margin }}padding:14px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px">
   <div style="font-weight:700;font-size:0.8em;text-transform:uppercase;letter-spacing:0.06em;color:#64748b;margin-bottom:10px">
-    Portfolio Snapshot
+    Portfolio Snapshot — {{ snapshot.name }}
   </div>
-  <div style="display:flex;gap:24px;margin-bottom:10px;flex-wrap:wrap">
-    <div><div style="font-size:0.72em;color:#64748b">Market Value</div>
-         <div style="font-weight:700;font-size:1.1em">£{{ total_value }}</div></div>
-    <div><div style="font-size:0.72em;color:#64748b">Cost Basis</div>
-         <div style="font-weight:700;font-size:1.1em">£{{ total_cost }}</div></div>
-    <div><div style="font-size:0.72em;color:#64748b">Unrealised P&amp;L</div>
-         <div style="font-weight:700;font-size:1.1em;color:{{ pnl_color }}">£{{ total_pnl }} ({{ pnl_pct }})</div></div>
-  </div>
+  <table role="presentation" style="width:100%;border-collapse:collapse;margin-bottom:10px">
+    <tr><td style="padding:3px 8px 3px 0;color:#64748b">Market Value</td><td style="padding:3px 0;text-align:right;font-weight:700">£{{ snapshot.market_value }}</td></tr>
+    <tr><td style="padding:3px 8px 3px 0;color:#64748b">Cost Basis</td><td style="padding:3px 0;text-align:right;font-weight:700">£{{ snapshot.total_cost }}</td></tr>
+    <tr><td style="padding:3px 8px 3px 0;color:#64748b">Unrealised P&amp;L</td><td style="padding:3px 0;text-align:right;font-weight:700;color:{{ snapshot.pnl_color }}">£{{ snapshot.total_pnl }} ({{ snapshot.pnl_pct }})</td></tr>
+    <tr><td style="padding:3px 8px 3px 0;color:#64748b">Cash</td><td style="padding:3px 0;text-align:right;font-weight:700">£{{ snapshot.cash }}</td></tr>
+    <tr><td style="padding:3px 8px 3px 0;color:#64748b">Portfolio Value</td><td style="padding:3px 0;text-align:right;font-weight:700">£{{ snapshot.portfolio_value }}</td></tr>
+  </table>
   <table style="width:100%;border-collapse:collapse;font-size:0.82em">
     <tr style="background:#e2e8f0">
       <th style="padding:4px 8px;text-align:left">Ticker</th>
@@ -19,7 +18,7 @@
       <th style="padding:4px 8px;text-align:right">Value</th>
       <th style="padding:4px 8px;text-align:right">P&amp;L %</th>
     </tr>
-    {% for row in rows %}
+    {% for row in snapshot.rows %}
     <tr>
       <td style="padding:5px 8px;font-weight:700">{{ row.ticker }}</td>
       <td style="padding:5px 8px;text-align:right">{{ row.shares }}</td>
