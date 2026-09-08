@@ -13,6 +13,7 @@ caller records an honest gap.
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 import logging
 import math
 from pathlib import Path
@@ -146,6 +147,28 @@ class HistoricalCacheGbpPriceSource:
         if code == "GBP":
             return 1.0
         return self._dated_rate(f"GBP{code}=X", as_of)
+
+    def trading_days(self, start: str, end: str) -> frozenset[str]:
+        """Return the days in ``[start, end]`` the market is known to have traded.
+
+        Read off the FX evidence, which is a market calendar the app already
+        maintains: ``ensure_fx_coverage`` fetches the ``GBPUSD=X`` daily
+        series across the whole backfill window, and the provider publishes
+        a row for each trading day and none for a weekend or a bank holiday.
+        That is a calendar nobody has to hand-maintain, and it stays right
+        for a year nobody anticipated.
+
+        One batched query rather than a lookup per day. An empty answer
+        means the calendar is simply unknown here -- a checkout with no FX
+        evidence at all -- and callers must treat it as "cannot tell",
+        never as "the market never opened".
+        """
+        days: list[str] = []
+        day, last = date.fromisoformat(start), date.fromisoformat(end)
+        while day <= last:
+            days.append(day.isoformat())
+            day += timedelta(days=1)
+        return frozenset(self._fx_cache.get_many(days).keys())
 
     def _symbols_for(self, ticker: str) -> set[str]:
         """Return every provider spelling ``ticker`` could be cached under."""

@@ -30,6 +30,14 @@ with no stated balance at all still leaves ``NULL`` -- the chart never
 invents a balance -- but a day merely *before* the first statement no longer
 does, because the reconstruction can unwind back to it.
 
+A day on which the market was closed is not revalued at all: it carries the
+previous trading day's row forward (#547). Revaluing it priced the whole
+book at carrying cost, because no provider publishes a close for a weekend
+or a bank holiday, and wrote a phantom dip every Saturday that recovered
+every Monday. A closed market is identified from the FX calendar the app
+already maintains plus the absence of any dated close, so no bank-holiday
+calendar has to be hand-maintained here.
+
 Two cheap idempotency guards keep the repeated triggers (import, price
 refresh, pipeline) from doing real work or corrupting rows:
 
@@ -77,6 +85,7 @@ from app.services.snapshot_repair import (
     first_trade_dates,
     holdings_as_of,
     last_trade_dates,
+    market_was_closed,
     position_cost_basis_as_of,
     value_holdings,
 )
@@ -115,6 +124,9 @@ class SnapshotBackfillReport(BaseModel):
     #: How many of ``rows_written`` carried at least one holding at its cost
     #: basis because no dated price covered it (#519).
     days_valued_with_estimates: int = 0
+    #: How many of ``rows_written`` were a closed market carried forward
+    #: from the trading day before it rather than revalued (#547).
+    days_carried_forward: int = 0
     fetch_failures: tuple[str, ...] = ()
     newly_unavailable: tuple[str, ...] = ()
 
@@ -195,6 +207,7 @@ class SnapshotBackfillService:
             days_skipped_no_evidence=totals.days_skipped_no_evidence,
             days_already_present=totals.days_already_present,
             days_valued_with_estimates=totals.days_valued_with_estimates,
+            days_carried_forward=totals.days_carried_forward,
             fetch_failures=tuple(sorted(totals.fetch_failures)),
             newly_unavailable=tuple(sorted(totals.newly_unavailable)),
         )
@@ -253,20 +266,30 @@ class SnapshotBackfillService:
             last_day=last_day.isoformat(),
         )
         rows_before = totals.rows_written
-        present = self._snapshots.dates_present(
+        present = self._snapshots.daily_rows_between(
             pid, start.isoformat(), last_day.isoformat()
         )
         self._prefetch_evidence(replay_rows, first_dates, start, end, totals, pid)
+        # Read once, after the prefetch has filled the window's FX series --
+        # this is the market calendar the closed-day test consults (#547).
+        trading_days = self._price_source.trading_days(
+            start.isoformat(), last_day.isoformat()
+        )
         self._progress.enter_valuing(pid)
 
         day = start
         days_done = 0
+        # The last day we know a position for, carried into any closed market
+        # that follows it (#547). Seeded from whatever the loop last saw --
+        # a row already present or one it just wrote -- so a weekend inherits
+        # the Friday whether or not this run is the one that wrote it.
+        carry: tuple[float | None, float | None, float | None, bool] | None = None
         while day < end:
             totals.days_considered += 1
             days_done += 1
             as_of = day.isoformat()
             day += timedelta(days=1)
-            if as_of in present:
+            if (existing := present.get(as_of)) is not None:
                 cash = self._cash_as_of(reconstruction, as_of)
                 # Rewrite this backfill's own row (its cash may have been
                 # computed under the old carry-forward semantics, #543);
@@ -278,23 +301,48 @@ class SnapshotBackfillService:
                     or self._snapshots.fill_missing_cash(pid, as_of, cash)
                 ):
                     totals.rows_written += 1
+                    existing = (existing[0], existing[1], cash, existing[3])
                 totals.days_already_present += 1
+                carry = existing
             elif not (holdings := holdings_as_of(replay_rows, as_of)):
                 totals.days_skipped_no_holdings += 1
+            elif carry is not None and market_was_closed(
+                self._price_source, holdings, as_of, trading_days
+            ):
+                # Nothing traded and no price moved, so the portfolio was
+                # worth exactly what it was worth on the last trading day.
+                # Revaluing here instead priced the whole book at carrying
+                # cost and wrote a phantom weekend dip (#547).
+                value, cost, cash, is_estimated = carry
+                if value is not None and self._snapshots.append_daily_value_if_absent(
+                    pid,
+                    as_of,
+                    f"{as_of}T00:00:00+00:00",
+                    value,
+                    total_cost=cost,
+                    cash_balance=cash,
+                    value_is_estimated=is_estimated,
+                ):
+                    totals.rows_written += 1
+                    totals.days_carried_forward += 1
+                    totals.days_valued_with_estimates += int(is_estimated)
             elif (valued := self._value(replay_rows, holdings, as_of))[0] is None:
                 totals.days_skipped_no_evidence += 1
             else:
                 value, is_estimated = valued
                 assert value is not None  # narrowed by the branch above
+                cost = cost_basis_as_of(replay_rows, as_of)
+                cash = self._cash_as_of(reconstruction, as_of)
                 if self._snapshots.append_daily_value_if_absent(
                     pid,
                     as_of,
                     f"{as_of}T00:00:00+00:00",
                     value,
-                    total_cost=cost_basis_as_of(replay_rows, as_of),
-                    cash_balance=self._cash_as_of(reconstruction, as_of),
+                    total_cost=cost,
+                    cash_balance=cash,
                     value_is_estimated=is_estimated,
                 ):
+                    carry = (value, cost, cash, is_estimated)
                     totals.rows_written += 1
                     totals.days_valued_with_estimates += int(is_estimated)
                 else:
@@ -458,6 +506,7 @@ class _RunTotals:
         self.days_skipped_no_evidence = 0
         self.days_already_present = 0
         self.days_valued_with_estimates = 0
+        self.days_carried_forward = 0
         self.fetch_failures: set[str] = set()
         self.newly_unavailable: set[str] = set()
 
