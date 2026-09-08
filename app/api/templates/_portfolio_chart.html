@@ -11,15 +11,16 @@
     <div style="font-size:0.72rem;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted)">
       <i class="bi bi-graph-up me-1"></i>Portfolio Value History
     </div>
+    <div class="d-flex flex-wrap align-items-center gap-2">
     {# Lives in the ALWAYS-rendered shell, not inside the canvas gate below:  #}
     {# an outerHTML swap into an empty range would otherwise delete the       #}
     {# control the user needs to turn markers back on (#542).                 #}
     <button type="button"
-            id="tradeMarkerToggle"
+            id="chartMarkerToggle"
             class="btn btn-sm btn-outline-secondary"
             aria-pressed="false"
-            onclick="toggleTradeMarkers()">
-      <i class="bi bi-triangle-fill me-1"></i><span data-marker-label>Show trades</span>
+            onclick="toggleChartMarkers()">
+      <i class="bi bi-triangle-fill me-1"></i><span data-marker-label>Show markers</span>
     </button>
     <div class="btn-group btn-group-sm" role="group" aria-label="Chart time range">
       {% for preset in _ranges %}
@@ -40,11 +41,14 @@
       </button>
       {% endfor %}
     </div>
+    </div>
   </div>
   {# Gated on the same canvas threshold as below (#519) -- otherwise this can
      reference a diamond marker on a chart that never renders. #}
   {% if chart_has_estimated_values and chart_usable_total_points is defined and chart_usable_total_points >= 3 %}
-  <p class="text-muted small mb-2" role="status">
+  {# Hidden with the diamonds it explains: the marker toggle owns both, so
+     the note never describes styling that is currently switched off. #}
+  <p class="text-muted small mb-2" role="status" id="chartEstimatedNote" hidden>
     <i class="bi bi-exclamation-circle me-1"></i>Points marked with a
     <span style="color:#b45309">&#9670;</span> are <strong>estimated</strong>: at least
     one holding had no price for that day and is carried at its cost.
@@ -82,16 +86,18 @@
     // (#519) -- drawn as a distinct point rather than passed off as observed.
     const estimated = {{ chart_estimated | default('[]', true) | safe }};
 
-    // Per-point overrides, or the plain scalar when nothing is estimated --
-    // an empty array would tell Chart.js to draw no points at all.
-    const estAny = estimated.some(Boolean);
-    const estPointRadius = base => estAny ? estimated.map(e => e ? 5 : base) : base;
-    const estPointStyle  = () => estAny ? estimated.map(e => e ? 'rectRot' : 'circle') : 'circle';
-    const estPointColor  = c => estAny ? estimated.map(e => e ? '#b45309' : c) : c;
-
-    // Hidden unless the user has opted in (#542). Guarded so the fragment
-    // still renders if it is ever loaded without index.html's page scope.
-    const markersOn = !!(window.showTradeMarkers && showTradeMarkers());
+    // Both marker kinds -- the buy/sell triangles and the amber estimate
+    // diamonds -- are hidden unless the user has opted in. Guarded so the
+    // fragment still renders if it is ever loaded without index.html's page
+    // scope, and defaults to hidden there too.
+    const markersOn = !!(window.showChartMarkers && showChartMarkers());
+    // Base point styling with the estimate overlay switched off. Keyed by
+    // dataset label so applyMarkers can restore it without re-reading the
+    // dataset configs below.
+    const estBase = {
+      'Portfolio Value': { radius: totals.length > 60 ? 0 : 3, colour: '#1d4ed8' },
+      'Market Value':    { radius: 0,                          colour: '#64748b' },
+    };
 
     const el = document.getElementById('portfolioChart');
     if (!el) return;
@@ -109,10 +115,10 @@
             borderColor: '#1d4ed8',
             backgroundColor: 'rgba(29,78,216,0.08)',
             borderWidth: 3,
-            pointRadius: estPointRadius(totals.length > 60 ? 0 : 3),
-            pointStyle: estPointStyle(),
-            pointBackgroundColor: estPointColor('#1d4ed8'),
-            pointBorderColor: estPointColor('#1d4ed8'),
+            pointRadius: estBase['Portfolio Value'].radius,
+            pointStyle: 'circle',
+            pointBackgroundColor: estBase['Portfolio Value'].colour,
+            pointBorderColor: estBase['Portfolio Value'].colour,
             pointHoverRadius: 6,
             fill: true,
             tension: 0.3,
@@ -125,10 +131,10 @@
             borderColor: '#64748b',
             borderWidth: 1.5,
             borderDash: [8, 4],
-            pointRadius: estPointRadius(0),
-            pointStyle: estPointStyle(),
-            pointBackgroundColor: estPointColor('#64748b'),
-            pointBorderColor: estPointColor('#64748b'),
+            pointRadius: estBase['Market Value'].radius,
+            pointStyle: 'circle',
+            pointBackgroundColor: estBase['Market Value'].colour,
+            pointBorderColor: estBase['Market Value'].colour,
             fill: false,
             tension: 0.3,
             spanGaps: true,
@@ -250,6 +256,42 @@
         }
       }
     });
+
+    // The single owner of what "markers on/off" means for this chart, used
+    // both to set the initial state and by the toggle button. Kept here
+    // rather than in index.html because it needs `estimated`, which only
+    // this fragment has -- index.html just flips the preference and calls.
+    window.__portfolioApplyMarkers = function (on) {
+      const chart = window.__portfolioChart;
+      if (!chart) return;
+      // Per-point overrides, or the plain scalar when there is nothing to
+      // overlay -- an empty array would tell Chart.js to draw no points.
+      const overlay = on && estimated.some(Boolean);
+      chart.data.datasets.forEach(function (ds, i) {
+        if (ds.label === 'Buy' || ds.label === 'Sell') {
+          ds.hidden = !on;
+          chart.setDatasetVisibility(i, on);
+          return;
+        }
+        const base = estBase[ds.label];
+        if (!base) return;
+        ds.pointRadius = overlay
+          ? estimated.map(e => e ? 5 : base.radius)
+          : base.radius;
+        ds.pointStyle = overlay
+          ? estimated.map(e => e ? 'rectRot' : 'circle')
+          : 'circle';
+        const colour = overlay
+          ? estimated.map(e => e ? '#b45309' : base.colour)
+          : base.colour;
+        ds.pointBackgroundColor = colour;
+        ds.pointBorderColor = colour;
+      });
+      const note = document.getElementById('chartEstimatedNote');
+      if (note) note.hidden = !overlay;
+      chart.update('none');
+    };
+    window.__portfolioApplyMarkers(markersOn);
   })();
   </script>
   {% elif chart_points >= 2 %}
@@ -268,5 +310,5 @@
   <script>if(window.__portfolioChart){window.__portfolioChart.destroy();window.__portfolioChart=null;}</script>
   {% endif %}
   {# Restate the persisted marker choice on the freshly-swapped button (#542). #}
-  <script>if(window.syncTradeMarkerButton)syncTradeMarkerButton();</script>
+  <script>if(window.syncChartMarkerButton)syncChartMarkerButton();</script>
 </div>
