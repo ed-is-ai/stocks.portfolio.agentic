@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -234,6 +234,7 @@ class StubFxFetcher:
 
     quotes: dict[tuple[str, str], FxQuote | None] = field(default_factory=dict)
     error: Exception | None = None
+    lookback: bool = False
     calls: list[tuple[str, str]] = field(default_factory=list)
 
     def fetch(self, pair: str, as_of: str) -> FxQuote | None:
@@ -241,6 +242,21 @@ class StubFxFetcher:
         if self.error is not None:
             raise self.error
         return self.quotes.get((pair, as_of))
+
+    def fetch_on_or_before(self, pair: str, as_of: str) -> FxQuote | None:
+        if self.error is not None:
+            raise self.error
+        if not self.lookback:
+            self.calls.append((pair, as_of))
+            return self.quotes.get((pair, as_of))
+        requested = date.fromisoformat(as_of)
+        for offset in range(5):
+            candidate = (requested - timedelta(days=offset)).isoformat()
+            self.calls.append((pair, candidate))
+            quote = self.quotes.get((pair, candidate))
+            if quote is not None:
+                return quote
+        return None
 
 
 @dataclass
@@ -716,6 +732,25 @@ def test_launch_backfills_missing_fx_evidence_and_pins() -> None:
     assert result.job.id == "job-1"
 
 
+def test_launch_uses_bounded_prior_fx_quote_and_preserves_observed_date() -> None:
+    fx_repo = FakeFxQuoteRepo(available=False)
+    quote = _backfill_quote(as_of="2026-01-30")
+    fetcher = StubFxFetcher(quotes={("GBPUSD=X", "2026-01-30"): quote}, lookback=True)
+    service, jobs = _service(fx_quote_repo=fx_repo, fx_fetcher=fetcher)
+
+    service.launch(_command(base_currency="GBP"))
+
+    assert len(jobs.submissions) == 1
+    assert fetcher.calls == [
+        ("GBPUSD=X", "2026-02-01"),
+        ("GBPUSD=X", "2026-01-31"),
+        ("GBPUSD=X", "2026-01-30"),
+    ]
+    assert fx_repo.inserted == [quote]
+    assert fx_repo.inserted[0].as_of == "2026-01-30"
+    assert fx_repo.unavailable_attempts == {}
+
+
 def test_launch_fx_backfill_transient_failure_is_mode_a() -> None:
     fx_repo = FakeFxQuoteRepo(available=False)
     fetcher = StubFxFetcher(error=FxProviderUnavailable("BoE unreachable"))
@@ -766,8 +801,8 @@ def test_launch_fx_backfill_negative_attempt_short_circuits() -> None:
         service.launch(_command(base_currency="GBP"))
 
     assert "choose a later start month" in _field_errors(excinfo.value)["form"]
-    # The negative cache means no network fetch is attempted at all.
-    assert fetcher.calls == []
+    # The cached exact-date miss still permits an earlier trading-day lookup.
+    assert fetcher.calls == [("GBPUSD=X", "2026-01-31")]
     assert jobs.submissions == []
 
 

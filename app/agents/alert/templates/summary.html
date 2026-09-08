@@ -16,16 +16,16 @@
 <h2 style="color:#1e3a5f;border-bottom:2px solid #1e3a5f;padding-bottom:8px">
   &#128200; Stock Scanner Summary &mdash; {{ today }}</h2>
 
-{% if narrative and snapshot %}
+{% if narrative and snapshots|length == 1 %}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:16px 0;border-collapse:collapse">
   <tr>
     <td valign="top" class="stack-col" style="width:50%;padding-right:8px">{{ mn.market_narrative_card(narrative, margin="margin:0;") }}</td>
-    <td valign="top" class="stack-col" style="width:50%;padding-left:8px">{{ snap.snapshot_card(snapshot.rows, snapshot.total_value, snapshot.total_cost, snapshot.total_pnl, snapshot.pnl_pct, snapshot.pnl_color, margin="margin:0;") }}</td>
+    <td valign="top" class="stack-col" style="width:50%;padding-left:8px">{{ snap.snapshot_card(snapshots[0], margin="margin:0;") }}</td>
   </tr>
 </table>
 {% else %}
 {% if narrative %}{{ mn.market_narrative_card(narrative) }}{% endif %}
-{% if snapshot %}{{ snap.snapshot_card(snapshot.rows, snapshot.total_value, snapshot.total_cost, snapshot.total_pnl, snapshot.pnl_pct, snapshot.pnl_color) }}{% endif %}
+{% for snapshot in snapshots %}{{ snap.snapshot_card(snapshot) }}{% endfor %}
 {% endif %}
 
 {% if cta_active %}

@@ -713,6 +713,52 @@ def test_snapshot_positive_pnl_is_blue_not_green(mock_smtp, tmp_path) -> None:
 
 
 @patch("smtplib.SMTP")
+def test_snapshot_renders_each_portfolio_with_cash_and_total(
+    mock_smtp, tmp_path
+) -> None:
+    mock_smtp.return_value.__enter__.return_value = MagicMock()
+    agent = _agent(tmp_path)
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(
+            positions=[_position("SIPP", 100.0), _position("ISA", 50.0)],
+            portfolio_snapshots=[
+                {
+                    "name": "SIPP",
+                    "positions": [_position("SIPP", 100.0)],
+                    "gbp_totals": (1000.0, 800.0, 200.0),
+                    "cash": 250.0,
+                },
+                {
+                    "name": "ISA",
+                    "positions": [_position("ISA", 50.0)],
+                    "gbp_totals": (500.0, 400.0, 100.0),
+                    "cash": 75.0,
+                },
+            ],
+        )
+
+    html = captured["html"]
+    text = captured["text"]
+    for body in (html, text):
+        lower_body = body.lower()
+        assert "portfolio snapshot — sipp" in lower_body
+        assert "portfolio snapshot — isa" in lower_body
+        assert body.count("Market Value") == 2
+        assert body.count("Cash") == 2
+        assert body.count("Portfolio Value") == 2
+    assert "display:flex" not in html
+    assert "£1,250.00" in html
+    assert "£575.00" in html
+
+
+@patch("smtplib.SMTP")
 def test_cta_html_collapsed_by_default_text_always_expanded(
     mock_smtp, tmp_path
 ) -> None:

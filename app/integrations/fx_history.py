@@ -60,6 +60,11 @@ _REQUEST_TIMEOUT_SECONDS = 15
 #: publishes business days, so the surrounding rows prove the exact date
 #: is genuinely absent rather than lost to a too-narrow window.
 _BOE_LOOKBACK_DAYS = 7
+#: Maximum calendar-day lookback used when a snapshot starts on a
+#: non-trading day.
+#: Four prior calendar days cover month-start weekends and adjacent holidays
+#: while staying within the backtest currency policy's five-day freshness cap.
+_FX_LOOKBACK_DAYS = 4
 
 _BOE_URL = "https://www.bankofengland.co.uk/boeapps/database/fromshowcolumns.asp"
 _FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -281,6 +286,29 @@ class ChainedFxQuoteFetcher:
                 # FxProviderUnavailable -- swallowed per provider so the
                 # chain keeps walking, escalated below if nothing hit.
                 logger.warning("FX provider %s failed: %s", provider.__name__, exc)
+                transient.append(str(exc))
+                continue
+            if quote is not None:
+                return quote
+        if transient:
+            raise FxProviderUnavailable("; ".join(transient))
+        return None
+
+    def fetch_on_or_before(self, pair: str, as_of: str) -> FxQuote | None:
+        """Return the nearest published quote within the bounded lookback."""
+        try:
+            requested = date.fromisoformat(as_of)
+        except ValueError as exc:
+            raise FxProviderUnavailable(f"Malformed FX pin date {as_of!r}") from exc
+
+        transient: list[str] = []
+        for offset in range(_FX_LOOKBACK_DAYS + 1):
+            candidate = (requested - timedelta(days=offset)).isoformat()
+            try:
+                quote = self.fetch(pair, candidate)
+            except FxUnsupportedPair:
+                raise
+            except FxProviderUnavailable as exc:
                 transient.append(str(exc))
                 continue
             if quote is not None:

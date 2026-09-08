@@ -1067,6 +1067,7 @@ class AlertAgent(Agent):
         positions: list[Position] | None = None,
         gbp_totals: tuple[float, float, float] | None = None,
         market_narrative: MarketNarrative | None = None,
+        portfolio_snapshots: list[dict[str, Any]] | None = None,
     ) -> None:
         """Send one consolidated daily summary email.
 
@@ -1137,32 +1138,48 @@ class AlertAgent(Agent):
             text_parts.append("\n".join(narrative_lines))
 
         # ── Portfolio snapshot (text) ───────────────────────────────────────
-        if positions:
-            if gbp_totals is not None:
-                total_value, total_cost, total_pnl = gbp_totals
-            else:
-                total_value = sum(p.current_value for p in positions if p.current_value)
-                total_cost = sum(p.total_cost for p in positions)
-                total_pnl = total_value - total_cost
-            pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
-            text_parts.append(
-                f"\n\nPORTFOLIO SNAPSHOT\n"
-                f"  Positions : {len(positions)}\n"
-                f"  Mkt Value : £{total_value:,.2f}\n"
-                f"  Cost Basis: £{total_cost:,.2f}\n"
-                f"  P&L       : £{total_pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
-            )
-            for p in positions:
-                sym = self._currency_symbol(p.price_currency)
-                pnl_str = (
-                    f"{sym}{p.unrealised_pnl:+.2f} ({p.unrealised_pnl_pct:+.1f}%)"
-                    if p.unrealised_pnl is not None
-                    else "--"
-                )
+        if portfolio_snapshots or positions:
+            text_snapshots = portfolio_snapshots or [
+                {
+                    "name": "Portfolio",
+                    "positions": positions,
+                    "gbp_totals": gbp_totals,
+                    "cash": 0.0,
+                }
+            ]
+            for source in text_snapshots:
+                source_positions = source["positions"]
+                totals = source.get("gbp_totals")
+                if totals is not None:
+                    total_value, total_cost, total_pnl = totals
+                else:
+                    total_value = sum(
+                        p.current_value for p in source_positions if p.current_value
+                    )
+                    total_cost = sum(p.total_cost for p in source_positions)
+                    total_pnl = total_value - total_cost
+                cash = float(source.get("cash") or 0.0)
+                pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
                 text_parts.append(
-                    f"  {p.ticker:<6} {p.shares:>8.1f} shares"
-                    f"  price {sym}{p.current_price or 0:.2f}  P&L {pnl_str}"
+                    f"\n\nPORTFOLIO SNAPSHOT — {source.get('name') or 'Portfolio'}\n"
+                    f"  Positions     : {len(source_positions)}\n"
+                    f"  Market Value  : £{total_value:,.2f}\n"
+                    f"  Cost Basis    : £{total_cost:,.2f}\n"
+                    f"  P&L           : £{total_pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
+                    f"  Cash          : £{cash:,.2f}\n"
+                    f"  Portfolio Value: £{total_value + cash:,.2f}\n"
                 )
+                for p in source_positions:
+                    sym = self._currency_symbol(p.price_currency)
+                    pnl_str = (
+                        f"{sym}{p.unrealised_pnl:+.2f} ({p.unrealised_pnl_pct:+.1f}%)"
+                        if p.unrealised_pnl is not None
+                        else "--"
+                    )
+                    text_parts.append(
+                        f"  {p.ticker:<6} {p.shares:>8.1f} shares"
+                        f"  price {sym}{p.current_price or 0:.2f}  P&L {pnl_str}"
+                    )
 
         def _conviction_rank(item: tuple[StockRecord, str]) -> int:
             verdict = self._breakout_narrative(item[0])["verdict"]
@@ -1249,46 +1266,62 @@ class AlertAgent(Agent):
         text_body = "\n".join(text_parts)
 
         # ── Portfolio snapshot (view model) ─────────────────────────────────
-        snapshot: dict[str, Any] | None = None
-        if positions:
-            if gbp_totals is not None:
-                total_value, total_cost, total_pnl = gbp_totals
-            else:
-                total_value = sum(p.current_value for p in positions if p.current_value)
-                total_cost = sum(p.total_cost for p in positions)
+        snapshots: list[dict[str, Any]] = []
+        source_snapshots = portfolio_snapshots
+        if source_snapshots is None and positions:
+            source_snapshots = [
+                {
+                    "name": "Portfolio",
+                    "positions": positions,
+                    "gbp_totals": gbp_totals,
+                    "cash": 0.0,
+                }
+            ]
+        for source in source_snapshots or []:
+            source_positions = source["positions"]
+            totals = source.get("gbp_totals")
+            if totals is None:
+                total_value = sum(
+                    p.current_value for p in source_positions if p.current_value
+                )
+                total_cost = sum(p.total_cost for p in source_positions)
                 total_pnl = total_value - total_cost
+            else:
+                total_value, total_cost, total_pnl = totals
+            cash = float(source.get("cash") or 0.0)
             pnl_pct = total_pnl / total_cost * 100 if total_cost else 0.0
-            # Blue for a portfolio gain, not the BUY-signal green (#168 review
-            # feedback) — "my portfolio is up" and "this is a buy signal"
-            # shouldn't share a colour.
-            pnl_color = "#2980b9" if total_pnl >= 0 else "#c0392b"
-            snapshot = {
-                "rows": [
-                    {
-                        "ticker": p.ticker,
-                        "shares": f"{p.shares:g}",
-                        "price": (
-                            f"{self._currency_symbol(p.price_currency)}"
-                            f"{p.current_price or 0:.2f}"
-                        ),
-                        "value": (
-                            f"{self._currency_symbol(p.price_currency)}"
-                            f"{p.current_value or 0:,.2f}"
-                        ),
-                        "pnl_pct": f"{p.unrealised_pnl_pct:+.1f}%",
-                        "pnl_color": (
-                            "#2980b9" if (p.unrealised_pnl or 0) >= 0 else "#c0392b"
-                        ),
-                    }
-                    for p in positions
-                    if p.current_value
-                ],
-                "total_value": f"{total_value:,.2f}",
-                "total_cost": f"{total_cost:,.2f}",
-                "total_pnl": f"{total_pnl:+,.2f}",
-                "pnl_pct": f"{pnl_pct:+.1f}%",
-                "pnl_color": pnl_color,
-            }
+            snapshots.append(
+                {
+                    "name": source.get("name") or "Portfolio",
+                    "rows": [
+                        {
+                            "ticker": p.ticker,
+                            "shares": f"{p.shares:g}",
+                            "price": (
+                                f"{self._currency_symbol(p.price_currency)}"
+                                f"{p.current_price or 0:.2f}"
+                            ),
+                            "value": (
+                                f"{self._currency_symbol(p.price_currency)}"
+                                f"{p.current_value or 0:,.2f}"
+                            ),
+                            "pnl_pct": f"{p.unrealised_pnl_pct:+.1f}%",
+                            "pnl_color": (
+                                "#2980b9" if (p.unrealised_pnl or 0) >= 0 else "#c0392b"
+                            ),
+                        }
+                        for p in source_positions
+                        if p.current_value
+                    ],
+                    "market_value": f"{total_value:,.2f}",
+                    "total_cost": f"{total_cost:,.2f}",
+                    "total_pnl": f"{total_pnl:+,.2f}",
+                    "pnl_pct": f"{pnl_pct:+.1f}%",
+                    "pnl_color": "#2980b9" if total_pnl >= 0 else "#c0392b",
+                    "cash": f"{cash:,.2f}",
+                    "portfolio_value": f"{total_value + cash:,.2f}",
+                }
+            )
 
         # ── HTML body ──────────────────────────────────────────────────────
         sell_cards = [
@@ -1316,7 +1349,7 @@ class AlertAgent(Agent):
         html_body = email_templates.get_template("summary.html").render(
             today=today,
             narrative=market_narrative,
-            snapshot=snapshot,
+            snapshots=snapshots,
             cta_active=cta_active,
             cta_groups=_CTA_GROUPS,
             cta_not_advice=_CTA_NOT_ADVICE,
