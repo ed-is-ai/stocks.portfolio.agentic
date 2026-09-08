@@ -8,12 +8,14 @@ reverse chains, cycles, self-mappings, and malformed configuration.
 
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from app.core import ticker_identity
 from app.core.ticker_identity import (
+    AliasFileUnreadableError,
     AmbiguousTickerAliasError,
     canonical_ticker,
     canonicalize_or_fallback,
@@ -124,6 +126,15 @@ def test_canonicalize_or_fallback_resolves_legacy_identity() -> None:
 # --- load_aliases ------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _reset_last_good_aliases() -> Iterator[None]:
+    """GH-531: the last-good alias map is a process-level module variable --
+    reset it between tests so ordering can't leak a cached map."""
+    ticker_identity._last_good_aliases = None
+    yield
+    ticker_identity._last_good_aliases = None
+
+
 def test_load_aliases_missing_file_returns_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -151,15 +162,14 @@ def test_load_provider_symbol_aliases_uses_versioned_mapping(
     assert load_provider_symbol_aliases() == {"BRK.B": "BRK-B"}
 
 
-def test_load_aliases_invalid_json_returns_empty_and_warns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_load_aliases_invalid_json_raises_when_no_last_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "ticker_aliases.json"
     path.write_text("{not valid json", encoding="utf-8")
     monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", path)
-    with caplog.at_level(logging.WARNING):
-        assert load_aliases() == {}
-    assert any("Invalid JSON" in r.message for r in caplog.records)
+    with pytest.raises(AliasFileUnreadableError):
+        load_aliases()
 
 
 @pytest.mark.parametrize(
@@ -171,29 +181,29 @@ def test_load_aliases_invalid_json_returns_empty_and_warns(
         {"ABC.L": ""},
     ],
 )
-def test_load_aliases_wrong_shape_returns_empty(
+def test_load_aliases_wrong_shape_raises_when_no_last_good(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, payload: object
 ) -> None:
     path = tmp_path / "ticker_aliases.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", path)
-    assert load_aliases() == {}
+    with pytest.raises(AliasFileUnreadableError):
+        load_aliases()
 
 
-def test_load_aliases_os_error_returns_empty_and_warns(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+def test_load_aliases_os_error_raises_when_no_last_good(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _BoomPath:
         def read_text(self, encoding: str = "utf-8") -> str:
             raise PermissionError("denied")
 
     monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", _BoomPath())
-    with caplog.at_level(logging.WARNING):
-        assert load_aliases() == {}
-    assert any("Could not read" in r.message for r in caplog.records)
+    with pytest.raises(AliasFileUnreadableError):
+        load_aliases()
 
 
-def test_load_aliases_unicode_decode_error_returns_empty(
+def test_load_aliases_unicode_decode_error_raises_when_no_last_good(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _BoomPath:
@@ -201,4 +211,39 @@ def test_load_aliases_unicode_decode_error_returns_empty(
             raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad byte")
 
     monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", _BoomPath())
+    with pytest.raises(AliasFileUnreadableError):
+        load_aliases()
+
+
+def test_load_aliases_reuses_last_good_after_prior_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "ticker_aliases.json"
+    path.write_text(json.dumps({"ABC.L": "ABC"}), encoding="utf-8")
+    monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", path)
+    assert load_aliases() == {"ABC.L": "ABC"}
+
+    path.write_text("{not valid json", encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert load_aliases() == {"ABC.L": "ABC"}
+    assert any("last-good" in r.message for r in caplog.records)
+
+
+def test_load_aliases_missing_file_returns_empty_even_with_last_good(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ticker_identity._last_good_aliases = {"ABC.L": "ABC"}
+    monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", tmp_path / "nope.json")
+    assert load_aliases() == {}
+
+
+@pytest.mark.parametrize("body", ["", "   \n\t "])
+def test_load_aliases_empty_or_whitespace_file_returns_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str
+) -> None:
+    """An empty (or whitespace-only) alias file means "no aliases", not a
+    corrupt file -- it must not raise ``AliasFileUnreadableError``."""
+    path = tmp_path / "ticker_aliases.json"
+    path.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(ticker_identity, "TICKER_ALIASES_JSON", path)
     assert load_aliases() == {}

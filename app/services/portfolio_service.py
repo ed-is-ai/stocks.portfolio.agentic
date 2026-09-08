@@ -775,13 +775,28 @@ class PortfolioService:
         from the cache rather than re-fetched live.
         """
         cached_prices, _, cached_display = self._trader.load_price_cache()
+        # GH-531: resolve the alias map up front (an unreadable file with no
+        # last-good map raises here, aborting before any snapshot is written)
+        # and value holdings only from price_cache rows that are their own
+        # canonical identity -- a row keyed by a now-aliased raw spelling is
+        # stale and must never be consulted. ``__…__`` sentinels are kept.
+        aliases = self.load_ticker_aliases()
+        cached_prices = {
+            k: v
+            for k, v in cached_prices.items()
+            if k.startswith("__")
+            or canonicalize_or_fallback(
+                k, aliases, logger=logger, context="price_cache"
+            )
+            == k
+        }
+        cached_display = {k: v for k, v in cached_display.items() if k in cached_prices}
         missing = [t for t in tickers if t not in cached_prices]
         if not missing:
             gbpusd = cached_prices.get("__GBPUSD__", _DEFAULT_GBPUSD)
             return cached_prices, cached_display, gbpusd
 
         gbpusd = self.gbpusd_rate()
-        aliases = self.load_ticker_aliases()
         fetched_prices, fetched_display = self.fetch_all_prices(
             missing, aliases, gbpusd
         )

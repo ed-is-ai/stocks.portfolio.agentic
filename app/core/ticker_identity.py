@@ -26,6 +26,26 @@ from app.core.config import PROVIDER_SYMBOL_ALIASES_JSON, TICKER_ALIASES_JSON
 
 logger = logging.getLogger(__name__)
 
+# Process-level last-good ticker-alias map. Plain module variable by design
+# (GH-531): no persistent/on-disk cache. ``None`` until a ``load_aliases()``
+# call first succeeds.
+_last_good_aliases: dict[str, str] | None = None
+
+
+class AliasFileUnreadableError(RuntimeError):
+    """Raised by ``load_aliases()`` when ``config/ticker_aliases.json`` is
+    present but unreadable/invalid and no last-good map has been cached yet.
+
+    The cold-start backstop for GH-531: degrading to raw import spellings
+    silently re-identifies every aliased holding and can value it off a
+    stale ``price_cache`` row, so a first-ever load that cannot read a
+    present file aborts loudly instead.
+    """
+
+
+class _AliasLoadError(RuntimeError):
+    """Internal: a present alias file could not be read or parsed."""
+
 
 class AmbiguousTickerAliasError(ValueError):
     """Raised when a ticker's alias chain revisits a ticker before reaching
@@ -49,50 +69,75 @@ class AmbiguousTickerAliasError(ValueError):
 
 
 def load_aliases() -> dict[str, str]:
-    """Load the ticker-alias map, tolerating every failure mode a
-    hand-edited config file can produce.
+    """Load the ticker-alias map, distinguishing "no aliases configured"
+    from "the alias file broke".
 
-    Returns ``{}`` for a missing ``config/ticker_aliases.json``, an
-    unreadable one (permission error, a directory in its place, or any
-    other ``OSError``), non-UTF-8 bytes, invalid JSON, syntactically valid
-    JSON that isn't a ``dict[str, str]`` (a list, or a dict with
-    non-string keys/values), or an entry with an empty-string key or
-    value -- a malformed alias file must degrade every caller to unaliased
-    tickers, never crash import, replay, or currency lookup. Logs a
-    warning (not silent) whenever it falls back to ``{}``, except for the
-    ordinary "file doesn't exist yet" case.
+    A missing ``config/ticker_aliases.json`` returns ``{}`` (a legitimate
+    state). A file that is present but unreadable or invalid -- a
+    permission error or any other ``OSError``, non-UTF-8 bytes, invalid
+    JSON, JSON that isn't a ``dict[str, str]`` with non-empty keys/values
+    -- does *not* degrade to ``{}`` (GH-531): silently re-identifying every
+    aliased holding by its raw spelling can value it off a stale
+    ``price_cache`` row. Instead it returns the process-cached last-good
+    map if one exists (logged at WARNING), else raises
+    ``AliasFileUnreadableError``. A successful load is cached as last-good.
     """
-    return _load_alias_map(TICKER_ALIASES_JSON)
+    global _last_good_aliases
+    try:
+        data = _load_alias_map_strict(TICKER_ALIASES_JSON)
+    except FileNotFoundError:
+        return {}
+    except _AliasLoadError as exc:
+        if _last_good_aliases is not None:
+            logger.warning("Reusing last-good ticker aliases: %s", exc)
+            return dict(_last_good_aliases)
+        raise AliasFileUnreadableError(str(exc)) from exc
+    _last_good_aliases = data
+    return data
 
 
 def load_provider_symbol_aliases() -> dict[str, str]:
-    """Load the versioned source-to-provider symbol spelling map."""
-    return _load_alias_map(PROVIDER_SYMBOL_ALIASES_JSON)
+    """Load the versioned source-to-provider symbol spelling map.
+
+    Stays lenient: returns ``{}`` on any read/parse/shape failure.
+    """
+    try:
+        return _load_alias_map_strict(PROVIDER_SYMBOL_ALIASES_JSON)
+    except FileNotFoundError:
+        return {}
+    except _AliasLoadError as exc:
+        logger.warning("Ignoring provider symbol aliases: %s", exc)
+        return {}
 
 
-def _load_alias_map(path: Path) -> dict[str, str]:
+def _load_alias_map_strict(path: Path) -> dict[str, str]:
+    """Read and validate an alias file, raising on any failure.
+
+    ``FileNotFoundError`` propagates (a legitimately absent file) and an
+    empty/whitespace-only file is treated as "no aliases" (``{}``); every
+    other read/parse/shape problem is raised as ``_AliasLoadError``.
+    """
     try:
         raw_text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return {}
+        raise
     except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("Could not read %s: %s", path, exc)
+        raise _AliasLoadError(f"could not read {path}: {exc}") from exc
+
+    if not raw_text.strip():
         return {}
 
     try:
         data = json.loads(raw_text)
     except json.JSONDecodeError as exc:
-        logger.warning("Invalid JSON in %s: %s", path, exc)
-        return {}
+        raise _AliasLoadError(f"invalid JSON in {path}: {exc}") from exc
 
     if not isinstance(data, dict) or not all(
         isinstance(k, str) and isinstance(v, str) and k and v for k, v in data.items()
     ):
-        logger.warning(
-            "%s is not a dict[str, str] with non-empty keys/values -- ignoring",
-            path,
+        raise _AliasLoadError(
+            f"{path} is not a dict[str, str] with non-empty keys/values"
         )
-        return {}
 
     return data
 
