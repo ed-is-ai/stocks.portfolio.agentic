@@ -124,6 +124,35 @@ def cost_basis_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> float:
     return round(sum(position_cost_basis_as_of(replay_rows, as_of).values()), 2)
 
 
+def net_trade_cash(
+    replay_rows: list[tuple[Any, ...]], start_exclusive: str, end_inclusive: str
+) -> float:
+    """Return the net cash trades moved in ``(start, end]`` (#543).
+
+    ``Σ(SELL shares*price) − Σ(BUY shares*price)`` over replay rows dated in
+    the half-open interval -- a sale puts cash *in*, a purchase takes it
+    *out*. Trade prices are already GBP major units, the same convention
+    :func:`position_cost_basis_as_of` and the live snapshot writer use, so
+    the result is GBP.
+
+    The interval excludes its start so it composes with a dated statement
+    anchor: the anchor already states the balance *after* everything that
+    happened on its own day. Returns ``0.0`` for an empty interval, and a
+    reversed interval (``start >= end``) is empty by construction.
+    """
+    total = 0.0
+    for row in replay_rows:
+        action, shares, price, trade_date = row[1], row[2], row[3], str(row[4])[:10]
+        if not (start_exclusive < trade_date <= end_inclusive):
+            continue
+        proceeds = float(shares) * float(price)
+        # "not BUY is a sell" mirrors :func:`holdings_as_of` exactly, so the
+        # shares leaving the position and the cash arriving for them can
+        # never disagree about what a row is.
+        total += -proceeds if action == "BUY" else proceeds
+    return total
+
+
 def holdings_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> dict[str, float]:
     """Return ``{ticker: net shares}`` from trades dated on/before ``as_of``.
 

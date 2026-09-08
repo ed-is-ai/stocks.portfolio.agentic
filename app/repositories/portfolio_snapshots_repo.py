@@ -146,6 +146,29 @@ class PortfolioSnapshotsRepository:
             )
         return cursor.rowcount > 0
 
+    def update_backfilled_cash(
+        self, portfolio_id: int, day: str, cash_balance: float
+    ) -> bool:
+        """Rewrite the cash on the row *this backfill wrote* for ``day`` (#543).
+
+        Scoped to the exact ``{day}T00:00:00+00:00`` timestamp the backfill
+        stamps its own rows with, so a live snapshot -- whose cash is the
+        account's own stated figure at that instant -- is never clobbered by
+        a reconstruction. Unlike :meth:`fill_missing_cash` this overwrites a
+        value that is already there, which is what correcting rows written
+        under the old carry-forward semantics requires; a row already
+        holding the same figure is left alone so a re-run stays a no-op.
+
+        Returns True when a row actually changed.
+        """
+        with session(self._connect) as conn:
+            cursor = conn.execute(
+                "UPDATE portfolio_snapshots SET cash_balance=? WHERE portfolio_id=? "
+                "AND timestamp=? AND (cash_balance IS NULL OR cash_balance != ?)",
+                (cash_balance, portfolio_id, f"{day}T00:00:00+00:00", cash_balance),
+            )
+        return cursor.rowcount > 0
+
     def append_daily_value_if_absent(
         self,
         portfolio_id: int,

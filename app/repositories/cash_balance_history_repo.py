@@ -81,6 +81,24 @@ class CashBalanceHistoryRepository:
             ).fetchall()
         return {row[0]: Decimal(row[1]) for row in rows}
 
+    def series(self, portfolio_id: int) -> list[tuple[str, str, Decimal]]:
+        """Return every ``(as_of, currency, amount)`` oldest-first (#543).
+
+        :meth:`balances_as_of` answers with amounts alone, collapsing the
+        anchor *dates* away -- which is precisely what the cash
+        reconstruction cannot work without. It rolls signed cash flows and
+        trade proceeds forward (or backward) from the nearest dated
+        statement, so it has to know which day each stated balance belongs
+        to; hence this method.
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT as_of, currency, amount FROM cash_balance_history "
+                "WHERE portfolio_id = ? ORDER BY as_of ASC, currency ASC",
+                (portfolio_id,),
+            ).fetchall()
+        return [(row[0], row[1], Decimal(row[2])) for row in rows]
+
     def earliest_as_of(self, portfolio_id: int) -> str | None:
         """Return the first date any balance is known for, or None.
 

@@ -1175,10 +1175,20 @@ class PortfolioService:
         )
 
     def with_current_chart_data(
-        self, snapshot: PortfolioInputSnapshot, portfolio_id: int | None
+        self,
+        snapshot: PortfolioInputSnapshot,
+        portfolio_id: int | None,
+        range_key: str = DEFAULT_CHART_RANGE,
     ) -> PortfolioInputSnapshot:
-        """Refresh chart history after a route persists a new value snapshot."""
-        return replace(snapshot, chart_data=self._load_portfolio_history(portfolio_id))
+        """Refresh chart history after a route persists a new value snapshot.
+
+        ``range_key`` is the range the *browser* is currently showing (#541):
+        a refresh that re-renders the whole portfolio partial must come back
+        on that same window, not silently snap the user back to the default.
+        """
+        return replace(
+            snapshot, chart_data=self._load_portfolio_history(portfolio_id, range_key)
+        )
 
     def positions_from_input_snapshot(
         self,

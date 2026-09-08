@@ -552,8 +552,34 @@ def _with_cash_history(agent: TraderAgent, rows: list[tuple[str, str, str]]) -> 
         conn.close()
 
 
+def _with_cash_flows(agent: TraderAgent, rows: list[tuple[str, str, float]]) -> None:
+    """Seed ``(date, flow_type, amount)`` GBP cash flows via the repository."""
+    from app.repositories.cash_flows_repo import CashFlowsRepository
+
+    repo = CashFlowsRepository(agent._trades._connect)
+    portfolio_id = agent._portfolios.list_all()[0].id
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        for index, (flow_date, flow_type, amount) in enumerate(rows):
+            repo.insert_ignore(
+                conn,
+                flow_date,
+                flow_type,
+                None,
+                amount,
+                flow_type.title(),
+                f"REF{index}",
+                portfolio_id,
+                idempotency_key=f"KEY{index}",
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _service_with_cash(agent: TraderAgent, source: object) -> SnapshotBackfillService:
     from app.repositories.cash_balance_history_repo import CashBalanceHistoryRepository
+    from app.repositories.cash_flows_repo import CashFlowsRepository
 
     return SnapshotBackfillService(
         agent._trades,
@@ -563,6 +589,7 @@ def _service_with_cash(agent: TraderAgent, source: object) -> SnapshotBackfillSe
         source,  # type: ignore[arg-type]
         today=lambda: TODAY,
         cash_history=CashBalanceHistoryRepository(agent._trades._connect),
+        cash_flows=CashFlowsRepository(agent._trades._connect),
     )
 
 
@@ -584,9 +611,16 @@ def test_cost_basis_uses_average_cost_and_survives_a_partial_sell(
     assert costs["2024-01-03"] == pytest.approx(75.0)  # 15 remaining @ 5.00
 
 
-def test_cash_balance_is_carried_forward_from_the_last_statement(
+def test_cash_balance_is_reconstructed_from_the_nearest_anchor(
     tmp_path: Path,
 ) -> None:
+    """Every day carries a figure, anchored on the one stated balance (#543).
+
+    Rewritten from ``..._is_carried_forward_from_the_last_statement``, which
+    encoded the defect: the day before the first statement was left NULL
+    (which forced the whole chart onto its Market-Value fallback) and every
+    day after it repeated the stated balance regardless of what moved.
+    """
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
     agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
@@ -595,11 +629,161 @@ def test_cash_balance_is_carried_forward_from_the_last_statement(
     _service_with_cash(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
 
     cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
-    # Before the first statement there is nothing to carry forward.
-    assert cash["2024-01-01"] is None
-    # From the statement onward the stated balance holds until superseded.
+    # The trade is on 01-01, outside the (01-01, 01-02] unwind interval, so
+    # the day before the statement takes the anchor unchanged -- a real
+    # figure, not the NULL the old semantics wrote.
+    assert cash["2024-01-01"] == pytest.approx(1500.0)
     assert cash["2024-01-02"] == pytest.approx(1500.0)
+    # Nothing moves cash after the statement either, so it holds.
     assert cash["2024-01-05"] == pytest.approx(1500.0)
+
+
+def test_a_sell_between_statements_raises_reconstructed_cash(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 20, 5.0, "2024-01-01", portfolio_id=pf.id)
+    # A partial sale, so the position survives and the day still gets a row.
+    agent.record_sell("AAPL", 10, 5.0, "2024-01-03", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1000.00")])
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    assert cash["2024-01-02"] == pytest.approx(1000.0)
+    # The sale moved £50 of securities into cash; the total is unchanged.
+    assert cash["2024-01-03"] == pytest.approx(1050.0)
+    assert cash["2024-01-04"] == pytest.approx(1050.0)
+
+
+def test_a_buy_between_statements_lowers_reconstructed_cash(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-03", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1000.00")])
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    assert cash["2024-01-02"] == pytest.approx(1000.0)
+    assert cash["2024-01-03"] == pytest.approx(950.0)
+
+
+def test_days_before_the_first_statement_roll_backward(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-03", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-05", "1000.00")])
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    # Unwinding the 01-03 purchase backwards puts its £50 back in cash...
+    assert cash["2024-01-02"] == pytest.approx(1050.0)
+    # ...and nothing moves between 01-04 and the anchor, so it holds there.
+    assert cash["2024-01-04"] == pytest.approx(1000.0)
+    # No row is left NULL, which is what kept the chart on its fallback.
+    assert all(value is not None for value in cash.values())
+
+
+def test_dated_cash_flows_move_the_reconstructed_balance(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1000.00")])
+    _with_cash_flows(
+        agent, [("2024-01-03", "DIVIDEND", 20.0), ("2024-01-04", "WITHDRAWAL", 50.0)]
+    )
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    assert cash["2024-01-03"] == pytest.approx(1020.0)
+    assert cash["2024-01-04"] == pytest.approx(970.0)
+
+
+def test_a_directionless_flow_type_contributes_nothing(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1000.00")])
+    _with_cash_flows(
+        agent,
+        [
+            ("2024-01-03", "OTHER", 40.0),
+            ("2024-01-03", "TRANSFER", 60.0),
+            ("2024-01-03", "OPENING", 90.0),
+        ],
+    )
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    # The magnitude is known but the direction is not, so guessing either way
+    # would silently shift the Portfolio Value line. A figure is still
+    # produced -- the documented ceiling, not an error.
+    assert cash["2024-01-03"] == pytest.approx(1000.0)
+
+
+def test_cash_stays_null_when_no_statement_exists_at_all(tmp_path: Path) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_flows(agent, [("2024-01-03", "DIVIDEND", 20.0)])
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    # With no anchor there is nothing to roll a delta from; the chart's
+    # Market-Value fallback and its banner are the honest answer.
+    assert all(value is None for value in cash.values())
+
+
+def test_a_backfilled_row_written_under_old_semantics_is_recomputed(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_sell("AAPL", 10, 5.0, "2024-01-03", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1000.00")])
+    # A live snapshot states its own cash; a reconstruction must not touch it.
+    agent._snapshots.append(pf.id, "2024-01-04T17:00:00+00:00", 50.0, 50.0, 4242.0)
+
+    # Simulate an install backfilled under the old carry-forward semantics.
+    conn = sqlite3.connect(agent.db_path)
+    try:
+        conn.execute(
+            "INSERT INTO portfolio_snapshots "
+            "(portfolio_id, timestamp, total_value, total_cost, cash_balance) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (pf.id, "2024-01-03T00:00:00+00:00", 0.0, 0.0, 1000.0),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    agent._account.set(f"snapshot_backfill:{pf.id}", "2024-01-01..2024-01-08")
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    assert cash["2024-01-03"] == pytest.approx(1050.0)
+    assert cash["2024-01-04"] == pytest.approx(4242.0)
+
+
+def test_a_second_run_rewrites_nothing_once_cash_is_reconstructed(
+    tmp_path: Path,
+) -> None:
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1000.00")])
+
+    _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+    again = _service_with_cash(agent, _FixedPriceSource({"AAPL": 5.0})).backfill(pf.id)
+
+    assert again.rows_written == 0
 
 
 def test_re_run_fills_missing_cash_after_statement_import(tmp_path: Path) -> None:
@@ -614,9 +798,10 @@ def test_re_run_fills_missing_cash_after_statement_import(tmp_path: Path) -> Non
     repair = _service_with_cash(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
 
     cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
-    assert repair.rows_written == 6
-    assert cash["2024-01-01"] is None
-    assert all(cash[f"2024-01-0{day}"] == pytest.approx(1500.0) for day in range(2, 8))
+    # Every day in the window now carries a reconstructed figure, including
+    # the one before the statement (#543).
+    assert repair.rows_written == 7
+    assert all(cash[f"2024-01-0{day}"] == pytest.approx(1500.0) for day in range(1, 8))
 
 
 def test_cash_balance_folds_currencies_through_a_dated_rate(tmp_path: Path) -> None:

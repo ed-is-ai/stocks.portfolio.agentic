@@ -895,6 +895,82 @@
     }
   }
 
+  // Trade markers on the value chart are per-browser too, and default to
+  // HIDDEN: a busy portfolio draws a triangle on nearly every point, which
+  // buries the value line the chart exists to show (#542). Same try/catch
+  // shape as activeChartRange -- private mode must fall back to the default,
+  // never throw out of the chart's init script.
+  function showTradeMarkers() {
+    try {
+      return localStorage.getItem('showTradeMarkers') === '1';
+    } catch (e) {
+      return false;
+    }
+  }
+  function setTradeMarkers(on) {
+    try {
+      if (on) {
+        localStorage.setItem('showTradeMarkers', '1');
+      } else {
+        localStorage.removeItem('showTradeMarkers');
+      }
+    } catch (e) {
+      /* localStorage unavailable (private mode, disabled) — no-op */
+    }
+  }
+
+  // Pure client-side (#542): the Buy/Sell datasets are already in the chart,
+  // so flipping them needs no server round-trip and no new route.
+  function toggleTradeMarkers() {
+    const on = !showTradeMarkers();
+    setTradeMarkers(on);
+    const chart = window.__portfolioChart;
+    if (chart) {
+      chart.data.datasets.forEach(function (ds, i) {
+        if (ds.label !== 'Buy' && ds.label !== 'Sell') return;
+        ds.hidden = !on;
+        chart.setDatasetVisibility(i, on);
+      });
+      chart.update();
+    }
+    syncTradeMarkerButton();
+  }
+
+  // The toggle lives in the always-rendered card shell, so every render of
+  // that shell (page load, range swap, backfill re-render) has to restate
+  // the persisted choice on it.
+  function syncTradeMarkerButton() {
+    const btn = document.getElementById('tradeMarkerToggle');
+    if (!btn) return;
+    const on = showTradeMarkers();
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.classList.toggle('btn-primary', on);
+    btn.classList.toggle('btn-outline-secondary', !on);
+    const label = btn.querySelector('[data-marker-label]');
+    if (label) label.textContent = on ? 'Hide trades' : 'Show trades';
+  }
+
+  // Swap a full-page partial into #tab-content *through htmx* (#541).
+  // `el.innerHTML = html` never executes the fragment's <script> tags and
+  // never processes its hx-* attributes, so the chart card came back inert:
+  // its Chart.js init never ran and its own range buttons were dead until a
+  // browser reload. htmx does both. The plain assignment stays as the
+  // fallback for the (impossible in this page, but cheap) case of htmx
+  // being absent.
+  function swapTabContent(html) {
+    const target = document.getElementById('tab-content');
+    if (!target) return;
+    if (window.htmx && typeof window.htmx.swap === 'function') {
+      // The spec key is `swapStyle`, not `swap` -- htmx falls back to
+      // config.defaultSwapStyle when it is missing, so the wrong key works
+      // by accident today and silently changes behaviour the moment that
+      // default is set to anything else.
+      htmx.swap('#tab-content', html, { swapStyle: 'innerHTML' });
+    } else {
+      target.innerHTML = html;
+    }
+  }
+
   function openBuy(ticker, price, entry, stop) {
     document.getElementById('buy-portfolio-id').value = activePortfolio();
     const buyPrice = parseFloat(price) || 0;
@@ -984,14 +1060,16 @@
 
     try {
       const pid = activePortfolio();
-      const url = pid ? '/api/portfolio/refresh?portfolio_id=' + encodeURIComponent(pid)
-                      : '/api/portfolio/refresh';
-      const response = await fetch(url, {
+      // Carry the range the user is actually looking at, so the re-rendered
+      // partial comes back on it instead of snapping to the default (#541).
+      const params = new URLSearchParams({ range: activeChartRange() });
+      if (pid) params.set('portfolio_id', pid);
+      const response = await fetch('/api/portfolio/refresh?' + params.toString(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       });
       const html = await response.text();
-      document.getElementById('tab-content').innerHTML = html;
+      swapTabContent(html);
       // The price fetch is done, but the snapshot backfill it scheduled runs
       // on after the response. Hand the button over to the status bar rather
       // than declaring victory here (#508); pollBackfillStatus restores it.
@@ -1030,11 +1108,15 @@
   // The bar re-swaps itself every 2s while running; each swap tells us
   // whether to keep the button spinning. An empty swap (run finished and
   // aged out, or nothing scheduled) also releases the button.
+  // Tracks whether the previous swap saw a run in flight, so the finish is
+  // detected as a transition rather than re-fired on every idle poll (#541).
+  let backfillWasRunning = false;
   document.body.addEventListener('htmx:afterSwap', function (event) {
     if (event.detail.target.id !== 'portfolio-backfill-status') return;
     const state = event.detail.target
       .querySelector('[data-backfill-state]')?.dataset.backfillState;
-    if (state === 'evidence' || state === 'valuing') {
+    const running = state === 'evidence' || state === 'valuing';
+    if (running) {
       const btn = document.getElementById('refreshBtn');
       const icon = document.getElementById('refreshIcon');
       const text = document.getElementById('refreshText');
@@ -1043,8 +1125,25 @@
       if (text) { text.textContent = 'Filling history...'; }
     } else {
       resetRefreshButton();
+      // The backfill wrote its rows *after* the refresh response was
+      // rendered, so the chart on screen predates them. Re-render the card
+      // once, on the range the user is on (#541).
+      if (backfillWasRunning) refreshChartCard();
     }
+    backfillWasRunning = running;
   });
+
+  // Re-render #portfolio-chart-card alone, the same lean fragment the range
+  // buttons use -- never the whole tab, which would rebuild positions and
+  // prices for nothing.
+  function refreshChartCard() {
+    if (!document.getElementById('portfolio-chart-card') || !window.htmx) return;
+    const params = new URLSearchParams({ range: activeChartRange() });
+    const pid = activePortfolio();
+    if (pid) params.set('portfolio_id', pid);
+    htmx.ajax('GET', '/partials/portfolio/chart?' + params.toString(),
+              { target: '#portfolio-chart-card', swap: 'outerHTML' });
+  }
 
   function escapeHtml(s) {
     const div = document.createElement('div');
@@ -1207,7 +1306,7 @@
       alert('Import discarded (active portfolio changed). ' + parts.join('; '));
       return false;
     }
-    document.getElementById('tab-content').innerHTML = displayHtml;
+    swapTabContent(displayHtml);
 
     // A committed import can move the first trade date backwards, so the
     // route schedules a backfill after the last queued file. Watch it the

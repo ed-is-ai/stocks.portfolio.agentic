@@ -90,3 +90,81 @@ def test_delete_portfolio_requires_auth(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("APP_AUTH_TOKEN", raising=False)
     resp = client.post("/portfolios/7/delete", headers={"Sec-Fetch-Site": "cross-site"})
     assert resp.status_code == 403
+
+
+# --- #541: the refresh response honours the browser's chart range ----------
+
+
+@pytest.fixture
+def refresh_mocks(monkeypatch: pytest.MonkeyPatch):
+    """A refresh with one priced position, rendered through a stub template."""
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    monkeypatch.setattr(
+        "app.api.routes.portfolio.templates.TemplateResponse",
+        lambda *a, **k: HTMLResponse("ok", status_code=k.get("status_code", 200)),
+    )
+    snapshot = MagicMock(cash_balance=1000.0)
+    chart_snapshot = MagicMock(cash_balance=1000.0)
+    positions = [MagicMock(ticker="AAPL")]
+    mock_trader = MagicMock()
+    mock_trader.load_price_cache.return_value = ({"AAPL": 100.0}, "now", {})
+    mock_portfolio = MagicMock()
+    mock_portfolio.portfolio_input_snapshot.return_value = snapshot
+    mock_portfolio.with_current_chart_data.return_value = chart_snapshot
+    mock_portfolio.positions_from_input_snapshot.return_value = positions
+    mock_portfolio.gbpusd_rate.return_value = 1.25
+    mock_portfolio.load_ticker_aliases.return_value = {}
+    mock_portfolio.fetch_all_prices_with_failures.return_value = (
+        {"AAPL": 100.0},
+        {},
+        set(),
+    )
+    app.dependency_overrides[get_trader_service] = lambda: mock_trader
+    app.dependency_overrides[get_portfolio_service] = lambda: mock_portfolio
+    try:
+        yield mock_trader, mock_portfolio, snapshot, chart_snapshot
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_refresh_renders_the_chart_on_the_supplied_range(refresh_mocks):
+    """The re-rendered partial stays on the range the user is looking at."""
+    _, mock_portfolio, snapshot, chart_snapshot = refresh_mocks
+
+    resp = client.post("/api/portfolio/refresh?portfolio_id=7&range=3M", headers=_AUTH)
+
+    assert resp.status_code == 200
+    mock_portfolio.portfolio_input_snapshot.assert_called_once_with(7, range_key="3M")
+    mock_portfolio.with_current_chart_data.assert_called_once_with(snapshot, 7, "3M")
+    context_kwargs = mock_portfolio.portfolio_partial_context.call_args.kwargs
+    assert context_kwargs["range_key"] == "3M"
+    assert context_kwargs["input_snapshot"] is chart_snapshot
+
+
+def test_refresh_chart_data_is_reread_after_the_new_snapshot_is_written(refresh_mocks):
+    """The response's chart must include the point this refresh just wrote.
+
+    ``with_current_chart_data`` is that re-read, so it has to happen *after*
+    ``update_portfolio_snapshot`` -- otherwise the swapped-in card shows the
+    pre-refresh series and only a browser reload would reveal the new point.
+    """
+    mock_trader, mock_portfolio, _, _ = refresh_mocks
+    order = MagicMock()
+    order.attach_mock(mock_trader.update_portfolio_snapshot, "write")
+    order.attach_mock(mock_portfolio.with_current_chart_data, "reread")
+
+    resp = client.post("/api/portfolio/refresh?portfolio_id=7&range=3M", headers=_AUTH)
+
+    assert resp.status_code == 200
+    assert [call[0] for call in order.mock_calls] == ["write", "reread"]
+
+
+def test_refresh_falls_back_to_the_default_range_for_an_unknown_token(refresh_mocks):
+    _, mock_portfolio, snapshot, _ = refresh_mocks
+
+    resp = client.post("/api/portfolio/refresh?range=nonsense", headers=_AUTH)
+
+    assert resp.status_code == 200
+    mock_portfolio.with_current_chart_data.assert_called_once_with(
+        snapshot, None, "12M"
+    )
