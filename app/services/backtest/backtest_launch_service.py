@@ -706,10 +706,14 @@ class BacktestLaunchService:
         attempt = self._fx_quote_repo.get_unavailable_attempt(
             _FX_BACKFILL_CHAIN_PROVIDER, pair, as_of
         )
-        if attempt is not None and attempt.reason == "no_rate":
-            return "definitive", None
         try:
-            quote = self._fx_fetcher.fetch(pair, as_of)
+            requested = date.fromisoformat(as_of)
+            lookup_date = (
+                (requested - timedelta(days=1)).isoformat()
+                if attempt is not None and attempt.reason == "no_rate"
+                else as_of
+            )
+            quote = self._fx_fetcher.fetch_on_or_before(pair, lookup_date)
         except FxUnsupportedPair as exc:
             logger.warning("FX pair unsupported: %s", exc)
             return "unsupported", None
