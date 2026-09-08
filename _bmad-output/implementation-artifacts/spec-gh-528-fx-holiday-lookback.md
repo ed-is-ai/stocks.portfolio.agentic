@@ -77,3 +77,22 @@ warnings: []
 **Commands:**
 - `uv run pytest -q tests/backtest/test_backtest_launch_service.py tests/test_fx_history.py` -- expected: all relevant regression and provider-chain tests pass (60 passed).
 - `uv run ruff check app/services/backtest/backtest_launch_service.py app/integrations/fx_history.py tests/backtest/test_backtest_launch_service.py tests/test_fx_history.py` -- expected: no lint errors.
+
+## Auto Run Result
+
+Implemented bounded most-recent-on-or-before FX lookup for non-trading
+snapshot dates. Unsupported pairs retain their existing classification,
+transient failures remain retryable, and definitive misses remain negatively
+cached against the original requested date.
+
+Files changed:
+- `app/integrations/fx_history.py` -- added the bounded prior-date lookup.
+- `app/services/backtest/backtest_launch_service.py` -- uses the fallback while preserving observed quote dates.
+- `tests/backtest/test_backtest_launch_service.py` -- added holiday and cache regression coverage.
+- `tests/test_fx_history.py` -- added prior-date, freshness, and unsupported-pair coverage.
+
+Review findings: 2 medium patch findings addressed; 1 medium request-volume concern rejected as the explicitly bounded tradeoff in this issue; no items deferred.
+
+Verification: Ruff checks passed; focused launch and FX suites passed with 60 tests; `git diff --check` passed.
+
+Residual risk: the fallback checks a maximum of four prior calendar days, so an exchange closure longer than that remains a definitive preparation failure.
