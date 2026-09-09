@@ -228,6 +228,21 @@ class TradeCurrencyResolver:
             ticker
         )
 
+    def _split_factor(self, ticker: str, day: str) -> float | None:
+        """Return the split factor to restore ``day``'s share definition.
+
+        ``1.0`` when the source cannot supply one at all -- a price source
+        predating #555, or a test double -- so an unsplit instrument and an
+        unaware source both compare exactly as they did before. ``None``
+        only when the source *can* answer and says it does not know this
+        symbol, which is a reason to skip the date rather than compare two
+        different share definitions.
+        """
+        lookup = getattr(self._source, "split_factor_since", None)
+        if lookup is None:
+            return 1.0
+        return lookup(ticker, day)
+
     def _vote(
         self, ticker: str, candidate: str, trades: list[tuple[str, float]]
     ) -> tuple[str | None, str, bool, bool]:
@@ -252,6 +267,7 @@ class TradeCurrencyResolver:
         """
         gbp = foreign = 0
         any_close = False
+        splits_applied = False
         # ``sorted`` before the dict so a date holding two trades keeps one
         # of them by value, not by however the rows happened to arrive.
         by_day = dict(sorted(trades))
@@ -267,22 +283,34 @@ class TradeCurrencyResolver:
             rate = self._source.gbp_rate(candidate, day)
             if rate is None or rate <= 0:
                 continue
+            # The stored close is adjusted for every split since; the price
+            # paid is not. Restore the day's own share definition before
+            # comparing, or a holding that split afterwards has every date
+            # abstain -- TSLA's 2021 fills sit near 690 against closes near
+            # 171, because of a 3:1 split in 2022 (#555).
+            factor = self._split_factor(ticker, day)
+            if factor is None:
+                continue
+            close *= factor
+            splits_applied = splits_applied or factor != 1.0
             raw_error = abs(price - close)
             converted_error = abs(price / rate - close)
             if raw_error * 2 <= converted_error:
                 gbp += 1
             elif converted_error * 2 <= raw_error:
                 foreign += 1
+        note = ", split-adjusted" if splits_applied else ""
         if gbp == foreign:
             return (
                 None,
-                f"tied {gbp}-{foreign}" if gbp else "no conclusive dated trade",
+                (f"tied {gbp}-{foreign}" if gbp else "no conclusive dated trade")
+                + note,
                 bool(gbp),
                 any_close,
             )
         return (
             ("GBP" if gbp > foreign else candidate),
-            f"{gbp} GBP vs {foreign} {candidate} of {gbp + foreign} dated trades",
+            f"{gbp} GBP vs {foreign} {candidate} of {gbp + foreign} dated trades{note}",
             True,
             any_close,
         )

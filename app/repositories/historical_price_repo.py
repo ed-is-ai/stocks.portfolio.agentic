@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
+import math
 import sqlite3
 from typing import Mapping, Sequence
 
@@ -465,6 +466,73 @@ class HistoricalPriceRepository:
             quote_unit_scale=str(row[4]),
             close=_hex_to_float(str(row[5])),
         )
+
+    def split_factor_since(
+        self, symbols: Sequence[str], session_date: str
+    ) -> float | None:
+        """Return the cumulative split factor applied after ``session_date``.
+
+        A stored close is what the provider published *after* adjusting for
+        every split up to the day it was fetched, so comparing it with a
+        price actually paid before one is comparing two different share
+        definitions (#555): TSLA's 2021 fills sit near $690 while its stored
+        2021 closes sit near $230, because of a 3:1 split in 2022.
+        Multiplying the close by this factor restores it to the shares that
+        existed on the day.
+
+        Splits are read across *every* revision of these symbols, not the
+        one :meth:`dated_close` happens to pick. A revision's window and its
+        adjustment baseline are different things -- the narrow
+        ``2020-12-01..2021-05-12`` revision this account holds for TSLA was
+        fetched in 2026 and is adjusted for a 2022 split its own window
+        cannot contain -- so asking only the covering revision reports no
+        split at all. One ratio per split date (the newest revision's, where
+        they overlap), so a split recorded by several revisions is counted
+        once.
+
+        ``None`` when no revision exists for these symbols, or when a stored
+        ratio is unusable; ``1.0`` -- an honest "no adjustment" -- when
+        revisions exist and record no later split.
+        """
+        if not symbols:
+            return None
+        placeholders = ",".join("?" for _ in symbols)
+        try:
+            with session(self._connect) as conn:
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM historical_price_revisions "
+                        f"WHERE requested_symbol IN ({placeholders}) LIMIT 1",
+                        list(symbols),
+                    ).fetchone()
+                    is None
+                ):
+                    return None
+                rows = conn.execute(
+                    "SELECT a.session_date, a.value_hex "
+                    "FROM historical_price_revisions r "
+                    "JOIN historical_corporate_actions a "
+                    "ON a.data_revision = r.data_revision "
+                    f"WHERE r.requested_symbol IN ({placeholders}) "
+                    "AND a.action_type = 'split' AND a.session_date > ? "
+                    "ORDER BY r.first_acquired_at DESC, r.data_revision",
+                    [*symbols, session_date],
+                ).fetchall()
+        except sqlite3.OperationalError as exc:
+            # Same contract as ``dated_close``: an absent cache is simply
+            # evidence-free, anything else must surface.
+            if not _is_absent_cache(exc):
+                raise
+            return None
+        ratios: dict[str, float] = {}
+        for split_date, value_hex in rows:
+            ratios.setdefault(str(split_date), _hex_to_float(str(value_hex)))
+        factor = 1.0
+        for ratio in ratios.values():
+            if not math.isfinite(ratio) or ratio <= 0:
+                return None
+            factor *= ratio
+        return factor
 
     def covering_revision(
         self, *, security_id: str, requested_symbol: str, start: str, end: str

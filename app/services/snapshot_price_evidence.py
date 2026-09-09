@@ -184,6 +184,22 @@ class HistoricalCacheGbpPriceSource:
                 return rate
         return None
 
+    def split_factor_since(self, ticker: str, as_of: str) -> float | None:
+        """Return the cumulative split factor applied after ``as_of`` (#555).
+
+        A stored close is adjusted for every split up to the day it was
+        fetched, so it describes today's shares, not the ones that existed
+        on ``as_of``. Multiplying by this restores the day's own share
+        definition -- which is what a price actually paid that day refers
+        to. ``None`` when the cache knows nothing about the symbol; ``1.0``
+        when it does and no split followed.
+
+        Resolved through the same alias spellings :meth:`gbp_price` uses, so
+        the factor and the close it corrects can never describe two
+        different listings.
+        """
+        return self._prices.split_factor_since(sorted(self._symbols_for(ticker)), as_of)
+
     def trading_days(self, start: str, end: str) -> frozenset[str]:
         """Return the days in ``[start, end]`` the market is known to have traded.
 

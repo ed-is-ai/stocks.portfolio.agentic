@@ -471,3 +471,131 @@ def test_gbp_price_still_refuses_a_nearby_rate(tmp_path: Path) -> None:
     )
 
     assert _source(tmp_path).gbp_price("DELL", "2024-06-03") is None
+
+
+# --- GH-555: a stored close describes today's shares, not the day's --------
+
+
+def _add_split(
+    tmp_path: Path, *, data_revision: str, session_date: str, ratio: float
+) -> None:
+    """Record one split action against a revision (append-only tables)."""
+    conn = sqlite3.connect(tmp_path / "historical_price_cache.db")
+    conn.execute(
+        "INSERT INTO historical_corporate_actions"
+        " (data_revision, session_date, action_type, value_hex)"
+        " VALUES (?, ?, 'split', ?)",
+        (data_revision, session_date, float(ratio).hex()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_split_factor_multiplies_every_later_split(tmp_path: Path) -> None:
+    repo = _cache_repo(tmp_path)
+    _add_revision(
+        tmp_path,
+        data_revision="rev-1",
+        requested_symbol="TSLA",
+        currency="USD",
+        quote_unit="USD",
+        quote_unit_scale="1.0",
+    )
+    _add_split(tmp_path, data_revision="rev-1", session_date="2022-08-25", ratio=3.0)
+    _add_split(tmp_path, data_revision="rev-1", session_date="2020-08-31", ratio=5.0)
+
+    # Only the 2022 split follows a 2021 trade; the 2020 one is already in
+    # the shares that were bought.
+    assert repo.split_factor_since(["TSLA"], "2021-03-01") == pytest.approx(3.0)
+    assert repo.split_factor_since(["TSLA"], "2019-01-01") == pytest.approx(15.0)
+    assert repo.split_factor_since(["TSLA"], "2023-01-01") == pytest.approx(1.0)
+
+
+def test_split_factor_is_read_across_revisions_not_just_the_covering_one(
+    tmp_path: Path,
+) -> None:
+    """The narrow revision a dated close comes from is adjusted for splits
+    its own window cannot contain -- it was fetched later (#555)."""
+    repo = _cache_repo(tmp_path)
+    _add_revision(
+        tmp_path,
+        data_revision="narrow",
+        requested_symbol="TSLA",
+        currency="USD",
+        quote_unit="USD",
+        quote_unit_scale="1.0",
+        first_acquired_at="2026-09-05T00:00:00+00:00",
+    )
+    _add_revision(
+        tmp_path,
+        data_revision="wide",
+        requested_symbol="TSLA",
+        currency="USD",
+        quote_unit="USD",
+        quote_unit_scale="1.0",
+        first_acquired_at="2026-09-02T00:00:00+00:00",
+    )
+    # The split lives only in the older, wider revision.
+    _add_split(tmp_path, data_revision="wide", session_date="2022-08-25", ratio=3.0)
+
+    assert repo.split_factor_since(["TSLA"], "2021-03-01") == pytest.approx(3.0)
+
+
+def test_a_split_recorded_by_two_revisions_is_counted_once(tmp_path: Path) -> None:
+    repo = _cache_repo(tmp_path)
+    for revision in ("rev-a", "rev-b"):
+        _add_revision(
+            tmp_path,
+            data_revision=revision,
+            requested_symbol="TSLA",
+            currency="USD",
+            quote_unit="USD",
+            quote_unit_scale="1.0",
+        )
+        _add_split(
+            tmp_path, data_revision=revision, session_date="2022-08-25", ratio=3.0
+        )
+
+    assert repo.split_factor_since(["TSLA"], "2021-03-01") == pytest.approx(3.0)
+
+
+def test_split_factor_is_none_for_a_symbol_the_cache_never_saw(
+    tmp_path: Path,
+) -> None:
+    repo = _cache_repo(tmp_path)
+    _add_revision(
+        tmp_path,
+        data_revision="rev-1",
+        requested_symbol="TSLA",
+        currency="USD",
+        quote_unit="USD",
+        quote_unit_scale="1.0",
+    )
+
+    assert repo.split_factor_since(["NOTHING"], "2021-03-01") is None
+    # Known symbol, no split recorded: an honest "no adjustment", not a gap.
+    assert repo.split_factor_since(["TSLA"], "2021-03-01") == pytest.approx(1.0)
+
+
+def test_the_price_source_resolves_the_factor_through_the_same_aliases(
+    tmp_path: Path,
+) -> None:
+    """The factor and the close it corrects must describe one listing."""
+    repo = _cache_repo(tmp_path)
+    _add_revision(
+        tmp_path,
+        data_revision="rev-1",
+        requested_symbol="0P00013P6I.L",
+        currency="GBP",
+        quote_unit="GBP",
+        quote_unit_scale="1.0",
+    )
+    _add_split(tmp_path, data_revision="rev-1", session_date="2025-01-01", ratio=2.0)
+    source = HistoricalCacheGbpPriceSource(
+        repo,
+        FxQuoteRepository(_trades_connect(tmp_path)),
+        FxRateCacheRepository(_trades_connect(tmp_path)),
+        aliases=_ALIASES,
+    )
+
+    assert source.split_factor_since("HSFWA", "2024-01-01") == pytest.approx(2.0)

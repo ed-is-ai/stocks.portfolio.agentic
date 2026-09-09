@@ -1115,12 +1115,26 @@ def test_a_stored_timestamp_is_classified_as_a_weekend() -> None:
 class _VotingSource(_RateSource):
     """Dated GBP closes plus one FX rate, for the currency vote (#553)."""
 
-    def __init__(self, closes: dict[str, float], rate: float | None = 1.25) -> None:
+    def __init__(
+        self,
+        closes: dict[str, float],
+        rate: float | None = 1.25,
+        splits: dict[str, float] | None = None,
+    ) -> None:
         super().__init__(lambda currency, as_of: 1.0 if currency == "GBP" else rate)
         self._closes = closes
+        self._splits = splits
 
     def gbp_price(self, ticker: str, as_of: str) -> float | None:
         return self._closes.get(as_of)
+
+    def split_factor_since(self, ticker: str, as_of: str) -> float | None:
+        """The factor restoring ``as_of``'s share definition (#555).
+
+        Omitting ``splits`` leaves this source split-unaware in the same way
+        a pre-#555 one is, which is what most of these tests want.
+        """
+        return 1.0 if self._splits is None else self._splits.get(as_of)
 
 
 def test_a_gbp_priced_holding_with_a_foreign_quote_is_left_unconverted() -> None:
@@ -1344,3 +1358,73 @@ def test_a_sterling_candidate_with_no_quote_is_never_voted_on() -> None:
         )
         == rows
     )
+
+
+# --- GH-555: the close is adjusted for later splits, the price paid is not --
+
+
+def test_a_split_after_the_last_trade_no_longer_defeats_the_vote() -> None:
+    """The TSLA shape: 2021 fills near 690 against closes adjusted for a 3:1
+    split in 2022. Unadjusted, every date abstains; restored to the day's own
+    shares, the evidence is unanimous (#555)."""
+    closes = {"2021-03-01": 171.39, "2021-03-09": 162.42, "2021-05-11": 145.59}
+    rows = [
+        _replay_row("TSLA", "BUY", 3, 690.11, "2021-03-01", "USD"),
+        _replay_row("TSLA", "BUY", 1, 674.77, "2021-03-09", "USD"),
+    ]
+    blind = _VotingSource(closes, rate=1.3973)
+    aware = _VotingSource(closes, rate=1.3973, splits=dict.fromkeys(closes, 3.0))
+
+    # Blind: no verdict, so the candidate stands untouched and the rows are
+    # still converted -- correct here only because the candidate happened to
+    # be right.
+    assert gbp_replay_rows(rows, blind, TradeCurrencyResolver(blind))[0][3] == (
+        pytest.approx(690.11 / 1.3973)
+    )
+    # Aware: the same answer, now actually evidenced.
+    resolver = TradeCurrencyResolver(aware)
+    assert resolver.resolve("TSLA", "USD", [("2021-03-01", 690.11)]) == "USD"
+
+
+def test_a_sterling_holding_is_not_promoted_by_a_split_resembling_the_rate() -> None:
+    """A 1.25:1 consolidation against a 1.25 rate puts the adjusted close
+    exactly where ``price / rate`` would sit. Restoring the day's shares
+    first is what stops that being a confident wrong verdict (#555)."""
+    # Paid £100 for a share worth £100 that day; the stored close has since
+    # been divided by a 1.25 split.
+    source = _VotingSource(
+        {"2024-01-01": 80.0, "2024-01-02": 80.0},
+        rate=1.25,
+        splits={"2024-01-01": 1.25, "2024-01-02": 1.25},
+    )
+    resolver = TradeCurrencyResolver(source)
+
+    assert resolver.resolve("UKCO", "USD", [("2024-01-01", 100.0)]) == "GBP"
+
+
+def test_a_source_that_cannot_answer_splits_behaves_exactly_as_before() -> None:
+    """An unaware source (or one predating #555) compares unadjusted, so no
+    existing caller changes behaviour."""
+
+    class _Unaware(_RateSource):
+        def __init__(self) -> None:
+            super().__init__(lambda currency, as_of: 1.0 if currency == "GBP" else 1.25)
+
+        def gbp_price(self, ticker: str, as_of: str) -> float | None:
+            return 56.0
+
+    source = _Unaware()
+    assert (
+        TradeCurrencyResolver(source).resolve("USDCO", "USD", [("2024-01-01", 70.0)])
+        == "USD"
+    )
+
+
+def test_an_unknown_split_factor_skips_the_date_rather_than_guessing() -> None:
+    """``None`` means the source knows nothing about this symbol, so the two
+    numbers may describe different share definitions -- not comparable."""
+    source = _VotingSource({"2024-01-01": 56.0}, rate=1.25, splits={})
+    resolver = TradeCurrencyResolver(source)
+
+    # No usable date, so the candidate stands untouched.
+    assert resolver.resolve("USDCO", "USD", [("2024-01-01", 70.0)]) == "USD"
