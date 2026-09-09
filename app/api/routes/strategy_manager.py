@@ -21,12 +21,14 @@ from fastapi.datastructures import FormData
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
+from app.agents.strategy_manager import StrategyManagerAgent
 from app.api.dependencies import (
     get_backtest_launch_service,
     get_backtest_repository,
     get_bootstrap_service,
     get_readiness_service,
     get_strategy_job_service,
+    get_strategy_manager_agent,
 )
 from app.api.templating import is_htmx_request, template_response
 from app.core.security import require_local_or_token
@@ -101,6 +103,9 @@ logger = logging.getLogger(__name__)
 BacktestDep = Annotated[BacktestRepository, Depends(get_backtest_repository)]
 JobsDep = Annotated[StrategyJobService, Depends(get_strategy_job_service)]
 LaunchDep = Annotated[BacktestLaunchService, Depends(get_backtest_launch_service)]
+StrategyManagerDep = Annotated[
+    StrategyManagerAgent, Depends(get_strategy_manager_agent)
+]
 BootstrapDep = Annotated[StrategyBootstrapService, Depends(get_bootstrap_service)]
 ReadinessDep = Annotated[StrategyReadinessService, Depends(get_readiness_service)]
 
@@ -1218,7 +1223,10 @@ async def strategy_configuration_fields(
     dependencies=[Depends(require_local_or_token)],
 )
 async def submit_strategy_configuration(
-    request: Request, launch: LaunchDep, backtest: BacktestDep
+    request: Request,
+    launch: LaunchDep,
+    backtest: BacktestDep,
+    agent: StrategyManagerDep,
 ) -> Response:
     """Validate and launch a Backtest (Story 2.7 AC 6-8).
 
@@ -1378,7 +1386,7 @@ async def submit_strategy_configuration(
             command, parameters=merged_params, universe_selection=selection
         )
     try:
-        result = launch.launch(command)
+        result = agent.run(command)
     except BacktestLaunchValidationError as exc:
         field_errors = {error.field: error.message for error in exc.errors}
         return template_response(
@@ -1933,7 +1941,7 @@ def _compare_context(repo: BacktestRepository, run_id: str) -> dict[str, object]
         "run_id": run_id,
         "integrity_error": None,
         "anchor": anchor,
-        "candidates": repo.comparison_candidates(run_id),
+        "candidates": repo.comparison_candidates(run_id, anchor_result=anchor),
         "picker_error": None,
     }
 
@@ -2061,7 +2069,7 @@ def _comparison_integrity_response(
 
 
 def _comparison_side_context(
-    repo: BacktestRepository, run_id: str
+    repo: BacktestRepository, run_id: str, *, result: BacktestResultV1 | None = None
 ) -> dict[str, object]:
     """Build one side of the Comparison page's context: the same Story
     2.9 Metrics/Trade-Log/Provenance formatting ``_result_context`` uses,
@@ -2069,7 +2077,7 @@ def _comparison_side_context(
     second formatter. Notes stay a standalone-Result (Story 2.9) concern,
     so ``note_view`` is never called here."""
     try:
-        result = repo.backtest_result(run_id)
+        result = result if result is not None else repo.backtest_result(run_id)
     except StrategyJobNotFound as exc:
         raise _reraise_vanished_evidence(exc) from exc
     coverage = repo.snapshot_coverage(profile_hash=result.profile_hash)
@@ -2084,14 +2092,19 @@ def _comparison_side_context(
 
 
 def _comparison_context(
-    repo: BacktestRepository, run_id_a: str, run_id_b: str
+    repo: BacktestRepository,
+    run_id_a: str,
+    run_id_b: str,
+    *,
+    result_a: BacktestResultV1 | None = None,
+    result_b: BacktestResultV1 | None = None,
 ) -> dict[str, object]:
     """Build the Comparison page's full context: both sides' independent
     presenter context (AC 1-4) plus the shared-timeline
     ``comparison_equity_payload`` (AC 3) -- a pure read, never a
     mutation of either Result, its note, or its manifest."""
-    side_a = _comparison_side_context(repo, run_id_a)
-    side_b = _comparison_side_context(repo, run_id_b)
+    side_a = _comparison_side_context(repo, run_id_a, result=result_a)
+    side_b = _comparison_side_context(repo, run_id_b, result=result_b)
     equity = comparison_equity_payload(
         cast(BacktestResultV1, side_a["result"]),
         cast(BacktestResultV1, side_b["result"]),
@@ -2127,7 +2140,13 @@ async def comparison_view(
     both remain independently accessible.
     """
     try:
-        eligibility = _revalidate_eligibility(backtest, run_id_a, run_id_b)
+        eligibility, result_a, result_b = backtest.comparison_results_if_eligible(
+            run_id_a, run_id_b
+        )
+    except StrategyJobNotFound as exc:
+        return _comparison_integrity_response(
+            request, run_id_a, run_id_b, _reraise_vanished_evidence(exc)
+        )
     except BacktestIntegrityError as exc:
         return _comparison_integrity_response(request, run_id_a, run_id_b, exc)
     if not eligibility.eligible:
@@ -2137,7 +2156,14 @@ async def comparison_view(
             status_code=303,
         )
     try:
-        context = _comparison_context(backtest, run_id_a, run_id_b)
+        assert result_a is not None and result_b is not None
+        context = _comparison_context(
+            backtest,
+            run_id_a,
+            run_id_b,
+            result_a=result_a,
+            result_b=result_b,
+        )
     except BacktestIntegrityError as exc:
         return _comparison_integrity_response(request, run_id_a, run_id_b, exc)
     return template_response(request, "_comparison.html", context)

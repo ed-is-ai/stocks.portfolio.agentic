@@ -7,7 +7,11 @@ module-level ``trader`` instance.
 """
 
 from functools import lru_cache
+from typing import Annotated
 
+from fastapi import Depends
+
+from app.agents.strategy_manager import StrategyManagerAgent
 from app.core import config
 from app.core.config import ALERTS_DB, TRADES_DB
 from app.integrations.fx_history import ChainedFxQuoteFetcher
@@ -147,6 +151,13 @@ def get_backtest_launch_service() -> BacktestLaunchService:
         fx_fetcher=get_fx_history_fetcher(),
         fx_series_fetcher=get_fx_series_fetcher(),
     )
+
+
+def get_strategy_manager_agent(
+    launch: Annotated[BacktestLaunchService, Depends(get_backtest_launch_service)],
+) -> StrategyManagerAgent:
+    """Compose the dispatch Agent with the shared, overridable launch service."""
+    return StrategyManagerAgent(name="strategy_manager", launch_service=launch)
 
 
 @lru_cache

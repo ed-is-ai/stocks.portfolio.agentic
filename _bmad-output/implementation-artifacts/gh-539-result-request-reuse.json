@@ -1,0 +1,14 @@
+{
+  "source": "approved main Backtest database copied offline for GH-539",
+  "completed_results": 3,
+  "runs": [
+    {"run_id": "e1c1019e-0906-40e7-8117-19aaab359fea", "events": 0, "equity_points": 23, "event_json_bytes": 0},
+    {"run_id": "52096a8e-fa34-47d5-a729-fa83b7cebe40", "events": 0, "equity_points": 23, "event_json_bytes": 0},
+    {"run_id": "8f1538db-3647-4730-88b4-ff3fa0412a8e", "events": 194, "equity_points": 400, "event_json_bytes": 69143}
+  ],
+  "request_verification_counts": {
+    "compare_picker_anchor": 1,
+    "comparison_page_each_side": 1
+  },
+  "interpretation": "This removes duplicate same-request full reconstruction only. The main measured bottleneck was profile coverage/member verification, now prepared at startup. No p95 or cold completed-Result acceptance claim is made."
+}

@@ -1,0 +1,341 @@
+{
+  "backtest": {
+    "database": "backtest.db",
+    "dbstat_available": true,
+    "file_bytes": 10550337536,
+    "free_bytes": 4096,
+    "journal_mode": "wal",
+    "logical_bytes": 10550337536,
+    "object_bytes": {
+      "active_snapshot_profile": 4096,
+      "backtest_enqueue_actions": 4096,
+      "backtest_result_entry_selection": 4096,
+      "backtest_result_entry_selection_decisions": 4096,
+      "backtest_results": 4096,
+      "backtest_staging": 4096,
+      "backtest_staging_entry_selection": 4096,
+      "backtest_staging_entry_selection_decisions": 4096,
+      "bau_run_authority": 4096,
+      "bootstrap_enqueue_actions": 12288,
+      "bootstrap_runs": 4096,
+      "equity_curve": 49152,
+      "historical_source_qualifications": 12288,
+      "idx_bau_run_authority_state": 4096,
+      "idx_monthly_scan_results_profile_security": 109473792,
+      "idx_run_input_manifests_execution_contract": 4096,
+      "idx_source_qualification_contract": 4096,
+      "idx_strategy_runs_comparison_dimensions": 4096,
+      "idx_strategy_runs_source_preparation": 4096,
+      "idx_trade_log_run_sequence": 16384,
+      "initialization_progress": 4096,
+      "initialization_runs": 114688,
+      "monthly_scan_results": 3242561536,
+      "notification_outbox": 442368,
+      "one_running_strategy_job": 4096,
+      "preparation_enqueue_actions": 4096,
+      "preparation_runs": 520192,
+      "reconstruction_roster_lineages": 4096,
+      "reconstruction_roster_members": 6324224,
+      "reconstruction_roster_sources": 1294336,
+      "reconstruction_rosters": 8351744,
+      "run_input_manifests": 319488,
+      "scan_reconstruction_cache": 3209326592,
+      "security_alias_entries": 2220032,
+      "security_alias_manifests": 2912256,
+      "security_identities": 225280,
+      "security_identity_registry_revisions": 1626112,
+      "snapshot_members": 3144695808,
+      "snapshot_months": 1703936,
+      "snapshot_profile_activation_history": 4096,
+      "snapshot_profiles": 36864,
+      "sqlite_autoindex_backtest_enqueue_actions_1": 4096,
+      "sqlite_autoindex_backtest_enqueue_actions_2": 4096,
+      "sqlite_autoindex_backtest_result_entry_selection_1": 4096,
+      "sqlite_autoindex_backtest_result_entry_selection_decisions_1": 4096,
+      "sqlite_autoindex_backtest_result_entry_selection_decisions_2": 4096,
+      "sqlite_autoindex_backtest_results_1": 4096,
+      "sqlite_autoindex_backtest_staging_1": 4096,
+      "sqlite_autoindex_backtest_staging_entry_selection_1": 4096,
+      "sqlite_autoindex_backtest_staging_entry_selection_decisions_1": 4096,
+      "sqlite_autoindex_backtest_staging_entry_selection_decisions_2": 4096,
+      "sqlite_autoindex_bau_run_authority_1": 4096,
+      "sqlite_autoindex_bau_run_authority_2": 4096,
+      "sqlite_autoindex_bootstrap_enqueue_actions_1": 4096,
+      "sqlite_autoindex_bootstrap_enqueue_actions_2": 4096,
+      "sqlite_autoindex_bootstrap_runs_1": 4096,
+      "sqlite_autoindex_equity_curve_1": 32768,
+      "sqlite_autoindex_equity_curve_2": 28672,
+      "sqlite_autoindex_initialization_progress_1": 4096,
+      "sqlite_autoindex_initialization_runs_1": 4096,
+      "sqlite_autoindex_monthly_scan_results_1": 107106304,
+      "sqlite_autoindex_notification_outbox_1": 12288,
+      "sqlite_autoindex_preparation_enqueue_actions_1": 4096,
+      "sqlite_autoindex_preparation_enqueue_actions_2": 4096,
+      "sqlite_autoindex_preparation_runs_1": 4096,
+      "sqlite_autoindex_reconstruction_roster_lineages_1": 4096,
+      "sqlite_autoindex_reconstruction_roster_members_1": 1683456,
+      "sqlite_autoindex_reconstruction_roster_members_2": 1232896,
+      "sqlite_autoindex_reconstruction_roster_sources_1": 4096,
+      "sqlite_autoindex_reconstruction_roster_sources_2": 4096,
+      "sqlite_autoindex_reconstruction_rosters_1": 4096,
+      "sqlite_autoindex_run_input_manifests_1": 4096,
+      "sqlite_autoindex_scan_reconstruction_cache_1": 557498368,
+      "sqlite_autoindex_security_alias_entries_1": 1351680,
+      "sqlite_autoindex_security_alias_manifests_1": 4096,
+      "sqlite_autoindex_security_identities_1": 49152,
+      "sqlite_autoindex_security_identities_2": 20480,
+      "sqlite_autoindex_security_identity_registry_revisions_1": 4096,
+      "sqlite_autoindex_snapshot_members_1": 148307968,
+      "sqlite_autoindex_snapshot_months_1": 131072,
+      "sqlite_autoindex_snapshot_profile_activation_history_1": 4096,
+      "sqlite_autoindex_snapshot_profiles_1": 4096,
+      "sqlite_autoindex_strategy_job_restart_actions_1": 4096,
+      "sqlite_autoindex_strategy_job_restart_actions_2": 4096,
+      "sqlite_autoindex_strategy_jobs_1": 12288,
+      "sqlite_autoindex_strategy_jobs_2": 4096,
+      "sqlite_autoindex_strategy_runs_1": 4096,
+      "sqlite_autoindex_trade_log_1": 16384,
+      "sqlite_autoindex_trade_log_2": 16384,
+      "sqlite_schema": 77824,
+      "sqlite_sequence": 4096,
+      "strategy_job_fifo": 4096,
+      "strategy_job_restart_actions": 4096,
+      "strategy_jobs": 28672,
+      "strategy_runs": 143360,
+      "strategy_worker_lease": 4096,
+      "trade_log": 106496
+    },
+    "row_counts": {
+      "active_snapshot_profile": 1,
+      "backtest_enqueue_actions": 0,
+      "backtest_result_entry_selection": 0,
+      "backtest_result_entry_selection_decisions": 0,
+      "backtest_results": 3,
+      "backtest_staging": 0,
+      "backtest_staging_entry_selection": 0,
+      "backtest_staging_entry_selection_decisions": 0,
+      "bau_run_authority": 0,
+      "bootstrap_enqueue_actions": 31,
+      "bootstrap_runs": 31,
+      "equity_curve": 446,
+      "historical_source_qualifications": 10,
+      "initialization_progress": 1,
+      "initialization_runs": 43,
+      "monthly_scan_results": 789655,
+      "notification_outbox": 102,
+      "preparation_enqueue_actions": 16,
+      "preparation_runs": 16,
+      "reconstruction_roster_lineages": 15,
+      "reconstruction_roster_members": 13197,
+      "reconstruction_roster_sources": 45,
+      "reconstruction_rosters": 15,
+      "run_input_manifests": 4,
+      "scan_reconstruction_cache": 2382811,
+      "security_alias_entries": 9054,
+      "security_alias_manifests": 10,
+      "security_identities": 957,
+      "security_identity_registry_revisions": 10,
+      "snapshot_members": 1098596,
+      "snapshot_months": 1243,
+      "snapshot_profile_activation_history": 4,
+      "snapshot_profiles": 15,
+      "strategy_job_restart_actions": 22,
+      "strategy_jobs": 102,
+      "strategy_runs": 10,
+      "strategy_worker_lease": 1,
+      "trade_log": 194
+    },
+    "wal_bytes": 0
+  },
+  "historical": {
+    "database": "historical_price_cache.db",
+    "dbstat_available": true,
+    "file_bytes": 27366866944,
+    "free_bytes": 0,
+    "journal_mode": "delete",
+    "logical_bytes": 27366866944,
+    "object_bytes": {
+      "historical_corporate_actions": 53469184,
+      "historical_evidence_references": 250626048,
+      "historical_price_acquisitions": 1093632,
+      "historical_price_observations": 10760314880,
+      "historical_price_revisions": 11743973376,
+      "idx_historical_revision_interval": 720896,
+      "idx_historical_revisions_requested_symbol": 86016,
+      "price_evidence_unavailable_attempts": 12288,
+      "sqlite_autoindex_historical_corporate_actions_1": 50688000,
+      "sqlite_autoindex_historical_evidence_references_1": 248553472,
+      "sqlite_autoindex_historical_price_acquisitions_1": 1249280,
+      "sqlite_autoindex_historical_price_observations_1": 4255555584,
+      "sqlite_autoindex_historical_price_revisions_1": 499712,
+      "sqlite_autoindex_price_evidence_unavailable_attempts_1": 4096,
+      "sqlite_schema": 12288,
+      "sqlite_sequence": 4096
+    },
+    "row_counts": {
+      "historical_corporate_actions": 456391,
+      "historical_evidence_references": 1098596,
+      "historical_price_acquisitions": 6111,
+      "historical_price_observations": 44603636,
+      "historical_price_revisions": 6111,
+      "price_evidence_unavailable_attempts": 59
+    },
+    "wal_bytes": 0
+  },
+  "metadata": {
+    "application_revision": "1d538ef8763322b8249ecf67b7912287b7f3b5b8-dirty",
+    "input_snapshot_id": "gh-535-main-20260908",
+    "percentile_method": "nearest-rank",
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "provenance_note": "Revision and snapshot identifiers attached after the run from recorded execution context; timing samples unchanged.",
+    "python": "3.14.6",
+    "recorded_at": "2026-09-08T18:36:48.391417+00:00",
+    "sqlite": "3.53.3"
+  },
+  "result_components": {
+    "cache_conditions": "First-use means a new repository cache, not a cold OS page cache. Warm samples reuse that repository. Component totals exclude HTML, HTTP and presentation; these are not Result-rendering acceptance results. When integrity fails, durations measure rejection, not successful reads.",
+    "failures": [
+      {
+        "component": "coverage",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 0
+      },
+      {
+        "component": "member_revision_verification",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 0
+      },
+      {
+        "component": "coverage",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 1
+      },
+      {
+        "component": "member_revision_verification",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 1
+      },
+      {
+        "component": "coverage",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 2
+      },
+      {
+        "component": "member_revision_verification",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 2
+      },
+      {
+        "component": "coverage",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 3
+      },
+      {
+        "component": "member_revision_verification",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 3
+      },
+      {
+        "component": "coverage",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 4
+      },
+      {
+        "component": "member_revision_verification",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 4
+      },
+      {
+        "component": "coverage",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 5
+      },
+      {
+        "component": "member_revision_verification",
+        "detail": "snapshot profile detector manifests do not match the runtime authority",
+        "error": "BacktestIntegrityError",
+        "sample": 5
+      }
+    ],
+    "first_use_seconds": {
+      "coverage": 9.784646541927941,
+      "member_revision_verification": 0.0029852089937776327,
+      "result_lookup": 0.13037208293098956,
+      "roster": 0.0030421660048887134,
+      "total_components": 9.921067083021626
+    },
+    "profile_hash": "e0569f59267ae151fd4857e7e8a8d6afa3846eb6934a0a21f851cbac37ccd5f7",
+    "requested_warm_repetitions": 5,
+    "run_id": "8f1538db-3647-4730-88b4-ff3fa0412a8e",
+    "status": "integrity_failure",
+    "warm": {
+      "coverage": {
+        "median_seconds": 3.1670847079949453,
+        "p95_seconds": 5.139148541959003,
+        "samples_seconds": [
+          5.139148541959003,
+          2.8938494590111077,
+          3.1670847079949453,
+          3.1367152499733493,
+          3.3829633749555796
+        ]
+      },
+      "member_revision_verification": {
+        "median_seconds": 0.0030731249134987593,
+        "p95_seconds": 0.0033217499731108546,
+        "samples_seconds": [
+          0.0033217499731108546,
+          0.0030731249134987593,
+          0.0030726250261068344,
+          0.0030747089767828584,
+          0.003068041056394577
+        ]
+      },
+      "result_lookup": {
+        "median_seconds": 0.006005416042171419,
+        "p95_seconds": 0.008564624935388565,
+        "samples_seconds": [
+          0.006038415944203734,
+          0.008564624935388565,
+          0.0054567919578403234,
+          0.005120874964632094,
+          0.006005416042171419
+        ]
+      },
+      "roster": {
+        "median_seconds": 0.0028905830113217235,
+        "p95_seconds": 0.004839957924559712,
+        "samples_seconds": [
+          0.004839957924559712,
+          0.0028905830113217235,
+          0.0035882500233128667,
+          0.002773209009319544,
+          0.0021730000153183937
+        ]
+      },
+      "total_components": {
+        "median_seconds": 3.179306000005454,
+        "p95_seconds": 5.153688207967207,
+        "samples_seconds": [
+          5.153688207967207,
+          2.9086177080171183,
+          3.179306000005454,
+          3.1478002079529688,
+          3.394332916010171
+        ]
+      }
+    },
+    "warm_repetitions": 5
+  }
+}

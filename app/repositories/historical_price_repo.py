@@ -9,7 +9,7 @@ import math
 import sqlite3
 from typing import Mapping, Sequence
 
-from app.repositories.db import Connect, session
+from app.repositories.db import Connect, evidence_connect, session
 from app.services.backtest.canonical_manifest import (
     canonical_json_digest,
     manifest_digest,
@@ -203,10 +203,11 @@ class HistoricalPriceRepository:
     """Own the append-only historical price database and exact-reference reads."""
 
     def __init__(self, connect: Connect) -> None:
-        self._connect = connect
+        self._connect = evidence_connect(connect)
 
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.executescript(_SCHEMA)
             try:
                 conn.execute(_ADD_CONTRACT_VERSION)

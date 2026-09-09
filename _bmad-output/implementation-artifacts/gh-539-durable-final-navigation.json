@@ -1,0 +1,74 @@
+{
+  "method": "in-process TestClient GET on isolated SQLite backup; real repository and services; three sequential reads each; OS caches uncontrolled",
+  "routes": {
+    "/strategy-manager": {
+      "seconds": [
+        3.6805899159990076,
+        0.07498629199835705,
+        0.07584937499996158
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ]
+    },
+    "/strategy-manager/initialization": {
+      "seconds": [
+        0.08831320800163667,
+        0.0825400419998914,
+        0.08215158299935865
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ]
+    },
+    "/strategy-manager/readiness": {
+      "seconds": [
+        0.04481991599823232,
+        0.0366316250001546,
+        0.03572329099915805
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ]
+    },
+    "/strategy-manager/configuration": {
+      "seconds": [
+        0.06639141599953291,
+        0.028801915999792982,
+        0.029117958998540416
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ]
+    },
+    "/strategy-manager/backtests": {
+      "seconds": [
+        0.028758666998328408,
+        0.028786124999896856,
+        0.028638125000725267
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ]
+    }
+  },
+  "code_revision": "d067ef7+durable-coverage-working-tree",
+  "repository_code_sha256": "b0165633b0b36cfce195f833e255a5dd06b8f2ff48548c598f81633fbdcfcff0",
+  "snapshot_id": "gh539-main-backtest-offline-2026-09-09",
+  "preparation_seconds": 126.33273462500074,
+  "fresh_preparation_seconds": 3.725150875001418,
+  "profile_hash": "8c891e8547236cfd66639ab6bd7e9bae7ad8676d2ca9984b5325b669d9efab93",
+  "snapshot_months": 320,
+  "limitations": "Fresh process against existing prepared offline backup. No lifespan; first route includes repository/schema initialization. OS caches uncontrolled, two warm samples; HTTP 200 does not establish successful Result rendering. Source changes and new backups may invalidate preparation.",
+  "measurement_note": "Final reviewed implementation, measured while full regression suite was also running."
+}

@@ -1,0 +1,80 @@
+{
+  "method": "in-process TestClient GET on isolated SQLite backup; real repository and services; three sequential reads each; OS caches uncontrolled",
+  "routes": {
+    "/strategy-manager": {
+      "seconds": [
+        137.87851362499987,
+        10.082841500000086,
+        9.655628333000095
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 137.87851362499987,
+      "warm_median_seconds": 9.86923491650009
+    },
+    "/strategy-manager/initialization": {
+      "seconds": [
+        4.926258707999978,
+        4.203398083000138,
+        5.011000875000036
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 4.926258707999978,
+      "warm_median_seconds": 4.607199479000087
+    },
+    "/strategy-manager/readiness": {
+      "seconds": [
+        5.254136333000133,
+        4.067832208000027,
+        5.212722332999874
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 5.254136333000133,
+      "warm_median_seconds": 4.640277270499951
+    },
+    "/strategy-manager/configuration": {
+      "seconds": [
+        5.835432042000093,
+        5.175099541999998,
+        5.368848458000002
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 5.835432042000093,
+      "warm_median_seconds": 5.271974
+    },
+    "/strategy-manager/backtests": {
+      "seconds": [
+        0.062477874999785854,
+        0.027543292000018482,
+        0.026882082999918566
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.062477874999785854,
+      "warm_median_seconds": 0.027212687499968524
+    }
+  },
+  "code_revision": "c1c5223f8fb84f1109fb761fae229e566ba7bae6",
+  "snapshot_id": "gh539-main-backtest-offline-2026-09-09",
+  "limitations": "First visit per route, not independent cold processes; OS caches uncontrolled; empty isolated historical cache; HTTP 200 may display readiness errors and does not establish successful Result rendering.",
+  "repository_code_sha256": "983e620c4c38b0c36a557658821ca1e16539711c64272f72185de15ac415b782",
+  "snapshot_notes": "Same isolated SQLite backup used for both runs; application schema initialization adds revision accounting on after run. Source backup size 10,550,337,536 bytes. Full source file fingerprint and response semantic indicators were not captured in this initial measurement."
+}

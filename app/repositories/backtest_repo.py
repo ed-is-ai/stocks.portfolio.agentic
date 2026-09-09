@@ -28,7 +28,7 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
-from app.repositories.db import Connect, session
+from app.repositories.db import Connect, evidence_connect, session
 from app.services.backtest.historical_scan_record import (
     DetectorFragmentEnvelopeV1,
     HistoricalScanRecordV1,
@@ -109,11 +109,6 @@ if TYPE_CHECKING:
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
-
-# Backtest work is served by both the web process and the orchestrator.  Keep
-# its SQLite tuning local to this repository: the trading and alert databases
-# have different contention profiles and must not inherit it accidentally.
-BACKTEST_SQLITE_BUSY_TIMEOUT_MS = 5_000
 
 
 @dataclass(frozen=True)
@@ -1752,6 +1747,50 @@ def _migrate_snapshot_exclusion_constraints(conn: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_trigger(conn: sqlite3.Connection, definition: str) -> None:
+    """Replace a migrated trigger only when its stored definition differs."""
+    definition = definition.strip().rstrip(";")
+    name = definition.split()[2]
+    existing = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)
+    ).fetchone()
+    if existing is not None and str(existing[0]).strip().rstrip(";") == definition:
+        return
+    conn.execute(f'DROP TRIGGER IF EXISTS "{name}"')
+    conn.execute(definition)
+
+
+def _execute_schema(conn: sqlite3.Connection, script: str) -> None:
+    """Execute schema in the caller's transaction without redundant trigger DDL."""
+    statement = ""
+    pending_drop = None
+    for line in script.splitlines(keepends=True):
+        statement += line
+        if not sqlite3.complete_statement(statement):
+            continue
+        sql = statement.strip()
+        statement = ""
+        if pending_drop is not None:
+            name = pending_drop.split()[4].rstrip(";")
+            if sql.split()[:3] != ["CREATE", "TRIGGER", name]:
+                conn.execute(pending_drop)
+            pending_drop = None
+        if sql.startswith("DROP TRIGGER IF EXISTS "):
+            # Skip only paired replacement drops, never intentional removals.
+            pending_drop = sql
+            continue
+        if sql.startswith("CREATE TRIGGER ") and not sql.startswith(
+            "CREATE TRIGGER IF NOT EXISTS "
+        ):
+            _ensure_trigger(conn, sql)
+        else:
+            conn.execute(sql)
+    if statement.strip():
+        raise ValueError("incomplete repository schema statement")
+    if pending_drop is not None:
+        conn.execute(pending_drop)
+
+
 class BacktestRepository:
     """Repository seed that later stories extend with jobs and results."""
 
@@ -1764,7 +1803,7 @@ class BacktestRepository:
         id_generator: Callable[[], str] = lambda: str(uuid4()),
         token_generator: Callable[[], str] = lambda: str(uuid4()),
     ) -> None:
-        self._connect = self._backtest_connection(connect)
+        self._connect = evidence_connect(connect)
         self._clock = clock
         self._instant_clock = instant_clock
         self._id_generator = id_generator
@@ -1776,22 +1815,6 @@ class BacktestRepository:
         self._snapshot_coverage_cache: dict[str, tuple[str, CoverageSummaryV1]] = {}
         self._snapshot_coverage_cache_limit = 16
 
-    @staticmethod
-    def _backtest_connection(connect: Connect) -> Connect:
-        """Return a fresh backtest connection with bounded lock waiting.
-
-        ``Connect`` deliberately returns a new connection for each repository
-        operation, so the pragma must be applied here rather than only during
-        schema setup.  SQLite scopes ``busy_timeout`` to the connection.
-        """
-
-        def open_connection() -> sqlite3.Connection:
-            conn = connect()
-            conn.execute(f"PRAGMA busy_timeout = {BACKTEST_SQLITE_BUSY_TIMEOUT_MS}")
-            return conn
-
-        return open_connection
-
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
             # WAL lets Strategy Manager's read-heavy tab rendering proceed
@@ -1799,20 +1822,21 @@ class BacktestRepository:
             # The mode is durable database state, but issuing it here also
             # upgrades existing rollback-journal databases at startup.
             conn.execute("PRAGMA journal_mode = WAL")
-            # ``executescript`` otherwise commits before running and permits
-            # two startup processes to interleave a trigger DROP/CREATE pair.
-            # Keep each schema phase under SQLite's cross-process write lock.
-            conn.executescript(
-                "BEGIN IMMEDIATE;\n"
-                + _QUALIFICATION_SCHEMA
+            # Preserve schema_version across unchanged startups so durable
+            # verification remains reusable. Changed triggers still migrate
+            # under SQLite's cross-process write lock.
+            conn.execute("BEGIN IMMEDIATE")
+            _execute_schema(
+                conn,
+                _QUALIFICATION_SCHEMA
                 + _ROSTER_SCHEMA
                 + _SCAN_RECONSTRUCTION_CACHE_SCHEMA
                 + _SNAPSHOT_COVERAGE_SCHEMA
                 + _BAU_RUN_AUTHORITY_SCHEMA
                 + _STRATEGY_JOB_SCHEMA
-                + _BACKTEST_RESULT_SCHEMA
-                + "\nCOMMIT;"
+                + _BACKTEST_RESULT_SCHEMA,
             )
+            conn.commit()
             _migrate_bats_mic_constraints(conn)
             _migrate_snapshot_exclusion_constraints(conn)
             conn.execute("BEGIN IMMEDIATE")
@@ -1897,8 +1921,8 @@ class BacktestRepository:
             # replace a pre-selection trigger on an existing database. Rebuild
             # this one after its additive column migration so legacy and fresh
             # stores enforce the same immutable evidence contract.
-            conn.execute("DROP TRIGGER IF EXISTS backtest_result_evidence_immutable")
-            conn.execute(
+            _ensure_trigger(
+                conn,
                 """CREATE TRIGGER backtest_result_evidence_immutable
                    BEFORE UPDATE ON backtest_results
                    WHEN NEW.run_id != OLD.run_id
@@ -1907,7 +1931,7 @@ class BacktestRepository:
                      OR NEW.final_cash_base != OLD.final_cash_base
                      OR NEW.result_digest != OLD.result_digest
                      OR NEW.completed_at != OLD.completed_at
-                   BEGIN SELECT RAISE(ABORT, 'backtest result evidence is immutable'); END"""
+                   BEGIN SELECT RAISE(ABORT, 'backtest result evidence is immutable'); END""",
             )
             conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS "
@@ -1915,8 +1939,8 @@ class BacktestRepository:
                 "ON strategy_runs(source_preparation_job_id) "
                 "WHERE source_preparation_job_id IS NOT NULL"
             )
-            conn.execute("DROP TRIGGER IF EXISTS strategy_run_v2_contract_insert")
-            conn.execute(
+            _ensure_trigger(
+                conn,
                 """CREATE TRIGGER strategy_run_v2_contract_insert
                    BEFORE INSERT ON strategy_runs
                    WHEN NOT EXISTS(
@@ -1947,8 +1971,9 @@ class BacktestRepository:
                        SELECT RAISE(
                            ABORT, 'strategy run version provenance mismatch'
                        );
-                   END"""
+                   END""",
             )
+            self._ensure_snapshot_coverage_revisions(conn)
             existing = conn.execute(
                 """SELECT id FROM strategy_jobs
                    WHERE id NOT IN (SELECT job_id FROM notification_outbox)
@@ -1957,6 +1982,89 @@ class BacktestRepository:
             for row in existing:
                 self._upsert_notification_outbox_on_connection(
                     conn, self._load_strategy_job(conn, str(row[0]))
+                )
+
+    @staticmethod
+    def _ensure_snapshot_coverage_revisions(conn: sqlite3.Connection) -> None:
+        """Account for source writes in their transaction, including external writers."""
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS snapshot_coverage_revision_state (
+                singleton_id INTEGER PRIMARY KEY CHECK(singleton_id=1),
+                epoch TEXT NOT NULL,
+                generation INTEGER NOT NULL
+            )"""
+        )
+        conn.execute(
+            """INSERT OR IGNORE INTO snapshot_coverage_revision_state
+               VALUES (1, lower(hex(randomblob(16))), 0)"""
+        )
+        # No foreign key: deleted/moved profiles must retain their generation.
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS snapshot_coverage_profile_revisions (
+                profile_hash TEXT PRIMARY KEY,
+                generation INTEGER NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS snapshot_coverage_summaries (
+                profile_hash TEXT PRIMARY KEY,
+                source_revision TEXT NOT NULL,
+                verifier_version INTEGER NOT NULL,
+                summary_json TEXT NOT NULL,
+                summary_digest TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS snapshot_member_revision_summaries (
+                profile_hash TEXT NOT NULL,
+                snapshot_month TEXT NOT NULL,
+                source_revision TEXT NOT NULL,
+                verifier_version INTEGER NOT NULL,
+                members_json TEXT NOT NULL,
+                members_digest TEXT NOT NULL,
+                PRIMARY KEY(profile_hash, snapshot_month)
+            )"""
+        )
+        profile_tables = (
+            "snapshot_profiles",
+            "snapshot_months",
+            "snapshot_members",
+            "monthly_scan_results",
+        )
+        shared_tables = (
+            "active_snapshot_profile",
+            "reconstruction_rosters",
+            "reconstruction_roster_members",
+            "security_alias_manifests",
+            "security_alias_entries",
+        )
+        for table in (*profile_tables, *shared_tables):
+            for event in ("INSERT", "UPDATE", "DELETE"):
+                if table in profile_tables:
+                    identities = (
+                        ("OLD", "NEW")
+                        if event == "UPDATE"
+                        else ("OLD",)
+                        if event == "DELETE"
+                        else ("NEW",)
+                    )
+                    body = "".join(
+                        "INSERT INTO snapshot_coverage_profile_revisions "
+                        f"VALUES ({identity}.profile_hash, 1) "
+                        "ON CONFLICT(profile_hash) DO UPDATE "
+                        "SET generation=generation+1;"
+                        for identity in identities
+                    )
+                else:
+                    # Shared roster/alias changes are infrequent; conservatively
+                    # invalidate every profile instead of indexing dependencies.
+                    body = (
+                        "UPDATE snapshot_coverage_revision_state "
+                        "SET generation=generation+1 WHERE singleton_id=1;"
+                    )
+                conn.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS coverage_revision_{table}_{event.lower()} "
+                    f"AFTER {event} ON {table} BEGIN {body} END"
                 )
 
     def record_qualification(self, result: QualificationResult) -> int:
@@ -3132,7 +3240,14 @@ class BacktestRepository:
                 continue
         return None
 
-    def is_comparable(self, left: str, right: str) -> ComparisonEligibilityV1:
+    def is_comparable(
+        self,
+        left: str,
+        right: str,
+        *,
+        left_result: BacktestResultV1 | None = None,
+        right_result: BacktestResultV1 | None = None,
+    ) -> ComparisonEligibilityV1:
         """Return AD-19's one canonical comparison-eligibility verdict for
         two persisted Backtest Result IDs (Story 3.1 AC 1, 2, 5).
 
@@ -3143,7 +3258,8 @@ class BacktestRepository:
         (queued/running/failed/cancelled, or a non-Backtest job type) is
         reported as an ordinary ``eligible=False`` outcome, never an
         error. Once both jobs are confirmed complete, their Results are
-        loaded via :meth:`backtest_result` -- never re-parsed here -- and
+        loaded via :meth:`backtest_result` -- or supplied as a Result that
+        the caller freshly verified in this request -- never re-parsed here -- and
         any :class:`BacktestIntegrityError`/:class:`StrategyJobNotFound`
         it raises for a complete job whose Result has vanished or been
         tampered with propagates uncaught, mirroring
@@ -3159,6 +3275,11 @@ class BacktestRepository:
         error is reported when both ``left`` and ``right`` are broken --
         ``left`` is always checked first. Fixing it and calling again is
         required to discover a second, independent problem on ``right``.
+
+        ``left_result`` and ``right_result`` are intentionally narrow
+        request-local reuse inputs for callers that already performed the
+        full retrieval verification.  They are never retained by this
+        repository; ordinary calls continue to verify both persisted Results.
         """
         if left == right:
             return ComparisonEligibilityV1(
@@ -3177,8 +3298,74 @@ class BacktestRepository:
                     f"({reason.value})",
                 )
 
+        left_result = self._comparison_result_for_request(left, left_result)
+        right_result = self._comparison_result_for_request(right, right_result)
+        return self._compare_verified_results(left_result, right_result)
+
+    def comparison_results_if_eligible(
+        self, left: str, right: str
+    ) -> tuple[
+        ComparisonEligibilityV1, BacktestResultV1 | None, BacktestResultV1 | None
+    ]:
+        """Revalidate eligibility and return its verified Result inputs once.
+
+        This is intentionally request-scoped: callers present the returned
+        objects immediately and never retain them as a repository cache.
+        """
+        if left == right:
+            return (
+                ComparisonEligibilityV1(
+                    eligible=False,
+                    reason=ComparisonIneligibleReason.SELF_COMPARISON,
+                    detail=f"{left!r} cannot be compared to itself",
+                ),
+                None,
+                None,
+            )
+        for run_id in (left, right):
+            reason = self._comparison_job_reason(run_id)
+            if reason is not None:
+                return (
+                    ComparisonEligibilityV1(
+                        eligible=False,
+                        reason=reason,
+                        detail=f"{run_id!r} is not eligible for comparison "
+                        f"({reason.value})",
+                    ),
+                    None,
+                    None,
+                )
         left_result = self.backtest_result(left)
         right_result = self.backtest_result(right)
+        return (
+            self.is_comparable(
+                left, right, left_result=left_result, right_result=right_result
+            ),
+            left_result,
+            right_result,
+        )
+
+    def _comparison_result_for_request(
+        self, run_id: str, result: BacktestResultV1 | None
+    ) -> BacktestResultV1:
+        """Return a Result freshly verified by this request, if supplied.
+
+        The optional object is deliberately request-scoped caller state, not
+        a repository cache.  Its ID must still name the requested row; the
+        caller is responsible for obtaining it through :meth:`backtest_result`
+        in the same request.  Calls without it retain the public full-read
+        verification boundary.
+        """
+        if result is None:
+            return self.backtest_result(run_id)
+        if result.run_id != run_id:
+            raise ValueError("reused backtest result does not match run_id")
+        return result
+
+    def _compare_verified_results(
+        self, left_result: BacktestResultV1, right_result: BacktestResultV1
+    ) -> ComparisonEligibilityV1:
+        """Apply the complete comparison predicate to verified Results."""
         if left_result.manifest_version != right_result.manifest_version:
             return ComparisonEligibilityV1(
                 False,
@@ -3272,11 +3459,14 @@ class BacktestRepository:
                 )
         return ComparisonEligibilityV1(eligible=True, reason=None, detail="")
 
-    def comparison_candidates(self, run_id: str) -> tuple[ComparisonCandidateV1, ...]:
+    def comparison_candidates(
+        self, run_id: str, *, anchor_result: BacktestResultV1 | None = None
+    ) -> tuple[ComparisonCandidateV1, ...]:
         """Return every other eligible Backtest Result for ``run_id``
         (Story 3.1 AC 3), newest first.
 
-        Loads the anchor via :meth:`backtest_result` first, propagating
+        Loads the anchor via :meth:`backtest_result` first (unless a caller
+        supplies its freshly verified request-local ``anchor_result``), propagating
         :class:`StrategyJobNotFound`/:class:`BacktestIntegrityError`
         unchanged for a missing/malformed anchor -- an ineligible
         (e.g. tombstoned) but still-loadable anchor is not itself an
@@ -3290,7 +3480,7 @@ class BacktestRepository:
         duplicated comparison. Only eligible peers are kept, ordered
         ``enqueue_seq DESC``. No candidate is ever preselected.
         """
-        anchor_result = self.backtest_result(run_id)
+        anchor_result = self._comparison_result_for_request(run_id, anchor_result)
         anchor_reason = self._comparison_job_reason(run_id)
         if anchor_reason is not None:
             return ()
@@ -6462,10 +6652,16 @@ class BacktestRepository:
     ) -> tuple[tuple[str, str], ...]:
         """Return immutable winner evidence IDs only after full month validation."""
         with session(self._connect) as conn:
-            if (
-                self._load_verified_snapshot_month(conn, profile_hash, snapshot_month)
-                is None
-            ):
+            conn.execute("BEGIN")
+            profile = self._load_snapshot_profile_on_connection(conn, profile_hash)
+            self._validate_profile_authority(profile)
+            revision = self._snapshot_coverage_revision(conn, profile_hash)
+            persisted = self._load_persisted_snapshot_member_revisions(
+                conn, profile_hash, snapshot_month, revision
+            )
+            if persisted is not None:
+                return persisted
+            if self._load_verified_snapshot_month(conn, profile_hash, snapshot_month) is None:
                 raise BacktestIntegrityError("snapshot month does not exist")
             rows = conn.execute(
                 """SELECT security_id, provider_data_revision FROM snapshot_members
@@ -6474,7 +6670,11 @@ class BacktestRepository:
                    ORDER BY security_id""",
                 (profile_hash, snapshot_month),
             ).fetchall()
-        return tuple((str(row[0]), str(row[1])) for row in rows)
+            revisions = tuple((str(row[0]), str(row[1])) for row in rows)
+        self._publish_snapshot_member_revisions(
+            profile_hash, snapshot_month, revisions, revision
+        )
+        return revisions
 
     def snapshot_month_write_set(
         self, profile_hash: str, snapshot_month: str
@@ -6896,23 +7096,29 @@ class BacktestRepository:
                     if active_row is None:
                         raise BacktestIntegrityError("no active snapshot profile")
                     selected_hash = str(active_row[0])
-                revision = self._snapshot_coverage_revision(conn, selected_hash)
-                cached = self._snapshot_coverage_cache.get(selected_hash)
-                if cached is not None and cached[0] == revision:
-                    # Re-run the profile authority check on every hit. The
-                    # revision detects database changes; this preserves the
-                    # existing runtime-authority failure semantics as well.
+                # Runtime authority can change independently of database writes.
+                # Reject it before reading bulk evidence, including on cache hits.
+                try:
                     profile = self._load_snapshot_profile_on_connection(
                         conn, selected_hash
                     )
                     self._validate_profile_authority(profile)
+                    revision = self._snapshot_coverage_revision(conn, selected_hash)
+                except Exception:
+                    self._snapshot_coverage_cache.pop(selected_hash, None)
+                    raise
+                cached = self._snapshot_coverage_cache.get(selected_hash)
+                if cached is not None and cached[0] == revision:
                     return cached[1]
 
-                # A failed integrity check must not leave an older value that
-                # could be returned by a later lookup.
+                # Failed verification must not leave an older reusable summary.
                 self._snapshot_coverage_cache.pop(selected_hash, None)
-                profile = self._load_snapshot_profile_on_connection(conn, selected_hash)
-                self._validate_profile_authority(profile)
+                persisted = self._load_persisted_snapshot_coverage(
+                    conn, profile, revision
+                )
+                if persisted is not None:
+                    self._cache_snapshot_coverage(selected_hash, revision, persisted)
+                    return persisted
                 rows = conn.execute(
                     """SELECT snapshot_month FROM snapshot_months
                        WHERE profile_hash=? AND processing_complete=1
@@ -6954,25 +7160,257 @@ class BacktestRepository:
                     intervals=self._coverage_intervals(months),
                     provenance=tuple(provenance),
                 )
-                # Recompute against the same explicit SQLite read snapshot. A
-                # writer racing this read cannot cause a partial projection to
-                # be published, and its committed revision will miss next time.
-                verified_revision = self._snapshot_coverage_revision(
-                    conn, selected_hash
-                )
+            # End the verification read transaction before acquiring a write
+            # transaction. Never upgrade a stale WAL read snapshot to a writer.
+            self._publish_snapshot_coverage(summary, revision)
+            self._cache_snapshot_coverage(selected_hash, revision, summary)
+            return summary
+
+    # Bump when full coverage verification or projection semantics change.
+    _coverage_verifier_version = 1
+    _coverage_summary_max_bytes = 1_048_576
+    _member_revision_verifier_version = 1
+    _member_revision_summary_max_bytes = 1_048_576
+
+    def _cache_snapshot_coverage(
+        self, profile_hash: str, revision: str, summary: CoverageSummaryV1
+    ) -> None:
+        if (
+            profile_hash not in self._snapshot_coverage_cache
+            and len(self._snapshot_coverage_cache)
+            >= self._snapshot_coverage_cache_limit
+        ):
+            self._snapshot_coverage_cache.pop(next(iter(self._snapshot_coverage_cache)))
+        self._snapshot_coverage_cache[profile_hash] = (revision, summary)
+
+    def _load_persisted_snapshot_coverage(
+        self, conn: sqlite3.Connection, profile: SnapshotProfileV1, revision: str
+    ) -> CoverageSummaryV1 | None:
+        row = conn.execute(
+            """SELECT summary_json, summary_digest
+               FROM snapshot_coverage_summaries
+               WHERE profile_hash=? AND source_revision=? AND verifier_version=?
+                 AND typeof(summary_json)='text'
+                 AND typeof(summary_digest)='text' AND length(summary_digest)=64
+                 AND length(CAST(summary_json AS BLOB))<=?""",
+            (
+                profile.profile_hash,
+                revision,
+                self._coverage_verifier_version,
+                self._coverage_summary_max_bytes,
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        payload, digest = row
+        if sha256(payload.encode("utf-8")).hexdigest() != digest:
+            return None
+        try:
+            summary = CoverageSummaryV1.from_canonical_json(payload)
+        except (ValueError, RecursionError):
+            return None
+        if (
+            summary.profile_hash != profile.profile_hash
+            or summary.display_version != profile.display_version
+        ):
+            return None
+        return summary
+
+    def _publish_snapshot_coverage(
+        self, summary: CoverageSummaryV1, revision: str
+    ) -> None:
+        payload = summary.canonical_json()
+        if len(payload.encode("utf-8")) > self._coverage_summary_max_bytes:
+            return
+        try:
+            with session(self._connect) as conn:
+                if conn.execute("PRAGMA query_only").fetchone()[0]:
+                    # Read-only diagnostics may verify without publishing.
+                    # Strict preparation still requires a durable projection.
+                    return
+                conn.execute("BEGIN IMMEDIATE")
                 if (
-                    selected_hash not in self._snapshot_coverage_cache
-                    and len(self._snapshot_coverage_cache)
-                    >= self._snapshot_coverage_cache_limit
+                    self._snapshot_coverage_revision(conn, summary.profile_hash)
+                    != revision
                 ):
-                    self._snapshot_coverage_cache.pop(
-                        next(iter(self._snapshot_coverage_cache))
-                    )
-                self._snapshot_coverage_cache[selected_hash] = (
-                    verified_revision,
-                    summary,
+                    return
+                conn.execute(
+                    """INSERT INTO snapshot_coverage_summaries
+                       (profile_hash, source_revision, verifier_version,
+                        summary_json, summary_digest) VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(profile_hash) DO UPDATE SET
+                         source_revision=excluded.source_revision,
+                         verifier_version=excluded.verifier_version,
+                         summary_json=excluded.summary_json,
+                         summary_digest=excluded.summary_digest""",
+                    (
+                        summary.profile_hash,
+                        revision,
+                        self._coverage_verifier_version,
+                        payload,
+                        sha256(payload.encode("utf-8")).hexdigest(),
+                    ),
                 )
-                return summary
+        except sqlite3.OperationalError as exc:
+            # Persistence is optional only for bounded lock contention.
+            if getattr(exc, "sqlite_errorcode", 0) & 0xFF not in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            ):
+                raise
+
+    def _load_persisted_snapshot_member_revisions(
+        self,
+        conn: sqlite3.Connection,
+        profile_hash: str,
+        snapshot_month: str,
+        revision: str,
+    ) -> tuple[tuple[str, str], ...] | None:
+        row = conn.execute(
+            """SELECT members_json, members_digest
+               FROM snapshot_member_revision_summaries
+               WHERE profile_hash=? AND snapshot_month=? AND source_revision=?
+                 AND verifier_version=? AND typeof(members_json)='text'
+                 AND typeof(members_digest)='text' AND length(members_digest)=64
+                 AND length(CAST(members_json AS BLOB))<=?""",
+            (
+                profile_hash,
+                snapshot_month,
+                revision,
+                self._member_revision_verifier_version,
+                self._member_revision_summary_max_bytes,
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        payload, digest = str(row[0]), str(row[1])
+        if sha256(payload.encode("utf-8")).hexdigest() != digest:
+            return None
+        try:
+            decoded = json.loads(payload)
+        except (json.JSONDecodeError, RecursionError):
+            return None
+        if not isinstance(decoded, list):
+            return None
+        revisions: list[tuple[str, str]] = []
+        for item in decoded:
+            if (
+                not isinstance(item, list)
+                or len(item) != 2
+                or not all(isinstance(value, str) for value in item)
+            ):
+                return None
+            revisions.append((item[0], item[1]))
+        if any(
+            left[0] >= right[0] for left, right in zip(revisions, revisions[1:])
+        ):
+            return None
+        return tuple(revisions)
+
+    def _publish_snapshot_member_revisions(
+        self,
+        profile_hash: str,
+        snapshot_month: str,
+        revisions: tuple[tuple[str, str], ...],
+        revision: str,
+    ) -> None:
+        payload = json.dumps(
+            revisions, ensure_ascii=False, separators=(",", ":")
+        )
+        if len(payload.encode("utf-8")) > self._member_revision_summary_max_bytes:
+            return
+        try:
+            with session(self._connect) as conn:
+                if conn.execute("PRAGMA query_only").fetchone()[0]:
+                    return
+                conn.execute("BEGIN IMMEDIATE")
+                if self._snapshot_coverage_revision(conn, profile_hash) != revision:
+                    return
+                conn.execute(
+                    """INSERT INTO snapshot_member_revision_summaries
+                       (profile_hash, snapshot_month, source_revision,
+                        verifier_version, members_json, members_digest)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(profile_hash, snapshot_month) DO UPDATE SET
+                         source_revision=excluded.source_revision,
+                         verifier_version=excluded.verifier_version,
+                         members_json=excluded.members_json,
+                         members_digest=excluded.members_digest""",
+                    (
+                        profile_hash,
+                        snapshot_month,
+                        revision,
+                        self._member_revision_verifier_version,
+                        payload,
+                        sha256(payload.encode("utf-8")).hexdigest(),
+                    ),
+                )
+        except sqlite3.OperationalError as exc:
+            if getattr(exc, "sqlite_errorcode", 0) & 0xFF not in (
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            ):
+                raise
+
+    def prepare_snapshot_member_revisions(
+        self, profile_hash: str, snapshot_month: str
+    ) -> tuple[tuple[str, str], ...]:
+        """Verify one Result month and require its durable projection."""
+        revisions = self.snapshot_member_revisions(profile_hash, snapshot_month)
+        with session(self._connect) as conn:
+            conn.execute("BEGIN")
+            profile = self._load_snapshot_profile_on_connection(conn, profile_hash)
+            self._validate_profile_authority(profile)
+            revision = self._snapshot_coverage_revision(conn, profile_hash)
+            if (
+                self._load_persisted_snapshot_member_revisions(
+                    conn, profile_hash, snapshot_month, revision
+                )
+                != revisions
+            ):
+                raise BacktestIntegrityError(
+                    "snapshot member revision preparation did not persist current evidence; retry"
+                )
+        return revisions
+
+    def prepare_snapshot_coverage(
+        self, profile_hash: str | None = None
+    ) -> CoverageSummaryV1:
+        """Verify coverage and require a current durable projection for startup."""
+        with self._snapshot_coverage_lock:
+            # A previous best-effort publication may have encountered a lock.
+            self._snapshot_coverage_cache.clear()
+            summary = self.snapshot_coverage(profile_hash)
+        with session(self._connect) as conn:
+            conn.execute("BEGIN")
+            profile = self._load_snapshot_profile_on_connection(
+                conn, summary.profile_hash
+            )
+            self._validate_profile_authority(profile)
+            revision = self._snapshot_coverage_revision(conn, summary.profile_hash)
+            if (
+                self._load_persisted_snapshot_coverage(conn, profile, revision)
+                != summary
+            ):
+                raise BacktestIntegrityError(
+                    "snapshot coverage preparation did not persist current evidence; retry"
+                )
+            months = tuple(
+                str(row[0])
+                for row in conn.execute(
+                    """SELECT DISTINCT run.start_month
+                       FROM backtest_results AS result
+                       JOIN strategy_runs AS run ON run.id=result.run_id
+                       JOIN strategy_jobs AS job ON job.id=run.id
+                       WHERE run.profile_hash=? AND job.job_type='backtest'
+                         AND job.status='complete' AND job.deleted_at IS NULL
+                       ORDER BY run.start_month""",
+                    (summary.profile_hash,),
+                ).fetchall()
+            )
+        for month in months:
+            self.prepare_snapshot_member_revisions(summary.profile_hash, month)
+        return summary
 
     @staticmethod
     def _load_snapshot_profile_on_connection(
@@ -6991,80 +7429,21 @@ class BacktestRepository:
 
     @staticmethod
     def _snapshot_coverage_revision(conn: sqlite3.Connection, profile_hash: str) -> str:
-        """Return a cheap identity for all evidence used by coverage reads.
-
-        This intentionally hashes stored bytes and denormalized columns rather
-        than parsing them. Thus cache hits avoid month verification, while any
-        committed profile, roster, alias, month, member, or result mutation
-        changes the identity and forces the normal fail-closed verifier.
-        """
-        profile_row = conn.execute(
-            "SELECT * FROM snapshot_profiles WHERE profile_hash=?", (profile_hash,)
+        """Read constant-size transactional generations from this read snapshot."""
+        row = conn.execute(
+            """SELECT state.epoch, state.generation, COALESCE(profile.generation, 0)
+               FROM snapshot_coverage_revision_state AS state
+               LEFT JOIN snapshot_coverage_profile_revisions AS profile
+                 ON profile.profile_hash=?
+               WHERE state.singleton_id=1""",
+            (profile_hash,),
         ).fetchone()
-        if profile_row is None:
-            raise BacktestIntegrityError("snapshot profile does not exist")
-        roster_digest = str(profile_row[3])
-        parts: list[str] = []
-        for table, query, params in (
-            (
-                "profile",
-                "SELECT * FROM snapshot_profiles WHERE profile_hash=?",
-                (profile_hash,),
-            ),
-            ("active", "SELECT * FROM active_snapshot_profile", ()),
-            (
-                "months",
-                "SELECT * FROM snapshot_months WHERE profile_hash=? ORDER BY snapshot_month",
-                (profile_hash,),
-            ),
-            (
-                "members",
-                "SELECT * FROM snapshot_members WHERE profile_hash=? ORDER BY snapshot_month, security_id",
-                (profile_hash,),
-            ),
-            (
-                "results",
-                "SELECT * FROM monthly_scan_results WHERE profile_hash=? ORDER BY snapshot_month, security_id",
-                (profile_hash,),
-            ),
-            (
-                "roster",
-                "SELECT * FROM reconstruction_rosters WHERE roster_digest=?",
-                (roster_digest,),
-            ),
-            (
-                "roster_members",
-                "SELECT * FROM reconstruction_roster_members WHERE roster_digest=? ORDER BY security_id",
-                (roster_digest,),
-            ),
-        ):
-            parts.append(table)
-            parts.extend(repr(tuple(row)) for row in conn.execute(query, params))
-        alias_revision = conn.execute(
-            "SELECT alias_revision FROM reconstruction_rosters WHERE roster_digest=?",
-            (roster_digest,),
-        ).fetchone()
-        if alias_revision is not None:
-            parts.extend(
-                [
-                    "aliases",
-                    *(
-                        repr(tuple(row))
-                        for row in conn.execute(
-                            "SELECT * FROM security_alias_manifests WHERE alias_revision=?",
-                            (str(alias_revision[0]),),
-                        )
-                    ),
-                ]
-            )
-            parts.extend(
-                repr(tuple(row))
-                for row in conn.execute(
-                    "SELECT * FROM security_alias_entries WHERE alias_revision=? ORDER BY provider, mic, observed_symbol",
-                    (str(alias_revision[0]),),
-                )
-            )
-        return sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+        if row is None:
+            raise BacktestIntegrityError("snapshot coverage revision state is missing")
+        # DDL (including dropped integrity triggers) and database replacement
+        # must not accidentally reuse an earlier process-local cache identity.
+        schema_version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        return repr((*row, schema_version))
 
     @staticmethod
     def _coverage_intervals(months: tuple[str, ...]) -> tuple[CoverageIntervalV1, ...]:

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
+from app.repositories.db import sqlite_failure_detail
 from app.repositories.historical_price_repo import (
     HistoricalPriceRepository,
     StoredHistoricalEvidence,
@@ -963,9 +964,13 @@ class HistoricalInitializationEngine:
                 if not self._owns(current, claim_token):
                     return current
                 return self._fail_or_cancel(
-                    current, claim_token, exc.code, month, exc.detail
+                    current,
+                    claim_token,
+                    exc.code,
+                    month,
+                    sqlite_failure_detail(exc, "initialization.month", exc.detail),
                 )
-            except Exception:
+            except Exception as exc:
                 current = self._repository.strategy_job(job_id)
                 if not self._owns(current, claim_token):
                     return current
@@ -974,7 +979,11 @@ class HistoricalInitializationEngine:
                     claim_token,
                     JobFailureCode.INTEGRITY_ERROR,
                     month,
-                    "Historical initialization failed integrity validation",
+                    sqlite_failure_detail(
+                        exc,
+                        "initialization.month",
+                        "Historical initialization failed integrity validation",
+                    ),
                 )
 
             job = self._repository.strategy_job(job_id)

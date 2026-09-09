@@ -54,6 +54,40 @@ epics:
     sub_issues: [275, 267, 268, 269, 270, 271, 279, 280, 281, 272, 273, 274]
     superseded_sub_issues: [255, 256, 257, 258, 259, 260, 261]
 stories:
+  database-storage-performance:
+    issue: 444
+    status: in-progress
+    feature_plan: feature-gh-444-database-storage-performance.md
+    sub_issues: [535, 536, 537, 538, 539, 540]
+    stories:
+      gh-535-database-baseline-contention-diagnostics:
+        issue: 535
+        status: review
+        spec: spec-gh-444-493-storage-baseline-strategy-agent.md
+      gh-536-historical-evidence-v2:
+        issue: 536
+        status: backlog
+        prerequisite_issues: [535]
+      gh-537-evidence-migration-cutover-rollback:
+        issue: 537
+        status: backlog
+        prerequisite_issues: [536]
+      gh-538-reference-aware-evidence-gc:
+        issue: 538
+        status: backlog
+        prerequisite_issues: [537]
+      gh-539-bounded-backtest-result-reads:
+        issue: 539
+        status: backlog
+        prerequisite_issues: [535]
+      gh-540-evidence-v2-rollout:
+        issue: 540
+        status: backlog
+        prerequisite_issues: [537, 538, 539]
+  strategy-manager-agent:
+    issue: 493
+    status: review
+    spec: spec-gh-444-493-storage-baseline-strategy-agent.md
   1-1-qualify-the-free-historical-data-contract: { issue: 184, status: done }
   1-2-capture-stable-security-identities-and-the-reconstruction-roster: { issue: 185, status: done }
   1-3-store-immutable-provider-native-historical-evidence: { issue: 186, status: done }

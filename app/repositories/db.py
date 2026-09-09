@@ -18,6 +18,55 @@ logger = logging.getLogger(__name__)
 #: A zero-argument factory returning a fresh SQLite connection.
 Connect = Callable[[], sqlite3.Connection]
 
+EVIDENCE_SQLITE_BUSY_TIMEOUT_MS = 5_000
+
+
+def evidence_connect(connect: Connect) -> Connect:
+    """Use SQLite's bounded busy handler, never replay repository transactions.
+
+    WAL is enabled once during schema setup. Each connection uses SQLite's
+    1000-page automatic passive checkpoint; long readers may delay reclamation,
+    so operators monitor WAL size and checkpoint only outside active work.
+    Existing repository BEGIN/BEGIN IMMEDIATE boundaries own read snapshots
+    and short write transactions. FULL synchronization preserves durability.
+    """
+
+    def open_connection() -> sqlite3.Connection:
+        conn = connect()
+        try:
+            conn.execute(f"PRAGMA busy_timeout = {EVIDENCE_SQLITE_BUSY_TIMEOUT_MS}")
+            conn.execute("PRAGMA synchronous = FULL")
+            conn.execute("PRAGMA wal_autocheckpoint = 1000")
+        except Exception:
+            conn.close()
+            raise
+        return conn
+
+    return open_connection
+
+
+def sqlite_failure_detail(error: BaseException, operation: str, fallback: str) -> str:
+    """Persist SQLite identity, never its SQL/parameter/path-bearing message.
+
+    Operation is a caller-owned constant. Wrapped repository/engine failures
+    retain their original SQLite cause or implicit context, including cycles.
+    Non-SQLite failures retain the existing boundary's presentation.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, sqlite3.Error):
+            code = getattr(current, "sqlite_errorcode", None)
+            name = getattr(current, "sqlite_errorname", None)
+            return (
+                f"{operation}: sqlite3.{type(current).__name__}; "
+                f"code={code if isinstance(code, int) else 'unknown'}; "
+                f"name={name if isinstance(name, str) and name.startswith('SQLITE_') and name.isidentifier() else 'unknown'}"
+            )[:500]
+        current = current.__cause__ or current.__context__
+    return fallback[:500]
+
 
 @contextmanager
 def session(connect: "Connect") -> Iterator[sqlite3.Connection]:

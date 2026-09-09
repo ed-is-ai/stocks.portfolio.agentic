@@ -1,0 +1,12 @@
+{
+  "backtest_finished_epoch": 1788885547.0267498,
+  "backtest_source": "/Users/me/Git/Agents.stocks/data/backtest.db",
+  "backtest_started_epoch": 1788885530.010984,
+  "files": {
+    "backtest.db": 10550337536,
+    "historical_price_cache.db": 27366866944
+  },
+  "method": "sqlite3 backup; explicit pinned read transaction for active Backtest source",
+  "snapshot_id": "gh-535-main-20260908",
+  "source_worktree": "main"
+}

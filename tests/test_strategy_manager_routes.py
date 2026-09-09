@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.app import app
+from app.agents.strategy_manager import StrategyManagerAgent
 from app.api.dependencies import (
     get_backtest_launch_service,
     get_backtest_repository,
@@ -41,6 +42,8 @@ from app.services.backtest.backtest_engine import (
 )
 from app.services.backtest.backtest_launch_service import (
     BacktestConfigurationViewV1,
+    BacktestLaunchCommandV1,
+    BacktestLaunchService,
     BacktestLaunchValidationError,
     LaunchFieldError,
 )
@@ -53,6 +56,7 @@ from app.services.backtest.result_presenter import comparison_equity_payload
 from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
+    StrategyDiscoveryResultV1,
     StrategyUniverseContractV1,
 )
 from app.services.backtest.snapshot_profile import (
@@ -62,6 +66,8 @@ from app.services.backtest.snapshot_profile import (
     SnapshotProfileV1,
 )
 from app.services.backtest.strategy_job import (
+    BacktestEnqueueResultV1,
+    PreparationEnqueueResultV1,
     RunUniverseSelectionV1,
     StrategyJobConflict,
     StrategyJobNotFound,
@@ -333,12 +339,12 @@ class FakeRepo:
             raise self.backtest_activities_error
         return self.backtest_activities
 
-    def comparison_candidates(self, run_id):
+    def comparison_candidates(self, run_id, *, anchor_result=None):
         if self.candidates_error is not None:
             raise self.candidates_error
         return self.candidates
 
-    def is_comparable(self, left, right):
+    def is_comparable(self, left, right, *, left_result=None, right_result=None):
         self.last_is_comparable_call = (left, right)
         if self.eligibility_error is not None:
             raise self.eligibility_error
@@ -349,6 +355,12 @@ class FakeRepo:
             reason=ComparisonIneligibleReason.NOT_FOUND,
             detail=f"{right!r} is not eligible for comparison (not_found)",
         )
+
+    def comparison_results_if_eligible(self, left, right):
+        eligibility = self.is_comparable(left, right)
+        if not eligibility.eligible:
+            return eligibility, None, None
+        return eligibility, self.backtest_result(left), self.backtest_result(right)
 
 
 class FakeJobs:
@@ -1643,7 +1655,7 @@ STRATEGY_BUY_AND_HOLD = StrategyDescriptorV1(
 )
 
 
-class FakeLaunchService:
+class FakeLaunchService(BacktestLaunchService):
     """Minimal fake mirroring ``BacktestLaunchService``'s public surface."""
 
     def __init__(
@@ -1668,8 +1680,8 @@ class FakeLaunchService:
         # object the route's dependency override returns.
         self.repo: FakeRepo | None = None
 
-    def discover(self):
-        return SimpleNamespace(strategies=self.strategies, warnings=())
+    def discover(self) -> StrategyDiscoveryResultV1:
+        return StrategyDiscoveryResultV1(strategies=self.strategies, warnings=())
 
     def configuration(self) -> BacktestConfigurationViewV1:
         return BacktestConfigurationViewV1(
@@ -1680,11 +1692,13 @@ class FakeLaunchService:
             profile=cast(SnapshotProfileV1, SimpleNamespace(profile_hash="a" * 64)),
         )
 
-    def launch(self, command):
+    def launch(
+        self, command: BacktestLaunchCommandV1
+    ) -> BacktestEnqueueResultV1 | PreparationEnqueueResultV1:
         self.launch_calls.append(command)
         if self.launch_error is not None:
             raise self.launch_error
-        return self.launch_result
+        return cast(BacktestEnqueueResultV1, self.launch_result)
 
 
 @pytest.fixture
@@ -2065,7 +2079,16 @@ def test_validation_failure_returns_422_preserves_values_and_selection(launch):
     assert len(launch.launch_calls) == 1  # attempted, but no job resulted
 
 
-def test_valid_submission_enqueues_once_and_redirects_to_activity(launch):
+def test_valid_submission_enqueues_once_and_redirects_to_activity(launch, monkeypatch):
+    dispatched = []
+    original_run = StrategyManagerAgent.run
+
+    def track_dispatch(self, payload):
+        dispatched.append(payload)
+        assert self.launch_service is launch
+        return original_run(self, payload)
+
+    monkeypatch.setattr(StrategyManagerAgent, "run", track_dispatch)
     response = client.post(
         "/strategy-manager/configuration",
         data=_base_form(),
@@ -2075,6 +2098,7 @@ def test_valid_submission_enqueues_once_and_redirects_to_activity(launch):
     assert response.status_code == 303
     assert response.headers["location"] == "/strategy-manager/activities/job-1"
     assert len(launch.launch_calls) == 1
+    assert dispatched == launch.launch_calls
 
 
 def test_configuration_post_requires_auth_guard(launch):

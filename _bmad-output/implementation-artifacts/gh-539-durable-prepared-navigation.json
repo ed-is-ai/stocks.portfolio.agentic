@@ -1,0 +1,83 @@
+{
+  "method": "in-process TestClient GET on isolated SQLite backup; real repository and services; three sequential reads each; OS caches uncontrolled",
+  "routes": {
+    "/strategy-manager": {
+      "seconds": [
+        3.255757041002653,
+        0.06351062500107219,
+        0.062059292002231814
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 3.255757041002653,
+      "warm_median_seconds": 0.062784958501652
+    },
+    "/strategy-manager/initialization": {
+      "seconds": [
+        0.07402441700105555,
+        0.06677862500146148,
+        0.06703475000176695
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.07402441700105555,
+      "warm_median_seconds": 0.06690668750161421
+    },
+    "/strategy-manager/readiness": {
+      "seconds": [
+        0.03852112499953364,
+        0.030343375001393724,
+        0.030227166000258876
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.03852112499953364,
+      "warm_median_seconds": 0.0302852705008263
+    },
+    "/strategy-manager/configuration": {
+      "seconds": [
+        0.04529037500105915,
+        0.025505125002382556,
+        0.025437042000703514
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.04529037500105915,
+      "warm_median_seconds": 0.025471083501543035
+    },
+    "/strategy-manager/backtests": {
+      "seconds": [
+        0.02544379100072547,
+        0.024818792000587564,
+        0.02467287500257953
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.02544379100072547,
+      "warm_median_seconds": 0.024745833501583547
+    }
+  },
+  "code_revision": "d067ef7+durable-coverage-working-tree",
+  "repository_code_sha256": "b0165633b0b36cfce195f833e255a5dd06b8f2ff48548c598f81633fbdcfcff0",
+  "snapshot_id": "gh539-main-backtest-offline-2026-09-09",
+  "preparation_seconds": 126.33273462500074,
+  "fresh_preparation_seconds": 3.725150875001418,
+  "profile_hash": "8c891e8547236cfd66639ab6bd7e9bae7ad8676d2ca9984b5325b669d9efab93",
+  "snapshot_months": 320,
+  "limitations": "Fresh process against existing prepared offline backup. No lifespan; first route includes repository/schema initialization. OS caches uncontrolled, two warm samples; HTTP 200 does not establish successful Result rendering. Source changes and new backups may invalidate preparation."
+}

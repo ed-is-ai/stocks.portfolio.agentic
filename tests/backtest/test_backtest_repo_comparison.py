@@ -602,6 +602,107 @@ def test_comparison_candidates_sql_prefilter_loads_only_plausible_peers(
     assert loaded_ids == [ANCHOR_ID, "eligible"]
 
 
+def test_comparison_candidates_reuses_freshly_verified_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    anchor = repo.backtest_result(ANCHOR_ID)
+
+    original_backtest_result = repo.backtest_result
+    loaded_ids: list[str] = []
+
+    def counting_backtest_result(candidate_id: str):
+        loaded_ids.append(candidate_id)
+        return original_backtest_result(candidate_id)
+
+    monkeypatch.setattr(repo, "backtest_result", counting_backtest_result)
+
+    candidates = repo.comparison_candidates(ANCHOR_ID, anchor_result=anchor)
+
+    assert [candidate.run_id for candidate in candidates] == [OTHER_ID]
+    assert loaded_ids == [OTHER_ID]
+
+
+def test_is_comparable_reuses_freshly_verified_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    anchor = repo.backtest_result(ANCHOR_ID)
+    other = repo.backtest_result(OTHER_ID)
+
+    original_backtest_result = repo.backtest_result
+    loaded_ids: list[str] = []
+
+    def counting_backtest_result(candidate_id: str):
+        loaded_ids.append(candidate_id)
+        return original_backtest_result(candidate_id)
+
+    monkeypatch.setattr(repo, "backtest_result", counting_backtest_result)
+
+    eligibility = repo.is_comparable(
+        ANCHOR_ID,
+        OTHER_ID,
+        left_result=anchor,
+        right_result=other,
+    )
+
+    assert eligibility.eligible
+    assert loaded_ids == []
+
+
+def test_comparison_results_loads_each_eligible_side_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    original_backtest_result = repo.backtest_result
+    loaded_ids: list[str] = []
+
+    def counting_backtest_result(run_id: str):
+        loaded_ids.append(run_id)
+        return original_backtest_result(run_id)
+
+    monkeypatch.setattr(repo, "backtest_result", counting_backtest_result)
+    eligibility, left, right = repo.comparison_results_if_eligible(ANCHOR_ID, OTHER_ID)
+
+    assert eligibility.eligible
+    assert left is not None and right is not None
+    assert loaded_ids == [ANCHOR_ID, OTHER_ID]
+
+
+def test_comparison_candidates_reused_anchor_still_rejects_tampered_peer(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    anchor = repo.backtest_result(ANCHOR_ID)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER IF EXISTS backtest_result_evidence_immutable")
+        conn.execute(
+            """UPDATE backtest_results
+               SET metrics_json=?, note_version=note_version+1 WHERE run_id=?""",
+            (
+                '{"total_return": 999.0, "sharpe_ratio": null, '
+                '"win_rate": null, "max_drawdown": null}',
+                OTHER_ID,
+            ),
+        )
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.comparison_candidates(ANCHOR_ID, anchor_result=anchor)
+
+
 def test_comparison_candidates_on_missing_anchor_raises(tmp_path: Path) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)

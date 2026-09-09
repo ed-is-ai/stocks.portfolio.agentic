@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 import sqlite3
 from typing import Literal
@@ -793,7 +794,7 @@ def test_coverage_cache_invalidates_after_commit_and_reconstructs_after_restart(
 
     monkeypatch.setattr(reopened, "_load_verified_snapshot_month", reopened_counted)
     assert reopened.snapshot_coverage(profile.profile_hash).snapshot_count == 2
-    assert reopened_calls == 2
+    assert reopened_calls == 0
 
 
 def test_coverage_cache_never_masks_corruption_and_serializes_readers(
@@ -924,3 +925,587 @@ def test_snapshot_profile_import_graph_stays_outside_live_portfolio() -> None:
         "strategy_job_service",
     )
     assert all(token not in source for token in forbidden)
+
+
+def test_warm_coverage_never_reads_bulk_evidence(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    expected = repo.snapshot_coverage(profile.profile_hash)
+    reads = []
+    original = repo._connect
+
+    def traced():
+        conn = original()
+
+        def authorize(action, table, column, database, trigger):
+            if action == sqlite3.SQLITE_READ:
+                reads.append(table)
+            return sqlite3.SQLITE_OK
+
+        conn.set_authorizer(authorize)
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", traced)
+    assert repo.snapshot_coverage(profile.profile_hash) == expected
+    assert not set(reads).intersection(
+        {
+            "snapshot_members",
+            "monthly_scan_results",
+            "snapshot_months",
+            "reconstruction_rosters",
+            "reconstruction_roster_members",
+            "security_alias_manifests",
+            "security_alias_entries",
+        }
+    )
+
+
+def test_invalid_authority_precedes_revision_lookup(tmp_path, monkeypatch):
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    repo.snapshot_coverage(profile.profile_hash)
+
+    def invalid(_):
+        raise BacktestIntegrityError("invalid authority")
+
+    def forbidden(*_):
+        pytest.fail("revision lookup ran before authority validation")
+
+    monkeypatch.setattr(repo, "_validate_profile_authority", invalid)
+    monkeypatch.setattr(repo, "_snapshot_coverage_revision", forbidden)
+    with pytest.raises(BacktestIntegrityError, match="invalid authority"):
+        repo.snapshot_coverage(profile.profile_hash)
+    assert profile.profile_hash not in repo._snapshot_coverage_cache
+
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "snapshot_profiles",
+        "snapshot_months",
+        "snapshot_members",
+        "monthly_scan_results",
+        "active_snapshot_profile",
+        "reconstruction_rosters",
+        "reconstruction_roster_members",
+        "security_alias_manifests",
+        "security_alias_entries",
+    ],
+)
+def test_revision_sources_commit_rollback_and_moved_keys(tmp_path, table):
+    # Minimal source columns isolate the accounting triggers from the immutable
+    # evidence guards; real repository corruption tests exercise both together.
+    path = tmp_path / "revisions.db"
+    conn = sqlite3.connect(path)
+    sources = (
+        "snapshot_profiles",
+        "snapshot_months",
+        "snapshot_members",
+        "monthly_scan_results",
+        "active_snapshot_profile",
+        "reconstruction_rosters",
+        "reconstruction_roster_members",
+        "security_alias_manifests",
+        "security_alias_entries",
+    )
+    for source in sources:
+        conn.execute(f"CREATE TABLE {source} (profile_hash TEXT)")
+    BacktestRepository._ensure_snapshot_coverage_revisions(conn)
+    conn.commit()
+    writer = sqlite3.connect(path)
+
+    def revision(key):
+        return BacktestRepository._snapshot_coverage_revision(conn, key)
+
+    try:
+        initial = revision("old")
+        BacktestRepository._ensure_snapshot_coverage_revisions(conn)
+        conn.commit()
+        assert revision("old") == initial
+        writer.execute(f"INSERT INTO {table} VALUES (?)", ("old",))
+        writer.rollback()
+        assert revision("old") == initial
+        writer.execute(f"INSERT INTO {table} VALUES (?)", ("old",))
+        writer.commit()
+        inserted = revision("old")
+        assert inserted != initial
+        new_before = revision("new")
+        other_before = revision("unaffected")
+        writer.execute(f"UPDATE {table} SET profile_hash=?", ("new",))
+        writer.rollback()
+        assert revision("old") == inserted
+        assert revision("new") == new_before
+        writer.execute(f"DELETE FROM {table}")
+        writer.rollback()
+        assert revision("old") == inserted
+        writer.execute(f"UPDATE {table} SET profile_hash=?", ("new",))
+        writer.commit()
+        assert revision("old") != inserted
+        assert revision("new") != new_before
+        if table in sources[:4]:
+            assert revision("unaffected") == other_before
+        else:
+            assert revision("unaffected") != other_before
+        before_delete = revision("new")
+        writer.execute(f"DELETE FROM {table}")
+        writer.commit()
+        assert revision("new") != before_delete
+        before_ddl = revision("new")
+        writer.execute("CREATE TABLE unrelated_jobs (heartbeat TEXT)")
+        writer.commit()
+        assert revision("new") != before_ddl
+        after_ddl = revision("new")
+        writer.execute("INSERT INTO unrelated_jobs VALUES (?)", ("heartbeat",))
+        writer.commit()
+        assert revision("new") == after_ddl
+    finally:
+        writer.close()
+        conn.close()
+
+
+def test_durable_coverage_restart_avoids_bulk_reads(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    expected = repo.prepare_snapshot_coverage(profile.profile_hash)
+    reopened = _repo(path)
+    statements = []
+    connect = reopened._connect
+
+    def traced():
+        conn = connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(reopened, "_connect", traced)
+    assert reopened.snapshot_coverage(profile.profile_hash) == expected
+    reads = " ".join(
+        sql.lower() for sql in statements if sql.lstrip().lower().startswith("select")
+    )
+    for table in (
+        "snapshot_months",
+        "snapshot_members",
+        "monthly_scan_results",
+        "reconstruction_rosters",
+        "reconstruction_roster_members",
+        "security_alias_manifests",
+        "security_alias_entries",
+    ):
+        assert table not in reads
+
+
+@pytest.mark.parametrize(
+    "damage", ["digest", "json", "profile", "display", "version", "oversize"]
+)
+def test_durable_coverage_damage_reverifies(tmp_path, monkeypatch, damage):
+    from hashlib import sha256
+
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    expected = repo.snapshot_coverage(profile.profile_hash)
+    with db.session(repo._connect) as conn:
+        payload = expected.model_dump(mode="json")
+        if damage == "profile":
+            payload["profile_hash"] = DIGEST_B
+        if damage == "display":
+            payload["display_version"] = "wrong"
+        text = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        )
+        if damage == "json":
+            text = "{broken"
+        if damage == "oversize":
+            text = " " * (repo._coverage_summary_max_bytes + 1)
+        digest = sha256(text.encode()).hexdigest() if damage != "digest" else DIGEST_B
+        conn.execute(
+            "UPDATE snapshot_coverage_summaries SET summary_json=?, summary_digest=?, verifier_version=?",
+            (
+                text,
+                digest,
+                999 if damage == "version" else repo._coverage_verifier_version,
+            ),
+        )
+    reopened = _repo(path)
+    original = reopened._load_verified_snapshot_month
+    calls = []
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(reopened, "_load_verified_snapshot_month", counted)
+    assert reopened.snapshot_coverage(profile.profile_hash) == expected
+    assert len(calls) == 1
+
+
+def test_durable_coverage_publication_race_never_relabels_summary(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile, "2026-05"))
+    publish = repo._publish_snapshot_coverage
+
+    def race(summary, revision):
+        _commit(repo, _snapshot(profile, "2026-07"))
+        publish(summary, revision)
+
+    monkeypatch.setattr(repo, "_publish_snapshot_coverage", race)
+    assert repo.snapshot_coverage(profile.profile_hash).snapshot_count == 1
+    with db.session(repo._connect) as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM snapshot_coverage_summaries").fetchone()[
+                0
+            ]
+            == 0
+        )
+    monkeypatch.setattr(repo, "_publish_snapshot_coverage", publish)
+    assert repo.snapshot_coverage(profile.profile_hash).snapshot_count == 2
+
+
+def test_durable_coverage_locked_publication_returns_verified_and_prepare_retries(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    connect = repo._connect
+
+    def quick_connection():
+        conn = connect()
+        conn.execute("PRAGMA busy_timeout=1")
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", quick_connection)
+    blocker = connect()
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert repo.snapshot_coverage(profile.profile_hash).snapshot_count == 1
+        with pytest.raises(BacktestIntegrityError, match="did not persist"):
+            repo.prepare_snapshot_coverage(profile.profile_hash)
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert repo.prepare_snapshot_coverage(profile.profile_hash).snapshot_count == 1
+
+
+def test_schema_startup_preserves_revision_and_repairs_old_trigger(tmp_path):
+    repo = _repo(tmp_path / "backtest.db")
+    with db.session(repo._connect) as conn:
+        before = conn.execute("PRAGMA schema_version").fetchone()[0]
+    repo.ensure_schema()
+    with db.session(repo._connect) as conn:
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == before
+        conn.execute("DROP TRIGGER strategy_job_terminal_immutable")
+        conn.execute(
+            "CREATE TRIGGER strategy_job_terminal_immutable BEFORE UPDATE ON strategy_jobs BEGIN SELECT 1; END"
+        )
+    repo.ensure_schema()
+    with db.session(repo._connect) as conn:
+        sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='strategy_job_terminal_immutable'"
+        ).fetchone()[0]
+        assert "terminal strategy job is immutable" in sql
+
+
+def test_durable_coverage_rolled_back_source_change_preserves_projection(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    expected = repo.snapshot_coverage(profile.profile_hash)
+    conn = repo._connect()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("DROP TRIGGER snapshot_month_immutable_update")
+        conn.execute("UPDATE snapshot_months SET expected_digest=?", (DIGEST_B,))
+        conn.rollback()
+    finally:
+        conn.close()
+    reopened = _repo(path)
+
+    def forbidden(*_):
+        pytest.fail("rolled-back source change invalidated persisted coverage")
+
+    monkeypatch.setattr(reopened, "_load_verified_snapshot_month", forbidden)
+    assert reopened.snapshot_coverage(profile.profile_hash) == expected
+
+
+def test_durable_coverage_verification_failure_does_not_publish(tmp_path):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    repo.snapshot_coverage(profile.profile_hash)
+    with db.session(repo._connect) as conn:
+        previous = tuple(
+            conn.execute("SELECT * FROM snapshot_coverage_summaries").fetchone()
+        )
+        conn.execute("DROP TRIGGER snapshot_month_immutable_update")
+        conn.execute("UPDATE snapshot_months SET expected_digest=?", (DIGEST_B,))
+    reopened = _repo(path)
+    with pytest.raises(BacktestIntegrityError):
+        reopened.snapshot_coverage(profile.profile_hash)
+    with db.session(repo._connect) as conn:
+        assert (
+            tuple(conn.execute("SELECT * FROM snapshot_coverage_summaries").fetchone())
+            == previous
+        )
+    assert not reopened._snapshot_coverage_cache
+
+
+def test_durable_coverage_non_lock_publication_failure_rolls_back(tmp_path):
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    with db.session(repo._connect) as conn:
+        conn.execute(
+            "CREATE TRIGGER reject_summary AFTER INSERT ON snapshot_coverage_summaries BEGIN SELECT RAISE(ABORT, 'broken projection storage'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError, match="broken projection storage"):
+        repo.snapshot_coverage(profile.profile_hash)
+    with db.session(repo._connect) as conn:
+        assert (
+            conn.execute("SELECT count(*) FROM snapshot_coverage_summaries").fetchone()[
+                0
+            ]
+            == 0
+        )
+    assert not repo._snapshot_coverage_cache
+
+
+def test_persisted_coverage_still_checks_runtime_authority(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    repo.prepare_snapshot_coverage(profile.profile_hash)
+    reopened = _repo(path)
+
+    def reject(_):
+        raise BacktestIntegrityError("runtime changed")
+
+    monkeypatch.setattr(reopened, "_validate_profile_authority", reject)
+    with pytest.raises(BacktestIntegrityError, match="runtime changed"):
+        reopened.snapshot_coverage(profile.profile_hash)
+    assert not reopened._snapshot_coverage_cache
+
+
+def test_durable_member_revisions_restart_avoids_month_verification(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    snapshot = _snapshot(profile)
+    _commit(repo, snapshot)
+    expected = repo.prepare_snapshot_member_revisions(profile.profile_hash, "2026-07")
+    reopened = _repo(path)
+
+    def forbidden(*_):
+        pytest.fail("prepared member revisions reverified the full month")
+
+    monkeypatch.setattr(reopened, "_load_verified_snapshot_month", forbidden)
+    assert reopened.snapshot_member_revisions(profile.profile_hash, "2026-07") == expected
+
+
+@pytest.mark.parametrize(
+    "damage", ["digest", "json", "version", "oversize", "duplicate"]
+)
+def test_durable_member_revisions_damage_reverifies(tmp_path, monkeypatch, damage):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    snapshot = _snapshot(profile)
+    _commit(repo, snapshot)
+    expected = repo.prepare_snapshot_member_revisions(profile.profile_hash, "2026-07")
+    with db.session(repo._connect) as conn:
+        payload = json.dumps([list(item) for item in expected], separators=(",", ":"))
+        if damage == "json":
+            payload = "{broken"
+        if damage == "oversize":
+            payload = " " * (repo._member_revision_summary_max_bytes + 1)
+        if damage == "duplicate":
+            payload = json.dumps(
+                [list(expected[0]), list(expected[0])], separators=(",", ":")
+            )
+        digest = sha256(payload.encode()).hexdigest() if damage != "digest" else DIGEST_B
+        conn.execute(
+            """UPDATE snapshot_member_revision_summaries
+               SET members_json=?, members_digest=?, verifier_version=?""",
+            (
+                payload,
+                digest,
+                999 if damage == "version" else repo._member_revision_verifier_version,
+            ),
+        )
+    reopened = _repo(path)
+    original = reopened._load_verified_snapshot_month
+    calls = []
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(reopened, "_load_verified_snapshot_month", counted)
+    assert reopened.snapshot_member_revisions(profile.profile_hash, "2026-07") == expected
+    assert calls == [1]
+
+
+def test_member_revisions_source_change_invalidates_projection(tmp_path, monkeypatch):
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    repo.prepare_snapshot_member_revisions(profile.profile_hash, "2026-07")
+    with db.session(repo._connect) as conn:
+        conn.execute("DROP TRIGGER snapshot_month_immutable_update")
+        conn.execute("UPDATE snapshot_months SET expected_digest=?", (DIGEST_B,))
+    reopened = _repo(path)
+    original = reopened._load_verified_snapshot_month
+    calls = []
+
+    def counted(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(reopened, "_load_verified_snapshot_month", counted)
+    with pytest.raises(BacktestIntegrityError):
+        reopened.snapshot_member_revisions(profile.profile_hash, "2026-07")
+    assert calls == [1]
+
+
+def test_member_revision_locked_publication_returns_verified_and_prepare_retries(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+    connect = repo._connect
+
+    def quick_connection():
+        conn = connect()
+        conn.execute("PRAGMA busy_timeout=1")
+        return conn
+
+    monkeypatch.setattr(repo, "_connect", quick_connection)
+    blocker = connect()
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        assert repo.snapshot_member_revisions(profile.profile_hash, "2026-07")
+        with pytest.raises(BacktestIntegrityError, match="did not persist"):
+            repo.prepare_snapshot_member_revisions(profile.profile_hash, "2026-07")
+    finally:
+        blocker.rollback()
+        blocker.close()
+    assert repo.prepare_snapshot_member_revisions(profile.profile_hash, "2026-07")
+
+
+def test_coverage_preparation_prewarms_distinct_live_completed_result_months(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path / "backtest.db")
+    profile = _profile()
+    _commit(repo, _snapshot(profile))
+
+    def result(run_id, start_month, *, deleted_at=None):
+        with db.session(repo._connect) as conn:
+            conn.execute(
+                """INSERT INTO strategy_jobs (
+                       id, job_type, status, parent_job_id, enqueue_seq,
+                       claim_token, current_month, current_stage, owner_instance_id,
+                       lease_generation, status_version, cancel_requested_at,
+                       failure_code, failed_month, failure_detail, deleted_at,
+                       audit_summary, created_at, updated_at
+                   ) VALUES (?, 'backtest', 'complete', NULL, ?, NULL, NULL, NULL,
+                             NULL, NULL, 1, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                (run_id, int(run_id[-1]) + 1, NOW.isoformat(), NOW.isoformat()),
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO run_input_manifests
+                   (digest, execution_contract_digest, canonical_manifest_json, created_at)
+                   VALUES (?, ?, '{}', ?)""",
+                ("f" * 64, "e" * 64, NOW.isoformat()),
+            )
+            conn.execute(
+                """INSERT INTO strategy_runs (
+                       id, strategy_id, strategy_api_version, strategy_source_digest,
+                       parameters_json, profile_hash, start_month, end_month,
+                       ordered_month_digest, base_currency, starting_capital,
+                       run_input_manifest_digest, execution_contract_digest, created_at
+                   ) VALUES (?, 'fixture', 1, ?, '{}', ?, ?, ?, ?, 'USD', '1', ?, ?, ?)""",
+                (
+                    run_id,
+                    "a" * 64,
+                    profile.profile_hash,
+                    start_month,
+                    start_month,
+                    "b" * 64,
+                    "f" * 64,
+                    "e" * 64,
+                    NOW.isoformat(),
+                ),
+            )
+            conn.execute(
+                """INSERT INTO backtest_results
+                   (run_id, metrics_json, final_cash_base, result_digest, note,
+                    note_version, completed_at, updated_at)
+                   VALUES (?, '{}', '1', ?, NULL, 1, ?, ?)""",
+                (run_id, "c" * 64, NOW.isoformat(), NOW.isoformat()),
+            )
+            if deleted_at is not None:
+                conn.execute(
+                    "UPDATE strategy_jobs SET deleted_at=?, status_version=2 WHERE id=?",
+                    (deleted_at, run_id),
+                )
+
+    result("result-1", "2026-07")
+    result("result-2", "2026-07")
+    result("result-3", "2026-07", deleted_at=NOW.isoformat())
+    prepared = []
+    monkeypatch.setattr(
+        repo,
+        "prepare_snapshot_member_revisions",
+        lambda profile_hash, month: prepared.append((profile_hash, month)),
+    )
+    repo.prepare_snapshot_coverage(profile.profile_hash)
+    assert prepared == [(profile.profile_hash, "2026-07")]
+
+
+def test_trigger_migration_preserves_removals_and_rolls_back_failures():
+    from app.repositories.backtest_repo import _execute_schema
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute("CREATE TABLE source (id INTEGER)")
+        definition = "CREATE TRIGGER guard BEFORE INSERT ON source BEGIN SELECT 1; END"
+        conn.execute(definition)
+        conn.execute("BEGIN")
+        with pytest.raises(sqlite3.OperationalError):
+            _execute_schema(
+                conn,
+                "DROP TRIGGER IF EXISTS guard;\n"
+                "CREATE TRIGGER guard BEFORE INSERT ON missing BEGIN SELECT 1; END;\n",
+            )
+        conn.rollback()
+        assert (
+            conn.execute("SELECT sql FROM sqlite_master WHERE name='guard'").fetchone()[
+                0
+            ]
+            == definition
+        )
+        _execute_schema(conn, "DROP TRIGGER IF EXISTS guard;\n")
+        assert (
+            conn.execute("SELECT sql FROM sqlite_master WHERE name='guard'").fetchone()
+            is None
+        )
+    finally:
+        conn.close()

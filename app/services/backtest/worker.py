@@ -440,7 +440,9 @@ class PreparationStageEngine(StageWalkEngine):
                     expected_version=current.status_version,
                     failure_code=code,
                     failed_month=None,
-                    detail=detail,
+                    detail=db.sqlite_failure_detail(
+                        exc, "preparation.seal_evidence", detail
+                    ),
                     lease=self._lease,
                 )
             except StrategyJobConflict:
@@ -528,7 +530,12 @@ class BootstrapStageEngine:
                         lease=self._lease,
                     )
                 except BootstrapStageFailure as exc:
-                    return self._fail_with_code(job, claim_token, exc.code, exc.detail)
+                    return self._fail_with_code(
+                        job,
+                        claim_token,
+                        exc.code,
+                        db.sqlite_failure_detail(exc, "bootstrap.stage", exc.detail),
+                    )
                 except StrategyJobConflict:
                     current = self._repository.strategy_job(job_id)
                     if (
@@ -542,7 +549,12 @@ class BootstrapStageEngine:
                 try:
                     method()
                 except BootstrapStageFailure as exc:
-                    return self._fail_with_code(job, claim_token, exc.code, exc.detail)
+                    return self._fail_with_code(
+                        job,
+                        claim_token,
+                        exc.code,
+                        db.sqlite_failure_detail(exc, "bootstrap.stage", exc.detail),
+                    )
                 except StrategyJobConflict:
                     return self._repository.strategy_job(job_id)
         return self._repository.strategy_job(job_id)
@@ -992,7 +1004,11 @@ class BacktestExecutionEngine:
             if not self._owns(current, claim_token):
                 return current
             return self._fail_or_cancel(
-                current, claim_token, exc.code, None, exc.detail
+                current,
+                claim_token,
+                exc.code,
+                None,
+                db.sqlite_failure_detail(exc, "backtest.resolve", exc.detail),
             )
         except EvidenceMissingError as exc:
             current = self._repository.strategy_job(job_id)
@@ -1005,7 +1021,7 @@ class BacktestExecutionEngine:
                 None,
                 _safe_detail("evidence_missing", str(exc)),
             )
-        except Exception:
+        except Exception as exc:
             current = self._repository.strategy_job(job_id)
             if not self._owns(current, claim_token):
                 return current
@@ -1014,7 +1030,9 @@ class BacktestExecutionEngine:
                 claim_token,
                 JobFailureCode.INTEGRITY_ERROR,
                 None,
-                "Backtest worker configuration is invalid",
+                db.sqlite_failure_detail(
+                    exc, "backtest.resolve", "Backtest worker configuration is invalid"
+                ),
             )
 
         job = self._repository.strategy_job(job_id)
@@ -1091,9 +1109,11 @@ class BacktestExecutionEngine:
                 claim_token,
                 _map_simulation_failure_code(exc.code),
                 exc.month,
-                _safe_detail(exc.code, str(exc)),
+                db.sqlite_failure_detail(
+                    exc, "backtest.simulate", _safe_detail(exc.code, str(exc))
+                ),
             )
-        except Exception:
+        except Exception as exc:
             current = self._repository.strategy_job(job_id)
             if not self._owns(current, claim_token):
                 return current
@@ -1102,7 +1122,11 @@ class BacktestExecutionEngine:
                 claim_token,
                 JobFailureCode.INTEGRITY_ERROR,
                 None,
-                "Backtest simulation failed integrity validation",
+                db.sqlite_failure_detail(
+                    exc,
+                    "backtest.simulate",
+                    "Backtest simulation failed integrity validation",
+                ),
             )
 
         job = self._repository.strategy_job(job_id)
@@ -1375,9 +1399,11 @@ def main(
                     expected_version=current.status_version,
                     failure_code=JobFailureCode.INTEGRITY_ERROR,
                     failed_month=None,
-                    detail=(
+                    detail=db.sqlite_failure_detail(
+                        exc,
+                        "worker.construct",
                         "Strategy worker configuration is invalid: "
-                        f"{type(exc).__name__}: {exc}"
+                        f"{type(exc).__name__}: {exc}",
                     ),
                     lease=lease,
                 )
@@ -1415,7 +1441,7 @@ def main(
                         expected_version=current.status_version,
                         failure_code=JobFailureCode.INTEGRITY_ERROR,
                         failed_month=current.current_month,
-                        detail=detail[:500],
+                        detail=db.sqlite_failure_detail(exc, "worker.execute", detail),
                         lease=lease,
                     )
             return 1

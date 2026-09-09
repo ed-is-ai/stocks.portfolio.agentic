@@ -48,6 +48,14 @@ tracking_system: file-system
 story_location: "{project-root}/_bmad-output/implementation-artifacts"
 
 development_status:
+  epic-gh-444-database-storage-performance: in-progress
+  gh-535-database-baseline-contention-diagnostics: review
+  gh-536-historical-evidence-v2: backlog
+  gh-537-evidence-migration-cutover-rollback: backlog
+  gh-538-reference-aware-evidence-gc: backlog
+  gh-539-bounded-backtest-result-reads: in-progress  # durable coverage and boot splash preparation
+  gh-540-evidence-v2-rollout: backlog
+  gh-493-strategy-manager-agent: review
   gh-503-preparation-liveness: review
   gh-492-price-evidence-backfill-stage: review
   epic-453-portfolio-dashboard: in-progress

@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from enum import StrEnum
 from pathlib import Path
+import sqlite3
 from types import MethodType, SimpleNamespace
 from typing import cast
 
@@ -548,3 +549,26 @@ def test_strategy_lifecycle_modules_do_not_import_live_trading_authority() -> No
     ):
         source = (root / relative).read_text(encoding="utf-8")
         assert all(token not in source for token in forbidden)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_initialization_persists_chained_sqlite_diagnostics(wrapped):
+    repo = FakeRepository()
+
+    def process(_month):
+        try:
+            raise sqlite3.OperationalError("private-path-or-query")
+        except sqlite3.Error as exc:
+            if wrapped:
+                raise InitializationMonthError(
+                    JobFailureCode.INTEGRITY_ERROR, "private-wrapper"
+                ) from exc
+            raise
+
+    result = HistoricalInitializationEngine(
+        cast(InitializationRepository, repo), process
+    ).run("job-1", "claim-1")
+    assert result.status is StrategyJobStatus.FAILED
+    assert repo.failed[0]["detail"] == (
+        "initialization.month: sqlite3.OperationalError; code=unknown; name=unknown"
+    )

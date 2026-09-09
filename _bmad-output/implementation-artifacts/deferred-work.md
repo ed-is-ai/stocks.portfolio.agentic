@@ -559,6 +559,34 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `spec-gh-541-542-543-portfolio-chart.md`
   summary: The new trade-marker toggle button is not covered by the mobile wrap rule for the chart-card header, which targets `.portfolio-chart-card .btn-group` only.
   evidence: The toggle is a standalone `<button>` beside the range `btn-group` in `_portfolio_chart.html`; the narrow-viewport CSS in `index.html` selects `.btn-group` alone, so the header now carries an extra uncovered control.
+
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: A persistently locked Backtest ledger can prevent failure persistence and lose the original SQLite cause during later lease recovery.
+  evidence: worker.py main exception handler attempts fail_claimed_strategy_job against the same database; this pre-existing ceiling is documented in the operations guide.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: Cash reconstruction invalidation can miss same-day corrections to anchor amounts, trades or cash flows.
+  evidence: Incoming main snapshot_backfill.py signature uses anchor count/latest date rather than their values or transaction revisions.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: Directionless TRANSFER/OTHER flows are omitted from cash reconstruction without a completeness indicator.
+  evidence: Incoming main cash_reconstruction.py assigns zero to these types while balances_at returns an ordinary balance.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: Cash movements in a currency with no balance anchor can be omitted from reconstructed totals.
+  evidence: Incoming main CashReconstruction.balances_at iterates only currencies in self._anchors.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: Foreign-currency trade replay lacks enough currency evidence for GBP net cash reconstruction.
+  evidence: Incoming main snapshot_repair.net_trade_cash applies shares times price to GBP while replay rows omit stored trade currency.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: A whitespace-only alias file can replace the last-good alias map with an empty mapping.
+  evidence: Incoming main ticker_identity._read_aliases returns {} for blank text, permitting a truncated file to reset identity mappings.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: The trade-marker toggle does not retain state when localStorage is unavailable.
+  evidence: Incoming main index.html reads every toggle state from localStorage; failed reads return false and subsequent clicks cannot turn markers off.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: Definitive FX negative cache entries can trigger repeated historical provider lookups.
+  evidence: Incoming main backtest_launch_service no longer short-circuits no_rate attempts, so repeated preparation may requery an already exhausted window.
+- source_spec: `spec-gh-444-493-storage-baseline-strategy-agent.md`
+  summary: Global Pyrefly still reports 33 errors in the alert-agent portfolio snapshot projection.
+  evidence: Actual-interpreter Pyrefly output lists only app/agents/alert/alert_agent.py:1284-1322; git diff origin/main for that file is empty.
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-549-replay-currency.md`
   summary: The live snapshot writer converts a position's `total_cost` with the *quote* currency of its price, not the currency its trades were priced in, so a pence-quoted or foreign-quoted holding's live cost is off by 100x or by an FX rate.
   evidence: `snapshot_valuation.amount_in_gbp` divides by 100 for `GBp`/`GBX` and by the GBP/USD rate for `USD`, fed `position.price_currency`. WCOG quotes 1448 `GBp` but its trades are priced 13.97 (pounds), so its live cost is written ~£240 instead of ~£24k; AZN's cached quote currency is `USD` while its trades are GBP.

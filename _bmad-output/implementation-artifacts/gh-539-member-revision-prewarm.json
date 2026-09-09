@@ -1,0 +1,10 @@
+{
+  "issue": 539,
+  "database_source": "offline SQLite backup of the database on main",
+  "completed_results": 3,
+  "active_profile_completed_result_months": [],
+  "retired_profile_completed_result_months": ["2025-01", "2026-07"],
+  "startup_selection": "active completed, non-tombstoned backtest Result months only",
+  "measurement": "No active completed Result existed in this approved copy; no completed Result navigation timing is claimed.",
+  "verification": "66 focused repository/lifespan tests passed; full suite pending final run."
+}

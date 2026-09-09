@@ -41,6 +41,12 @@ AlertsDep = Annotated[AlertsRepository, Depends(get_alerts_repository)]
 RealisedPnlDep = Annotated[RealisedPnlService, Depends(get_realised_pnl_service)]
 
 
+@router.get("/startup-status")
+async def startup_status(request: Request) -> dict[str, str]:
+    """Report boot preparation without reading the evidence database."""
+    return {"status": request.app.state.strategy_preparation}
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     """Render the shell, with freshness ready for the header affordance (#418).

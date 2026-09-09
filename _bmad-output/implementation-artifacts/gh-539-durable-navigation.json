@@ -1,0 +1,167 @@
+{
+  "code_revision": "d067ef7+durable-coverage-working-tree",
+  "snapshot_id": "gh539-main-backtest-offline-2026-09-09",
+  "source_identity": {
+    "size_bytes": 10550366208,
+    "schema_version": 59
+  },
+  "repository_code_sha256": "ee50fbc5596c2464097fdcbad4a882c1e13c0122ea853898dde1688b82e06055",
+  "method": "Sequential in-process GETs; disposable SQLite backup; no lifespan; empty isolated historical cache; OS caches uncontrolled. First means first visit to each route, not a cold process. HTTP 200 can contain readiness errors and is not proof of a successful completed Result.",
+  "routes": {
+    "/strategy-manager": {
+      "seconds": [
+        131.92505591600275,
+        0.0634098329974222,
+        0.08892574999845237
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 131.92505591600275,
+      "warm_median_seconds": 0.07616779149793729,
+      "outcomes": [
+        {
+          "body_sha256": "ab74ecec80fef468300f3c15ec073f2ef12205a898631d79a63f5a0c1bf846de",
+          "status_error_markers": 7,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "ab74ecec80fef468300f3c15ec073f2ef12205a898631d79a63f5a0c1bf846de",
+          "status_error_markers": 7,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "ab74ecec80fef468300f3c15ec073f2ef12205a898631d79a63f5a0c1bf846de",
+          "status_error_markers": 7,
+          "alert_markers": 0
+        }
+      ]
+    },
+    "/strategy-manager/initialization": {
+      "seconds": [
+        0.07632316700255615,
+        0.07136991700099315,
+        0.06885679200058803
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.07632316700255615,
+      "warm_median_seconds": 0.07011335450079059,
+      "outcomes": [
+        {
+          "body_sha256": "f3548066d03367c154ce239dd5bb42afdeef58f0054fab8422265e7ff64014b8",
+          "status_error_markers": 0,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "f3548066d03367c154ce239dd5bb42afdeef58f0054fab8422265e7ff64014b8",
+          "status_error_markers": 0,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "f3548066d03367c154ce239dd5bb42afdeef58f0054fab8422265e7ff64014b8",
+          "status_error_markers": 0,
+          "alert_markers": 0
+        }
+      ]
+    },
+    "/strategy-manager/readiness": {
+      "seconds": [
+        0.03959954200036009,
+        0.03074995899805799,
+        0.03089291600190336
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.03959954200036009,
+      "warm_median_seconds": 0.030821437499980675,
+      "outcomes": [
+        {
+          "body_sha256": "66f5accb2bf7980598f6a1f4e5d0d1e81253e3c23a32f558ca4b67890d467069",
+          "status_error_markers": 1,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "66f5accb2bf7980598f6a1f4e5d0d1e81253e3c23a32f558ca4b67890d467069",
+          "status_error_markers": 1,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "66f5accb2bf7980598f6a1f4e5d0d1e81253e3c23a32f558ca4b67890d467069",
+          "status_error_markers": 1,
+          "alert_markers": 0
+        }
+      ]
+    },
+    "/strategy-manager/configuration": {
+      "seconds": [
+        0.04912049999984447,
+        0.02635691699833842,
+        0.02615062499899068
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.04912049999984447,
+      "warm_median_seconds": 0.02625377099866455,
+      "outcomes": [
+        {
+          "body_sha256": "b9271ce79d10097d481b12e8575ad98ed0a0dc4c8ac4a2d90c1cf5d84c7b6c0d",
+          "status_error_markers": 0,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "bfa1ee099ccd75cd8950300d0c2f470403fab585204bec695faa606f3e2e0152",
+          "status_error_markers": 0,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "fe42efd4d1e28bb8f39b2285465b39459dbe7751bb0922796422f02cdf4f5fd9",
+          "status_error_markers": 0,
+          "alert_markers": 0
+        }
+      ]
+    },
+    "/strategy-manager/backtests": {
+      "seconds": [
+        0.12917220899907988,
+        0.028413957999873674,
+        0.025451957997574937
+      ],
+      "status_codes": [
+        200,
+        200,
+        200
+      ],
+      "first_seconds": 0.12917220899907988,
+      "warm_median_seconds": 0.026932957998724305,
+      "outcomes": [
+        {
+          "body_sha256": "32dbb6de8a8f035bee8298f11380c7b9e3534ff8ebc3036096ea4e4ff88c6561",
+          "status_error_markers": 7,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "32dbb6de8a8f035bee8298f11380c7b9e3534ff8ebc3036096ea4e4ff88c6561",
+          "status_error_markers": 7,
+          "alert_markers": 0
+        },
+        {
+          "body_sha256": "32dbb6de8a8f035bee8298f11380c7b9e3534ff8ebc3036096ea4e4ff88c6561",
+          "status_error_markers": 7,
+          "alert_markers": 0
+        }
+      ]
+    }
+  }
+}

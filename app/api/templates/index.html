@@ -497,10 +497,7 @@
 </head>
 <body>
 
-<!-- Boot splash (#377) — covers the hydration gap, then crossfades out.
-     Retired by the inline script below as soon as fonts and the first htmx
-     swap settle; splash.css carries a 4s CSS-only failsafe so a script
-     failure can never leave it covering the app. -->
+<!-- Boot splash waits for startup preparation, fonts and the first tab. -->
 <div id="boot-splash" class="boot-splash" data-state="waiting" role="status" aria-live="polite">
   <div class="boot-mark">
     <span class="boot-mark-glyph"><i class="bi bi-graph-up-arrow"></i></span>
@@ -516,6 +513,7 @@
     </p>
   </div>
 </div>
+<div id="boot-preparation-warning" class="alert alert-warning m-3" role="alert" hidden></div>
 <script>
   // Retire the boot splash once the page is genuinely usable. No minimum
   // display time — if the app is ready in 80ms, the splash is gone in 80ms.
@@ -527,6 +525,8 @@
       if (splash.dataset.state === 'waiting') splash.dataset.state = 'slow';
     }, 1200);
 
+    var preparationReady = false;
+    var hydrationExpired = false;
     var done = false;
     function retire() {
       if (done) return;
@@ -549,7 +549,7 @@
     var pageLoaded = false;
     var tabSwapped = false;
     function maybeRetire() {
-      if (pageLoaded && tabSwapped) retire();
+      if (preparationReady && ((pageLoaded && tabSwapped) || hydrationExpired)) retire();
     }
 
     // Gate 1 — fonts + document. document.fonts may be unavailable in older
@@ -571,9 +571,8 @@
     // only listens for the one targeting #tab-content, then stops caring.
     // htmx:responseError / :timeout also release the gate: a failed tab fetch
     // must still uncover the app (the error state is more useful than a splash).
-    var tabContent = document.getElementById('tab-content');
     function markSwapped(event) {
-      if (event.target !== tabContent) return;
+      if (event.target.id !== 'tab-content') return;
       tabSwapped = true;
       maybeRetire();
     }
@@ -586,8 +585,45 @@
       if (!window.htmx) { tabSwapped = true; maybeRetire(); }
     }, { once: true });
 
-    // Hard ceiling: retire regardless if either gate never opens.
-    window.setTimeout(retire, 3000);
+    // Bound missing font/tab events, but keep the splash during known work.
+    window.setTimeout(function () {
+      hydrationExpired = true;
+      maybeRetire();
+    }, 3000);
+
+    function preparationFailed(message) {
+      var warning = document.getElementById('boot-preparation-warning');
+      warning.textContent = message;
+      warning.hidden = false;
+      preparationReady = true;
+      maybeRetire();
+    }
+    async function pollPreparation() {
+      var controller = new AbortController();
+      var timeout = window.setTimeout(function () { controller.abort(); }, 3000);
+      try {
+        var response = await fetch('/startup-status', {
+          signal: controller.signal, cache: 'no-store'
+        });
+        if (!response.ok) throw new Error('Startup status unavailable');
+        var result = await response.json();
+        if (result.status === 'pending') {
+          splash.dataset.preparation = 'pending';
+          splash.querySelector('.boot-status-slow').textContent = 'Preparing Strategy Manager';
+          window.setTimeout(pollPreparation, 500);
+        } else if (result.status === 'ready') {
+          preparationReady = true;
+          maybeRetire();
+        } else {
+          preparationFailed('Strategy Manager preparation failed. Check Strategy Manager readiness for details; other screens remain available.');
+        }
+      } catch (error) {
+        preparationFailed('Startup status is unavailable. Reload to retry; Strategy Manager may still be preparing.');
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    }
+    pollPreparation();
   })();
 </script>
 

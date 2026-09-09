@@ -164,7 +164,7 @@
 /* ── No-JS failsafe ──────────────────────────────────────────────────────
    If the boot script never runs (JS disabled, script error, CSP block),
    the splash would otherwise cover the app forever. This CSS-only animation
-   retires it unconditionally at 4s. The script normally removes the splash
+   retires it at 4s unless startup work is known to be pending. The script normally removes the splash
    long before this fires; it is a floor, not the mechanism.             */
 @keyframes boot-splash-failsafe {
   to { opacity: 0; visibility: hidden; }
@@ -173,6 +173,7 @@
   animation: boot-splash-failsafe 1ms var(--ease-out) 4s forwards;
 }
 /* Once the script has taken control, the failsafe is irrelevant. */
+.boot-splash[data-preparation="pending"],
 .boot-splash[data-state="ready"],
 .boot-splash[data-state="fading"],
 .boot-splash[data-state="hidden"] {
