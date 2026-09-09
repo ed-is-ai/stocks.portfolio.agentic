@@ -28,9 +28,11 @@ def test_realised_pnl_route_runs_blocking_work_in_fastapi_threadpool() -> None:
 
 
 def _stat_card(html: str, label: str) -> str:
+    # ``sval`` carries conditional pos/neg classes on the tiles that colour
+    # their value, so the class attribute cannot be matched literally.
     match = re.search(
         rf'<div class="stat-card">\s*<div class="slbl">.*?{re.escape(label)}</div>'
-        r'\s*<div class="sval">(.*?)</div>\s*</div>',
+        r'\s*<div class="sval[^"]*">(.*?)</div>\s*</div>',
         html,
         re.DOTALL,
     )
@@ -95,8 +97,8 @@ def test_zero_round_trips_shows_empty_state_copy(mocked):
     resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     assert "No Round-trips yet for this account." in resp.text
-    assert "0 Wins" in resp.text
-    assert "0 Losses" in resp.text
+    assert _stat_card(resp.text, "Wins").strip() == "0"
+    assert _stat_card(resp.text, "Losses").strip() == "0"
     assert "Avg Win % / Avg Loss %" in resp.text
     average_card = _stat_card(resp.text, "Avg Win % / Avg Loss %")
     assert average_card.count("&mdash;") == 2
@@ -152,61 +154,50 @@ def _round_trip(
     )
 
 
-def test_round_trip_details_are_collapsed_and_retain_all_row_content(mocked):
-    _, mock_realised_pnl = mocked
+def test_round_trip_rows_are_flat_with_prices_in_the_result_tooltip(mocked):
+    """The table is one row per round trip, newest exit first (#573).
+
+    Replaces the per-ticker subtotal rows and collapsible detail tables:
+    those answered "how did this ticker do", which the chart's ticker filter
+    now answers better, and they buried individual trades behind a click.
+    Entry and exit prices moved into the Result cell's tooltip.
+    """
+    _mock_trader, mock_realised_pnl = mocked
     mock_realised_pnl.compute_summary.return_value = RealisedPnlSummary(
         portfolio_id=1,
         round_trips={
-            "WIN": [
-                _round_trip("WIN", 10.0, exit_date="2026-02-02"),
-                _round_trip("WIN", 0.0, exit_date="2026-02-01"),
-            ],
-            "LOSS": [_round_trip("LOSS", -5.0)],
+            "WIN": [_round_trip("WIN", 10.0, exit_date="2026-02-02")],
+            "LOSS": [_round_trip("LOSS", -5.0, exit_date="2026-02-01")],
             "USDX": [_round_trip("USDX", 0.0, fx_unavailable=True)],
         },
         total_realised_pnl_gbp=5.0,
-        round_trip_count=4,
-        winning_round_trip_count=2,
-        losing_round_trip_count=1,
-        average_win_pct=5.0,
-        average_loss_pct=-5.0,
+        round_trip_count=3,
     )
 
     resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
 
     assert resp.status_code == 200
-    assert "2 Wins" in resp.text
-    assert "1 Loss" in resp.text
-    assert "+5.0%" in resp.text
-    assert "-5.0%" in resp.text
-    average_card = _stat_card(resp.text, "Avg Win % / Avg Loss %")
-    assert 'class="pos">+5.0%</span>' in average_card
-    assert 'class="neg">-5.0%</span>' in average_card
-    assert resp.text.index("Win / Loss") < resp.text.index("Avg Win % / Avg Loss %")
-    assert resp.text.index("Avg Win % / Avg Loss %") < resp.text.index(
-        "Unmatched Sells"
-    )
-    assert "WIN subtotal" in resp.text
-    assert "LOSS subtotal" in resp.text
-    assert "USDX subtotal" in resp.text
-    details_tags = re.findall(r"<details\b[^>]*\bticker-detail\b[^>]*>", resp.text)
-    assert len(details_tags) == 3
-    assert all("open" not in tag.split() for tag in details_tags)
-    assert "2 round-trips" in resp.text
-    assert "FX rate unavailable" in resp.text
-    assert "+£5.00" in resp.text
-    assert "2026-01-01" in resp.text
-    assert "100.00" in resp.text
-    # Scoped to the table: the timeline chart above it (#563) serialises the
-    # same dates in ascending order, so a whole-document index() would find
-    # them there and read the table's ordering backwards.
-    table = resp.text[resp.text.index("<table") :]
+    assert re.findall(r"<th>([^<]+)</th>", resp.text) == [
+        "Ticker",
+        "Entered",
+        "Exited",
+        "Held",
+        "Stake",
+        "Result",
+        "P&amp;L %",
+    ]
+    # No grouping scaffolding survives in the round-trip table. Scoped to
+    # it: the unmatched-sells panel below has its own <details> disclosure.
+    table = resp.text[resp.text.index("<tbody>") : resp.text.index("</table>")]
+    assert "subtotal" not in table
+    assert "ticker-detail" not in table
+    assert "<details" not in table
+    # Newest exit first, across tickers rather than within one.
     assert table.index("2026-02-02") < table.index("2026-02-01")
-    assert "110.00" in resp.text
-    assert "+£10.00" in resp.text
-    assert "+0.0%" in resp.text
-    assert resp.text.index("WIN subtotal") < resp.text.index("LOSS subtotal")
-    assert resp.text.index("LOSS subtotal") < resp.text.index("USDX subtotal")
+    # Prices are reference detail, reachable but not a column to scan.
+    assert "entry 100.00 &rarr; exit 110.00" in table
+    # An unconvertible round trip says so rather than showing a figure.
+    assert "FX rate unavailable" in table
 
 
 # --- Story 1.5: POST /trades/{trade_id}/ack --------------------------------

@@ -44,6 +44,10 @@
         <select id="pnlTicker" class="form-select form-select-sm"
                 aria-label="Filter round trips by ticker"></select>
       </label>
+      <button type="button" id="pnlQuarters" class="btn btn-sm btn-outline-secondary"
+              aria-pressed="false" onclick="togglePnlQuarters()">
+        <i class="bi bi-bar-chart-steps me-1"></i>Quarterly net
+      </button>
       <button type="button" id="pnlStake" class="btn btn-sm btn-outline-secondary"
               aria-pressed="true" onclick="togglePnlStake()">
         <i class="bi bi-circle-half me-1"></i>Size by stake
@@ -57,9 +61,8 @@
   <p class="pnl-chart-legend">
     <span class="pnl-key"><span class="pnl-dot win"></span>Win</span>
     <span class="pnl-key"><span class="pnl-dot loss"></span>Loss</span>
-    <span class="pnl-key"><span class="pnl-dot size"></span>Larger dot = more money at stake</span>
-    <span class="pnl-key text-muted">Height is return %, dot size is money staked
-      &mdash; hover a date to list every trade that closed on it</span>
+    <span class="pnl-key"><span class="pnl-dot size"></span>Dot size = money invested</span>
+    <span class="pnl-key text-muted">Hover a date to see every trade that closed</span>
   </p>
   <p class="pnl-chart-context" id="pnlContext" role="status"></p>
   <script id="pnlTimelineData" type="application/json">{{ pnl_timeline | safe }}</script>
@@ -140,7 +143,7 @@
     tickers.forEach(k => tickSel.appendChild(
       new Option(k + ' \u00b7 ' + tickCount[k] + '\u00d7 \u00b7 ' + money(tickNet[k]), k)));
 
-    let year = 'all', ticker = 'all', sizeOn = true, chart = null;
+    let year = 'all', ticker = 'all', sizeOn = true, quartersOn = false, chart = null;
     const inView = t => (ticker === 'all' || t.t === ticker) &&
                         (year === 'all' || t.x.slice(0, 4) === year);
 
@@ -163,6 +166,20 @@
 
     function draw() {
       const shown = TRIPS.filter(inView);
+      // The axis is a percentage, so a quarter's bar is its *mean* return.
+      // Summing percentages across trades would be arithmetic nonsense.
+      const buckets = {};
+      shown.forEach(t => {
+        const k = t.x.slice(0, 4) + '-Q' + Math.ceil(+t.x.slice(5, 7) / 3);
+        (buckets[k] = buckets[k] || []).push(t);
+      });
+      const quarterBars = Object.keys(buckets).sort().map(k => {
+        const rows = buckets[k];
+        const mean = rows.reduce((a, t) => a + t.pc, 0) / rows.length;
+        const mid = k.slice(0, 4) + '-' +
+          String(+k.slice(6) * 3 - 1).padStart(2, '0') + '-15';
+        return { x: toX(mid), y: mean, n: rows.length, q: k };
+      });
       const series = (rows, line, fill) => ({
         type: 'scatter',
         data: rows.map(t => ({ x: t.X, y: t.pc, t: t })),
@@ -181,7 +198,13 @@
           data: {
             datasets: [
               series(shown.filter(t => t.p > 0), green, 'rgba(10,125,52,0.45)'),
-              series(shown.filter(t => t.p <= 0), red, 'rgba(200,30,30,0.45)')
+              series(shown.filter(t => t.p <= 0), red, 'rgba(200,30,30,0.45)'),
+              {
+                type: 'bar', data: quartersOn ? quarterBars : [], order: 9,
+                barThickness: 22, borderWidth: 0, grouped: false,
+                backgroundColor: c => (c.raw && c.raw.y < 0)
+                  ? 'rgba(200,30,30,0.16)' : 'rgba(10,125,52,0.16)'
+              }
             ]
           },
           options: {
@@ -221,11 +244,13 @@
                 callbacks: {
                   title: items => {
                     const p = items[0].raw;
+                    if (p.q) { return p.q + ' \u00b7 ' + p.n + ' round trips'; }
                     const same = byDate[p.x] || [];
                     return longDate(p.x) +
                       (same.length > 1 ? '  \u00b7  ' + same.length + ' trades closed' : '');
                   },
                   label: item => {
+                    if (item.raw.q) { return '  mean return ' + pct(item.raw.y); }
                     const same = (byDate[item.raw.x] || [])
                       .slice().sort((a, b) => b.p - a.p);
                     const lines = same.slice(0, 8).map(
@@ -262,6 +287,12 @@
 
     yearSel.addEventListener('change', () => { year = yearSel.value; draw(); });
     tickSel.addEventListener('change', () => { ticker = tickSel.value; draw(); });
+    window.togglePnlQuarters = function () {
+      quartersOn = !quartersOn;
+      document.getElementById('pnlQuarters')
+        .setAttribute('aria-pressed', String(quartersOn));
+      draw();
+    };
     window.togglePnlStake = function () {
       sizeOn = !sizeOn;
       document.getElementById('pnlStake').setAttribute('aria-pressed', String(sizeOn));
@@ -279,25 +310,36 @@
 </div>
 {% endif %}
 
-<!-- Summary strip (all values in GBP) -->
-<div class="d-flex flex-wrap gap-3 mb-4">
-  <div class="stat-card">
-    <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Realised P&amp;L</div>
-    <div class="sval {% if summary.total_realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
-      {{ "+" if summary.total_realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(summary.total_realised_pnl_gbp) }}
-    </div>
-  </div>
+<!-- Summary strip (all values in GBP). Ordered as the ledger reads: how
+     many trips, how they split, what each side came to, then the net (#573).
+     Wins and losses get their own tiles because a combined "Win / Loss"
+     cell made the two counts compete for one value slot, and gross won /
+     gross lost are new -- net alone cannot tell a quiet profitable period
+     from a frantic one that turned over far more to reach the same place. -->
+<div class="pnl-stat-strip">
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-arrow-repeat me-1"></i>Round-trips</div>
     <div class="sval">{{ summary.round_trip_count }}</div>
   </div>
   <div class="stat-card">
-    <div class="slbl"><i class="bi bi-bar-chart-line me-1"></i>Win / Loss</div>
-    <div class="sval">
-      <span class="{% if summary.winning_round_trip_count > 0 %}pos{% endif %}">{{ summary.winning_round_trip_count }} Win{% if summary.winning_round_trip_count != 1 %}s{% endif %}</span>
-      /
-      <span class="{% if summary.losing_round_trip_count > 0 %}neg{% endif %}">{{ summary.losing_round_trip_count }} Loss{% if summary.losing_round_trip_count != 1 %}es{% endif %}</span>
-    </div>
+    <div class="slbl"><i class="bi bi-arrow-up-right me-1"></i>Wins</div>
+    <div class="sval {% if summary.winning_round_trip_count > 0 %}pos{% endif %}">{{ summary.winning_round_trip_count }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-arrow-down-right me-1"></i>Losses</div>
+    <div class="sval {% if summary.losing_round_trip_count > 0 %}neg{% endif %}">{{ summary.losing_round_trip_count }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-plus-circle me-1"></i>Gross Won</div>
+    <div class="sval pos">£{{ "%.2f"|format(summary.gross_won_gbp) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-dash-circle me-1"></i>Gross Lost</div>
+    <div class="sval neg">£{{ "%.2f"|format(summary.gross_lost_gbp) }}</div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-exclamation-triangle me-1"></i>Unmatched Sells</div>
+    <div class="sval">{{ summary.unmatched_count }}</div>
   </div>
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-percent me-1"></i>Avg Win % / Avg Loss %</div>
@@ -308,30 +350,36 @@
     </div>
   </div>
   <div class="stat-card">
-    <div class="slbl"><i class="bi bi-exclamation-triangle me-1"></i>Unmatched Sells</div>
-    <div class="sval">{{ summary.unmatched_count }}</div>
+    <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Realised P&amp;L</div>
+    <div class="sval {% if summary.total_realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+      {{ "+" if summary.total_realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(summary.total_realised_pnl_gbp) }}
+    </div>
   </div>
 </div>
 
 <div class="tbl-wrap">
+  {# Flat: one row per closed round trip, newest exit first (#573). The
+     per-ticker subtotal rows and the collapsible detail tables are gone --
+     they answered "how did this ticker do", which the chart's ticker filter
+     now answers better, and they buried the individual trades behind a
+     click. Entry and exit prices move into the Result cell's tooltip: they
+     are reference detail, not a column anyone scans down. #}
   <table class="table table-hover align-middle">
     <thead>
       <tr>
         <th>Ticker</th>
-        <th>Entry Date</th>
-        <th>Entry Price</th>
-        <th>Exit Date</th>
-        <th>Exit Price</th>
-        <th>Shares</th>
-        <th>Holding (days)</th>
-        <th>Realised P&amp;L</th>
+        <th>Entered</th>
+        <th>Exited</th>
+        <th>Held</th>
+        <th>Stake</th>
+        <th>Result</th>
         <th>P&amp;L %</th>
       </tr>
     </thead>
     <tbody>
       {% if not summary.round_trips %}
       <tr>
-        <td colspan="9">
+        <td colspan="7">
           <div class="alert alert-info border-0 d-flex align-items-center gap-2 my-2">
             <i class="bi bi-info-circle-fill fs-5"></i>
             No Round-trips yet for this account.
@@ -339,97 +387,33 @@
         </td>
       </tr>
       {% else %}
-      {% for ticker, round_trips in summary.round_trips.items() %}
-      {% set resolved_round_trips = round_trips | selectattr("fx_unavailable", "equalto", false) | list %}
-      {% set ticker_subtotal = resolved_round_trips | sum(attribute="realised_pnl_gbp") %}
-      <tr class="table-subtotal-row">
-        <td>{{ ticker }} subtotal</td>
+      {% set flat = [] %}
+      {% for _ticker, trips in summary.round_trips.items() %}{% for rt in trips %}
+      {% set _ = flat.append(rt) %}
+      {% endfor %}{% endfor %}
+      {% for rt in flat | sort(attribute="exit_date", reverse=true) %}
+      <tr>
+        <td class="fw-semibold">{{ rt.ticker }}</td>
+        <td>{{ rt.entry_date }}</td>
+        <td>{{ rt.exit_date }}</td>
+        <td>{{ rt.holding_period_days }}d</td>
+        <td>£{{ "%.2f"|format(rt.entry_price * rt.shares) }}</td>
+        {% if rt.fx_unavailable %}
+        <td><span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span></td>
         <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>
-          {% if resolved_round_trips %}
-          <span class="{% if ticker_subtotal >= 0 %}pos{% else %}neg{% endif %}">
-            {{ "+" if ticker_subtotal >= 0 }}£{{ "%.2f"|format(ticker_subtotal) }}
-          </span>
-          {% else %}
-          <span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span>
-          {% endif %}
+        {% else %}
+        <td class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}"
+            title="{{ "%g"|format(rt.shares) }} shares &middot; entry {{ "%.2f"|format(rt.entry_price) }} &rarr; exit {{ "%.2f"|format(rt.exit_price) }}">
+          {{ "+" if rt.realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(rt.realised_pnl_gbp) }}
         </td>
-        <td>&mdash;</td>
-      </tr>
-      <tr class="ticker-detail-row">
-        <td colspan="9" class="p-0">
-          <details class="ticker-detail">
-            <summary class="px-4 py-2 bg-light border-top">{{ round_trips|length }} round-trip{% if round_trips|length != 1 %}s{% endif %}</summary>
-            <table class="table table-hover align-middle mb-0" aria-label="{{ ticker }} round-trip details">
-              <thead>
-                <tr>
-                  <th>Ticker</th>
-                  <th>Entry Date</th>
-                  <th>Entry Price</th>
-                  <th>Exit Date</th>
-                  <th>Exit Price</th>
-                  <th>Shares</th>
-                  <th>Holding (days)</th>
-                  <th>Realised P&amp;L</th>
-                  <th>P&amp;L %</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for rt in round_trips %}
-                <tr>
-                  <td><span class="fw-bold" style="color:var(--primary); font-size:0.85rem">{{ rt.ticker }}</span></td>
-                  <td>{{ rt.entry_date }}</td>
-                  <td>{{ "%.2f"|format(rt.entry_price) }}</td>
-                  <td>{{ rt.exit_date }}</td>
-                  <td>{{ "%.2f"|format(rt.exit_price) }}</td>
-                  <td>{{ rt.shares }}</td>
-                  <td>{{ rt.holding_period_days }}</td>
-                  {% if rt.fx_unavailable %}
-                  <td colspan="2">
-                    <span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span>
-                  </td>
-                  {% else %}
-                  <td>
-                    <span class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
-                      {{ "+" if rt.realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(rt.realised_pnl_gbp) }}
-                    </span>
-                  </td>
-                  <td>
-                    <span class="{% if rt.realised_pnl_pct >= 0 %}pos{% else %}neg{% endif %}">
-                      {{ "+" if rt.realised_pnl_pct >= 0 }}{{ "%.1f"|format(rt.realised_pnl_pct) }}%
-                    </span>
-                  </td>
-                  {% endif %}
-                </tr>
-                {% endfor %}
-              </tbody>
-            </table>
-          </details>
+        <td class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+          {{ "+" if rt.realised_pnl_pct >= 0 }}{{ "%.1f"|format(rt.realised_pnl_pct) }}%
         </td>
+        {% endif %}
       </tr>
       {% endfor %}
       {% endif %}
     </tbody>
-    <tfoot>
-      <tr class="table-total-row">
-        <td>Account Total</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>&mdash;</td>
-        <td>
-          {{ "+" if summary.total_realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(summary.total_realised_pnl_gbp) }}
-        </td>
-        <td>&mdash;</td>
-      </tr>
-    </tfoot>
   </table>
 </div>
 

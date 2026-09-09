@@ -156,6 +156,15 @@ class RealisedPnlSummary(BaseModel):
     portfolio_id: int
     round_trips: dict[str, list[RoundTrip]] = {}
     total_realised_pnl_gbp: float
+    gross_won_gbp: float = 0.0
+    """Sum of the winning Round-trips alone (#573).
+
+    Net alone cannot distinguish a quiet profitable period from a frantic one
+    that turned over a large gross to end up in the same place, and those are
+    not the same behaviour. Excludes ``fx_unavailable`` rows, exactly as
+    ``total_realised_pnl_gbp`` does."""
+    gross_lost_gbp: float = 0.0
+    """Sum of the losing Round-trips alone, negative (#573)."""
     round_trip_count: int
     winning_round_trip_count: int = 0
     losing_round_trip_count: int = 0

@@ -244,6 +244,8 @@ class RealisedPnlService:
             portfolio_id=portfolio_id,
             round_trips=grouped,
             total_realised_pnl_gbp=total_pnl,
+            gross_won_gbp=sum(rt.realised_pnl_gbp for rt in winning_round_trips),
+            gross_lost_gbp=sum(rt.realised_pnl_gbp for rt in losing_round_trips),
             round_trip_count=len(round_trips),
             winning_round_trip_count=len(winning_round_trips),
             losing_round_trip_count=len(losing_round_trips),
