@@ -2234,6 +2234,18 @@ class TraderAgent(Agent):
         no-longer-scanned ticker's currency lookup survives restarts."""
         self._ticker_currency_cache.upsert_many(currencies)
 
+    def evidenced_trade_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return ``{ticker: evidenced trading currency}``, or absent (#554).
+
+        The currency a ticker *quotes* in and the currency its trades were
+        *priced* in are two different facts, and a ticker with no trades is
+        simply absent. Distinct from
+        :meth:`get_cached_ticker_currencies`, which answers the quote
+        question; see ``TradesRepository.resolve_currencies`` (#553) for how
+        the trading currency is decided.
+        """
+        return self._trades.evidenced_currencies(tickers)
+
     def set_cash_balance(self, amount: float, portfolio_id: int | None = None) -> None:
         """Persist a portfolio's cash balance (Running Balance) to account_state."""
         self._account.set(self._cash_key(portfolio_id), str(amount))

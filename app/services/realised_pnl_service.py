@@ -22,7 +22,10 @@ from typing import Literal
 
 from app.core.quantity import QUANTITY_EPSILON, round_quantity
 from app.core.config import TICKER_ALIASES_JSON
-from app.core.ticker_identity import canonicalize_or_fallback
+from app.core.ticker_identity import (
+    canonicalize_or_fallback,
+    matching_raw_tickers,
+)
 from app.schemas import (
     MatchTrace,
     MatchTraceCandidateLot,
@@ -32,7 +35,7 @@ from app.schemas import (
     Trade,
     UnmatchedSell,
 )
-from app.services.portfolio_service import PortfolioService
+from app.services.portfolio_service import CONVERTIBLE_CURRENCIES, PortfolioService
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
@@ -118,9 +121,14 @@ class RealisedPnlService:
     must never call or import the Portfolio tab's average-cost matching
     method on ``TraderAgent`` (it stays untouched).
 
-    Currency and FX resolution go exclusively through ``PortfolioService``
-    (``ticker_currencies``/``historical_gbpusd_rates``, AD-5) — this service
-    never fetches market data or the live rate itself. The portfolio boundary
+    FX rate resolution goes exclusively through ``PortfolioService``
+    (``historical_fx_rates``, AD-5) — this service never fetches market data
+    or the live rate itself. AD-5 also named ``ticker_currencies`` the sole
+    currency seam, which held while a ticker had one currency; there are now
+    two facts (the currency trades were priced in, and the currency the
+    ticker quotes in), so the trading currency comes from the ledger via
+    ``TraderService.resolve_trade_currencies`` and ``ticker_currencies``
+    keeps the quote question it is named for (#553/#554). The portfolio boundary
     may reuse immutable currency classifications; FIFO and summary data are
     always recomputed from the current trade ledger.
 
@@ -736,39 +744,91 @@ class RealisedPnlService:
         """Convert every raw Round-trip's legs to GBP at their own
         trade-date FX rate (Story 1.2, AC1/AC5/AC6).
 
-        Resolves distinct ticker currencies in one cache-first batch via
-        ``PortfolioService.ticker_currencies`` (the sole currency seam,
-        AD-5), then batch-fetches every distinct trade date once per supported
-        foreign currency. A GBP-currency ticker never needs a rate lookup.
-        """
-        currencies = self._portfolio.ticker_currencies(
-            list(dict.fromkeys(raw.ticker for raw in raw_round_trips))
-        )
+        A Round-trip's legs are FIFO *trade* prices, so they are converted
+        from the currency the trades were priced in, not the one the ticker
+        quotes in (#554). Those are two different facts about the same
+        holding, and using the quote currency divided sterling-priced legs by
+        a rate they never traded at. ``TraderService.resolve_trade_currencies``
+        answers the first question (#553's evidence-backed resolution);
+        ``PortfolioService.ticker_currencies`` still answers the second, and
+        remains the fallback for a ticker the ledger cannot resolve -- an
+        alias whose canonical spelling has no trade rows of its own -- so an
+        unresolvable holding keeps its previous behaviour rather than
+        silently changing basis.
 
-        dates_by_currency: dict[str, set[str]] = {"USD": set(), "HKD": set()}
+        Distinct trade dates are then batch-fetched once per currency, over
+        whatever :data:`~app.services.portfolio_service.CONVERTIBLE_CURRENCIES`
+        holds rather than a set restated here; the restated copy is what
+        dropped every EUR Round-trip when the shared one grew (#554). A
+        GBP-priced ticker never needs a rate lookup.
+        """
+        tickers = list(dict.fromkeys(raw.ticker for raw in raw_round_trips))
+        currencies = self._evidenced_trade_currencies(tickers)
+        unresolved = [ticker for ticker in tickers if ticker not in currencies]
+        if unresolved:
+            logger.info(
+                "Realised P&L: no trade currency for %s -- falling back to the "
+                "quote currency",
+                ", ".join(sorted(unresolved)),
+            )
+            currencies = {**self._portfolio.ticker_currencies(unresolved), **currencies}
+
+        dates_by_currency: dict[str, set[str]] = {}
         for raw in raw_round_trips:
-            dates = dates_by_currency.get(currencies[raw.ticker])
-            if dates is not None:
+            currency = currencies.get(raw.ticker, "")
+            if currency in CONVERTIBLE_CURRENCIES:
+                dates = dates_by_currency.setdefault(currency, set())
                 dates.add(raw.entry_date)
                 dates.add(raw.exit_date)
         rates_by_currency = {
-            "USD": self._portfolio.historical_gbpusd_rates(
-                sorted(dates_by_currency["USD"])
-            )
+            currency: self._portfolio.historical_fx_rates(currency, sorted(dates))
+            for currency, dates in dates_by_currency.items()
         }
-        if dates_by_currency["HKD"]:
-            rates_by_currency["HKD"] = self._portfolio.historical_fx_rates(
-                "HKD", sorted(dates_by_currency["HKD"])
-            )
 
         return [
             self._convert_round_trip(
                 raw,
-                currencies[raw.ticker],
-                rates_by_currency.get(currencies[raw.ticker], {}),
+                currencies.get(raw.ticker, ""),
+                rates_by_currency.get(currencies.get(raw.ticker, ""), {}),
             )
             for raw in raw_round_trips
         ]
+
+    def _evidenced_trade_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return ``{canonical ticker: evidenced trading currency}``.
+
+        ``tickers`` are canonical identities (``SGLN.L``); the trades table
+        holds whatever spelling was imported (``SGLN``), so the lookup goes
+        through ``matching_raw_tickers`` and the answers fold back onto the
+        canonical identity. Asking by the canonical name alone matched
+        nothing for every aliased ticker -- most of the foreign ones, and
+        both holdings #554 exists to fix.
+
+        Only evidenced verdicts (#553) are returned, never the ledger's
+        lower tiers. Those end in a bare ``'GBP'`` default, and treating
+        that default as an answer is worse than the quote currency it would
+        displace: the euro holdings have no verdict, and taking their
+        default would have valued €-priced legs as sterling. An absent
+        ticker means "the ledger does not know", and the caller falls back.
+
+        Where two spellings of one holding carry different verdicts the
+        first sorted wins -- arbitrary but stable, and a disagreement means
+        the ledger holds two currencies for one security, which is a data
+        problem this cannot paper over.
+        """
+        aliases = self._portfolio.load_ticker_aliases()
+        spellings = {
+            ticker: sorted(matching_raw_tickers(ticker, aliases)) for ticker in tickers
+        }
+        evidenced = self._trader.evidenced_trade_currencies(
+            sorted({s for group in spellings.values() for s in group})
+        )
+        resolved = {}
+        for ticker, group in spellings.items():
+            found = [evidenced[s] for s in group if s in evidenced]
+            if found:
+                resolved[ticker] = found[0]
+        return resolved
 
     @staticmethod
     def _convert_round_trip(
@@ -793,7 +853,7 @@ class RealisedPnlService:
         if currency == "GBP":
             entry_rate: float | None = 1.0
             exit_rate: float | None = 1.0
-        elif currency in {"USD", "HKD"}:
+        elif currency in CONVERTIBLE_CURRENCIES:
             entry_rate = rates.get(raw.entry_date)
             exit_rate = rates.get(raw.exit_date)
         else:

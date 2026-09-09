@@ -155,6 +155,14 @@ class TraderService:
         live price-cache entry (delisted/no-longer-scanned)."""
         return self._agent.get_cached_ticker_currencies(tickers)
 
+    def evidenced_trade_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return ``{ticker: evidenced trading currency}``, or absent (#554).
+
+        The trading currency, not the quote currency -- a ticker with no
+        trades is absent from the result.
+        """
+        return self._agent.evidenced_trade_currencies(tickers)
+
     # --- writes -----------------------------------------------------------
 
     def save_price_cache(

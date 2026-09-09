@@ -411,6 +411,31 @@ class TradesRepository:
         sql += f" ORDER BY {_REPLAY_ORDER}"
         return conn.execute(sql, params).fetchall()
 
+    def evidenced_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return ``{ticker: currency}`` for tickers with a stored *verdict*.
+
+        Only the ``trade_currency_resolutions`` tier that
+        :data:`_REPLAY_CURRENCY` consults first -- the one backed by voting
+        trade prices against dated closes (#553). The tiers below it are
+        guesses of descending quality, ending in a bare ``'GBP'`` default,
+        and a caller that needs to know whether the ledger *knows* cannot
+        tell them apart through :meth:`resolve_currencies` (#554). A ticker
+        with no verdict is absent rather than defaulted.
+        """
+        if not tickers:
+            return {}
+        placeholders = _in_placeholders(tickers)
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT ticker, TRIM(currency) FROM trade_currency_resolutions"
+                f" WHERE ticker IN ({placeholders}) AND TRIM(currency) <> ''",
+                tuple(tickers),
+            ).fetchall()
+        return {
+            row[0]: ("GBP" if row[1].upper() in ("GBP", "GBX") else row[1])
+            for row in rows
+        }
+
     def resolve_currencies(self, tickers: list[str]) -> dict[str, str]:
         """Return ``{ticker: resolved trading currency}`` for ``tickers``.
 

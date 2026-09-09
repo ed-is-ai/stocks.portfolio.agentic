@@ -17,6 +17,8 @@ from typing import Literal, cast
 import pytest
 
 from app.agents.trader.trader_agent import TraderAgent
+from app.repositories import db
+from app.repositories.trade_currency_repo import TradeCurrencyRepository
 from app.schemas import Trade
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
@@ -63,6 +65,16 @@ def _make_service_with_agent(
         RealisedPnlService(trader_service, cast(PortfolioService, portfolio)),
         agent,
     )
+
+
+def _record_currency_verdict(agent: TraderAgent, ticker: str, currency: str) -> None:
+    """Persist an evidenced trade-currency verdict, as #553's resolver does.
+
+    Realised P&L trusts only this tier (#554) -- the quote currency is the
+    fallback -- so a test that needs the two to disagree writes here.
+    """
+    connect = db.make_connect(lambda: agent.db_path)
+    TradeCurrencyRepository(connect).upsert(ticker, currency, "test")
 
 
 def _stub_trade_history(
@@ -788,14 +800,14 @@ class _FakePortfolioService:
         rates: dict[str, float],
         aliases: dict[str, str] | None = None,
     ) -> None:
-        self._currencies = currencies
+        self.currencies = currencies
         self._rates = rates
         self._aliases = aliases or {}
         self.rate_lookup_calls: list[list[str]] = []
         self.currency_rate_lookup_calls: list[tuple[str, list[str]]] = []
 
     def ticker_currency(self, ticker: str) -> str:
-        return self._currencies.get(ticker, "GBP")
+        return self.currencies.get(ticker, "GBP")
 
     def ticker_currencies(self, tickers: list[str]) -> dict[str, str]:
         return {ticker: self.ticker_currency(ticker) for ticker in tickers}
@@ -828,8 +840,10 @@ def test_gbp_ticker_round_trip_uses_rate_of_one_no_conversion(
     assert rt.fx_unavailable is False
     assert rt.realised_pnl_gbp == 500.0
     assert summary.total_realised_pnl_gbp == 500.0
-    # GBP legs never contribute a date to the FX-rate lookup.
-    assert portfolio.rate_lookup_calls == [[]]
+    # GBP legs never contribute a date to the FX-rate lookup -- since #554
+    # that means no lookup happens at all, rather than one with no dates.
+    assert portfolio.rate_lookup_calls == []
+    assert portfolio.currency_rate_lookup_calls == []
 
 
 def test_usd_round_trip_converts_buy_and_sell_legs_independently_by_trade_date(
@@ -935,6 +949,7 @@ def test_hkd_round_trip_uses_trade_date_gbphkd_rates(tmp_path: Path) -> None:
         rates={"2026-01-01": 10.0, "2026-02-01": 12.0},
     )
     service, agent = _make_service_with_agent(tmp_path, portfolio)
+    _record_currency_verdict(agent, "9988", "HKD")
     agent.record_buy("9988", 100, 80.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
     agent.record_sell("9988", 100, 108.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
 
@@ -967,33 +982,36 @@ def test_hkd_round_trip_is_unavailable_when_one_rate_is_missing(
     assert rt.realised_pnl_pct == 0.0
 
 
-def test_third_currency_ticker_is_fx_unavailable_without_wrong_pair_lookup(
+def test_unpaired_currency_ticker_is_fx_unavailable_without_wrong_pair_lookup(
     tmp_path: Path,
 ) -> None:
-    """A ticker whose currency is neither GBP nor USD must never fall
-    through to a rates.get(...) lookup -- doing so could silently apply an
-    unrelated USD leg's rate to a same-date third-currency trade. It must
-    be immediately fx_unavailable instead, even when a USD round-trip on
-    the exact same dates has a perfectly valid rate available."""
+    """A ticker in a currency with no GBP pair must never fall through to a
+    rates.get(...) lookup -- doing so could silently apply an unrelated USD
+    leg's rate to a same-date third-currency trade. It must be immediately
+    fx_unavailable instead, even when a USD round-trip on the exact same
+    dates has a perfectly valid rate available.
+
+    JPY, not EUR: EUR became convertible in #554, so it no longer exercises
+    the guard this test exists for."""
     portfolio = _FakePortfolioService(
-        currencies={"EURCO": "EUR", "USDX": "USD"},
+        currencies={"JPYCO": "JPY", "USDX": "USD"},
         rates={"2026-01-01": 1.25, "2026-02-01": 1.50},
     )
     service, agent = _make_service_with_agent(tmp_path, portfolio)
     # Same dates as the USD round-trip below, so a bug that looked EURCO's
     # dates up in `rates` would find a (wrong-currency-pair) value.
-    agent.record_buy("EURCO", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
-    agent.record_sell("EURCO", 5, 120.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_buy("JPYCO", 5, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("JPYCO", 5, 120.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
     agent.record_buy("USDX", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
     agent.record_sell("USDX", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
 
     summary = service.compute_summary(PORTFOLIO_ID)
 
-    eur_rt = summary.round_trips["EURCO"][0]
-    assert eur_rt.fx_unavailable is True
-    assert eur_rt.realised_pnl_gbp == 0.0
+    jpy_rt = summary.round_trips["JPYCO"][0]
+    assert jpy_rt.fx_unavailable is True
+    assert jpy_rt.realised_pnl_gbp == 0.0
     # The USD round-trip is unaffected and still resolves normally -- proof
-    # that EURCO's dates weren't excluded from the batch (only its currency
+    # that JPYCO's dates weren't excluded from the batch (only its currency
     # was rejected), and USDX's genuinely valid rate wasn't disturbed.
     usd_rt = summary.round_trips["USDX"][0]
     assert usd_rt.fx_unavailable is False
@@ -1101,8 +1119,12 @@ def test_batches_historical_gbpusd_rates_call_once_per_compute_summary(
 
     service.compute_summary(PORTFOLIO_ID)
 
-    assert len(portfolio.rate_lookup_calls) == 1
-    assert set(portfolio.rate_lookup_calls[0]) == {
+    # One call per currency present, carrying every distinct date at once --
+    # since #554 every currency goes through the same seam, USD included.
+    assert len(portfolio.currency_rate_lookup_calls) == 1
+    currency, dates = portfolio.currency_rate_lookup_calls[0]
+    assert currency == "USD"
+    assert set(dates) == {
         "2026-01-01",
         "2026-01-05",
         "2026-02-01",
@@ -1110,28 +1132,40 @@ def test_batches_historical_gbpusd_rates_call_once_per_compute_summary(
     }
 
 
-def test_realised_pnl_service_calls_ticker_currency_not_yfinance_directly(
+def test_realised_pnl_service_resolves_currency_through_a_seam_not_yfinance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC6: RealisedPnlService resolves currency exclusively via
-    PortfolioService.ticker_currency -- never yfinance or its own
-    currency-derivation logic."""
+    """AC6, as amended by #554: the service never derives a currency itself
+    and never touches yfinance. The seam it asks moved -- the trading
+    currency comes from the ledger, so a resolvable ticker never reaches
+    ``ticker_currency`` at all."""
     portfolio = _FakePortfolioService(currencies={"TEST1": "GBP"}, rates={})
-    calls: list[str] = []
+    quote_calls: list[str] = []
     original = portfolio.ticker_currency
 
     def spy(ticker: str) -> str:
-        calls.append(ticker)
+        quote_calls.append(ticker)
         return original(ticker)
 
     monkeypatch.setattr(portfolio, "ticker_currency", spy)
     service, agent = _make_service_with_agent(tmp_path, portfolio)
+    ledger_calls: list[list[str]] = []
+    resolve = service._trader.evidenced_trade_currencies
+
+    def resolve_spy(tickers: list[str]) -> dict[str, str]:
+        ledger_calls.append(list(tickers))
+        return resolve(tickers)
+
+    monkeypatch.setattr(service._trader, "evidenced_trade_currencies", resolve_spy)
     agent.record_buy("TEST1", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
     agent.record_sell("TEST1", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
 
     service.compute_summary(PORTFOLIO_ID)
 
-    assert calls == ["TEST1"]
+    assert ledger_calls == [["TEST1"]]
+    # No verdict exists for TEST1, so the quote currency answered -- through
+    # the same seam as before, never a currency this service derived itself.
+    assert quote_calls == ["TEST1"]
     assert "yfinance" not in inspect.getsource(RealisedPnlService)
 
 
@@ -1901,3 +1935,142 @@ def test_opening_lot_dated_before_matched_sell_triggers_forward_rematch(
     assert after.round_trip_count == 2
     entries = sorted((rt.entry_price, rt.shares) for rt in after.round_trips["TEST1"])
     assert entries == [(90.0, 3.0), (100.0, 2.0)]
+
+
+# --- GH-554: trade currency, not quote currency ----------------------------
+
+
+def test_gbp_priced_legs_are_not_converted_by_a_usd_quote(tmp_path: Path) -> None:
+    """The bug #554 names: a holding quoted in USD whose trades were priced
+    in pounds had both legs divided by a rate they never traded at.
+
+    The two facts are seeded apart here on purpose -- the ledger says GBP,
+    the quote says USD -- because that disagreement *is* the scenario.
+    """
+    portfolio = _FakePortfolioService(
+        currencies={"SGLN": "USD"},
+        rates={"2026-01-01": 1.25, "2026-02-01": 1.50},
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    # The evidence says these trades were priced in pounds, while the ticker
+    # quotes in dollars -- that disagreement is the scenario.
+    _record_currency_verdict(agent, "SGLN", "GBP")
+    agent.record_buy("SGLN", 100, 50.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("SGLN", 100, 60.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    rt = service.compute_summary(PORTFOLIO_ID).round_trips["SGLN"][0]
+
+    # £6,000 - £5,000, used as-is. Converting by the quote currency gave
+    # £4,000 - £4,000 = £0.00 here, an entire round trip erased.
+    assert rt.fx_unavailable is False
+    assert rt.realised_pnl_gbp == 1000.0
+    # A sterling holding contributes no date to any FX lookup.
+    assert portfolio.currency_rate_lookup_calls == []
+
+
+def test_a_genuinely_foreign_holding_still_converts_per_leg(tmp_path: Path) -> None:
+    """The other side of the same coin: where the ledger agrees the trades
+    were foreign, each leg still converts at its own trade-date rate."""
+    portfolio = _FakePortfolioService(
+        currencies={"9988": "HKD"},
+        rates={"2026-01-01": 10.0, "2026-02-01": 8.0},
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("9988", 100, 80.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("9988", 100, 96.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    rt = service.compute_summary(PORTFOLIO_ID).round_trips["9988"][0]
+
+    # cost = HK$8,000/10 = £800; proceeds = HK$9,600/8 = £1,200.
+    assert rt.fx_unavailable is False
+    assert rt.realised_pnl_gbp == 400.0
+
+
+def test_eur_round_trips_are_valued_not_dropped(tmp_path: Path) -> None:
+    """#554: EUR had no GBP pair, so every euro round trip was flagged
+    fx_unavailable and silently excluded from the account total -- five of
+    them on the real portfolio, hiding a net loss."""
+    portfolio = _FakePortfolioService(
+        currencies={"VOW.DE": "EUR"},
+        rates={"2026-01-01": 1.20, "2026-02-01": 1.20},
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("VOW.DE", 10, 230.40, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("VOW.DE", 10, 286.00, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    summary = service.compute_summary(PORTFOLIO_ID)
+    rt = summary.round_trips["VOW.DE"][0]
+
+    # €556 gain / 1.20 = £463.33, and it reaches the account total.
+    assert rt.fx_unavailable is False
+    assert rt.realised_pnl_gbp == pytest.approx(463.33)
+    assert summary.total_realised_pnl_gbp == pytest.approx(463.33)
+
+
+def test_an_unresolvable_ticker_falls_back_to_the_quote_currency(
+    tmp_path: Path,
+) -> None:
+    """A ticker the ledger cannot resolve -- no trade rows under the
+    canonical spelling -- keeps its previous behaviour rather than silently
+    changing basis to GBP."""
+    portfolio = _FakePortfolioService(
+        currencies={"USDX": "USD"},
+        rates={"2026-01-01": 1.25, "2026-02-01": 1.50},
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    agent.record_buy("USDX", 10, 100.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("USDX", 10, 150.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+    # Simulate the ledger having nothing to say about this ticker.
+    service._trader.evidenced_trade_currencies = lambda tickers: {}  # type: ignore[method-assign]
+
+    rt = service.compute_summary(PORTFOLIO_ID).round_trips["USDX"][0]
+
+    # $1,000/1.25 = £800 cost, $1,500/1.50 = £1,000 proceeds.
+    assert rt.fx_unavailable is False
+    assert rt.realised_pnl_gbp == 200.0
+
+
+def test_an_unevidenced_ledger_default_never_displaces_a_foreign_quote(
+    tmp_path: Path,
+) -> None:
+    """The ledger's currency resolution ends in a bare ``'GBP'`` default, so
+    "GBP" from it can mean either "evidenced as sterling" or "no idea".
+
+    Taking the default as an answer valued euro-priced legs as sterling --
+    €556 of gain reported as £556 -- which is worse than the quote currency
+    it displaced. Only an evidenced verdict may override the quote (#554).
+    """
+    portfolio = _FakePortfolioService(
+        currencies={"VOW.DE": "EUR"},
+        rates={"2026-01-01": 1.20, "2026-02-01": 1.20},
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    # No verdict recorded: the ledger would default this ticker to GBP.
+    agent.record_buy("VOW.DE", 10, 230.40, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("VOW.DE", 10, 286.00, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    rt = service.compute_summary(PORTFOLIO_ID).round_trips["VOW.DE"][0]
+
+    # €556/1.20 = £463.33, not the unconverted £556.00.
+    assert rt.realised_pnl_gbp == pytest.approx(463.33)
+
+
+def test_a_verdict_is_found_under_the_ledgers_own_spelling(tmp_path: Path) -> None:
+    """Round trips are keyed by canonical identity (``SGLN.L``) while the
+    trades table holds the imported spelling (``SGLN``). Looking the verdict
+    up by the canonical name alone found nothing for every aliased ticker --
+    which is most of the foreign ones, and both holdings #554 exists to fix.
+    """
+    portfolio = _FakePortfolioService(
+        currencies={"SGLN.L": "USD"},
+        rates={"2026-01-01": 1.25, "2026-02-01": 1.50},
+        aliases={"SGLN": "SGLN.L"},
+    )
+    service, agent = _make_service_with_agent(tmp_path, portfolio)
+    _record_currency_verdict(agent, "SGLN", "GBP")
+    agent.record_buy("SGLN", 100, 50.0, "2026-01-01", portfolio_id=PORTFOLIO_ID)
+    agent.record_sell("SGLN", 100, 60.0, "2026-02-01", portfolio_id=PORTFOLIO_ID)
+
+    rt = service.compute_summary(PORTFOLIO_ID).round_trips["SGLN.L"][0]
+
+    assert rt.realised_pnl_gbp == 1000.0

@@ -63,7 +63,12 @@ def _load_provider_options() -> tuple[ProviderOption, ...]:
 _HISTORICAL_FX_PAIR: dict[str, str] = {
     "USD": "GBPUSD=X",
     "HKD": "GBPHKD=X",
+    "EUR": "GBPEUR=X",
 }
+#: The currencies anything downstream may convert a dated amount from. Read
+#: it rather than restating the set: realised P&L kept its own copy and
+#: silently dropped every EUR round trip when this one grew (#554).
+CONVERTIBLE_CURRENCIES: frozenset[str] = frozenset(_HISTORICAL_FX_PAIR)
 _YFINANCE_SYMBOL_OVERRIDES: dict[str, str] = {"9988": "9988.HK"}
 _PRICE_DOWNLOAD_CHUNK_SIZE = 50
 
