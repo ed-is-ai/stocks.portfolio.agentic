@@ -52,7 +52,10 @@ app/agents/extraction/heat_map_cache.json.*
 app/agents/extraction/stocktwits_email_watermark.json
 app/agents/extraction/extraction_results.json
 app/agents/scanner/scan_history.json
-app/agents/trader/trades.db.backup
+# A full trade ledger reached the public repo through a timestamped backup
+# that this pattern, without the wildcard, did not match.
+app/agents/trader/trades.db.backup*
+*.db.backup-*
 **/scan_history.json
 **/sector_allocation_history.json
 **/market_narrative.json
