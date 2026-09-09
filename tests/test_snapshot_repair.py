@@ -1428,3 +1428,65 @@ def test_an_unknown_split_factor_skips_the_date_rather_than_guessing() -> None:
 
     # No usable date, so the candidate stands untouched.
     assert resolver.resolve("USDCO", "USD", [("2024-01-01", 70.0)]) == "USD"
+
+
+class _DatedPriceSource:
+    """A historical source keyed by ``(ticker, date)`` -- a genuine calendar.
+
+    ``_FixedPriceSource`` answers every date alike, which cannot express the
+    one situation #558 is about: a holding priced on one session and not the
+    next.
+    """
+
+    def __init__(self, prices: dict[tuple[str, str], float]) -> None:
+        self._prices = prices
+
+    def gbp_price(self, ticker: str, as_of: str) -> float | None:
+        return self._prices.get((ticker, as_of[:10]))
+
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        return 1.0 if currency.strip().upper() == "GBP" else None
+
+    def trading_days(self, start: str, end: str) -> frozenset[str]:
+        return frozenset()
+
+
+def test_a_closed_market_carries_the_last_close_not_the_cost() -> None:
+    """The UK bank holiday case: the LSE is shut while the NYSE trades, so
+    one holding has no close for the day. Its market was closed, not its
+    price collapsed -- carry Friday's close rather than dropping the book by
+    the whole cost-to-market gap (#558)."""
+    source = _DatedPriceSource(
+        {
+            ("WCOG", "2026-08-28"): 14.16,
+            ("GOOGL", "2026-08-28"): 10.0,
+            # GOOGL keeps trading on the 31st -- that is what proves the day
+            # was open and it was WCOG's market that was shut.
+            ("GOOGL", "2026-08-31"): 10.0,
+        }
+    )
+    holdings = {"WCOG": 1000.0, "GOOGL": 20.0}
+    carrying = {"WCOG": 10_000.0, "GOOGL": 150.0}
+
+    priced = value_holdings(source, holdings, "2026-08-28", carrying)
+    closed = value_holdings(source, holdings, "2026-08-31", carrying)
+
+    assert priced == (pytest.approx(14_360.0), False)
+    # Carried, not observed, so still flagged estimated -- but at WCOG's
+    # last close, not the £10,000 cost the old fallback would have used.
+    assert closed == (pytest.approx(14_360.0), True)
+
+
+def test_a_holding_with_no_close_anywhere_still_falls_back_to_cost() -> None:
+    """#519's guarantee is unchanged past the lookback: a holding the cache
+    has never priced is carried at cost, not turned into a gap."""
+    source = _DatedPriceSource(
+        {("WCOG", "2026-08-01"): 14.16, ("GOOGL", "2026-08-31"): 10.0}
+    )
+    value, estimated = value_holdings(
+        source,
+        {"WCOG": 1000.0, "GOOGL": 20.0},
+        "2026-08-31",
+        {"WCOG": 10_000.0, "GOOGL": 150.0},
+    )
+    assert (value, estimated) == (pytest.approx(10_200.0), True)

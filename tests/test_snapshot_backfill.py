@@ -1219,7 +1219,9 @@ def test_a_weekend_carries_cash_forward_when_a_holding_is_priced(
 def test_a_weekday_with_one_unpriced_holding_is_valued_and_flagged(
     tmp_path: Path,
 ) -> None:
-    """#519 is untouched: a weekday gap is estimated, never carried (#550)."""
+    """A weekday gap is estimated, and valued at the holding's own last
+    close (#558) -- AAPL traded that day, so the day was open and it was
+    MSFT's market that was shut, not MSFT's price that collapsed to cost."""
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
     agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
@@ -1235,8 +1237,10 @@ def test_a_weekday_with_one_unpriced_holding_is_valued_and_flagged(
     flags = {r[0]: r[2] for r in _estimated_rows(agent, pf.id)}
     values = {r[0]: r[1] for r in _estimated_rows(agent, pf.id)}
     assert flags["2024-01-03"] == 1
-    # AAPL at its close plus MSFT at its 40.00 carrying cost, not Friday's.
-    assert values["2024-01-03"] == pytest.approx(115.0)
+    # AAPL at its close (75.00) plus MSFT at its own last close (60.00) --
+    # not the 40.00 carrying cost, which would dip the book by the whole
+    # cost-to-market gap for one day and spring back (#558).
+    assert values["2024-01-03"] == pytest.approx(135.0)
     assert report.days_carried_forward == 2  # the weekend, never the gap
 
 

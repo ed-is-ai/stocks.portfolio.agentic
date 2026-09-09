@@ -37,6 +37,12 @@ logger = logging.getLogger(__name__)
 #: defective "zero" the bug wrote, not as a meaningful valuation.
 _ZERO_TOLERANCE = 0.005
 
+#: How far :func:`value_holdings` may reach back for a holding's most recent
+#: close when its own market was shut on a day the rest of the book traded
+#: (#558). Wide enough for a long weekend with an adjacent bank holiday at
+#: either end; short of the staleness where a gap is the honester answer.
+_STALE_PRICE_LOOKBACK_DAYS = 7
+
 
 def first_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
     """Return ``{ticker: earliest replay date}`` in one pass over the rows.
@@ -347,10 +353,11 @@ def market_was_closed(
     * and *no* held ticker has a dated close.
 
     One holding missing a close on a trading day is a genuine data gap, not
-    a closure: that day still gets valued with the unpriceable holding
-    carried at cost and flagged estimated (#519), and silencing it here
-    would hide the very gap that flag exists to show. Conversely a thin FX
-    calendar alone must not freeze a real trading day's valuation.
+    a closure: that day still gets valued, with the unpriceable holding
+    carried at its last close (#558) or, failing that, at cost (#519), and
+    flagged estimated either way -- silencing it here would hide the very
+    gap that flag exists to show. Conversely a thin FX calendar alone must
+    not freeze a real trading day's valuation.
 
     An empty ``trading_days`` means the calendar is unknown, so this always
     returns False -- a checkout with no FX evidence writes honest gaps
@@ -382,7 +389,14 @@ def value_holdings(
     """Value ``holdings`` at ``as_of``, returning ``(value, is_estimated)`` (#519).
 
     A holding with a dated GBP close is always valued from that evidence. A
-    holding with none falls back to its carrying cost from ``carrying``
+    holding with none, *on a day some other holding was priced*, is valued
+    at its most recent close within :data:`_STALE_PRICE_LOOKBACK_DAYS`: one
+    market traded and this one did not, so this one was shut (#558). The
+    qualifier matters -- when nothing at all is priced there is no evidence
+    that the day was open, and reaching back would manufacture history for
+    a window the cache simply does not cover. That case, and a holding with
+    no close anywhere in the window, fall back to the carrying cost from
+    ``carrying``
     (``{ticker: GBP cost}``, from :func:`position_cost_basis_as_of`), and the
     result is flagged estimated. A ``None`` carrying cost -- a foreign trade
     with no dated FX rate to convert it (#549) -- counts as no carrying cost
@@ -398,11 +412,25 @@ def value_holdings(
     Shared by :class:`SnapshotRepairService` and the snapshot backfill service
     so the two cannot drift apart.
     """
+    dated = {ticker: source.gbp_price(ticker, as_of) for ticker in holdings}
+    # Some market traded on ``as_of`` and this holding's did not -- the
+    # signal that distinguishes a partial closure from a day with no
+    # evidence at all (#558).
+    partial_closure = any(price is not None for price in dated.values())
     total = 0.0
     estimated = False
     for ticker, shares in holdings.items():
-        price = source.gbp_price(ticker, as_of)
+        price = dated[ticker]
         if price is None:
+            carried = (
+                _last_known_gbp_price(source, ticker, as_of)
+                if partial_closure
+                else None
+            )
+            if carried is not None:
+                total += shares * carried
+                estimated = True
+                continue
             cost = carrying.get(ticker)
             if cost is None:
                 return None, False
@@ -412,6 +440,42 @@ def value_holdings(
         total += shares * price
     value = round(total, 2)
     return (None, False) if value == 0.0 else (value, estimated)
+
+
+def _last_known_gbp_price(
+    source: "HistoricalGbpPriceSource", ticker: str, as_of: str
+) -> float | None:
+    """Return ``ticker``'s most recent close within the lookback, or None (#558).
+
+    A partial closure -- the LSE shut for a UK bank holiday while the NYSE
+    trades, or a fund that skips a NAV -- leaves one holding without a close
+    on a day the calendar calls open, so :func:`market_was_closed` rightly
+    declines to freeze it. Valuing that holding at cost then answers "what
+    did I pay?" when the question was "what was it worth?", dipping the book
+    by the whole cost-to-market gap for exactly one day.
+
+    Its market was shut, so its last close is what it was worth: carry that
+    forward, exactly as #547 does when *every* market is shut. Bounded to
+    :data:`_STALE_PRICE_LOOKBACK_DAYS`, and only ever reached once the
+    exact-date lookup has already returned None, so the priced path is
+    untouched. The caller still flags the point estimated -- this is a
+    carried price, not an observed one.
+
+    A malformed ``as_of`` has no timeline to walk back along, so it yields
+    None and the carrying-cost fallback stands.
+    """
+    try:
+        day = date.fromisoformat(as_of[:10])
+    except ValueError:
+        return None
+    # ponytail: a split inside the lookback would un-adjust the carried
+    # close. Needs both a split date and no close the next session; add
+    # source.split_factor_since here if that ever shows up.
+    for offset in range(1, _STALE_PRICE_LOOKBACK_DAYS + 1):
+        price = source.gbp_price(ticker, (day - timedelta(days=offset)).isoformat())
+        if price is not None:
+            return price
+    return None
 
 
 class HistoricalGbpPriceSource(Protocol):
