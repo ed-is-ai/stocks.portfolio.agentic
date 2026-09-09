@@ -424,8 +424,18 @@
        the screen-reader hint must not claim otherwise. #}
     {% if cash_balance is not none %}<span class="visually-hidden">Includes cash.</span>{% endif %}
   </div>
+  {# Holdings alone, without cash. Portfolio Value folds cash in, and on a
+     cash-heavy account that buries what the investments are actually doing
+     -- it is not derivable at a glance from the other three (#561). #}
   <div class="stat-card">
-    <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Total Cost</div>
+    <div class="slbl"><i class="bi bi-bar-chart-line me-1"></i>Market Value</div>
+    <div class="sval">£{{ "%.2f"|format(market_value_gbp|default(0)) }}</div>
+    <span class="visually-hidden">Holdings only, excluding cash.</span>
+  </div>
+  {# "Cost Basis", not "Total Cost": the positions table column and the chart
+     legend both already say Cost Basis, so this was the odd one out (#561). #}
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-cash-coin me-1"></i>Cost Basis</div>
     <div class="sval">£{{ "%.2f"|format(total_cost_gbp) }}</div>
     {% if cash_balance is not none %}<span class="visually-hidden">Includes cash.</span>{% endif %}
   </div>

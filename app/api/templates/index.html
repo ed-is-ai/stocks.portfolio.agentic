@@ -195,8 +195,13 @@
       background: white; border: 1px solid var(--border); border-radius: 0;
       padding: 1rem 1.25rem; margin-bottom: 1.25rem;
     }
+    /* The container owns the height; Chart.js owns the canvas. Forcing the
+       canvas to 100% with !important overrode the size Chart.js had just
+       set, stretching whatever resolution its backing store happened to be
+       at -- which is why a range change came back blurry and magnified
+       (#561). This is Chart.js's documented responsive-container pattern:
+       a positioned parent with a fixed height, and hands off the canvas. */
     .portfolio-chart-canvas { height: clamp(13rem, 20vw, 16rem); position: relative; }
-    .portfolio-chart-canvas canvas { height: 100% !important; width: 100% !important; }
     .portfolio-dashboard :focus-visible { outline: 3px solid currentColor; outline-offset: 2px; }
     @media (max-width: 575.98px) {
       .portfolio-dashboard-controls { align-items: stretch; }
@@ -1133,10 +1138,19 @@
   // buttons use -- never the whole tab, which would rebuild positions and
   // prices for nothing.
   function refreshChartCard() {
-    if (!document.getElementById('portfolio-chart-card') || !window.htmx) return;
+    if (!window.htmx) return;
     const params = new URLSearchParams({ range: activeChartRange() });
     const pid = activePortfolio();
     if (pid) params.set('portfolio_id', pid);
+    // _portfolio.html omits the whole card when there is no history yet, so
+    // on the first-run path there is nothing to swap into and the lean
+    // fragment has no home. Re-render the tab instead: the backfill has just
+    // written the rows that make the card render at all (#561).
+    if (!document.getElementById('portfolio-chart-card')) {
+      htmx.ajax('GET', '/partials/portfolio?' + params.toString(),
+                { target: '#tab-content', swap: 'innerHTML' });
+      return;
+    }
     htmx.ajax('GET', '/partials/portfolio/chart?' + params.toString(),
               { target: '#portfolio-chart-card', swap: 'outerHTML' });
   }

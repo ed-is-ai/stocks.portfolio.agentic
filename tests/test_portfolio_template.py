@@ -187,17 +187,29 @@ def _card(html: str, title: str) -> str:
 def test_summary_cards_have_the_required_portfolio_value_first_order() -> None:
     html = _render_with_total_pnl(12.5)
 
-    labels = ["Portfolio Value", "Total Cost", "Unrealised P&amp;L", "Cash"]
+    # Market Value sits between the two totals it decomposes: Portfolio
+    # Value folds cash in, Market Value is the holdings alone (#561).
+    labels = [
+        "Portfolio Value",
+        "Market Value",
+        "Cost Basis",
+        "Unrealised P&amp;L",
+        "Cash",
+    ]
     indices = [html.index(label) for label in labels]
     assert indices == sorted(indices)
     assert "Positions</div>" not in html[indices[0] : indices[-1]]
-    # "Market Value" is holdings-only everywhere: never a summary-card title,
-    # still the holdings-table column header.
-    assert "Market Value</div>" not in html
+    # The holdings table keeps its own shorter column header, so the card
+    # title and the column cannot be confused for one another.
     assert "Mkt Value" in html
-    # The two cash-inclusive cards each carry the screen-reader hint.
+    # One name for cost basis across card, table column and chart legend --
+    # the card used to say "Total Cost" while the other two said Cost Basis.
+    assert "Total Cost" not in html
+    # The two cash-inclusive cards each carry the screen-reader hint, and
+    # the holdings-only one says so instead.
     assert "Includes cash." in _card(html, "Portfolio Value")
-    assert "Includes cash." in _card(html, "Total Cost")
+    assert "Includes cash." in _card(html, "Cost Basis")
+    assert "Holdings only, excluding cash." in _card(html, "Market Value")
 
 
 def test_portfolio_value_headline_uses_total_value_including_cash() -> None:
@@ -935,3 +947,47 @@ def test_a_sterling_cost_under_a_usd_quote_renders_in_pounds() -> None:
     assert "+&pound;15.70" in row
     assert "+2.2%" in row
     assert "+$195.70" not in row and "+27.8%" not in row
+
+
+def test_legend_hint_tells_the_user_the_series_are_clickable() -> None:
+    """Three of the four series default to hidden, so the legend is the only
+    way to reach them and nothing on screen said it was interactive (#561)."""
+    html = templates.get_template("_portfolio_chart.html").render(
+        **_CHART_CONTEXT,
+    )
+    assert "Click a name below the chart" in html
+    assert "Market Value, Cost Basis and Cash start hidden" in html
+
+
+def test_chart_canvas_is_built_after_layout_not_during_the_swap() -> None:
+    """The card is swapped with outerHTML and this script runs during the
+    swap, before layout. Chart.js measured a stale container and its output
+    was then stretched by CSS, so a range change came back blurry (#561)."""
+    html = templates.get_template("_portfolio_chart.html").render(
+        **_CHART_CONTEXT,
+    )
+    build = html.index("new Chart(")
+    defer = html.index("requestAnimationFrame(")
+    assert defer < build
+    # The card can be swapped away again before the frame arrives.
+    assert "el.isConnected" in html
+
+
+#: The minimum context that renders a drawable chart canvas.
+_CHART_CONTEXT = {
+    "portfolio_id": 1,
+    "chart_range": "12M",
+    "chart_points": 3,
+    "chart_usable_total_points": 3,
+    "chart_labels": '["2026-08-01", "2026-08-02", "2026-08-03"]',
+    "chart_total_values": "[110, 125, 130]",
+    "chart_values": "[100, 120, 115]",
+    "chart_costs": "[90, 90, 90]",
+    "chart_cash": "[10, 5, 8]",
+    "chart_has_unavailable_totals": False,
+    "chart_all_totals_unavailable": False,
+    "chart_buys": "[null, null, null]",
+    "chart_sells": "[null, null, null]",
+    "chart_buy_tips": "[null, null, null]",
+    "chart_sell_tips": "[null, null, null]",
+}

@@ -76,8 +76,12 @@
   <div class="portfolio-chart-canvas">
     <canvas id="portfolioChart"
             role="img"
-            aria-label="Portfolio value history, with supporting market value, cost basis and cash series">Portfolio value history chart. Use the legend and point tooltips to inspect the series.</canvas>
+            aria-label="Portfolio value history, with supporting market value, cost basis and cash series">Portfolio value history chart. Use the legend below to show or hide each series, and point tooltips to inspect values.</canvas>
   </div>
+  <p class="text-muted small mb-0 mt-2" id="chartLegendHint">
+    <i class="bi bi-hand-index me-1"></i><strong>Click a name below the chart</strong>
+    to show or hide that line. Market Value, Cost Basis and Cash start hidden.
+  </p>
   <script>
   (function() {
     const labels   = {{ chart_labels     | safe }};
@@ -111,6 +115,13 @@
     // An outerHTML swap of this card can leave the previous Chart instance
     // bound to a now-detached canvas — tear it down first (#421).
     window.__portfolioChart?.destroy();
+    // This script runs *during* the htmx swap, before the browser has laid
+    // the new card out, so Chart.js measured a stale or zero container width
+    // and sized its backing store to it (#561). One frame is enough for the
+    // container to have its real width. Guarded because the card can be
+    // swapped away again before the frame arrives.
+    requestAnimationFrame(function () {
+    if (!el.isConnected) return;
     window.__portfolioChart = new Chart(el.getContext('2d'), {
       type: 'line',
       data: {
@@ -217,6 +228,10 @@
           legend: {
             position: 'bottom',
             align: 'start',
+            // Three of the four series default to hidden, so the legend is
+            // the only way to reach them -- it has to look clickable (#561).
+            onHover: (event) => { event.native.target.style.cursor = 'pointer'; },
+            onLeave: (event) => { event.native.target.style.cursor = 'default'; },
             labels: {
               font: { size: 11 },
               boxWidth: 14,
@@ -299,6 +314,7 @@
       chart.update('none');
     };
     window.__portfolioApplyMarkers(markersOn);
+    });
   })();
   </script>
   {% elif chart_points >= 2 %}
