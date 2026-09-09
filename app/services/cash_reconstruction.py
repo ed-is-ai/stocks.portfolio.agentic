@@ -59,8 +59,9 @@ FLOW_SIGNS: dict[str, int] = {
     "OPENING": 0,
 }
 
-#: Trades settle in the account's base currency, and replay prices are
-#: already GBP major units, so trade deltas apply to this currency alone.
+#: Trades settle in the account's base currency, and replay prices have been
+#: converted to GBP major units before they reach here (``gbp_replay_rows``,
+#: #549), so trade deltas apply to this currency alone.
 _TRADE_CURRENCY = "GBP"
 
 
@@ -103,6 +104,15 @@ class CashReconstruction:
         ``NULL`` and the chart on its Market-Value fallback, exactly as
         before.
 
+        ``None`` is also the answer when any currency's balance cannot be
+        reconstructed at all -- a trade in the interval whose foreign price
+        has no dated FX rate (#549). One unconvertible trade makes the whole
+        day's cash wrong, not merely imprecise, so it is written NULL -- and
+        because a balance is an anchor rolled *through* that interval, every
+        day on the far side of the trade from its anchor goes NULL with it.
+        That is the honest blast radius: once an unknown amount has moved,
+        no later balance is known either.
+
         A currency reconstructing to zero is omitted rather than reported.
         Every anchored currency is projected across the *whole* series, so a
         USD balance first stated this year is also asked about years before
@@ -119,16 +129,28 @@ class CashReconstruction:
         balances = {
             currency: self._balance_for(currency, day) for currency in self._anchors
         }
-        return {currency: amount for currency, amount in balances.items() if amount}
+        if any(amount is None for amount in balances.values()):
+            return None
+        return {
+            currency: amount
+            for currency, amount in balances.items()
+            if amount is not None and amount
+        }
 
-    def _balance_for(self, currency: str, day: str) -> Decimal:
-        """Return one currency's balance on ``day`` from its nearest anchor."""
+    def _balance_for(self, currency: str, day: str) -> Decimal | None:
+        """Return one currency's balance on ``day`` from its nearest anchor.
+
+        ``None`` when the movement between the anchor and ``day`` is itself
+        unknown (#549) -- see :meth:`_delta`.
+        """
         anchor_day, amount = self._nearest_anchor(currency, day)
         if day >= anchor_day:
-            return amount + self._delta(currency, anchor_day, day)
+            delta = self._delta(currency, anchor_day, day)
+            return None if delta is None else amount + delta
         # Rolling backward: the anchor already includes everything that moved
         # in ``(day, anchor_day]``, so unwinding it means subtracting it.
-        return amount - self._delta(currency, day, anchor_day)
+        delta = self._delta(currency, day, anchor_day)
+        return None if delta is None else amount - delta
 
     def _nearest_anchor(self, currency: str, day: str) -> tuple[str, Decimal]:
         """Return the ``(as_of, amount)`` anchor closest to ``day`` in time."""
@@ -140,8 +162,14 @@ class CashReconstruction:
 
     def _delta(
         self, currency: str, start_exclusive: str, end_inclusive: str
-    ) -> Decimal:
-        """Return the signed cash movement in ``(start, end]`` for ``currency``."""
+    ) -> Decimal | None:
+        """Return the signed cash movement in ``(start, end]`` for ``currency``.
+
+        ``None`` when a trade in the interval has no GBP price -- a foreign
+        trade whose date has no dated FX rate (#549). The movement is then
+        genuinely unknown, and inventing it would silently shift the
+        Portfolio Value line, the very defect this module exists to fix.
+        """
         total = Decimal("0")
         for flow_date, flow_type, amount, flow_currency in self._flows:
             if flow_currency != currency:
@@ -155,9 +183,10 @@ class CashReconstruction:
             # Trade rows are written to ``planned_trades`` only, never to
             # ``cash_flows`` (see the SIPP import), so adding them here
             # cannot double-count what the loop above already added.
-            total += Decimal(
-                str(net_trade_cash(self._replay_rows, start_exclusive, end_inclusive))
-            )
+            traded = net_trade_cash(self._replay_rows, start_exclusive, end_inclusive)
+            if traded is None:
+                return None
+            total += Decimal(str(traded))
         return total
 
 

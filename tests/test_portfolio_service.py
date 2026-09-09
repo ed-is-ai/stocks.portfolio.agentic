@@ -1492,6 +1492,37 @@ def _rows_with_missing_cash():
     ]
 
 
+def _rows(count: int, *, with_cash: int, contiguous: bool = False) -> list[tuple]:
+    """``count`` daily rows with a market value, ``with_cash`` of them with cash.
+
+    The missing rows are spread evenly through the range by default -- the
+    scattered shape real history has (#551) -- or bunched into one trailing
+    block with ``contiguous``, which is the shape the chart draws as a
+    straight fabricated line.
+    """
+    missing = count - with_cash
+    if contiguous:
+        holes = set(range(with_cash, count))
+    else:
+        holes = (
+            {round(index * count / missing) for index in range(missing)}
+            if missing
+            else set()
+        )
+    from datetime import date, timedelta
+
+    start = date(2020, 1, 1)
+    return [
+        (
+            f"{(start + timedelta(days=index)).isoformat()}T00:00:00+00:00",
+            100.0 + index,
+            90.0,
+            None if index in holes else 10.0,
+        )
+        for index in range(count)
+    ]
+
+
 def test_market_value_extends_further_when_backfilled_rows_lack_cash():
     projected = PortfolioService._project_portfolio_chart_rows(
         _rows_with_missing_cash()
@@ -1500,7 +1531,75 @@ def test_market_value_extends_further_when_backfilled_rows_lack_cash():
     # Portfolio Value is market + cash, so it is None wherever cash is None.
     assert projected["total_values"].count(None) == 3
     assert all(value is not None for value in projected["values"])
+    # 2 usable totals against 5 market values: below the canvas minimum and
+    # far below the coverage threshold, so Market Value takes over (#512).
     assert projected["market_value_extends_further"] is True
+
+
+def test_scattered_cash_gaps_do_not_trip_the_fallback():
+    """#551: 69 NULL-cash rows in 3,043 is a gap, not a missing history.
+
+    The old strict count comparison fired here and produced a banner whose
+    every clause was false. These points belong to the template's "some
+    points unavailable" note instead.
+    """
+    projected = PortfolioService._project_portfolio_chart_rows(
+        _rows(3043, with_cash=2974)
+    )
+
+    assert projected["has_unavailable_totals"] is True
+    assert projected["market_value_extends_further"] is False
+
+
+def test_no_cash_anywhere_reveals_market_value():
+    projected = PortfolioService._project_portfolio_chart_rows(_rows(200, with_cash=0))
+
+    assert projected["all_totals_unavailable"] is True
+    assert projected["market_value_extends_further"] is True
+
+
+def test_coverage_just_below_the_threshold_reveals_market_value():
+    """899 of 1000 drawable days is under 90% -- too holed to read (#551)."""
+    projected = PortfolioService._project_portfolio_chart_rows(
+        _rows(1000, with_cash=899)
+    )
+
+    assert projected["market_value_extends_further"] is True
+
+
+def test_coverage_exactly_at_the_threshold_keeps_market_value_hidden():
+    """900 of 1000 is the boundary and counts as covered (#551)."""
+    projected = PortfolioService._project_portfolio_chart_rows(
+        _rows(1000, with_cash=900)
+    )
+
+    assert projected["market_value_extends_further"] is False
+
+
+def test_too_few_totals_to_draw_reveals_market_value():
+    """2 usable totals would hide the canvas; 200 market values need not (#551)."""
+    projected = PortfolioService._project_portfolio_chart_rows(
+        _rows(200, with_cash=2, contiguous=True)
+    )
+
+    assert projected["market_value_extends_further"] is True
+
+
+def test_one_long_unbroken_gap_reveals_market_value():
+    """Coverage alone cannot see contiguity: 96% covered, but the missing 40
+    are consecutive, so Portfolio Value would be drawn as a straight line
+    across them (#551 review)."""
+    projected = PortfolioService._project_portfolio_chart_rows(
+        _rows(1000, with_cash=960, contiguous=True)
+    )
+
+    assert projected["market_value_extends_further"] is True
+
+
+def test_market_value_flag_is_false_for_an_empty_range():
+    projected = PortfolioService._project_portfolio_chart_rows([])
+
+    assert projected["market_value_extends_further"] is False
 
 
 def test_a_reconstructed_sell_day_keeps_the_total_continuous():

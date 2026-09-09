@@ -559,3 +559,33 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `spec-gh-541-542-543-portfolio-chart.md`
   summary: The new trade-marker toggle button is not covered by the mobile wrap rule for the chart-card header, which targets `.portfolio-chart-card .btn-group` only.
   evidence: The toggle is a standalone `<button>` beside the range `btn-group` in `_portfolio_chart.html`; the narrow-viewport CSS in `index.html` selects `.btn-group` alone, so the header now carries an extra uncovered control.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-549-replay-currency.md`
+  summary: The live snapshot writer converts a position's `total_cost` with the *quote* currency of its price, not the currency its trades were priced in, so a pence-quoted or foreign-quoted holding's live cost is off by 100x or by an FX rate.
+  evidence: `snapshot_valuation.amount_in_gbp` divides by 100 for `GBp`/`GBX` and by the GBP/USD rate for `USD`, fed `position.price_currency`. WCOG quotes 1448 `GBp` but its trades are priced 13.97 (pounds), so its live cost is written ~£240 instead of ~£24k; AZN's cached quote currency is `USD` while its trades are GBP.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-549-replay-currency.md`
+  summary: The replay currency join matches `ticker_currency_cache` on the raw broker ticker, while the cache is written from canonicalized/display tickers, so an aliased foreign ticker silently falls back to GBP.
+  evidence: `trades_repo._REPLAY_SELECT` joins `c.ticker = t.ticker`; `portfolio_service` persists currencies under `canonicalize_or_fallback` output. 9988 happens to match; an aliased equivalent would not.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-549-replay-currency.md`
+  summary: Existing snapshot rows keep their pre-#549 foreign `total_cost`; backfill only fills absent rows and repair does not recompute cost, so the stored history needs a delete-and-re-backfill cleanup.
+  evidence: `snapshot_backfill` has `update_backfilled_cash` but no cost equivalent; `SnapshotRepairService` passes stored `total_cost` straight through to `update_valuation`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-549-replay-currency.md`
+  summary: Tests can still write to the developer's real databases; only `TRADES_DB` in the two pipeline smoke tests is isolated, by inline patches rather than a conftest-level guard.
+  evidence: `tests/test_smoke.py::test_full_pipeline_execution` ran the snapshot repair pass against `app/agents/trader/trades.db` before this change added the patch; the historical price cache and account-state paths remain unisolated.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-550-cash-holes-and-weekends.md`
+  summary: Carry-forward copies the last day a row existed, not the last trading day, so a closed day can inherit a value from several days earlier across a stretch of honest gaps.
+  evidence: `snapshot_backfill._backfill_one`'s `carry` is updated on every written row; a Thursday/Friday with no evidence followed by a weekend stamps Wednesday's value on Saturday.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-550-cash-holes-and-weekends.md`
+  summary: A weekend-dated trade would be invisible in value and cost until the next trading day, because a closed day carries holdings forward rather than replaying them.
+  evidence: `market_was_closed` now returns True for every Saturday and Sunday; portfolio 19 has no weekend-dated trades today, so this is latent rather than live.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-550-cash-holes-and-weekends.md`
+  summary: The 25 existing phantom weekend rows are not corrected by a re-run; `present.get(as_of)` short-circuits before the closed-market branch and only refreshes cash.
+  evidence: `snapshot_backfill._backfill_one`; the issue itself calls for a delete-and-re-backfill of the affected rows.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-550-cash-holes-and-weekends.md`
+  summary: An FX hole still drops a foreign holding's whole valuation for the day while the same day's cash converts through the bounded lookback, so the two halves of one row follow different evidence rules.
+  evidence: `gbp_price` calls `_dated_rate` (exact date) while `gbp_rate` now walks back; #519's `value_is_estimated` flag could express the difference instead.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-551-fallback-banner-materiality.md`
+  summary: `market_value_extends_further` no longer means what it says — it now means "Portfolio Value coverage is materially incomplete" — and a stale flag name is exactly what caused this bug.
+  evidence: The flag is read in `portfolio_service.py` (three sites), `_portfolio_chart.html` (banner and `hidden:`), and ~20 test contexts; a mechanical rename was judged too much churn to bundle here.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-551-fallback-banner-materiality.md`
+  summary: `chart_all_totals_unavailable`'s message cannot render on a range that has three or more usable market values, because the fallback branch wins the `if/elif`.
+  evidence: `_portfolio_chart.html:64-73`; reachable only when market values are too few to draw, which is the case the message was written for anyway.

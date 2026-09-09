@@ -64,7 +64,10 @@ _BOE_LOOKBACK_DAYS = 7
 #: non-trading day.
 #: Four prior calendar days cover month-start weekends and adjacent holidays
 #: while staying within the backtest currency policy's five-day freshness cap.
-_FX_LOOKBACK_DAYS = 4
+#: Public so the stored-evidence walk in ``snapshot_price_evidence.gbp_rate``
+#: is bounded by the same number (#550) -- how stale a rate this codebase is
+#: ever willing to accept is one decision, made once.
+FX_LOOKBACK_DAYS = 4
 
 _BOE_URL = "https://www.bankofengland.co.uk/boeapps/database/fromshowcolumns.asp"
 _FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -302,7 +305,7 @@ class ChainedFxQuoteFetcher:
             raise FxProviderUnavailable(f"Malformed FX pin date {as_of!r}") from exc
 
         transient: list[str] = []
-        for offset in range(_FX_LOOKBACK_DAYS + 1):
+        for offset in range(FX_LOOKBACK_DAYS + 1):
             candidate = (requested - timedelta(days=offset)).isoformat()
             try:
                 quote = self.fetch(pair, candidate)

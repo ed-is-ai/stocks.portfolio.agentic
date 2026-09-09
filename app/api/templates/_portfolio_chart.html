@@ -63,9 +63,9 @@
   {% endif %}
   {% if chart_market_value_extends_further %}
   <p class="text-muted small mb-2" role="status">
-    <i class="bi bi-info-circle me-1"></i>Portfolio Value needs a cash balance, which
-    reconstructed history doesn't carry yet — <strong>Market Value</strong> (dashed) is
-    shown instead and covers the full range. It excludes cash.
+    <i class="bi bi-info-circle me-1"></i>Portfolio Value is missing for part of this
+    range, where those days have no cash balance — <strong>Market Value</strong>
+    (dashed) is shown for them instead. It excludes cash.
   </p>
   {% elif chart_has_unavailable_totals %}
   <p class="text-muted small mb-2" role="status">

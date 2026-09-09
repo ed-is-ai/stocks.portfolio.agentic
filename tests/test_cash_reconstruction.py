@@ -8,7 +8,10 @@ away rather than buried in a written row.
 
 from decimal import Decimal
 
+import pytest
+
 from app.services.cash_reconstruction import CashReconstruction
+from app.services.snapshot_repair import gbp_replay_rows
 
 
 def _replay(*rows: tuple[str, str, float, float, str]) -> list[tuple[object, ...]]:
@@ -135,3 +138,30 @@ def test_a_currency_reconstructing_to_zero_is_omitted() -> None:
         [],
     )
     assert model.balances_at("2024-05-01") == {"GBP": Decimal("1000")}
+
+
+def test_a_foreign_buy_lowers_cash_by_its_gbp_value() -> None:
+    """The replay rows reaching here are already converted (#549), so an
+    HKD purchase takes ``price / rate`` out of the sterling balance -- not
+    the raw HKD figure, which moved cash by ~10x the real amount."""
+    rows = gbp_replay_rows(
+        [("9988", "BUY", 10.0, 80.0, "2024-01-02", None, None, "HKD")],
+        lambda currency, as_of: 9.8,
+    )
+    model = CashReconstruction([("2024-01-01", "GBP", Decimal("1000"))], [], rows)
+    balance = model.balances_at("2024-01-02")
+    assert balance is not None
+    assert float(balance["GBP"]) == pytest.approx(1000 - 800 / 9.8)
+
+
+def test_an_unconvertible_trade_nulls_the_whole_days_cash() -> None:
+    """No dated rate for the trade's day: the movement is unknown, so the
+    day's cash is NULL rather than the anchor pretending nothing moved."""
+    rows = gbp_replay_rows(
+        [("9988", "BUY", 10.0, 80.0, "2024-01-02", None, None, "HKD")],
+        lambda currency, as_of: None,
+    )
+    model = CashReconstruction([("2024-01-01", "GBP", Decimal("1000"))], [], rows)
+    assert model.balances_at("2024-01-02") is None
+    # A day before the trade is unaffected -- it is outside the interval.
+    assert model.balances_at("2024-01-01") == {"GBP": Decimal("1000")}

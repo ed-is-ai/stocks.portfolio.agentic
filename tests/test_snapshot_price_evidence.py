@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -374,3 +375,99 @@ def test_dated_close_seeks_the_revisions_table_rather_than_scanning_observations
     steps = "\n".join(str(row) for row in plan)
     assert "SCAN" not in steps, steps
     assert "idx_historical_revisions_requested_symbol" in steps
+
+
+# --- GH-550: cash converts off a bounded nearest-prior rate ------------------
+
+
+def _counting_source(tmp_path: Path) -> tuple[HistoricalCacheGbpPriceSource, list[str]]:
+    """Return a source plus the list of dates its ``_dated_rate`` was asked for.
+
+    The lookback's cost is the whole point of bounding it, so the tests
+    assert the number of probes, not just the answer (#550).
+    """
+    source = _source(tmp_path)
+    probed: list[str] = []
+    inner = source._dated_rate
+
+    def _spy(pair: str, as_of: str) -> float | None:
+        probed.append(as_of)
+        return inner(pair, as_of)
+
+    source._dated_rate = _spy  # type: ignore[method-assign]
+    return source, probed
+
+
+def test_gbp_rate_uses_the_exact_day_without_looking_back(tmp_path: Path) -> None:
+    """A rate stored for ``as_of`` ends the walk on its first probe (#550)."""
+    FxRateCacheRepository(_trades_connect(tmp_path)).upsert_many(
+        {"2024-06-03": 1.25, "2024-06-02": 9.99}, "GBPUSD=X"
+    )
+    source, probed = _counting_source(tmp_path)
+
+    assert source.gbp_rate("USD", "2024-06-03") == pytest.approx(1.25)
+    assert probed == ["2024-06-03"]
+
+
+@pytest.mark.parametrize(
+    "offset_days", [1, 2, snapshot_price_evidence.FX_LOOKBACK_DAYS]
+)
+def test_gbp_rate_resolves_a_hole_from_the_nearest_earlier_rate(
+    tmp_path: Path, offset_days: int
+) -> None:
+    """A hole in the FX series must not discard a stated cash balance (#550)."""
+    stored = (date(2024, 6, 3) - timedelta(days=offset_days)).isoformat()
+    FxRateCacheRepository(_trades_connect(tmp_path)).upsert_many(
+        {stored: 1.25}, "GBPUSD=X"
+    )
+
+    assert _source(tmp_path).gbp_rate("USD", "2024-06-03") == pytest.approx(1.25)
+
+
+def test_gbp_rate_stops_at_the_shared_bound(tmp_path: Path) -> None:
+    """One day past the bound is a gap, not an arbitrarily stale figure."""
+    stale = (
+        date(2024, 6, 3) - timedelta(days=snapshot_price_evidence.FX_LOOKBACK_DAYS + 1)
+    ).isoformat()
+    FxRateCacheRepository(_trades_connect(tmp_path)).upsert_many(
+        {stale: 1.25}, "GBPUSD=X"
+    )
+    source, probed = _counting_source(tmp_path)
+
+    assert source.gbp_rate("USD", "2024-06-03") is None
+    assert len(probed) == snapshot_price_evidence.FX_LOOKBACK_DAYS + 1
+
+
+def test_gbp_rate_never_uses_a_rate_published_after_the_day(tmp_path: Path) -> None:
+    """A later rate was not knowable on ``as_of``; the walk only goes back."""
+    FxRateCacheRepository(_trades_connect(tmp_path)).upsert_many(
+        {"2024-06-04": 1.25, "2024-06-05": 1.26}, "GBPUSD=X"
+    )
+
+    assert _source(tmp_path).gbp_rate("USD", "2024-06-03") is None
+
+
+def test_gbp_rate_short_circuits_sterling_without_any_lookup(tmp_path: Path) -> None:
+    """GBP per GBP is 1.0 by definition, so no evidence is consulted."""
+    source, probed = _counting_source(tmp_path)
+
+    assert source.gbp_rate("gbp", "2024-06-03") == pytest.approx(1.0)
+    assert probed == []
+
+
+def test_gbp_rate_does_not_raise_on_a_malformed_date(tmp_path: Path) -> None:
+    """A backfill spanning years must not abort on one unparseable day."""
+    source, probed = _counting_source(tmp_path)
+
+    assert source.gbp_rate("USD", "not-a-date") is None
+    assert probed == ["not-a-date"]
+
+
+def test_gbp_price_still_refuses_a_nearby_rate(tmp_path: Path) -> None:
+    """#550's lookback is for cash only: a holding stays exact-date."""
+    _seed_dell(tmp_path)
+    FxRateCacheRepository(_trades_connect(tmp_path)).upsert_many(
+        {"2024-06-02": 1.25}, "GBPUSD=X"
+    )
+
+    assert _source(tmp_path).gbp_price("DELL", "2024-06-03") is None

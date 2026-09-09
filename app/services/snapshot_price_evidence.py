@@ -20,6 +20,7 @@ from pathlib import Path
 import sqlite3
 
 from app.core.config import HISTORICAL_PRICE_CACHE
+from app.integrations.fx_history import FX_LOOKBACK_DAYS
 from app.core.ticker_identity import (
     canonicalize_or_fallback,
     load_aliases,
@@ -100,7 +101,14 @@ class HistoricalCacheGbpPriceSource:
         self._aliases = load_aliases() if aliases is None else aliases
 
     def gbp_price(self, ticker: str, as_of: str) -> float | None:
-        """Return the GBP close for ``ticker`` on ``as_of`` (YYYY-MM-DD)."""
+        """Return the GBP close for ``ticker`` on ``as_of`` (YYYY-MM-DD).
+
+        Exact-date throughout, including the FX leg: a holding's valuation
+        is evidence about that holding on that session, so neither a nearby
+        close nor a nearby rate may stand in for it (#550). Contrast
+        :meth:`gbp_rate`, which converts a *stated* cash balance and may
+        therefore reach back a bounded number of days.
+        """
         symbols = self._symbols_for(ticker)
         observed = self._prices.dated_close(sorted(symbols), as_of)
         if observed is None:
@@ -133,20 +141,48 @@ class HistoricalCacheGbpPriceSource:
         return native / rate
 
     def gbp_rate(self, currency: str, as_of: str) -> float | None:
-        """Return units of ``currency`` per GBP on ``as_of``, or None (#514).
+        """Return units of ``currency`` per GBP on or just before ``as_of`` (#514).
 
-        Reuses the same exact-date, evidence-only lookup that prices a
-        non-GBP holding -- ``fx_quotes``, then ``fx_rate_cache``, then the
-        backfilled ``GBP<CCY>=X`` series. Never a nearby day and never a
-        live rate, so a converted cash balance is as auditable as a
-        converted holding.
+        Unlike :meth:`gbp_price` and :meth:`_dated_rate`, which are strictly
+        same-day, this walks back from ``as_of`` over at most
+        :data:`~app.integrations.fx_history.FX_LOOKBACK_DAYS` calendar days
+        and returns the first stored rate it finds (#550). A holding's
+        valuation is evidence *about that holding*, so pricing it off a
+        neighbouring session would be a fabrication; a cash balance is
+        stated by the account and does not move because a rate went
+        unpublished, so a single hole in the FX series must not discard a
+        balance the statement asserts. The bound is shared with
+        ``fx_history`` so a rate too stale to fetch is also too stale to
+        use here, and the walk never looks forward -- a rate published
+        after ``as_of`` was not knowable on the day.
+
+        Still evidence-only: ``fx_quotes``, then ``fx_rate_cache``, then the
+        backfilled ``GBP<CCY>=X`` series, never a live fetch. Beyond the
+        bound the answer stays None, so the caller records an honest gap
+        rather than an arbitrarily stale figure.
+
+        A malformed ``as_of`` yields the exact-date answer rather than
+        raising: this runs inside a backfill over many days, and one
+        unparseable date must degrade to the pre-#550 behaviour, not abort
+        the run.
         """
         code = currency.strip().upper()
         if not code:
             return None
         if code == "GBP":
             return 1.0
-        return self._dated_rate(f"GBP{code}=X", as_of)
+        pair = f"GBP{code}=X"
+        try:
+            requested = date.fromisoformat(as_of)
+        except ValueError:
+            return self._dated_rate(pair, as_of)
+        for offset in range(FX_LOOKBACK_DAYS + 1):
+            rate = self._dated_rate(
+                pair, (requested - timedelta(days=offset)).isoformat()
+            )
+            if rate is not None:
+                return rate
+        return None
 
     def trading_days(self, start: str, end: str) -> frozenset[str]:
         """Return the days in ``[start, end]`` the market is known to have traded.
@@ -182,6 +218,12 @@ class HistoricalCacheGbpPriceSource:
 
     def _dated_rate(self, pair: str, as_of: str) -> float | None:
         """Return a stored rate for the exact ``(pair, as_of)``, or None.
+
+        Same-day only, and deliberately so: this is the primitive both
+        lookups are built from, so any lookback belongs in the caller that
+        can justify it. :meth:`gbp_rate` calls it once per candidate day
+        within the shared bound (#550); :meth:`gbp_price` calls it once,
+        for the session being valued.
 
         Never falls back to a nearby date -- unlike
         ``PortfolioService.historical_fx_rates``, whose seven-day

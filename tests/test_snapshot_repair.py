@@ -19,6 +19,12 @@ from app.services.snapshot_price_backfill import PriceEvidenceUnavailable
 from app.services.snapshot_repair import (
     NoHistoricalPriceSource,
     SnapshotRepairService,
+    cost_basis_as_of,
+    gbp_replay_rows,
+    market_was_closed,
+    net_trade_cash,
+    position_cost_basis_as_of,
+    value_holdings,
 )
 
 
@@ -32,6 +38,14 @@ class _FixedPriceSource:
     def gbp_price(self, ticker: str, as_of: str) -> float | None:
         self.calls.append((ticker, as_of))
         return self._prices.get(ticker)
+
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        """Only GBP is evidenced -- these fixtures trade in sterling (#549)."""
+        return 1.0 if currency.strip().upper() == "GBP" else None
+
+    def trading_days(self, start: str, end: str) -> frozenset[str]:
+        """No market calendar: the repair pass never asks for one."""
+        return frozenset()
 
 
 def _agent(tmp_path: Path) -> TraderAgent:
@@ -791,3 +805,278 @@ def test_legacy_database_gains_the_estimated_column_idempotently(
         "FROM portfolio_snapshots"
     ).fetchall() == [(7, 100.0, 90.0, 10.0, 0)]
     conn.close()
+
+
+# --- GH-549: replay prices are converted to GBP -----------------------------
+
+
+def _replay_row(
+    ticker: str,
+    action: str,
+    shares: float,
+    price: float,
+    when: str,
+    currency: str = "GBP",
+) -> tuple[object, ...]:
+    """One repository replay tuple, currency in the 8th column (#549)."""
+    return (ticker, action, shares, price, when, None, None, currency)
+
+
+def _rate(currency: str, as_of: str) -> float | None:
+    """9.8 HKD per GBP on the one evidenced day; nothing else is known."""
+    return 9.8 if (currency, as_of) == ("HKD", "2024-01-01") else None
+
+
+def test_gbp_rows_are_returned_untouched(tmp_path: Path) -> None:
+    """An all-GBP portfolio must be byte-identical to before #549 -- and
+    must not cost an FX lookup either."""
+    rows = [_replay_row("AAPL", "BUY", 10, 5.0, "2024-01-01")]
+
+    def boom(currency: str, as_of: str) -> float | None:
+        raise AssertionError("a GBP row must never ask for a rate")
+
+    assert gbp_replay_rows(rows, boom) == rows
+
+
+def test_a_foreign_price_is_divided_by_its_dated_rate() -> None:
+    converted = gbp_replay_rows(
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _rate
+    )
+    # Only the price changes; every other column survives untouched.
+    assert converted[0][3] == pytest.approx(80.0 / 9.8)
+    assert converted[0][:3] == ("9988", "BUY", 10)
+    assert converted[0][4:] == ("2024-01-01", None, None, "HKD")
+
+
+def test_a_rate_is_looked_up_once_per_currency_and_date() -> None:
+    calls: list[tuple[str, str]] = []
+
+    def counting(currency: str, as_of: str) -> float | None:
+        calls.append((currency, as_of))
+        return _rate(currency, as_of)
+
+    gbp_replay_rows(
+        [
+            _replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD"),
+            _replay_row("0700", "BUY", 5, 300.0, "2024-01-01", "HKD"),
+            _replay_row("9988", "SELL", 2, 90.0, "2024-01-02", "HKD"),
+        ],
+        counting,
+    )
+    assert calls == [("HKD", "2024-01-01"), ("HKD", "2024-01-02")]
+
+
+def test_a_foreign_price_with_no_dated_rate_becomes_none() -> None:
+    """The exact-date contract, not a nearest-prior guess: the day after the
+    evidenced one is unconvertible, so its price is unavailable."""
+    converted = gbp_replay_rows(
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD")], _rate
+    )
+    assert converted[0][3] is None
+
+
+def test_cost_basis_uses_the_converted_price() -> None:
+    rows = gbp_replay_rows(
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _rate
+    )
+    assert position_cost_basis_as_of(rows, "2024-02-01") == {
+        "9988": pytest.approx(800.0 / 9.8)
+    }
+    assert cost_basis_as_of(rows, "2024-02-01") == pytest.approx(81.63)
+
+
+def test_an_unconvertible_trade_makes_its_cost_unavailable() -> None:
+    """A GBP-assumed 800.0 would carry the position at ~10x its worth, so
+    the answer is ``None`` for that ticker and for the whole total."""
+    rows = gbp_replay_rows(
+        [
+            _replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD"),
+            _replay_row("AAPL", "BUY", 10, 5.0, "2024-01-02"),
+        ],
+        _rate,
+    )
+    assert position_cost_basis_as_of(rows, "2024-02-01") == {
+        "9988": None,
+        "AAPL": pytest.approx(50.0),
+    }
+    assert cost_basis_as_of(rows, "2024-02-01") is None
+
+
+def test_net_trade_cash_is_none_when_a_trade_cannot_be_converted() -> None:
+    rows = gbp_replay_rows(
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD")], _rate
+    )
+    assert net_trade_cash(rows, "2024-01-01", "2024-01-31") is None
+    # Outside the interval it never contributes, so the answer is real again.
+    assert net_trade_cash(rows, "2024-02-01", "2024-02-28") == 0.0
+
+
+def test_net_trade_cash_falls_by_a_converted_buy() -> None:
+    rows = gbp_replay_rows(
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _rate
+    )
+    assert net_trade_cash(rows, "2023-12-31", "2024-01-31") == pytest.approx(
+        -800.0 / 9.8
+    )
+
+
+def test_an_unavailable_carrying_cost_is_not_an_estimate() -> None:
+    """A ``None`` cost is exactly as absent as a missing one: the point is
+    unavailable rather than estimated from an unconverted figure."""
+    source = _FixedPriceSource({})
+    assert value_holdings(source, {"9988": 10.0}, "2024-02-01", {"9988": None}) == (
+        None,
+        False,
+    )
+
+
+def test_repair_leaves_an_unconvertible_holding_unavailable(tmp_path: Path) -> None:
+    """End to end: an HKD holding with no dated rate and no dated close is
+    an honest gap, never a ~10x-overstated carrying cost (#549)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("9988", 10, 80.0, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"9988": "HKD"})
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 800.0, 100.0)
+
+    report = _service(agent, _FixedPriceSource({}), estimate_unpriceable=True).repair()
+
+    assert (report.repaired, report.marked_unavailable) == (0, 1)
+    assert _values(agent, pf.id) == [None]
+
+
+def test_an_unconvertible_sell_leaves_the_cost_basis_intact() -> None:
+    """A sell price never enters an average cost, so a missing rate on a
+    sell day costs the replay nothing (#549 review)."""
+    rows = gbp_replay_rows(
+        [
+            _replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD"),
+            _replay_row("9988", "SELL", 2, 90.0, "2024-01-02", "HKD"),
+        ],
+        _rate,
+    )
+    assert position_cost_basis_as_of(rows, "2024-02-01") == {
+        "9988": pytest.approx(8 * 80.0 / 9.8)
+    }
+
+
+def test_closing_a_position_clears_its_unconvertible_mark() -> None:
+    """A reopened position is judged on its own trades, not on a closed
+    lot's missing FX rate (#549 review)."""
+
+    def rate(currency: str, as_of: str) -> float | None:
+        """Unevidenced on the opening buy's day, evidenced on the reopen's."""
+        return 9.8 if (currency, as_of) == ("HKD", "2024-01-04") else None
+
+    rows = gbp_replay_rows(
+        [
+            _replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD"),
+            _replay_row("9988", "SELL", 10, 90.0, "2024-01-03", "HKD"),
+            _replay_row("9988", "BUY", 5, 80.0, "2024-01-04", "HKD"),
+        ],
+        rate,
+    )
+    assert position_cost_basis_as_of(rows, "2024-02-01") == {
+        "9988": pytest.approx(5 * 80.0 / 9.8)
+    }
+
+
+# --- GH-550: weekends are closed unconditionally ----------------------------
+
+#: 2024-01-01..05 are Mon-Fri, 06 is a Saturday and 07 a Sunday.
+_TRADING_WEEK = frozenset(
+    {"2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"}
+)
+
+
+@pytest.mark.parametrize("weekend_day", ["2024-01-06", "2024-01-07"])
+def test_a_weekend_is_closed_even_when_a_holding_reports_a_price(
+    weekend_day: str,
+) -> None:
+    """A stray weekend NAV must not defeat the closure test (#550).
+
+    No market the app tracks opens at the weekend, so a Saturday close is
+    wrong evidence rather than a reason to doubt the calendar.
+    """
+    source = _FixedPriceSource({"AAPL": 7.5})
+
+    assert market_was_closed(source, {"AAPL": 10.0}, weekend_day, _TRADING_WEEK)
+
+
+def test_a_weekend_is_closed_without_consulting_the_calendar_or_prices() -> None:
+    """Neither piece of evidence is needed, so neither is read (#550)."""
+    source = _FixedPriceSource({"AAPL": 7.5})
+
+    assert market_was_closed(source, {"AAPL": 10.0}, "2024-01-06", frozenset())
+    assert source.calls == []
+
+
+def test_a_weekend_with_no_holdings_is_not_closed() -> None:
+    """An empty portfolio has nothing to carry forward (unchanged)."""
+    assert not market_was_closed(_FixedPriceSource({}), {}, "2024-01-06", _TRADING_WEEK)
+
+
+def test_a_weekday_on_the_calendar_is_open() -> None:
+    assert not market_was_closed(
+        _FixedPriceSource({"AAPL": 7.5}), {"AAPL": 10.0}, "2024-01-03", _TRADING_WEEK
+    )
+
+
+def test_a_weekday_off_the_calendar_with_nothing_priced_is_closed() -> None:
+    """The two-condition bank-holiday test is untouched by #550."""
+    assert market_was_closed(
+        _FixedPriceSource({}),
+        {"AAPL": 10.0},
+        "2024-01-03",
+        _TRADING_WEEK - {"2024-01-03"},
+    )
+
+
+def test_a_weekday_off_the_calendar_with_a_price_is_still_open() -> None:
+    """One priced holding on a weekday keeps the day a valuation, not a
+    closure -- the #519 estimated flag has to stay reachable."""
+    assert not market_was_closed(
+        _FixedPriceSource({"AAPL": 7.5}),
+        {"AAPL": 10.0},
+        "2024-01-03",
+        _TRADING_WEEK - {"2024-01-03"},
+    )
+
+
+def test_an_unknown_calendar_still_means_cannot_tell_on_a_weekday() -> None:
+    assert not market_was_closed(
+        _FixedPriceSource({}), {"AAPL": 10.0}, "2024-01-03", frozenset()
+    )
+
+
+def test_a_malformed_date_falls_through_to_the_weekday_test() -> None:
+    """A backfill must never abort on one unparseable timestamp (#550)."""
+    assert market_was_closed(
+        _FixedPriceSource({}), {"AAPL": 10.0}, "not-a-date", _TRADING_WEEK
+    )
+
+
+def test_repair_leaves_a_weekend_row_alone(tmp_path: Path) -> None:
+    """A Saturday has no session to revalue, so the pass must not price it
+    off a stray weekend close (#550 review)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-02", portfolio_id=pf.id)
+    # 2024-01-06 is a Saturday, and the source has a (stale) close for it.
+    agent._snapshots.append(pf.id, "2024-01-06T00:00:00+00:00", None, 50.0, 100.0)
+
+    report = _service(
+        agent, _FixedPriceSource({"AAPL": 9.0}), estimate_unpriceable=True
+    ).repair()
+
+    assert (report.candidates, report.repaired) == (0, 0)
+    assert _values(agent, pf.id) == [None]
+
+
+def test_a_stored_timestamp_is_classified_as_a_weekend() -> None:
+    """``market_was_closed`` reads the date part, so a snapshot key answers
+    the same as a bare day (#550 review)."""
+    source = _FixedPriceSource({"AAPL": 9.0})
+    assert market_was_closed(
+        source, {"AAPL": 1.0}, "2024-01-06T00:00:00+00:00", frozenset()
+    )

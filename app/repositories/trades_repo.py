@@ -17,7 +17,55 @@ logger = logging.getLogger(__name__)
 
 # Dates are stored ISO (YYYY-MM-DD), which sorts chronologically as text.
 _DATE_SORT = "date"
-_REPLAY_COLUMNS = "ticker, action, shares, price, date, stop_loss, entry_price"
+_REPLAY_COLUMNS = (
+    "t.ticker, t.action, t.shares, t.price, t.date, t.stop_loss, t.entry_price"
+)
+
+# The 8th replay column: the ticker's *resolved* trading currency (#549), so a
+# replay can convert ``shares * price`` to GBP instead of assuming every price
+# already is GBP (9988's HKD cost basis was carried ~10x its market value).
+#
+# Resolution order, deliberately one currency per ticker -- a position's
+# average cost can never mix units:
+#
+# 1. the listing currency in ``ticker_currency_cache`` (same database), with
+#    both pence spellings (``GBp``, ``GBX``) folded to ``GBP``: imported/CSV
+#    prices are major units, never pence -- WCOG quotes at 1448 ``GBp`` and
+#    its trades are priced 13.97 -- so a pence-quoted listing must neither be
+#    divided by 100 nor sent to an FX lookup that could never evidence it;
+# 2. else the earliest non-``GBP`` currency stored on that ticker's own trade
+#    rows -- ordered, so the answer cannot change with row order and silently
+#    re-denominate a ticker's whole history;
+# 3. else ``GBP``.
+#
+# The stored per-trade flag alone is unusable as the primary signal: in
+# production 9988 (HKD-listed) is ``GBP`` on all five rows, and
+# TSLA/T/PENN/TDOC/LULU carry ``USD`` on one row and ``GBP`` on others for
+# identically denominated prices -- hence the cache first, the flag only as a
+# per-ticker fallback, and both resolved in SQL so every replay caller gets
+# the same answer.
+_REPLAY_CURRENCY = """CASE
+        WHEN c.currency IS NOT NULL AND TRIM(c.currency) <> ''
+        THEN CASE
+            WHEN UPPER(TRIM(c.currency)) IN ('GBP', 'GBX') THEN 'GBP'
+            ELSE TRIM(c.currency)
+        END
+        ELSE COALESCE((
+            SELECT TRIM(o.currency) FROM trades o
+            WHERE o.ticker = t.ticker
+              AND o.currency IS NOT NULL
+              AND TRIM(o.currency) <> ''
+              AND UPPER(TRIM(o.currency)) NOT IN ('GBP', 'GBX')
+            ORDER BY o.date, o.id
+            LIMIT 1
+        ), 'GBP')
+    END"""
+
+_REPLAY_SELECT = (
+    f"SELECT {_REPLAY_COLUMNS}, {_REPLAY_CURRENCY} AS currency"
+    " FROM trades t LEFT JOIN ticker_currency_cache c ON c.ticker = t.ticker"
+    " WHERE t.ticker NOT IN ('', 'n/a', 'N/A')"
+)
 
 # Story 2.2: deterministic same-day replay order, applied identically to
 # average-cost (here, in SQL) and FIFO (``RealisedPnlService._sorted_valid_
@@ -313,20 +361,19 @@ class TradesRepository:
     def open_rows(self, portfolio_id: int | None = None) -> list[tuple[Any, ...]]:
         """Return valid-ticker trade rows in chronological order for replay.
 
-        Columns: (ticker, action, shares, price, date, stop_loss, entry_price).
+        Columns: (ticker, action, shares, price, date, stop_loss, entry_price,
+        currency) -- the 8th being the ticker's *resolved* trading currency
+        (see ``_REPLAY_CURRENCY``, #549), not the stored per-trade flag.
         Excludes blank/``n/a`` tickers, matching the legacy portfolio query.
         Scoped to ``portfolio_id`` when given. Ordered by ``_REPLAY_ORDER``
         (Story 2.2): date ascending, then same-day rows deterministically by
         descending ``source_row_index`` (NULL-safe), then ``idempotency_key``
         as the cross-file tiebreak.
         """
-        sql = (
-            f"SELECT {_REPLAY_COLUMNS} FROM trades"
-            " WHERE ticker NOT IN ('', 'n/a', 'N/A')"
-        )
+        sql = _REPLAY_SELECT
         params: tuple[Any, ...] = ()
         if portfolio_id is not None:
-            sql += " AND portfolio_id = ?"
+            sql += " AND t.portfolio_id = ?"
             params = (portfolio_id,)
         sql += f" ORDER BY {_REPLAY_ORDER}"
         with session(self._connect) as conn:
@@ -344,13 +391,10 @@ class TradesRepository:
         not-yet-committed trade inserts (a separate connection would only
         see the database's last *committed* state and silently miss them).
         """
-        sql = (
-            f"SELECT {_REPLAY_COLUMNS} FROM trades"
-            " WHERE ticker NOT IN ('', 'n/a', 'N/A')"
-        )
+        sql = _REPLAY_SELECT
         params: tuple[Any, ...] = ()
         if portfolio_id is not None:
-            sql += " AND portfolio_id = ?"
+            sql += " AND t.portfolio_id = ?"
             params = (portfolio_id,)
         sql += f" ORDER BY {_REPLAY_ORDER}"
         return conn.execute(sql, params).fetchall()

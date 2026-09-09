@@ -152,12 +152,14 @@ def test_chart_fragment_keeps_markers_and_reports_partial_totals(stack) -> None:
 
     assert resp.status_code == 200
     # Cash is missing on this snapshot, so Portfolio Value (market + cash) is
-    # unavailable while Market Value is not. #512 surfaces that specifically
-    # and reveals the Market Value series rather than leaving the only visible
-    # line blank.
+    # unavailable there while Market Value is not. One gap in thirteen is not
+    # a missing history though: #551 keeps that on the "some points
+    # unavailable" note and leaves Market Value hidden, because the #512
+    # fallback banner would claim the range has no cash at all.
     assert "Market Value" in resp.text
-    assert "doesn't carry yet" in resp.text
-    assert "hidden: false" in resp.text
+    assert "Some Portfolio Value points are unavailable" in resp.text
+    assert "Most of this range has no cash balance" not in resp.text
+    assert "hidden: true" in resp.text
     assert "BUY 1 AAPL" in resp.text
     assert _chart_array(resp.text, "totals")[-1] is None
 

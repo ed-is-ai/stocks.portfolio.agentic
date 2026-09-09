@@ -135,6 +135,11 @@ class TestSmokeTests:
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
                 patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
+                # The snapshot repair stage writes to whatever trades.db it
+                # is pointed at, so point it at a throwaway: an unisolated
+                # smoke test otherwise repairs the developer's own
+                # portfolio history (#549).
+                patch.object(orchestrator, "TRADES_DB", os.path.join(tmp, "trades.db")),
                 patch.object(
                     orchestrator.AlertAgent,
                     "send_summary_email",
@@ -239,6 +244,11 @@ class TestSmokeTests:
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
                 patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
+                # The snapshot repair stage writes to whatever trades.db it
+                # is pointed at, so point it at a throwaway: an unisolated
+                # smoke test otherwise repairs the developer's own
+                # portfolio history (#549).
+                patch.object(orchestrator, "TRADES_DB", os.path.join(tmp, "trades.db")),
                 patch.object(
                     orchestrator.os, "replace", side_effect=_replace_then_crash
                 ),

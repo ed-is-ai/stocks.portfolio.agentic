@@ -15,6 +15,7 @@ byte-identical.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import date, timedelta
 import logging
 from typing import Any, Protocol
@@ -68,16 +69,71 @@ def last_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
     return last
 
 
+def gbp_replay_rows(
+    replay_rows: list[tuple[Any, ...]],
+    gbp_rate: Callable[[str, str], float | None],
+) -> list[tuple[Any, ...]]:
+    """Return ``replay_rows`` with every price converted to GBP major units (#549).
+
+    A replay row's 8th column is the ticker's resolved trading currency
+    (``TradesRepository.open_rows``); its ``price`` is in that currency, not
+    in GBP, so replaying ``shares * price`` as sterling overstated a foreign
+    holding's cost basis by its FX rate -- 9988 carried ~£54k against ~£4.5k
+    of market value, spiking the Portfolio Value line on every day it was
+    unpriced.
+
+    Conversion is ``price / gbp_rate(currency, trade_date)`` (the rate being
+    units of the currency per GBP) through stored evidence only, never a live
+    fetch. Whatever bound ``gbp_rate`` applies applies here: since #550 that
+    is the trade date or the few days before it, which is far better evidence
+    of what a trade cost than discarding its cost basis over an unpublished
+    rate. A non-GBP row with no rate inside that bound keeps every other field
+    but gets ``price = None``: the cost or cash it feeds is then *unavailable*,
+    never a GBP-assumed figure.
+
+    Rows already in GBP (and rows with no currency column at all, e.g. a
+    hand-built tuple in a test) pass through untouched, so an all-GBP
+    portfolio is byte-identical to before. Rates are memoised per
+    ``(currency, date)``, so a multi-year replay costs one lookup per
+    distinct pair-day however many trades share it.
+    """
+    rates: dict[tuple[str, str], float | None] = {}
+    converted: list[tuple[Any, ...]] = []
+    for row in replay_rows:
+        currency = str(row[7]).strip().upper() if len(row) > 7 and row[7] else "GBP"
+        if currency == "GBP":
+            converted.append(row)
+            continue
+        trade_date = str(row[4])[:10]
+        key = (currency, trade_date)
+        if key not in rates:
+            rates[key] = gbp_rate(currency, trade_date)
+        rate = rates[key]
+        price = (
+            None
+            if rate is None or rate <= 0 or row[3] is None
+            else float(row[3]) / rate
+        )
+        converted.append((*row[:3], price, *row[4:]))
+    return converted
+
+
 def position_cost_basis_as_of(
     replay_rows: list[tuple[Any, ...]], as_of: str
-) -> dict[str, float]:
+) -> dict[str, float | None]:
     """Return ``{ticker: GBP carrying cost}`` for positions open on ``as_of`` (#519).
 
     Average-cost replay over trades dated on or before ``as_of``, matching
     ``TraderAgent._compute_positions`` exactly -- a sell reduces the position
     at the running average and leaves the average untouched, and a fully
-    closed position resets to zero. Trade prices are treated as already in
-    GBP major units, the same convention the live snapshot writer uses.
+    closed position resets to zero. Prices are taken as GBP major units, so
+    callers holding raw repository rows must first run them through
+    :func:`gbp_replay_rows` (#549); a row whose price that conversion could
+    not evidence arrives here as ``None`` and makes its ticker's cost
+    ``None`` -- unavailable, never a GBP-assumed number -- while still
+    moving the position's share count, which is known regardless of FX.
+    Only a BUY can do that: a sell's price never enters an average cost, and
+    closing the position out clears the mark with it.
 
     This is the single replay both the total cost basis (:func:`cost_basis_as_of`,
     its sum) and the estimated valuation of an unpriceable holding are built
@@ -85,6 +141,7 @@ def position_cost_basis_as_of(
     apart. Values are unrounded; callers round their own aggregate.
     """
     state: dict[str, dict[str, float]] = {}
+    unpriced: set[str] = set()
     for row in replay_rows:
         ticker, action, shares, price, trade_date = (
             row[0],
@@ -98,42 +155,62 @@ def position_cost_basis_as_of(
         held = state.setdefault(ticker, {"shares": 0.0, "avg_cost": 0.0})
         quantity = float(shares)
         if action == "BUY":
+            if price is None:
+                unpriced.add(ticker)
+                held["shares"] += quantity
+                continue
             total = held["avg_cost"] * held["shares"] + float(price) * quantity
             held["shares"] += quantity
             held["avg_cost"] = total / held["shares"] if held["shares"] else 0.0
         else:
+            # A sell's price never enters an average cost, so an unconvertible
+            # one costs this replay nothing (#549) -- only a BUY can poison a
+            # position's cost.
             held["shares"] -= quantity
             if held["shares"] <= QUANTITY_EPSILON:
                 held["shares"] = 0.0
                 held["avg_cost"] = 0.0
+                # The position is gone, and with it every unconvertible buy
+                # that made it unpriceable: a later reopen is judged on its
+                # own trades, not on a closed lot's missing FX rate.
+                unpriced.discard(ticker)
     return {
-        ticker: held["avg_cost"] * held["shares"]
+        ticker: None if ticker in unpriced else held["avg_cost"] * held["shares"]
         for ticker, held in state.items()
         if held["shares"] > QUANTITY_EPSILON
     }
 
 
-def cost_basis_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> float:
+def cost_basis_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> float | None:
     """Return the GBP cost basis of positions open on ``as_of`` (#514).
 
     The sum of :func:`position_cost_basis_as_of`, so a backfilled row's
     ``total_cost`` is computed on exactly the same basis as a live one, and
     on the same basis as the carrying-cost fallback used for an unpriceable
-    holding (#519).
+    holding (#519). ``None`` when any open position's own cost is
+    unavailable (#549): a total missing one leg is not a smaller total, it
+    is a wrong one, and the caller writes it as NULL.
     """
-    return round(sum(position_cost_basis_as_of(replay_rows, as_of).values()), 2)
+    costs = position_cost_basis_as_of(replay_rows, as_of).values()
+    if any(cost is None for cost in costs):
+        return None
+    return round(sum(cost for cost in costs if cost is not None), 2)
 
 
 def net_trade_cash(
     replay_rows: list[tuple[Any, ...]], start_exclusive: str, end_inclusive: str
-) -> float:
+) -> float | None:
     """Return the net cash trades moved in ``(start, end]`` (#543).
 
     ``Σ(SELL shares*price) − Σ(BUY shares*price)`` over replay rows dated in
     the half-open interval -- a sale puts cash *in*, a purchase takes it
-    *out*. Trade prices are already GBP major units, the same convention
-    :func:`position_cost_basis_as_of` and the live snapshot writer use, so
-    the result is GBP.
+    *out*. Prices must already be GBP major units (:func:`gbp_replay_rows`,
+    #549), the same convention :func:`position_cost_basis_as_of` uses, so
+    the result is GBP. The live writer reaches GBP by its own route -- it
+    converts a whole position's cost at *today's* rate rather than each
+    trade's dated one -- so the two agree on units, not to the penny. A row in the interval
+    whose price could not be converted (``None``) makes the whole interval
+    ``None``: the day's cash is then NULL rather than short by one trade.
 
     The interval excludes its start so it composes with a dated statement
     anchor: the anchor already states the balance *after* everything that
@@ -145,6 +222,8 @@ def net_trade_cash(
         action, shares, price, trade_date = row[1], row[2], row[3], str(row[4])[:10]
         if not (start_exclusive < trade_date <= end_inclusive):
             continue
+        if price is None:
+            return None
         proceeds = float(shares) * float(price)
         # "not BUY is a sell" mirrors :func:`holdings_as_of` exactly, so the
         # shares leaving the position and the cash arriving for them can
@@ -176,6 +255,19 @@ def holdings_as_of(replay_rows: list[tuple[Any, ...]], as_of: str) -> dict[str, 
     return {t: s for t, s in net.items() if s > QUANTITY_EPSILON}
 
 
+def _is_weekend(as_of: str) -> bool:
+    """True when ``as_of`` is a Saturday or Sunday (#550).
+
+    Reads the date part only, so a stored snapshot timestamp answers the
+    same as a bare day, and never raises on a malformed value -- a
+    multi-year pass must not abort on one bad row.
+    """
+    try:
+        return date.fromisoformat(as_of[:10]).weekday() >= 5
+    except ValueError:
+        return False
+
+
 def market_was_closed(
     source: "HistoricalGbpPriceSource",
     holdings: dict[str, float],
@@ -184,8 +276,16 @@ def market_was_closed(
 ) -> bool:
     """True when the market was shut on ``as_of``, so nothing could move (#547).
 
-    Two independent evidence failures are required, because either alone is
-    ambiguous:
+    A Saturday or Sunday is closed unconditionally whenever the portfolio
+    holds anything -- no calendar, no price check (#550). The two-condition
+    test below was defeated on 25 of portfolio 19's weekends by a single
+    holding reporting a stray weekend NAV or a stale Friday close, and those
+    days then neither carried forward nor resolved. No equity market the app
+    tracks opens at the weekend, so there is no ambiguity to weigh: the
+    evidence is wrong, not the calendar.
+
+    On a weekday the ambiguity is real, so two independent evidence failures
+    are required, because either alone is not enough:
 
     * ``as_of`` is not in ``trading_days`` -- the FX calendar, which the app
       already maintains across the whole window, published nothing that day;
@@ -203,8 +303,17 @@ def market_was_closed(
 
     The ticker scan short-circuits on the first priced holding, and only
     runs at all on a day the calendar has already flagged.
+
+    Only the date part of ``as_of`` is read, so a stored snapshot key
+    (``2024-01-06T00:00:00+00:00``) classifies the same as a bare day; a
+    malformed one never raises, it simply falls through to the weekday path,
+    which is what this did before #550.
     """
-    if not holdings or not trading_days or as_of in trading_days:
+    if not holdings:
+        return False
+    if _is_weekend(as_of):
+        return True
+    if not trading_days or as_of in trading_days:
         return False
     return not any(source.gbp_price(ticker, as_of) is not None for ticker in holdings)
 
@@ -213,16 +322,19 @@ def value_holdings(
     source: "HistoricalGbpPriceSource",
     holdings: dict[str, float],
     as_of: str,
-    carrying: dict[str, float],
+    carrying: dict[str, float | None],
 ) -> tuple[float | None, bool]:
     """Value ``holdings`` at ``as_of``, returning ``(value, is_estimated)`` (#519).
 
     A holding with a dated GBP close is always valued from that evidence. A
     holding with none falls back to its carrying cost from ``carrying``
     (``{ticker: GBP cost}``, from :func:`position_cost_basis_as_of`), and the
-    result is flagged estimated. Passing an empty ``carrying`` disables
-    estimation and restores the pre-#519 all-or-nothing rule: one unpriced
-    holding makes the whole point unavailable.
+    result is flagged estimated. A ``None`` carrying cost -- a foreign trade
+    with no dated FX rate to convert it (#549) -- counts as no carrying cost
+    at all, so the point is unavailable rather than estimated from a figure
+    in the wrong currency. Passing an empty ``carrying`` disables estimation
+    and restores the pre-#519 all-or-nothing rule: one unpriced holding makes
+    the whole point unavailable.
 
     A value that rounds to ``0.00`` is reported as unavailable either way --
     writing it back would recreate the very row the repair pass exists to
@@ -236,9 +348,10 @@ def value_holdings(
     for ticker, shares in holdings.items():
         price = source.gbp_price(ticker, as_of)
         if price is None:
-            if ticker not in carrying:
+            cost = carrying.get(ticker)
+            if cost is None:
                 return None, False
-            total += carrying[ticker]
+            total += cost
             estimated = True
             continue
         total += shares * price
@@ -383,10 +496,21 @@ class SnapshotRepairService:
                 unchanged += 1
                 continue
             if pf_id not in replay_cache:
-                replay_cache[pf_id] = self._trades.open_rows(pf_id)
+                # Converted once per portfolio, so this pass's carrying costs
+                # are GBP rather than raw foreign price units (#549).
+                replay_cache[pf_id] = gbp_replay_rows(
+                    self._trades.open_rows(pf_id), self._price_source.gbp_rate
+                )
             holdings = self._holdings_as_of(replay_cache[pf_id], str(timestamp)[:10])
             if not holdings:
                 # A genuinely empty (cash-only) portfolio: 0.00 is correct.
+                unchanged += 1
+                continue
+
+            if _is_weekend(str(timestamp)):
+                # No venue opened, so there is nothing to revalue: pricing a
+                # Saturday off whatever stray close exists writes back the
+                # very phantom the backfill's carry-forward avoids (#550).
                 unchanged += 1
                 continue
 
@@ -526,7 +650,7 @@ class SnapshotRepairService:
         pre-#519 all-or-nothing behaviour (the CLI's
         ``--no-historical-evidence``) exactly as it was.
         """
-        carrying = (
+        carrying: dict[str, float | None] = (
             position_cost_basis_as_of(replay_rows, as_of)
             if self._estimate_unpriceable
             else {}

@@ -10,6 +10,9 @@ from app.repositories.cash_flows_repo import CashFlowsRepository
 from app.repositories.fx_rate_cache_repo import FxRateCacheRepository
 from app.repositories.price_cache_repo import PriceCacheRepository
 from app.repositories.results_repo import ResultsRepository
+from app.repositories.ticker_currency_cache_repo import (
+    TickerCurrencyCacheRepository,
+)
 from app.repositories.trades_repo import TradesRepository
 
 
@@ -398,6 +401,64 @@ def test_trades_open_rows_both_source_row_index_and_idempotency_key_null_falls_b
     repo.insert("SECOND", "BUY", 1, 10.0, "2024-01-02")
     rows = repo.open_rows()
     assert [r[0] for r in rows] == ["FIRST", "SECOND"]
+
+
+# --- GH-549: resolved replay currency ---------------------------------------
+
+
+def _cache_currency(connect, ticker, currency):
+    """Store a listing currency for ``ticker`` in ``ticker_currency_cache``."""
+    TickerCurrencyCacheRepository(connect).upsert_many({ticker: currency})
+
+
+def test_open_rows_defaults_the_replay_currency_to_gbp(trades_connect):
+    """No cache row and a sterling trade flag: the 8th column is ``GBP``,
+    so an all-GBP portfolio replays exactly as it did before #549."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("AAPL", "BUY", 10, 100.0, "2024-01-02")
+    assert repo.open_rows()[0][7] == "GBP"
+
+
+def test_open_rows_prefers_the_cached_listing_currency_over_the_trade_flag(
+    trades_connect,
+):
+    """9988 is HKD-listed but stored ``GBP`` on every trade row, so the
+    listing cache -- not the per-trade flag -- has to decide (#549)."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("9988", "BUY", 10, 80.0, "2024-01-02", currency="GBP")
+    _cache_currency(trades_connect, "9988", "HKD")
+    assert repo.open_rows()[0][7] == "HKD"
+
+
+def test_open_rows_treats_a_pence_listing_as_gbp(trades_connect):
+    """``GBp`` prices arrive from the CSV in major units, so a pence-quoted
+    listing must resolve to ``GBP`` and never be converted (#549)."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("VOD.L", "BUY", 10, 0.75, "2024-01-02")
+    _cache_currency(trades_connect, "VOD.L", "GBp")
+    assert repo.open_rows()[0][7] == "GBP"
+
+
+def test_open_rows_resolves_mixed_trade_flags_to_one_currency(trades_connect):
+    """TSLA carries ``USD`` on one row and ``GBP`` on others for identically
+    denominated prices; with no cache entry every row must still resolve to
+    the one non-GBP flag, so an average cost can never mix units (#549)."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("TSLA", "BUY", 1, 100.0, "2024-01-02", currency="GBP")
+    repo.insert("TSLA", "BUY", 1, 110.0, "2024-01-03", currency="USD")
+    repo.insert("TSLA", "BUY", 1, 120.0, "2024-01-04", currency="GBP")
+    assert [row[7] for row in repo.open_rows()] == ["USD", "USD", "USD"]
+
+
+def test_open_rows_currency_is_scoped_to_its_own_ticker(trades_connect):
+    """One foreign holding must not colour a sterling one's rows (#549)."""
+    repo = TradesRepository(trades_connect)
+    repo.insert("TSLA", "BUY", 1, 100.0, "2024-01-02", currency="USD")
+    repo.insert("AAPL", "BUY", 1, 100.0, "2024-01-03", currency="GBP")
+    assert {row[0]: row[7] for row in repo.open_rows()} == {
+        "TSLA": "USD",
+        "AAPL": "GBP",
+    }
 
 
 # --- Story 2.4: trade provenance (source / import_batch_id) ----------------

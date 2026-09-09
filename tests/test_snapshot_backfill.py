@@ -28,9 +28,13 @@ class _FixedPriceSource:
         prices: dict[str, float],
         holes: set[tuple[str, str]] | None = None,
         trading: set[str] | None = None,
+        rates: dict[tuple[str, str], float] | None = None,
     ) -> None:
         self._prices = prices
         self._holes = holes or set()
+        # Dated ``(currency, date) -> units per GBP`` evidence (#549); a pair
+        # not listed here is simply unknown, exactly like a missing close.
+        self._rates = rates or {}
         # Empty means "no market calendar known", which is what most tests
         # want: the backfill must then never call a day closed (#547).
         self._trading = frozenset(trading or ())
@@ -43,7 +47,9 @@ class _FixedPriceSource:
         return self._prices.get(ticker)
 
     def gbp_rate(self, currency: str, as_of: str) -> float | None:
-        return 1.0 if currency.strip().upper() == "GBP" else None
+        if currency.strip().upper() == "GBP":
+            return 1.0
+        return self._rates.get((currency, as_of))
 
     def trading_days(self, start: str, end: str) -> frozenset[str]:
         return frozenset(d for d in self._trading if start <= d <= end)
@@ -148,12 +154,17 @@ def test_first_backfill_writes_one_priced_row_per_day(tmp_path: Path) -> None:
         "2024-01-06",
         "2024-01-07",
     ]
-    assert all(r[1] == pytest.approx(75.0) for r in backfilled)
+    # 01-06 and 01-07 are a weekend, so since #550 they repeat the live
+    # Friday row rather than being revalued off a close no market published.
+    weekdays = [r for r in backfilled if r[0][:10] < "2024-01-06"]
+    weekend = [r for r in backfilled if r[0][:10] >= "2024-01-06"]
+    assert all(r[1] == pytest.approx(75.0) for r in weekdays)
+    assert all(r[1] == pytest.approx(999.0) for r in weekend)
     # Cost basis is now reconstructed (10 shares bought at 5.0 = 50.00);
     # cash stays None because this fixture imported no Running Balance
     # history for the service to read (#514).
-    assert all(r[2] == pytest.approx(50.0) for r in backfilled)
-    assert all(r[3] is None for r in backfilled)
+    assert all(r[2] == pytest.approx(50.0) for r in weekdays)
+    assert all(r[3] is None for r in weekdays)
     # The pre-existing live row is untouched.
     assert (999.0, 900.0, 100.0) in [(r[1], r[2], r[3]) for r in rows]
 
@@ -287,8 +298,11 @@ def test_one_unpriceable_holding_drops_the_whole_day(tmp_path: Path) -> None:
 
     report = _service(agent, source).backfill(pf.id)
 
-    assert report.rows_written == 0
-    assert report.days_skipped_no_evidence == 6
+    # Only the weekend is written, and only as a copy of the live 01-03 row
+    # (#550): a weekend is closed whatever the evidence says.
+    assert report.rows_written == 2
+    assert report.days_carried_forward == 2
+    assert report.days_skipped_no_evidence == 4
 
 
 def test_days_before_first_trade_are_skipped_as_no_holdings(tmp_path: Path) -> None:
@@ -390,8 +404,11 @@ def test_no_price_source_writes_nothing_but_does_not_raise(tmp_path: Path) -> No
 
     report = _service(agent, NoHistoricalPriceSource()).backfill(pf.id)
 
-    assert report.rows_written == 0
-    assert report.days_skipped_no_evidence == 6
+    # The weekend still repeats the live 01-03 row -- that needs no price
+    # source at all (#550) -- and every weekday stays an honest gap.
+    assert report.rows_written == 2
+    assert report.days_carried_forward == 2
+    assert report.days_skipped_no_evidence == 4
 
 
 def test_fx_pair_constant_is_the_reported_name() -> None:
@@ -1019,22 +1036,29 @@ def test_a_data_gap_on_a_trading_day_stays_an_honest_gap(tmp_path: Path) -> None
     days = {r[0][:10] for r in _rows(agent, pf.id)}
     assert "2024-01-03" not in days
     assert report.days_skipped_no_evidence == 1
-    assert report.days_carried_forward == 0
+    # Only the weekend carries; the Wednesday gap does not (#550).
+    assert report.days_carried_forward == 2
 
 
-def test_an_unknown_market_calendar_never_carries_forward(tmp_path: Path) -> None:
-    """No FX evidence means "cannot tell", never "the market never opened"."""
+def test_an_unknown_market_calendar_never_carries_a_weekday_forward(
+    tmp_path: Path,
+) -> None:
+    """No FX evidence means "cannot tell", never "the market never opened".
+
+    Asserted on a Wednesday since #550, because a weekend is closed on the
+    date alone and no longer consults the calendar at all.
+    """
     agent = _agent(tmp_path)
     pf = agent.create_portfolio("SIPP")
     agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
     source = _FixedPriceSource(
-        {"AAPL": 7.5}, holes={("AAPL", "2024-01-06")}, trading=set()
+        {"AAPL": 7.5}, holes={("AAPL", "2024-01-03")}, trading=set()
     )
 
     report = _service(agent, source).backfill(pf.id)
 
-    assert report.days_carried_forward == 0
-    assert "2024-01-06" not in {r[0][:10] for r in _rows(agent, pf.id)}
+    assert "2024-01-03" not in {r[0][:10] for r in _rows(agent, pf.id)}
+    assert report.days_carried_forward == 2  # the weekend, and only it
 
 
 def test_a_carried_forward_row_inherits_the_estimated_flag_it_copies(
@@ -1078,3 +1102,177 @@ def test_a_closed_market_carries_cash_forward_rather_than_nulling_it(
     assert cash["2024-01-06"] is not None
     assert cash["2024-01-06"] == pytest.approx(cash["2024-01-05"])
     assert cash["2024-01-07"] == pytest.approx(cash["2024-01-05"])
+
+
+# --- GH-549: foreign trades are replayed in GBP -----------------------------
+
+
+def test_backfilled_cost_converts_a_foreign_trade(tmp_path: Path) -> None:
+    """An HKD holding's cost basis is ``shares * price / rate``, the same
+    order as its market value -- not the ~10x figure a GBP-assumed replay
+    carried (#549)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("9988", 10, 80.0, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"9988": "HKD"})
+    source = _FixedPriceSource({"9988": 8.0}, rates={("HKD", "2024-01-01"): 9.8})
+
+    report = _service(agent, source).backfill(pf.id)
+
+    assert report.rows_written == 7
+    assert all(r[2] == pytest.approx(81.63) for r in _rows(agent, pf.id))
+
+
+def test_a_gbp_portfolio_is_unaffected_by_the_conversion(tmp_path: Path) -> None:
+    """Regression guard for the "byte-identical" constraint: no cache row,
+    a sterling flag, and a source with no FX evidence at all."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+
+    _service(agent, _FixedPriceSource({"AAPL": 7.5})).backfill(pf.id)
+
+    rows = _rows(agent, pf.id)
+    assert all(r[1] == pytest.approx(75.0) for r in rows)
+    assert all(r[2] == pytest.approx(50.0) for r in rows)
+
+
+def test_an_unconvertible_trade_writes_a_null_cost(tmp_path: Path) -> None:
+    """The holding still has a dated close, so the day is valued -- but its
+    cost is unavailable and stored NULL rather than GBP-assumed (#549)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("9988", 10, 80.0, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"9988": "HKD"})
+
+    report = _service(agent, _FixedPriceSource({"9988": 8.0})).backfill(pf.id)
+
+    assert report.rows_written == 7
+    rows = _rows(agent, pf.id)
+    assert all(r[1] == pytest.approx(80.0) for r in rows)
+    assert all(r[2] is None for r in rows)
+
+
+def test_an_unpriced_unconvertible_holding_is_skipped_not_estimated(
+    tmp_path: Path,
+) -> None:
+    """No dated close *and* no dated rate: estimation has nothing honest to
+    fall back on, so the day is left unwritten (#549)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("9988", 10, 80.0, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"9988": "HKD"})
+
+    report = _service(agent, _FixedPriceSource({}), estimate_unpriceable=True).backfill(
+        pf.id
+    )
+
+    assert (report.rows_written, report.days_skipped_no_evidence) == (0, 7)
+    assert _rows(agent, pf.id) == []
+
+
+# --- GH-550: a stray weekend price no longer defeats the carry-forward -------
+
+
+def test_a_weekend_carries_forward_even_when_every_holding_is_priced(
+    tmp_path: Path,
+) -> None:
+    """25 of portfolio 19's weekends were revalued off a stray close (#550).
+
+    With no hole in the evidence the pre-#550 two-condition test found the
+    Saturday priced, declined to call it closed, and wrote a weekend
+    valuation the market never produced.
+    """
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    source = _FixedPriceSource({"AAPL": 7.5}, trading=_TRADING_WEEK)
+
+    report = _service(agent, source).backfill(pf.id)
+
+    values = {r[0][:10]: r[1] for r in _rows(agent, pf.id)}
+    assert values["2024-01-06"] == pytest.approx(values["2024-01-05"])
+    assert values["2024-01-07"] == pytest.approx(values["2024-01-05"])
+    assert report.days_carried_forward == 2
+
+
+def test_a_weekend_carries_cash_forward_when_a_holding_is_priced(
+    tmp_path: Path,
+) -> None:
+    """The carried Saturday keeps Friday's cash rather than a NULL (#550)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1500.00")])
+    source = _FixedPriceSource({"AAPL": 7.5}, trading=_TRADING_WEEK)
+
+    _service_with_cash(agent, source).backfill(pf.id)
+
+    cash = {r[0][:10]: r[3] for r in _rows(agent, pf.id)}
+    assert cash["2024-01-06"] == pytest.approx(cash["2024-01-05"])
+    assert cash["2024-01-07"] == pytest.approx(cash["2024-01-05"])
+
+
+def test_a_weekday_with_one_unpriced_holding_is_valued_and_flagged(
+    tmp_path: Path,
+) -> None:
+    """#519 is untouched: a weekday gap is estimated, never carried (#550)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    agent.record_buy("MSFT", 10, 4.0, "2024-01-01", portfolio_id=pf.id)
+    source = _FixedPriceSource(
+        {"AAPL": 7.5, "MSFT": 6.0},
+        holes={("MSFT", "2024-01-03")},
+        trading=_TRADING_WEEK,
+    )
+
+    report = _service(agent, source, estimate_unpriceable=True).backfill(pf.id)
+
+    flags = {r[0]: r[2] for r in _estimated_rows(agent, pf.id)}
+    values = {r[0]: r[1] for r in _estimated_rows(agent, pf.id)}
+    assert flags["2024-01-03"] == 1
+    # AAPL at its close plus MSFT at its 40.00 carrying cost, not Friday's.
+    assert values["2024-01-03"] == pytest.approx(115.0)
+    assert report.days_carried_forward == 2  # the weekend, never the gap
+
+
+# --- GH-550 review: closed days still move cash, and need something to carry --
+
+
+def test_a_weekend_withdrawal_moves_the_carried_days_cash(tmp_path: Path) -> None:
+    """Cash moves on a closed day even though prices do not: real statements
+    date withdrawals, interest and dividends on weekends (#550 review)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-01", portfolio_id=pf.id)
+    _with_cash_history(agent, [("GBP", "2024-01-02", "1500.00")])
+    # 2024-01-06 is a Saturday.
+    _with_cash_flows(agent, [("2024-01-06", "WITHDRAWAL", 500.0)])
+    source = _FixedPriceSource({"AAPL": 7.5}, trading=_TRADING_WEEK)
+
+    _service_with_cash(agent, source).backfill(pf.id)
+
+    rows = {r[0][:10]: r for r in _rows(agent, pf.id)}
+    # The value is Friday's, carried; the cash is not.
+    assert rows["2024-01-06"][1] == pytest.approx(rows["2024-01-05"][1])
+    assert rows["2024-01-05"][3] == pytest.approx(1500.0)
+    assert rows["2024-01-06"][3] == pytest.approx(1000.0)
+
+
+def test_a_weekend_with_nothing_to_carry_is_skipped_not_valued(
+    tmp_path: Path,
+) -> None:
+    """A window opening on a weekend has no previous day to carry, and must
+    not fall through to valuing the day off a stray close (#550 review)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    # 2024-01-06 is a Saturday: the first day this portfolio holds anything.
+    agent.record_buy("AAPL", 10, 5.0, "2024-01-06", portfolio_id=pf.id)
+    source = _FixedPriceSource({"AAPL": 7.5}, trading=_TRADING_WEEK)
+
+    report = _service(agent, source).backfill(pf.id)
+
+    days = {r[0][:10] for r in _rows(agent, pf.id)}
+    assert "2024-01-06" not in days and "2024-01-07" not in days
+    assert report.days_skipped_no_evidence >= 2

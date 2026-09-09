@@ -843,3 +843,47 @@ def test_range_buttons_carry_ids_so_htmx_can_restore_focus() -> None:
         chart_all_totals_unavailable=False,
     )
     assert 'id="chartRange12M"' in other
+
+
+def _render_chart(**overrides: Any) -> str:
+    """Render the chart fragment with a three-point history (#551)."""
+    context: dict[str, Any] = {
+        "portfolio_id": 1,
+        "chart_range": "12M",
+        "chart_points": 3,
+        "chart_usable_total_points": 3,
+        "chart_labels": '["2026-08-01", "2026-08-02", "2026-08-03"]',
+        "chart_total_values": "[110, null, 130]",
+        "chart_values": "[100, 120, 115]",
+        "chart_costs": "[90, 90, 90]",
+        "chart_cash": "[10, null, 15]",
+        "chart_has_unavailable_totals": True,
+        "chart_all_totals_unavailable": False,
+        "chart_buys": "[null, null, null]",
+        "chart_sells": "[null, null, null]",
+        "chart_buy_tips": "[null, null, null]",
+        "chart_sell_tips": "[null, null, null]",
+    }
+    context.update(overrides)
+    return templates.get_template("_portfolio_chart.html").render(**context)
+
+
+def test_chart_fallback_banner_states_the_real_reason() -> None:
+    """#551: every clause must be true when the flag now fires."""
+    html = _render_chart(chart_market_value_extends_further=True)
+
+    assert "Portfolio Value is missing for part of this" in html
+    assert "shown for them instead" in html
+    assert "It excludes cash." in html
+    assert "Some Portfolio Value points are unavailable" not in html
+    # The fallback is the only thing that unhides Market Value.
+    assert "hidden: false" in html
+
+
+def test_chart_scattered_gaps_keep_the_some_points_note() -> None:
+    """#551: a gap is not a missing history -- no fallback banner."""
+    html = _render_chart(chart_market_value_extends_further=False)
+
+    assert "Some Portfolio Value points are unavailable" in html
+    assert "Portfolio Value is missing for part of this" not in html
+    assert "hidden: true" in html

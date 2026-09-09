@@ -83,6 +83,7 @@ from app.services.snapshot_repair import (
     NoHistoricalPriceSource,
     cost_basis_as_of,
     first_trade_dates,
+    gbp_replay_rows,
     holdings_as_of,
     last_trade_dates,
     market_was_closed,
@@ -257,7 +258,6 @@ class SnapshotBackfillService:
         # recomputes its carry-forward rows exactly once.
         if self._account_state.get(marker_key) == signature:
             return
-        reconstruction = self._cash_reconstruction(pid, anchors, replay_rows)
 
         self._progress.begin(
             pid,
@@ -270,6 +270,14 @@ class SnapshotBackfillService:
             pid, start.isoformat(), last_day.isoformat()
         )
         self._prefetch_evidence(replay_rows, first_dates, start, end, totals, pid)
+        # Convert foreign trade prices to GBP once for the whole portfolio
+        # (#549), and only here: the conversion reads the very FX series the
+        # prefetch above just filled, so doing it any earlier turned a first
+        # run on a foreign holding into a whole window of NULL costs and
+        # NULL cash. Only ``price`` changes, so the prefetch and the dates
+        # it works from are unaffected by running after it.
+        replay_rows = gbp_replay_rows(replay_rows, self._price_source.gbp_rate)
+        reconstruction = self._cash_reconstruction(pid, anchors, replay_rows)
         # Read once, after the prefetch has filled the window's FX series --
         # this is the market calendar the closed-day test consults (#547).
         trading_days = self._price_source.trading_days(
@@ -306,15 +314,33 @@ class SnapshotBackfillService:
                 carry = existing
             elif not (holdings := holdings_as_of(replay_rows, as_of)):
                 totals.days_skipped_no_holdings += 1
-            elif carry is not None and market_was_closed(
-                self._price_source, holdings, as_of, trading_days
-            ):
+            elif market_was_closed(self._price_source, holdings, as_of, trading_days):
                 # Nothing traded and no price moved, so the portfolio was
                 # worth exactly what it was worth on the last trading day.
                 # Revaluing here instead priced the whole book at carrying
                 # cost and wrote a phantom weekend dip (#547).
-                value, cost, cash, is_estimated = carry
-                if value is not None and self._snapshots.append_daily_value_if_absent(
+                #
+                # With nothing to carry -- a window that opens on a weekend --
+                # the day is simply skipped: revaluing it would write the
+                # stray-close phantom this branch exists to prevent (#550).
+                value, cost, carried_cash, is_estimated = carry or (
+                    None,
+                    None,
+                    None,
+                    False,
+                )
+                # Cash still moves on a closed day: withdrawals, interest and
+                # dividends are dated on weekends in real statements, so the
+                # balance is reconstructed rather than copied, and only falls
+                # back to the carried figure when it cannot be known (#550).
+                cash = self._cash_as_of(reconstruction, as_of)
+                if cash is None:
+                    cash = carried_cash
+                if value is None:
+                    # A closed day with nothing to carry produces no row, and
+                    # counts as the evidence gap it is.
+                    totals.days_skipped_no_evidence += 1
+                elif self._snapshots.append_daily_value_if_absent(
                     pid,
                     as_of,
                     f"{as_of}T00:00:00+00:00",
@@ -326,6 +352,7 @@ class SnapshotBackfillService:
                     totals.rows_written += 1
                     totals.days_carried_forward += 1
                     totals.days_valued_with_estimates += int(is_estimated)
+                    carry = (value, cost, cash, is_estimated)
             elif (valued := self._value(replay_rows, holdings, as_of))[0] is None:
                 totals.days_skipped_no_evidence += 1
             else:
@@ -488,7 +515,7 @@ class SnapshotBackfillService:
         ``estimate_unpriceable`` is off, which keeps the pre-#519
         all-or-nothing rule exactly as it was.
         """
-        carrying = (
+        carrying: dict[str, float | None] = (
             position_cost_basis_as_of(replay_rows, as_of)
             if self._estimate_unpriceable
             else {}

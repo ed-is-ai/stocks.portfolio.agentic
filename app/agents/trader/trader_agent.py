@@ -797,6 +797,7 @@ class TraderAgent(Agent):
                 trade.date,
                 trade.stop_loss,
                 trade.entry_price,
+                trade.currency,
             )
             for trade in ordered
         ]
@@ -875,6 +876,7 @@ class TraderAgent(Agent):
             trade_date,
             stop_loss,
             entry_price,
+            *_,
         ) in rows:
             try:
                 parsed_date = _date.fromisoformat(trade_date)

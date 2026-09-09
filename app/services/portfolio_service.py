@@ -8,6 +8,7 @@ context dicts; rendering stays in the API layer.
 
 import csv
 import json
+from itertools import groupby
 import logging
 import math
 import threading
@@ -91,6 +92,24 @@ CHART_RANGE_DAYS: dict[str, int] = {
 }
 DEFAULT_CHART_RANGE = "12M"
 _CHART_MAX_POINTS = 250
+# The canvas gate: below this many usable points a series renders as detached
+# dots indistinguishable from a broken chart (#484). ``_portfolio_chart.html``
+# repeats the literal -- Jinja cannot import a Python constant (#551).
+MIN_DRAWABLE_CHART_POINTS = 3
+# Portfolio Value has to cover at least this share of the drawable Market Value
+# days to stand on its own. Below it -- more than one day in ten with no cash
+# balance -- the line is too holed to read, so Market Value takes over (#551).
+# Held as a fraction of ten so the comparison stays in integers: a float ratio
+# is exact at 0.9 but silently mis-rounds at other thresholds someone may tune
+# this to.
+_TOTALS_COVERAGE_NUMERATOR = 9
+_TOTALS_COVERAGE_DENOMINATOR = 10
+# A run of consecutive missing totals longer than this is a fabrication the
+# coverage ratio cannot see: Chart.js spans gaps, so a contiguous hole is drawn
+# as a straight line in the same weight as observed data. The real portfolio's
+# longest run was 4 points, so this fires on a genuinely unreadable stretch and
+# not on the weekend-and-holiday gaps ordinary history has (#551).
+_MAX_UNBROKEN_TOTALS_GAP = 10
 
 
 @dataclass(frozen=True)
@@ -1025,6 +1044,17 @@ class PortfolioService:
             total_values.append(total)
 
         has_unavailable_totals = any(value is None for value in total_values)
+        # The longest unbroken run of missing totals: the coverage ratio alone
+        # cannot tell 69 scattered days from one six-month hole, and only the
+        # second is drawn as a fabricated straight line (#551).
+        longest_totals_gap = max(
+            (
+                len(list(run))
+                for missing, run in groupby(value is None for value in total_values)
+                if missing
+            ),
+            default=0,
+        )
         usable_totals = sum(1 for value in total_values if value is not None)
         usable_values = sum(1 for value in values if value is not None)
         return {
@@ -1042,7 +1072,21 @@ class PortfolioService:
             # the chart's only non-hidden series, so without this the user
             # sees a near-empty chart sitting on top of years of real data
             # (#512). Signals the template to reveal Market Value too.
-            "market_value_extends_further": usable_values > usable_totals,
+            #
+            # It is a materiality test, not a strict count comparison: the
+            # latter tripped on a single NULL-cash row in 3,043 and then every
+            # clause of the fallback banner was false, because that history
+            # does carry cash. #543 separated "a gap" from "no cash anywhere"
+            # and this flag never followed. Scattered gaps stay with the
+            # template's "some points unavailable" note; only a Portfolio Value
+            # too holed to read -- by share of the range, or by one unbroken
+            # stretch -- hands the chart over to Market Value (#551).
+            "market_value_extends_further": usable_values >= MIN_DRAWABLE_CHART_POINTS
+            and (
+                usable_totals * _TOTALS_COVERAGE_DENOMINATOR
+                < usable_values * _TOTALS_COVERAGE_NUMERATOR
+                or longest_totals_gap > _MAX_UNBROKEN_TOTALS_GAP
+            ),
             # Aligned with ``labels``: True where at least one holding in that
             # snapshot was carried at cost rather than priced (#519), so the
             # chart can mark the point instead of presenting it as observed.
