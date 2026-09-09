@@ -4,13 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
 import json
 import math
 import sqlite3
 from typing import Mapping, Sequence
+import zlib
 
 from app.repositories.db import Connect, evidence_connect, session
 from app.services.backtest.canonical_manifest import (
+    canonical_json,
     canonical_json_digest,
     manifest_digest,
 )
@@ -88,6 +91,39 @@ CREATE TABLE IF NOT EXISTS historical_evidence_references (
     created_at TEXT NOT NULL,
     PRIMARY KEY(consumer_type, consumer_id, data_revision)
 );
+
+CREATE TABLE IF NOT EXISTS historical_price_v2_revisions (
+    revision_id INTEGER PRIMARY KEY,
+    data_revision TEXT NOT NULL UNIQUE,
+    metadata_json TEXT NOT NULL,
+    response_metadata_digest TEXT NOT NULL,
+    observation_count INTEGER NOT NULL CHECK(observation_count > 0),
+    action_count INTEGER NOT NULL CHECK(action_count >= 0),
+    first_acquired_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS historical_price_v2_chunks (
+    chunk_digest TEXT PRIMARY KEY,
+    codec TEXT NOT NULL CHECK(codec = 'zlib'),
+    format_version INTEGER NOT NULL CHECK(format_version = 1),
+    compressed_payload BLOB NOT NULL,
+    uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes > 0)
+);
+CREATE TABLE IF NOT EXISTS historical_price_v2_revision_chunks (
+    revision_id INTEGER NOT NULL REFERENCES historical_price_v2_revisions(revision_id),
+    chunk_order INTEGER NOT NULL CHECK(chunk_order >= 0),
+    chunk_kind TEXT NOT NULL CHECK(chunk_kind IN ('rows', 'actions')),
+    chunk_year INTEGER NOT NULL,
+    chunk_digest TEXT NOT NULL REFERENCES historical_price_v2_chunks(chunk_digest),
+    PRIMARY KEY(revision_id, chunk_order),
+    UNIQUE(revision_id, chunk_kind, chunk_year)
+);
+
+CREATE TRIGGER IF NOT EXISTS historical_v2_revision_immutable_update BEFORE UPDATE ON historical_price_v2_revisions BEGIN SELECT RAISE(ABORT, 'historical v2 revision is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_revision_immutable_delete BEFORE DELETE ON historical_price_v2_revisions BEGIN SELECT RAISE(ABORT, 'historical v2 revision is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_chunk_immutable_update BEFORE UPDATE ON historical_price_v2_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 chunk is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_chunk_immutable_delete BEFORE DELETE ON historical_price_v2_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 chunk is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_mapping_immutable_update BEFORE UPDATE ON historical_price_v2_revision_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 mapping is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_mapping_immutable_delete BEFORE DELETE ON historical_price_v2_revision_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 mapping is immutable'); END;
 
 CREATE TRIGGER IF NOT EXISTS historical_revision_immutable_update BEFORE UPDATE ON historical_price_revisions BEGIN SELECT RAISE(ABORT, 'historical revision is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS historical_revision_immutable_delete BEFORE DELETE ON historical_price_revisions BEGIN SELECT RAISE(ABORT, 'historical revision is immutable'); END;
@@ -201,6 +237,8 @@ class PriceEvidenceUnavailableAttempt:
 
 class HistoricalPriceRepository:
     """Own the append-only historical price database and exact-reference reads."""
+
+    _v2_chunk_max_bytes = 64 * 1024 * 1024
 
     def __init__(self, connect: Connect) -> None:
         self._connect = evidence_connect(connect)
@@ -334,9 +372,99 @@ class HistoricalPriceRepository:
             )
         return payload.data_revision
 
+    def commit_v2(self, payload: HistoricalEvidencePayload) -> str:
+        """Append one independently verifiable v2 evidence representation.
+
+        This is deliberately separate from :meth:`commit`: #537 owns the
+        migration/cutover that makes v2 the normal write and read path.
+        """
+        if payload.security_id is None:
+            raise HistoricalEvidenceIntegrityError("resolved security_id is required")
+        try:
+            canonical = json.loads(payload.canonical_manifest_json)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise HistoricalEvidenceIntegrityError("invalid canonical manifest") from exc
+        if (
+            manifest_digest(canonical) != payload.data_revision
+            or canonical.get("rows") != list(payload.rows)
+            or canonical.get("actions") != list(payload.actions)
+        ):
+            raise HistoricalEvidenceIntegrityError("manifest payload mismatch")
+        metadata = dict(canonical)
+        metadata.pop("rows", None)
+        metadata.pop("actions", None)
+        chunks = self._v2_chunks(payload.rows, payload.actions)
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT revision_id FROM historical_price_v2_revisions WHERE data_revision=?",
+                (payload.data_revision,),
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    """INSERT INTO historical_price_v2_revisions
+                       (data_revision, metadata_json, response_metadata_digest,
+                        observation_count, action_count, first_acquired_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        payload.data_revision,
+                        canonical_json(metadata),
+                        payload.response_metadata_digest,
+                        len(payload.rows),
+                        len(payload.actions),
+                        payload.acquired_at,
+                    ),
+                )
+                revision_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+                for order, (kind, year, encoded, digest) in enumerate(chunks):
+                    conn.execute(
+                        """INSERT OR IGNORE INTO historical_price_v2_chunks
+                           (chunk_digest, codec, format_version, compressed_payload,
+                            uncompressed_bytes) VALUES (?, 'zlib', 1, ?, ?)""",
+                        (digest, zlib.compress(encoded), len(encoded)),
+                    )
+                    conn.execute(
+                        """INSERT INTO historical_price_v2_revision_chunks
+                           (revision_id, chunk_order, chunk_kind, chunk_year, chunk_digest)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (revision_id, order, kind, year, digest),
+                    )
+            self._verify_v2_on_connection(conn, payload.data_revision)
+        return payload.data_revision
+
+    @staticmethod
+    def _v2_chunks(
+        rows: Sequence[Mapping[str, object]], actions: Sequence[Mapping[str, object]]
+    ) -> tuple[tuple[str, int, bytes, str], ...]:
+        grouped: dict[tuple[str, int], list[Mapping[str, object]]] = {}
+        for kind, items in (("rows", rows), ("actions", actions)):
+            for item in items:
+                try:
+                    year = int(str(item["session"])[:4])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise HistoricalEvidenceIntegrityError("v2 chunk session is invalid") from exc
+                grouped.setdefault((kind, year), []).append(item)
+        chunks = []
+        for (kind, year), items in sorted(grouped.items()):
+            encoded = canonical_json(
+                {"kind": kind, "year": year, "items": items}
+            ).encode()
+            if len(encoded) > HistoricalPriceRepository._v2_chunk_max_bytes:
+                raise HistoricalEvidenceIntegrityError("v2 chunk exceeds size limit")
+            chunks.append((kind, year, encoded, sha256(encoded).hexdigest()))
+        return tuple(chunks)
+
     def get(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:
-            return self._load_on_connection(conn, data_revision)
+            try:
+                return self._load_on_connection(conn, data_revision)
+            except EvidenceMissingError:
+                return self._verify_v2_on_connection(conn, data_revision)
+
+    def get_v2(self, data_revision: str) -> StoredHistoricalEvidence:
+        """Read and fully verify one opt-in v2 evidence revision."""
+        with session(self._connect) as conn:
+            return self._verify_v2_on_connection(conn, data_revision)
 
     def get_exact(
         self, *, security_id: str, start: str, end: str, data_revision: str
@@ -696,6 +824,109 @@ class HistoricalPriceRepository:
         if canonical.get("actions") != list(evidence.actions):
             raise HistoricalEvidenceIntegrityError("stored action mismatch")
         return evidence
+
+    @staticmethod
+    def _verify_v2_on_connection(
+        conn: sqlite3.Connection, data_revision: str
+    ) -> StoredHistoricalEvidence:
+        revision = conn.execute(
+            """SELECT revision_id, metadata_json, response_metadata_digest,
+                      observation_count, action_count
+               FROM historical_price_v2_revisions WHERE data_revision=?""",
+            (data_revision,),
+        ).fetchone()
+        if revision is None:
+            raise EvidenceMissingError("historical evidence is missing")
+        try:
+            metadata = json.loads(str(revision[1]))
+        except json.JSONDecodeError as exc:
+            raise HistoricalEvidenceIntegrityError("invalid v2 metadata") from exc
+        rows: list[Mapping[str, object]] = []
+        actions: list[Mapping[str, object]] = []
+        mappings = conn.execute(
+            """SELECT mapping.chunk_kind, mapping.chunk_year, chunk.chunk_digest,
+                      chunk.codec, chunk.format_version, chunk.compressed_payload,
+                      chunk.uncompressed_bytes
+               FROM historical_price_v2_revision_chunks AS mapping
+               JOIN historical_price_v2_chunks AS chunk
+                 ON chunk.chunk_digest=mapping.chunk_digest
+               WHERE mapping.revision_id=? ORDER BY mapping.chunk_order""",
+            (int(revision[0]),),
+        ).fetchall()
+        for kind, year, digest, codec, version, compressed, size in mappings:
+            if str(codec) != "zlib" or int(version) != 1:
+                raise HistoricalEvidenceIntegrityError("unsupported v2 chunk format")
+            try:
+                if int(size) > HistoricalPriceRepository._v2_chunk_max_bytes:
+                    raise ValueError("v2 chunk exceeds size limit")
+                decompressor = zlib.decompressobj()
+                encoded = decompressor.decompress(
+                    bytes(compressed), HistoricalPriceRepository._v2_chunk_max_bytes + 1
+                )
+                if (
+                    decompressor.unconsumed_tail
+                    or not decompressor.eof
+                    or len(encoded) > HistoricalPriceRepository._v2_chunk_max_bytes
+                ):
+                    raise ValueError("v2 chunk exceeds size limit")
+                chunk = json.loads(encoded)
+            except (TypeError, ValueError, zlib.error, json.JSONDecodeError) as exc:
+                raise HistoricalEvidenceIntegrityError("invalid v2 chunk") from exc
+            if (
+                len(encoded) != int(size)
+                or sha256(encoded).hexdigest() != str(digest)
+                or chunk.get("kind") != str(kind)
+                or chunk.get("year") != int(year)
+                or not isinstance(chunk.get("items"), list)
+            ):
+                raise HistoricalEvidenceIntegrityError("v2 chunk integrity mismatch")
+            (rows if str(kind) == "rows" else actions).extend(chunk["items"])
+        if len(rows) != int(revision[3]) or len(actions) != int(revision[4]):
+            raise HistoricalEvidenceIntegrityError("v2 evidence count mismatch")
+        canonical = {**metadata, "rows": rows, "actions": actions}
+        rendered = canonical_json(canonical)
+        if canonical_json_digest(rendered) != data_revision:
+            raise HistoricalEvidenceIntegrityError("v2 revision digest mismatch")
+        return HistoricalPriceRepository._stored_from_canonical(
+            data_revision, canonical, rendered, str(revision[2])
+        )
+
+    @staticmethod
+    def _stored_from_canonical(
+        data_revision: str,
+        canonical: Mapping[str, object],
+        rendered: str,
+        response_metadata_digest: str,
+    ) -> StoredHistoricalEvidence:
+        try:
+            request = canonical["request"]
+            rows = canonical["rows"]
+            actions = canonical["actions"]
+            if not isinstance(request, Mapping) or not isinstance(rows, list) or not isinstance(actions, list):
+                raise TypeError
+            return StoredHistoricalEvidence(
+                data_revision=data_revision,
+                security_id=str(canonical["security_id"]),
+                provider=str(canonical["provider"]),
+                provider_version=str(canonical["provider_version"]),
+                request_contract_version=str(canonical["request_contract_version"]),
+                requested_symbol=str(canonical["requested_symbol"]),
+                observed_symbol=str(canonical["observed_symbol"]),
+                alias_revision=None if canonical.get("alias_revision") is None else str(canonical["alias_revision"]),
+                currency=str(canonical["currency"]),
+                quote_unit=str(canonical["quote_unit"]),
+                quote_unit_scale=str(canonical["quote_unit_scale"]),
+                exchange_timezone=str(canonical["exchange_timezone"]),
+                start=str(request["start"]),
+                end=str(request["end"]),
+                request_contract=dict(request),
+                response_metadata_digest=response_metadata_digest,
+                canonical_manifest_json=rendered,
+                rows=tuple(rows),
+                actions=tuple(actions),
+            )
+        except (KeyError, TypeError) as exc:
+            raise HistoricalEvidenceIntegrityError("invalid v2 metadata") from exc
 
     @staticmethod
     def _load_on_connection(

@@ -19,6 +19,7 @@ from app.services.backtest.canonical_manifest import canonical_json, manifest_di
 from app.services.backtest.historical_price_evidence import (
     HistoricalEvidenceRequest,
     YFinanceHistoricalEvidenceAdapter,
+    rebind_historical_evidence_alias,
 )
 
 
@@ -133,6 +134,96 @@ def test_changed_content_and_overlapping_interval_are_distinct_revisions(
             end="2024-02-01",
             data_revision=changed.data_revision,
         )
+
+
+def test_v2_commit_reconstructs_canonical_evidence_and_reuses_chunks(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    first = _payload()
+    rebound = rebind_historical_evidence_alias(
+        first, alias_revision="alias-v2", acquired_at="2026-08-12T00:00:00+00:00"
+    )
+
+    assert repo.commit_v2(first) == first.data_revision
+    assert repo.commit_v2(rebound) == rebound.data_revision
+    with db.session(repo._connect) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM historical_price_v2_revisions"
+        ).fetchone() == (2,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM historical_price_v2_chunks"
+        ).fetchone() == (2,)
+    stored = repo.get_v2(first.data_revision)
+    assert stored.canonical_manifest_json == first.canonical_manifest_json
+    assert stored.rows == first.rows
+    assert stored.actions == first.actions
+    assert repo.get(first.data_revision) == stored
+
+
+def test_v2_reader_rejects_corrupt_chunk(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit_v2(payload)
+    with db.session(repo._connect) as conn:
+        conn.execute("DROP TRIGGER historical_v2_chunk_immutable_update")
+        conn.execute("UPDATE historical_price_v2_chunks SET compressed_payload=x'00'")
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="invalid v2 chunk"):
+        repo.get_v2(payload.data_revision)
+
+
+def test_v2_reader_rejects_oversized_chunk_claim(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit_v2(payload)
+    with db.session(repo._connect) as conn:
+        conn.execute("DROP TRIGGER historical_v2_chunk_immutable_update")
+        conn.execute(
+            "UPDATE historical_price_v2_chunks SET uncompressed_bytes=?",
+            (repo._v2_chunk_max_bytes + 1,),
+        )
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="invalid v2 chunk"):
+        repo.get_v2(payload.data_revision)
+
+
+def test_v2_revision_and_chunk_mappings_are_sql_immutable(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit_v2(payload)
+    conn = repo._connect()
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute("UPDATE historical_price_v2_revisions SET metadata_json='{}'")
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute("DELETE FROM historical_price_v2_revision_chunks")
+    finally:
+        conn.close()
+
+
+def test_v2_splits_rows_into_calendar_year_chunks(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    first = _payload()
+    second_year_row = {**first.rows[0], "session": "2025-01-02"}
+    identity = json.loads(first.canonical_manifest_json)
+    identity["request"]["end"] = "2025-02-01"
+    identity["rows"] = [*first.rows, second_year_row]
+    payload = replace(
+        first,
+        end="2025-02-01",
+        request_contract={**first.request_contract, "end": "2025-02-01"},
+        rows=(*first.rows, second_year_row),
+        data_revision=manifest_digest(identity),
+        canonical_manifest_json=canonical_json(identity),
+    )
+
+    repo.commit_v2(payload)
+    with db.session(repo._connect) as conn:
+        mappings = conn.execute(
+            "SELECT chunk_kind, chunk_year FROM historical_price_v2_revision_chunks "
+            "ORDER BY chunk_order"
+        ).fetchall()
+    assert mappings == [("actions", 2024), ("rows", 2024), ("rows", 2025)]
+    assert repo.get_v2(payload.data_revision).canonical_manifest_json == (
+        payload.canonical_manifest_json
+    )
 
 
 def test_find_cached_request_reuses_earliest_verified_revision(tmp_path) -> None:

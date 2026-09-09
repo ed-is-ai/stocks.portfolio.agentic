@@ -264,3 +264,29 @@ correctly selected zero startup months and does not claim an active completed
 Result timing. The retained historical Results continue to use the existing
 on-demand integrity path. Source counts and selection evidence:
 `gh-539-member-revision-prewarm.json`.
+
+## Historical evidence schema v2 (GH-536)
+
+The repository can now persist an opt-in v2 representation of immutable
+historical evidence. It stores the revision's canonical metadata separately
+from zlib-compressed, content-addressed row and action chunks grouped by
+calendar year. Internal chunk mappings use an integer revision key; the public
+evidence identity remains the original canonical uncompressed digest.
+
+Every v2 read checks the compression format, uncompressed length, chunk digest,
+payload shape, row/action counts, and reconstructed canonical revision digest
+before returning evidence. Identical annual content is shared by revisions.
+The current default writer remains v1; generic revision reads can verify a
+v2-only revision for migration compatibility. Activation, rollback, reference
+migration, and any deletion of v1 storage belong to GH-537 and GH-538. No
+production-sized storage-reduction claim has been made because the prior
+offline historical backup is no longer available for a repeatable measurement.
+
+A fresh read-only sample from the approved main historical database selected 25
+revisions in lexical digest order. Their v1 canonical manifests totalled
+53,110,749 bytes; v2 metadata plus compressed chunks totalled 5,561,397 bytes
+(**89.53%** smaller). All 1,413 chunk references were unique in this sample,
+so this is a compression and duplicate-representation result, not a measured
+deduplication benefit. It does not establish the whole-cache 70% migration
+target or a read-latency result. Raw sample evidence:
+`gh-536-v2-encoding-sample.json`.

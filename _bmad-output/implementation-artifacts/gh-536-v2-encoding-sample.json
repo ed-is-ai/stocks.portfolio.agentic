@@ -1,0 +1,11 @@
+{
+  "database": "approved main historical database; read-only",
+  "sample_revisions": 25,
+  "selection": "lexical data_revision order",
+  "v1_canonical_manifest_bytes": 53110749,
+  "v2_metadata_plus_unique_compressed_chunk_bytes": 5561397,
+  "reduction_percent": 89.53,
+  "chunk_references": 1413,
+  "unique_chunks": 1413,
+  "interpretation": "The sample measures compressed v2 encoding only. It does not measure full database migration, SQLite table/index footprint, chunk deduplication, read latency, or the 70 percent whole-cache cutover target."
+}
