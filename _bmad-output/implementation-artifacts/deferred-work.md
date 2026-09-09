@@ -617,3 +617,6 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-551-fallback-banner-materiality.md`
   summary: `chart_all_totals_unavailable`'s message cannot render on a range that has three or more usable market values, because the fallback branch wins the `if/elif`.
   evidence: `_portfolio_chart.html:64-73`; reachable only when market values are too few to draw, which is the case the message was written for anyway.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-590-sortable-searchable-pnl-table.md`
+  summary: The round-trip table's Stake / Buy price / Sell price columns sort by the raw native-currency amount, so a mixed-currency SIPP (USD + EUR + GBP) gets a misordered "by size" sort even though each cell now carries its own currency symbol.
+  evidence: `_realised_pnl.html` sets `data-val="{{ entry_price * shares }}"` in native currency; `pnl-table.js compareRows` does a raw numeric compare. Result / P&L % columns are GBP and sort correctly, so two adjacent sortable columns use different money units. Fixing needs GBP-normalised stake/price values on `RoundTrip` (only `realised_pnl_gbp` exists today); #590's issue text explicitly specified native floats for these `data-val`s, so this is out of that story's intent.

@@ -99,11 +99,87 @@ def test_zero_round_trips_shows_empty_state_copy(mocked):
     assert "No Round-trips yet for this account." in resp.text
     assert _stat_card(resp.text, "Wins").strip() == "0"
     assert _stat_card(resp.text, "Losses").strip() == "0"
-    assert "Avg Win % / Avg Loss %" in resp.text
-    average_card = _stat_card(resp.text, "Avg Win % / Avg Loss %")
-    assert average_card.count("&mdash;") == 2
-    assert 'class="pos"' not in average_card
-    assert 'class="neg"' not in average_card
+    assert "Avg Win % / Avg Loss %" not in resp.text
+    win_card = _stat_card(resp.text, "Avg Win %")
+    loss_card = _stat_card(resp.text, "Avg Loss %")
+    assert win_card.count("&mdash;") == 1
+    assert loss_card.count("&mdash;") == 1
+
+
+def test_strip_order_and_dropped_gross_tiles(mocked):
+    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    assert resp.status_code == 200
+    labels = [
+        re.sub(r"<[^>]+>", "", raw).replace("&amp;", "&").strip()
+        for raw in re.findall(r'<div class="slbl">(.*?)</div>', resp.text, re.DOTALL)
+    ]
+    strip = [
+        label
+        for label in labels
+        if label
+        in {
+            "Unmatched Sells",
+            "Round-trips",
+            "Wins",
+            "Losses",
+            "Avg Win %",
+            "Avg Loss %",
+            "Total Realised P&L",
+        }
+    ]
+    assert strip == [
+        "Unmatched Sells",
+        "Round-trips",
+        "Wins",
+        "Losses",
+        "Avg Win %",
+        "Avg Loss %",
+        "Total Realised P&L",
+    ]
+    assert "Gross Won" not in resp.text
+    assert "Gross Lost" not in resp.text
+
+
+def test_index_html_has_table_cell_pnl_colour_rules():
+    from pathlib import Path
+
+    css = Path("app/api/templates/index.html").read_text()
+    assert ".table tbody td.pos { color: var(--green); }" in css
+    assert ".table tbody td.neg { color: var(--red); }" in css
+
+
+def test_pnl_table_js_defaults():
+    from pathlib import Path
+
+    src = Path("app/api/static/js/pnl-table.js").read_text()
+    assert "pnl-table-state-v1" in src
+    assert "wl-state-v1" not in src
+    hidden = re.search(r"DEFAULT_HIDDEN\s*=\s*\[([^\]]*)\]", src)
+    assert hidden is not None
+    assert "buyprice" in hidden.group(1)
+    assert "sellprice" in hidden.group(1)
+
+
+def test_split_average_tiles_render_populated_values(mocked):
+    _, mock_realised_pnl = mocked
+    mock_realised_pnl.compute_summary.return_value = RealisedPnlSummary(
+        portfolio_id=1,
+        round_trips={},
+        total_realised_pnl_gbp=5.0,
+        round_trip_count=2,
+        winning_round_trip_count=1,
+        losing_round_trip_count=1,
+        average_win_pct=12.5,
+        average_loss_pct=-4.2,
+    )
+    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    assert resp.status_code == 200
+    assert "+12.5%" in _stat_card(resp.text, "Avg Win %")
+    assert "-4.2%" in _stat_card(resp.text, "Avg Loss %")
+    win = re.search(r'Avg Win %</div>\s*<div class="sval ([^"]*)">', resp.text)
+    loss = re.search(r'Avg Loss %</div>\s*<div class="sval ([^"]*)">', resp.text)
+    assert win is not None and win.group(1).strip() == "pos"
+    assert loss is not None and loss.group(1).strip() == "neg"
 
 
 def test_history_uses_service_owned_cached_presentation(mocked):
@@ -177,18 +253,20 @@ def test_round_trip_rows_are_flat_with_prices_in_the_result_tooltip(mocked):
     resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
 
     assert resp.status_code == 200
-    assert re.findall(r"<th>([^<]+)</th>", resp.text) == [
-        "Ticker",
-        "Entered",
-        "Exited",
-        "Held",
-        "Stake",
-        "Result",
-        "P&amp;L %",
+    # Every header now carries a .wl-sort button with a data-col.
+    sort_cols = re.findall(r'<button class="wl-sort" data-col="([a-z]+)"', resp.text)
+    assert sort_cols == [
+        "ticker",
+        "entered",
+        "exited",
+        "held",
+        "stake",
+        "buyprice",
+        "sellprice",
+        "result",
+        "pnlpct",
     ]
-    # No grouping scaffolding survives in the round-trip table. Scoped to
-    # it: the unmatched-sells panel below has its own <details> disclosure.
-    table = resp.text[resp.text.index("<tbody>") : resp.text.index("</table>")]
+    table = resp.text[resp.text.index('id="pnl-table"') : resp.text.index("</table>")]
     assert "subtotal" not in table
     assert "ticker-detail" not in table
     assert "<details" not in table
@@ -196,8 +274,58 @@ def test_round_trip_rows_are_flat_with_prices_in_the_result_tooltip(mocked):
     assert table.index("2026-02-02") < table.index("2026-02-01")
     # Prices are reference detail, reachable but not a column to scan.
     assert "entry 100.00 &rarr; exit 110.00" in table
-    # An unconvertible round trip says so rather than showing a figure.
+    # Buy/Sell price exist as hidden columns.
+    assert 'class="wl-hidden" data-col="buyprice"' in table
+    assert 'class="wl-hidden" data-col="sellprice"' in table
+    # An unconvertible round trip says so rather than showing a figure, and
+    # emits empty data-val on result/pnlpct so it sorts last.
     assert "FX rate unavailable" in table
+    assert '<td data-col="result" data-val="">' in table
+    assert '<td data-col="pnlpct" data-val="">' in table
+    # Losing row carries neg on both Result and P&L % cells.
+    loss_row = table[table.index("LOSS") : table.index("USDX")]
+    assert loss_row.count('class="neg"') == 2
+    win_row = table[table.index("WIN") : table.index("LOSS")]
+    assert win_row.count('class="pos"') == 2
+
+
+def test_toolbar_exposes_search_and_columns_mount(mocked):
+    _, mock_realised_pnl = mocked
+    mock_realised_pnl.compute_summary.return_value = RealisedPnlSummary(
+        portfolio_id=1,
+        round_trips={"WIN": [_round_trip("WIN", 10.0)]},
+        total_realised_pnl_gbp=10.0,
+        round_trip_count=1,
+    )
+    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    assert resp.status_code == 200
+    assert 'id="pnl-search"' in resp.text
+    assert 'type="search"' in resp.text
+    assert 'id="pnl-match-count"' in resp.text
+    assert 'id="pnl-adv"' in resp.text
+
+
+def test_toolbar_absent_when_no_round_trips(mocked):
+    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    assert resp.status_code == 200
+    assert 'id="pnl-search"' not in resp.text
+
+
+def test_currency_symbol_on_stake_and_price_cells(mocked):
+    _mock_trader, mock_realised_pnl = mocked
+    trip = _round_trip("USDX", 10.0).model_copy(update={"currency": "USD"})
+    mock_realised_pnl.compute_summary.return_value = RealisedPnlSummary(
+        portfolio_id=1,
+        round_trips={"USDX": [trip]},
+        total_realised_pnl_gbp=10.0,
+        round_trip_count=1,
+    )
+    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    assert resp.status_code == 200
+    table = resp.text[resp.text.index('id="pnl-table"') : resp.text.index("</table>")]
+    assert '<td data-col="stake" data-val="100.0000">$100.00</td>' in table
+    assert ">$100.00</td>" in table  # buy price
+    assert ">$110.00</td>" in table  # sell price
 
 
 # --- Story 1.5: POST /trades/{trade_id}/ack --------------------------------

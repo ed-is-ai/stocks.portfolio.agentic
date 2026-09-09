@@ -166,6 +166,10 @@
        which the single-class `.pos`/`.neg` rules lose to on specificity. */
     .stat-card .sval.pos { color: var(--green); }
     .stat-card .sval.neg { color: var(--red); }
+    /* Directional P&L colour in any table body must beat Bootstrap's own
+       `.table` cell colour, which the single-class `.pos`/`.neg` lose to. */
+    .table tbody td.pos { color: var(--green); }
+    .table tbody td.neg { color: var(--red); }
     .stat-card.pnl-positive { border-left: 3px solid var(--green); }
     .stat-card.pnl-negative { border-left: 3px solid var(--red); }
 
@@ -1436,6 +1440,7 @@
   }
 </script>
 <script src="/static/js/watchlist.js?v=20260829-1"></script>
+<script src="/static/js/pnl-table.js?v=20260909-1"></script>
 <script src="/static/js/pipeline-refresh.js"></script>
 <script src="/static/js/strategy-manager.js?v=20260824-1" defer></script>
 </body>

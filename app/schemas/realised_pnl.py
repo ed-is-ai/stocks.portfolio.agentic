@@ -30,6 +30,8 @@ class RoundTrip(BaseModel):
     realised_pnl_gbp: float
     realised_pnl_pct: float
     fx_unavailable: bool = False
+    currency: str = ""
+    """Native trading currency; ``""`` when the ledger has no evidenced verdict."""
 
 
 class UnmatchedSell(BaseModel):

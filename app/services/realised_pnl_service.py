@@ -880,6 +880,7 @@ class RealisedPnlService:
                 realised_pnl_gbp=0.0,
                 realised_pnl_pct=0.0,
                 fx_unavailable=True,
+                currency=currency,
             )
 
         gbp_cost = _round2(raw.entry_price * raw.shares / entry_rate)
@@ -898,6 +899,7 @@ class RealisedPnlService:
             realised_pnl_gbp=pnl_gbp,
             realised_pnl_pct=pnl_pct,
             fx_unavailable=False,
+            currency=currency,
         )
 
     @staticmethod

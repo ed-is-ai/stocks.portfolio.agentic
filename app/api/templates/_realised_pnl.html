@@ -310,13 +310,15 @@
 </div>
 {% endif %}
 
-<!-- Summary strip (all values in GBP). Ordered as the ledger reads: how
-     many trips, how they split, what each side came to, then the net (#573).
-     Wins and losses get their own tiles because a combined "Win / Loss"
-     cell made the two counts compete for one value slot, and gross won /
-     gross lost are new -- net alone cannot tell a quiet profitable period
-     from a frantic one that turned over far more to reach the same place. -->
+<!-- Summary strip (all values in GBP). Ordered as the ledger reads:
+     unmatched sells, how many trips, how they split, the average each side
+     ran to, then the net (#590). Wins/losses and Avg Win %/Avg Loss % each
+     get their own tile so the two figures never compete for one value slot. -->
 <div class="pnl-stat-strip">
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-exclamation-triangle me-1"></i>Unmatched Sells</div>
+    <div class="sval">{{ summary.unmatched_count }}</div>
+  </div>
   <div class="stat-card">
     <div class="slbl"><i class="bi bi-arrow-repeat me-1"></i>Round-trips</div>
     <div class="sval">{{ summary.round_trip_count }}</div>
@@ -330,23 +332,15 @@
     <div class="sval {% if summary.losing_round_trip_count > 0 %}neg{% endif %}">{{ summary.losing_round_trip_count }}</div>
   </div>
   <div class="stat-card">
-    <div class="slbl"><i class="bi bi-plus-circle me-1"></i>Gross Won</div>
-    <div class="sval pos">£{{ "%.2f"|format(summary.gross_won_gbp) }}</div>
+    <div class="slbl"><i class="bi bi-percent me-1"></i>Avg Win %</div>
+    <div class="sval {% if summary.average_win_pct is not none %}pos{% endif %}">
+      {% if summary.average_win_pct is not none %}+{{ "%.1f"|format(summary.average_win_pct) }}%{% else %}&mdash;{% endif %}
+    </div>
   </div>
   <div class="stat-card">
-    <div class="slbl"><i class="bi bi-dash-circle me-1"></i>Gross Lost</div>
-    <div class="sval neg">£{{ "%.2f"|format(summary.gross_lost_gbp) }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="slbl"><i class="bi bi-exclamation-triangle me-1"></i>Unmatched Sells</div>
-    <div class="sval">{{ summary.unmatched_count }}</div>
-  </div>
-  <div class="stat-card">
-    <div class="slbl"><i class="bi bi-percent me-1"></i>Avg Win % / Avg Loss %</div>
-    <div class="sval">
-      {% if summary.average_win_pct is not none %}<span class="pos">+{{ "%.1f"|format(summary.average_win_pct) }}%</span>{% else %}<span>&mdash;</span>{% endif %}
-      /
-      {% if summary.average_loss_pct is not none %}<span class="neg">{{ "%.1f"|format(summary.average_loss_pct) }}%</span>{% else %}<span>&mdash;</span>{% endif %}
+    <div class="slbl"><i class="bi bi-percent me-1"></i>Avg Loss %</div>
+    <div class="sval {% if summary.average_loss_pct is not none %}neg{% endif %}">
+      {% if summary.average_loss_pct is not none %}{{ "%.1f"|format(summary.average_loss_pct) }}%{% else %}&mdash;{% endif %}
     </div>
   </div>
   <div class="stat-card">
@@ -357,29 +351,52 @@
   </div>
 </div>
 
+{% set flat = [] %}
+{% for _ticker, trips in summary.round_trips.items() %}{% for rt in trips %}
+{% set _ = flat.append(rt) %}
+{% endfor %}{% endfor %}
+{% set sorted_trips = flat | sort(attribute="exit_date", reverse=true) %}
+
+{% if summary.round_trips %}
+<div class="tbl-toolbar wl-toolbar" id="pnl-toolbar">
+  <div class="wl-toolbar-info">
+    <i class="bi bi-bar-chart-line me-1"></i>
+    <span id="pnl-match-count">{{ sorted_trips|length }}</span> of {{ sorted_trips|length }} shown
+    <span class="wl-hint">&middot; click headers to sort, shift-click for multi-sort</span>
+  </div>
+  <div class="wl-toolbar-controls">
+    <label class="wl-search">
+      <i class="bi bi-search" aria-hidden="true"></i>
+      <input type="search" id="pnl-search" placeholder="Search ticker"
+             aria-label="Search ticker" autocomplete="off">
+    </label>
+    <div class="wl-adv" id="pnl-adv"></div>
+  </div>
+</div>
+{% endif %}
+
 <div class="tbl-wrap">
-  {# Flat: one row per closed round trip, newest exit first (#573). The
-     per-ticker subtotal rows and the collapsible detail tables are gone --
-     they answered "how did this ticker do", which the chart's ticker filter
-     now answers better, and they buried the individual trades behind a
-     click. Entry and exit prices move into the Result cell's tooltip: they
-     are reference detail, not a column anyone scans down. #}
-  <table class="table table-hover align-middle">
+  {# Flat: one row per closed round trip, newest exit first (#573). Sorting,
+     search and column visibility are wired by pnl-table.js, mirroring the
+     Stock Scanner's data-col/data-val conventions. #}
+  <table class="table table-hover align-middle" id="pnl-table">
     <thead>
       <tr>
-        <th>Ticker</th>
-        <th>Entered</th>
-        <th>Exited</th>
-        <th>Held</th>
-        <th>Stake</th>
-        <th>Result</th>
-        <th>P&amp;L %</th>
+        <th scope="col" data-col="ticker"><button class="wl-sort" data-col="ticker" type="button">Ticker<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="entered"><button class="wl-sort" data-col="entered" type="button">Entered<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="exited"><button class="wl-sort" data-col="exited" type="button">Exited<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="held"><button class="wl-sort" data-col="held" type="button">Held<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="stake"><button class="wl-sort" data-col="stake" type="button">Stake<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="buyprice"><button class="wl-sort" data-col="buyprice" type="button">Buy price<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="sellprice"><button class="wl-sort" data-col="sellprice" type="button">Sell price<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="result"><button class="wl-sort" data-col="result" type="button">Result<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th scope="col" data-col="pnlpct"><button class="wl-sort" data-col="pnlpct" type="button">P&amp;L %<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
       </tr>
     </thead>
     <tbody>
       {% if not summary.round_trips %}
       <tr>
-        <td colspan="7">
+        <td colspan="9">
           <div class="alert alert-info border-0 d-flex align-items-center gap-2 my-2">
             <i class="bi bi-info-circle-fill fs-5"></i>
             No Round-trips yet for this account.
@@ -387,26 +404,30 @@
         </td>
       </tr>
       {% else %}
-      {% set flat = [] %}
-      {% for _ticker, trips in summary.round_trips.items() %}{% for rt in trips %}
-      {% set _ = flat.append(rt) %}
-      {% endfor %}{% endfor %}
-      {% for rt in flat | sort(attribute="exit_date", reverse=true) %}
+      {% for rt in sorted_trips %}
+      {# Symbol for the known currencies; an unmapped-but-known currency (HKD,
+         CAD, …) falls back to its code so the figure is never mistaken for
+         GBP. "" only when the ledger has no verdict at all. #}
+      {% set sym = {'GBP': '£', 'USD': '$', 'EUR': '€'}.get(rt.currency, (rt.currency ~ ' ') if rt.currency else '') %}
       <tr>
-        <td class="fw-semibold">{{ rt.ticker }}</td>
-        <td>{{ rt.entry_date }}</td>
-        <td>{{ rt.exit_date }}</td>
-        <td>{{ rt.holding_period_days }}d</td>
-        <td>£{{ "%.2f"|format(rt.entry_price * rt.shares) }}</td>
+        <td class="fw-semibold" data-col="ticker" data-val="{{ rt.ticker }}">{{ rt.ticker }}</td>
+        <td data-col="entered" data-val="{{ rt.entry_date }}">{{ rt.entry_date }}</td>
+        <td data-col="exited" data-val="{{ rt.exit_date }}">{{ rt.exit_date }}</td>
+        <td data-col="held" data-val="{{ rt.holding_period_days }}">{{ rt.holding_period_days }}d</td>
+        <td data-col="stake" data-val="{{ "%.4f"|format(rt.entry_price * rt.shares) }}">{{ sym }}{{ "%.2f"|format(rt.entry_price * rt.shares) }}</td>
+        <td class="wl-hidden" data-col="buyprice" data-val="{{ "%.4f"|format(rt.entry_price) }}">{{ sym }}{{ "%.2f"|format(rt.entry_price) }}</td>
+        <td class="wl-hidden" data-col="sellprice" data-val="{{ "%.4f"|format(rt.exit_price) }}">{{ sym }}{{ "%.2f"|format(rt.exit_price) }}</td>
         {% if rt.fx_unavailable %}
-        <td><span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span></td>
-        <td>&mdash;</td>
+        <td data-col="result" data-val=""><span class="flag-badge"><i class="bi bi-flag-fill me-1"></i>FX rate unavailable</span></td>
+        <td data-col="pnlpct" data-val="">&mdash;</td>
         {% else %}
         <td class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}"
-            title="{{ "%g"|format(rt.shares) }} shares &middot; entry {{ "%.2f"|format(rt.entry_price) }} &rarr; exit {{ "%.2f"|format(rt.exit_price) }}">
+            data-col="result" data-val="{{ "%.4f"|format(rt.realised_pnl_gbp) }}"
+            title="{{ "%g"|format(rt.shares) }} shares &middot; entry {{ sym }}{{ "%.2f"|format(rt.entry_price) }} &rarr; exit {{ sym }}{{ "%.2f"|format(rt.exit_price) }}">
           {{ "+" if rt.realised_pnl_gbp >= 0 }}£{{ "%.2f"|format(rt.realised_pnl_gbp) }}
         </td>
-        <td class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+        <td class="{% if rt.realised_pnl_gbp >= 0 %}pos{% else %}neg{% endif %}"
+            data-col="pnlpct" data-val="{{ "%.4f"|format(rt.realised_pnl_pct) }}">
           {{ "+" if rt.realised_pnl_pct >= 0 }}{{ "%.1f"|format(rt.realised_pnl_pct) }}%
         </td>
         {% endif %}
