@@ -195,6 +195,36 @@
       background: white; border: 1px solid var(--border); border-radius: 0;
       padding: 1rem 1.25rem; margin-bottom: 1.25rem;
     }
+    /* Realised P&L timeline (#563) -- reuses the card and canvas geometry
+       above; only the legend and filter chrome are new. */
+    .pnl-chart-title {
+      font-size: 0.72rem; font-weight: var(--fw-semibold); text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--muted);
+    }
+    .pnl-chart-field {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--muted); margin: 0;
+    }
+    .pnl-chart-field .form-select { width: auto; font-size: var(--fs-xs); }
+    .pnl-chart-legend {
+      display: flex; flex-wrap: wrap; gap: 0.9rem; align-items: center;
+      font-size: var(--fs-xs); color: var(--muted); margin: 0.7rem 0 0;
+    }
+    .pnl-key { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .pnl-dot {
+      width: 0.7rem; height: 0.7rem; border-radius: 50%; display: inline-block;
+    }
+    .pnl-dot.win { background: var(--green-bg); border: 1px solid var(--green); }
+    .pnl-dot.loss { background: var(--red-bg); border: 1px solid var(--red); }
+    .pnl-dot.size {
+      width: 1rem; height: 1rem; background: transparent; border: 1px solid var(--muted);
+    }
+    .pnl-chart-context {
+      font-size: var(--fs-xs); color: var(--muted); margin: 0.5rem 0 0;
+      font-variant-numeric: tabular-nums;
+    }
+    .pnl-chart-error { color: var(--red); font-size: var(--fs-sm); padding: 1rem 0; margin: 0; }
     /* The container owns the height; Chart.js owns the canvas. Forcing the
        canvas to 100% with !important overrode the size Chart.js had just
        set, stretching whatever resolution its backing store happened to be

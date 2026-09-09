@@ -18,7 +18,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
 from threading import RLock
-from typing import Literal
+from typing import Any, Literal
 
 from app.core.quantity import QUANTITY_EPSILON, round_quantity
 from app.core.config import TICKER_ALIASES_JSON
@@ -897,6 +897,42 @@ class RealisedPnlService:
             realised_pnl_pct=pnl_pct,
             fx_unavailable=False,
         )
+
+    @staticmethod
+    def timeline_points(summary: RealisedPnlSummary) -> list[dict[str, Any]]:
+        """Project a summary's Round-trips into chart-ready points (#563).
+
+        One point per closed Round-trip, anchored at its ``exit_date``,
+        because that is the day a result is realised. Oldest first, so the
+        chart's own ordering never depends on AD-9's most-recent-first group
+        order.
+
+        ``fx_unavailable`` Round-trips are excluded rather than plotted:
+        their P&L fields hold a documented ``0.0`` placeholder, and a dot at
+        zero would read as a trade that broke even. They are already absent
+        from ``total_realised_pnl_gbp`` for the same reason.
+
+        ``stake`` is the money that was actually committed
+        (``entry_price * shares``), so the chart can size a point by what was
+        at risk -- a GBP 7,000 position and a GBP 200 one are not the same
+        event even when they return the same percentage.
+        """
+        points = [
+            {
+                "t": trip.ticker,
+                "x": trip.exit_date,
+                "e": trip.entry_date,
+                "p": round(trip.realised_pnl_gbp, 2),
+                "pc": round(trip.realised_pnl_pct, 2),
+                "d": trip.holding_period_days,
+                "r": round(trip.entry_price * trip.shares, 2),
+            }
+            for trips in summary.round_trips.values()
+            for trip in trips
+            if not trip.fx_unavailable
+        ]
+        points.sort(key=lambda point: (point["x"], point["t"]))
+        return points
 
     @staticmethod
     def _group_and_order(round_trips: list[RoundTrip]) -> dict[str, list[RoundTrip]]:

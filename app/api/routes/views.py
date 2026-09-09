@@ -164,6 +164,9 @@ def partial_realised_pnl(
         active_id = portfolios[0].id
     active_portfolio = next(p for p in portfolios if p.id == active_id)
     summary = realised_pnl.compute_summary(active_id)
+    # Projected from the summary already in hand -- never a second
+    # compute_summary, which would re-run FIFO for the same render (#563).
+    timeline = RealisedPnlService.timeline_points(summary)
     return templates.TemplateResponse(
         request,
         "_realised_pnl.html",
@@ -172,6 +175,8 @@ def partial_realised_pnl(
             "active_portfolio": active_portfolio,
             "summary": summary,
             "unmatched_sells": summary.unmatched_sells,
+            "pnl_timeline": json.dumps(timeline),
+            "pnl_timeline_count": len(timeline),
         },
     )
 

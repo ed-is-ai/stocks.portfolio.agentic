@@ -21,6 +21,264 @@
 </div>
 {% endif %}
 
+{# Realised result per closed round trip, plotted at its exit date (#563).
+   One dot, one trade, at its true date and true result -- no jitter: the
+   usual scatter fix for same-day collisions moves points onto days the
+   trade did not happen, which on a chart of real money is not a trade
+   worth making. Overlap is left to read as overlap, and the tooltip
+   groups by date to pull a cluster apart. #}
+{% if pnl_timeline_count and pnl_timeline_count >= 2 %}
+<div id="pnl-chart-card" class="portfolio-chart-card mb-4">
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+    <div class="pnl-chart-title">
+      <i class="bi bi-graph-up-arrow me-1"></i>Realised result per round trip
+    </div>
+    <div class="d-flex flex-wrap align-items-center gap-2">
+      <label class="pnl-chart-field">
+        <span>Year</span>
+        <select id="pnlYear" class="form-select form-select-sm"
+                aria-label="Filter round trips by exit year"></select>
+      </label>
+      <label class="pnl-chart-field">
+        <span>Ticker</span>
+        <select id="pnlTicker" class="form-select form-select-sm"
+                aria-label="Filter round trips by ticker"></select>
+      </label>
+      <button type="button" id="pnlStake" class="btn btn-sm btn-outline-secondary"
+              aria-pressed="true" onclick="togglePnlStake()">
+        <i class="bi bi-circle-half me-1"></i>Size by stake
+      </button>
+    </div>
+  </div>
+  <div class="portfolio-chart-canvas">
+    <canvas id="pnlTimelineChart" role="img"
+            aria-label="Each closed round trip plotted at its exit date, above or below zero by its percentage return">Realised P&amp;L timeline chart. Use the year and ticker filters, and point tooltips, to inspect individual round trips.</canvas>
+  </div>
+  <p class="pnl-chart-legend">
+    <span class="pnl-key"><span class="pnl-dot win"></span>Win</span>
+    <span class="pnl-key"><span class="pnl-dot loss"></span>Loss</span>
+    <span class="pnl-key"><span class="pnl-dot size"></span>Larger dot = more money at stake</span>
+    <span class="pnl-key text-muted">Height is return %, dot size is money staked
+      &mdash; hover a date to list every trade that closed on it</span>
+  </p>
+  <p class="pnl-chart-context" id="pnlContext" role="status"></p>
+  <script id="pnlTimelineData" type="application/json">{{ pnl_timeline | safe }}</script>
+  <script>
+  (function () {
+    const box = document.querySelector('#pnl-chart-card .portfolio-chart-canvas');
+    const fail = function (msg) {
+      if (box) { box.innerHTML = '<p class="pnl-chart-error">' + msg + '</p>'; }
+    };
+    // An empty canvas reads as "no closed trades" when the real cause is a
+    // script that never ran. Say which it is (#561, #563).
+    if (typeof Chart === 'undefined') {
+      fail('The chart library did not load, so the timeline could not be drawn.');
+      return;
+    }
+    let TRIPS;
+    try {
+      TRIPS = JSON.parse(document.getElementById('pnlTimelineData').textContent);
+    } catch (err) {
+      fail('The timeline data could not be read: ' + err.message);
+      return;
+    }
+    if (!TRIPS.length) { return; }
+
+    const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+    const FONT = 'Inter, system-ui, sans-serif';
+    const DAY = 864e5;
+    const base = Date.parse(TRIPS[0].x.slice(0, 4) + '-01-01');
+    const toX = d => Math.round((Date.parse(d) - base) / DAY);
+    const fromX = x => new Date(base + x * DAY);
+    const money = v => (v < 0 ? '\u2212£' : '£') +
+      Math.abs(v).toLocaleString('en-GB', { maximumFractionDigits: 0 });
+    // Percentage return is what places a dot; the amount rides in the
+    // tooltip. Small returns keep a decimal, large ones do not need one.
+    const pct = function (v) {
+      var sign = v > 0 ? '+' : (v < 0 ? '\u2212' : '');
+      return sign + Math.abs(v).toFixed(Math.abs(v) < 10 ? 1 : 0) + '%';
+    };
+    const longDate = x => fromX(x).toLocaleDateString('en-GB',
+      { day: 'numeric', month: 'short', year: 'numeric' });
+
+    TRIPS.forEach(t => { t.X = toX(t.x); });
+    const maxStake = Math.max.apply(null, TRIPS.map(t => t.r)) || 1;
+    // Area, not radius, tracks the stake -- a linear radius would make a
+    // GBP 7,000 trade swamp the chart rather than read as larger.
+    const radius = t => 3 + 7 * Math.sqrt(Math.min(t.r, maxStake) / maxStake);
+
+    const byDate = {};
+    TRIPS.forEach(t => { (byDate[t.X] = byDate[t.X] || []).push(t); });
+
+    const yearCount = {};
+    TRIPS.forEach(t => { const y = t.x.slice(0, 4); yearCount[y] = (yearCount[y] || 0) + 1; });
+    const years = Object.keys(yearCount).sort();
+    const PAD = 20;
+    const yearSpan = {
+      all: [toX(years[0] + '-01-01') - PAD, toX(years[years.length - 1] + '-12-31') + PAD]
+    };
+    years.forEach(y => {
+      yearSpan[y] = [toX(y + '-01-01') - PAD, toX(y + '-12-31') + PAD];
+    });
+
+    const tickNet = {}, tickCount = {};
+    TRIPS.forEach(t => {
+      tickNet[t.t] = (tickNet[t.t] || 0) + t.p;
+      tickCount[t.t] = (tickCount[t.t] || 0) + 1;
+    });
+    // Biggest movers first: an alphabetical list of every ticker ever held
+    // buries the handful that actually moved the account.
+    const tickers = Object.keys(tickNet)
+      .sort((a, b) => Math.abs(tickNet[b]) - Math.abs(tickNet[a]));
+
+    const yearSel = document.getElementById('pnlYear');
+    yearSel.appendChild(new Option('All years \u00b7 ' + TRIPS.length, 'all'));
+    years.forEach(y => yearSel.appendChild(
+      new Option(y + ' \u00b7 ' + yearCount[y], y)));
+    const tickSel = document.getElementById('pnlTicker');
+    tickSel.appendChild(new Option('All tickers \u00b7 ' + tickers.length, 'all'));
+    tickers.forEach(k => tickSel.appendChild(
+      new Option(k + ' \u00b7 ' + tickCount[k] + '\u00d7 \u00b7 ' + money(tickNet[k]), k)));
+
+    let year = 'all', ticker = 'all', sizeOn = true, chart = null;
+    const inView = t => (ticker === 'all' || t.t === ticker) &&
+                        (year === 'all' || t.x.slice(0, 4) === year);
+
+    // A single ticker's few trades would be lost inside a multi-year window,
+    // so the axis follows the selection -- floored, or two same-week exits
+    // would stretch to fill the chart.
+    function bounds() {
+      if (ticker === 'all') { return yearSpan[year]; }
+      const xs = TRIPS.filter(inView).map(t => t.X);
+      if (!xs.length) { return yearSpan[year]; }
+      let lo = Math.min.apply(null, xs), hi = Math.max.apply(null, xs);
+      const pad = Math.max(15, (hi - lo) * 0.06);
+      lo -= pad; hi += pad;
+      if (year !== 'all') {
+        lo = Math.max(lo, yearSpan[year][0]);
+        hi = Math.min(hi, yearSpan[year][1]);
+      }
+      return [lo, hi];
+    }
+
+    function draw() {
+      const shown = TRIPS.filter(inView);
+      const series = (rows, line, fill) => ({
+        type: 'scatter',
+        data: rows.map(t => ({ x: t.X, y: t.pc, t: t })),
+        backgroundColor: fill,
+        borderColor: line,
+        borderWidth: 1,
+        pointRadius: c => (sizeOn && c.raw && c.raw.t) ? radius(c.raw.t) : 4,
+        pointHoverRadius: c => ((sizeOn && c.raw && c.raw.t) ? radius(c.raw.t) : 4) + 2
+      });
+      const green = css('--green') || '#0a7d34';
+      const red = css('--red') || '#c81e1e';
+      const span = bounds();
+      if (chart) { chart.destroy(); chart = null; }
+      try {
+        chart = new Chart(document.getElementById('pnlTimelineChart').getContext('2d'), {
+          data: {
+            datasets: [
+              series(shown.filter(t => t.p > 0), green, 'rgba(10,125,52,0.45)'),
+              series(shown.filter(t => t.p <= 0), red, 'rgba(200,30,30,0.45)')
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            scales: {
+              x: {
+                type: 'linear', min: span[0], max: span[1],
+                grid: { color: css('--border') || '#dfe3e8' },
+                ticks: {
+                  color: css('--muted') || '#5b6470',
+                  font: { family: FONT, size: 10 },
+                  maxRotation: 0, autoSkipPadding: 20,
+                  callback: v => fromX(v).toLocaleDateString('en-GB',
+                    year === 'all' ? { year: 'numeric' } : { month: 'short' })
+                }
+              },
+              y: {
+                grid: {
+                  color: c => (c.tick && c.tick.value === 0)
+                    ? (css('--muted') || '#5b6470') : (css('--border') || '#dfe3e8')
+                },
+                ticks: {
+                  color: css('--muted') || '#5b6470',
+                  font: { family: FONT, size: 10 },
+                  callback: v => pct(v)
+                }
+              }
+            },
+            plugins: {
+              legend: { display: false },
+              tooltip: {
+                displayColors: false, padding: 10,
+                titleFont: { family: FONT, weight: '600' },
+                bodyFont: { family: FONT, size: 11 },
+                callbacks: {
+                  title: items => {
+                    const p = items[0].raw;
+                    const same = byDate[p.x] || [];
+                    return longDate(p.x) +
+                      (same.length > 1 ? '  \u00b7  ' + same.length + ' trades closed' : '');
+                  },
+                  label: item => {
+                    const same = (byDate[item.raw.x] || [])
+                      .slice().sort((a, b) => b.p - a.p);
+                    const lines = same.slice(0, 8).map(
+                      t => '  ' + t.t + '  ' + pct(t.pc) + '  ' + money(t.p) +
+                           '  (' + t.d + 'd)');
+                    if (same.length > 8) {
+                      lines.push('  \u2026 and ' + (same.length - 8) + ' more');
+                    }
+                    if (same.length > 1) {
+                      lines.push('  day net ' +
+                        money(same.reduce((sum, t) => sum + t.p, 0)));
+                    }
+                    return lines;
+                  }
+                }
+              }
+            }
+          }
+        });
+      } catch (err) {
+        fail('The timeline could not be drawn: ' + err.message);
+      }
+      const won = shown.filter(t => t.p > 0);
+      const lost = shown.filter(t => t.p <= 0);
+      const sum = rows => rows.reduce((a, t) => a + t.p, 0);
+      document.getElementById('pnlContext').textContent =
+        (ticker === 'all' ? 'All tickers' : ticker) + ', ' +
+        (year === 'all' ? 'all years' : year) + ' \u00b7 ' +
+        shown.length + ' round trip' + (shown.length === 1 ? '' : 's') + ' \u00b7 ' +
+        won.length + ' won ' + money(sum(won)) + ' \u00b7 ' +
+        lost.length + ' lost ' + money(sum(lost)) + ' \u00b7 net ' +
+        money(sum(shown));
+    }
+
+    yearSel.addEventListener('change', () => { year = yearSel.value; draw(); });
+    tickSel.addEventListener('change', () => { ticker = tickSel.value; draw(); });
+    window.togglePnlStake = function () {
+      sizeOn = !sizeOn;
+      document.getElementById('pnlStake').setAttribute('aria-pressed', String(sizeOn));
+      draw();
+    };
+
+    // This runs during an htmx swap, before the browser has laid the card
+    // out, so Chart.js would measure a zero-width container and stretch the
+    // result (#561). One frame is enough.
+    requestAnimationFrame(function () {
+      if (document.getElementById('pnlTimelineChart')) { draw(); }
+    });
+  })();
+  </script>
+</div>
+{% endif %}
+
 <!-- Summary strip (all values in GBP) -->
 <div class="d-flex flex-wrap gap-3 mb-4">
   <div class="stat-card">

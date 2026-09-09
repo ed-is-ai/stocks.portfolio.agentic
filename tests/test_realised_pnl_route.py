@@ -197,7 +197,11 @@ def test_round_trip_details_are_collapsed_and_retain_all_row_content(mocked):
     assert "+£5.00" in resp.text
     assert "2026-01-01" in resp.text
     assert "100.00" in resp.text
-    assert resp.text.index("2026-02-02") < resp.text.index("2026-02-01")
+    # Scoped to the table: the timeline chart above it (#563) serialises the
+    # same dates in ascending order, so a whole-document index() would find
+    # them there and read the table's ordering backwards.
+    table = resp.text[resp.text.index("<table") :]
+    assert table.index("2026-02-02") < table.index("2026-02-01")
     assert "110.00" in resp.text
     assert "+£10.00" in resp.text
     assert "+0.0%" in resp.text

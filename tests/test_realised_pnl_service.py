@@ -20,6 +20,7 @@ from app.agents.trader.trader_agent import TraderAgent
 from app.repositories import db
 from app.repositories.trade_currency_repo import TradeCurrencyRepository
 from app.schemas import Trade
+from app.schemas.realised_pnl import RealisedPnlSummary, RoundTrip
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.trader_service import TraderService
@@ -2074,3 +2075,83 @@ def test_a_verdict_is_found_under_the_ledgers_own_spelling(tmp_path: Path) -> No
     rt = service.compute_summary(PORTFOLIO_ID).round_trips["SGLN.L"][0]
 
     assert rt.realised_pnl_gbp == 1000.0
+
+
+# --- GH-563: timeline projection -------------------------------------------
+
+
+def test_timeline_points_are_oldest_first_regardless_of_group_order() -> None:
+    """AD-9 orders groups most-recent-exit first; a chart must not inherit
+    that. Ordering is the projection's own job (#563)."""
+    summary = RealisedPnlSummary(
+        portfolio_id=PORTFOLIO_ID,
+        total_realised_pnl_gbp=0.0,
+        round_trip_count=3,
+        round_trips={
+            "LATE": [_round_trip("LATE", "2026-05-01", 100.0)],
+            "EARLY": [
+                _round_trip("EARLY", "2021-01-04", 20.0),
+                _round_trip("EARLY", "2020-02-02", -5.0),
+            ],
+        },
+    )
+
+    points = RealisedPnlService.timeline_points(summary)
+
+    assert [p["x"] for p in points] == ["2020-02-02", "2021-01-04", "2026-05-01"]
+    assert [p["t"] for p in points] == ["EARLY", "EARLY", "LATE"]
+
+
+def test_timeline_points_exclude_fx_unavailable_round_trips() -> None:
+    """Their P&L fields hold a documented 0.0 placeholder, so plotting one
+    would draw a real trade as having broken even (#563)."""
+    summary = RealisedPnlSummary(
+        portfolio_id=PORTFOLIO_ID,
+        total_realised_pnl_gbp=20.0,
+        round_trip_count=2,
+        round_trips={
+            "OK": [_round_trip("OK", "2026-01-02", 20.0)],
+            "NOFX": [_round_trip("NOFX", "2026-01-03", 0.0, fx_unavailable=True)],
+        },
+    )
+
+    points = RealisedPnlService.timeline_points(summary)
+
+    assert [p["t"] for p in points] == ["OK"]
+
+
+def test_timeline_points_carry_the_money_actually_committed() -> None:
+    """Dot size encodes what was at risk, so the chart needs the stake --
+    a GBP 7,000 position and a GBP 200 one are not the same event (#563)."""
+    summary = RealisedPnlSummary(
+        portfolio_id=PORTFOLIO_ID,
+        total_realised_pnl_gbp=50.0,
+        round_trip_count=1,
+        round_trips={"BIG": [_round_trip("BIG", "2026-01-02", 50.0)]},
+    )
+
+    point = RealisedPnlService.timeline_points(summary)[0]
+
+    # _round_trip buys 10 shares at 70.0.
+    assert point["r"] == pytest.approx(700.0)
+    assert point["p"] == pytest.approx(50.0)
+    assert point["e"] == "2025-12-01"
+
+
+def _round_trip(
+    ticker: str, exit_date: str, pnl: float, fx_unavailable: bool = False
+) -> RoundTrip:
+    """One RoundTrip with only the fields the projection reads varying."""
+    return RoundTrip(
+        ticker=ticker,
+        portfolio_id=PORTFOLIO_ID,
+        entry_date="2025-12-01",
+        entry_price=70.0,
+        exit_date=exit_date,
+        exit_price=75.0,
+        shares=10.0,
+        holding_period_days=32,
+        realised_pnl_gbp=pnl,
+        realised_pnl_pct=1.0,
+        fx_unavailable=fx_unavailable,
+    )
