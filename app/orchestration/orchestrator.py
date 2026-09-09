@@ -89,6 +89,7 @@ from app.repositories.pipeline_status_repo import (
     PipelineStatusRepository,
 )
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
+from app.repositories.trade_currency_repo import TradeCurrencyRepository
 from app.repositories.trades_repo import TradesRepository
 from app.schemas.analysis_artifact import (
     CurrentAnalysisEvidenceV1,
@@ -110,6 +111,7 @@ from app.services.snapshot_price_backfill import PriceEvidenceBackfillService
 from app.services.snapshot_backfill import build_backfill_service
 from app.services.snapshot_price_evidence import build_price_source
 from app.services.snapshot_repair import SnapshotRepairService
+from app.services.trade_currency_resolver import TradeCurrencyResolver
 from app.workflows.pipeline import PipelineStepEvent
 
 
@@ -1449,13 +1451,19 @@ def pipeline(
                 db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
             )
             backfill_prices.ensure_schema()
+            price_source = build_price_source(trades_connect)
             agent = PriceBackfillAgent(
                 name="PriceBackfillAgent",
                 repair_service=SnapshotRepairService(
                     TradesRepository(trades_connect),
                     PortfolioSnapshotsRepository(trades_connect),
-                    build_price_source(trades_connect),
+                    price_source,
                     backfill=PriceEvidenceBackfillService(backfill_prices),
+                    currency_resolver=TradeCurrencyResolver(
+                        price_source,
+                        TradeCurrencyRepository(trades_connect),
+                        TradesRepository(trades_connect),
+                    ),
                 ),
             )
             repair_report = agent.run(PriceBackfillPayload())

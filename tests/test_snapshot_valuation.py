@@ -62,7 +62,10 @@ def _position(
     cost: float,
     value: float | None,
     currency: str = "GBP",
+    cost_currency: str | None = None,
 ) -> Position:
+    """A position quoted in ``currency``, its trades priced in the same
+    currency unless ``cost_currency`` says otherwise (#553)."""
     return Position(
         ticker=ticker,
         shares=10.0,
@@ -70,6 +73,7 @@ def _position(
         total_cost=cost,
         current_value=value,
         price_currency=currency,
+        cost_currency=cost_currency or currency,
     )
 
 
@@ -305,3 +309,28 @@ def test_legacy_csv_path_writes_blank_cell_when_unavailable(
     last = body.strip().splitlines()[-1].split(",")
     assert last[1] == ""  # total_value column left blank, never "0.00"
     assert last[3] == "250.00"
+
+
+# --- GH-553: cost converts by the trade currency, value by the quote -------
+
+
+def test_cost_converts_by_the_trade_currency_and_value_by_the_quote() -> None:
+    """The HSFWA/SGLN shape: quoted USD, traded in pounds. ``current_value``
+    still goes through GBP/USD; ``total_cost`` must not (#553)."""
+    position = _position(
+        "SGLN", cost=1000.0, value=1200.0, currency="USD", cost_currency="GBP"
+    )
+
+    result = value_positions_gbp([position], 1.25, _valuation())
+
+    assert result.cost_gbp == 1000.0
+    assert result.market_value_gbp == pytest.approx(960.0)
+
+
+def test_an_all_gbp_portfolio_is_unchanged() -> None:
+    """Nothing about #553 moves a sterling portfolio's numbers."""
+    result = value_positions_gbp(
+        [_position("AAPL", cost=100.0, value=150.0)], 1.25, _valuation()
+    )
+
+    assert (result.cost_gbp, result.market_value_gbp) == (100.0, 150.0)

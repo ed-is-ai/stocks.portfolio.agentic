@@ -6,12 +6,29 @@ branch, multi-currency isolation -- where a wrong answer is one assertion
 away rather than buried in a written row.
 """
 
+from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
 
 from app.services.cash_reconstruction import CashReconstruction
 from app.services.snapshot_repair import gbp_replay_rows
+
+
+class _RateSource:
+    """A price source evidencing one FX rate and no closes (#553)."""
+
+    def __init__(self, rate: Callable[[str, str], float | None]) -> None:
+        self._rate = rate
+
+    def gbp_price(self, ticker: str, as_of: str) -> float | None:
+        return None
+
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        return self._rate(currency, as_of)
+
+    def trading_days(self, start: str, end: str) -> frozenset[str]:
+        return frozenset()
 
 
 def _replay(*rows: tuple[str, str, float, float, str]) -> list[tuple[object, ...]]:
@@ -146,7 +163,7 @@ def test_a_foreign_buy_lowers_cash_by_its_gbp_value() -> None:
     the raw HKD figure, which moved cash by ~10x the real amount."""
     rows = gbp_replay_rows(
         [("9988", "BUY", 10.0, 80.0, "2024-01-02", None, None, "HKD")],
-        lambda currency, as_of: 9.8,
+        _RateSource(lambda currency, as_of: 9.8),
     )
     model = CashReconstruction([("2024-01-01", "GBP", Decimal("1000"))], [], rows)
     balance = model.balances_at("2024-01-02")
@@ -159,7 +176,7 @@ def test_an_unconvertible_trade_nulls_the_whole_days_cash() -> None:
     day's cash is NULL rather than the anchor pretending nothing moved."""
     rows = gbp_replay_rows(
         [("9988", "BUY", 10.0, 80.0, "2024-01-02", None, None, "HKD")],
-        lambda currency, as_of: None,
+        _RateSource(lambda currency, as_of: None),
     )
     model = CashReconstruction([("2024-01-01", "GBP", Decimal("1000"))], [], rows)
     assert model.balances_at("2024-01-02") is None

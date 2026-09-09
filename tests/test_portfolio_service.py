@@ -315,6 +315,7 @@ def test_portfolio_totals_convert_usd_and_include_cash(monkeypatch) -> None:
             total_cost=200,
             current_value=270,
             price_currency="USD",
+            cost_currency="USD",
         ),
     ]
     ctx = svc.portfolio_partial_context(positions, gbpusd_rate=2.0, cash_balance=1000.0)
@@ -326,7 +327,9 @@ def test_portfolio_totals_convert_usd_and_include_cash(monkeypatch) -> None:
     # GH-484: per-position GBP equivalents for the holdings table — only the
     # non-GBP row gets an entry, using the same rate as the aggregates.
     # USDCO leaves unrealised_pnl unset (None), so no P&L key is emitted.
-    assert ctx["position_gbp_values"] == {"USDCO": {"market_value_gbp": 135.0}}
+    assert ctx["position_gbp_values"] == {
+        "USDCO": {"market_value_gbp": 135.0, "cost_gbp": 100.0}
+    }
 
 
 def test_position_gbp_values_none_when_usd_rate_unavailable(monkeypatch) -> None:
@@ -365,6 +368,7 @@ def test_position_gbp_values_preserve_negative_pnl_sign(monkeypatch) -> None:
             current_value=200,
             unrealised_pnl=-100,
             price_currency="USD",
+            cost_currency="USD",
         )
     ]
 
@@ -1737,3 +1741,67 @@ def test_get_prices_for_holdings_raises_when_alias_file_unreadable(
         svc.get_prices_for_holdings(["ZZZ"])
 
     assert trader.saved == []
+
+
+# --- GH-553: the dashboard converts cost by the trade currency -------------
+
+
+def _mixed_currency_position() -> Position:
+    """Quoted in USD, traded in pounds -- the AZN/HSFWA shape (#553)."""
+    return Position(
+        ticker="SGLN",
+        shares=10,
+        avg_cost=100.0,
+        total_cost=1000.0,
+        current_value=1200.0,
+        price_currency="USD",
+        cost_currency="GBP",
+    )
+
+
+def test_gbp_totals_convert_cost_by_the_trade_currency(monkeypatch) -> None:
+    service = _make_service(monkeypatch)
+
+    total_value, total_cost, total_pnl = service.gbp_totals(
+        [_mixed_currency_position()], gbpusd=2.0
+    )
+
+    assert (total_value, total_cost) == (600.0, 1000.0)
+    assert total_pnl == -400.0
+
+
+def test_partial_context_converts_cost_by_the_trade_currency(monkeypatch) -> None:
+    svc = _make_service(monkeypatch)
+
+    ctx = svc.portfolio_partial_context(
+        [_mixed_currency_position()], gbpusd_rate=2.0, cash_balance=0.0
+    )
+
+    assert ctx["total_cost_gbp"] == 1000.0
+    assert ctx["total_value_gbp"] == 600.0
+
+
+def test_position_gbp_pnl_uses_each_legs_own_currency(monkeypatch) -> None:
+    """#553: a sterling-priced holding with a USD quote must not have its
+    cost divided by the rate, and its GBP P&L is the two converted legs
+    subtracted -- not ``unrealised_pnl``, which mixes the units."""
+    svc = _make_service(monkeypatch)
+    positions = [
+        Position(
+            ticker="SGLN",
+            shares=10,
+            avg_cost=60,
+            total_cost=600,
+            current_value=1000,
+            unrealised_pnl=400,
+            price_currency="USD",
+            cost_currency="GBP",
+        )
+    ]
+
+    ctx = svc.portfolio_partial_context(positions, gbpusd_rate=2.0, cash_balance=0.0)
+
+    entry = ctx["position_gbp_values"]["SGLN"]
+    # Value converts (1000 USD -> £500); cost does not (already sterling).
+    assert entry["market_value_gbp"] == pytest.approx(500.0)
+    assert entry["unrealised_pnl_gbp"] == pytest.approx(-100.0)

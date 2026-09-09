@@ -78,6 +78,7 @@ from app.services.snapshot_price_backfill import (
     PriceEvidenceUnavailable,
 )
 from app.services.snapshot_price_evidence import build_price_source
+from app.services.trade_currency_resolver import TradeCurrencyResolver
 from app.services.snapshot_repair import (
     HistoricalGbpPriceSource,
     NoHistoricalPriceSource,
@@ -148,6 +149,7 @@ class SnapshotBackfillService:
         cash_history: CashBalanceHistoryRepository | None = None,
         estimate_unpriceable: bool = True,
         cash_flows: CashFlowsRepository | None = None,
+        currency_resolver: TradeCurrencyResolver | None = None,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
@@ -161,6 +163,10 @@ class SnapshotBackfillService:
             price_source or NoHistoricalPriceSource()
         )
         self._backfill = backfill
+        # Decides, from dated evidence, which currency a ticker's *trades*
+        # were priced in (#553); without one the quote currency stands, which
+        # is the pre-#553 behaviour.
+        self._currency_resolver = currency_resolver
         # False restores the pre-#519 all-or-nothing rule: a holding with no
         # dated evidence skips the whole day instead of being carried at cost.
         self._estimate_unpriceable = estimate_unpriceable
@@ -276,7 +282,9 @@ class SnapshotBackfillService:
         # run on a foreign holding into a whole window of NULL costs and
         # NULL cash. Only ``price`` changes, so the prefetch and the dates
         # it works from are unaffected by running after it.
-        replay_rows = gbp_replay_rows(replay_rows, self._price_source.gbp_rate)
+        replay_rows = gbp_replay_rows(
+            replay_rows, self._price_source, self._currency_resolver
+        )
         reconstruction = self._cash_reconstruction(pid, anchors, replay_rows)
         # Read once, after the prefetch has filled the window's FX series --
         # this is the market calendar the closed-day test consults (#547).
@@ -548,6 +556,7 @@ def build_backfill_service(trades_connect: Connect) -> SnapshotBackfillService:
     """
     from app.core.config import HISTORICAL_PRICE_CACHE
     from app.repositories import db
+    from app.repositories.trade_currency_repo import TradeCurrencyRepository
 
     from app.services.backfill_status import tracker
 
@@ -555,14 +564,20 @@ def build_backfill_service(trades_connect: Connect) -> SnapshotBackfillService:
         db.make_connect(lambda: str(HISTORICAL_PRICE_CACHE))
     )
     backfill_prices.ensure_schema()
+    price_source = build_price_source(trades_connect)
     return SnapshotBackfillService(
         TradesRepository(trades_connect),
         PortfolioSnapshotsRepository(trades_connect),
         PortfoliosRepository(trades_connect),
         AccountStateRepository(trades_connect),
-        build_price_source(trades_connect),
+        price_source,
         backfill=PriceEvidenceBackfillService(backfill_prices),
         progress=tracker,
         cash_history=CashBalanceHistoryRepository(trades_connect),
         cash_flows=CashFlowsRepository(trades_connect),
+        currency_resolver=TradeCurrencyResolver(
+            price_source,
+            TradeCurrencyRepository(trades_connect),
+            TradesRepository(trades_connect),
+        ),
     )

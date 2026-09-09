@@ -16,8 +16,10 @@ from app.agents.trader.trader_agent import (
 )
 from app.core.config import PORTFOLIO_VALUE_CSV
 from app.repositories import db
+from app.schemas import Trade
 from app.repositories.import_receipt_repo import ImportReceiptRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
+from app.repositories.trade_currency_repo import TradeCurrencyRepository
 from app.repositories.trades_repo import TradesRepository
 from app.services.portfolio_import.contract_schema import contract_content_digest
 from app.services.portfolio_import.registry_loader import get_contract_registry
@@ -3358,3 +3360,85 @@ def test_earliest_snapshot_timestamp_none_when_no_snapshots(tmp_path: Path) -> N
     pf = agent.create_portfolio("Test")
 
     assert agent.earliest_snapshot_timestamp(pf.id) is None
+
+
+# --- GH-553: a position's cost currency is not its quote currency ----------
+
+
+def _cost_currency_agent(tmp_path: Path) -> TraderAgent:
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    return agent
+
+
+def test_cost_currency_defaults_to_gbp_and_ignores_the_quote_unit(
+    tmp_path: Path,
+) -> None:
+    """The AZN shape: the live feed quotes USD, the SIPP rows are pounds.
+    ``price_currency`` still drives value and P&L; the cost basis is not
+    silently divided by GBP/USD any more (#553)."""
+    agent = _cost_currency_agent(tmp_path)
+    agent.record_buy("AZN", 10, 116.49, "2024-01-01")
+
+    position = agent.get_portfolio(
+        current_prices={"AZN": 130.0}, display_info={"AZN": (130.0, "USD")}
+    )[0]
+
+    assert (position.price_currency, position.cost_currency) == ("USD", "GBP")
+    assert position.total_cost == pytest.approx(1164.90)
+
+
+def test_cost_currency_follows_a_resolved_trade_currency(tmp_path: Path) -> None:
+    """A stored verdict (#553) outranks the quote cache in the replay
+    query, so the live position agrees with the backfilled history."""
+    agent = _cost_currency_agent(tmp_path)
+    agent.record_buy("9988", 10, 80.0, "2024-01-01")
+    agent.save_ticker_currencies({"9988": "USD"})
+    TradeCurrencyRepository(db.make_connect(lambda: agent.db_path)).upsert(
+        "9988", "HKD", "0 GBP vs 6 USD of 6 dated trades"
+    )
+
+    assert agent.get_portfolio()[0].cost_currency == "HKD"
+
+
+def test_positions_from_a_trade_snapshot_carry_the_same_cost_currency(
+    tmp_path: Path,
+) -> None:
+    """``get_portfolio_from_trades`` hand-builds its replay tuples, so it
+    must stay in step with ``open_rows``'s currency column (#553)."""
+    agent = _cost_currency_agent(tmp_path)
+    trades = [
+        Trade(
+            ticker="9988",
+            action="BUY",
+            shares=10,
+            price=80.0,
+            date="2024-01-01",
+            currency="HKD",
+        )
+    ]
+
+    positions = agent.get_portfolio_from_trades(trades)
+
+    assert positions[0].cost_currency == "HKD"
+
+
+def test_a_pence_flagged_trade_costs_in_pounds(tmp_path: Path) -> None:
+    """A SIPP CSV quotes LSE trades in pounds, never pence, so a ``GBp``
+    flag must not send the cost basis through a /100 (#553)."""
+    agent = _cost_currency_agent(tmp_path)
+    trades = [
+        Trade(
+            ticker="WCOG",
+            action="BUY",
+            shares=10,
+            price=13.97,
+            date="2024-01-01",
+            currency="GBp",
+        )
+    ]
+
+    positions = agent.get_portfolio_from_trades(trades)
+
+    assert positions[0].cost_currency == "GBP"

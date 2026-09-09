@@ -13,7 +13,9 @@ from app.repositories.results_repo import ResultsRepository
 from app.repositories.ticker_currency_cache_repo import (
     TickerCurrencyCacheRepository,
 )
+from app.repositories.trade_currency_repo import TradeCurrencyRepository
 from app.repositories.trades_repo import TradesRepository
+from app.services.trade_currency_resolver import TradeCurrencyResolver
 
 
 @pytest.fixture
@@ -1088,3 +1090,195 @@ def test_results_latest_scores_single_row_per_ticker(tmp_path):
     )
     # Both tickers must appear; a LIMIT 1 or global MAX would drop one.
     assert repo.latest_scores() == {"AAPL": 7, "MSFT": 5}
+
+
+# --- GH-553: the resolved *trade* currency store ----------------------------
+
+
+class _VotingSource:
+    """A dated source whose closes are quoted in pounds, counting lookups."""
+
+    def __init__(self, closes: dict[str, float], rate: float | None = 1.25) -> None:
+        self._closes = closes
+        self._rate = rate
+        self.calls = 0
+
+    def gbp_price(self, ticker, as_of):
+        self.calls += 1
+        return self._closes.get(as_of)
+
+    def gbp_rate(self, currency, as_of):
+        return 1.0 if currency == "GBP" else self._rate
+
+
+def test_a_trade_currency_verdict_round_trips(trades_connect):
+    """A verdict is durable and overwritable, keyed by ticker (#553)."""
+    repo = TradeCurrencyRepository(trades_connect)
+
+    assert repo.get_all() == {}
+    repo.upsert("SGLN", "GBP", "6 GBP vs 0 USD of 6 dated trades")
+    repo.upsert("9988", "HKD", "0 GBP vs 6 HKD of 6 dated trades")
+    repo.upsert("SGLN", "USD", "later evidence")
+
+    assert repo.get_all() == {"SGLN": "USD", "9988": "HKD"}
+
+
+def test_a_persisted_verdict_is_reused_without_voting_again(trades_connect):
+    """The vote is paid once per ticker, not once per replay (#553): a
+    second resolver reads the stored answer and never touches the source."""
+    repo = TradeCurrencyRepository(trades_connect)
+    source = _VotingSource({"2024-01-01": 70.0, "2024-01-02": 70.5})
+    trades = [("2024-01-01", 70.43), ("2024-01-02", 70.2)]
+
+    assert TradeCurrencyResolver(source, repo).resolve("SGLN", "USD", trades) == "GBP"
+    assert repo.get_all() == {"SGLN": "GBP"}
+    assert source.calls == 2
+
+    fresh = _VotingSource({})
+    assert TradeCurrencyResolver(fresh, repo).resolve("SGLN", "USD", trades) == "GBP"
+    assert fresh.calls == 0
+
+
+def test_a_broker_currency_flag_is_visible_to_the_resolver(trades_connect):
+    """Provenance for the no-evidence branch (#553): does any stored trade
+    for this ticker carry a non-GBP flag of the broker's own?"""
+    trades = TradesRepository(trades_connect)
+    trades.insert("TSLA", "BUY", 1, 100.0, "2024-01-01", currency="USD")
+    trades.insert("B39RMM8", "BUY", 1, 100.0, "2024-01-01", currency="GBP")
+    trades.insert("WCOG", "BUY", 1, 13.97, "2024-01-01", currency="GBp")
+
+    assert trades.has_foreign_currency_flag("TSLA") is True
+    # Sterling in either spelling, and a ticker with no trades at all, are
+    # all "no foreign flag" -- pence is a GBP quote unit, not a currency.
+    assert trades.has_foreign_currency_flag("B39RMM8") is False
+    assert trades.has_foreign_currency_flag("WCOG") is False
+    assert trades.has_foreign_currency_flag("NOPE") is False
+
+
+def test_an_unverifiable_quote_cache_guess_resolves_to_gbp(trades_connect):
+    """B39RMM8's shape: a SEDOL-only UK fund line with no dated close, whose
+    ``USD`` candidate came only from the quote cache's suffix heuristic. It
+    must not have its cost divided by GBP/USD (#553)."""
+    trades = TradesRepository(trades_connect)
+    trades.insert("B39RMM8", "BUY", 1, 100.0, "2024-01-01", currency="GBP")
+    repo = TradeCurrencyRepository(trades_connect)
+    resolver = TradeCurrencyResolver(_VotingSource({}), repo, trades)
+
+    verdict = resolver.resolve("B39RMM8", "USD", [("2024-01-01", 100.0)])
+
+    assert verdict == "GBP"
+    # Memoised for this run, but never stored: it rests on the absence of
+    # evidence, and a stored row would outrank the quote cache for good.
+    assert repo.get_all() == {}
+    assert resolver.resolve("B39RMM8", "USD", []) == "GBP"
+
+
+def test_an_unverifiable_candidate_with_a_broker_flag_keeps_converting(
+    trades_connect,
+):
+    """A currency symbol in the broker's own price cell is a statement about
+    the trade, so it stands even with no dated close to test it (#553)."""
+    trades = TradesRepository(trades_connect)
+    trades.insert("GPN", "BUY", 1, 100.0, "2024-01-01", currency="USD")
+    repo = TradeCurrencyRepository(trades_connect)
+
+    verdict = TradeCurrencyResolver(_VotingSource({}), repo, trades).resolve(
+        "GPN", "USD", [("2024-01-01", 100.0)]
+    )
+
+    assert verdict == "USD"
+    # Nothing is recorded: the candidate was never bettered.
+    assert repo.get_all() == {}
+
+
+def test_a_no_evidence_verdict_is_never_persisted(trades_connect):
+    """The #549 killer: 9988 is flagged GBP on every row, so a cold price
+    cache would resolve it to GBP -- and persisting that would outrank the
+    quote cache for good, putting ~10x its market value back on the chart.
+    The verdict is memoised for the run and written nowhere (#553)."""
+    trades = TradesRepository(trades_connect)
+    trades.insert("9988", "BUY", 10, 80.0, "2024-01-01", currency="GBP")
+    repo = TradeCurrencyRepository(trades_connect)
+    resolver = TradeCurrencyResolver(_VotingSource({}), repo, trades)
+
+    assert resolver.resolve("9988", "HKD", []) == "GBP"
+    assert repo.get_all() == {}
+
+
+def test_a_missing_rate_is_not_a_missing_instrument(trades_connect):
+    """A dated close exists and only the FX series has a hole: the ticker
+    is priceable, so its candidate stands rather than falling back (#553)."""
+    trades = TradesRepository(trades_connect)
+    trades.insert("9988", "BUY", 10, 80.0, "2024-01-01", currency="GBP")
+    source = _VotingSource({"2024-01-01": 8.16}, rate=None)
+
+    verdict = TradeCurrencyResolver(
+        source, TradeCurrencyRepository(trades_connect), trades
+    ).resolve("9988", "HKD", [])
+
+    assert verdict == "HKD"
+
+
+def test_an_ambiguous_date_abstains(trades_connect):
+    """A 4:1 split after the last trade leaves the raw price 52.8 off the
+    adjusted close and the converted one 38.8 off -- a bare nearest-match
+    would call that USD and divide the cost basis by the rate for ever, so
+    neither side wins without a 2x margin (#553)."""
+    trades = TradesRepository(trades_connect)
+    trades.insert("SPLIT", "BUY", 1, 100.0, "2024-01-01", currency="GBP")
+    source = _VotingSource({"2024-01-01": 25.0}, rate=1.25)
+    repo = TradeCurrencyRepository(trades_connect)
+
+    # The only date abstains, so there is no verdict -- and a close *was*
+    # found, so the no-evidence fallback stays out of it too.
+    assert (
+        TradeCurrencyResolver(source, repo, trades).resolve("SPLIT", "USD", []) == "USD"
+    )
+    assert repo.get_all() == {}
+
+
+def test_the_vote_samples_a_tickers_trades_across_portfolios(trades_connect):
+    """TSLA carries ``USD`` on one row and ``GBP`` on the rest, and its rows
+    are spread over portfolios; the currency is a fact about the listing, so
+    the sample must be every recent trade of that ticker (#553)."""
+    trades = TradesRepository(trades_connect)
+    for day, price, pid in [
+        ("2024-01-01", 100.0, 1),
+        ("2024-01-02", 110.0, 2),
+        ("2024-01-03", 120.0, None),
+    ]:
+        trades.insert("TSLA", "BUY", 1, price, day, currency="GBP", portfolio_id=pid)
+
+    assert trades.recent_trade_prices("TSLA") == [
+        ("2024-01-03", 120.0),
+        ("2024-01-02", 110.0),
+        ("2024-01-01", 100.0),
+    ]
+    # All three vote (the closes are the converted price), so the verdict is
+    # unanimous rather than decided by one flagged row.
+    source = _VotingSource({"2024-01-01": 80.0, "2024-01-02": 88.0, "2024-01-03": 96.0})
+    resolver = TradeCurrencyResolver(
+        source, TradeCurrencyRepository(trades_connect), trades
+    )
+    assert resolver.resolve("TSLA", "USD", []) == "USD"
+
+
+def test_the_dashboard_and_replay_paths_agree_on_the_cost_currency(
+    trades_connect, tmp_path
+):
+    """``get_portfolio_from_trades`` (dashboard, live snapshot writer) must
+    resolve currencies the same way ``open_rows`` does, or a live row and a
+    backfilled row for the same day differ by a whole FX rate (#553)."""
+    from app.agents.trader.trader_agent import TraderAgent
+
+    agent = TraderAgent(name="TraderAgent")
+    agent.db_path = tmp_path / "trades.db"
+    agent._init_db()
+    agent.record_buy("9988", 10, 80.0, "2024-01-01")
+    # The broker's own flag says GBP; the quote cache knows better.
+    agent.save_ticker_currencies({"9988": "HKD"})
+
+    from_rows = agent.get_portfolio()[0]
+    from_trades = agent.get_portfolio_from_trades(agent.get_trade_history())[0]
+
+    assert from_rows.cost_currency == from_trades.cost_currency == "HKD"

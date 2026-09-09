@@ -44,7 +44,18 @@ _REPLAY_COLUMNS = (
 # identically denominated prices -- hence the cache first, the flag only as a
 # per-ticker fallback, and both resolved in SQL so every replay caller gets
 # the same answer.
+# Since #553 an evidence-resolved *trade* currency in
+# ``trade_currency_resolutions`` outranks all of the above: the cache below is
+# the currency a ticker is *quoted* in, which is a different fact -- HSFWA and
+# SGLN quote in USD and trade in pounds. That table is only ever written by
+# ``TradeCurrencyResolver``, from dated closes, and only when the evidence is
+# conclusive, so an absent row means "no better answer than the quote".
 _REPLAY_CURRENCY = """CASE
+        WHEN r.currency IS NOT NULL AND TRIM(r.currency) <> ''
+        THEN CASE
+            WHEN UPPER(TRIM(r.currency)) IN ('GBP', 'GBX') THEN 'GBP'
+            ELSE TRIM(r.currency)
+        END
         WHEN c.currency IS NOT NULL AND TRIM(c.currency) <> ''
         THEN CASE
             WHEN UPPER(TRIM(c.currency)) IN ('GBP', 'GBX') THEN 'GBP'
@@ -64,6 +75,7 @@ _REPLAY_CURRENCY = """CASE
 _REPLAY_SELECT = (
     f"SELECT {_REPLAY_COLUMNS}, {_REPLAY_CURRENCY} AS currency"
     " FROM trades t LEFT JOIN ticker_currency_cache c ON c.ticker = t.ticker"
+    " LEFT JOIN trade_currency_resolutions r ON r.ticker = t.ticker"
     " WHERE t.ticker NOT IN ('', 'n/a', 'N/A')"
 )
 
@@ -398,6 +410,124 @@ class TradesRepository:
             params = (portfolio_id,)
         sql += f" ORDER BY {_REPLAY_ORDER}"
         return conn.execute(sql, params).fetchall()
+
+    def resolve_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return ``{ticker: resolved trading currency}`` for ``tickers``.
+
+        The same ``_REPLAY_CURRENCY`` expression ``open_rows`` selects, so
+        there is exactly one definition of a ticker's currency however a
+        caller reaches it (#553). ``TraderAgent.get_portfolio_from_trades``
+        hand-builds its replay tuples from the raw per-trade flag, which is
+        the unreliable signal ``_REPLAY_CURRENCY`` exists to override; that
+        made a live dashboard row and a backfilled row for the same day
+        disagree by a whole FX rate. A ticker with no trades is absent from
+        the result.
+        """
+        if not tickers:
+            return {}
+        placeholders = _in_placeholders(tickers)
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT t.ticker, {_REPLAY_CURRENCY} AS currency"
+                " FROM trades t"
+                " LEFT JOIN ticker_currency_cache c ON c.ticker = t.ticker"
+                " LEFT JOIN trade_currency_resolutions r ON r.ticker = t.ticker"
+                f" WHERE t.ticker IN ({placeholders})",
+                tuple(tickers),
+            ).fetchall()
+        return {row[0]: row[1] for row in rows}
+
+    def quote_currencies(self, tickers: list[str]) -> dict[str, str]:
+        """Return ``{ticker: non-GBP quote currency}`` for ``tickers`` (#553).
+
+        The currency a ticker is *quoted* in, from the live price cache's
+        display metadata first and the resolved-currency cache second --
+        both in this database. It is emphatically **not** the currency its
+        trades were priced in (HSFWA and SGLN quote USD and trade in
+        pounds), so it is never a candidate: it is only the rival hypothesis
+        :class:`TradeCurrencyResolver` puts to a vote against sterling.
+
+        Without it a ticker with no cache row and no broker flag has no
+        foreign hypothesis at all, so the vote never runs and the trades
+        stay assumed-sterling -- which is what left ~60 US holdings
+        (GOOGL among them, paid 374.47 the day it was worth £285.28) with a
+        cost basis overstated by the whole FX rate.
+
+        Pence spellings fold to ``GBP`` and sterling entries are omitted
+        entirely, so a caller can read "present in this mapping" as "there
+        is something to test".
+        """
+        if not tickers:
+            return {}
+        placeholders = _in_placeholders(tickers)
+        params = tuple(tickers)
+        quotes: dict[str, str] = {}
+        with session(self._connect) as conn:
+            for table in ("ticker_currency_cache", "price_cache"):
+                for ticker, currency in conn.execute(
+                    f"SELECT ticker, currency FROM {table}"
+                    f" WHERE ticker IN ({placeholders})",
+                    params,
+                ).fetchall():
+                    unit = str(currency or "").strip()
+                    if unit and unit.upper() not in {"GBP", "GBX"}:
+                        # ``price_cache`` runs second so its live display
+                        # metadata wins: it is refreshed on every scan,
+                        # while a ``ticker_currency_cache`` row can predate
+                        # a re-listing.
+                        quotes[ticker] = unit.upper()
+                    else:
+                        quotes.pop(ticker, None)
+        return quotes
+
+    def recent_trade_prices(
+        self, ticker: str, limit: int = 40
+    ) -> list[tuple[str, float]]:
+        """Return ``ticker``'s most recent ``(date, price)`` pairs (#553).
+
+        Across every portfolio, because the currency a ticker's trades are
+        priced in is a global fact about the listing, not a per-portfolio
+        one -- voting on one portfolio's replay rows sampled whichever
+        subset happened to be there. Newest first (the resolver wants the
+        most recent trades, so a stock split cannot pit an adjusted close
+        against an unadjusted old fill), one row per date, and never a
+        non-positive price: an unpriceable row cannot vote.
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT date, price FROM trades"
+                " WHERE ticker = ? AND price IS NOT NULL AND price > 0"
+                " ORDER BY date DESC, id DESC LIMIT ?",
+                (ticker, limit),
+            ).fetchall()
+        seen: dict[str, float] = {}
+        for trade_date, price in rows:
+            seen.setdefault(str(trade_date)[:10], float(price))
+        return sorted(seen.items(), reverse=True)
+
+    def has_foreign_currency_flag(self, ticker: str) -> bool:
+        """True when any stored trade for ``ticker`` carries a non-GBP flag.
+
+        The flag comes from a currency symbol in the broker's own price cell,
+        so it is a statement about the trade itself -- unreliable as the
+        primary signal (see ``_REPLAY_CURRENCY``) but decisive as provenance
+        when no dated close can settle the question (#553): a ticker whose
+        every flag says sterling has a foreign candidate only because the
+        *quote* cache guessed one, and a SEDOL-only UK fund line
+        (``B39RMM8``) must not have its cost basis divided by GBP/USD on the
+        strength of a suffix heuristic applied to a non-Yahoo symbol.
+        """
+        with session(self._connect) as conn:
+            return (
+                conn.execute(
+                    "SELECT 1 FROM trades WHERE ticker = ?"
+                    " AND currency IS NOT NULL"
+                    " AND UPPER(TRIM(currency)) NOT IN ('', 'GBP', 'GBX')"
+                    " LIMIT 1",
+                    (ticker,),
+                ).fetchone()
+                is not None
+            )
 
     def held_tickers(self) -> set[str]:
         """Return the set of tickers with a net-positive position in any

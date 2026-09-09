@@ -157,6 +157,12 @@ CREATE TABLE IF NOT EXISTS ticker_currency_cache (
     currency    TEXT NOT NULL,
     resolved_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS trade_currency_resolutions (
+    ticker      TEXT PRIMARY KEY,
+    currency    TEXT NOT NULL,
+    resolved_at TEXT NOT NULL,
+    evidence    TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS portfolio_import_receipts (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     import_batch_id          TEXT NOT NULL,

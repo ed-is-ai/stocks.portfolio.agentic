@@ -10,9 +10,14 @@ from typing import Any
 from app.api.templating import templates
 
 
-def _render(cash_balance: float | None, positions: list[Any] | None = None) -> str:
+def _render(
+    cash_balance: float | None,
+    positions: list[Any] | None = None,
+    position_gbp_values: dict[str, Any] | None = None,
+) -> str:
     context = {
         "positions": [] if positions is None else positions,
+        "position_gbp_values": position_gbp_values or {},
         "cash_balance": cash_balance,
         "cash_flows": [],
         "positions_with_value": [],
@@ -101,6 +106,9 @@ def _fake_position() -> SimpleNamespace:
         shares=1,
         avg_cost=100,
         price_currency="GBP",
+        # Trades priced in the same unit as the quote unless a test says
+        # otherwise -- the mixed case is #553's, and has its own test.
+        cost_currency="GBP",
         total_cost=100,
         current_price=100,
         current_value=100,
@@ -679,6 +687,7 @@ def test_usd_row_leads_with_native_symbol_and_shows_gbp_equivalent() -> None:
     usd.ticker = "GOOGL"
     usd.display_symbol = "GOOGL"
     usd.price_currency = "USD"
+    usd.cost_currency = "USD"
     usd.current_value = 1000.0
     usd.unrealised_pnl = 250.0
     context = {
@@ -730,6 +739,7 @@ def test_usd_row_omits_gbp_equivalent_when_fx_unavailable() -> None:
     usd.ticker = "GOOGL"
     usd.display_symbol = "GOOGL"
     usd.price_currency = "USD"
+    usd.cost_currency = "USD"
     usd.current_value = 1000.0
     usd.unrealised_pnl = 250.0
     context = {
@@ -887,3 +897,41 @@ def test_chart_scattered_gaps_keep_the_some_points_note() -> None:
     assert "Some Portfolio Value points are unavailable" in html
     assert "Portfolio Value is missing for part of this" not in html
     assert "hidden: true" in html
+
+
+def test_a_sterling_cost_under_a_usd_quote_renders_in_pounds() -> None:
+    """SGLN's shape (#553): quoted USD, traded in pounds. The cost columns
+    must not wear a ``$``, and the P&L -- a subtraction across two
+    currencies -- is shown in GBP instead of a native figure that is not
+    expressible in either unit."""
+    pos = _fake_position()
+    pos.ticker = "SGLN"
+    pos.display_symbol = "SGLN"
+    pos.price_currency = "USD"
+    pos.cost_currency = "GBP"
+    pos.avg_cost = 70.43
+    pos.total_cost = 704.30
+    pos.current_price = 90.0
+    pos.current_value = 900.0
+    pos.unrealised_pnl = 195.70
+    pos.unrealised_pnl_pct = 27.8
+    html = _render(
+        0.0,
+        positions=[pos],
+        position_gbp_values={
+            "SGLN": {
+                "market_value_gbp": 720.0,
+                "cost_gbp": 704.30,
+                "unrealised_pnl_gbp": 15.70,
+            }
+        },
+    )
+
+    row = _position_row(html, "SGLN")
+
+    assert "£70.43" in row and "£704.30" in row
+    assert "$70.43" not in row and "$704.30" not in row
+    # The GBP P&L and its percentage of the GBP cost, never the native pair.
+    assert "+&pound;15.70" in row
+    assert "+2.2%" in row
+    assert "+$195.70" not in row and "+27.8%" not in row

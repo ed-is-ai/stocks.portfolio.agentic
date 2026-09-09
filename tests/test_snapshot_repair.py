@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
 import shlex
 import sqlite3
@@ -16,6 +17,8 @@ from app.cli import repair_portfolio_snapshots as repair_cli
 from app.repositories import db
 from app.services.backtest.historical_price_evidence import FX_PAIR
 from app.services.snapshot_price_backfill import PriceEvidenceUnavailable
+from app.repositories.trade_currency_repo import TradeCurrencyRepository
+from app.services.trade_currency_resolver import TradeCurrencyResolver
 from app.services.snapshot_repair import (
     NoHistoricalPriceSource,
     SnapshotRepairService,
@@ -59,6 +62,7 @@ def _service(
     agent: TraderAgent,
     source: object | None = None,
     estimate_unpriceable: bool = False,
+    currency_resolver: object | None = None,
 ) -> SnapshotRepairService:
     """Build the service; estimation is off by default (#519).
 
@@ -71,6 +75,7 @@ def _service(
         agent._snapshots,
         source,  # type: ignore[arg-type]
         estimate_unpriceable=estimate_unpriceable,
+        currency_resolver=currency_resolver,  # type: ignore[arg-type]
     )
 
 
@@ -822,6 +827,28 @@ def _replay_row(
     return (ticker, action, shares, price, when, None, None, currency)
 
 
+class _RateSource:
+    """A price source evidencing FX rates only (#553).
+
+    ``gbp_replay_rows`` now takes the whole source rather than a bare rate
+    callable, since resolving a ticker's *trade* currency needs its dated
+    closes too; these fixtures exercise the conversion, so they evidence no
+    close and every candidate currency stands.
+    """
+
+    def __init__(self, rate: Callable[[str, str], float | None]) -> None:
+        self._rate = rate
+
+    def gbp_price(self, ticker: str, as_of: str) -> float | None:
+        return None
+
+    def gbp_rate(self, currency: str, as_of: str) -> float | None:
+        return self._rate(currency, as_of)
+
+    def trading_days(self, start: str, end: str) -> frozenset[str]:
+        return frozenset()
+
+
 def _rate(currency: str, as_of: str) -> float | None:
     """9.8 HKD per GBP on the one evidenced day; nothing else is known."""
     return 9.8 if (currency, as_of) == ("HKD", "2024-01-01") else None
@@ -835,12 +862,12 @@ def test_gbp_rows_are_returned_untouched(tmp_path: Path) -> None:
     def boom(currency: str, as_of: str) -> float | None:
         raise AssertionError("a GBP row must never ask for a rate")
 
-    assert gbp_replay_rows(rows, boom) == rows
+    assert gbp_replay_rows(rows, _RateSource(boom)) == rows
 
 
 def test_a_foreign_price_is_divided_by_its_dated_rate() -> None:
     converted = gbp_replay_rows(
-        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _rate
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _RateSource(_rate)
     )
     # Only the price changes; every other column survives untouched.
     assert converted[0][3] == pytest.approx(80.0 / 9.8)
@@ -861,7 +888,7 @@ def test_a_rate_is_looked_up_once_per_currency_and_date() -> None:
             _replay_row("0700", "BUY", 5, 300.0, "2024-01-01", "HKD"),
             _replay_row("9988", "SELL", 2, 90.0, "2024-01-02", "HKD"),
         ],
-        counting,
+        _RateSource(counting),
     )
     assert calls == [("HKD", "2024-01-01"), ("HKD", "2024-01-02")]
 
@@ -870,14 +897,14 @@ def test_a_foreign_price_with_no_dated_rate_becomes_none() -> None:
     """The exact-date contract, not a nearest-prior guess: the day after the
     evidenced one is unconvertible, so its price is unavailable."""
     converted = gbp_replay_rows(
-        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD")], _rate
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD")], _RateSource(_rate)
     )
     assert converted[0][3] is None
 
 
 def test_cost_basis_uses_the_converted_price() -> None:
     rows = gbp_replay_rows(
-        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _rate
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _RateSource(_rate)
     )
     assert position_cost_basis_as_of(rows, "2024-02-01") == {
         "9988": pytest.approx(800.0 / 9.8)
@@ -893,7 +920,7 @@ def test_an_unconvertible_trade_makes_its_cost_unavailable() -> None:
             _replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD"),
             _replay_row("AAPL", "BUY", 10, 5.0, "2024-01-02"),
         ],
-        _rate,
+        _RateSource(_rate),
     )
     assert position_cost_basis_as_of(rows, "2024-02-01") == {
         "9988": None,
@@ -904,7 +931,7 @@ def test_an_unconvertible_trade_makes_its_cost_unavailable() -> None:
 
 def test_net_trade_cash_is_none_when_a_trade_cannot_be_converted() -> None:
     rows = gbp_replay_rows(
-        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD")], _rate
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-02", "HKD")], _RateSource(_rate)
     )
     assert net_trade_cash(rows, "2024-01-01", "2024-01-31") is None
     # Outside the interval it never contributes, so the answer is real again.
@@ -913,7 +940,7 @@ def test_net_trade_cash_is_none_when_a_trade_cannot_be_converted() -> None:
 
 def test_net_trade_cash_falls_by_a_converted_buy() -> None:
     rows = gbp_replay_rows(
-        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _rate
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")], _RateSource(_rate)
     )
     assert net_trade_cash(rows, "2023-12-31", "2024-01-31") == pytest.approx(
         -800.0 / 9.8
@@ -953,7 +980,7 @@ def test_an_unconvertible_sell_leaves_the_cost_basis_intact() -> None:
             _replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD"),
             _replay_row("9988", "SELL", 2, 90.0, "2024-01-02", "HKD"),
         ],
-        _rate,
+        _RateSource(_rate),
     )
     assert position_cost_basis_as_of(rows, "2024-02-01") == {
         "9988": pytest.approx(8 * 80.0 / 9.8)
@@ -974,7 +1001,7 @@ def test_closing_a_position_clears_its_unconvertible_mark() -> None:
             _replay_row("9988", "SELL", 10, 90.0, "2024-01-03", "HKD"),
             _replay_row("9988", "BUY", 5, 80.0, "2024-01-04", "HKD"),
         ],
-        rate,
+        _RateSource(rate),
     )
     assert position_cost_basis_as_of(rows, "2024-02-01") == {
         "9988": pytest.approx(5 * 80.0 / 9.8)
@@ -1079,4 +1106,241 @@ def test_a_stored_timestamp_is_classified_as_a_weekend() -> None:
     source = _FixedPriceSource({"AAPL": 9.0})
     assert market_was_closed(
         source, {"AAPL": 1.0}, "2024-01-06T00:00:00+00:00", frozenset()
+    )
+
+
+# --- GH-553: the trade currency is resolved from evidence, not the quote ----
+
+
+class _VotingSource(_RateSource):
+    """Dated GBP closes plus one FX rate, for the currency vote (#553)."""
+
+    def __init__(self, closes: dict[str, float], rate: float | None = 1.25) -> None:
+        super().__init__(lambda currency, as_of: 1.0 if currency == "GBP" else rate)
+        self._closes = closes
+
+    def gbp_price(self, ticker: str, as_of: str) -> float | None:
+        return self._closes.get(as_of)
+
+
+def test_a_gbp_priced_holding_with_a_foreign_quote_is_left_unconverted() -> None:
+    """The HSFWA/SGLN shape: quoted USD, traded in pounds. Its trade price
+    matches the dated GBP close to the penny, so the rows are already
+    sterling and dividing them by GBP/USD would understate the cost ~20%."""
+    rows = gbp_replay_rows(
+        [
+            _replay_row("SGLN", "BUY", 10, 70.43, "2024-01-01", "USD"),
+            _replay_row("SGLN", "BUY", 10, 71.10, "2024-01-02", "USD"),
+        ],
+        _VotingSource({"2024-01-01": 70.01, "2024-01-02": 71.30}),
+        TradeCurrencyResolver(
+            _VotingSource({"2024-01-01": 70.01, "2024-01-02": 71.30})
+        ),
+    )
+    assert [row[3] for row in rows] == [70.43, 71.10]
+    assert position_cost_basis_as_of(rows, "2024-02-01") == {
+        "SGLN": pytest.approx(1415.3)
+    }
+
+
+def test_a_genuinely_foreign_holding_still_converts() -> None:
+    """The 9988 shape: the raw price is nowhere near the GBP close and the
+    converted one is, so the trades really are in HKD (#553)."""
+    source = _VotingSource({"2024-01-01": 8.16}, rate=9.8)
+    rows = gbp_replay_rows(
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")],
+        source,
+        TradeCurrencyResolver(source),
+    )
+    assert rows[0][3] == pytest.approx(80.0 / 9.8)
+
+
+def test_no_usable_evidence_leaves_the_candidate_currency_alone() -> None:
+    """No dated close means no verdict, so #549's answer stands: the HKD
+    conversion still happens, and nothing is inferred from silence."""
+    source = _VotingSource({}, rate=9.8)
+    rows = gbp_replay_rows(
+        [_replay_row("9988", "BUY", 10, 80.0, "2024-01-01", "HKD")],
+        source,
+        TradeCurrencyResolver(source),
+    )
+    assert rows[0][3] == pytest.approx(80.0 / 9.8)
+
+
+def test_a_tied_vote_leaves_the_candidate_currency_alone() -> None:
+    """One trade votes each way: a coin toss is not evidence, so the
+    candidate stands rather than half the history re-denominating."""
+    source = _VotingSource({"2024-01-01": 70.0, "2024-01-02": 56.0}, rate=1.25)
+    rows = gbp_replay_rows(
+        [
+            _replay_row("SGLN", "BUY", 10, 70.43, "2024-01-01", "USD"),
+            _replay_row("SGLN", "BUY", 10, 70.43, "2024-01-02", "USD"),
+        ],
+        source,
+        TradeCurrencyResolver(source),
+    )
+    assert [row[3] for row in rows] == [
+        pytest.approx(70.43 / 1.25),
+        pytest.approx(70.43 / 1.25),
+    ]
+
+
+def test_a_sterling_quoted_ticker_costs_no_price_lookup() -> None:
+    """A sterling portfolio pays nothing for #553: a ``GBP`` candidate with
+    nothing foreign quoted is answered before any evidence is read."""
+
+    class _Exploding(_VotingSource):
+        def gbp_price(self, ticker: str, as_of: str) -> float | None:
+            raise AssertionError("a sterling holding must never be priced")
+
+        def gbp_rate(self, currency: str, as_of: str) -> float | None:
+            raise AssertionError("a sterling holding must never need a rate")
+
+    rows = [_replay_row("AAPL", "BUY", 10, 5.0, "2024-01-01")]
+    source = _Exploding({})
+    assert gbp_replay_rows(rows, source, TradeCurrencyResolver(source)) == rows
+
+
+def test_one_ticker_is_voted_on_once_however_many_trades_it_has() -> None:
+    """The verdict is per ticker, so its rows can never be converted on
+    two different bases -- and the vote is not paid per row."""
+    source = _VotingSource({"2024-01-01": 70.0, "2024-01-02": 70.5})
+    resolver = TradeCurrencyResolver(source)
+    asked: list[str] = []
+    original = resolver.resolve
+
+    def counting(ticker: str, candidate: str, trades: list[tuple[str, float]]) -> str:
+        asked.append(ticker)
+        return original(ticker, candidate, trades)
+
+    resolver.resolve = counting  # type: ignore[method-assign]
+    gbp_replay_rows(
+        [
+            _replay_row("SGLN", "BUY", 10, 70.43, "2024-01-01", "USD"),
+            _replay_row("SGLN", "BUY", 10, 70.20, "2024-01-02", "USD"),
+        ],
+        source,
+        resolver,
+    )
+    assert asked == ["SGLN"]
+
+
+def test_a_dry_run_writes_no_currency_verdict(tmp_path: Path) -> None:
+    """``repair(dry_run=True)`` promises nothing is written, and the
+    currency resolution runs before every ``if not dry_run`` guard (#553)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("SGLN", 10, 70.43, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"SGLN": "USD"})
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 704.3, 0.0)
+    connect = db.make_connect(lambda: agent.db_path)
+    repo = TradeCurrencyRepository(connect)
+    source = _VotingSource({"2024-02-01": 70.01, "2024-01-01": 70.01})
+    resolver = TradeCurrencyResolver(source, repo, agent._trades)
+    service = _service(agent, source, currency_resolver=resolver)
+
+    service.repair(pf.id, dry_run=True)
+    assert repo.get_all() == {}
+
+    # The real pass writes it, and the shared memo means it was voted once.
+    service.repair(pf.id)
+    assert repo.get_all() == {"SGLN": "GBP"}
+
+
+def test_the_cli_resolves_no_currency_without_historical_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--no-historical-evidence`` means no evidence, and a resolver with
+    none can only guess -- durably, at the top of the currency order (#553)."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("9988", 10, 80.0, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"9988": "HKD"})
+    agent._snapshots.append(pf.id, "2024-02-01T00:00:00+00:00", 0.0, 800.0, 0.0)
+    monkeypatch.setattr(repair_cli, "TRADES_DB", str(agent.db_path))
+
+    repair_cli.main(["--no-historical-evidence"])
+
+    connect = db.make_connect(lambda: agent.db_path)
+    assert TradeCurrencyRepository(connect).get_all() == {}
+
+
+class _QuotedTrades:
+    """A trades repository stub that only answers the quote hypothesis."""
+
+    def __init__(
+        self,
+        quotes: dict[str, str],
+        prices: dict[str, list[tuple[str, float]]] | None = None,
+    ) -> None:
+        self._quotes = quotes
+        self._prices = prices or {}
+
+    def quote_currencies(self, tickers: list[str]) -> dict[str, str]:
+        return {t: self._quotes[t] for t in tickers if t in self._quotes}
+
+    def recent_trade_prices(
+        self, ticker: str, limit: int = 40
+    ) -> list[tuple[str, float]]:
+        """The ticker's voting sample, newest first, as the real repo returns."""
+        return sorted(self._prices.get(ticker, []), reverse=True)
+
+    def has_foreign_currency_flag(self, ticker: str) -> bool:
+        return False
+
+
+def test_a_sterling_candidate_is_promoted_when_the_quote_says_otherwise() -> None:
+    """The GOOGL shape: no cache row and no broker flag, so the candidate is
+    ``GBP`` only because the fallback chain ran out of signals -- but it is
+    quoted in USD and its prices sit ~1.3x the dated close (#553)."""
+    source = _VotingSource({"2024-01-01": 285.28, "2024-01-02": 137.56}, rate=1.31)
+    rows = gbp_replay_rows(
+        [
+            _replay_row("GOOGL", "BUY", 10, 374.47, "2024-01-01"),
+            _replay_row("GOOGL", "BUY", 10, 180.20, "2024-01-02"),
+        ],
+        source,
+        TradeCurrencyResolver(
+            source,
+            trades=_QuotedTrades(
+                {"GOOGL": "USD"},
+                {"GOOGL": [("2024-01-01", 374.47), ("2024-01-02", 180.20)]},
+            ),
+        ),
+    )
+    assert rows[0][3] == pytest.approx(374.47 / 1.31)
+    assert rows[1][3] == pytest.approx(180.20 / 1.31)
+
+
+def test_a_sterling_candidate_survives_a_foreign_quote_when_prices_agree() -> None:
+    """The mirror: quoted USD, but the trade prices match the GBP close, so
+    the vote confirms sterling and the rows are left alone (#553)."""
+    source = _VotingSource({"2024-01-01": 4.11, "2024-01-02": 3.98})
+    rows = [
+        _replay_row("HSFWA", "BUY", 100, 4.11, "2024-01-01"),
+        _replay_row("HSFWA", "BUY", 100, 3.98, "2024-01-02"),
+    ]
+    converted = gbp_replay_rows(
+        rows,
+        source,
+        TradeCurrencyResolver(source, trades=_QuotedTrades({"HSFWA": "USD"})),
+    )
+    assert converted == rows
+
+
+def test_a_sterling_candidate_with_no_quote_is_never_voted_on() -> None:
+    """No foreign quote means no hypothesis to test, so sterling stands
+    without reading a single close (#553)."""
+
+    class _Exploding(_VotingSource):
+        def gbp_price(self, ticker: str, as_of: str) -> float | None:
+            raise AssertionError("nothing to test, so nothing to look up")
+
+    source = _Exploding({})
+    rows = [_replay_row("BP.", "BUY", 100, 4.11, "2024-01-01")]
+    assert (
+        gbp_replay_rows(
+            rows, source, TradeCurrencyResolver(source, trades=_QuotedTrades({}))
+        )
+        == rows
     )

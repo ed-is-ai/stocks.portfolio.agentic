@@ -475,6 +475,13 @@
     <tbody>
       {% for p in positions %}
       {% set sym = '$' if p.price_currency == 'USD' else 'HK$' if p.price_currency == 'HKD' else '£' %}
+      {# #553: cost and value are not always in the same unit — a holding can
+         quote in USD and have been traded in pounds — so the cost columns
+         carry their own symbol, and where the two differ the P&L is shown in
+         GBP (the only unit both legs can be expressed in) rather than as a
+         cross-currency subtraction wearing the quote's symbol. #}
+      {% set cost_sym = '$' if p.cost_currency == 'USD' else 'HK$' if p.cost_currency == 'HKD' else '£' %}
+      {% set mixed_units = p.cost_currency != p.price_currency %}
       {# GH-484: per-position GBP equivalents (non-GBP rows only); absent or
          None entries mean FX was unavailable — omit, never fabricate. #}
       {% set gbp_equiv = (position_gbp_values or {}).get(p.ticker, {}) %}
@@ -494,7 +501,7 @@
           {% endif %}
         </td>
         <td>{{ p.shares }}</td>
-        <td>{{ sym }}{{ "%.2f"|format(p.avg_cost) }}</td>
+        <td>{{ cost_sym }}{{ "%.2f"|format(p.avg_cost) }}</td>
         <td>
           {% if p.current_price %}
             <strong>{{ sym }}{{ "%.2f"|format(p.current_price) }}</strong>
@@ -502,12 +509,21 @@
             <span class="text-muted">—</span>
           {% endif %}
         </td>
-        <td>{{ sym }}{{ "%.2f"|format(p.total_cost) }}</td>
+        <td>{{ cost_sym }}{{ "%.2f"|format(p.total_cost) }}</td>
         <td>
           {% if p.current_value %}{{ sym }}{{ "%.2f"|format(p.current_value) }}{% if gbp_equiv.get('market_value_gbp') is not none %} <span class="text-muted" style="font-size:0.72rem">&asymp; &pound;{{ "%.2f"|format(gbp_equiv.get('market_value_gbp')) }}</span>{% endif %}{% else %}<span class="text-muted">—</span>{% endif %}
         </td>
         <td>
-          {% if p.unrealised_pnl is not none %}
+          {% if mixed_units %}
+            {% set pnl_gbp = gbp_equiv.get('unrealised_pnl_gbp') %}
+            {% if pnl_gbp is not none %}
+            <span class="{% if pnl_gbp >= 0 %}pos{% else %}neg{% endif %}">
+              {{ "+" if pnl_gbp >= 0 }}&pound;{{ "%.2f"|format(pnl_gbp) }}
+            </span>
+            {% else %}
+            <span class="text-muted">—</span>
+            {% endif %}
+          {% elif p.unrealised_pnl is not none %}
             <span class="{% if p.unrealised_pnl >= 0 %}pos{% else %}neg{% endif %}">
               {{ "+" if p.unrealised_pnl >= 0 }}{{ sym }}{{ "%.2f"|format(p.unrealised_pnl) }}
             </span>
@@ -519,7 +535,18 @@
           {% endif %}
         </td>
         <td>
-          {% if p.unrealised_pnl_pct is not none %}
+          {% if mixed_units %}
+            {% set pnl_gbp = gbp_equiv.get('unrealised_pnl_gbp') %}
+            {% set cost_gbp = gbp_equiv.get('cost_gbp') %}
+            {% if pnl_gbp is not none and cost_gbp %}
+            {% set pct_gbp = pnl_gbp / cost_gbp * 100 %}
+            <span class="{% if pct_gbp >= 0 %}pos{% else %}neg{% endif %}">
+              {{ "+" if pct_gbp >= 0 }}{{ "%.1f"|format(pct_gbp) }}%
+            </span>
+            {% else %}
+            <span class="text-muted">—</span>
+            {% endif %}
+          {% elif p.unrealised_pnl_pct is not none %}
             <span class="{% if p.unrealised_pnl_pct >= 0 %}pos{% else %}neg{% endif %}">
               {{ "+" if p.unrealised_pnl_pct >= 0 }}{{ "%.1f"|format(p.unrealised_pnl_pct) }}%
             </span>

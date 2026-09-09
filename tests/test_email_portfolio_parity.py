@@ -166,6 +166,7 @@ def test_gbp_totals_converts_usd_positions() -> None:
             total_cost=200,
             current_value=270,
             price_currency="USD",
+            cost_currency="USD",
         ),
     ]
     service = PortfolioService(TraderService(TraderAgent(name="TraderAgent")))
@@ -190,6 +191,7 @@ def test_gbp_totals_values_hkd_positions_through_the_valuation_service(trader) -
         total_cost=100.0,
         current_value=100.0,
         price_currency="HKD",
+        cost_currency="HKD",
     )
 
     value, cost, pnl = service.gbp_totals([position], gbpusd=1.25)

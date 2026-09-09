@@ -15,7 +15,6 @@ byte-identical.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from datetime import date, timedelta
 import logging
 from typing import Any, Protocol
@@ -30,6 +29,7 @@ from app.services.snapshot_price_backfill import (
     PriceEvidenceBackfillService,
     PriceEvidenceUnavailable,
 )
+from app.services.trade_currency_resolver import TradeCurrencyResolver
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,8 @@ def last_trade_dates(replay_rows: list[tuple[Any, ...]]) -> dict[str, str]:
 
 def gbp_replay_rows(
     replay_rows: list[tuple[Any, ...]],
-    gbp_rate: Callable[[str, str], float | None],
+    source: "HistoricalGbpPriceSource",
+    resolver: "TradeCurrencyResolver | None" = None,
 ) -> list[tuple[Any, ...]]:
     """Return ``replay_rows`` with every price converted to GBP major units (#549).
 
@@ -82,32 +83,46 @@ def gbp_replay_rows(
     of market value, spiking the Portfolio Value line on every day it was
     unpriced.
 
-    Conversion is ``price / gbp_rate(currency, trade_date)`` (the rate being
-    units of the currency per GBP) through stored evidence only, never a live
-    fetch. Whatever bound ``gbp_rate`` applies applies here: since #550 that
-    is the trade date or the few days before it, which is far better evidence
-    of what a trade cost than discarding its cost basis over an unpublished
-    rate. A non-GBP row with no rate inside that bound keeps every other field
-    but gets ``price = None``: the cost or cash it feeds is then *unavailable*,
-    never a GBP-assumed figure.
+    That column is resolved from the *quote* currency, which is a different
+    fact from the currency a trade was priced in (#553): HSFWA and SGLN quote
+    in USD and trade in pounds. ``resolver`` (a
+    :class:`~app.services.trade_currency_resolver.TradeCurrencyResolver`)
+    gets the final say on each non-GBP ticker, voting its trade prices
+    against ``source``'s dated closes. Its answer is taken once per ticker, so
+    one row can never be converted on a different basis from its neighbour --
+    and that per-ticker collapse happens with or without a resolver, which is
+    the one way ``resolver=None`` differs from the pre-#553 code: a row set
+    whose flags disagree for one ticker (only ever a hand-built one; the
+    repository resolves a single currency per ticker in SQL) now converts on
+    the first non-GBP flag seen rather than row by row.
+
+    Conversion is ``price / source.gbp_rate(currency, trade_date)`` (the rate
+    being units of the currency per GBP) through stored evidence only, never a
+    live fetch. Whatever bound ``gbp_rate`` applies applies here: since #550
+    that is the trade date or the few days before it, which is far better
+    evidence of what a trade cost than discarding its cost basis over an
+    unpublished rate. A non-GBP row with no rate inside that bound keeps every
+    other field but gets ``price = None``: the cost or cash it feeds is then
+    *unavailable*, never a GBP-assumed figure.
 
     Rows already in GBP (and rows with no currency column at all, e.g. a
     hand-built tuple in a test) pass through untouched, so an all-GBP
-    portfolio is byte-identical to before. Rates are memoised per
-    ``(currency, date)``, so a multi-year replay costs one lookup per
-    distinct pair-day however many trades share it.
+    portfolio is byte-identical to before and costs no lookup at all. Rates
+    are memoised per ``(currency, date)``, so a multi-year replay costs one
+    lookup per distinct pair-day however many trades share it.
     """
+    resolved = _resolved_currencies(replay_rows, resolver)
     rates: dict[tuple[str, str], float | None] = {}
     converted: list[tuple[Any, ...]] = []
     for row in replay_rows:
-        currency = str(row[7]).strip().upper() if len(row) > 7 and row[7] else "GBP"
+        currency = resolved.get(row[0], "GBP")
         if currency == "GBP":
             converted.append(row)
             continue
         trade_date = str(row[4])[:10]
         key = (currency, trade_date)
         if key not in rates:
-            rates[key] = gbp_rate(currency, trade_date)
+            rates[key] = source.gbp_rate(currency, trade_date)
         rate = rates[key]
         price = (
             None
@@ -116,6 +131,46 @@ def gbp_replay_rows(
         )
         converted.append((*row[:3], price, *row[4:]))
     return converted
+
+
+def _resolved_currencies(
+    replay_rows: list[tuple[Any, ...]],
+    resolver: "TradeCurrencyResolver | None",
+) -> dict[str, str]:
+    """Return ``{ticker: currency its trades are priced in}`` (#553).
+
+    The candidate is the rows' own currency column (a ticker carries one, by
+    construction of ``_REPLAY_CURRENCY``); ``resolver`` may correct it in
+    either direction on dated evidence -- downgrading a foreign candidate to
+    ``GBP``, or promoting a sterling one to the currency the instrument is
+    quoted in. A sterling holding that is also quoted in sterling still
+    costs nothing: the resolver returns it before any price lookup.
+    """
+    trades: dict[str, list[tuple[str, float]]] = {}
+    candidates: dict[str, str] = {}
+    for row in replay_rows:
+        ticker = row[0]
+        currency = str(row[7]).strip().upper() if len(row) > 7 and row[7] else "GBP"
+        if ticker not in candidates or (
+            candidates[ticker] == "GBP" and currency != "GBP"
+        ):
+            # First non-GBP spelling wins, mirroring ``_REPLAY_CURRENCY``'s
+            # own ordered fallback, so a hand-built row set whose flags
+            # disagree still resolves one currency per ticker.
+            candidates[ticker] = currency
+        if row[3] is not None:
+            trades.setdefault(ticker, []).append((str(row[4])[:10], float(row[3])))
+    if resolver is None:
+        return candidates
+    # Every ticker is offered, sterling candidates included (#553): a ``GBP``
+    # candidate is often just where the fallback chain ran out of signals,
+    # and the resolver returns it untouched for free when the instrument is
+    # not quoted in anything foreign.
+    resolver.prime(list(candidates))
+    return {
+        ticker: resolver.resolve(ticker, currency, trades.get(ticker, []))
+        for ticker, currency in candidates.items()
+    }
 
 
 def position_cost_basis_as_of(
@@ -451,6 +506,7 @@ class SnapshotRepairService:
         price_source: HistoricalGbpPriceSource | None = None,
         backfill: PriceEvidenceBackfillService | None = None,
         estimate_unpriceable: bool = True,
+        currency_resolver: TradeCurrencyResolver | None = None,
     ) -> None:
         self._trades = trades
         self._snapshots = snapshots
@@ -461,6 +517,9 @@ class SnapshotRepairService:
         # False restores the pre-#519 all-or-nothing rule: a holding with no
         # dated evidence nulls the whole row instead of being carried at cost.
         self._estimate_unpriceable = estimate_unpriceable
+        # Without one, a replay row's quote currency is taken as its trade
+        # currency, which is the pre-#553 behaviour.
+        self._currency_resolver = currency_resolver
 
     def repair(
         self, portfolio_id: int | None = None, dry_run: bool = False
@@ -475,6 +534,12 @@ class SnapshotRepairService:
         reports every row as ``unchanged``.
         """
         rows = self._snapshots.rows_with_ids(portfolio_id)
+        # A dry run must write nothing at all, and the currency resolution
+        # below runs before every ``if not dry_run`` guard -- its verdict
+        # upsert would be a write this pass promised not to make (#553).
+        resolver = self._currency_resolver
+        if resolver is not None and dry_run:
+            resolver = resolver.without_persistence()
         fetch_failures: tuple[str, ...] = ()
         newly_unavailable: tuple[str, ...] = ()
         if self._backfill is not None and not dry_run:
@@ -499,7 +564,9 @@ class SnapshotRepairService:
                 # Converted once per portfolio, so this pass's carrying costs
                 # are GBP rather than raw foreign price units (#549).
                 replay_cache[pf_id] = gbp_replay_rows(
-                    self._trades.open_rows(pf_id), self._price_source.gbp_rate
+                    self._trades.open_rows(pf_id),
+                    self._price_source,
+                    resolver,
                 )
             holdings = self._holdings_as_of(replay_cache[pf_id], str(timestamp)[:10])
             if not holdings:

@@ -22,9 +22,11 @@ from app.core.config import HISTORICAL_PRICE_CACHE, TRADES_DB
 from app.repositories import db
 from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.repositories.portfolio_snapshots_repo import PortfolioSnapshotsRepository
+from app.repositories.trade_currency_repo import TradeCurrencyRepository
 from app.repositories.trades_repo import TradesRepository
 from app.services.snapshot_price_backfill import PriceEvidenceBackfillService
 from app.services.snapshot_price_evidence import build_price_source
+from app.services.trade_currency_resolver import TradeCurrencyResolver
 from app.services.snapshot_repair import (
     HistoricalGbpPriceSource,
     NoHistoricalPriceSource,
@@ -102,6 +104,18 @@ def main(argv: list[str] | None = None) -> None:
         price_source,
         backfill=backfill,
         estimate_unpriceable=not args.no_historical_evidence,
+        # ``--no-historical-evidence`` means exactly that: a resolver over
+        # ``NoHistoricalPriceSource`` has no dated close for any ticker, so
+        # it could only ever guess -- and a guess here is durable (#553).
+        currency_resolver=(
+            None
+            if args.no_historical_evidence
+            else TradeCurrencyResolver(
+                price_source,
+                TradeCurrencyRepository(connect),
+                TradesRepository(connect),
+            )
+        ),
     )
     report = service.repair(portfolio_id=args.portfolio_id, dry_run=args.dry_run)
     for field, value in report.model_dump().items():

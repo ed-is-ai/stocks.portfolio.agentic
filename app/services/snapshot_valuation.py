@@ -119,8 +119,12 @@ def value_positions_gbp(
     unvalued = 0
     cost_complete = True
     for position in positions:
+        # ``total_cost`` is in the currency the *trades* were priced in, which
+        # is not always the quote currency ``current_value`` below is in
+        # (#553) -- converting cost by the quote unit understated a
+        # sterling-priced, USD-quoted holding by the whole GBP/USD rate.
         cost = amount_in_gbp(
-            position.total_cost, position.price_currency, gbpusd, gbp_valuation
+            position.total_cost, position.cost_currency, gbpusd, gbp_valuation
         )
         if cost is None:
             cost_complete = False

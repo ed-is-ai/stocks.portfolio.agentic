@@ -18,6 +18,7 @@ from app.services.backtest.historical_price_evidence import FX_PAIR
 from app.services.snapshot_backfill import SnapshotBackfillService
 from app.services.snapshot_price_backfill import PriceEvidenceUnavailable
 from app.services.snapshot_repair import NoHistoricalPriceSource
+from app.services.trade_currency_resolver import TradeCurrencyResolver
 
 
 class _FixedPriceSource:
@@ -101,6 +102,7 @@ def _service(
     backfill: object | None = None,
     today: date = TODAY,
     estimate_unpriceable: bool = False,
+    currency_resolver: object | None = None,
 ) -> SnapshotBackfillService:
     """Build the service; estimation is off by default (#519).
 
@@ -117,6 +119,7 @@ def _service(
         backfill=backfill,  # type: ignore[arg-type]
         today=lambda: today,
         estimate_unpriceable=estimate_unpriceable,
+        currency_resolver=currency_resolver,  # type: ignore[arg-type]
     )
 
 
@@ -1276,3 +1279,42 @@ def test_a_weekend_with_nothing_to_carry_is_skipped_not_valued(
     days = {r[0][:10] for r in _rows(agent, pf.id)}
     assert "2024-01-06" not in days and "2024-01-07" not in days
     assert report.days_skipped_no_evidence >= 2
+
+
+# --- GH-553: cost converts by the trade currency, not the quote -------------
+
+
+def test_a_gbp_priced_holding_with_a_usd_quote_backfills_an_unconverted_cost(
+    tmp_path: Path,
+) -> None:
+    """SGLN caches as USD but its SIPP rows are in pounds, and its trade
+    price matches the dated GBP close (#553). The resolver must catch that
+    before the conversion, or the whole history carries a ~20%-understated
+    cost basis."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("SGLN", 10, 70.43, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"SGLN": "USD"})
+    source = _FixedPriceSource({"SGLN": 70.01}, rates={("USD", "2024-01-01"): 1.25})
+
+    report = _service(
+        agent, source, currency_resolver=TradeCurrencyResolver(source)
+    ).backfill(pf.id)
+
+    assert report.rows_written == 7
+    assert all(r[2] == pytest.approx(704.30) for r in _rows(agent, pf.id))
+
+
+def test_a_foreign_holding_still_converts_with_a_resolver(tmp_path: Path) -> None:
+    """The #549 answer survives #553 whenever the evidence agrees with it."""
+    agent = _agent(tmp_path)
+    pf = agent.create_portfolio("SIPP")
+    agent.record_buy("9988", 10, 80.0, "2024-01-01", portfolio_id=pf.id)
+    agent.save_ticker_currencies({"9988": "HKD"})
+    source = _FixedPriceSource({"9988": 8.16}, rates={("HKD", "2024-01-01"): 9.8})
+
+    _service(agent, source, currency_resolver=TradeCurrencyResolver(source)).backfill(
+        pf.id
+    )
+
+    assert all(r[2] == pytest.approx(81.63) for r in _rows(agent, pf.id))

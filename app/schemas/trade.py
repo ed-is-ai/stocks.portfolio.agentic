@@ -179,6 +179,14 @@ class Position(BaseModel):
     )
     exit_signal: ExitSignal | None = None  # populated by ExitEvaluator in web layer
     price_currency: str = "GBP"  # ISO currency code for current_price/current_value/pnl
+    # The currency this position's *trades* were priced in (#553), which is
+    # not always ``price_currency``: that is the unit the live feed quotes,
+    # and a sterling-priced holding can resolve to a foreign-quoted line
+    # (HSFWA, SGLN and AZN all quote USD while their SIPP rows are pounds).
+    # ``total_cost``/``avg_cost`` are in this currency, ``current_value`` and
+    # the P&L fields in ``price_currency``. Defaults to ``"GBP"`` so every
+    # existing construction site is unchanged.
+    cost_currency: str = "GBP"
     # The portfolio's own raw import spelling for this holding (GH-473),
     # carried alongside the canonical ``ticker`` so presenters can show the
     # symbol the user actually imported (e.g. ``HSFWA``) instead of the

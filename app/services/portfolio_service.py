@@ -836,11 +836,14 @@ class PortfolioService:
         distort the aggregate the way a naive cross-currency sum would.
         ``total_cost`` includes every position; ``total_value`` only those
         with a known ``current_value`` (unpriced positions are excluded).
+        Cost converts by ``cost_currency`` and value by ``price_currency``:
+        the two differ whenever a holding's trades were priced in a
+        different unit from its live quote (#553).
         """
         total_cost_gbp = sum(
             amount
             for amount in (
-                self._amount_in_gbp(p.total_cost, p.price_currency, gbpusd)
+                self._amount_in_gbp(p.total_cost, p.cost_currency, gbpusd)
                 for p in positions
             )
             if amount is not None
@@ -1285,8 +1288,9 @@ class PortfolioService:
         # remains the authoritative cash-inclusive portfolio total; the
         # dashboard consumes the separate market-only projection below.
         fx = gbpusd_rate or _DEFAULT_GBPUSD
+        # Cost by the trade currency, value by the quote currency (#553).
         valued_costs = [
-            self._amount_in_gbp(p.total_cost, p.price_currency, fx) for p in positions
+            self._amount_in_gbp(p.total_cost, p.cost_currency, fx) for p in positions
         ]
         total_cost_gbp = sum(amount for amount in valued_costs if amount is not None)
         if effective_cash_balance is not None:
@@ -1303,7 +1307,7 @@ class PortfolioService:
         total_cost_gbp_valued = sum(
             amount
             for amount in (
-                self._amount_in_gbp(p.total_cost, p.price_currency, fx)
+                self._amount_in_gbp(p.total_cost, p.cost_currency, fx)
                 for p in positions_with_value
             )
             if amount is not None
@@ -1325,17 +1329,44 @@ class PortfolioService:
         # either way an unavailable conversion yields None and the template
         # omits the figure rather than fabricating one.
         position_gbp_values: dict[str, dict[str, float | None]] = {}
+        _STERLING = {"GBP", "GBp", "GBX"}
         for pos in positions:
-            if pos.price_currency in {"GBP", "GBp", "GBX"}:
+            # Both currencies are consulted (#553): the mirror case -- a
+            # sterling quote over a foreign-priced cost -- needs the GBP
+            # equivalent just as much as the USD-quoted one does, and
+            # skipping on the quote alone left it with none.
+            if pos.price_currency in _STERLING and pos.cost_currency in _STERLING:
                 continue
             entry: dict[str, float | None] = {}
-            if pos.current_value is not None:
-                entry["market_value_gbp"] = self._amount_in_gbp(
+            value_gbp = (
+                None
+                if pos.current_value is None
+                else self._amount_in_gbp(
                     pos.current_value, pos.price_currency, gbpusd_rate
                 )
+            )
+            if pos.current_value is not None:
+                entry["market_value_gbp"] = value_gbp
+            # Built from the two converted legs rather than by converting
+            # ``pos.unrealised_pnl``: that field is ``current_value -
+            # total_cost`` in whatever units each happened to be, and since
+            # #553 those are knowingly different currencies for a
+            # sterling-priced holding with a foreign quote. Subtracting after
+            # each side is in GBP is the only arithmetic that is true for
+            # both kinds of holding.
+            cost_gbp = self._amount_in_gbp(
+                pos.total_cost, pos.cost_currency, gbpusd_rate
+            )
+            if cost_gbp is not None:
+                # The template needs the converted cost both to label the
+                # cost columns and to express a cross-currency P&L as a
+                # percentage of something in the same unit (#553).
+                entry["cost_gbp"] = cost_gbp
             if pos.unrealised_pnl is not None:
-                entry["unrealised_pnl_gbp"] = self._amount_in_gbp(
-                    pos.unrealised_pnl, pos.price_currency, gbpusd_rate
+                entry["unrealised_pnl_gbp"] = (
+                    None
+                    if value_gbp is None or cost_gbp is None
+                    else round(value_gbp - cost_gbp, 2)
                 )
             if entry:
                 position_gbp_values[pos.ticker] = entry

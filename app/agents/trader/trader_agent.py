@@ -788,6 +788,15 @@ class TraderAgent(Agent):
                 trade.id or 0,
             ),
         )
+        # The per-trade flag is the unreliable signal ``_REPLAY_CURRENCY``
+        # exists to override (#549/#553), and this path feeds the dashboard
+        # and the live snapshot writer -- taking it raw made a live row and a
+        # backfilled row for the same day disagree by a whole FX rate. Ask
+        # the repository for the same resolved answer ``open_rows`` selects,
+        # in one query, and keep the flag only for a ticker it does not know.
+        resolved = self._trades.resolve_currencies(
+            sorted({trade.ticker for trade in ordered})
+        )
         rows = [
             (
                 trade.ticker,
@@ -797,7 +806,7 @@ class TraderAgent(Agent):
                 trade.date,
                 trade.stop_loss,
                 trade.entry_price,
-                trade.currency,
+                resolved.get(trade.ticker, trade.currency),
             )
             for trade in ordered
         ]
@@ -876,7 +885,7 @@ class TraderAgent(Agent):
             trade_date,
             stop_loss,
             entry_price,
-            *_,
+            *rest,
         ) in rows:
             try:
                 parsed_date = _date.fromisoformat(trade_date)
@@ -899,8 +908,39 @@ class TraderAgent(Agent):
                     "stop_loss": None,
                     "display_ticker": raw_ticker,
                     "display_date": parsed_date,
+                    "cost_currency": "GBP",
                 }
             s = state[ticker]
+            # The 8th replay column is the currency this row's *price* is in
+            # (#553) -- the resolved trade currency for rows from
+            # ``open_rows``, the raw per-trade flag for the hand-built tuples
+            # ``get_portfolio_from_trades`` supplies. Pence spellings are
+            # folded exactly as ``_build_position`` folds the quote unit: a
+            # SIPP CSV quotes LSE trades in pounds, never pence. Upper-cased
+            # first, so a lowercase ``"usd"`` flag still reaches
+            # ``amount_in_gbp``'s USD branch instead of falling through to a
+            # same-day quote lookup that nulls the cost.
+            #
+            # First non-GBP spelling wins (mirroring ``_REPLAY_CURRENCY``'s
+            # ordered fallback). That makes the *label* single-valued, but it
+            # cannot make the average single-currency: state is keyed by the
+            # canonical ticker while the flag comes from the raw one, so two
+            # spellings folding into one position can genuinely disagree.
+            # That is a data problem, not something to paper over, so it is
+            # logged.
+            row_currency = str(rest[0]).strip().upper() if rest and rest[0] else "GBP"
+            if row_currency in {"GBP", "GBX"}:
+                row_currency = "GBP"
+            if s["cost_currency"] == "GBP":
+                s["cost_currency"] = row_currency
+            elif row_currency not in {"GBP", s["cost_currency"]}:
+                logger.warning(
+                    "%s: trade rows disagree on currency (%s vs %s); "
+                    "its average cost mixes units",
+                    ticker,
+                    s["cost_currency"],
+                    row_currency,
+                )
             # Latest-dated raw spelling wins; a same-date tie goes to the
             # lexicographically smallest spelling. Re-deciding on every row
             # (rather than trusting replay order) is what makes the choice
@@ -1053,6 +1093,7 @@ class TraderAgent(Agent):
             profit_target_20=pt20,
             profit_target_25=pt25,
             price_currency=currency,
+            cost_currency=s.get("cost_currency", "GBP"),
             display_ticker=display_ticker,
         )
 
