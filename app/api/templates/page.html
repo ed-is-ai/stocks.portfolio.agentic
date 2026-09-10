@@ -45,6 +45,17 @@
     .brand-name { color: #fff; }
     .brand-name em { font-style: normal; color: rgba(255, 255, 255, 0.6); }
 
+    .navbar { display: flex; align-items: center; gap: 1rem; }
+    .shell-back {
+      margin-left: auto;
+      color: rgba(255, 255, 255, 0.85);
+      text-decoration: none;
+      font-size: var(--fs-sm);
+      font-weight: var(--fw-bold);
+      white-space: nowrap;
+    }
+    .shell-back:hover { color: #fff; text-decoration: underline; }
+
     /* ── HTMX spinner ──────────────────────────────── */
     .htmx-indicator { opacity: 0; transition: opacity 200ms ease-in; }
     .htmx-request .htmx-indicator,
@@ -58,6 +69,9 @@
       <span class="brand-name">Stock <em>Manager</em></span>
     </a>
     <span id="spinner" class="htmx-indicator spinner-border spinner-border-sm text-light"></span>
+    {# This shell has no tab bar, so a fragment reached directly (a bookmark,
+       a shared link) needs one visible way back into the app (#597). #}
+    <a class="shell-back" href="/"><i class="bi bi-arrow-left"></i> Back to Stock Manager</a>
   </nav>
   <div class="container-fluid mt-3 px-3">
     {# Fragments are trusted, app-owned templates — never user-supplied HTML. #}

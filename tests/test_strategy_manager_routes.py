@@ -4004,3 +4004,48 @@ def test_index_pins_every_status_bar_to_the_bottom():
     assert fixed and "position: fixed" in fixed[0] and "bottom: 0" in fixed[0]
     # Nothing may suppress the pinned bar while an activity page is open.
     assert "#tab-content .strategy-activity" not in markup
+
+
+# gh-597: restart and retry were plain POSTs, so the browser navigated away
+# from the app shell and the 303 landed on the minimal page.html -- no tab
+# bar, no status-bar containers, no way back.
+
+
+@pytest.mark.parametrize(
+    ("template", "action"),
+    [
+        ("_backtest_activity.html", "/restart"),
+        ("_initialization_activity.html", "/restart"),
+        ("_bootstrap_activity.html", "/strategy-manager/setup"),
+    ],
+)
+def test_restart_and_retry_stay_inside_the_app_shell(template, action):
+    """Every POST control swaps in place instead of navigating away."""
+    markup = Path("app/api/templates").joinpath(template).read_text()
+
+    posts = [
+        form for form in re.findall(r"<form[^>]*>", markup) if 'method="post"' in form
+    ]
+    assert posts, template
+
+    # No POST may navigate away from the shell; where each one swaps is its
+    # own business (cancel replaces the activity section in place).
+    for form in posts:
+        assert "hx-post=" in form, form
+        assert "hx-target=" in form, form
+
+    # The restart/retry control specifically replaces the tab body, because
+    # it lands on a different run's activity page.
+    restarts = [form for form in posts if action in form]
+    assert restarts, template
+    for form in restarts:
+        assert 'hx-target="#tab-content"' in form, form
+
+
+def test_standalone_shell_offers_a_way_back():
+    """A fragment reached directly is never a dead end (#597)."""
+    shell = Path("app/api/templates/page.html").read_text()
+
+    assert 'class="shell-back"' in shell
+    assert 'href="/"' in shell
+    assert "Back to Stock Manager" in shell
