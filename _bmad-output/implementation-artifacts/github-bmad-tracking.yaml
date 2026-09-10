@@ -70,7 +70,7 @@ stories:
         prerequisite_issues: [535]
       gh-537-evidence-migration-cutover-rollback:
         issue: 537
-        status: backlog
+        status: in-progress
         prerequisite_issues: [536]
       gh-538-reference-aware-evidence-gc:
         issue: 538

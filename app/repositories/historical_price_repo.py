@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import math
+from pathlib import Path
+import shutil
 import sqlite3
 from typing import Mapping, Sequence
 import zlib
@@ -116,6 +118,23 @@ CREATE TABLE IF NOT EXISTS historical_price_v2_revision_chunks (
     chunk_digest TEXT NOT NULL REFERENCES historical_price_v2_chunks(chunk_digest),
     PRIMARY KEY(revision_id, chunk_order),
     UNIQUE(revision_id, chunk_kind, chunk_year)
+);
+CREATE TABLE IF NOT EXISTS historical_price_storage_state (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+    active_format TEXT NOT NULL CHECK(active_format IN ('v1', 'v2')),
+    activated_at TEXT,
+    activation_review TEXT
+);
+INSERT OR IGNORE INTO historical_price_storage_state
+    (singleton_id, active_format, activated_at)
+    VALUES (1, 'v1', NULL);
+CREATE TABLE IF NOT EXISTS historical_price_v2_migration_state (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
+    source_fingerprint TEXT NOT NULL,
+    source_revision_count INTEGER NOT NULL,
+    last_data_revision TEXT,
+    migrated_revision_count INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT
 );
 
 CREATE TRIGGER IF NOT EXISTS historical_v2_revision_immutable_update BEFORE UPDATE ON historical_price_v2_revisions BEGIN SELECT RAISE(ABORT, 'historical v2 revision is immutable'); END;
@@ -235,6 +254,16 @@ class PriceEvidenceUnavailableAttempt:
     reason: str
 
 
+@dataclass(frozen=True)
+class HistoricalEvidenceMigrationProgress:
+    source_revision_count: int
+    migrated_revision_count: int
+    completed: bool
+    source_database_bytes: int
+    available_bytes: int
+    required_reserve_bytes: int
+
+
 class HistoricalPriceRepository:
     """Own the append-only historical price database and exact-reference reads."""
 
@@ -252,10 +281,196 @@ class HistoricalPriceRepository:
             except sqlite3.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+            try:
+                conn.execute(
+                    "ALTER TABLE historical_price_storage_state ADD COLUMN activation_review TEXT"
+                )
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc).lower():
+                    raise
+
+    def migrate_v1_to_v2(
+        self, *, max_revisions: int | None = None, available_bytes: int | None = None
+    ) -> HistoricalEvidenceMigrationProgress:
+        """Migrate a bounded offline v1 batch, checkpointing every revision."""
+        if max_revisions is not None and max_revisions < 1:
+            raise HistoricalEvidenceIntegrityError("migration batch size must be positive")
+        self.ensure_schema()
+        with session(self._connect) as conn:
+            fingerprint, count = self._v1_source_identity(conn)
+            path = self._database_path(conn)
+            source_database_bytes = path.stat().st_size
+            reserve = max(source_database_bytes // 4, 1_048_576)
+            free = (
+                shutil.disk_usage(path.parent).free
+                if available_bytes is None
+                else available_bytes
+            )
+            if free < reserve:
+                raise HistoricalEvidenceIntegrityError(
+                    "insufficient disk space for v2 migration"
+                )
+            state = conn.execute(
+                """SELECT source_fingerprint, source_revision_count, last_data_revision,
+                          migrated_revision_count, completed_at
+                   FROM historical_price_v2_migration_state WHERE singleton_id=1"""
+            ).fetchone()
+            if state is None:
+                conn.execute(
+                    """INSERT INTO historical_price_v2_migration_state
+                       (singleton_id, source_fingerprint, source_revision_count)
+                       VALUES (1, ?, ?)""",
+                    (fingerprint, count),
+                )
+                last, migrated, completed = None, 0, None
+            else:
+                if str(state[0]) != fingerprint or int(state[1]) != count:
+                    raise HistoricalEvidenceIntegrityError(
+                        "v1 migration source changed"
+                    )
+                last, migrated, completed = state[2], int(state[3]), state[4]
+            if completed is not None:
+                return HistoricalEvidenceMigrationProgress(
+                    count, migrated, True, source_database_bytes, free, reserve
+                )
+            rows = conn.execute(
+                """SELECT data_revision FROM historical_price_revisions
+                   WHERE data_revision>? ORDER BY data_revision LIMIT ?""",
+                (
+                    "" if last is None else str(last),
+                    -1 if max_revisions is None else max_revisions,
+                ),
+            ).fetchall()
+        for row in rows:
+            revision = str(row[0])
+            with session(self._connect) as conn:
+                evidence = self._load_on_connection(conn, revision)
+                acquired = conn.execute(
+                    """SELECT first_acquired_at, response_metadata_digest
+                       FROM historical_price_revisions WHERE data_revision=?""",
+                    (revision,),
+                ).fetchone()
+                assert acquired is not None
+                payload = HistoricalEvidencePayload(
+                    security_id=evidence.security_id,
+                    alias_revision=evidence.alias_revision,
+                    provider=evidence.provider,
+                    provider_version=evidence.provider_version,
+                    request_contract_version=evidence.request_contract_version,
+                    requested_symbol=evidence.requested_symbol,
+                    observed_symbol=evidence.observed_symbol,
+                    currency=evidence.currency,
+                    quote_unit=evidence.quote_unit,
+                    quote_unit_scale=evidence.quote_unit_scale,
+                    exchange_timezone=evidence.exchange_timezone,
+                    start=evidence.start,
+                    end=evidence.end,
+                    request_contract=evidence.request_contract,
+                    rows=evidence.rows,
+                    actions=evidence.actions,
+                    response_metadata_digest=str(acquired[1]),
+                    data_revision=revision,
+                    canonical_manifest_json=evidence.canonical_manifest_json,
+                    acquired_at=str(acquired[0]),
+                )
+            self.commit_v2(payload)
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                current, current_count = self._v1_source_identity(conn)
+                if current != fingerprint or current_count != count:
+                    raise HistoricalEvidenceIntegrityError(
+                        "v1 migration source changed"
+                    )
+                conn.execute(
+                    """UPDATE historical_price_v2_migration_state
+                       SET last_data_revision=?, migrated_revision_count=migrated_revision_count+1
+                       WHERE singleton_id=1 AND source_fingerprint=?""",
+                    (revision, fingerprint),
+                )
+                migrated += 1
+        with session(self._connect) as conn:
+            current, current_count = self._v1_source_identity(conn)
+            if current != fingerprint or current_count != count:
+                raise HistoricalEvidenceIntegrityError("v1 migration source changed")
+            done = migrated == count
+            if done:
+                conn.execute(
+                    "UPDATE historical_price_v2_migration_state SET completed_at=? WHERE singleton_id=1",
+                    (datetime.now(timezone.utc).isoformat(),),
+                )
+        return HistoricalEvidenceMigrationProgress(
+            count, migrated, done, source_database_bytes, free, reserve
+        )
+
+    def activate_v2(self, *, review_reference: str) -> None:
+        """Atomically activate v2 reads after a recorded capacity review."""
+        if not review_reference.strip():
+            raise HistoricalEvidenceIntegrityError("v2 activation review is required")
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = conn.execute(
+                "SELECT completed_at FROM historical_price_v2_migration_state WHERE singleton_id=1"
+            ).fetchone()
+            if state is None or state[0] is None:
+                raise HistoricalEvidenceIntegrityError("v2 migration is incomplete")
+            fingerprint, count = self._v1_source_identity(conn)
+            migration = conn.execute(
+                """SELECT source_fingerprint, source_revision_count, migrated_revision_count
+                   FROM historical_price_v2_migration_state WHERE singleton_id=1"""
+            ).fetchone()
+            if migration is None or (
+                str(migration[0]),
+                int(migration[1]),
+                int(migration[2]),
+            ) != (fingerprint, count, count):
+                raise HistoricalEvidenceIntegrityError("v1 migration source changed")
+            conn.execute(
+                """UPDATE historical_price_storage_state
+                   SET active_format='v2', activated_at=?, activation_review=?
+                   WHERE singleton_id=1""",
+                (datetime.now(timezone.utc).isoformat(), review_reference),
+            )
+
+    def rollback_v2_activation(self) -> None:
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """UPDATE historical_price_storage_state
+                   SET active_format='v1', activated_at=NULL, activation_review=NULL
+                   WHERE singleton_id=1"""
+            )
+
+    @staticmethod
+    def _database_path(conn: sqlite3.Connection) -> Path:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        if row is None or not row[2]:
+            raise HistoricalEvidenceIntegrityError(
+                "migration database path is unavailable"
+            )
+        return Path(str(row[2]))
+
+    @staticmethod
+    def _v1_source_identity(conn: sqlite3.Connection) -> tuple[str, int]:
+        revisions = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT data_revision FROM historical_price_revisions ORDER BY data_revision"
+            )
+        ]
+        return sha256("\n".join(revisions).encode()).hexdigest(), len(revisions)
 
     def commit(self, payload: HistoricalEvidencePayload) -> str:
         try:
-            return self._commit(payload)
+            self._validate_payload(payload)
+            with session(self._connect) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                self._commit_v1_on_connection(conn, payload)
+                active = conn.execute(
+                    "SELECT active_format FROM historical_price_storage_state WHERE singleton_id=1"
+                ).fetchone()
+                if active is not None and str(active[0]) == "v2":
+                    self._commit_v2_on_connection(conn, payload)
+            return payload.data_revision
         except HistoricalEvidenceIntegrityError:
             raise
         except sqlite3.IntegrityError as exc:
@@ -264,6 +479,15 @@ class HistoricalPriceRepository:
             ) from exc
 
     def _commit(self, payload: HistoricalEvidencePayload) -> str:
+        """Append v1 evidence for legacy callers and migration fixtures."""
+        self._validate_payload(payload)
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._commit_v1_on_connection(conn, payload)
+        return payload.data_revision
+
+    @staticmethod
+    def _validate_payload(payload: HistoricalEvidencePayload) -> None:
         if payload.security_id is None:
             raise HistoricalEvidenceIntegrityError("resolved security_id is required")
         try:
@@ -279,20 +503,21 @@ class HistoricalPriceRepository:
         ) != list(payload.actions):
             raise HistoricalEvidenceIntegrityError("manifest payload mismatch")
 
-        with session(self._connect) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT canonical_manifest_json FROM historical_price_revisions "
-                "WHERE data_revision=?",
-                (payload.data_revision,),
-            ).fetchone()
-            if existing is not None:
-                if str(existing[0]) != payload.canonical_manifest_json:
-                    raise HistoricalEvidenceIntegrityError("revision digest collision")
-                self._verify_on_connection(conn, payload.data_revision)
-            else:
-                conn.execute(
-                    """INSERT INTO historical_price_revisions (
+    def _commit_v1_on_connection(
+        self, conn: sqlite3.Connection, payload: HistoricalEvidencePayload
+    ) -> None:
+        existing = conn.execute(
+            "SELECT canonical_manifest_json FROM historical_price_revisions "
+            "WHERE data_revision=?",
+            (payload.data_revision,),
+        ).fetchone()
+        if existing is not None:
+            if str(existing[0]) != payload.canonical_manifest_json:
+                raise HistoricalEvidenceIntegrityError("revision digest collision")
+            self._verify_on_connection(conn, payload.data_revision)
+        else:
+            conn.execute(
+                """INSERT INTO historical_price_revisions (
                         data_revision, security_id, provider, provider_version,
                         request_contract_version, requested_symbol, observed_symbol,
                         alias_revision, currency, quote_unit, quote_unit_scale,
@@ -300,137 +525,131 @@ class HistoricalPriceRepository:
                         response_metadata_digest, canonical_manifest_json,
                         observation_count, action_count, first_acquired_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        payload.data_revision,
-                        payload.security_id,
-                        payload.provider,
-                        payload.provider_version,
-                        payload.request_contract_version,
-                        payload.requested_symbol,
-                        payload.observed_symbol,
-                        payload.alias_revision,
-                        payload.currency,
-                        payload.quote_unit,
-                        payload.quote_unit_scale,
-                        payload.exchange_timezone,
-                        payload.start,
-                        payload.end,
-                        json.dumps(
-                            payload.request_contract,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ),
-                        payload.response_metadata_digest,
-                        payload.canonical_manifest_json,
-                        len(payload.rows),
-                        len(payload.actions),
-                        payload.acquired_at,
+                (
+                    payload.data_revision,
+                    payload.security_id,
+                    payload.provider,
+                    payload.provider_version,
+                    payload.request_contract_version,
+                    payload.requested_symbol,
+                    payload.observed_symbol,
+                    payload.alias_revision,
+                    payload.currency,
+                    payload.quote_unit,
+                    payload.quote_unit_scale,
+                    payload.exchange_timezone,
+                    payload.start,
+                    payload.end,
+                    json.dumps(
+                        payload.request_contract,
+                        sort_keys=True,
+                        separators=(",", ":"),
                     ),
-                )
-                for row in payload.rows:
-                    conn.execute(
-                        """INSERT INTO historical_price_observations (
+                    payload.response_metadata_digest,
+                    payload.canonical_manifest_json,
+                    len(payload.rows),
+                    len(payload.actions),
+                    payload.acquired_at,
+                ),
+            )
+            for row in payload.rows:
+                conn.execute(
+                    """INSERT INTO historical_price_observations (
                             data_revision, session_date, open_hex, high_hex, low_hex,
                             close_hex, adj_close_hex, volume_hex, dividends_hex,
                             stock_splits_hex
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            payload.data_revision,
-                            row["session"],
-                            row["open"],
-                            row["high"],
-                            row["low"],
-                            row["close"],
-                            row["adj_close"],
-                            row["volume"],
-                            row["dividends"],
-                            row["stock_splits"],
-                        ),
-                    )
-                for action in payload.actions:
-                    conn.execute(
-                        """INSERT INTO historical_corporate_actions
+                    (
+                        payload.data_revision,
+                        row["session"],
+                        row["open"],
+                        row["high"],
+                        row["low"],
+                        row["close"],
+                        row["adj_close"],
+                        row["volume"],
+                        row["dividends"],
+                        row["stock_splits"],
+                    ),
+                )
+            for action in payload.actions:
+                conn.execute(
+                    """INSERT INTO historical_corporate_actions
                            (data_revision, session_date, action_type, value_hex)
                            VALUES (?, ?, ?, ?)""",
-                        (
-                            payload.data_revision,
-                            action["session"],
-                            action["action_type"],
-                            action["value"],
-                        ),
-                    )
-                self._verify_on_connection(conn, payload.data_revision)
-            conn.execute(
-                """INSERT OR IGNORE INTO historical_price_acquisitions
+                    (
+                        payload.data_revision,
+                        action["session"],
+                        action["action_type"],
+                        action["value"],
+                    ),
+                )
+            self._verify_on_connection(conn, payload.data_revision)
+        conn.execute(
+            """INSERT OR IGNORE INTO historical_price_acquisitions
                    (data_revision, acquired_at, response_metadata_digest)
                    VALUES (?, ?, ?)""",
-                (
-                    payload.data_revision,
-                    payload.acquired_at,
-                    payload.response_metadata_digest,
-                ),
-            )
-        return payload.data_revision
+            (
+                payload.data_revision,
+                payload.acquired_at,
+                payload.response_metadata_digest,
+            ),
+        )
 
     def commit_v2(self, payload: HistoricalEvidencePayload) -> str:
         """Append one independently verifiable v2 evidence representation.
 
-        This is deliberately separate from :meth:`commit`: #537 owns the
-        migration/cutover that makes v2 the normal write and read path.
+        Kept as an explicit entrypoint so migration can add v2 records before
+        activation. Normal writes add both formats once v2 is active.
         """
-        if payload.security_id is None:
-            raise HistoricalEvidenceIntegrityError("resolved security_id is required")
-        try:
-            canonical = json.loads(payload.canonical_manifest_json)
-        except (TypeError, json.JSONDecodeError) as exc:
-            raise HistoricalEvidenceIntegrityError("invalid canonical manifest") from exc
-        if (
-            manifest_digest(canonical) != payload.data_revision
-            or canonical.get("rows") != list(payload.rows)
-            or canonical.get("actions") != list(payload.actions)
-        ):
-            raise HistoricalEvidenceIntegrityError("manifest payload mismatch")
+        self._validate_payload(payload)
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._commit_v2_on_connection(conn, payload)
+        return payload.data_revision
+
+    def _commit_v2_on_connection(
+        self, conn: sqlite3.Connection, payload: HistoricalEvidencePayload
+    ) -> None:
+        canonical = json.loads(payload.canonical_manifest_json)
         metadata = dict(canonical)
         metadata.pop("rows", None)
         metadata.pop("actions", None)
         chunks = self._v2_chunks(payload.rows, payload.actions)
-        with session(self._connect) as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT revision_id FROM historical_price_v2_revisions WHERE data_revision=?",
-                (payload.data_revision,),
-            ).fetchone()
-            if existing is None:
-                conn.execute(
-                    """INSERT INTO historical_price_v2_revisions
+        existing = conn.execute(
+            "SELECT revision_id FROM historical_price_v2_revisions WHERE data_revision=?",
+            (payload.data_revision,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                """INSERT INTO historical_price_v2_revisions
                        (data_revision, metadata_json, response_metadata_digest,
                         observation_count, action_count, first_acquired_at)
                        VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        payload.data_revision,
-                        canonical_json(metadata),
-                        payload.response_metadata_digest,
-                        len(payload.rows),
-                        len(payload.actions),
-                        payload.acquired_at,
-                    ),
-                )
-                revision_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
-                for order, (kind, year, encoded, digest) in enumerate(chunks):
-                    conn.execute(
-                        """INSERT OR IGNORE INTO historical_price_v2_chunks
+                (
+                    payload.data_revision,
+                    canonical_json(metadata),
+                    payload.response_metadata_digest,
+                    len(payload.rows),
+                    len(payload.actions),
+                    payload.acquired_at,
+                ),
+            )
+            revision_id = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            for order, (kind, year, encoded, digest) in enumerate(chunks):
+                conn.execute(
+                    """INSERT OR IGNORE INTO historical_price_v2_chunks
                            (chunk_digest, codec, format_version, compressed_payload,
                             uncompressed_bytes) VALUES (?, 'zlib', 1, ?, ?)""",
-                        (digest, zlib.compress(encoded), len(encoded)),
-                    )
-                    conn.execute(
-                        """INSERT INTO historical_price_v2_revision_chunks
+                    (digest, zlib.compress(encoded), len(encoded)),
+                )
+                conn.execute(
+                    """INSERT INTO historical_price_v2_revision_chunks
                            (revision_id, chunk_order, chunk_kind, chunk_year, chunk_digest)
                            VALUES (?, ?, ?, ?, ?)""",
-                        (revision_id, order, kind, year, digest),
-                    )
-            self._verify_v2_on_connection(conn, payload.data_revision)
-        return payload.data_revision
+                    (revision_id, order, kind, year, digest),
+                )
+        self._verify_v2_on_connection(conn, payload.data_revision)
 
     @staticmethod
     def _v2_chunks(
@@ -442,7 +661,9 @@ class HistoricalPriceRepository:
                 try:
                     year = int(str(item["session"])[:4])
                 except (KeyError, TypeError, ValueError) as exc:
-                    raise HistoricalEvidenceIntegrityError("v2 chunk session is invalid") from exc
+                    raise HistoricalEvidenceIntegrityError(
+                        "v2 chunk session is invalid"
+                    ) from exc
                 grouped.setdefault((kind, year), []).append(item)
         chunks = []
         for (kind, year), items in sorted(grouped.items()):
@@ -456,6 +677,11 @@ class HistoricalPriceRepository:
 
     def get(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:
+            active = conn.execute(
+                "SELECT active_format FROM historical_price_storage_state WHERE singleton_id=1"
+            ).fetchone()
+            if active is not None and str(active[0]) == "v2":
+                return self._verify_v2_on_connection(conn, data_revision)
             try:
                 return self._load_on_connection(conn, data_revision)
             except EvidenceMissingError:
@@ -902,7 +1128,11 @@ class HistoricalPriceRepository:
             request = canonical["request"]
             rows = canonical["rows"]
             actions = canonical["actions"]
-            if not isinstance(request, Mapping) or not isinstance(rows, list) or not isinstance(actions, list):
+            if (
+                not isinstance(request, Mapping)
+                or not isinstance(rows, list)
+                or not isinstance(actions, list)
+            ):
                 raise TypeError
             return StoredHistoricalEvidence(
                 data_revision=data_revision,
@@ -912,7 +1142,9 @@ class HistoricalPriceRepository:
                 request_contract_version=str(canonical["request_contract_version"]),
                 requested_symbol=str(canonical["requested_symbol"]),
                 observed_symbol=str(canonical["observed_symbol"]),
-                alias_revision=None if canonical.get("alias_revision") is None else str(canonical["alias_revision"]),
+                alias_revision=None
+                if canonical.get("alias_revision") is None
+                else str(canonical["alias_revision"]),
                 currency=str(canonical["currency"]),
                 quote_unit=str(canonical["quote_unit"]),
                 quote_unit_scale=str(canonical["quote_unit_scale"]),

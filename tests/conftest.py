@@ -44,17 +44,20 @@ def isolate_strategy_di_caches():
     of the pytest session.
     """
     from app.api.dependencies import (
+        get_backtest_repository,
         get_portfolio_recommendation_service,
         get_portfolio_service,
         get_portfolio_strategies_repository,
         get_strategy_assignment_service,
     )
 
+    get_backtest_repository.cache_clear()
     get_portfolio_service.cache_clear()
     get_portfolio_strategies_repository.cache_clear()
     get_strategy_assignment_service.cache_clear()
     get_portfolio_recommendation_service.cache_clear()
     yield
+    get_backtest_repository.cache_clear()
     get_portfolio_service.cache_clear()
     get_portfolio_strategies_repository.cache_clear()
     get_strategy_assignment_service.cache_clear()
@@ -84,6 +87,7 @@ def isolate_notifications_db(tmp_path, monkeypatch):
         "app.core.config.HISTORICAL_PRICE_CACHE",
         tmp_path / "historical_price_cache.db",
     )
+    monkeypatch.setattr("app.core.config.BACKTEST_DB", tmp_path / "backtest.db")
     # Global FastAPI tests must never launch a real Strategy Manager child.
     # Dedicated lifespan tests opt in explicitly with an injected fake.
     monkeypatch.setenv("STRATEGY_MANAGER_WORKER_ENABLED", "false")

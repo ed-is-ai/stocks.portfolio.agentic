@@ -12,4 +12,5 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --all-extras --dev
+      - run: uv run playwright install --with-deps chromium
       - run: uv run pytest

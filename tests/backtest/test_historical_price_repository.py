@@ -226,6 +226,62 @@ def test_v2_splits_rows_into_calendar_year_chunks(tmp_path) -> None:
     )
 
 
+def test_v2_migration_resumes_then_activates_and_rolls_back(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    first, second = _payload(), _payload(close=102.0)
+    repo.commit(first)
+    repo.commit(second)
+
+    partial = repo.migrate_v1_to_v2(max_revisions=1)
+    assert (
+        partial.source_revision_count,
+        partial.migrated_revision_count,
+        partial.completed,
+    ) == (
+        2,
+        1,
+        False,
+    )
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="incomplete"):
+        repo.activate_v2(review_reference="test evidence")
+    complete = _repo(tmp_path).migrate_v1_to_v2()
+    assert (complete.migrated_revision_count, complete.completed) == (2, True)
+    repo.activate_v2(review_reference="test evidence")
+    assert repo.get(first.data_revision).canonical_manifest_json == (
+        first.canonical_manifest_json
+    )
+    post_activation = _payload(close=103.0)
+    repo.commit(post_activation)
+    assert repo.get(post_activation.data_revision).canonical_manifest_json == (
+        post_activation.canonical_manifest_json
+    )
+    repo.rollback_v2_activation()
+    assert repo.get(second.data_revision).canonical_manifest_json == (
+        second.canonical_manifest_json
+    )
+
+
+def test_v2_activation_requires_a_review_reference(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    repo.commit(_payload())
+    repo.migrate_v1_to_v2()
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="review is required"):
+        repo.activate_v2(review_reference=" ")
+
+
+def test_v2_migration_refuses_insufficient_capacity_and_source_drift(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    first, second = _payload(), _payload(close=102.0)
+    repo.commit(first)
+    repo.commit(second)
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="insufficient disk"):
+        repo.migrate_v1_to_v2(available_bytes=0)
+    assert repo.migrate_v1_to_v2(max_revisions=1).migrated_revision_count == 1
+    repo.commit(_payload(close=103.0))
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="source changed"):
+        repo.migrate_v1_to_v2()
+
+
 def test_find_cached_request_reuses_earliest_verified_revision(tmp_path) -> None:
     repo = _repo(tmp_path)
     first = _payload(close=101.0)
