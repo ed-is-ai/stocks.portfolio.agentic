@@ -57,7 +57,6 @@ async def refresh_data(
     portfolio: PortfolioDep,
     pipeline: PipelineDep,
     alerts: AlertsDep,
-    confirm_missing: bool = Form(False),
     extract: bool = Form(False),
     force_whale_wisdom: bool = Form(False),
     force_stocktwits: bool = Form(False),
@@ -66,22 +65,11 @@ async def refresh_data(
 
     When ``extract`` is set the run refreshes institutional sources
     (WhaleWisdom/StockTwits) instead of reusing the cached extraction file.
+
+    Reduced-coverage warnings are shown in the Refresh Data menu itself,
+    beside the buttons that start a run, so a refresh no longer stops on a
+    confirmation dialog that said the same thing after the fact.
     """
-    warnings = pipeline.missing_configuration()
-    if warnings and not confirm_missing:
-        response = templates.TemplateResponse(
-            request,
-            "_pipeline_confirmation.html",
-            context={
-                "warnings": warnings,
-                "extract": extract,
-                "force_whale_wisdom": force_whale_wisdom,
-                "force_stocktwits": force_stocktwits,
-            },
-        )
-        response.headers["HX-Retarget"] = "#pipeline-confirmation"
-        response.headers["HX-Reswap"] = "innerHTML"
-        return response
     # The run outcome (success or failure) is surfaced by the live
     # /pipeline-status bar; no inline completion banner is rendered here.
     await asyncio.to_thread(

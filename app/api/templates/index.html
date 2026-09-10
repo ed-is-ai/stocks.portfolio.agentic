@@ -507,13 +507,14 @@
     body:has(#tab-stock-scanner.active):has(#pipeline-status > .pipeline-status),
     body:has(#tab-portfolio.active):has(#portfolio-backfill-status > .pipeline-status),
     body:has(#tab-strategy-manager.active):has(#strategy-activity-status > .pipeline-status) { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
-    .pipeline-confirmation { position: fixed; inset: 0; z-index: 1050; display: grid; place-items: center; background: rgba(15, 23, 42, .42); padding: 1rem; }
-    .pipeline-confirmation-card { width: min(32rem, 100%); background: white; border-radius: .65rem; box-shadow: 0 20px 50px rgba(0,0,0,.24); padding: 1.3rem; }
-    .pipeline-confirmation h2 { font-size: 1rem; font-weight: 700; color: var(--amber); margin: 0 0 .75rem; }
-    .pipeline-confirmation ul { padding-left: 1.2rem; margin-bottom: .9rem; font-size: .85rem; }
-    .pipeline-confirmation li { margin-bottom: .55rem; }
-    .pipeline-confirmation li span { color: var(--muted); }
-    .pipeline-confirmation-actions { display: flex; justify-content: flex-end; gap: .5rem; }
+    /* Reduced-coverage note in the Refresh Data menu (replaces the old
+       "continue with partial refresh" confirmation dialog). */
+    .refresh-coverage { border: 1px solid var(--amber); background: var(--amber-bg); border-radius: .4rem; padding: .55rem .7rem; margin-bottom: .75rem; }
+    .refresh-coverage-title { display: flex; align-items: center; gap: .35rem; margin: 0 0 .35rem; font-size: .78rem; font-weight: 700; color: var(--amber); }
+    .refresh-coverage-list { margin: 0; padding-left: 1.1rem; font-size: .76rem; color: var(--muted); }
+    .refresh-coverage-list li + li { margin-top: .3rem; }
+    .refresh-coverage-list strong { color: var(--primary); font-weight: 600; }
+    .refresh-coverage-help { margin: .4rem 0 0; font-size: .74rem; color: var(--muted); }
   </style>
 </head>
 <body>
@@ -690,6 +691,23 @@
         <div class="refresh-menu-freshness">
           {{ macros.freshness_detail(freshness, latest_attempt_error) }}
         </div>
+        {# Reduced-coverage warnings sit with the buttons that start a run, so
+           the cost of running now is readable before the click rather than in
+           a confirmation dialog after it. #}
+        {% if pipeline_warnings %}
+        <div class="refresh-coverage" role="note">
+          <p class="refresh-coverage-title">
+            <i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>
+            Reduced coverage
+          </p>
+          <ul class="refresh-coverage-list">
+            {% for warning in pipeline_warnings %}
+            <li><strong>{{ warning.name }}</strong> — {{ warning.impact }}</li>
+            {% endfor %}
+          </ul>
+          <p class="refresh-coverage-help">Add the missing configuration to <code>.env</code> for full coverage. Every refresh below still runs.</p>
+        </div>
+        {% endif %}
         <form hx-post="/refresh-data"
               hx-target="#tab-content" hx-swap="innerHTML"
               hx-indicator="#spinner" class="refresh-action">
@@ -817,7 +835,6 @@
    idling at 10s so a run started anywhere on the tab still shows up. #}
 <div id="strategy-activity-status" class="pipeline-status-bar"
      hx-get="/strategy-manager/activity-status" hx-trigger="load" hx-swap="innerHTML"></div>
-<div id="pipeline-confirmation"></div>
 
 <!-- Buy Modal -->
 <div class="modal fade" id="buyModal" tabindex="-1">

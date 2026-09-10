@@ -573,7 +573,6 @@ async def test_initial_and_completed_refresh_use_equivalent_stock_scanner_contex
         portfolio,
         pipeline,
         alerts,
-        confirm_missing=False,
     )
 
     initial_response = cast(Any, initial)
@@ -619,7 +618,6 @@ async def test_refresh_data_threads_extract_flag_to_run_once() -> None:
         portfolio,
         pipeline,
         alerts,
-        confirm_missing=True,
         extract=True,
         force_whale_wisdom=False,
         force_stocktwits=False,
@@ -722,7 +720,7 @@ def test_stock_scanner_and_refresh_http_paths_render_canonical_partial(
         initial = client.get("/partials/stock-scanner")
         refreshed = client.post(
             "/refresh-data",
-            data={"confirm_missing": "true"},
+            data={},
             headers={"X-Auth-Token": "test-token"},
         )
     finally:

@@ -89,10 +89,16 @@ def test_refresh_data_custom_flags_are_independent(
     assert args == expected
 
 
-def test_confirmation_retains_selected_custom_flags(
+def test_missing_configuration_no_longer_blocks_a_refresh(
     monkeypatch: pytest.MonkeyPatch,
     capture_run_once: list[tuple[Any, ...]],
 ) -> None:
+    """Warnings are shown in the menu, so a click runs rather than prompting.
+
+    The old flow answered the click with a "continue with partial refresh"
+    dialog and ran nothing until it was confirmed, which meant the user
+    learned the cost only after asking for the run.
+    """
     monkeypatch.setattr(
         PipelineService,
         "missing_configuration",
@@ -111,10 +117,9 @@ def test_confirmation_retains_selected_custom_flags(
     )
 
     assert response.status_code == 200
-    assert '"extract": true' in response.text
-    assert '"force_whale_wisdom": true' in response.text
-    assert '"force_stocktwits": false' in response.text
-    assert capture_run_once == []
+    assert "Continue with partial refresh" not in response.text
+    args, _kwargs = capture_run_once[0]
+    assert args == (True, True, False)
 
 
 # --------------------------------------------------------------------------- #

@@ -28,6 +28,7 @@ from app.schemas.source_health import SourceHealth
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
+from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.strategy_assignment_service import StrategyAssignmentService
@@ -56,7 +57,16 @@ async def index(request: Request) -> HTMLResponse:
     with) the load-triggered ``/pipeline-status`` fetch.
     """
     return templates.TemplateResponse(
-        request, "index.html", context=build_freshness_context()
+        request,
+        "index.html",
+        context={
+            **build_freshness_context(),
+            #: Reduced-coverage warnings live in the Refresh Data menu, beside
+            #: the buttons that start a run, rather than in a confirmation
+            #: dialog after the click. They come from the process environment,
+            #: so first paint is the only time they can change.
+            "pipeline_warnings": PipelineService.missing_configuration(),
+        },
     )
 
 

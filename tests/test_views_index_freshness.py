@@ -9,6 +9,7 @@ from app.api.app import app
 import app.api.stock_scanner_context as stock_scanner_context_module
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.analysis_artifact import build_analysis_payload
+from app.services.pipeline_service import PipelineService
 
 
 client = TestClient(app)
@@ -150,3 +151,46 @@ def test_index_reserves_no_permanent_space_for_the_status_bar(
         ("tab-strategy-manager", "strategy-activity-status"),
     ):
         assert f"body:has(#{tab}.active):has(#{bar} > .pipeline-status)" in markup
+
+
+def test_refresh_menu_carries_reduced_coverage_warnings(monkeypatch, tmp_path) -> None:
+    """Warnings sit in the menu, not behind a post-click confirmation dialog.
+
+    The old flow answered a refresh click with a "Continue with partial
+    refresh" dialog, so the cost of running was only visible after asking
+    for the run.
+    """
+    _use_artifact(monkeypatch, tmp_path, datetime.now(timezone.utc))
+    monkeypatch.setattr(
+        PipelineService,
+        "missing_configuration",
+        staticmethod(
+            lambda: [{"name": "Anthropic API key", "impact": "Summaries disabled."}]
+        ),
+    )
+
+    markup = client.get("/").text
+
+    assert 'class="refresh-coverage"' in markup
+    assert "Reduced coverage" in markup
+    assert "Anthropic API key" in markup
+    assert "Summaries disabled." in markup
+    # The warnings must sit inside the Refresh Data menu, above its actions.
+    menu = markup.split('class="dropdown-menu dropdown-menu-end refresh-menu', 1)[1]
+    assert menu.index('class="refresh-coverage"') < menu.index("Standard refresh")
+    # The dialog and its container are gone for good.
+    assert "Continue with partial refresh" not in markup
+    assert 'id="pipeline-confirmation"' not in markup
+
+
+def test_refresh_menu_omits_the_warning_block_when_fully_configured(
+    monkeypatch, tmp_path
+) -> None:
+    _use_artifact(monkeypatch, tmp_path, datetime.now(timezone.utc))
+    monkeypatch.setattr(PipelineService, "missing_configuration", staticmethod(list))
+
+    markup = client.get("/").text
+
+    # The stylesheet always defines the class; only the element is gated.
+    assert 'class="refresh-coverage"' not in markup
+    assert "Reduced coverage" not in markup
