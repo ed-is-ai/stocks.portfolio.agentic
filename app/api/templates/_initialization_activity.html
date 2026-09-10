@@ -1,9 +1,8 @@
-<section id="initialization-activity-{{ job.id }}" aria-labelledby="activity-heading" {% if not terminal %}hx-get="/strategy-manager/activities/{{ job.id }}/status?last_seen_version={{ job.status_version }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %} class="strategy-activity">
+<section id="initialization-activity-{{ job.id }}" aria-labelledby="activity-heading" {% if not terminal %}hx-get="/strategy-manager/activities/{{ job.id }}/status?last_seen_version={{ job.status_version }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
  <h1 id="activity-heading" tabindex="-1" class="h3">Historical data preparation run</h1>
  <div class="card sm-card"><div class="card-body">
   <p><strong>Status:</strong> {{ job.status.value|title }}{% if job.status.value == 'running' and job.cancel_requested_at %} - Cancellation requested{% endif %}</p>
   <p><strong>Requested period:</strong> <span class="mono-num">{{ run.requested_start }} to {{ run.requested_end }}</span></p>
-  <div class="pipeline-status pipeline-status-inline {{ activity_bar.state }}">{% include "_activity_bar.html" %}</div>
   {% if initialization_progress %}
   <p>{% if initialization_progress.last_month %}<strong>Last committed:</strong> <span class="mono-num">{{ initialization_progress.last_month }}</span>, {{ initialization_progress.last_age }}s ago{% else %}<strong>No months committed yet:</strong> {{ initialization_progress.last_age }}s since run started{% endif %}</p>
   <p><strong>Time remaining:</strong> {% if initialization_progress.committed == initialization_progress.total %}finishing...{% elif initialization_progress.eta is none %}estimating...{% else %}about {{ initialization_progress.eta }}s{% endif %}</p>

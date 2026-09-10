@@ -1,10 +1,9 @@
-<section id="bootstrap-activity-{{ job.id }}" aria-labelledby="activity-heading" data-status-version="{{ job.status_version }}"{% if not terminal %} hx-get="/strategy-manager/activities/{{ job.id }}/status?last_seen_version={{ job.status_version }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %} class="strategy-activity">
+<section id="bootstrap-activity-{{ job.id }}" aria-labelledby="activity-heading" data-status-version="{{ job.status_version }}"{% if not terminal %} hx-get="/strategy-manager/activities/{{ job.id }}/status?last_seen_version={{ job.status_version }}" hx-trigger="every 3s" hx-swap="outerHTML"{% endif %}>
  <h1 id="activity-heading" tabindex="-1" class="h3">Strategy Manager setup run</h1>
  <div class="card sm-card"><div class="card-body">
   <p><strong>Status:</strong> {{ job.status.value|title }}{% if job.status.value == 'running' and job.cancel_requested_at %} — Cancellation requested{% endif %}</p>
   {% if job.current_stage %}<p><strong>Current stage:</strong> <span class="mono-num">{{ job.current_stage|replace('_', ' ')|title }}</span></p>{% endif %}
  {% if job.status.value == 'failed' %}<p class="text-danger"><strong>Setup failed:</strong> {{ job.failure_detail or 'Setup failed for an unknown reason.' }}</p>{% endif %}
-  <div class="pipeline-status pipeline-status-inline {{ activity_bar.state }}">{% include "_activity_bar.html" %}</div>
   <div role="status" aria-live="polite" aria-atomic="true" class="visually-hidden">{{ job.status.value|title }}{% if job.current_stage %}, {{ job.current_stage|replace('_', ' ')|title }}{% endif %}</div>
  </div></div>
  {% if job.status.value == 'complete' %}<div class="card sm-card"><div class="card-body">

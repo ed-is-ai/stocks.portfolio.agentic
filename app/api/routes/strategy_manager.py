@@ -1605,7 +1605,8 @@ def _activity_context(
         and hasattr(repo, "initialization_progress")
         else None
     )
-    stage_progress = _stage_progress(job) if job.job_type in STAGE_JOB_TYPES else None
+    #: Progress itself belongs to the pinned status bar (#593); the page
+    #: keeps only the detail lines that read alongside it.
     backtest_progress = (
         _backtest_progress(run, job.current_month)
         if job.job_type is StrategyJobType.BACKTEST
@@ -1625,12 +1626,8 @@ def _activity_context(
         ),
         "review_url": review_url,
         "child_url": f"/strategy-manager/activities/{child_id}" if child_id else None,
-        "stage_progress": stage_progress,
         "backtest_progress": backtest_progress,
         "initialization_progress": initialization_progress,
-        "activity_bar": _activity_bar(
-            job, stage_progress, backtest_progress, initialization_progress
-        ),
     }
 
 
@@ -1674,16 +1671,22 @@ def _activity_context_for_bar(
     stage_progress = _stage_progress(job) if job.job_type in STAGE_JOB_TYPES else None
     backtest_progress = None
     initialization_progress = None
-    if job.job_type is StrategyJobType.BACKTEST and job.current_month:
-        backtest_progress = _backtest_progress(
-            repo.strategy_run(job.id), job.current_month
-        )
-    elif job.job_type is StrategyJobType.INITIALIZATION:
-        initialization_progress = _initialization_progress(
-            repo.initialization_run(job.id),
-            repo.initialization_progress(job.id),
-            job.created_at,
-        )
+    #: The n/total count is decoration; the run's own state is the point.
+    #: A detail row that is missing or unreadable must cost the count, never
+    #: the whole bar -- blanking it would read as "nothing is running".
+    try:
+        if job.job_type is StrategyJobType.BACKTEST and job.current_month:
+            backtest_progress = _backtest_progress(
+                repo.strategy_run(job.id), job.current_month
+            )
+        elif job.job_type is StrategyJobType.INITIALIZATION:
+            initialization_progress = _initialization_progress(
+                repo.initialization_run(job.id),
+                repo.initialization_progress(job.id),
+                job.created_at,
+            )
+    except Exception:  # noqa: BLE001 -- see above; the bar still renders
+        logger.warning("activity bar progress unavailable", exc_info=True)
     return _activity_bar(
         job, stage_progress, backtest_progress, initialization_progress
     )

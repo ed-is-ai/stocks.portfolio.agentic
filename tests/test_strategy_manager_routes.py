@@ -1003,15 +1003,22 @@ def test_backtest_activity_shows_inclusive_progress_and_project_buttons(services
         cancel_requested_at=datetime(2024, 2, 1, tzinfo=timezone.utc),
         failed_month=None,
         failure_detail=None,
+        deleted_at=None,
+        created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
+
+    # The month count belongs to the pinned bar; the page keeps the
+    # cancellation note and the run controls beside it.
+    bar = client.get("/strategy-manager/activity-status").text
+    assert "Months" in bar
+    assert ">2/3<" in bar
+    assert 'class="pipeline-stage running"' in bar
+    assert 'aria-current="step"' in bar
 
     response = client.get("/strategy-manager/activities/job-1")
 
     assert response.status_code == 200
-    assert "Months" in response.text
-    assert ">2/3<" in response.text
-    assert 'class="pipeline-stage running"' in response.text
-    assert 'aria-current="step"' in response.text
     assert "Stopping after this month" in response.text
     assert 'class="sm-btn sm-btn-primary">Restart backtest</button>' in response.text
     assert response.text.count('role="status"') == 1
@@ -1032,6 +1039,9 @@ def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
         cancel_requested_at=None,
         failed_month=None,
         failure_detail=None,
+        deleted_at=None,
+        created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
 
     updated = client.get(
@@ -1039,9 +1049,12 @@ def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
     )
 
     assert updated.status_code == 200
-    assert ">3/3<" in updated.text
-    assert 'class="pipeline-stage running"' in updated.text
+    bar = client.get("/strategy-manager/activity-status").text
+    assert ">3/3<" in bar
+    assert 'class="pipeline-stage running"' in bar
 
+    # A month outside the run's own range yields no position, so the bar
+    # shows the run without inventing a count.
     repo.activity = SimpleNamespace(
         id="job-1",
         job_type=StrategyJobType.BACKTEST,
@@ -1051,11 +1064,12 @@ def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
         cancel_requested_at=None,
         failed_month=None,
         failure_detail=None,
+        deleted_at=None,
+        created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
-    invalid = client.get("/strategy-manager/activities/job-1")
-
-    assert invalid.status_code == 200
-    assert "pipeline-stages" not in invalid.text
+    assert client.get("/strategy-manager/activities/job-1").status_code == 200
+    assert "pipeline-stages" not in client.get("/strategy-manager/activity-status").text
 
     for status, current_month in (
         (StrategyJobStatus.QUEUED, None),
@@ -1071,9 +1085,14 @@ def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
             cancel_requested_at=None,
             failed_month=None,
             failure_detail=None,
+            deleted_at=None,
+            created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+            updated_at=datetime.now(timezone.utc),
         )
-        response = client.get("/strategy-manager/activities/job-1")
-        assert "pipeline-stages" not in response.text
+        assert (
+            "pipeline-stages"
+            not in client.get("/strategy-manager/activity-status").text
+        )
 
     unchanged = client.get(
         "/strategy-manager/activities/job-1/status?last_seen_version=8"
@@ -1266,6 +1285,9 @@ def _bootstrap_job(
         else None,
         deleted_at=deleted_at,
         created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        # A terminal job only stays in the pinned bar for its linger
+        # window, so fakes need a recent updated_at to be visible there.
+        updated_at=datetime.now(timezone.utc),
     )
 
 
@@ -1360,16 +1382,19 @@ def test_bootstrap_activity_shows_ordered_stage_progress_mid_run(services):
     repo.activity = _bootstrap_job(
         status=StrategyJobStatus.RUNNING, current_stage="roster_capture"
     )
-    text = client.get("/strategy-manager/activities/job-1").text
-    assert "Verifying historical data" in text
-    assert "Capturing securities" in text
-    assert "Activating setup" in text
-    assert "pipeline-stage complete" in text
-    assert "pipeline-stage running" in text
-    assert "pipeline-stage pending" in text
-    assert 'aria-current="step"' in text
-    assert "Running" in text
-    assert "In progress" not in text
+    # gh-593 follow-up: progress is the pinned bar's job, never the page's.
+    bar = client.get("/strategy-manager/activity-status").text
+    assert "Verifying historical data" in bar
+    assert "Capturing securities" in bar
+    assert "Activating setup" in bar
+    assert "pipeline-stage complete" in bar
+    assert "pipeline-stage running" in bar
+    assert "pipeline-stage pending" in bar
+    assert 'aria-current="step"' in bar
+    page = client.get("/strategy-manager/activities/job-1").text
+    assert "Running" in page
+    assert "In progress" not in page
+    assert "pipeline-status" not in page
 
 
 def test_bootstrap_activity_marks_failed_stage_and_recovery_link(services):
@@ -1380,8 +1405,10 @@ def test_bootstrap_activity_marks_failed_stage_and_recovery_link(services):
         current_stage="roster_capture",
         status_version=8,
     )
+    assert (
+        "pipeline-stage failed" in client.get("/strategy-manager/activity-status").text
+    )
     text = client.get("/strategy-manager/activities/job-1").text
-    assert "pipeline-stage failed" in text
     assert "Roster capture failed" in text
     assert 'href="/strategy-manager/setup"' in text
     assert "Try setup again" in text
@@ -1395,11 +1422,14 @@ def test_bootstrap_activity_cancelled_shows_stopped_stage_and_recovery_link(serv
         current_stage="roster_capture",
         status_version=8,
     )
-    text = client.get("/strategy-manager/activities/job-1").text
-    assert "pipeline-stage skipped" in text
-    assert "Strategy Manager setup cancelled" in text
-    assert "pipeline-stage failed" not in text
-    assert 'href="/strategy-manager/setup"' in text
+    bar = client.get("/strategy-manager/activity-status").text
+    assert "pipeline-stage skipped" in bar
+    assert "Strategy Manager setup cancelled" in bar
+    assert "pipeline-stage failed" not in bar
+    assert (
+        'href="/strategy-manager/setup"'
+        in client.get("/strategy-manager/activities/job-1").text
+    )
 
 
 def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(services):
@@ -1410,7 +1440,12 @@ def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(servic
     assert "Strategy Manager is set up." in text
     assert 'href="/strategy-manager"' in text
     assert "hx-trigger=" not in text
-    assert text.count("pipeline-stage complete") == 3
+    assert (
+        client.get("/strategy-manager/activity-status").text.count(
+            "pipeline-stage complete"
+        )
+        == 3
+    )
 
 
 @pytest.mark.parametrize(
@@ -3916,9 +3951,56 @@ def test_preparation_activity_finally_shows_its_stages(services):
     repo.preparation_run = lambda _job_id: SimpleNamespace()
     repo.preparation_child_backtest_id = lambda _job_id: None
 
-    text = client.get("/strategy-manager/activities/job-1").text
+    text = client.get("/strategy-manager/activity-status").text
 
     assert "Selecting evidence" in text
     assert "Pinning FX rates" in text
     assert "Sealing manifest" in text
     assert 'class="pipeline-stage running"' in text
+
+
+def test_activity_page_leaves_progress_to_the_pinned_bar(services):
+    """Regression: the bar is pinned to the bottom even on an activity page.
+
+    The first cut rendered a second, inline bar inside the activity card and
+    hid the pinned one while that page was open, so starting a backtest --
+    which lands you straight on its activity page -- showed progress in the
+    middle of the page instead of pinned at the foot.
+    """
+    repo, jobs = services
+    jobs.actions = ("cancel",)
+    repo.activity = _bootstrap_job(
+        status=StrategyJobStatus.RUNNING, current_stage="roster_capture"
+    )
+
+    page = client.get("/strategy-manager/activities/job-1").text
+
+    # No second bar on the page, and nothing that would hide the pinned one.
+    assert "pipeline-status" not in page
+    assert "strategy-activity" not in page
+    # The pinned bar carries the progress instead.
+    assert (
+        'class="pipeline-status running"'
+        in client.get("/strategy-manager/activity-status").text
+    )
+
+
+def test_index_pins_every_status_bar_to_the_bottom():
+    """Each bar's on-screen rule is position:fixed at bottom:0."""
+    markup = Path("app/api/templates/index.html").read_text()
+
+    for bar in (
+        "pipeline-status",
+        "portfolio-backfill-status",
+        "strategy-activity-status",
+    ):
+        rule = f"#{bar}:has(> .pipeline-status)"
+        assert rule in markup
+    fixed = [
+        line
+        for line in markup.splitlines()
+        if "#strategy-activity-status:has(> .pipeline-status)" in line
+    ]
+    assert fixed and "position: fixed" in fixed[0] and "bottom: 0" in fixed[0]
+    # Nothing may suppress the pinned bar while an activity page is open.
+    assert "#tab-content .strategy-activity" not in markup
