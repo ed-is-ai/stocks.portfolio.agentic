@@ -11,22 +11,8 @@
      data-pipeline-state="{{ status.state }}"
      hx-get="/pipeline-status" hx-trigger="every 2s"
      hx-target="#pipeline-status" hx-swap="innerHTML">
-  <div class="pipeline-status-summary">
-    <i class="bi bi-arrow-repeat"></i>
-    <strong>Pipeline running</strong>
-    <span>{{ "%.0f"|format(status.elapsed_seconds) }}s</span>
-  </div>
-  <ol class="pipeline-stages" aria-label="Pipeline progress">
-    {% for stage in status.stages %}
-    <li class="pipeline-stage {{ stage.state }}" {% if stage.state == 'running' %}aria-current="step"{% endif %}>
-      <i class="bi bi-{% if stage.state == 'complete' %}check-circle-fill{% elif stage.state == 'failed' %}x-circle-fill{% elif stage.state == 'running' %}circle-fill{% elif stage.state == 'skipped' %}dash-circle{% else %}circle{% endif %}"></i>
-      <span>{{ stage.label }}</span>
-      {% if stage.stage == 'analysis' and stage.current is not none and stage.total is not none %}
-      <span class="pipeline-stage-count">{{ stage.current }}/{{ stage.total }}</span>
-      {% endif %}
-    </li>
-    {% endfor %}
-  </ol>
+  {{ macros.status_summary('arrow-repeat', 'Pipeline running', status.elapsed_seconds) }}
+  {{ macros.status_stages(status.stages, 'Pipeline progress') }}
   {% if status.error_summary %}<span class="pipeline-status-error">{{ status.error_summary }}</span>{% endif %}
   {{ macros.freshness_affordance(freshness, latest_attempt_error) }}
 </div>

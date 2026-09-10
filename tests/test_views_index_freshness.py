@@ -134,10 +134,19 @@ def test_index_latest_failure_keeps_stale_caution(monkeypatch, tmp_path) -> None
 def test_index_reserves_no_permanent_space_for_the_status_bar(
     monkeypatch, tmp_path
 ) -> None:
-    """The body offset is conditional on a bar actually being present (#418)."""
+    """The body offset is conditional on a bar actually being present (#418).
+
+    gh-593 scopes each bar to its own tab, so the reserve is conditional on
+    both a bar existing and its tab being the active one.
+    """
     _use_artifact(monkeypatch, tmp_path, datetime.now(timezone.utc))
 
     markup = client.get("/").text
 
     assert "body { padding-bottom: calc(2.5rem" not in markup
-    assert "body:has(.pipeline-status-bar .pipeline-status)" in markup
+    for tab, bar in (
+        ("tab-stock-scanner", "pipeline-status"),
+        ("tab-portfolio", "portfolio-backfill-status"),
+        ("tab-strategy-manager", "strategy-activity-status"),
+    ):
+        assert f"body:has(#{tab}.active):has(#{bar} > .pipeline-status)" in markup

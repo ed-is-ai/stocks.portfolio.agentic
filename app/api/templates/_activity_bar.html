@@ -1,0 +1,8 @@
+{# The inner rows of one Strategy Manager status bar (#593), shared by the
+   fixed tab bar and the inline bar on an activity page so both read
+   identically. The caller owns the .pipeline-status element and its
+   polling; this partial owns only what goes inside it. #}
+{% import "_macros.html" as macros %}
+{{ macros.status_summary(activity_bar.icon, activity_bar.label, activity_bar.elapsed_seconds) }}
+{% if activity_bar.stages %}{{ macros.status_stages(activity_bar.stages, 'Activity progress') }}{% endif %}
+{% if activity_bar.error %}<span class="pipeline-status-error">{{ activity_bar.error }}</span>{% endif %}

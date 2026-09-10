@@ -262,7 +262,16 @@ DEFAULT_PORTFOLIO_NAME = "SIPP"
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
-    """Open a SQLite connection to ``db_path``."""
+    """Open a SQLite connection to ``db_path``, creating its directory.
+
+    SQLite creates a missing database file but never a missing parent
+    directory, so a data directory that is gitignored (``data/``, holding
+    backtest evidence and the price cache) leaves every caller with an
+    opaque "unable to open database file" on a fresh checkout or in CI.
+    """
+    parent = Path(db_path).parent
+    if str(parent) not in ("", "."):
+        parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     # SQLite foreign-key checks are disabled by default and scoped to each
     # connection. Backtest evidence uses fresh connections per repository

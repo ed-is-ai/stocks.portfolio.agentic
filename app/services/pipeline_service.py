@@ -195,6 +195,15 @@ class PipelineService:
         result = status.model_dump(mode="json")
         for item, model in zip(result["stages"], status.stages, strict=True):
             item["label"] = model.stage.label
+            #: The status bar renders whatever ``count`` a stage carries
+            #: (#593); only Analysis walks a countable set of tickers.
+            item["count"] = (
+                f"{model.current}/{model.total}"
+                if model.stage is PipelineStage.ANALYSIS
+                and model.current is not None
+                and model.total is not None
+                else None
+            )
         analysis = status.stage(PipelineStage.ANALYSIS)
         result["analysis_current"] = analysis.current
         result["analysis_total"] = analysis.total

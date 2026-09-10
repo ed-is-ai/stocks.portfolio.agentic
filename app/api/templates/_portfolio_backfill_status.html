@@ -6,6 +6,7 @@
    button spinning past the price fetch. Reuses the .pipeline-status* styles
    the scanner's status bar already defines -- same visual language, no new
    CSS. #}
+{% import "_macros.html" as macros %}
 {% if progress %}
 <div class="pipeline-status {% if progress.running %}running{% elif progress.phase == 'failed' %}failed{% else %}complete{% endif %}"
      data-backfill-state="{{ progress.phase }}"
@@ -19,35 +20,17 @@
      hx-trigger="load delay:8s"
      hx-target="#portfolio-backfill-status" hx-swap="innerHTML"
      {% endif %}>
-  <div class="pipeline-status-summary">
-    <i class="bi bi-{% if progress.running %}arrow-repeat{% elif progress.phase == 'failed' %}x-circle-fill{% else %}check-circle-fill{% endif %}"></i>
-    <strong>
-      {%- if progress.phase == 'evidence' %}Fetching price history
-      {%- elif progress.phase == 'valuing' %}Filling chart history
-      {%- elif progress.phase == 'failed' %}Chart backfill failed
-      {%- else %}Chart history updated{% endif -%}
-    </strong>
-    <span>{{ "%.0f"|format(progress.elapsed_seconds) }}s</span>
-  </div>
-
-  <ol class="pipeline-stages" aria-label="Backfill progress">
-    <li class="pipeline-stage {% if progress.phase == 'evidence' %}running{% else %}complete{% endif %}"
-        {% if progress.phase == 'evidence' %}aria-current="step"{% endif %}>
-      <i class="bi bi-{% if progress.phase == 'evidence' %}circle-fill{% else %}check-circle-fill{% endif %}"></i>
-      <span>Evidence</span>
-      {% if progress.tickers_total %}
-      <span class="pipeline-stage-count">{{ progress.tickers_done }}/{{ progress.tickers_total }}</span>
-      {% endif %}
-    </li>
-    <li class="pipeline-stage {% if progress.phase == 'valuing' %}running{% elif progress.phase == 'evidence' %}pending{% else %}complete{% endif %}"
-        {% if progress.phase == 'valuing' %}aria-current="step"{% endif %}>
-      <i class="bi bi-{% if progress.phase == 'valuing' %}circle-fill{% elif progress.phase == 'evidence' %}circle{% else %}check-circle-fill{% endif %}"></i>
-      <span>Valuing days</span>
-      {% if progress.days_total %}
-      <span class="pipeline-stage-count">{{ "{:,}".format(progress.days_done) }}/{{ "{:,}".format(progress.days_total) }}</span>
-      {% endif %}
-    </li>
-  </ol>
+  {%- set icon = 'arrow-repeat' if progress.running else ('x-circle-fill' if progress.phase == 'failed' else 'check-circle-fill') -%}
+  {%- set label = {'evidence': 'Fetching price history', 'valuing': 'Filling chart history', 'failed': 'Chart backfill failed'}.get(progress.phase, 'Chart history updated') -%}
+  {{ macros.status_summary(icon, label, progress.elapsed_seconds) }}
+  {{ macros.status_stages([
+       {'state': 'running' if progress.phase == 'evidence' else 'complete',
+        'label': 'Evidence',
+        'count': '%d/%d'|format(progress.tickers_done, progress.tickers_total) if progress.tickers_total else none},
+       {'state': 'running' if progress.phase == 'valuing' else ('pending' if progress.phase == 'evidence' else 'complete'),
+        'label': 'Valuing days',
+        'count': '{:,}/{:,}'.format(progress.days_done, progress.days_total) if progress.days_total else none},
+     ], 'Backfill progress') }}
 
   {# Calendar days advance faster than rows (weekends, holidays and
      evidence gaps produce no row), so both are shown -- a slow stretch

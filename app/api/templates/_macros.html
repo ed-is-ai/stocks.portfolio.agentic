@@ -72,3 +72,32 @@
 {% macro provenance_label(quality) -%}
 {{- {'best_effort_reconstructed': 'Reconstructed (approximate)', 'observed_bau': 'Observed (from live scans)'}.get(quality, quality|replace('_', ' ')|title) -}}
 {%- endmacro %}
+
+{% macro status_summary(icon, label, elapsed_seconds=none) %}
+{# Leading line of a .pipeline-status bar: icon, what is running, how long
+   (#593). Shared by the scanner, the portfolio backfill and every Strategy
+   Manager activity so one progress affordance serves all three. #}
+<div class="pipeline-status-summary">
+  <i class="bi bi-{{ icon }}"></i>
+  <strong>{{ label }}</strong>
+  {%- if elapsed_seconds is not none %}<span>{{ "%.0f"|format(elapsed_seconds) }}s</span>{% endif %}
+</div>
+{% endmacro %}
+
+{% macro status_stages(stages, aria_label) %}
+{# Stage strip of a .pipeline-status bar (#593). ``stages`` is any sequence
+   of objects or mappings exposing ``state`` (running/complete/failed/
+   skipped/pending), ``label`` and an optional ``count`` -- attribute and
+   key access are interchangeable in Jinja, so callers pass whichever they
+   already have. #}
+{%- set icons = {'complete': 'check-circle-fill', 'failed': 'x-circle-fill', 'running': 'circle-fill', 'skipped': 'dash-circle'} -%}
+<ol class="pipeline-stages" aria-label="{{ aria_label }}">
+  {%- for stage in stages %}
+  <li class="pipeline-stage {{ stage.state }}"{% if stage.state == 'running' %} aria-current="step"{% endif %}>
+    <i class="bi bi-{{ icons.get(stage.state, 'circle') }}"></i>
+    <span>{{ stage.label }}</span>
+    {%- if stage.count %}<span class="pipeline-stage-count">{{ stage.count }}</span>{% endif %}
+  </li>
+  {%- endfor %}
+</ol>
+{% endmacro %}

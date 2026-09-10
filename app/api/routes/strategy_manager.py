@@ -12,6 +12,7 @@ from decimal import Decimal, InvalidOperation
 import logging
 import re
 from time import perf_counter
+from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
@@ -30,7 +31,7 @@ from app.api.dependencies import (
     get_strategy_job_service,
     get_strategy_manager_agent,
 )
-from app.api.templating import is_htmx_request, template_response
+from app.api.templating import is_htmx_request, template_response, templates
 from app.core.security import require_local_or_token
 from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
@@ -74,6 +75,7 @@ from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
 from app.services.backtest.strategy_job import (
+    STAGE_JOB_TYPES,
     STAGE_SEQUENCES,
     BootstrapSubmissionV1,
     InitializationSubmissionV1,
@@ -155,27 +157,34 @@ _BOOTSTRAP_ACTIVITY_STATUSES = frozenset(
     }
 )
 #: gh-397: labels mirror the copy already shown in ``_strategy_setup.html``.
-_BOOTSTRAP_STAGE_LABELS: dict[str, str] = {
+#: gh-593 extends the map to Preparation, whose activity previously showed
+#: no progress at all.
+_STAGE_LABELS: dict[str, str] = {
     "qualification": "Verifying historical data",
     "roster_capture": "Capturing securities",
     "profile_activation": "Activating setup",
+    "evidence_selection": "Selecting evidence",
+    "fx_pinning": "Pinning FX rates",
+    "manifest_sealing": "Sealing manifest",
 }
 
 
-def _bootstrap_stage_label(stage: str) -> str:
-    """Human label for a bootstrap stage, tolerant of unmapped enum values."""
-    return _BOOTSTRAP_STAGE_LABELS.get(stage, stage.replace("_", " ").title())
+def _stage_label(stage: str) -> str:
+    """Human label for a job stage, tolerant of unmapped enum values."""
+    return _STAGE_LABELS.get(stage, stage.replace("_", " ").title())
 
 
-def _bootstrap_stage_progress(job: StrategyJobV1) -> list[dict[str, str]]:
-    """Return the ordered bootstrap stages with a per-stage lifecycle state.
+def _stage_progress(job: StrategyJobV1) -> list[dict[str, str]]:
+    """Return a stage-walking job's stages with a per-stage lifecycle state.
 
-    ``state`` is one of ``complete``/``current``/``pending``/``failed``/
-    ``stopped``, derived only from ``STAGE_SEQUENCES``, ``job.current_stage``
-    and ``job.status`` -- gh-397 adds no new persisted progress field.
-    A ``queued`` job has started no work, so every stage reads ``pending``.
+    ``state`` uses the shared status-bar vocabulary -- ``complete``/
+    ``running``/``pending``/``failed``/``skipped`` (#593) -- derived only
+    from ``STAGE_SEQUENCES``, ``job.current_stage`` and ``job.status``; no
+    new persisted progress field is involved. A ``queued`` job has started
+    no work, so every stage reads ``pending``. Serves both stage-walking
+    job types, so Preparation gets the same strip Bootstrap has.
     """
-    stages = STAGE_SEQUENCES[StrategyJobType.BOOTSTRAP]
+    stages = STAGE_SEQUENCES[job.job_type]
     current = job.current_stage
     idx = stages.index(current) if current in stages else 0
     progress: list[dict[str, str]] = []
@@ -187,18 +196,12 @@ def _bootstrap_stage_progress(job: StrategyJobV1) -> list[dict[str, str]]:
         elif position == idx and job.status is StrategyJobStatus.FAILED:
             state = "failed"
         elif position == idx and job.status is StrategyJobStatus.CANCELLED:
-            state = "stopped"
+            state = "skipped"
         elif position == idx:
-            state = "current"
+            state = "running"
         else:
             state = "pending"
-        progress.append(
-            {
-                "key": stage,
-                "label": _bootstrap_stage_label(stage),
-                "state": state,
-            }
-        )
+        progress.append({"key": stage, "label": _stage_label(stage), "state": state})
     return progress
 
 
@@ -1482,6 +1485,89 @@ def _initialization_progress(
     }
 
 
+#: gh-593: one label per job type, so every Strategy Manager activity reads
+#: the same way in the shared status bar as the scanner and portfolio runs.
+_ACTIVITY_LABELS: dict[StrategyJobType, str] = {
+    StrategyJobType.BOOTSTRAP: "Strategy Manager setup",
+    StrategyJobType.INITIALIZATION: "Preparing historical data",
+    StrategyJobType.PREPARATION: "Preparing evidence",
+    StrategyJobType.BACKTEST: "Backtest",
+}
+_ACTIVITY_BAR_STATES: dict[StrategyJobStatus, str] = {
+    StrategyJobStatus.QUEUED: "running",
+    StrategyJobStatus.RUNNING: "running",
+    StrategyJobStatus.COMPLETE: "complete",
+    StrategyJobStatus.FAILED: "failed",
+    StrategyJobStatus.CANCELLED: "skipped",
+}
+_ACTIVITY_BAR_ICONS: dict[str, str] = {
+    "running": "arrow-repeat",
+    "complete": "check-circle-fill",
+    "failed": "x-circle-fill",
+    "skipped": "dash-circle",
+}
+
+
+def _activity_bar(
+    job: StrategyJobV1,
+    stage_progress: Sequence[Mapping[str, str]] | None,
+    backtest_progress: Mapping[str, object] | None,
+    initialization_progress: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Build the shared status-bar context for one Strategy Manager job (#593).
+
+    Every activity renders through the same ``.pipeline-status`` component
+    the scanner and the portfolio backfill use, so the four bespoke progress
+    treatments collapse into one. Month-walking jobs contribute a single
+    stage carrying an ``n/total`` count; stage-walking jobs contribute their
+    stage strip.
+    """
+    state = _ACTIVITY_BAR_STATES[job.status]
+    suffix = {"complete": " complete", "failed": " failed", "skipped": " cancelled"}
+    stages: list[Mapping[str, object]] = []
+    if stage_progress is not None:
+        stages = list(stage_progress)
+    elif initialization_progress is not None:
+        stages = [
+            {
+                "state": state,
+                "label": "Months prepared",
+                "count": (
+                    f"{initialization_progress['committed']}"
+                    f"/{initialization_progress['total']}"
+                ),
+            }
+        ]
+    elif backtest_progress is not None:
+        stages = [
+            {
+                "state": state,
+                "label": "Months",
+                "count": (
+                    f"{backtest_progress['position']}/{backtest_progress['total']}"
+                ),
+            }
+        ]
+    #: Elapsed is decoration, not data: a job shape without usable
+    #: timestamps still gets a bar, just without the seconds counter.
+    started = getattr(job, "created_at", None)
+    updated = getattr(job, "updated_at", None)
+    elapsed: float | None = None
+    if isinstance(started, datetime) and isinstance(updated, datetime):
+        finished = updated if job.status.terminal else datetime.now(timezone.utc)
+        elapsed = max(0.0, (finished - started).total_seconds())
+    return {
+        "state": state,
+        "icon": _ACTIVITY_BAR_ICONS[state],
+        "label": _ACTIVITY_LABELS[job.job_type] + suffix.get(state, ""),
+        "stages": stages,
+        "elapsed_seconds": elapsed,
+        "error": job.failure_detail if job.status is StrategyJobStatus.FAILED else None,
+        "href": f"/strategy-manager/activities/{job.id}",
+        "running": not job.status.terminal,
+    }
+
+
 def _activity_context(
     repo: BacktestRepository, service: StrategyJobService, job_id: str
 ) -> dict[str, object]:
@@ -1519,6 +1605,13 @@ def _activity_context(
         and hasattr(repo, "initialization_progress")
         else None
     )
+    stage_progress = _stage_progress(job) if job.job_type in STAGE_JOB_TYPES else None
+    backtest_progress = (
+        _backtest_progress(run, job.current_month)
+        if job.job_type is StrategyJobType.BACKTEST
+        and job.status is StrategyJobStatus.RUNNING
+        else None
+    )
     return {
         "job": job,
         "run": run,
@@ -1532,23 +1625,89 @@ def _activity_context(
         ),
         "review_url": review_url,
         "child_url": f"/strategy-manager/activities/{child_id}" if child_id else None,
-        "stage_progress": (
-            _bootstrap_stage_progress(job)
-            if job.job_type is StrategyJobType.BOOTSTRAP
-            else None
-        ),
-        "backtest_progress": (
-            _backtest_progress(run, job.current_month)
-            if job.job_type is StrategyJobType.BACKTEST
-            and job.status is StrategyJobStatus.RUNNING
-            else None
-        ),
+        "stage_progress": stage_progress,
+        "backtest_progress": backtest_progress,
         "initialization_progress": initialization_progress,
+        "activity_bar": _activity_bar(
+            job, stage_progress, backtest_progress, initialization_progress
+        ),
     }
 
 
 def _activity_template(job_type: StrategyJobType) -> str:
     return _ACTIVITY_TEMPLATES[job_type]
+
+
+#: How long a finished job stays in the tab status bar before the bar clears
+#: itself -- long enough to notice an outcome after navigating back, short
+#: enough that a stale run never squats at the page foot.
+_ACTIVITY_BAR_LINGER = timedelta(seconds=60)
+
+
+def _live_activity_bar(repo: BacktestRepository) -> dict[str, object] | None:
+    """Return the status-bar context for the newest live Strategy job (#593).
+
+    "Live" means still working, or finished within ``_ACTIVITY_BAR_LINGER``
+    so its outcome is visible to someone who navigated away mid-run. Deleted
+    jobs never surface.
+    """
+    # ponytail: scans every job row; strategy_jobs is a handful of rows per
+    # install. Add a `WHERE deleted_at IS NULL ORDER BY enqueue_seq DESC
+    # LIMIT 1` repository query if it ever grows.
+    jobs = [job for job in repo.list_strategy_jobs() if job.deleted_at is None]
+    if not jobs:
+        return None
+    job = jobs[-1]
+    if (
+        job.status.terminal
+        and datetime.now(timezone.utc) - job.updated_at > _ACTIVITY_BAR_LINGER
+    ):
+        return None
+    context = _activity_context_for_bar(repo, job)
+    return context
+
+
+def _activity_context_for_bar(
+    repo: BacktestRepository, job: StrategyJobV1
+) -> dict[str, object]:
+    """Assemble one job's bar context without the full activity page load."""
+    stage_progress = _stage_progress(job) if job.job_type in STAGE_JOB_TYPES else None
+    backtest_progress = None
+    initialization_progress = None
+    if job.job_type is StrategyJobType.BACKTEST and job.current_month:
+        backtest_progress = _backtest_progress(
+            repo.strategy_run(job.id), job.current_month
+        )
+    elif job.job_type is StrategyJobType.INITIALIZATION:
+        initialization_progress = _initialization_progress(
+            repo.initialization_run(job.id),
+            repo.initialization_progress(job.id),
+            job.created_at,
+        )
+    return _activity_bar(
+        job, stage_progress, backtest_progress, initialization_progress
+    )
+
+
+@router.get("/strategy-manager/activity-status", response_class=HTMLResponse)
+async def strategy_activity_status_bar(
+    request: Request, backtest: BacktestDep
+) -> HTMLResponse:
+    """Render the Strategy Manager tab's fixed status bar (#593).
+
+    Always renders a root element that owns its own polling cadence, so an
+    idle tab picks a newly started run up without the page needing to know
+    a job was enqueued.
+    """
+    try:
+        bar = _live_activity_bar(backtest)
+    except Exception:  # noqa: BLE001 -- a status bar never breaks the page
+        bar = None
+    #: Never page-wrapped: this is bar chrome swapped into a fixed
+    #: container, not a navigable fragment -- same as /pipeline-status.
+    return templates.TemplateResponse(
+        request, "_strategy_activity_bar.html", {"activity_bar": bar}
+    )
 
 
 @router.get("/strategy-manager/activities/{job_id}", response_class=HTMLResponse)

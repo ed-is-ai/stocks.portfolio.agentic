@@ -12,5 +12,8 @@ jobs:
         with:
           python-version: "3.14"
       - run: uv sync --all-extras --dev
+      # The boot-splash tests drive a real browser. playwright ships the
+      # client library as a dependency but never the browser binary, so
+      # without this step they fail rather than skip.
       - run: uv run playwright install --with-deps chromium
       - run: uv run pytest

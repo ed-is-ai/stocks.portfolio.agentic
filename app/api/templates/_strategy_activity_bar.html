@@ -1,0 +1,20 @@
+{# Strategy Manager's tab status bar (#593). Renders a root element even when
+   idle so it keeps re-checking: a run started from anywhere on the tab shows
+   up here without the page having to know a job was enqueued. CSS scopes it
+   to the Strategy Manager tab and hides it while an activity page -- which
+   renders its own inline bar -- is open. #}
+{% if activity_bar %}
+<div class="pipeline-status {{ activity_bar.state }}"
+     data-strategy-activity-state="{{ activity_bar.state }}"
+     hx-get="/strategy-manager/activity-status"
+     hx-trigger="every {{ 2 if activity_bar.running else 10 }}s"
+     hx-target="#strategy-activity-status" hx-swap="innerHTML">
+  <a href="{{ activity_bar.href }}" hx-get="{{ activity_bar.href }}"
+     hx-target="#tab-content" hx-swap="innerHTML" class="pipeline-status-link">
+    {% include "_activity_bar.html" %}
+  </a>
+</div>
+{% else %}
+<span hx-get="/strategy-manager/activity-status" hx-trigger="every 10s"
+      hx-target="#strategy-activity-status" hx-swap="innerHTML"></span>
+{% endif %}

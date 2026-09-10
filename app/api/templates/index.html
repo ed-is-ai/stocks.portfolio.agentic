@@ -416,10 +416,29 @@
     .form-label { font-size: 0.76rem; font-weight: 600; color: #374151; margin-bottom: 0.3rem; }
     .form-control, .form-select { font-size: 0.85rem; border-color: var(--border); }
     .form-control:focus, .form-select:focus { border-color: #93c5fd; box-shadow: 0 0 0 3px rgba(59,130,246,0.12); }
-    /* The bar only exists while a refresh runs -- .pipeline-status is
-       rendered running-only, so the fixed chrome comes and goes with it.
-       #pipeline-status itself stays put: it also hosts the breakdown toast. */
-    .pipeline-status-bar:has(.pipeline-status) { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); padding-bottom: env(safe-area-inset-bottom, 0px); }
+    /* A bar only exists while its run does -- .pipeline-status is rendered
+       running-only, so the fixed chrome comes and goes with it. The
+       containers themselves stay put: #pipeline-status also hosts the
+       breakdown toast. */
+    /* One bar, mirroring the tab you are on (#593). Three fixed bars share the
+       one slot at the page foot, so without this the last one in the DOM
+       silently covers the others. Scoping by active tab keeps a single bar
+       eligible at a time, so the slot and the body reserve below stay as they
+       are. The hide lands on .pipeline-status, never on #pipeline-status
+       itself -- that container also hosts the scan-failure toast, which must
+       still fire from any tab. */
+    .pipeline-status-bar > .pipeline-status { display: none; }
+    body:has(#tab-stock-scanner.active) #pipeline-status > .pipeline-status,
+    body:has(#tab-portfolio.active) #portfolio-backfill-status > .pipeline-status,
+    body:has(#tab-strategy-manager.active) #strategy-activity-status > .pipeline-status { display: flex; }
+    body:has(#tab-stock-scanner.active) #pipeline-status:has(> .pipeline-status),
+    body:has(#tab-portfolio.active) #portfolio-backfill-status:has(> .pipeline-status),
+    body:has(#tab-strategy-manager.active) #strategy-activity-status:has(> .pipeline-status) { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); padding-bottom: env(safe-area-inset-bottom, 0px); }
+    /* The activity page renders its own inline bar, so the fixed one would
+       duplicate it. */
+    body:has(#tab-content .strategy-activity) #strategy-activity-status > .pipeline-status { display: none; }
+    .pipeline-status-link { display: flex; align-items: center; gap: 1rem; flex: 1; min-width: 0; color: inherit; text-decoration: none; }
+    .pipeline-status-inline { border: 1px solid var(--border); border-radius: .4rem; margin: .6rem 0; }
     .pipeline-status { min-height: 2.35rem; display: flex; align-items: center; gap: 1rem; padding: .45rem 1.25rem; font-size: .78rem; color: var(--muted); overflow-x: auto; }
     .pipeline-status-summary, .pipeline-stages, .pipeline-stage { display: flex; align-items: center; gap: .4rem; white-space: nowrap; }
     .pipeline-stages { list-style: none; margin: 0; padding: 0; gap: .75rem; }
@@ -489,7 +508,9 @@
     /* Reserve room for the fixed pipeline status bar (incl. its own
        safe-area padding) only while it is on screen -- an idle page pays
        no permanent dead space at the page foot (#418). */
-    body:has(.pipeline-status-bar .pipeline-status) { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
+    body:has(#tab-stock-scanner.active):has(#pipeline-status > .pipeline-status),
+    body:has(#tab-portfolio.active):has(#portfolio-backfill-status > .pipeline-status),
+    body:has(#tab-strategy-manager.active):has(#strategy-activity-status > .pipeline-status) { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
     .pipeline-confirmation { position: fixed; inset: 0; z-index: 1050; display: grid; place-items: center; background: rgba(15, 23, 42, .42); padding: 1rem; }
     .pipeline-confirmation-card { width: min(32rem, 100%); background: white; border-radius: .65rem; box-shadow: 0 20px 50px rgba(0,0,0,.24); padding: 1.3rem; }
     .pipeline-confirmation h2 { font-size: 1rem; font-weight: 700; color: var(--amber); margin: 0 0 .75rem; }
@@ -795,6 +816,11 @@
    portfolio partial swap can never remove it mid-run; the partial it loads
    owns its own 2s polling and clears itself when the run ages out. #}
 <div id="portfolio-backfill-status" class="pipeline-status-bar"></div>
+{# Strategy Manager activity progress (#593). Same fixed bar, scoped by CSS to
+   the Strategy Manager tab; it loads once and then owns its own polling,
+   idling at 10s so a run started anywhere on the tab still shows up. #}
+<div id="strategy-activity-status" class="pipeline-status-bar"
+     hx-get="/strategy-manager/activity-status" hx-trigger="load" hx-swap="innerHTML"></div>
 <div id="pipeline-confirmation"></div>
 
 <!-- Buy Modal -->

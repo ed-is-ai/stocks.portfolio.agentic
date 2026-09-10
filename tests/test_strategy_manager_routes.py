@@ -77,7 +77,7 @@ from app.services.backtest.strategy_job import (
 )
 from app.api.routes.strategy_manager import (
     _backtest_progress,
-    _bootstrap_stage_progress,
+    _stage_progress,
 )
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
@@ -1008,12 +1008,10 @@ def test_backtest_activity_shows_inclusive_progress_and_project_buttons(services
     response = client.get("/strategy-manager/activities/job-1")
 
     assert response.status_code == 200
-    assert "Month 2 of 3" in response.text
-    assert 'role="progressbar"' in response.text
-    assert 'aria-valuemin="1"' in response.text
-    assert 'aria-valuemax="3"' in response.text
-    assert 'aria-valuenow="2"' in response.text
-    assert 'style="width: 66.67%"' in response.text
+    assert "Months" in response.text
+    assert ">2/3<" in response.text
+    assert 'class="pipeline-stage running"' in response.text
+    assert 'aria-current="step"' in response.text
     assert "Stopping after this month" in response.text
     assert 'class="sm-btn sm-btn-primary">Restart backtest</button>' in response.text
     assert response.text.count('role="status"') == 1
@@ -1041,9 +1039,8 @@ def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
     )
 
     assert updated.status_code == 200
-    assert "Month 3 of 3" in updated.text
-    assert 'aria-valuenow="3"' in updated.text
-    assert 'style="width: 100.00%"' in updated.text
+    assert ">3/3<" in updated.text
+    assert 'class="pipeline-stage running"' in updated.text
 
     repo.activity = SimpleNamespace(
         id="job-1",
@@ -1058,8 +1055,7 @@ def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
     invalid = client.get("/strategy-manager/activities/job-1")
 
     assert invalid.status_code == 200
-    assert 'role="progressbar"' not in invalid.text
-    assert "Month " not in invalid.text
+    assert "pipeline-stages" not in invalid.text
 
     for status, current_month in (
         (StrategyJobStatus.QUEUED, None),
@@ -1077,7 +1073,7 @@ def test_backtest_activity_poll_rerenders_progress_and_omits_inapplicable_state(
             failure_detail=None,
         )
         response = client.get("/strategy-manager/activities/job-1")
-        assert 'role="progressbar"' not in response.text
+        assert "pipeline-stages" not in response.text
 
     unchanged = client.get(
         "/strategy-manager/activities/job-1/status?last_seen_version=8"
@@ -1368,9 +1364,9 @@ def test_bootstrap_activity_shows_ordered_stage_progress_mid_run(services):
     assert "Verifying historical data" in text
     assert "Capturing securities" in text
     assert "Activating setup" in text
-    assert "sm-stage-complete" in text
-    assert "sm-stage-current" in text
-    assert "sm-stage-pending" in text
+    assert "pipeline-stage complete" in text
+    assert "pipeline-stage running" in text
+    assert "pipeline-stage pending" in text
     assert 'aria-current="step"' in text
     assert "Running" in text
     assert "In progress" not in text
@@ -1385,7 +1381,7 @@ def test_bootstrap_activity_marks_failed_stage_and_recovery_link(services):
         status_version=8,
     )
     text = client.get("/strategy-manager/activities/job-1").text
-    assert "sm-stage-failed" in text
+    assert "pipeline-stage failed" in text
     assert "Roster capture failed" in text
     assert 'href="/strategy-manager/setup"' in text
     assert "Try setup again" in text
@@ -1400,9 +1396,9 @@ def test_bootstrap_activity_cancelled_shows_stopped_stage_and_recovery_link(serv
         status_version=8,
     )
     text = client.get("/strategy-manager/activities/job-1").text
-    assert "sm-stage-stopped" in text
-    assert "Stopped" in text
-    assert "sm-stage-failed" not in text
+    assert "pipeline-stage skipped" in text
+    assert "Strategy Manager setup cancelled" in text
+    assert "pipeline-stage failed" not in text
     assert 'href="/strategy-manager/setup"' in text
 
 
@@ -1414,23 +1410,23 @@ def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(servic
     assert "Strategy Manager is set up." in text
     assert 'href="/strategy-manager"' in text
     assert "hx-trigger=" not in text
-    assert text.count("sm-stage-complete") == 3
+    assert text.count("pipeline-stage complete") == 3
 
 
 @pytest.mark.parametrize(
     ("status", "current_stage", "expected"),
     [
         (StrategyJobStatus.QUEUED, None, ["pending", "pending", "pending"]),
-        (StrategyJobStatus.RUNNING, None, ["current", "pending", "pending"]),
+        (StrategyJobStatus.RUNNING, None, ["running", "pending", "pending"]),
         (
             StrategyJobStatus.RUNNING,
             "roster_capture",
-            ["complete", "current", "pending"],
+            ["complete", "running", "pending"],
         ),
         (
             StrategyJobStatus.RUNNING,
             "profile_activation",
-            ["complete", "complete", "current"],
+            ["complete", "complete", "running"],
         ),
         (
             StrategyJobStatus.FAILED,
@@ -1441,9 +1437,9 @@ def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(servic
         (
             StrategyJobStatus.CANCELLED,
             "roster_capture",
-            ["complete", "stopped", "pending"],
+            ["complete", "skipped", "pending"],
         ),
-        (StrategyJobStatus.CANCELLED, None, ["stopped", "pending", "pending"]),
+        (StrategyJobStatus.CANCELLED, None, ["skipped", "pending", "pending"]),
         (
             StrategyJobStatus.COMPLETE,
             "profile_activation",
@@ -1454,7 +1450,7 @@ def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(servic
 )
 def test_bootstrap_stage_progress_matrix(status, current_stage, expected):
     job = _bootstrap_job(status=status, current_stage=current_stage)
-    progress = _bootstrap_stage_progress(cast(StrategyJobV1, job))
+    progress = _stage_progress(cast(StrategyJobV1, job))
     assert [stage["key"] for stage in progress] == [
         "qualification",
         "roster_capture",
@@ -3831,3 +3827,98 @@ def test_initialization_defaults_to_update_without_predecessor(services):
 
     assert response.status_code in (200, 303)
     assert jobs.submissions[0].mode == "update"
+
+
+# gh-593: every long-running Strategy Manager activity renders through the
+# same .pipeline-status bar the scanner and the portfolio backfill use, and
+# the tab bar surfaces the newest live run from anywhere on the tab.
+
+
+def test_activity_status_bar_shows_the_newest_running_job(services):
+    repo, _ = services
+    repo.activity = _bootstrap_job(
+        status=StrategyJobStatus.RUNNING, current_stage="roster_capture"
+    )
+
+    text = client.get("/strategy-manager/activity-status").text
+
+    assert 'class="pipeline-status running"' in text
+    assert "Strategy Manager setup" in text
+    assert 'class="pipeline-stage complete"' in text
+    assert 'class="pipeline-stage running"' in text
+    assert 'href="/strategy-manager/activities/job-1"' in text
+    # A live run polls at the scanner's cadence, not the idle one.
+    assert 'hx-trigger="every 2s"' in text
+
+
+def test_activity_status_bar_is_empty_but_keeps_watching_when_idle(services):
+    repo, _ = services
+    repo.activity = None
+
+    text = client.get("/strategy-manager/activity-status").text
+
+    assert "pipeline-status" not in text
+    # An idle tab still has to notice a run that starts elsewhere.
+    assert 'hx-trigger="every 10s"' in text
+
+
+def test_activity_status_bar_drops_a_run_that_finished_long_ago(services):
+    repo, _ = services
+    stale = _bootstrap_job(status=StrategyJobStatus.COMPLETE)
+    stale.updated_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    repo.activity = stale
+
+    text = client.get("/strategy-manager/activity-status").text
+
+    assert "pipeline-status" not in text
+
+
+def test_activity_status_bar_lingers_on_a_just_finished_run(services):
+    repo, _ = services
+    fresh = _bootstrap_job(status=StrategyJobStatus.FAILED)
+    fresh.updated_at = datetime.now(timezone.utc)
+    repo.activity = fresh
+
+    text = client.get("/strategy-manager/activity-status").text
+
+    assert 'class="pipeline-status failed"' in text
+    assert "Strategy Manager setup failed" in text
+    assert "Roster capture failed" in text
+
+
+def test_activity_status_bar_ignores_a_soft_deleted_job(services):
+    repo, _ = services
+    repo.activity = _bootstrap_job(
+        status=StrategyJobStatus.RUNNING,
+        deleted_at=datetime.now(timezone.utc),
+    )
+
+    assert "pipeline-status" not in client.get("/strategy-manager/activity-status").text
+
+
+def test_preparation_activity_finally_shows_its_stages(services):
+    """Preparation was the one activity with no progress affordance at all."""
+    repo, _ = services
+    repo.activity = SimpleNamespace(
+        id="job-1",
+        job_type=StrategyJobType.PREPARATION,
+        status=StrategyJobStatus.RUNNING,
+        status_version=3,
+        current_month=None,
+        current_stage="fx_pinning",
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+        deleted_at=None,
+        created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+    )
+
+    repo.preparation_run = lambda _job_id: SimpleNamespace()
+    repo.preparation_child_backtest_id = lambda _job_id: None
+
+    text = client.get("/strategy-manager/activities/job-1").text
+
+    assert "Selecting evidence" in text
+    assert "Pinning FX rates" in text
+    assert "Sealing manifest" in text
+    assert 'class="pipeline-stage running"' in text
