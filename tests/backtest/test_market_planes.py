@@ -326,6 +326,41 @@ def test_each_price_plane_has_a_distinct_runtime_contract() -> None:
     )
 
 
+def test_as_traded_projection_is_cached_on_the_prepared_plane() -> None:
+    planes = HistoricalMarketPlanes.from_evidence(
+        _evidence((_row("2024-01-02", 25, 100),), ())
+    )
+
+    first = planes.as_traded()
+    second = planes.as_traded()
+
+    assert second is first
+
+
+def test_bounded_split_continuous_window_matches_full_projection() -> None:
+    planes = HistoricalMarketPlanes.from_evidence(
+        _evidence(
+            (
+                _row("2024-01-02", 10, 100),
+                _row("2024-01-03", 20, 110),
+                _row("2024-01-04", 30, 120, split=2),
+            ),
+            (
+                {
+                    "session": "2024-01-04",
+                    "action_type": "split",
+                    "value": _hex(2),
+                },
+            ),
+        )
+    )
+
+    full = planes.split_continuous_as_of(date(2024, 1, 4))
+    bounded = planes.split_continuous_window_as_of(date(2024, 1, 4), limit=2)
+
+    assert bounded == full[-2:]
+
+
 def test_ohlc_fields_transform_independently_and_dividends_never_change_prices() -> (
     None
 ):

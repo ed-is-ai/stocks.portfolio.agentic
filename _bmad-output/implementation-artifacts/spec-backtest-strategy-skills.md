@@ -36,7 +36,7 @@ context:
 | Turtle Trend | Current high strictly exceeds prior entry channel | BUY; current low strictly breaches prior exit channel | Each channel applies its own warm-up |
 | Moving Average | Fast SMA strictly crosses above/below slow SMA | BUY/SELL on true crossover only | Require slow window plus one; fast >= slow emits none |
 | Buy and Hold | Active target session is on/after valid configured date | Deterministic BUY candidate; never SELL | Invalid date emits none; engine rejects later held-position candidates |
-| Sizing | BUY or SELL signal | Fixed integer BUY shares; full integral held SELL quantity | Missing/fractional held quantity returns zero |
+| Sizing | BUY or SELL signal | Fixed integer BUY shares; full exact held SELL quantity, including split-created fractional holdings | Missing or non-positive held quantity returns zero |
 
 </frozen-after-approval>
 
@@ -71,7 +71,7 @@ context:
 **Acceptance Criteria:**
 - Given the repository `skills/` root, when discovery runs, then all six IDs appear in deterministic order with valid defaults and no warnings attributable to them.
 - Given identical bounded views and parameters, when any runtime is called repeatedly, then validated signals and sizing are identical.
-- Given empty, short, stale, equality-boundary, malformed-date, or fractional-position inputs, when rules run, then they fail closed as defined in the matrix without live access or mutation.
+- Given empty, short, stale, equality-boundary, malformed-date, or invalid-position inputs, when rules run, then they fail closed as defined in the matrix without live access or mutation; split-created fractional holdings remain valid SELL inputs.
 - Given the complete suite, when focused and repository quality checks run, then tests, lint, formatting, typing, and import-boundary checks pass without altering unrelated work.
 
 ## Spec Change Log

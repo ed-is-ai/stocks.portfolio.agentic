@@ -60,9 +60,9 @@ def _as_date(value: object) -> date | None:
     return None
 
 
-def _fresh_history(view: MarketViewV1, security_id: str) -> Any | None:
+def _fresh_history(view: MarketViewV1, security_id: str, *, limit: int) -> Any | None:
     try:
-        history = view.price_history(security_id)
+        history = view.price_history(security_id, limit=limit, columns=("close",))
         if history is None or len(history.index) == 0:
             return None
         latest_session = _as_date(history.index[-1])
@@ -127,7 +127,11 @@ def _crossover(
     the emitted signal can explain itself (#472).
     """
     windows = _windows(parameters)
-    history = _fresh_history(view, security_id)
+    history = _fresh_history(
+        view,
+        security_id,
+        limit=windows[1] + 1 if windows is not None else 201,
+    )
     if windows is None or history is None:
         return None
     fast, slow = windows
@@ -287,12 +291,11 @@ class MovingAverageStrategy:
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> int:
+    ) -> int | Decimal:
         if signal.side == SignalSide.BUY:
             # The engine reserves equal capital and determines whole shares.
             return 0
         for position in portfolio.positions:
             if position.security_id == signal.security_id:
-                integral = position.quantity.to_integral_value()
-                return int(integral) if position.quantity == integral else 0
+                return position.quantity
         return 0

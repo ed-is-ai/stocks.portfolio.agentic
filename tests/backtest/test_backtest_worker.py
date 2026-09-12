@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
+from typing import cast
 
 import pandas as pd
 import pytest
@@ -29,6 +30,14 @@ from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
     RunInputManifestV1,
     build_run_input_manifest_v2,
+    current_execution_contract_payload,
+)
+from app.services.backtest.backtest_engine import (
+    EntryFillEventV1,
+    EquityCurvePointV1,
+    ExitFillEventV1,
+    OpenPositionMarkEventV1,
+    SplitAppliedEventV1,
 )
 from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.skill_discovery import (
@@ -478,15 +487,18 @@ def _manifest(
     parameters: dict[str, object] | None = None,
     starting_capital: Decimal = Decimal("10000"),
 ) -> RunInputManifestV1:
+    contract_payload = current_execution_contract_payload(
+        Path(__file__).resolve().parents[2]
+    )
     return RunInputManifestV1(
         schema_version="run_input_manifest.v1",
         engine_version=ENGINE_VERSION,
         protocol_schema_version=PROTOCOL_SCHEMA_VERSION,
-        market_view_source_digest="1" * 64,
-        ledger_action_metrics_digest="2" * 64,
-        numeric_rounding_policy="HistoricalMarketPlanesV1",
-        runtime_lock_digest="3" * 64,
-        calendar_session_table_digest=TradingCalendar().session_table_digest(),
+        market_view_source_digest=contract_payload["market_view_source_digest"],
+        ledger_action_metrics_digest=contract_payload["ledger_action_metrics_digest"],
+        numeric_rounding_policy=contract_payload["numeric_rounding_policy"],
+        runtime_lock_digest=contract_payload["runtime_lock_digest"],
+        calendar_session_table_digest=contract_payload["calendar_session_table_digest"],
         python_runtime="3.13",
         timezone_dataset_version="2026.2",
         strategy_id="momentum_v1",
@@ -604,6 +616,135 @@ def test_worker_completes_a_real_backtest_end_to_end(
             ).fetchone()
             is None
         )
+
+
+def test_worker_active_v2_resolves_access_without_complete_price_get(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_strategy_resolution(monkeypatch)
+    repo = _repo(tmp_path / "backtest.db")
+    prices = _price_repo(tmp_path)
+    sessions = TradingCalendar().sessions_in_range(
+        "XNYS", date(2026, 6, 1), date(2026, 7, 1)
+    )
+    revision = _commit_evidence(prices, security_id=SECURITY_ID, sessions=sessions)
+    prices.migrate_v1_to_v2()
+    prices.activate_v2(review_reference="worker-v2-test")
+    prices.reset_read_counters()
+    manifest = _manifest(
+        revision=revision,
+        start_month="2026-06",
+        end_month="2026-06",
+        parameters={"watch_security_id": SECURITY_ID, "fixed_shares": 1},
+    )
+    enqueued = _enqueue(repo, manifest)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    engine = worker_module.build_backtest_engine(claim.job.id, claim.claim_token, repo)
+    engine._prices = prices  # type: ignore[attr-defined]
+
+    def fail_get(_revision: str):
+        raise AssertionError("active-v2 worker must not complete-read price evidence")
+
+    monkeypatch.setattr(prices, "get", fail_get)
+    result = engine.run(claim.job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.COMPLETE
+    assert repo.backtest_result(enqueued.job.id).events
+    assert prices.read_counters.complete_revision_materializations == 0
+
+
+def test_staging_sink_tracks_split_fraction_and_exact_exit_quantity() -> None:
+    captured: list[dict[str, object]] = []
+
+    class CaptureRepository:
+        def write_backtest_staging(self, _run_id: str, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+    sink = worker_module._StagingSink(
+        repository=cast(BacktestRepository, CaptureRepository()),
+        state=worker_module._ClaimState("run", "claim", 1),
+    )
+
+    def curve(sequence: int) -> EquityCurvePointV1:
+        return EquityCurvePointV1(
+            session=date(2026, 6, sequence),
+            cash_base=Decimal("0"),
+            positions_value_base=Decimal("100"),
+            total_equity_base=Decimal("100"),
+            sequence=sequence,
+        )
+
+    entry = EntryFillEventV1(
+        security_id="sec-a",
+        signal_session=date(2026, 6, 1),
+        fill_session=date(2026, 6, 1),
+        rule_id="r",
+        shares=1,
+        fill_price_native=Decimal("100"),
+        fill_currency="USD",
+        fill_quote_unit="USD",
+        cost_base=Decimal("100"),
+        sequence=1,
+    )
+    split = SplitAppliedEventV1(
+        security_id="sec-a",
+        session=date(2026, 6, 2),
+        ratio=Decimal("0.5"),
+        shares_before=Decimal("1"),
+        shares_after=Decimal("0.5"),
+        evidence_revision="a" * 64,
+        policy_version="SplitAccountingPolicyV2",
+        sequence=2,
+    )
+    mark = OpenPositionMarkEventV1(
+        security_id="sec-a",
+        session=date(2026, 6, 3),
+        shares=Decimal("0.5"),
+        mark_price_native=Decimal("200"),
+        market_value_base=Decimal("100"),
+        cost_basis_base=Decimal("100"),
+        unrealized_pnl_base=Decimal("0"),
+        sequence=3,
+    )
+    exit_event = ExitFillEventV1(
+        security_id="sec-a",
+        signal_session=date(2026, 6, 4),
+        fill_session=date(2026, 6, 4),
+        rule_id="r",
+        shares=Decimal("0.5"),
+        fill_price_native=Decimal("200"),
+        fill_currency="USD",
+        fill_quote_unit="USD",
+        proceeds_base=Decimal("100"),
+        cost_basis_base=Decimal("100"),
+        realized_pnl_base=Decimal("0"),
+        sequence=4,
+    )
+
+    sink.publish_session(
+        session=date(2026, 6, 1), events=(entry,), equity_point=curve(1)
+    )
+    assert captured[-1]["portfolio_state"] == {
+        "cash": "0",
+        "positions": [{"security_id": "sec-a", "shares": "1"}],
+    }
+    sink.publish_session(
+        session=date(2026, 6, 2), events=(split,), equity_point=curve(2)
+    )
+    assert captured[-1]["portfolio_state"]["positions"] == [  # type: ignore[index]
+        {"security_id": "sec-a", "shares": "0.5"}
+    ]
+    sink.publish_session(
+        session=date(2026, 6, 3), events=(mark,), equity_point=curve(3)
+    )
+    assert captured[-1]["portfolio_state"]["positions"] == [  # type: ignore[index]
+        {"security_id": "sec-a", "shares": "0.5"}
+    ]
+    sink.publish_session(
+        session=date(2026, 6, 4), events=(exit_event,), equity_point=curve(4)
+    )
+    assert captured[-1]["portfolio_state"] == {"cash": "0", "positions": []}
 
 
 def test_worker_persists_production_buy_and_hold_top_x_selection_from_sealed_v2(
@@ -865,15 +1006,10 @@ def test_worker_maps_missing_pinned_evidence_to_required_data_missing(
         )
 
 
-def test_worker_maps_a_fatal_missing_open_to_required_data_missing_with_month(
+def test_worker_carries_forward_prior_close_for_missing_fill_open(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Commits evidence for only the first two sessions of the month, so
-    the third session's scheduled SELL fill has no as-traded open --
-    ``SimulationErrorCode.MISSING_REQUIRED_OPEN`` -- proving a genuine
-    fatal engine error maps to the documented failure code with its
-    deterministic failed month, staging discarded, never a stray
-    ``complete``."""
+    """A missing third-session open uses the second session's close."""
     _patch_strategy_resolution(monkeypatch)
     repo = _repo(tmp_path / "backtest.db")
     prices = _price_repo(tmp_path)
@@ -898,9 +1034,15 @@ def test_worker_maps_a_fatal_missing_open_to_required_data_missing_with_month(
 
     result = engine.run(claim.job.id, claim.claim_token)
 
-    assert result.status is StrategyJobStatus.FAILED
-    assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
-    assert result.failed_month == "2026-06"
+    assert result.status is StrategyJobStatus.COMPLETE
+    exit_fills = [
+        event
+        for event in repo.backtest_result(claim.job.id).events
+        if isinstance(event, ExitFillEventV1)
+    ]
+    assert exit_fills
+    assert exit_fills[0].fill_session == full_sessions[2]
+    assert exit_fills[0].fill_price_native == Decimal("100.5")
 
 
 def test_worker_maps_strategy_identity_mismatch_to_integrity_error(
@@ -944,6 +1086,61 @@ def test_worker_maps_strategy_identity_mismatch_to_integrity_error(
     assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
     assert result.failure_detail is not None
     assert "no longer matches" in result.failure_detail
+
+
+def test_worker_rejects_manifest_from_an_incompatible_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pinned manifest cannot silently run under newer accounting code."""
+    _patch_strategy_resolution(monkeypatch)
+    repo = _repo(tmp_path / "backtest.db")
+    prices = _price_repo(tmp_path)
+    manifest = _manifest(
+        revision="9" * 64,
+        start_month="2026-06",
+        end_month="2026-06",
+    ).model_copy(update={"engine_version": "backtest_engine.v4"})
+    _enqueue(repo, manifest)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    engine = worker_module.build_backtest_engine(claim.job.id, claim.claim_token, repo)
+    engine._prices = prices  # type: ignore[attr-defined]
+
+    result = engine.run(claim.job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.FAILED
+    assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
+    assert result.failure_detail == (
+        "Pinned run input manifest uses an incompatible engine or protocol identity"
+    )
+
+
+def test_worker_rejects_stale_execution_contract_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_strategy_resolution(monkeypatch)
+    repo = _repo(tmp_path / "backtest.db")
+    prices = _price_repo(tmp_path)
+    manifest = _manifest(
+        revision="9" * 64,
+        start_month="2026-06",
+        end_month="2026-06",
+    ).model_copy(update={"runtime_lock_digest": "f" * 64})
+    _enqueue(repo, manifest)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    engine = worker_module.build_backtest_engine(claim.job.id, claim.claim_token, repo)
+    engine._prices = prices  # type: ignore[attr-defined]
+
+    result = engine.run(claim.job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.FAILED
+    assert result.failure_code is JobFailureCode.INTEGRITY_ERROR
+    assert result.failure_detail == (
+        "Pinned run input manifest does not match the current execution contract"
+    )
 
 
 def test_safe_detail_falls_back_when_code_and_message_are_both_empty() -> None:

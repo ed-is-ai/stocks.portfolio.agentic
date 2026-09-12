@@ -12,6 +12,7 @@ from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping, Protocol, cast
+from types import MappingProxyType
 
 from app.core import config
 from app.integrations.fx_history import ChainedFxQuoteFetcher
@@ -19,6 +20,7 @@ from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.historical_price_repo import (
     EvidenceMissingError,
+    HistoricalEvidenceReadHandle,
     HistoricalPriceRepository,
     StoredHistoricalEvidence,
 )
@@ -27,10 +29,13 @@ from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.backtest_engine import (
     EquityCurvePointV1,
     EntryFillEventV1,
+    MarketDataAccessV1,
     ExitFillEventV1,
+    OpenPositionMarkEventV1,
     SecurityMarketDataV1,
     SimulationError,
     SimulationErrorCode,
+    SplitAppliedEventV1,
     TradeLogEvent,
     run_simulation,
 )
@@ -38,15 +43,20 @@ from app.services.backtest.historical_price_evidence import (
     FxSeriesFetcher,
     YFinanceFxSeriesFetcher,
 )
+from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.historical_initialization_engine import (
     CanonicalSnapshotMonthProcessor,
     HistoricalInitializationEngine,
 )
 from app.services.backtest.market_view import MarketView
+from app.services.backtest.market_planes import HistoricalMarketPlanes
 from app.services.backtest.reconstruction_roster import CapturedRosterV1
 from app.services.backtest.run_input_manifest import (
+    ENGINE_VERSION,
     PinnedSecurityEvidenceV1,
+    PROTOCOL_SCHEMA_VERSION,
     RunInputManifestV1,
+    current_execution_contract_digest,
     read_run_input_manifest,
     build_run_input_manifest,
     build_run_input_manifest_v2,
@@ -778,6 +788,10 @@ class _StagingSink:
                 self.open_positions[event.security_id] = Decimal(event.shares)
             elif isinstance(event, ExitFillEventV1):
                 self.open_positions.pop(event.security_id, None)
+            elif isinstance(event, SplitAppliedEventV1):
+                self.open_positions[event.security_id] = event.shares_after
+            elif isinstance(event, OpenPositionMarkEventV1):
+                self.open_positions[event.security_id] = event.shares
         portfolio_state = {
             "cash": str(equity_point.cash_base),
             "positions": [
@@ -1037,8 +1051,14 @@ class BacktestExecutionEngine:
 
         job = self._repository.strategy_job(job_id)
         if not self._owns(job, claim_token):
+            for item in security_market_data:
+                if item.price_access is not None:
+                    item.price_access.close()
             return job
         if job.cancel_requested_at is not None:
+            for item in security_market_data:
+                if item.price_access is not None:
+                    item.price_access.close()
             return self._repository.cancel_claimed_strategy_job(
                 job_id,
                 claim_token,
@@ -1056,6 +1076,10 @@ class BacktestExecutionEngine:
             backtest=self._backtest,
             lease=self._lease,
         )
+        prepared_planes: dict[str, HistoricalMarketPlanes] = {}
+        prepared_planes_view = MappingProxyType(prepared_planes)
+        scan_cache: dict[tuple[str, str], HistoricalScanRecordV1 | None] = {}
+        scan_cache_month: dict[str, str] = {}
 
         def market_view_factory(session: date) -> MarketView:
             return MarketView(
@@ -1070,6 +1094,17 @@ class BacktestExecutionEngine:
                 ),
                 backtest_repo=self._repository,
                 historical_price_repo=self._prices,
+                prepared_planes=prepared_planes_view,
+                price_accesses=cast(
+                    Mapping[str, HistoricalEvidenceReadHandle],
+                    {
+                        item.security_id: item.price_access
+                        for item in security_market_data
+                        if item.price_access is not None
+                    },
+                ),
+                scan_cache=scan_cache,
+                scan_cache_month=scan_cache_month,
             )
 
         try:
@@ -1081,6 +1116,7 @@ class BacktestExecutionEngine:
                 fx_evidence=fx_evidence,
                 sink=sink,
                 month_boundary_observer=observer,
+                prepared_planes=prepared_planes,
             )
         except _BacktestCancelled:
             return self._cancel(job_id, claim_token)
@@ -1128,6 +1164,16 @@ class BacktestExecutionEngine:
                     "Backtest simulation failed integrity validation",
                 ),
             )
+        finally:
+            # The context belongs to this attempt only. Explicitly clear the
+            # shared maps on success, cancellation, ownership loss, and all
+            # failure paths before the worker returns.
+            prepared_planes.clear()
+            scan_cache.clear()
+            scan_cache_month.clear()
+            for item in security_market_data:
+                if item.price_access is not None:
+                    item.price_access.close()
 
         job = self._repository.strategy_job(job_id)
         if not self._owns(job, claim_token):
@@ -1189,6 +1235,21 @@ class BacktestExecutionEngine:
             raise BacktestResolutionError(
                 JobFailureCode.INTEGRITY_ERROR, "Pinned manifest provenance is invalid"
             )
+        if (
+            manifest.engine_version != ENGINE_VERSION
+            or manifest.protocol_schema_version != PROTOCOL_SCHEMA_VERSION
+        ):
+            raise BacktestResolutionError(
+                JobFailureCode.INTEGRITY_ERROR,
+                "Pinned run input manifest uses an incompatible engine or protocol identity",
+            )
+        if manifest.execution_contract_digest() != current_execution_contract_digest(
+            self._project_root
+        ):
+            raise BacktestResolutionError(
+                JobFailureCode.INTEGRITY_ERROR,
+                "Pinned run input manifest does not match the current execution contract",
+            )
         if self._repository.snapshot_profile(self._backtest.profile_hash) is None:
             raise BacktestResolutionError(
                 JobFailureCode.INTEGRITY_ERROR,
@@ -1208,21 +1269,37 @@ class BacktestExecutionEngine:
         runtime_path = config.SKILLS_DIR / descriptor.runtime_path
         strategy = _load_strategy_instance(runtime_path)
 
-        security_market_data = tuple(
-            self._resolve_security(item) for item in manifest.securities
-        )
-        fx_evidence = self._resolve_fx_evidence(manifest)
+        resolved_security_data: list[SecurityMarketDataV1] = []
+        try:
+            resolved_security_data.extend(
+                self._resolve_security(item) for item in manifest.securities
+            )
+        except Exception:
+            for item in resolved_security_data:
+                if item.price_access is not None:
+                    item.price_access.close()
+            raise
+        security_market_data = tuple(resolved_security_data)
+        try:
+            fx_evidence = self._resolve_fx_evidence(manifest)
+        except Exception:
+            for item in security_market_data:
+                if item.price_access is not None:
+                    item.price_access.close()
+            raise
         return manifest, strategy, security_market_data, fx_evidence
 
     def _resolve_security(self, item: PinnedSecurityEvidenceV1) -> SecurityMarketDataV1:
-        evidence = self._prices.get(item.price_revision)
-        if evidence.security_id != item.security_id:
+        access = self._prices.open_read(item.price_revision)
+        if access.security_id != item.security_id:
+            access.close()
             raise BacktestResolutionError(
                 JobFailureCode.INTEGRITY_ERROR,
                 f"Pinned price evidence does not match {item.security_id!r}",
             )
         return SecurityMarketDataV1(
-            security_id=item.security_id, price_evidence=evidence
+            security_id=item.security_id,
+            price_access=cast(MarketDataAccessV1, access),
         )
 
     def _resolve_fx_evidence(

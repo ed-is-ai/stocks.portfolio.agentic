@@ -73,8 +73,26 @@ class _View:
             index=index,
         )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        return self._history.copy()
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._history.copy()
+        history = history.loc[
+            [
+                (index.date() if hasattr(index, "date") else index)
+                <= self.as_of_session
+                for index in history.index
+            ]
+        ]
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
 
     def scan_result(self, security_id: str) -> None:
         return None
@@ -173,8 +191,14 @@ def test_unavailable_history_has_a_distinct_stable_exclusion() -> None:
     strategy = BuyAndHoldStrategy()
 
     class _UnavailableView(_View):
-        def price_history(self, security_id: str) -> None:
-            del security_id
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: object | None = None,
+        ) -> None:
+            del security_id, limit, columns
             return None
 
     selection = strategy.initial_entry_selection(_UnavailableView(), PARAMETERS)
@@ -256,7 +280,7 @@ def test_strategy_never_exits() -> None:
     )
 
 
-def test_position_size_defers_buy_to_engine_and_sizes_sell_integrally() -> None:
+def test_position_size_defers_buy_to_engine_and_sizes_full_sell() -> None:
     strategy = BuyAndHoldStrategy()
     view = _View()
     buy = strategy.initial_entry_selection(view, PARAMETERS).signals[0]
@@ -269,7 +293,9 @@ def test_position_size_defers_buy_to_engine_and_sizes_sell_integrally() -> None:
 
     assert strategy.position_size(buy, view, _portfolio(), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio("7"), PARAMETERS) == 7
-    assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == 0
+    assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == Decimal(
+        "7.5"
+    )
     assert strategy.position_size(sell, view, _portfolio(), PARAMETERS) == 0
 
 
@@ -298,8 +324,19 @@ def test_top_x_selects_the_highest_return_not_input_order() -> None:
     low, high = _View(current_close="110"), _View(current_close="200")
 
     class _PerSecurityView(_View):
-        def price_history(self, security_id: str) -> pd.DataFrame:
-            return (high if security_id == "sec-high" else low)._history.copy()
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: object | None = None,
+        ) -> pd.DataFrame:
+            history = (high if security_id == "sec-high" else low)._history.copy()
+            if limit is not None:
+                history = history.iloc[-limit:]
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
 
     selection = strategy.initial_entry_selection(
         _PerSecurityView(),
@@ -353,14 +390,32 @@ class _RegimeView:
     def __init__(self, inner: object, benchmark_closes: list[str]) -> None:
         self._inner = inner
         self.as_of_session = inner.as_of_session
+        closes = [Decimal(value) for value in benchmark_closes]
         self._benchmark = pd.DataFrame(
-            {"close": [Decimal(value) for value in benchmark_closes]}
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": closes,
+            }
         )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
         if security_id == _BENCHMARK_ID:
-            return self._benchmark.copy()
-        return self._inner.price_history(security_id)
+            history = self._benchmark.copy()
+            if limit is not None:
+                history = history.iloc[-limit:]
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+        return self._inner.price_history(security_id, limit=limit, columns=columns)
 
     def scan_result(self, security_id: str) -> object:
         return self._inner.scan_result(security_id)

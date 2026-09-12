@@ -31,10 +31,11 @@ Design notes
 see. Fills and valuation must never use that plane or any provider-native/
 adjusted close; they use only the exact *as-traded* plane
 (``HistoricalMarketPlanes.as_traded()``). Because the as-traded plane is not
-reachable through ``MarketViewV1``, this engine builds its own
-``HistoricalMarketPlanes`` directly from the same pinned evidence a caller
-already resolved for ``MarketView`` (via :class:`SecurityMarketDataV1`),
-entirely separate from the Strategy-facing view.
+reachable through ``MarketViewV1``, direct callers build
+``HistoricalMarketPlanes`` from the same pinned evidence a caller already
+resolved for ``MarketView`` (via :class:`SecurityMarketDataV1`). The worker
+path passes a run-scoped mapping so the Engine and Strategy-facing views share
+those immutable planes.
 
 A security's MIC trading calendar is derived from its pinned evidence's own
 ``exchange_timezone`` (``America/New_York`` -> XNYS, ``Europe/London`` ->
@@ -51,17 +52,21 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, DecimalException, ROUND_DOWN
 from enum import StrEnum
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, MutableMapping, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
-from app.repositories.historical_price_repo import StoredHistoricalEvidence
 from app.services.backtest.corporate_actions import (
     PositionState,
     apply_dividend_cash,
     apply_split,
 )
-from app.services.backtest.currency import CurrencyPolicyError, convert_to_base
+from app.services.backtest.currency import (
+    CurrencyPolicyError,
+    PreparedFxCloses,
+    convert_to_base,
+    prepare_fx_closes,
+)
 from app.services.backtest.market_planes import (
     AsTradedRow,
     CorporateAction,
@@ -172,6 +177,11 @@ class _EngineModel(BaseModel):
     )
 
 
+def _serialize_share_quantity(value: Decimal) -> int | str:
+    """Keep whole-share legacy JSON numeric while preserving fractions exactly."""
+    return int(value) if value == value.to_integral_value() else str(value)
+
+
 class SkippedSignalEventV1(_EngineModel):
     """One signal that was validated but not scheduled/executed."""
 
@@ -213,7 +223,7 @@ class ExitFillEventV1(_EngineModel):
     signal_session: date
     fill_session: date
     rule_id: str = Field(min_length=1)
-    shares: int = Field(gt=0)
+    shares: Decimal = Field(gt=Decimal(0))
     fill_price_native: Decimal
     fill_currency: str = Field(pattern=r"^[A-Z]{3}$")
     fill_quote_unit: str = Field(min_length=1)
@@ -224,6 +234,20 @@ class ExitFillEventV1(_EngineModel):
     fx_session: date | None = None
     fx_revision: str | None = None
     sequence: int = Field(ge=1)
+
+    @field_validator("shares", mode="before")
+    @classmethod
+    def _coerce_legacy_integer_shares(cls, value: object) -> object:
+        """Keep older callers that supplied whole-share ``int`` values valid.
+
+        The stored and emitted value remains an exact ``Decimal``; floats and
+        strings are still rejected by the strict engine model.
+        """
+        return Decimal(value) if type(value) is int else value
+
+    @field_serializer("shares", when_used="json")
+    def _serialize_shares(self, value: Decimal) -> int | str:
+        return _serialize_share_quantity(value)
 
 
 class SplitAppliedEventV1(_EngineModel):
@@ -268,12 +292,21 @@ class OpenPositionMarkEventV1(_EngineModel):
     kind: Literal["open_position_mark"] = "open_position_mark"
     security_id: str = Field(min_length=1)
     session: date
-    shares: int = Field(gt=0)
+    shares: Decimal = Field(gt=Decimal(0))
     mark_price_native: Decimal
     market_value_base: Decimal
     cost_basis_base: Decimal
     unrealized_pnl_base: Decimal
     sequence: int = Field(ge=1)
+
+    @field_validator("shares", mode="before")
+    @classmethod
+    def _coerce_legacy_integer_shares(cls, value: object) -> object:
+        return Decimal(value) if type(value) is int else value
+
+    @field_serializer("shares", when_used="json")
+    def _serialize_shares(self, value: Decimal) -> int | str:
+        return _serialize_share_quantity(value)
 
 
 #: The full closed set of Trade Log work events.
@@ -332,7 +365,7 @@ class PendingOrderV1:
     # BUY quantities are deliberately not strategy-owned.  A BUY carries a
     # base-currency reservation and derives its whole-share quantity at its
     # own fill open.  SELL quantities retain the existing full-exit check.
-    requested_shares: int | None
+    requested_shares: int | Decimal | None
     #: Engine-owned base-currency target reserved for a shared BUY cohort.
     #: ``None`` remains the legacy/full-exit path.
     allocation_target_base: Decimal | None = None
@@ -353,7 +386,41 @@ class SecurityMarketDataV1:
     """
 
     security_id: str
-    price_evidence: StoredHistoricalEvidence
+    price_evidence: Any = None
+    price_access: "MarketDataAccessV1 | None" = None
+
+
+class MarketDataAccessV1(Protocol):
+    """Plain run-owned price/action access supplied by the worker."""
+
+    security_id: str
+    data_revision: str
+    currency: str
+    quote_unit: str
+    exchange_timezone: str
+    start: date
+    end: date
+
+    def as_traded_row_on_or_before(self, session: date) -> AsTradedRow | None: ...
+
+    def as_traded_row(self, session: date) -> AsTradedRow | None: ...
+
+    def actions_on(self, session: date) -> tuple[CorporateAction, ...]: ...
+
+    def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class _EngineSecurityContext:
+    security_id: str
+    data_revision: str
+    currency: str
+    quote_unit: str
+    exchange_timezone: str
+    start: date
+    end: date
+    plane: HistoricalMarketPlanes | None = None
+    access: MarketDataAccessV1 | None = None
 
 
 #: A caller-supplied, session-bound ``MarketViewV1`` constructor -- the
@@ -520,9 +587,10 @@ class _Engine:
         strategy: StrategyProtocolV1,
         market_view_factory: MarketViewFactory,
         security_market_data: tuple[SecurityMarketDataV1, ...],
-        fx_evidence: StoredHistoricalEvidence | None,
+        fx_evidence: Any,
         sink: SessionBatchSink,
         month_observer: MonthBoundaryObserver,
+        prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
     ) -> None:
         self.manifest = manifest
         self.strategy = strategy
@@ -561,7 +629,14 @@ class _Engine:
                 "security_market_data does not match the manifest's pinned securities",
             )
         for security_id, item in supplied.items():
-            if item.price_evidence.data_revision != pinned[security_id].price_revision:
+            revision = (
+                item.price_access.data_revision
+                if item.price_access is not None
+                else None
+                if item.price_evidence is None
+                else item.price_evidence.data_revision
+            )
+            if revision != pinned[security_id].price_revision:
                 raise _fatal(
                     SimulationErrorCode.MISSING_PINNED_EVIDENCE,
                     self.start_date,
@@ -584,33 +659,95 @@ class _Engine:
                         "fx_revision",
                     )
 
-        self.planes: dict[str, HistoricalMarketPlanes] = {}
-        self.as_traded_by_session: dict[str, dict[date, AsTradedRow]] = {}
-        self.session_index: dict[str, tuple[date, ...]] = {}
+        self.planes = prepared_planes if prepared_planes is not None else {}
+        self.market_data: dict[str, _EngineSecurityContext] = {}
+        self.prepared_fx: PreparedFxCloses | None = None
         self.mic_by_security: dict[str, str] = {}
-        self.actions_by_security: dict[
-            str, dict[date, tuple[CorporateAction, ...]]
-        ] = {}
         try:
-            for security_id, item in supplied.items():
-                plane = HistoricalMarketPlanes.from_evidence(item.price_evidence)
-                self.planes[security_id] = plane
-                rows = plane.as_traded()
-                by_session = {row.session: row for row in rows}
-                self.as_traded_by_session[security_id] = by_session
-                self.session_index[security_id] = tuple(sorted(by_session))
-                self.mic_by_security[security_id] = _mic_for_exchange_timezone(
-                    plane.exchange_timezone, session=self.start_date
+            unexpected_planes = set(self.planes).difference(supplied)
+            if unexpected_planes:
+                raise _fatal(
+                    SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                    self.start_date,
+                    "Prepared planes contain securities outside the manifest",
                 )
-                actions = plane.actions_as_of(plane.end - timedelta(days=1))
-                bucketed: dict[date, list[CorporateAction]] = {}
-                for action in actions:
-                    bucketed.setdefault(action.session, []).append(action)
-                self.actions_by_security[security_id] = {
-                    session: tuple(sorted(items, key=lambda a: a.action_type))
-                    for session, items in bucketed.items()
-                }
+            planes_by_revision: dict[str, HistoricalMarketPlanes] = {}
+            for security_id, item in supplied.items():
+                access = item.price_access
+                evidence = item.price_evidence
+                if access is not None:
+                    revision = access.data_revision
+                    if access.security_id != security_id:
+                        raise _fatal(
+                            SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                            self.start_date,
+                            f"Price access does not match {security_id!r}",
+                        )
+                    context = _EngineSecurityContext(
+                        security_id=security_id,
+                        data_revision=revision,
+                        currency=access.currency,
+                        quote_unit=access.quote_unit,
+                        exchange_timezone=access.exchange_timezone,
+                        start=access.start,
+                        end=access.end,
+                        access=access,
+                    )
+                    if evidence is not None and evidence.data_revision != revision:
+                        raise _fatal(
+                            SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                            self.start_date,
+                            f"Price evidence does not match {security_id!r}",
+                        )
+                else:
+                    if evidence is None:
+                        raise _fatal(
+                            SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                            self.start_date,
+                            f"No price evidence or access for {security_id!r}",
+                        )
+                    revision = evidence.data_revision
+                    plane = self.planes.get(security_id)
+                    if plane is None:
+                        plane = planes_by_revision.get(revision)
+                        if plane is None:
+                            plane = HistoricalMarketPlanes.from_evidence(evidence)
+                    elif plane.data_revision != revision:
+                        raise _fatal(
+                            SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                            self.start_date,
+                            f"Prepared plane for {security_id!r} does not match its pinned revision",
+                        )
+                    planes_by_revision[revision] = plane
+                    self.planes[security_id] = plane
+                    context = _EngineSecurityContext(
+                        security_id=security_id,
+                        data_revision=revision,
+                        currency=plane.currency,
+                        quote_unit=plane.quote_unit,
+                        exchange_timezone=plane.exchange_timezone,
+                        start=plane.start,
+                        end=plane.end,
+                        plane=plane,
+                    )
+                if revision != pinned[security_id].price_revision:
+                    raise _fatal(
+                        SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                        self.start_date,
+                        f"{security_id!r} price evidence does not match its pinned revision",
+                    )
+                self.market_data[security_id] = context
+                self.mic_by_security[security_id] = _mic_for_exchange_timezone(
+                    context.exchange_timezone, session=self.start_date
+                )
+            if fx_evidence is not None and any(
+                context.currency != self.manifest.base_currency
+                for context in self.market_data.values()
+            ):
+                self.prepared_fx = prepare_fx_closes(fx_evidence)
         except MarketDataPolicyError as exc:
+            raise _fatal(exc.code, self.start_date, exc.detail) from exc
+        except CurrencyPolicyError as exc:
             raise _fatal(exc.code, self.start_date, exc.detail) from exc
 
         mics = sorted(set(self.mic_by_security.values()))
@@ -658,16 +795,41 @@ class _Engine:
     def _latest_row_on_or_before(
         self, security_id: str, as_of: date
     ) -> AsTradedRow | None:
-        sessions = self.session_index[security_id]
-        index = bisect_right(sessions, as_of) - 1
-        if index < 0:
-            return None
-        return self.as_traded_by_session[security_id][sessions[index]]
+        context = self.market_data[security_id]
+        if context.access is not None:
+            return context.access.as_traded_row_on_or_before(as_of)
+        assert context.plane is not None
+        rows = context.plane.as_traded()
+        index = bisect_right(tuple(row.session for row in rows), as_of) - 1
+        return None if index < 0 else rows[index]
+
+    def _row_on(self, security_id: str, session: date) -> AsTradedRow | None:
+        context = self.market_data[security_id]
+        if context.access is not None:
+            return context.access.as_traded_row(session)
+        assert context.plane is not None
+        return next(
+            (row for row in context.plane.as_traded() if row.session == session),
+            None,
+        )
+
+    def _actions_on(
+        self, security_id: str, session: date
+    ) -> tuple[CorporateAction, ...]:
+        context = self.market_data[security_id]
+        if context.access is not None:
+            return context.access.actions_on(session)
+        assert context.plane is not None
+        return tuple(
+            action
+            for action in context.plane.actions_as_of(session)
+            if action.session == session
+        )
 
     def _convert(
         self,
         native_value: Decimal,
-        plane: HistoricalMarketPlanes,
+        plane: _EngineSecurityContext,
         *,
         valuation_session: date,
     ):
@@ -680,6 +842,7 @@ class _Engine:
                 valuation_session=valuation_session,
                 completed_fx_through=valuation_session,
                 fx_evidence=self.fx_evidence,
+                prepared_fx=self.prepared_fx,
             )
         except CurrencyPolicyError as exc:
             raise _fatal(exc.code, valuation_session, exc.detail) from exc
@@ -709,7 +872,7 @@ class _Engine:
         self, session: date, session_events: list[TradeLogEvent]
     ) -> None:
         for security_id in sorted(self.positions):
-            actions = self.actions_by_security.get(security_id, {}).get(session, ())
+            actions = self._actions_on(security_id, session)
             for action in actions:
                 action_key = (
                     f"{security_id}:{action.evidence_revision}:"
@@ -727,7 +890,7 @@ class _Engine:
         session: date,
         session_events: list[TradeLogEvent],
     ) -> None:
-        plane = self.planes[security_id]
+        plane = self.market_data[security_id]
         position = self.positions[security_id]
         try:
             if action.action_type == "split":
@@ -793,29 +956,36 @@ class _Engine:
             session_events.append(self._execute_fill(order, session))
 
     def _execute_fill(self, order: PendingOrderV1, session: date) -> TradeLogEvent:
-        row = self.as_traded_by_session[order.security_id].get(session)
-        if row is None:
+        row = self._row_on(order.security_id, session)
+        price_native = row.open if row is not None else None
+        if price_native is None:
+            # Match valuation/FX weekend behavior: an exchange session with
+            # no observation carries the prior as-traded close forward.
+            previous = self._latest_row_on_or_before(order.security_id, session)
+            price_native = None if previous is None else previous.close
+        if price_native is None:
             raise _fatal(
                 SimulationErrorCode.MISSING_REQUIRED_OPEN,
                 session,
-                f"{order.security_id!r} has no as-traded open on {session.isoformat()}",
+                f"{order.security_id!r} has no as-traded open or prior close on "
+                f"{session.isoformat()}",
             )
-        if row.open <= 0:
+        if price_native <= 0:
             raise _fatal(
                 SimulationErrorCode.INVARIANT_VIOLATION,
                 session,
                 f"{order.security_id!r} as-traded open on {session.isoformat()} "
                 "is not a positive price",
             )
-        plane = self.planes[order.security_id]
+        plane = self.market_data[order.security_id]
         if order.side is SignalSide.BUY:
-            return self._execute_buy(order, plane, row.open, session)
-        return self._execute_sell(order, plane, row.open, session)
+            return self._execute_buy(order, plane, price_native, session)
+        return self._execute_sell(order, plane, price_native, session)
 
     def _execute_buy(
         self,
         order: PendingOrderV1,
-        plane: HistoricalMarketPlanes,
+        plane: _EngineSecurityContext,
         price_native: Decimal,
         session: date,
     ) -> TradeLogEvent:
@@ -910,7 +1080,7 @@ class _Engine:
     def _execute_sell(
         self,
         order: PendingOrderV1,
-        plane: HistoricalMarketPlanes,
+        plane: _EngineSecurityContext,
         price_native: Decimal,
         session: date,
     ) -> TradeLogEvent:
@@ -927,10 +1097,10 @@ class _Engine:
         # scheduled -- a split effective on this fill session already
         # adjusted ``position.shares`` in ``_apply_actions`` above, and the
         # order's original ``requested_shares`` is not re-derived for it.
-        fill_shares = int(position.shares)
+        fill_shares = position.shares
         try:
             with deterministic_decimal_context():
-                native_proceeds = price_native * Decimal(fill_shares)
+                native_proceeds = price_native * fill_shares
         except DecimalException as exc:
             raise _fatal(
                 "integrity_error", session, "fill proceeds arithmetic failed"
@@ -1009,7 +1179,7 @@ class _Engine:
                 f"no as-traded close is available to value {security_id!r} "
                 f"on or before {session.isoformat()}",
             )
-        plane = self.planes[security_id]
+        plane = self.market_data[security_id]
         try:
             with deterministic_decimal_context():
                 native_value = row.close * position.shares
@@ -1173,7 +1343,7 @@ class _Engine:
                 SkipReasonCode.SIGNAL_SESSION_MISMATCH,
                 "signal session does not match the invoking session",
             )
-        if signal.security_id not in self.planes:
+        if signal.security_id not in self.market_data:
             return self._skip_signal(
                 signal,
                 session,
@@ -1255,7 +1425,7 @@ class _Engine:
                 SkipReasonCode.SIGNAL_SESSION_MISMATCH,
                 "signal session does not match the invoking session",
             )
-        if signal.security_id not in self.planes:
+        if signal.security_id not in self.market_data:
             return None, self._skip_signal(
                 signal,
                 session,
@@ -1313,7 +1483,7 @@ class _Engine:
                     session,
                     f"no as-traded close is available to mark {security_id!r}",
                 )
-            plane = self.planes[security_id]
+            plane = self.market_data[security_id]
             try:
                 with deterministic_decimal_context():
                     native_value = row.close * position.shares
@@ -1331,7 +1501,7 @@ class _Engine:
                 OpenPositionMarkEventV1(
                     security_id=security_id,
                     session=session,
-                    shares=int(position.shares),
+                    shares=position.shares,
                     mark_price_native=row.close,
                     market_value_base=market_value_base,
                     cost_basis_base=cost_basis_base,
@@ -1404,9 +1574,10 @@ def run_simulation(
     strategy: StrategyProtocolV1,
     market_view_factory: MarketViewFactory,
     security_market_data: tuple[SecurityMarketDataV1, ...],
-    fx_evidence: StoredHistoricalEvidence | None = None,
+    fx_evidence: Any = None,
     sink: SessionBatchSink | None = None,
     month_boundary_observer: MonthBoundaryObserver | None = None,
+    prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
 ) -> SimulationOutputV1:
     """Deterministically replay ``manifest`` and return its complete
     :class:`SimulationOutputV1` (AC 1-7).
@@ -1435,6 +1606,7 @@ def run_simulation(
             if month_boundary_observer is not None
             else NoOpMonthBoundaryObserver()
         ),
+        prepared_planes=prepared_planes,
     )
     return engine.run()
 
@@ -1446,6 +1618,7 @@ __all__ = [
     "ExitFillEventV1",
     "InMemorySessionBatchSink",
     "MarketViewFactory",
+    "MarketDataAccessV1",
     "MonthBoundaryObserver",
     "NoOpMonthBoundaryObserver",
     "OpenPositionMarkEventV1",

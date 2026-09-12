@@ -1,10 +1,10 @@
 generated: 2026-08-20
-updated: 2026-09-01
+updated: 2026-09-12
 repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
   ux_design: embedded-relevant-text
-  github_issues_verified: 45
+  github_issues_verified: 48
 correct_course:
   proposal: sprint-change-proposal-2026-08-20.md
   status: approved-major-handoff
@@ -59,6 +59,7 @@ stories:
     status: in-progress
     feature_plan: feature-gh-444-database-storage-performance.md
     sub_issues: [535, 536, 537, 538, 539, 540]
+    follow_on_issues: [602]
     stories:
       gh-535-database-baseline-contention-diagnostics:
         issue: 535
@@ -66,11 +67,11 @@ stories:
         spec: spec-gh-444-493-storage-baseline-strategy-agent.md
       gh-536-historical-evidence-v2:
         issue: 536
-        status: backlog
+        status: done
         prerequisite_issues: [535]
       gh-537-evidence-migration-cutover-rollback:
         issue: 537
-        status: in-progress
+        status: done
         prerequisite_issues: [536]
       gh-538-reference-aware-evidence-gc:
         issue: 538
@@ -84,6 +85,49 @@ stories:
         issue: 540
         status: done
         prerequisite_issues: [537, 538, 539]
+  backtest-cache-performance:
+    issue: 601
+    status: in-progress
+    parent_issue: 444
+    feature_plan: feature-gh-601-backtest-cache-performance.md
+    storage_follow_up_issue: 602
+    sub_issues: [603, 604, 605, 606]
+    stories:
+      gh-601-1-share-run-scoped-prepared-planes:
+        issue: 603
+        status: review
+      gh-601-2-add-bounded-price-windows:
+        issue: 604
+        status: review
+        prerequisite_issues: [603]
+      gh-601-3-adapt-six-strategies-and-reuse-scans:
+        issue: 605
+        status: review
+        prerequisite_issues: [604]
+      gh-601-4-rebuild-caches-and-prove-budget:
+        issue: 606
+        status: in-progress
+        prerequisite_issues: [603, 604, 605]
+  gh-602-bounded-historical-evidence-chunk-reads:
+    issue: 602
+    status: in-progress
+    parent_issue: 444
+    prerequisite_issues: [601, 536, 537]
+    feature_plan: feature-gh-602-bounded-historical-evidence-chunk-reads.md
+    sub_issues: [611, 612, 613]
+    stories:
+      gh-602-1-establish-bounded-historical-reader-and-format-routing:
+        issue: 611
+        status: review
+        prerequisite_issues: [536, 537, 604]
+      gh-602-2-wire-chunk-backed-reads-through-marketview-and-backtest-execution:
+        issue: 612
+        status: review
+        prerequisite_issues: [611, 603, 604]
+      gh-602-3-benchmark-storage-bounds-and-replay-equivalence:
+        issue: 613
+        status: review
+        prerequisite_issues: [611, 612, 606]
   strategy-manager-agent:
     issue: 493
     status: review

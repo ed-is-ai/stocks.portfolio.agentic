@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
 import math
 from pathlib import Path
 import shutil
 import sqlite3
-from typing import Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping, Sequence, cast
 import zlib
+from decimal import Decimal
 
 from app.repositories.db import Connect, evidence_connect, session
 from app.services.backtest.canonical_manifest import (
@@ -23,6 +24,9 @@ from app.services.backtest.historical_price_evidence import (
     EVIDENCE_CONTRACT_VERSION,
     HistoricalEvidencePayload,
 )
+
+if TYPE_CHECKING:
+    from app.services.backtest.market_planes import AsTradedRow, CorporateAction
 
 _SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -283,6 +287,279 @@ class HistoricalEvidenceMigrationProgress:
     required_reserve_bytes: int
 
 
+@dataclass
+class HistoricalEvidenceReadCounters:
+    """Storage-read counters owned by one repository instance."""
+
+    chunks_decompressed: int = 0
+    items_decoded: int = 0
+    rows_retained: int = 0
+    complete_revision_materializations: int = 0
+    compressed_bytes: int = 0
+    uncompressed_bytes: int = 0
+    price_chunks_decompressed: int = 0
+    action_chunks_decompressed: int = 0
+
+    @property
+    def complete_v2_materializations(self) -> int:
+        return self.complete_revision_materializations
+
+
+@dataclass(frozen=True)
+class HistoricalEvidenceMetadata:
+    data_revision: str
+    security_id: str
+    provider: str
+    provider_version: str
+    request_contract_version: str
+    requested_symbol: str
+    observed_symbol: str
+    alias_revision: str | None
+    currency: str
+    quote_unit: str
+    quote_unit_scale: str
+    exchange_timezone: str
+    start: str
+    end: str
+    request_contract: Mapping[str, object]
+    response_metadata_digest: str
+    observation_count: int
+    action_count: int
+
+
+@dataclass(frozen=True)
+class BoundedHistoricalEvidence:
+    """Partial evidence selected from an active v2 read.
+
+    This is intentionally not ``StoredHistoricalEvidence``: its rows/actions
+    are a projection of a complete immutable revision, not the revision's
+    canonical payload.
+    """
+
+    metadata: HistoricalEvidenceMetadata
+    rows: tuple[Mapping[str, object], ...]
+    actions: tuple[Mapping[str, object], ...]
+    through: str
+    selected_price_chunk_years: tuple[int, ...]
+    selected_action_chunk_years: tuple[int, ...]
+
+    def __getattr__(self, name: str) -> object:
+        # Keep the metadata readable like the complete value without making
+        # partial data masquerade as a complete canonical evidence object.
+        try:
+            return object.__getattribute__(self, name)
+        except AttributeError:
+            return getattr(self.metadata, name)
+
+
+class HistoricalEvidenceReadHandle:
+    """Run-owned access to one revision in the authoritative active format."""
+
+    def __init__(
+        self,
+        repository: "HistoricalPriceRepository",
+        *,
+        data_revision: str,
+        format_name: str,
+        evidence: StoredHistoricalEvidence | None = None,
+        metadata: HistoricalEvidenceMetadata | None = None,
+    ) -> None:
+        self._repository = repository
+        self.data_revision = data_revision
+        self.format = format_name
+        self._evidence = evidence
+        self._metadata = metadata
+        self._chunk_cache: dict[
+            tuple[str, str, int, str, str, int], tuple[Mapping[str, object], ...]
+        ] = {}
+        self._closed = False
+
+    @property
+    def metadata(self) -> HistoricalEvidenceMetadata:
+        if self._metadata is None:
+            assert self._evidence is not None
+            self._metadata = HistoricalEvidenceMetadata(
+                data_revision=self._evidence.data_revision,
+                security_id=self._evidence.security_id,
+                provider=self._evidence.provider,
+                provider_version=self._evidence.provider_version,
+                request_contract_version=self._evidence.request_contract_version,
+                requested_symbol=self._evidence.requested_symbol,
+                observed_symbol=self._evidence.observed_symbol,
+                alias_revision=self._evidence.alias_revision,
+                currency=self._evidence.currency,
+                quote_unit=self._evidence.quote_unit,
+                quote_unit_scale=self._evidence.quote_unit_scale,
+                exchange_timezone=self._evidence.exchange_timezone,
+                start=self._evidence.start,
+                end=self._evidence.end,
+                request_contract=self._evidence.request_contract,
+                response_metadata_digest=self._evidence.response_metadata_digest,
+                observation_count=len(self._evidence.rows),
+                action_count=len(self._evidence.actions),
+            )
+        return self._metadata
+
+    @property
+    def security_id(self) -> str:
+        return str(self.metadata.security_id)
+
+    @property
+    def currency(self) -> str:
+        return self.metadata.currency
+
+    @property
+    def quote_unit(self) -> str:
+        return self.metadata.quote_unit
+
+    @property
+    def exchange_timezone(self) -> str:
+        return self.metadata.exchange_timezone
+
+    @property
+    def start(self) -> date:
+        return date.fromisoformat(self.metadata.start)
+
+    @property
+    def end(self) -> date:
+        return date.fromisoformat(self.metadata.end)
+
+    @property
+    def counters(self) -> HistoricalEvidenceReadCounters:
+        return self._repository.read_counters
+
+    def bounded(
+        self,
+        *,
+        through: "date",
+        limit: int | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> BoundedHistoricalEvidence:
+        self._ensure_open()
+        if not isinstance(through, date):
+            raise HistoricalEvidenceIntegrityError("bounded read date is invalid")
+        start = date.fromisoformat(self.metadata.start)
+        end = date.fromisoformat(self.metadata.end)
+        if not start <= through < end:
+            raise HistoricalEvidenceIntegrityError(
+                "bounded read is outside evidence bounds"
+            )
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise HistoricalEvidenceIntegrityError(
+                "bounded read limit must be positive"
+            )
+        if self.format == "v1":
+            assert self._evidence is not None
+            rows = tuple(
+                row
+                for row in self._evidence.rows
+                if str(row["session"]) <= through.isoformat()
+            )
+            if limit is not None:
+                rows = rows[-limit:]
+            rows = self._project_rows(rows, columns)
+            actions = tuple(
+                action
+                for action in self._evidence.actions
+                if rows and str(action["session"]) >= str(rows[0]["session"])
+            )
+            self.counters.rows_retained += len(rows)
+            return BoundedHistoricalEvidence(
+                self.metadata,
+                rows,
+                actions,
+                through.isoformat(),
+                (),
+                (),
+            )
+        return self._repository._read_bounded_v2(
+            self,
+            through=through,
+            limit=limit,
+            columns=columns,
+        )
+
+    read_bounded = bounded
+    read = bounded
+
+    def as_traded_row_on_or_before(self, session_date: "date") -> "AsTradedRow | None":
+        if session_date < self.start:
+            return None
+        bounded = self.bounded(
+            through=min(session_date, self.end - timedelta(days=1)), limit=1
+        )
+        if not bounded.rows:
+            return None
+        from app.services.backtest.market_planes import HistoricalMarketPlanes
+
+        plane = HistoricalMarketPlanes.from_bounded_evidence(bounded)
+        return plane.as_traded()[-1]
+
+    def as_traded_row(self, session_date: "date") -> "AsTradedRow | None":
+        row = self.as_traded_row_on_or_before(session_date)
+        return None if row is None or row.session != session_date else row
+
+    def actions_on(self, session_date: "date") -> "tuple[CorporateAction, ...]":
+        self._ensure_open()
+        if self.format == "v1":
+            assert self._evidence is not None
+            from app.services.backtest.market_planes import CorporateAction
+
+            return tuple(
+                CorporateAction(
+                    session=session_date,
+                    action_type=str(action["action_type"]),
+                    value=self._repository._provider_decimal(action["value"]),
+                    evidence_revision=self.data_revision,
+                )
+                for action in self._evidence.actions
+                if str(action["session"]) == session_date.isoformat()
+            )
+        return self._repository._read_v2_actions_on(
+            self, session_date, self._chunk_cache
+        )
+
+    def close(self) -> None:
+        self._chunk_cache.clear()
+        self._evidence = None
+        self._metadata = None
+        self._closed = True
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise HistoricalEvidenceIntegrityError(
+                "historical evidence handle is closed"
+            )
+
+    @staticmethod
+    def _project_rows(
+        rows: Sequence[Mapping[str, object]], columns: Sequence[str] | None
+    ) -> tuple[Mapping[str, object], ...]:
+        if columns is None:
+            return tuple(dict(row) for row in rows)
+        requested = tuple(columns)
+        if not requested or len(set(requested)) != len(requested):
+            raise HistoricalEvidenceIntegrityError("invalid bounded evidence columns")
+        allowed = {
+            "open",
+            "high",
+            "low",
+            "close",
+            "adj_close",
+            "volume",
+            "dividends",
+            "stock_splits",
+        }
+        if any(column not in allowed for column in requested):
+            raise HistoricalEvidenceIntegrityError("invalid bounded evidence columns")
+        return tuple(
+            {"session": row["session"], **{column: row[column] for column in requested}}
+            for row in rows
+        )
+
+
 @dataclass(frozen=True)
 class HistoricalEvidenceRetentionPlan:
     """Offline, reviewable v2 retention decision for one grace cutoff."""
@@ -299,6 +576,14 @@ class HistoricalPriceRepository:
 
     def __init__(self, connect: Connect) -> None:
         self._connect = evidence_connect(connect)
+        self._read_counters = HistoricalEvidenceReadCounters()
+
+    @property
+    def read_counters(self) -> HistoricalEvidenceReadCounters:
+        return self._read_counters
+
+    def reset_read_counters(self) -> None:
+        self._read_counters = HistoricalEvidenceReadCounters()
 
     def ensure_schema(self) -> None:
         with session(self._connect) as conn:
@@ -580,6 +865,7 @@ class HistoricalPriceRepository:
                 ).fetchone()
                 if active is not None and str(active[0]) == "v2":
                     self._commit_v2_on_connection(conn, payload)
+                    self._refresh_v2_migration_state_on_connection(conn)
             return payload.data_revision
         except HistoricalEvidenceIntegrityError:
             raise
@@ -785,22 +1071,427 @@ class HistoricalPriceRepository:
             chunks.append((kind, year, encoded, sha256(encoded).hexdigest()))
         return tuple(chunks)
 
+    def _refresh_v2_migration_state_on_connection(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Keep an already-active v2 database readable after an append."""
+        state = conn.execute(
+            "SELECT completed_at FROM historical_price_v2_migration_state "
+            "WHERE singleton_id=1"
+        ).fetchone()
+        if state is None or state[0] is None:
+            raise HistoricalEvidenceIntegrityError("v2 migration is incomplete")
+        fingerprint, count = self._v1_source_identity(conn)
+        conn.execute(
+            """UPDATE historical_price_v2_migration_state
+               SET source_fingerprint=?, source_revision_count=?,
+                   migrated_revision_count=?, completed_at=?
+               WHERE singleton_id=1""",
+            (fingerprint, count, count, str(state[0])),
+        )
+
+    def _active_format_on_connection(self, conn: sqlite3.Connection) -> str:
+        row = conn.execute(
+            "SELECT active_format FROM historical_price_storage_state "
+            "WHERE singleton_id=1"
+        ).fetchone()
+        if row is None or str(row[0]) not in {"v1", "v2"}:
+            raise HistoricalEvidenceIntegrityError(
+                "historical price active format is inconsistent"
+            )
+        return str(row[0])
+
+    def _require_v2_active_on_connection(self, conn: sqlite3.Connection) -> None:
+        if self._active_format_on_connection(conn) != "v2":
+            raise HistoricalEvidenceIntegrityError("v2 format is not active")
+        state = conn.execute(
+            """SELECT source_fingerprint, source_revision_count,
+                      migrated_revision_count, completed_at
+               FROM historical_price_v2_migration_state WHERE singleton_id=1"""
+        ).fetchone()
+        if state is None or state[3] is None:
+            raise HistoricalEvidenceIntegrityError("v2 migration is incomplete")
+        fingerprint, count = self._v1_source_identity(conn)
+        if (
+            str(state[0]) != fingerprint
+            or int(state[1]) != count
+            or int(state[2]) != count
+        ):
+            raise HistoricalEvidenceIntegrityError("v2 migration state is inconsistent")
+
+    def _verify_active_on_connection(
+        self, conn: sqlite3.Connection, data_revision: str
+    ) -> StoredHistoricalEvidence:
+        if self._active_format_on_connection(conn) == "v2":
+            self._require_v2_active_on_connection(conn)
+            return self._verify_v2_on_connection(conn, data_revision)
+        return self._verify_on_connection(conn, data_revision)
+
     def get(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:
-            active = conn.execute(
-                "SELECT active_format FROM historical_price_storage_state WHERE singleton_id=1"
+            if self._active_format_on_connection(conn) == "v2":
+                self._require_v2_active_on_connection(conn)
+                return self._verify_v2_on_connection(conn, data_revision)
+            return self._load_on_connection(conn, data_revision)
+
+    def open_read(self, data_revision: str) -> HistoricalEvidenceReadHandle:
+        """Open an active-format, run-owned access handle for one revision."""
+        with session(self._connect) as conn:
+            format_name = self._active_format_on_connection(conn)
+            if format_name == "v1":
+                evidence = self._load_on_connection(conn, data_revision)
+                return HistoricalEvidenceReadHandle(
+                    self,
+                    data_revision=data_revision,
+                    format_name="v1",
+                    evidence=evidence,
+                )
+            self._require_v2_active_on_connection(conn)
+            revision = conn.execute(
+                """SELECT metadata_json, response_metadata_digest,
+                          observation_count, action_count
+                   FROM historical_price_v2_revisions WHERE data_revision=?""",
+                (data_revision,),
             ).fetchone()
-            if active is not None and str(active[0]) == "v2":
-                return self._verify_v2_on_connection(conn, data_revision)
-            try:
-                return self._load_on_connection(conn, data_revision)
-            except EvidenceMissingError:
-                return self._verify_v2_on_connection(conn, data_revision)
+            if revision is None:
+                raise EvidenceMissingError("historical evidence is missing")
+            metadata = self._v2_metadata(
+                data_revision,
+                str(revision[0]),
+                str(revision[1]),
+                int(revision[2]),
+                int(revision[3]),
+            )
+            return HistoricalEvidenceReadHandle(
+                self,
+                data_revision=data_revision,
+                format_name="v2",
+                metadata=metadata,
+            )
+
+    read_handle = open_read
+
+    def read_bounded(
+        self,
+        data_revision: str,
+        *,
+        through: date,
+        limit: int | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> BoundedHistoricalEvidence:
+        handle = self.open_read(data_revision)
+        try:
+            return handle.bounded(through=through, limit=limit, columns=columns)
+        finally:
+            handle.close()
 
     def get_v2(self, data_revision: str) -> StoredHistoricalEvidence:
         """Read and fully verify one opt-in v2 evidence revision."""
         with session(self._connect) as conn:
             return self._verify_v2_on_connection(conn, data_revision)
+
+    @staticmethod
+    def _provider_decimal(value: object) -> Decimal:
+        try:
+            decoded = float.fromhex(str(value))
+            if not math.isfinite(decoded) or decoded.hex() != str(value):
+                raise ValueError
+            return Decimal(str(decoded))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise HistoricalEvidenceIntegrityError(
+                "invalid market value encoding"
+            ) from exc
+
+    @staticmethod
+    def _v2_metadata(
+        data_revision: str,
+        metadata_json: str,
+        response_metadata_digest: str,
+        observation_count: int,
+        action_count: int,
+    ) -> HistoricalEvidenceMetadata:
+        try:
+            metadata = json.loads(metadata_json)
+            request = metadata["request"]
+            if not isinstance(metadata, Mapping) or not isinstance(request, Mapping):
+                raise TypeError
+            return HistoricalEvidenceMetadata(
+                data_revision=data_revision,
+                security_id=str(metadata["security_id"]),
+                provider=str(metadata["provider"]),
+                provider_version=str(metadata["provider_version"]),
+                request_contract_version=str(metadata["request_contract_version"]),
+                requested_symbol=str(metadata["requested_symbol"]),
+                observed_symbol=str(metadata["observed_symbol"]),
+                alias_revision=(
+                    None
+                    if metadata.get("alias_revision") is None
+                    else str(metadata["alias_revision"])
+                ),
+                currency=str(metadata["currency"]),
+                quote_unit=str(metadata["quote_unit"]),
+                quote_unit_scale=str(metadata["quote_unit_scale"]),
+                exchange_timezone=str(metadata["exchange_timezone"]),
+                start=str(request["start"]),
+                end=str(request["end"]),
+                request_contract=dict(request),
+                response_metadata_digest=response_metadata_digest,
+                observation_count=observation_count,
+                action_count=action_count,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise HistoricalEvidenceIntegrityError("invalid v2 metadata") from exc
+
+    @staticmethod
+    def _v2_mappings(
+        conn: sqlite3.Connection, revision_id: int
+    ) -> tuple[tuple[object, ...], ...]:
+        return tuple(
+            conn.execute(
+                """SELECT mapping.chunk_kind, mapping.chunk_year,
+                          mapping.chunk_digest, chunk.codec, chunk.format_version,
+                          chunk.compressed_payload, chunk.uncompressed_bytes
+                   FROM historical_price_v2_revision_chunks AS mapping
+                   LEFT JOIN historical_price_v2_chunks AS chunk
+                     ON chunk.chunk_digest=mapping.chunk_digest
+                   WHERE mapping.revision_id=? ORDER BY mapping.chunk_order""",
+                (revision_id,),
+            ).fetchall()
+        )
+
+    def _decode_v2_chunk(
+        self,
+        mapping: Sequence[object],
+        cache: dict[
+            tuple[str, str, int, str, str, int], tuple[Mapping[str, object], ...]
+        ]
+        | None = None,
+    ) -> tuple[Mapping[str, object], ...]:
+        kind, year, digest, codec, version, compressed, size = mapping
+        digest_text = str(digest)
+        try:
+            kind_text = str(kind)
+            year_value = int(cast(int, year))
+            codec_text = str(codec)
+            version_text = str(version)
+            claimed_size = int(cast(int, size))
+            if compressed is None:
+                raise HistoricalEvidenceIntegrityError("v2 chunk mapping is missing")
+            if codec_text != "zlib" or version_text != "1":
+                raise HistoricalEvidenceIntegrityError("unsupported v2 chunk format")
+            if claimed_size > self._v2_chunk_max_bytes:
+                raise ValueError("v2 chunk exceeds size limit")
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+            HistoricalEvidenceIntegrityError,
+        ) as exc:
+            if isinstance(exc, HistoricalEvidenceIntegrityError):
+                raise
+            raise HistoricalEvidenceIntegrityError("invalid v2 chunk") from exc
+        cache_key = (
+            digest_text,
+            kind_text,
+            year_value,
+            codec_text,
+            version_text,
+            claimed_size,
+        )
+        if cache is not None and cache_key in cache:
+            return cache[cache_key]
+        try:
+            compressed_bytes = bytes(cast(bytes, compressed))
+            decompressor = zlib.decompressobj()
+            encoded = decompressor.decompress(
+                compressed_bytes, self._v2_chunk_max_bytes + 1
+            )
+            if (
+                decompressor.unconsumed_tail
+                or decompressor.unused_data
+                or not decompressor.eof
+                or len(encoded) > self._v2_chunk_max_bytes
+            ):
+                raise ValueError("v2 chunk exceeds size limit")
+            chunk = json.loads(encoded)
+            if (
+                len(encoded) != claimed_size
+                or sha256(encoded).hexdigest() != digest_text
+                or not isinstance(chunk, Mapping)
+                or chunk.get("kind") != kind_text
+                or chunk.get("year") != year_value
+                or not isinstance(chunk.get("items"), list)
+            ):
+                raise ValueError("v2 chunk integrity mismatch")
+            items = tuple(chunk["items"])
+            sessions: list[tuple[date, str]] = []
+            for item in items:
+                if not isinstance(item, Mapping):
+                    raise ValueError("v2 chunk item is invalid")
+                item_session = date.fromisoformat(str(item["session"]))
+                if item_session.year != year_value:
+                    raise ValueError("v2 chunk item year mismatch")
+                sessions.append((item_session, str(item.get("action_type", ""))))
+            if sessions != sorted(sessions):
+                raise ValueError("v2 chunk items are unordered")
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            zlib.error,
+            json.JSONDecodeError,
+        ) as exc:
+            raise HistoricalEvidenceIntegrityError("invalid v2 chunk") from exc
+        self._read_counters.chunks_decompressed += 1
+        self._read_counters.items_decoded += len(items)
+        self._read_counters.compressed_bytes += len(compressed_bytes)
+        self._read_counters.uncompressed_bytes += len(encoded)
+        if str(kind) == "rows":
+            self._read_counters.price_chunks_decompressed += 1
+        else:
+            self._read_counters.action_chunks_decompressed += 1
+        if cache is not None:
+            cache[cache_key] = items
+        return items
+
+    def _read_bounded_v2(
+        self,
+        handle: HistoricalEvidenceReadHandle,
+        *,
+        through: date,
+        limit: int | None,
+        columns: Sequence[str] | None,
+    ) -> BoundedHistoricalEvidence:
+        metadata = handle.metadata
+        try:
+            start = date.fromisoformat(metadata.start)
+            end = date.fromisoformat(metadata.end)
+        except ValueError as exc:
+            raise HistoricalEvidenceIntegrityError(
+                "invalid v2 evidence interval"
+            ) from exc
+        if not start <= through < end:
+            raise HistoricalEvidenceIntegrityError(
+                "bounded read is outside evidence bounds"
+            )
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise HistoricalEvidenceIntegrityError(
+                "bounded read limit must be positive"
+            )
+        with session(self._connect) as conn:
+            revision = conn.execute(
+                "SELECT revision_id FROM historical_price_v2_revisions WHERE data_revision=?",
+                (handle.data_revision,),
+            ).fetchone()
+            if revision is None:
+                raise EvidenceMissingError("historical evidence is missing")
+            mappings = self._v2_mappings(conn, int(revision[0]))
+            row_mappings = [
+                mapping for mapping in mappings if str(mapping[0]) == "rows"
+            ]
+            if metadata.observation_count and not row_mappings:
+                raise EvidenceMissingError("v2 price chunk mapping is missing")
+            selected_rows: list[Mapping[str, object]] = []
+            selected_price_years: set[int] = set()
+            for mapping in sorted(
+                row_mappings,
+                key=lambda item: int(cast(int, item[1])),
+                reverse=True,
+            ):
+                if int(cast(int, mapping[1])) > through.year:
+                    continue
+                items = self._decode_v2_chunk(mapping, handle._chunk_cache)
+                selected_price_years.add(int(cast(int, mapping[1])))
+                selected_rows.extend(
+                    item
+                    for item in items
+                    if start <= date.fromisoformat(str(item["session"])) <= through
+                )
+                if limit is not None and len(selected_rows) >= limit:
+                    break
+            selected_rows.sort(key=lambda item: str(item["session"]))
+            if limit is not None:
+                selected_rows = selected_rows[-limit:]
+            rows = HistoricalEvidenceReadHandle._project_rows(selected_rows, columns)
+            earliest = date.fromisoformat(str(rows[0]["session"])) if rows else None
+            selected_actions: list[Mapping[str, object]] = []
+            selected_action_years: set[int] = set()
+            if earliest is not None:
+                action_mappings = [
+                    mapping
+                    for mapping in mappings
+                    if str(mapping[0]) == "actions"
+                    and earliest.year
+                    <= int(cast(int, mapping[1]))
+                    <= (end - timedelta(days=1)).year
+                ]
+                for mapping in action_mappings:
+                    items = self._decode_v2_chunk(mapping, handle._chunk_cache)
+                    selected_action_years.add(int(cast(int, mapping[1])))
+                    selected_actions.extend(
+                        item
+                        for item in items
+                        if earliest <= date.fromisoformat(str(item["session"])) < end
+                    )
+            actions = tuple(
+                sorted(
+                    selected_actions,
+                    key=lambda item: (str(item["session"]), str(item["action_type"])),
+                )
+            )
+        self._read_counters.rows_retained += len(rows)
+        return BoundedHistoricalEvidence(
+            metadata,
+            rows,
+            actions,
+            through.isoformat(),
+            tuple(sorted(selected_price_years)),
+            tuple(sorted(selected_action_years)),
+        )
+
+    def _read_v2_actions_on(
+        self,
+        handle: HistoricalEvidenceReadHandle,
+        session_date: date,
+        cache: dict[
+            tuple[str, str, int, str, str, int], tuple[Mapping[str, object], ...]
+        ],
+    ) -> tuple["CorporateAction", ...]:
+        with session(self._connect) as conn:
+            revision = conn.execute(
+                "SELECT revision_id FROM historical_price_v2_revisions WHERE data_revision=?",
+                (handle.data_revision,),
+            ).fetchone()
+            if revision is None:
+                raise EvidenceMissingError("historical evidence is missing")
+            mappings = [
+                mapping
+                for mapping in self._v2_mappings(conn, int(revision[0]))
+                if (
+                    str(mapping[0]) == "actions"
+                    and int(cast(int, mapping[1])) == session_date.year
+                )
+            ]
+            actions = [
+                item
+                for mapping in mappings
+                for item in self._decode_v2_chunk(mapping, cache)
+                if str(item["session"]) == session_date.isoformat()
+            ]
+        from app.services.backtest.market_planes import CorporateAction
+
+        return tuple(
+            CorporateAction(
+                session=session_date,
+                action_type=str(action["action_type"]),
+                value=self._provider_decimal(action["value"]),
+                evidence_revision=handle.data_revision,
+            )
+            for action in actions
+        )
 
     def get_exact(
         self, *, security_id: str, start: str, end: str, data_revision: str
@@ -846,7 +1537,7 @@ class HistoricalPriceRepository:
             ).fetchone()
             if row is None:
                 return None
-            return self._verify_on_connection(conn, str(row[0]))
+            return self._verify_active_on_connection(conn, str(row[0]))
 
     def find_compatible_request(
         self,
@@ -878,7 +1569,7 @@ class HistoricalPriceRepository:
             ).fetchone()
             if row is None:
                 return None
-            return self._verify_on_connection(conn, str(row[0]))
+            return self._verify_active_on_connection(conn, str(row[0]))
 
     def dated_close(
         self, symbols: Sequence[str], session_date: str
@@ -1107,14 +1798,14 @@ class HistoricalPriceRepository:
 
     def verify(self, data_revision: str) -> StoredHistoricalEvidence:
         with session(self._connect) as conn:
-            return self._verify_on_connection(conn, data_revision)
+            return self._verify_active_on_connection(conn, data_revision)
 
     def pin(self, consumer_type: str, consumer_id: str, data_revision: str) -> None:
         if consumer_type not in {"snapshot", "backtest"}:
             raise ValueError("unsupported evidence consumer type")
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._verify_on_connection(conn, data_revision)
+            self._verify_active_on_connection(conn, data_revision)
             row = conn.execute(
                 "SELECT first_acquired_at FROM historical_price_revisions "
                 "WHERE data_revision=?",
@@ -1161,9 +1852,8 @@ class HistoricalPriceRepository:
             raise HistoricalEvidenceIntegrityError("stored action mismatch")
         return evidence
 
-    @staticmethod
     def _verify_v2_on_connection(
-        conn: sqlite3.Connection, data_revision: str
+        self, conn: sqlite3.Connection, data_revision: str
     ) -> StoredHistoricalEvidence:
         revision = conn.execute(
             """SELECT revision_id, metadata_json, response_metadata_digest,
@@ -1173,50 +1863,25 @@ class HistoricalPriceRepository:
         ).fetchone()
         if revision is None:
             raise EvidenceMissingError("historical evidence is missing")
+        self._read_counters.complete_revision_materializations += 1
         try:
             metadata = json.loads(str(revision[1]))
+            if not isinstance(metadata, Mapping):
+                raise TypeError
         except json.JSONDecodeError as exc:
+            raise HistoricalEvidenceIntegrityError("invalid v2 metadata") from exc
+        except TypeError as exc:
             raise HistoricalEvidenceIntegrityError("invalid v2 metadata") from exc
         rows: list[Mapping[str, object]] = []
         actions: list[Mapping[str, object]] = []
-        mappings = conn.execute(
-            """SELECT mapping.chunk_kind, mapping.chunk_year, chunk.chunk_digest,
-                      chunk.codec, chunk.format_version, chunk.compressed_payload,
-                      chunk.uncompressed_bytes
-               FROM historical_price_v2_revision_chunks AS mapping
-               JOIN historical_price_v2_chunks AS chunk
-                 ON chunk.chunk_digest=mapping.chunk_digest
-               WHERE mapping.revision_id=? ORDER BY mapping.chunk_order""",
-            (int(revision[0]),),
-        ).fetchall()
-        for kind, year, digest, codec, version, compressed, size in mappings:
-            if str(codec) != "zlib" or int(version) != 1:
-                raise HistoricalEvidenceIntegrityError("unsupported v2 chunk format")
-            try:
-                if int(size) > HistoricalPriceRepository._v2_chunk_max_bytes:
-                    raise ValueError("v2 chunk exceeds size limit")
-                decompressor = zlib.decompressobj()
-                encoded = decompressor.decompress(
-                    bytes(compressed), HistoricalPriceRepository._v2_chunk_max_bytes + 1
-                )
-                if (
-                    decompressor.unconsumed_tail
-                    or not decompressor.eof
-                    or len(encoded) > HistoricalPriceRepository._v2_chunk_max_bytes
-                ):
-                    raise ValueError("v2 chunk exceeds size limit")
-                chunk = json.loads(encoded)
-            except (TypeError, ValueError, zlib.error, json.JSONDecodeError) as exc:
-                raise HistoricalEvidenceIntegrityError("invalid v2 chunk") from exc
-            if (
-                len(encoded) != int(size)
-                or sha256(encoded).hexdigest() != str(digest)
-                or chunk.get("kind") != str(kind)
-                or chunk.get("year") != int(year)
-                or not isinstance(chunk.get("items"), list)
-            ):
-                raise HistoricalEvidenceIntegrityError("v2 chunk integrity mismatch")
-            (rows if str(kind) == "rows" else actions).extend(chunk["items"])
+        mappings = self._v2_mappings(conn, int(revision[0]))
+        if int(revision[3]) and not any(
+            str(mapping[0]) == "rows" for mapping in mappings
+        ):
+            raise EvidenceMissingError("v2 price chunk mapping is missing")
+        for mapping in mappings:
+            items = self._decode_v2_chunk(mapping)
+            (rows if str(mapping[0]) == "rows" else actions).extend(items)
         if len(rows) != int(revision[3]) or len(actions) != int(revision[4]):
             raise HistoricalEvidenceIntegrityError("v2 evidence count mismatch")
         canonical = {**metadata, "rows": rows, "actions": actions}
@@ -1270,9 +1935,8 @@ class HistoricalPriceRepository:
         except (KeyError, TypeError) as exc:
             raise HistoricalEvidenceIntegrityError("invalid v2 metadata") from exc
 
-    @staticmethod
     def _load_on_connection(
-        conn: sqlite3.Connection, data_revision: str
+        self, conn: sqlite3.Connection, data_revision: str
     ) -> StoredHistoricalEvidence:
         revision = conn.execute(
             """SELECT security_id, provider, provider_version,
@@ -1286,6 +1950,7 @@ class HistoricalPriceRepository:
         ).fetchone()
         if revision is None:
             raise EvidenceMissingError("historical evidence is missing")
+        self._read_counters.complete_revision_materializations += 1
         observation_rows = conn.execute(
             """SELECT session_date, open_hex, high_hex, low_hex, close_hex,
                       adj_close_hex, volume_hex, dividends_hex, stock_splits_hex

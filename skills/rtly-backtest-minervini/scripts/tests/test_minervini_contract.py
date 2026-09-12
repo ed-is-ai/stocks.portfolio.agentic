@@ -83,8 +83,26 @@ class _View:
         self._history = history
         self._scan = scan
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        return self._history
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._history.copy()
+        history = history.loc[
+            [
+                (index.date() if hasattr(index, "date") else index)
+                <= self.as_of_session
+                for index in history.index
+            ]
+        ]
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         return self._scan
@@ -162,7 +180,7 @@ def test_entry_fails_closed_for_missing_future_or_invalid_volume_evidence() -> N
     assert strategy.entry_signals(_View(zero_volume, _scan()), PARAMETERS) == []
 
 
-def test_exit_and_position_sizing_use_full_integral_held_quantity() -> None:
+def test_exit_and_position_sizing_use_full_held_quantity() -> None:
     strategy = MinerviniStrategy()
     view = _View(_history(), _scan(state="Damaged"))
     portfolio = _portfolio()
@@ -176,7 +194,9 @@ def test_exit_and_position_sizing_use_full_integral_held_quantity() -> None:
         )
         == 10
     )
-    assert strategy.position_size(exits[0], view, _portfolio("10.5"), PARAMETERS) == 0
+    assert strategy.position_size(
+        exits[0], view, _portfolio("10.5"), PARAMETERS
+    ) == Decimal("10.5")
     buy = Signal(
         security_id="sec-aapl",
         side=SignalSide.BUY,
@@ -268,8 +288,19 @@ class _KeyedView:
         self._histories = histories
         self._scans = scans
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        return self._histories.get(security_id, pd.DataFrame())
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._histories.get(security_id, pd.DataFrame()).copy()
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         scan = self._scans.get(security_id)
@@ -423,14 +454,32 @@ class _RegimeView:
     def __init__(self, inner: object, benchmark_closes: list[str]) -> None:
         self._inner = inner
         self.as_of_session = inner.as_of_session
+        closes = [Decimal(value) for value in benchmark_closes]
         self._benchmark = pd.DataFrame(
-            {"close": [Decimal(value) for value in benchmark_closes]}
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": closes,
+            }
         )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
         if security_id == _BENCHMARK_ID:
-            return self._benchmark.copy()
-        return self._inner.price_history(security_id)
+            history = self._benchmark.copy()
+            if limit is not None:
+                history = history.iloc[-limit:]
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+        return self._inner.price_history(security_id, limit=limit, columns=columns)
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         return self._inner.scan_result(security_id)

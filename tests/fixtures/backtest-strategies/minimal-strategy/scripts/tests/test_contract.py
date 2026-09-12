@@ -53,7 +53,14 @@ class _View:
     def __init__(self, as_of_session: date) -> None:
         self.as_of_session = as_of_session
 
-    def price_history(self, security_id: str):  # noqa: ANN201
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ):  # noqa: ANN201
+        del security_id, limit, columns
         raise NotImplementedError
 
     def scan_result(self, security_id: str):  # noqa: ANN201

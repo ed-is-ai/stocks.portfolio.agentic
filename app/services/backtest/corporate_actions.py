@@ -14,8 +14,8 @@ from app.services.backtest.market_planes import (
     quantize_eight,
 )
 
-SPLIT_ACCOUNTING_POLICY_VERSION = "SplitAccountingPolicyV1"
-DIVIDEND_CASH_POLICY_VERSION = "DividendCashPolicyV1"
+SPLIT_ACCOUNTING_POLICY_VERSION = "SplitAccountingPolicyV2"
+DIVIDEND_CASH_POLICY_VERSION = "DividendCashPolicyV2"
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,6 @@ def _validate_position(position: PositionState) -> None:
         or not position.per_share_basis.is_finite()
         or position.shares < 0
         or position.per_share_basis < 0
-        or position.shares != position.shares.to_integral_value()
     ):
         raise MarketDataPolicyError("integrity_error", "Position state is invalid.")
 
@@ -87,11 +86,6 @@ def apply_split(
                 shares=position.shares * action.value,
                 per_share_basis=position.per_share_basis / action.value,
             )
-            if updated.shares != updated.shares.to_integral_value():
-                raise MarketDataPolicyError(
-                    "unsupported_corporate_action",
-                    "Split would require fractional-share or cash-in-lieu policy.",
-                )
             value_after = quantize_eight(updated.shares * updated.per_share_basis)
     except DecimalException as exc:
         raise MarketDataPolicyError(
@@ -127,7 +121,7 @@ def apply_dividend_cash(
     quote_currency: str,
     quote_unit: str,
 ) -> DividendCashApplication:
-    """Credit only shares explicitly carried into D under DividendCashPolicyV1."""
+    """Credit only shares explicitly carried into D under DividendCashPolicyV2."""
     if action.action_type != "dividend":
         raise MarketDataPolicyError(
             "unsupported_corporate_action",
@@ -136,7 +130,6 @@ def apply_dividend_cash(
     if (
         not shares_carried_into_open.is_finite()
         or shares_carried_into_open < 0
-        or shares_carried_into_open != shares_carried_into_open.to_integral_value()
         or not action.value.is_finite()
         or action.value <= 0
     ):

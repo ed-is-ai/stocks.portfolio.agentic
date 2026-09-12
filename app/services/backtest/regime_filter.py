@@ -107,11 +107,32 @@ def entry_signals_permitted(
         return False
 
     try:
-        history = view.price_history(benchmark)
+        history = view.price_history(benchmark, limit=ma_length, columns=("close",))
     except Exception:
         return False
 
     closes = _finite_closes(history)
+    limit = ma_length
+    while len(closes) < ma_length:
+        # A bounded window can contain dirty rows that the legacy projection
+        # discarded before counting. Widen only this exceptional path so the
+        # clean case remains one small close-only read. Stop when the view has
+        # returned its complete finite history rather than guessing a fixed
+        # widening factor.
+        limit *= 2
+        if limit > 1_000_000:
+            break
+        try:
+            history = view.price_history(benchmark, limit=limit, columns=("close",))
+        except Exception:
+            return False
+        closes = _finite_closes(history)
+        try:
+            returned_rows = len(history.index)
+        except (AttributeError, TypeError):
+            returned_rows = None
+        if returned_rows is not None and returned_rows < limit:
+            break
     if len(closes) < ma_length:
         return False
 

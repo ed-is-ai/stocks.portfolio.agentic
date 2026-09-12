@@ -37,6 +37,7 @@ from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
     RunInputManifestV1,
 )
+from app.services.backtest.market_planes import HistoricalMarketPlanes
 from app.services.backtest.strategy_protocol import (
     EntrySelectionDecisionV1,
     EntrySelectionState,
@@ -282,8 +283,14 @@ class _FakeMarketView:
 
     as_of_session: date
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        del security_id
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        del security_id, limit, columns
         return pd.DataFrame()
 
     def scan_result(self, security_id: str):
@@ -306,7 +313,7 @@ class _ScriptedStrategy:
         *,
         entries: Mapping[date, list[Signal]] | None = None,
         exits: Mapping[date, list[Signal]] | None = None,
-        size_by_rule: Mapping[str, int] | None = None,
+        size_by_rule: Mapping[str, int | Decimal] | None = None,
         default_size: int = 1,
     ) -> None:
         self._entries = entries or {}
@@ -335,16 +342,14 @@ class _ScriptedStrategy:
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> int:
+    ) -> int | Decimal:
         del view, parameters
         requested = self._size_by_rule.get(signal.rule_id, self._default_size)
         if requested == -1:
-            return int(
-                next(
-                    position.quantity
-                    for position in portfolio.positions
-                    if position.security_id == signal.security_id
-                )
+            return next(
+                position.quantity
+                for position in portfolio.positions
+                if position.security_id == signal.security_id
             )
         return requested
 
@@ -562,6 +567,31 @@ def test_contradictory_buy_and_sell_same_session_processes_sell_first() -> None:
     assert len(position_conflicts) == 1  # nothing was held yet, so SELL is rejected
     assert len(fills) == 1  # BUY still schedules and fills normally
     assert fills[0].rule_id == "rb"
+
+
+def test_engine_reuses_supplied_prepared_plane(monkeypatch) -> None:
+    start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
+    sessions = _sessions("XNYS", start, end_exclusive)
+    market_data, pinned = _build_security("sec-a", "XNYS", sessions, revision=DIGEST_A)
+    manifest = _manifest(
+        securities=(pinned,), start_month=_month_str(start), end_month=_month_str(start)
+    )
+    prepared = HistoricalMarketPlanes.from_evidence(market_data.price_evidence)
+
+    def fail_from_evidence(_evidence):
+        raise AssertionError("Engine must reuse the supplied prepared plane")
+
+    monkeypatch.setattr(HistoricalMarketPlanes, "from_evidence", fail_from_evidence)
+
+    output = run_simulation(
+        manifest=manifest,
+        strategy=_ScriptedStrategy(),
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+        prepared_planes={"sec-a": prepared},
+    )
+
+    assert output.equity_curve
 
 
 # ---------------------------------------------------------------------------
@@ -852,9 +882,7 @@ def test_full_exit_sells_current_post_split_shares_not_stale_scheduled_quantity(
     assert output.final_open_positions == ()
 
 
-def test_split_requiring_fractional_shares_is_fatal_unsupported_corporate_action() -> (
-    None
-):
+def test_split_preserves_fractional_shares_in_position_and_final_mark() -> None:
     start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
     sessions = _sessions("XNYS", start, end_exclusive)
     d0, d2 = sessions[0], sessions[2]
@@ -884,16 +912,91 @@ def test_split_requiring_fractional_shares_is_fatal_unsupported_corporate_action
         starting_capital=Decimal("325"),
     )
 
-    with pytest.raises(SimulationError) as exc_info:
-        run_simulation(
-            manifest=manifest,
-            strategy=strategy,
-            market_view_factory=_market_view_factory(),
-            security_market_data=(market_data,),
-        )
+    output = run_simulation(
+        manifest=manifest,
+        strategy=strategy,
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+    )
+    split_events = [
+        event for event in output.events if isinstance(event, SplitAppliedEventV1)
+    ]
+    assert len(split_events) == 1
+    assert split_events[0].shares_before == Decimal("13")
+    assert split_events[0].shares_after == Decimal("3.25")
+    assert len(output.final_open_positions) == 1
+    assert output.final_open_positions[0].shares == Decimal("3.25")
 
-    assert exc_info.value.code == "unsupported_corporate_action"
-    assert exc_info.value.session == d2
+
+def test_share_event_json_preserves_legacy_whole_share_numbers() -> None:
+    event = ExitFillEventV1(
+        security_id="sec-a",
+        signal_session=date(2024, 3, 1),
+        fill_session=date(2024, 3, 1),
+        rule_id="r",
+        shares=Decimal("10"),
+        fill_price_native=Decimal("100"),
+        fill_currency="USD",
+        fill_quote_unit="USD",
+        proceeds_base=Decimal("1000"),
+        cost_basis_base=Decimal("900"),
+        realized_pnl_base=Decimal("100"),
+        sequence=1,
+    )
+    fractional = event.model_copy(update={"shares": Decimal("3.25")})
+
+    assert event.model_dump(mode="json")["shares"] == 10
+    assert fractional.model_dump(mode="json")["shares"] == "3.25"
+
+
+def test_full_exit_closes_fractional_shares_created_by_split() -> None:
+    start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
+    sessions = _sessions("XNYS", start, end_exclusive)
+    d0, d2, d3 = sessions[0], sessions[2], sessions[3]
+    market_data, pinned = _build_security(
+        "sec-a",
+        "XNYS",
+        sessions,
+        revision=DIGEST_A,
+        open_price=100.0,
+        close_price=100.0,
+        split_by_session={d2: 0.25},
+    )
+    strategy = _ScriptedStrategy(
+        entries={
+            d0: [
+                Signal(
+                    security_id="sec-a", side=SignalSide.BUY, session=d0, rule_id="rb"
+                )
+            ]
+        },
+        exits={
+            d3: [
+                Signal(
+                    security_id="sec-a", side=SignalSide.SELL, session=d3, rule_id="rs"
+                )
+            ]
+        },
+        size_by_rule={"rb": 1, "rs": -1},
+    )
+    manifest = _manifest(
+        securities=(pinned,),
+        start_month=_month_str(start),
+        end_month=_month_str(start),
+        starting_capital=Decimal("325"),
+    )
+
+    output = run_simulation(
+        manifest=manifest,
+        strategy=strategy,
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+    )
+
+    exits = [event for event in output.events if isinstance(event, ExitFillEventV1)]
+    assert len(exits) == 1
+    assert exits[0].shares == Decimal("3.25")
+    assert output.final_open_positions == ()
 
 
 # ---------------------------------------------------------------------------
@@ -1033,6 +1136,54 @@ def test_stale_fx_aborts_fatal() -> None:
         )
 
     assert exc_info.value.code == "fx_stale"
+
+
+def test_fx_evidence_is_decoded_once_per_simulation(monkeypatch) -> None:
+    start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
+    sessions = _sessions("XNYS", start, end_exclusive)
+    d0 = sessions[0]
+    market_data, pinned = _build_security(
+        "sec-a", "XNYS", sessions, revision=DIGEST_A, currency="GBP", quote_unit="GBP"
+    )
+    strategy = _ScriptedStrategy(
+        entries={
+            d0: [
+                Signal(
+                    security_id="sec-a", side=SignalSide.BUY, session=d0, rule_id="rb"
+                )
+            ]
+        },
+        size_by_rule={"rb": 1},
+    )
+    manifest = _manifest(
+        securities=(pinned,),
+        start_month=_month_str(start),
+        end_month=_month_str(start),
+        base_currency="USD",
+    )
+    fx_evidence = _fx_evidence(
+        tuple((session, 1.25) for session in sessions),
+        start=start - timedelta(days=1),
+        end=end_exclusive,
+    )
+    original = backtest_engine.prepare_fx_closes
+    calls = 0
+
+    def counted(evidence):
+        nonlocal calls
+        calls += 1
+        return original(evidence)
+
+    monkeypatch.setattr(backtest_engine, "prepare_fx_closes", counted)
+    run_simulation(
+        manifest=manifest,
+        strategy=strategy,
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+        fx_evidence=fx_evidence,
+    )
+
+    assert calls == 1
 
 
 def test_ambiguous_fx_aborts_fatal() -> None:
@@ -1715,18 +1866,18 @@ def test_pinned_evidence_revision_mismatch_aborts_fatal() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 25. A missing required open on the scheduled fill session is fatal
+# 25. A missing session carries the prior as-traded close into the fill
 # ---------------------------------------------------------------------------
 
 
-def test_missing_required_open_on_fill_session_aborts_fatal() -> None:
+def test_missing_open_on_fill_session_carries_forward_prior_close() -> None:
     start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
     full_sessions = _sessions("XNYS", start, end_exclusive)
     d0 = full_sessions[0]
     gap_day = full_sessions[1]
     # Evidence has no row for ``gap_day`` even though it is a valid XNYS
-    # trading session -- distinct from a legitimate holiday/weekend gap,
-    # this models tampered/incomplete provider-native evidence.
+    # trading session. The engine should use the prior as-traded close,
+    # matching its existing weekend/as-of valuation behavior.
     sessions_with_gap = full_sessions[:1] + full_sessions[2:]
     market_data, pinned = _build_security(
         "sec-a", "XNYS", sessions_with_gap, revision=DIGEST_A
@@ -1747,17 +1898,45 @@ def test_missing_required_open_on_fill_session_aborts_fatal() -> None:
         end_month=_month_str(start),
     )
 
+    output = run_simulation(
+        manifest=manifest,
+        strategy=strategy,
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+    )
+
+    fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
+    assert len(fills) == 1
+    assert fills[0].fill_session == gap_day
+    assert fills[0].fill_price_native == Decimal("101")
+
+
+def test_missing_open_without_prior_close_remains_fatal() -> None:
+    start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
+    full_sessions = _sessions("XNYS", start, end_exclusive)
+    gap_day = full_sessions[1]
+    market_data, pinned = _build_security(
+        "sec-a", "XNYS", full_sessions[2:], revision=DIGEST_A
+    )
+    signal = Signal(
+        security_id="sec-a", side=SignalSide.BUY, session=full_sessions[0], rule_id="rb"
+    )
+    manifest = _manifest(
+        securities=(pinned,),
+        start_month=_month_str(start),
+        end_month=_month_str(start),
+    )
+
     with pytest.raises(SimulationError) as exc_info:
         run_simulation(
             manifest=manifest,
-            strategy=strategy,
+            strategy=_ScriptedStrategy(entries={full_sessions[0]: [signal]}),
             market_view_factory=_market_view_factory(),
             security_market_data=(market_data,),
         )
 
     assert exc_info.value.code == "missing_required_open"
     assert exc_info.value.session == gap_day
-    assert exc_info.value.month == _month_str(gap_day)
 
 
 def test_fx_evidence_revision_mismatch_against_pinned_fx_revision_aborts_fatal() -> (

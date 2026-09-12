@@ -418,7 +418,7 @@ def test_validate_position_size_rejects_negative() -> None:
     assert excinfo.value.code == StrategyProtocolErrorCode.NEGATIVE_POSITION_SIZE
 
 
-@pytest.mark.parametrize("bad_size", [5.5, "5", None, Decimal("5")])
+@pytest.mark.parametrize("bad_size", [5.5, "5", None])
 def test_validate_position_size_rejects_non_integral(bad_size: object) -> None:
     with pytest.raises(StrategyProtocolError) as excinfo:
         validate_position_size(bad_size)
@@ -429,6 +429,10 @@ def test_validate_position_size_rejects_non_integral(bad_size: object) -> None:
 def test_validate_position_size_accepts_valid_int() -> None:
     assert validate_position_size(10) == 10
     assert validate_position_size(0) == 0
+
+
+def test_validate_position_size_accepts_finite_decimal() -> None:
+    assert validate_position_size(Decimal("7.5")) == Decimal("7.5")
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +560,14 @@ class _ConformingMarketView:
 
     as_of_session = date(2026, 6, 1)
 
-    def price_history(self, security_id):  # noqa: ANN001, ANN201
+    def price_history(
+        self,
+        security_id,
+        *,
+        limit=None,
+        columns=None,
+    ):  # noqa: ANN001, ANN201
+        del security_id, limit, columns
         raise NotImplementedError
 
     def scan_result(self, security_id):  # noqa: ANN001, ANN201

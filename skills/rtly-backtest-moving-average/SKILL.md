@@ -42,8 +42,8 @@ beyond the slow window to prove a crossover, ignore equality, reject
 `fast_window >= slow_window`, and fail closed on missing, malformed, short,
 or stale history.
 
-The engine owns BUY allocation and whole-share sizing. Close only an integral
-held quantity for a SELL. Make decisions from bounded close-of-session
+The engine owns BUY allocation and whole-share sizing. A SELL closes the exact
+held quantity, including split-created fractional shares. Make decisions from bounded close-of-session
 evidence; the engine fills accepted signals at the next-session open.
 
 ```bash

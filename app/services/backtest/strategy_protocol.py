@@ -337,9 +337,17 @@ class MarketViewV1(Protocol):
     @property
     def as_of_session(self) -> date: ...
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
         """Return ``security_id``'s split-continuous OHLCV history through
-        ``as_of_session``, oldest first.
+        ``as_of_session``, oldest first. ``limit`` selects the latest rows and
+        ``columns`` selects a canonical subset; omitting both preserves the
+        legacy full-history call.
 
         An unknown/untracked ``security_id`` returns an empty DataFrame
         (not an error) -- the absence of *any* pinned evidence for a
@@ -402,8 +410,13 @@ class StrategyProtocolV1(Protocol):
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> int:
-        """Return the integer share count to act on ``signal`` with."""
+    ) -> int | Decimal:
+        """Return the share count to act on ``signal`` with.
+
+        BUY sizing remains engine-owned and whole-share. SELL sizing may
+        return the exact held Decimal quantity, including shares created by
+        a split.
+        """
         ...
 
 
@@ -476,18 +489,24 @@ def validate_signal_explanations(
     return tuple(signals)
 
 
-def validate_position_size(value: object) -> int:
+def validate_position_size(value: object) -> int | Decimal:
     """Validate a ``position_size`` result before any engine mutation.
 
     Rejects ``bool`` (a ``bool`` is an ``int`` subclass in Python and
     would otherwise silently pass an ``int`` check), any other
-    non-``int``/non-integral value, and negative sizes, each with a
-    stable error code.
+    non-``int``/non-Decimal value, non-finite Decimal values, and negative
+    sizes, each with a stable error code.
     """
-    if isinstance(value, bool) or not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
         raise StrategyProtocolError(
             StrategyProtocolErrorCode.INVALID_POSITION_SIZE_TYPE,
-            f"position_size must return a plain int, got {type(value).__name__}",
+            "position_size must return a non-negative int or finite Decimal, "
+            f"got {type(value).__name__}",
+        )
+    if isinstance(value, Decimal) and not value.is_finite():
+        raise StrategyProtocolError(
+            StrategyProtocolErrorCode.INVALID_POSITION_SIZE_TYPE,
+            "position_size Decimal must be finite",
         )
     if value < 0:
         raise StrategyProtocolError(

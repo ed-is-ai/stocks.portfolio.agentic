@@ -85,7 +85,14 @@ class _View:
         self._history = history
         self._scan = scan
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        del limit, columns
         return self._history.copy()
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:

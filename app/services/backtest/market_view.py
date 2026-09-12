@@ -24,23 +24,31 @@ silently dropped. ``.price_history``/``.scan_result`` never reach past
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import InitVar, dataclass, field
+from datetime import date, timedelta
+from calendar import monthrange
 import logging
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, MutableMapping, Sequence
 
 import pandas as pd
 
 from app.repositories.backtest_repo import BacktestRepository
-from app.repositories.historical_price_repo import HistoricalPriceRepository
+from app.repositories.historical_price_repo import (
+    HistoricalEvidenceReadHandle,
+    HistoricalPriceRepository,
+)
 from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
-from app.services.backtest.market_planes import HistoricalMarketPlanes
+from app.services.backtest.market_planes import (
+    HistoricalMarketPlanes,
+    MarketDataPolicyError,
+)
 from app.services.backtest.run_universe import canonical_run_universe
 from app.services.backtest.strategy_evidence import (
     EvidenceKind,
     SecurityEvidenceCoverageV1,
 )
+from app.services.backtest.trading_calendar import TradingCalendar
 
 #: Column order every ``MarketView.price_history`` DataFrame uses, whether
 #: populated or empty -- a Strategy can rely on this shape regardless of
@@ -103,13 +111,6 @@ class UnselectedSecurityError(LookupError):
         )
 
 
-def _empty_price_history() -> pd.DataFrame:
-    return pd.DataFrame(
-        columns=PRICE_HISTORY_COLUMNS,
-        index=pd.Index([], dtype=object, name="session"),
-    )
-
-
 @dataclass(frozen=True)
 class MarketView:
     """Pandas-backed, bounds-checked market view for one simulated session.
@@ -133,8 +134,33 @@ class MarketView:
     selected_universe: tuple[str, ...]
     backtest_repo: BacktestRepository
     historical_price_repo: HistoricalPriceRepository
+    prepared_planes: InitVar[Mapping[str, HistoricalMarketPlanes] | None] = None
+    price_accesses: InitVar[Mapping[str, HistoricalEvidenceReadHandle] | None] = None
+    scan_cache: InitVar[
+        MutableMapping[tuple[str, str], HistoricalScanRecordV1 | None] | None
+    ] = None
+    scan_cache_month: InitVar[MutableMapping[str, str] | None] = None
+    _prepared_planes: Mapping[str, HistoricalMarketPlanes] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _scan_cache: (
+        MutableMapping[tuple[str, str], HistoricalScanRecordV1 | None] | None
+    ) = field(default=None, init=False, repr=False, compare=False)
+    _scan_cache_month: MutableMapping[str, str] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _price_accesses: Mapping[str, HistoricalEvidenceReadHandle] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+        prepared_planes: Mapping[str, HistoricalMarketPlanes] | None,
+        price_accesses: Mapping[str, HistoricalEvidenceReadHandle] | None,
+        scan_cache: MutableMapping[tuple[str, str], HistoricalScanRecordV1 | None]
+        | None,
+        scan_cache_month: MutableMapping[str, str] | None,
+    ) -> None:
         # Detach from a caller-supplied dict so later caller-side mutation
         # can never reach this view, matching PortfolioView's convention.
         object.__setattr__(
@@ -145,6 +171,25 @@ class MarketView:
         object.__setattr__(
             self, "selected_universe", canonical_run_universe(self.selected_universe)
         )
+        if (
+            prepared_planes is not None
+            and type(prepared_planes) is not MappingProxyType
+        ):
+            object.__setattr__(
+                self,
+                "_prepared_planes",
+                MappingProxyType(dict(prepared_planes)),
+            )
+        else:
+            object.__setattr__(self, "_prepared_planes", prepared_planes)
+        if price_accesses is not None and type(price_accesses) is not MappingProxyType:
+            object.__setattr__(
+                self, "_price_accesses", MappingProxyType(dict(price_accesses))
+            )
+        else:
+            object.__setattr__(self, "_price_accesses", price_accesses)
+        object.__setattr__(self, "_scan_cache", scan_cache)
+        object.__setattr__(self, "_scan_cache_month", scan_cache_month)
 
     def require_selected(self, security_id: str) -> None:
         """Reject ``security_id`` unless this Run selected it.
@@ -159,9 +204,17 @@ class MarketView:
                 security_id=security_id, selected_universe=self.selected_universe
             )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
         """Return ``security_id``'s split-continuous OHLCV history through
-        ``as_of_session``, oldest first, indexed by session date.
+        ``as_of_session``, oldest first, indexed by session date. ``limit``
+        selects the latest rows and ``columns`` selects a canonical subset;
+        omitting both preserves the legacy full-history result.
 
         Uses AD-6's ``split_continuous_as_of_D`` plane -- the one plane a
         Strategy or detector may see: every split effective by
@@ -179,25 +232,88 @@ class MarketView:
         misleadingly-labeled "current" state.
         """
         self.require_selected(security_id)
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise MarketDataPolicyError(
+                "invalid_price_history_request", "limit must be a positive integer."
+            )
+        try:
+            requested_columns = (
+                PRICE_HISTORY_COLUMNS if columns is None else tuple(columns)
+            )
+            valid_column_set = len(set(requested_columns)) == len(requested_columns)
+        except (TypeError, ValueError):
+            requested_columns = ()
+            valid_column_set = False
+        if (
+            not requested_columns
+            or not valid_column_set
+            or any(column not in PRICE_HISTORY_COLUMNS for column in requested_columns)
+        ):
+            raise MarketDataPolicyError(
+                "invalid_price_history_request",
+                "columns must be a non-empty subset of the canonical price columns.",
+            )
+        requested_columns = tuple(
+            column for column in PRICE_HISTORY_COLUMNS if column in requested_columns
+        )
         revision = self.security_price_revisions.get(security_id)
         if revision is None:
-            return _empty_price_history()
-        evidence = self.historical_price_repo.get(revision)
-        plane = HistoricalMarketPlanes.from_evidence(evidence)
-        if not (plane.start <= self.as_of_session < plane.end):
+            return pd.DataFrame(
+                columns=requested_columns,
+                index=pd.Index([], dtype=object, name="session"),
+            )
+        plane = None
+        if self._prepared_planes is not None:
+            plane = self._prepared_planes.get(security_id)
+            if plane is not None and plane.data_revision != revision:
+                raise MarketDataPolicyError(
+                    "integrity_error",
+                    f"Prepared plane for {security_id!r} does not match its pinned revision.",
+                )
+        access = (
+            None
+            if self._price_accesses is None
+            else self._price_accesses.get(security_id)
+        )
+        if access is not None and access.data_revision != revision:
+            raise MarketDataPolicyError(
+                "integrity_error",
+                f"Price access for {security_id!r} does not match its pinned revision.",
+            )
+        if plane is None and access is None:
+            evidence = self.historical_price_repo.get(revision)
+            plane = HistoricalMarketPlanes.from_evidence(evidence)
+        if access is not None:
+            bound_start = date.fromisoformat(access.metadata.start)
+            bound_end = date.fromisoformat(access.metadata.end)
+        else:
+            assert plane is not None
+            bound_start, bound_end = plane.start, plane.end
+        if not (bound_start <= self.as_of_session < bound_end):
             raise MarketViewBoundError(
                 security_id=security_id, as_of_session=self.as_of_session
             )
-        rows = plane.split_continuous_as_of(self.as_of_session)
+        if access is not None:
+            partial = access.bounded(through=self.as_of_session, limit=limit)
+            if not partial.rows:
+                return pd.DataFrame(
+                    columns=requested_columns,
+                    index=pd.Index([], dtype=object, name="session"),
+                )
+            plane = HistoricalMarketPlanes.from_bounded_evidence(partial)
+        assert plane is not None
+        rows = plane.split_continuous_window_as_of(self.as_of_session, limit=limit)
         if not rows:
-            return _empty_price_history()
+            return pd.DataFrame(
+                columns=requested_columns,
+                index=pd.Index([], dtype=object, name="session"),
+            )
         frame = pd.DataFrame(
             {
-                "open": [row.open for row in rows],
-                "high": [row.high for row in rows],
-                "low": [row.low for row in rows],
-                "close": [row.close for row in rows],
-                "volume": [row.volume for row in rows],
+                column: [getattr(row, column) for row in rows]
+                for column in requested_columns
             },
             # ``dtype=object`` keeps the index as plain ``datetime.date``
             # values -- pandas would otherwise infer a tz-naive
@@ -205,7 +321,7 @@ class MarketView:
             # compares unreliably against plain ``date`` values callers
             # naturally hold (e.g. ``as_of_session`` itself).
             index=pd.Index([row.session for row in rows], dtype=object, name="session"),
-            columns=PRICE_HISTORY_COLUMNS,
+            columns=requested_columns,
         )
         return frame
 
@@ -223,6 +339,50 @@ class MarketView:
         this Run's selected universe.
         """
         self.require_selected(security_id)
+        if self._scan_cache is not None and self._scan_cache_month is not None:
+            visible_month = self.as_of_session.strftime("%Y-%m")
+            if self._scan_cache_month.get("month") != visible_month:
+                self._scan_cache.clear()
+                self._scan_cache_month["month"] = visible_month
+                self._scan_cache_month.pop("boundary", None)
+            month_end = date(
+                self.as_of_session.year,
+                self.as_of_session.month,
+                monthrange(self.as_of_session.year, self.as_of_session.month)[1],
+            )
+            month_boundaries: set[date] = set()
+            if self._prepared_planes:
+                calendar = TradingCalendar()
+                for plane in self._prepared_planes.values():
+                    mic = {
+                        "America/New_York": "XNYS",
+                        "Europe/London": "XLON",
+                    }.get(plane.exchange_timezone)
+                    if mic is not None:
+                        month_boundaries.add(
+                            calendar.last_session_of_month(mic, visible_month)
+                        )
+            if not month_boundaries:
+                while month_end.weekday() >= 5:
+                    month_end -= timedelta(days=1)
+                month_boundaries.add(month_end)
+            if (
+                self.as_of_session in month_boundaries
+                and self._scan_cache_month.get("boundary")
+                != self.as_of_session.isoformat()
+            ):
+                self._scan_cache.clear()
+                self._scan_cache_month["boundary"] = self.as_of_session.isoformat()
+            cache_key = (self.profile_hash, security_id)
+            if cache_key not in self._scan_cache:
+                self._scan_cache[cache_key] = (
+                    self.backtest_repo.latest_committed_scan_result(
+                        profile_hash=self.profile_hash,
+                        security_id=security_id,
+                        as_of_session=self.as_of_session,
+                    )
+                )
+            return self._scan_cache[cache_key]
         return self.backtest_repo.latest_committed_scan_result(
             profile_hash=self.profile_hash,
             security_id=security_id,

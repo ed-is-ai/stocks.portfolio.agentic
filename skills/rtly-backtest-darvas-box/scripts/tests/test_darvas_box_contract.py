@@ -44,8 +44,26 @@ class _View:
         self.as_of_session = as_of_session
         self._history = history
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        return self._history.copy()
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._history.copy()
+        history = history.loc[
+            [
+                (index.date() if hasattr(index, "date") else index)
+                <= self.as_of_session
+                for index in history.index
+            ]
+        ]
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
 
     def scan_result(self, security_id: str):  # noqa: ANN201
         return None
@@ -170,9 +188,7 @@ def test_short_stale_and_non_finite_history_fail_closed() -> None:
     assert strategy.entry_signals(_View(as_of, malformed), _parameters()) == []
 
 
-def test_position_size_defers_buy_to_engine_and_sizes_full_integral_sell_quantity() -> (
-    None
-):
+def test_position_size_defers_buy_to_engine_and_sizes_full_sell_quantity() -> None:
     strategy = MODULE.DarvasBoxStrategy()
     as_of, history = _history()
     view = _View(as_of, history)
@@ -196,7 +212,9 @@ def test_position_size_defers_buy_to_engine_and_sizes_full_integral_sell_quantit
         )
         == 7
     )
-    assert strategy.position_size(sell, view, _portfolio("7.5"), _parameters()) == 0
+    assert strategy.position_size(
+        sell, view, _portfolio("7.5"), _parameters()
+    ) == Decimal("7.5")
 
 
 def test_multi_security_universe_breaks_out_per_selected_security() -> None:
@@ -273,14 +291,32 @@ class _RegimeView:
     def __init__(self, inner: object, benchmark_closes: list[str]) -> None:
         self._inner = inner
         self.as_of_session = inner.as_of_session
+        closes = [Decimal(value) for value in benchmark_closes]
         self._benchmark = pd.DataFrame(
-            {"close": [Decimal(value) for value in benchmark_closes]}
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": closes,
+            }
         )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
         if security_id == _BENCHMARK_ID:
-            return self._benchmark.copy()
-        return self._inner.price_history(security_id)
+            history = self._benchmark.copy()
+            if limit is not None:
+                history = history.iloc[-limit:]
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+        return self._inner.price_history(security_id, limit=limit, columns=columns)
 
     def scan_result(self, security_id: str):  # noqa: ANN201
         return self._inner.scan_result(security_id)

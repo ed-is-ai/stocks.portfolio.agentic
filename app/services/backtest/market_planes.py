@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from bisect import bisect_right
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import (
     Context,
@@ -13,9 +14,12 @@ from decimal import (
     localcontext,
 )
 import math
-from typing import TypeVar
+from typing import TypeVar, cast
 
-from app.repositories.historical_price_repo import StoredHistoricalEvidence
+from app.repositories.historical_price_repo import (
+    BoundedHistoricalEvidence,
+    StoredHistoricalEvidence,
+)
 from app.services.backtest.historical_data_qualification import (
     REQUEST_CONTRACT_VERSION,
 )
@@ -178,10 +182,29 @@ class HistoricalMarketPlanes:
     end: date
     _provider_rows: tuple[ProviderNativeRow, ...]
     _actions: tuple[CorporateAction, ...]
+    _as_traded_cache: tuple[AsTradedRow, ...] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _as_traded_sessions_cache: tuple[date, ...] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @classmethod
     def from_evidence(
         cls, evidence: StoredHistoricalEvidence
+    ) -> HistoricalMarketPlanes:
+        return cls._from_values(evidence, partial=False)
+
+    @classmethod
+    def from_bounded_evidence(
+        cls, evidence: BoundedHistoricalEvidence
+    ) -> HistoricalMarketPlanes:
+        """Build the same planes from a repository-owned partial read."""
+        return cls._from_values(cast(StoredHistoricalEvidence, evidence), partial=True)
+
+    @classmethod
+    def _from_values(
+        cls, evidence: StoredHistoricalEvidence, *, partial: bool
     ) -> HistoricalMarketPlanes:
         try:
             start = date.fromisoformat(evidence.start)
@@ -317,14 +340,24 @@ class HistoricalMarketPlanes:
             )
 
         row_sessions = {row.session for row in rows}
-        if any(action.session not in row_sessions for action in actions):
+        if not partial and any(
+            action.session not in row_sessions for action in actions
+        ):
             raise MarketDataPolicyError(
                 "integrity_error", "Corporate action has no matching observation."
             )
         action_values = {
             (action.session, action.action_type): action.value for action in actions
         }
-        if action_values != row_action_values:
+        if (
+            action_values != row_action_values
+            if not partial
+            else any(
+                action_values.get(key) != value
+                for key, value in row_action_values.items()
+            )
+            or any(key not in action_values for key in row_action_values)
+        ):
             raise MarketDataPolicyError(
                 "integrity_error", "Corporate-action projections conflict."
             )
@@ -347,10 +380,13 @@ class HistoricalMarketPlanes:
 
     def as_traded(self) -> tuple[AsTradedRow, ...]:
         """Reverse provider retroactive split factors through the pinned cutoff."""
+        cached = self._as_traded_cache
+        if cached is not None:
+            return cached
         splits = tuple(
             action for action in self._actions if action.action_type == "split"
         )
-        return tuple(
+        result = tuple(
             self._scale_price(
                 row,
                 self._split_product(splits, after=row.session, through=None),
@@ -359,19 +395,55 @@ class HistoricalMarketPlanes:
             )
             for row in self._provider_rows
         )
+        object.__setattr__(self, "_as_traded_cache", result)
+        object.__setattr__(
+            self,
+            "_as_traded_sessions_cache",
+            tuple(row.session for row in result),
+        )
+        return result
+
+    def as_traded_sessions(self) -> tuple[date, ...]:
+        """Return the cached as-traded session index used by bounded scans."""
+        self.as_traded()
+        assert self._as_traded_sessions_cache is not None
+        return self._as_traded_sessions_cache
 
     def split_continuous_as_of(self, as_of: date) -> tuple[SplitContinuousRow, ...]:
         """Return detector history bounded to D with only D-effective splits."""
+        return self.split_continuous_window_as_of(as_of, limit=None)
+
+    def split_continuous_window_as_of(
+        self, as_of: date, *, limit: int | None
+    ) -> tuple[SplitContinuousRow, ...]:
+        """Return the latest split-continuous rows through D.
+
+        ``limit=None`` preserves the full-history projection. A bounded
+        request selects the latest as-traded sessions before applying the
+        point-in-time split factors, so it does not materialize a second full
+        detector projection or change split-continuous values.
+        """
         self._validate_as_of(as_of)
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise MarketDataPolicyError(
+                "invalid_price_history_request", "limit must be a positive integer."
+            )
         splits = tuple(
             action
             for action in self._actions
             if action.action_type == "split" and action.session <= as_of
         )
+        as_traded = self.as_traded()
+        sessions = self._as_traded_sessions_cache
+        if sessions is None:  # pragma: no cover - defensive for old instances
+            sessions = tuple(row.session for row in as_traded)
+            object.__setattr__(self, "_as_traded_sessions_cache", sessions)
+        end = bisect_right(sessions, as_of)
+        start = 0 if limit is None else max(0, end - limit)
         result: list[SplitContinuousRow] = []
-        for row in self.as_traded():
-            if row.session > as_of:
-                break
+        for row in as_traded[start:end]:
             factor = self._split_product(splits, after=row.session, through=as_of)
             try:
                 with deterministic_decimal_context():

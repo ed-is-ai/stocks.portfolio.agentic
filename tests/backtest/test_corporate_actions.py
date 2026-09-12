@@ -90,15 +90,16 @@ def test_wrong_action_and_invalid_position_fail_with_stable_codes() -> None:
     assert invalid.value.code == "integrity_error"
 
 
-def test_split_that_requires_fractional_share_policy_fails_visibly() -> None:
-    with pytest.raises(MarketDataPolicyError) as exc_info:
-        apply_split(
-            PositionState(Decimal("1"), Decimal("100")),
-            _action("split", "0.1"),
-            quote_currency="USD",
-            quote_unit="USD",
-        )
-    assert exc_info.value.code == "unsupported_corporate_action"
+def test_split_preserves_fractional_shares_without_cash_in_lieu() -> None:
+    result = apply_split(
+        PositionState(Decimal("1"), Decimal("100")),
+        _action("split", "0.1"),
+        quote_currency="USD",
+        quote_unit="USD",
+    )
+    assert result.position.shares == Decimal("0.1")
+    assert result.position.per_share_basis == Decimal("1000")
+    assert result.value_before == result.value_after == Decimal("100.00000000")
 
 
 def test_corporate_action_rejects_unsupported_quote_unit() -> None:

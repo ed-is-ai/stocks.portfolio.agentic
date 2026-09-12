@@ -40,6 +40,29 @@ class CurrencyConversion:
     fx_revision: str | None
 
 
+_PREPARED_FX_TOKEN = object()
+
+
+@dataclass(frozen=True, init=False)
+class PreparedFxCloses:
+    """Validated FX closes bound to the evidence revision they came from."""
+
+    evidence_revision: str
+    closes: tuple[tuple[date, Decimal], ...]
+
+    def __init__(
+        self,
+        evidence_revision: str,
+        closes: tuple[tuple[date, Decimal], ...],
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _PREPARED_FX_TOKEN:
+            raise TypeError("PreparedFxCloses must be created by prepare_fx_closes")
+        object.__setattr__(self, "evidence_revision", evidence_revision)
+        object.__setattr__(self, "closes", closes)
+
+
 def _input_decimal(value: object) -> Decimal:
     try:
         result = Decimal(str(value))
@@ -131,6 +154,12 @@ def _fx_closes(
     return tuple(closes)
 
 
+def prepare_fx_closes(evidence: StoredHistoricalEvidence) -> PreparedFxCloses:
+    return PreparedFxCloses(
+        evidence.data_revision, _fx_closes(evidence), _token=_PREPARED_FX_TOKEN
+    )
+
+
 def convert_to_base(
     *,
     value: object,
@@ -140,6 +169,7 @@ def convert_to_base(
     valuation_session: date,
     completed_fx_through: date | None,
     fx_evidence: StoredHistoricalEvidence | None,
+    prepared_fx: PreparedFxCloses | None = None,
 ) -> CurrencyConversion:
     """Normalize quote units, then convert using bounded GBPUSD=X evidence."""
     if base_currency not in SUPPORTED_CURRENCIES:
@@ -184,9 +214,18 @@ def convert_to_base(
             "fx_ambiguous",
             "FX completion bound is outside the exact evidence interval.",
         )
-    eligible = tuple(
-        row for row in _fx_closes(fx_evidence) if row[0] <= completed_fx_through
-    )
+    if prepared_fx is not None:
+        if (
+            not isinstance(prepared_fx, PreparedFxCloses)
+            or prepared_fx.evidence_revision != fx_evidence.data_revision
+        ):
+            raise CurrencyPolicyError(
+                "fx_ambiguous", "Prepared FX closes do not match FX evidence."
+            )
+        closes = prepared_fx.closes
+    else:
+        closes = _fx_closes(fx_evidence)
+    eligible = tuple(row for row in closes if row[0] <= completed_fx_through)
     if not eligible:
         raise CurrencyPolicyError("fx_missing", "Required GBP/USD FX close is missing.")
     fx_session, rate = eligible[-1]

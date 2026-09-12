@@ -85,12 +85,15 @@ def _strength_score(
     accidentally offers it.
     """
     try:
-        history: Any = view.price_history(security_id)
+        history: Any = view.price_history(
+            security_id, limit=_LOOKBACK_CLOSES + 1, columns=("close",)
+        )
         if history is None or not hasattr(history, "index"):
             return None, _EXCLUDED_HISTORY_UNAVAILABLE
+        closes = history["close"]
         rows = [
-            row
-            for index, (_, row) in zip(history.index, history.iterrows(), strict=True)
+            value
+            for index, value in zip(history.index, closes, strict=True)
             if (session := _as_date(index)) is not None and session < view.as_of_session
         ]
     except (AttributeError, IndexError, KeyError, TypeError, ValueError):
@@ -101,7 +104,7 @@ def _strength_score(
 
     window = rows[-_LOOKBACK_CLOSES:]
     try:
-        closes = tuple(Decimal(str(row["close"])) for row in window)
+        closes = tuple(Decimal(str(value)) for value in window)
     except InvalidOperation:
         return None, _EXCLUDED_INVALID_CLOSE
     except (KeyError, TypeError, ValueError):
@@ -297,12 +300,11 @@ class BuyAndHoldStrategy:
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> int:
+    ) -> int | Decimal:
         if signal.side == SignalSide.BUY:
             # The engine reserves equal capital and determines whole shares.
             return 0
         for position in portfolio.positions:
             if position.security_id == signal.security_id:
-                integral = position.quantity.to_integral_value()
-                return int(integral) if position.quantity == integral else 0
+                return position.quantity
         return 0

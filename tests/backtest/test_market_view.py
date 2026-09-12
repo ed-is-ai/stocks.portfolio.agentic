@@ -5,6 +5,7 @@ security handling."""
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,6 +25,10 @@ from app.services.backtest.market_view import (
     MarketViewBoundError,
     PRICE_HISTORY_COLUMNS,
     UnselectedSecurityError,
+)
+from app.services.backtest.market_planes import (
+    HistoricalMarketPlanes,
+    MarketDataPolicyError,
 )
 from app.services.backtest.strategy_evidence import (
     EvidenceCapableViewV1,
@@ -387,6 +392,147 @@ def test_price_history_returns_only_rows_on_or_before_the_bound(tmp_path) -> Non
     assert tuple(frame.columns) == PRICE_HISTORY_COLUMNS
 
 
+def test_price_history_returns_bounded_rows_and_requested_columns(tmp_path) -> None:
+    price_repo = _price_repo(tmp_path)
+    sessions = (
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+        date(2026, 6, 3),
+        date(2026, 6, 4),
+    )
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=sessions,
+        closes=(100.0, 101.0, 102.0, 103.0),
+    )
+    view = MarketView(
+        as_of_session=date(2026, 6, 4),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+    )
+
+    frame = view.price_history(SECURITY_ID, limit=2, columns=("close", "volume"))
+
+    assert list(frame.index) == [date(2026, 6, 3), date(2026, 6, 4)]
+    assert tuple(frame.columns) == ("close", "volume")
+
+
+@pytest.mark.parametrize(
+    ("limit", "columns"),
+    [(0, None), (-1, None), (True, None), (None, ()), (None, ("bad",))],
+)
+def test_price_history_rejects_invalid_bounds(tmp_path, limit, columns) -> None:
+    price_repo = _price_repo(tmp_path)
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=(date(2026, 6, 1),),
+        closes=(100.0,),
+    )
+    view = MarketView(
+        as_of_session=date(2026, 6, 1),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+    )
+
+    with pytest.raises(MarketDataPolicyError) as exc_info:
+        view.price_history(SECURITY_ID, limit=limit, columns=columns)
+
+    assert exc_info.value.code == "invalid_price_history_request"
+
+
+def test_price_history_uses_a_prepared_plane_without_repository_io(
+    tmp_path, monkeypatch
+) -> None:
+    price_repo = _price_repo(tmp_path)
+    sessions = (date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3))
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=sessions,
+        closes=(100.0, 101.0, 102.0),
+    )
+    prepared = HistoricalMarketPlanes.from_evidence(price_repo.get(revision))
+
+    def fail_get(_revision: str):
+        raise AssertionError("prepared MarketView must not read the repository")
+
+    monkeypatch.setattr(price_repo, "get", fail_get)
+    view = MarketView(
+        as_of_session=date(2026, 6, 3),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+        prepared_planes={SECURITY_ID: prepared},
+    )
+
+    frame = view.price_history(SECURITY_ID)
+
+    assert list(frame.index) == list(sessions)
+
+
+def test_price_history_uses_active_v2_bounded_access_without_complete_get(
+    tmp_path, monkeypatch
+) -> None:
+    price_repo = _price_repo(tmp_path)
+    sessions = (
+        date(2024, 12, 30),
+        date(2025, 1, 2),
+        date(2025, 1, 3),
+    )
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2024, 12, 1),
+        end=date(2025, 2, 1),
+        sessions=sessions,
+        closes=(100.0, 101.0, 102.0),
+    )
+    price_repo.migrate_v1_to_v2()
+    price_repo.activate_v2(review_reference="market-view-test")
+    price_repo.reset_read_counters()
+    access = price_repo.open_read(revision)
+
+    def fail_get(_revision: str):
+        raise AssertionError("active-v2 MarketView must not complete-read")
+
+    monkeypatch.setattr(price_repo, "get", fail_get)
+    view = MarketView(
+        as_of_session=date(2025, 1, 3),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+        price_accesses={SECURITY_ID: access},
+    )
+
+    frame = view.price_history(SECURITY_ID, limit=2, columns=("close",))
+
+    assert list(frame.index) == [date(2025, 1, 2), date(2025, 1, 3)]
+    assert list(frame["close"]) == [Decimal("101.0"), Decimal("102.0")]
+    assert price_repo.read_counters.complete_revision_materializations == 0
+
+
 def test_price_history_out_of_bound_evidence_raises_stable_error(tmp_path) -> None:
     price_repo = _price_repo(tmp_path)
     sessions = (date(2026, 6, 1), date(2026, 6, 2))
@@ -574,6 +720,126 @@ def test_scan_result_switches_once_superseded_by_the_next_committed_month(
     assert result is not None
     assert result.snapshot_month == july_record.snapshot_month
     assert result.digest() == july_record.digest()
+
+
+def test_scan_result_reuses_one_current_month_cache_entry(
+    tmp_path, monkeypatch
+) -> None:
+    backtest_repo = _backtest_repo(tmp_path)
+    price_repo = _price_repo(tmp_path)
+    profile = _profile()
+    _commit_month(backtest_repo, profile, "2026-06")
+    _commit_month(backtest_repo, profile, "2026-07")
+    original = backtest_repo.latest_committed_scan_result
+    calls = 0
+
+    def counted(*, profile_hash, security_id, as_of_session):
+        nonlocal calls
+        calls += 1
+        return original(
+            profile_hash=profile_hash,
+            security_id=security_id,
+            as_of_session=as_of_session,
+        )
+
+    monkeypatch.setattr(backtest_repo, "latest_committed_scan_result", counted)
+    cache: dict[tuple[str, str], HistoricalScanRecordV1 | None] = {}
+    month: dict[str, str] = {}
+    for session in (date(2026, 7, 15), date(2026, 7, 20)):
+        view = MarketView(
+            as_of_session=session,
+            profile_hash=PROFILE_HASH,
+            security_price_revisions={},
+            selected_universe=(SECURITY_ID,),
+            backtest_repo=backtest_repo,
+            historical_price_repo=price_repo,
+            scan_cache=cache,
+            scan_cache_month=month,
+        )
+        assert view.scan_result(SECURITY_ID) is not None
+    assert calls == 1
+    assert len(cache) == 1
+
+
+def test_scan_result_refreshes_at_month_end_visibility_boundary(
+    tmp_path, monkeypatch
+) -> None:
+    backtest_repo = _backtest_repo(tmp_path)
+    price_repo = _price_repo(tmp_path)
+    profile = _profile()
+    _commit_month(backtest_repo, profile, "2026-06")
+    july_record = _commit_month(backtest_repo, profile, "2026-07")
+    original = backtest_repo.latest_committed_scan_result
+    calls = 0
+
+    def counted(*, profile_hash, security_id, as_of_session):
+        nonlocal calls
+        calls += 1
+        return original(
+            profile_hash=profile_hash,
+            security_id=security_id,
+            as_of_session=as_of_session,
+        )
+
+    monkeypatch.setattr(backtest_repo, "latest_committed_scan_result", counted)
+    cache: dict[tuple[str, str], HistoricalScanRecordV1 | None] = {}
+    month: dict[str, str] = {}
+    for session in (date(2026, 7, 15), date(2026, 7, 31)):
+        view = MarketView(
+            as_of_session=session,
+            profile_hash=PROFILE_HASH,
+            security_price_revisions={},
+            selected_universe=(SECURITY_ID,),
+            backtest_repo=backtest_repo,
+            historical_price_repo=price_repo,
+            scan_cache=cache,
+            scan_cache_month=month,
+        )
+        result = view.scan_result(SECURITY_ID)
+    assert calls == 2
+    assert result is not None
+    assert result.snapshot_month == july_record.snapshot_month
+
+
+def test_scan_result_refreshes_on_last_weekday_when_calendar_month_end_is_weekend(
+    tmp_path, monkeypatch
+) -> None:
+    backtest_repo = _backtest_repo(tmp_path)
+    price_repo = _price_repo(tmp_path)
+    profile = _profile()
+    _commit_month(backtest_repo, profile, "2026-05")
+    may_record = _record("2026-05")
+    original = backtest_repo.latest_committed_scan_result
+    calls = 0
+
+    def counted(*, profile_hash, security_id, as_of_session):
+        nonlocal calls
+        calls += 1
+        return original(
+            profile_hash=profile_hash,
+            security_id=security_id,
+            as_of_session=as_of_session,
+        )
+
+    monkeypatch.setattr(backtest_repo, "latest_committed_scan_result", counted)
+    cache: dict[tuple[str, str], HistoricalScanRecordV1 | None] = {}
+    month: dict[str, str] = {}
+    for session in (date(2026, 5, 28), date(2026, 5, 29)):
+        view = MarketView(
+            as_of_session=session,
+            profile_hash=PROFILE_HASH,
+            security_price_revisions={},
+            selected_universe=(SECURITY_ID,),
+            backtest_repo=backtest_repo,
+            historical_price_repo=price_repo,
+            scan_cache=cache,
+            scan_cache_month=month,
+        )
+        result = view.scan_result(SECURITY_ID)
+
+    assert calls == 2
+    assert result is not None
+    assert result.snapshot_month == may_record.snapshot_month
 
 
 # ---------------------------------------------------------------------------

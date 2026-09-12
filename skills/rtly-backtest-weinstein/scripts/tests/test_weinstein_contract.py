@@ -77,8 +77,26 @@ class _View:
         self._history = history
         self._scan = scan
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        return self._history
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._history.copy()
+        history = history.loc[
+            [
+                (index.date() if hasattr(index, "date") else index)
+                <= self.as_of_session
+                for index in history.index
+            ]
+        ]
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         return self._scan
@@ -166,7 +184,9 @@ def test_non_stage2_exit_and_position_sizing_are_fail_closed() -> None:
         )
         == 10
     )
-    assert strategy.position_size(exits[0], view, _portfolio("10.5"), PARAMETERS) == 0
+    assert strategy.position_size(
+        exits[0], view, _portfolio("10.5"), PARAMETERS
+    ) == Decimal("10.5")
     buy = Signal(
         security_id="sec-aapl",
         side=SignalSide.BUY,
@@ -258,8 +278,19 @@ class _KeyedView:
         self._histories = histories
         self._scans = scans
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        return self._histories.get(security_id, pd.DataFrame())
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._histories.get(security_id, pd.DataFrame()).copy()
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         scan = self._scans.get(security_id)
@@ -413,14 +444,32 @@ class _RegimeView:
     def __init__(self, inner: object, benchmark_closes: list[str]) -> None:
         self._inner = inner
         self.as_of_session = inner.as_of_session
+        closes = [Decimal(value) for value in benchmark_closes]
         self._benchmark = pd.DataFrame(
-            {"close": [Decimal(value) for value in benchmark_closes]}
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": closes,
+            }
         )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
         if security_id == _BENCHMARK_ID:
-            return self._benchmark.copy()
-        return self._inner.price_history(security_id)
+            history = self._benchmark.copy()
+            if limit is not None:
+                history = history.iloc[-limit:]
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+        return self._inner.price_history(security_id, limit=limit, columns=columns)
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         return self._inner.scan_result(security_id)
@@ -495,7 +544,7 @@ def test_evidence_requirements_declare_history_and_stage() -> None:
     exit_ = {item.kind: item for item in requirements.exit}
     assert set(entry) == {EvidenceKind.PRICE_HISTORY, EvidenceKind.SCAN_STAGE}
     assert set(exit_) == {EvidenceKind.PRICE_HISTORY, EvidenceKind.SCAN_STAGE}
-    assert entry[EvidenceKind.PRICE_HISTORY].minimum_sessions == 204
+    assert entry[EvidenceKind.PRICE_HISTORY].minimum_sessions == 220
     assert exit_[EvidenceKind.PRICE_HISTORY].minimum_sessions == 150
     deeper = WeinsteinStrategy().evidence_requirements(
         {**PARAMETERS, "breakout_lookback_sessions": 300}
@@ -591,4 +640,4 @@ def test_upgrade_exit_explains_the_rotation() -> None:
 
     assert _codes(exits[0]) == ("portfolio_upgrade",)
     assert exits[0].explanation is not None
-    assert len(exits[0].explanation.reasons[0].facts) == 3
+    assert len(exits[0].explanation.reasons[0].facts) == 4

@@ -10,7 +10,9 @@ from app.services.backtest.currency import (
     CURRENCY_CONVERSION_POLICY_VERSION,
     CurrencyPolicyError,
     convert_to_base,
+    prepare_fx_closes,
 )
+import app.services.backtest.currency as currency
 
 
 def _hex(value: float) -> str:
@@ -88,6 +90,47 @@ def test_gbp_pence_scales_before_gbp_to_usd_conversion() -> None:
     assert result.fx_session == date(2024, 1, 5)
     assert result.fx_revision == "fx-revision-1"
     assert result.policy_version == CURRENCY_CONVERSION_POLICY_VERSION
+
+
+def test_prepared_fx_closes_skip_repeated_evidence_decoding(monkeypatch) -> None:
+    evidence = _fx_evidence()
+    prepared = prepare_fx_closes(evidence)
+
+    def fail_decode(_evidence):
+        raise AssertionError("prepared FX closes must bypass decoding")
+
+    monkeypatch.setattr(currency, "_fx_closes", fail_decode)
+    result = convert_to_base(
+        value="10",
+        quote_currency="GBP",
+        quote_unit="GBP",
+        base_currency="USD",
+        valuation_session=date(2024, 1, 8),
+        completed_fx_through=date(2024, 1, 5),
+        fx_evidence=evidence,
+        prepared_fx=prepared,
+    )
+
+    assert result.base_amount == Decimal("12.50000000")
+
+
+def test_prepared_fx_closes_cannot_be_reused_for_other_evidence() -> None:
+    prepared = prepare_fx_closes(_fx_evidence())
+    other = _fx_evidence(data_revision="fx-revision-2")
+
+    with pytest.raises(CurrencyPolicyError) as exc_info:
+        convert_to_base(
+            value="10",
+            quote_currency="GBP",
+            quote_unit="GBP",
+            base_currency="USD",
+            valuation_session=date(2024, 1, 8),
+            completed_fx_through=date(2024, 1, 5),
+            fx_evidence=other,
+            prepared_fx=prepared,
+        )
+
+    assert exc_info.value.code == "fx_ambiguous"
 
 
 def test_usd_to_gbp_divides_and_same_currency_does_not_require_fx() -> None:

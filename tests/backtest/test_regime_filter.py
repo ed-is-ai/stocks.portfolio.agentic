@@ -42,7 +42,14 @@ class _View:
             self._history = pd.DataFrame({"close": closes}, index=index)
         self.as_of_session = AS_OF
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        del limit, columns
         if self._raises:
             raise RuntimeError("bound violation")
         return self._history.copy()
@@ -97,6 +104,25 @@ def test_non_container_universe_fails_closed() -> None:
 
 def test_one_dirty_cell_does_not_discard_the_whole_series() -> None:
     view = _View([10.0, "bad", 10.0, 40.0])  # one junk cell dropped -> 3 finite
+    assert entry_signals_permitted(view, _params(), UNIVERSE) is True
+
+
+def test_widens_until_older_finite_closes_are_visible() -> None:
+    class LimitedView(_View):
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: object | None = None,
+        ) -> pd.DataFrame:
+            frame = super().price_history(security_id, limit=limit, columns=columns)
+            return frame if limit is None else frame.tail(limit)
+
+    # More than one dirty row follows the last valid closes. A fixed 2x
+    # widening would still see only dirty rows; the bounded view must keep
+    # widening until the complete finite history is available.
+    view = LimitedView([10.0, 10.0, 40.0, "bad", "bad", "bad", "bad", "bad"])
     assert entry_signals_permitted(view, _params(), UNIVERSE) is True
 
 

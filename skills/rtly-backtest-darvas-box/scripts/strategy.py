@@ -67,8 +67,14 @@ def _session_date(value: object) -> date | None:
     return None
 
 
-def _bounded_history(view: MarketViewV1, security_id: str) -> Any | None:
-    history = view.price_history(security_id)
+def _bounded_history(
+    view: MarketViewV1,
+    security_id: str,
+    *,
+    limit: int,
+    columns: tuple[str, ...],
+) -> Any | None:
+    history = view.price_history(security_id, limit=limit, columns=columns)
     if history is None or getattr(history, "empty", True):
         return None
     try:
@@ -83,15 +89,13 @@ def _plain_int(parameters: StrategyParameters, name: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _held_quantity(portfolio: PortfolioView, security_id: str) -> int:
+def _held_quantity(portfolio: PortfolioView, security_id: str) -> Decimal:
     for position in portfolio.positions:
         if position.security_id != security_id:
             continue
         quantity = position.quantity
-        if quantity <= 0 or quantity != quantity.to_integral_value():
-            return 0
-        return int(quantity)
-    return 0
+        return quantity if quantity > 0 else Decimal(0)
+    return Decimal(0)
 
 
 class DarvasBoxStrategy:
@@ -150,7 +154,12 @@ class DarvasBoxStrategy:
         lookback = _plain_int(parameters, "box_lookback_sessions")
         maximum_depth = _decimal(parameters.get("maximum_box_depth_pct"))
         volume_multiplier = _decimal(parameters.get("volume_multiplier"))
-        history = _bounded_history(view, security_id)
+        history = _bounded_history(
+            view,
+            security_id,
+            limit=max(lookback, 1) + 1 if lookback is not None else 1,
+            columns=("high", "low", "close", "volume"),
+        )
         if (
             lookback is None
             or lookback < 1
@@ -272,7 +281,12 @@ class DarvasBoxStrategy:
         if _held_quantity(portfolio, security_id) == 0:
             return None
         lookback = _plain_int(parameters, "box_lookback_sessions")
-        history = _bounded_history(view, security_id)
+        history = _bounded_history(
+            view,
+            security_id,
+            limit=max(lookback, 1) + 1 if lookback is not None else 1,
+            columns=("low", "close"),
+        )
         if (
             lookback is None
             or lookback < 1
@@ -328,7 +342,7 @@ class DarvasBoxStrategy:
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> int:
+    ) -> int | Decimal:
         if signal.side == SignalSide.SELL:
             return _held_quantity(portfolio, signal.security_id)
         # The engine reserves equal capital and determines whole shares.

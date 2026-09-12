@@ -77,11 +77,17 @@ def _session_date(value: Any) -> date | None:
     return None
 
 
-def _current_history(view: MarketViewV1, security_id: str) -> Any | None:
-    history = view.price_history(security_id)
+def _current_history(
+    view: MarketViewV1,
+    security_id: str,
+    *,
+    limit: int,
+    columns: tuple[str, ...],
+) -> Any | None:
+    history = view.price_history(security_id, limit=limit, columns=columns)
     if history.empty or _session_date(history.index[-1]) != view.as_of_session:
         return None
-    if not {"close", "volume"}.issubset(history.columns):
+    if not set(columns).issubset(history.columns):
         return None
     return history
 
@@ -103,12 +109,11 @@ def _position(portfolio: PortfolioView, security_id: str) -> Any | None:
     )
 
 
-def _integral_quantity(portfolio: PortfolioView, security_id: str) -> int:
+def _integral_quantity(portfolio: PortfolioView, security_id: str) -> Decimal:
     held = _position(portfolio, security_id)
     if held is None or held.quantity <= 0:
         return 0
-    integral = held.quantity.to_integral_value()
-    return int(integral) if held.quantity == integral else 0
+    return held.quantity
 
 
 class _EntryQualification(NamedTuple):
@@ -264,7 +269,26 @@ def _upgrade_explanation(
 
 
 class MinerviniStrategy:
-    """Apply approved VCP entry and risk-exit rules without mutable state."""
+    """Apply approved VCP entry and risk-exit rules."""
+
+    def __init__(self) -> None:
+        self._qualification_view: MarketViewV1 | None = None
+        self._qualification_cache: dict[
+            tuple[str, str], _EntryQualification | None
+        ] = {}
+
+    def _cached_entry_qualification(
+        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
+    ) -> _EntryQualification | None:
+        if self._qualification_view is not view:
+            self._qualification_view = view
+            self._qualification_cache.clear()
+        key = (security_id, repr(sorted(parameters.items(), key=lambda item: item[0])))
+        if key not in self._qualification_cache:
+            self._qualification_cache[key] = self._entry_qualification(
+                view, parameters, security_id
+            )
+        return self._qualification_cache[key]
 
     def evidence_requirements(
         self, parameters: StrategyParameters
@@ -341,9 +365,13 @@ class MinerviniStrategy:
         ranking (below) can score a would-be candidate using the exact same
         qualification rules, without duplicating them, and so the emitted
         Signal can explain itself (#472) from the very same numbers."""
-        history = _current_history(view, security_id)
         scan = _visible_scan(view, security_id)
-        if history is None or scan is None or len(history) < 51:
+        if scan is None:
+            return None
+        history = _current_history(
+            view, security_id, limit=51, columns=("close", "volume")
+        )
+        if history is None or len(history) < 51:
             return None
 
         closes = _decimals(history["close"])
@@ -414,7 +442,7 @@ class MinerviniStrategy:
     def _entry_signal(
         self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
     ) -> Signal | None:
-        qualification = self._entry_qualification(view, parameters, security_id)
+        qualification = self._cached_entry_qualification(view, parameters, security_id)
         if qualification is None:
             return None
         return Signal(
@@ -475,7 +503,9 @@ class MinerviniStrategy:
         for security_id in _universe(parameters):
             if security_id in held_ids:
                 continue
-            qualification = self._entry_qualification(view, parameters, security_id)
+            qualification = self._cached_entry_qualification(
+                view, parameters, security_id
+            )
             if qualification is not None:
                 candidates.append((qualification.score, security_id))
         if not candidates:
@@ -515,9 +545,11 @@ class MinerviniStrategy:
         security_id: str,
     ) -> Signal | None:
         held = _position(portfolio, security_id)
-        history = _current_history(view, security_id)
+        if held is None or held.quantity <= 0:
+            return None
         scan = _visible_scan(view, security_id)
-        if held is None or held.quantity <= 0 or history is None or len(history) < 50:
+        history = _current_history(view, security_id, limit=50, columns=("close",))
+        if history is None or len(history) < 50:
             return None
         closes = _decimals(history["close"].iloc[-50:])
         maximum_loss = _decimal(parameters["maximum_loss_pct"])
@@ -620,7 +652,7 @@ class MinerviniStrategy:
         view: MarketViewV1,
         portfolio: PortfolioView,
         parameters: StrategyParameters,
-    ) -> int:
+    ) -> int | Decimal:
         if signal.side == SignalSide.SELL:
             return _integral_quantity(portfolio, signal.security_id)
         # The engine reserves equal capital and determines whole shares.

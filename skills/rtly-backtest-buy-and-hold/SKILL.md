@@ -44,7 +44,8 @@ rerank, rebalance, emit an ordinary entry candidate, or emit SELL.
 Fail closed into an auditable exclusion for malformed cutoff dates and missing,
 short, stale, non-finite, or non-positive bounded history. The engine owns BUY
 allocation and whole-share sizing. Implement SELL sizing defensively for
-protocol completeness by returning only an integral held quantity.
+protocol completeness by returning the exact held quantity, including any
+split-created fractional shares.
 
 ```bash
 uv run pytest skills/rtly-backtest-buy-and-hold/scripts/tests -q

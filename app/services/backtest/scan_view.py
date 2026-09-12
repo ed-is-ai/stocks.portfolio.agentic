@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from types import MappingProxyType
-from typing import Iterable, Mapping, cast
+from typing import Iterable, Mapping, Sequence, cast
 
 import pandas as pd
 
@@ -34,6 +34,7 @@ from app.schemas.analysis_artifact import (
     CurrentEvidenceSuccessV1,
 )
 from app.schemas.trade import Position
+from app.services.backtest.market_planes import MarketDataPolicyError
 from app.services.backtest.market_view import PRICE_HISTORY_COLUMNS
 from app.services.backtest.strategy_evidence import (
     EvidenceKind,
@@ -92,7 +93,13 @@ class CurrentScanMarketView:
             MappingProxyType(dict(self._scan_results or {})),
         )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
         """Return OHLCV history through ``as_of_session``, oldest first.
 
         Columns are exactly ``PRICE_HISTORY_COLUMNS`` with ``Decimal``
@@ -104,10 +111,41 @@ class CurrentScanMarketView:
         DataFrame, not error"): the fail-safe Hold rule depends on a
         runtime being able to query a held position the scan never saw.
         """
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise MarketDataPolicyError(
+                "invalid_price_history_request", "limit must be a positive integer."
+            )
+        try:
+            requested_columns = (
+                PRICE_HISTORY_COLUMNS if columns is None else tuple(columns)
+            )
+            valid_column_set = len(set(requested_columns)) == len(requested_columns)
+        except (TypeError, ValueError):
+            requested_columns = ()
+            valid_column_set = False
+        if (
+            not requested_columns
+            or not valid_column_set
+            or any(column not in PRICE_HISTORY_COLUMNS for column in requested_columns)
+        ):
+            raise MarketDataPolicyError(
+                "invalid_price_history_request",
+                "columns must be a non-empty subset of the canonical price columns.",
+            )
+        requested_columns = tuple(
+            column for column in PRICE_HISTORY_COLUMNS if column in requested_columns
+        )
         frame = self._histories.get(security_id)
         if frame is None:
-            return _empty_price_history()
-        return frame
+            return pd.DataFrame(
+                columns=requested_columns,
+                index=pd.Index([], dtype=object, name="session"),
+            )
+        if limit is not None:
+            frame = frame.iloc[-limit:]
+        return frame.loc[:, requested_columns]
 
     def scan_result(self, security_id: str) -> CurrentScanRecordView | None:
         """Return the honest scan projection, or ``None`` outside the universe."""

@@ -156,7 +156,74 @@ def test_v2_commit_reconstructs_canonical_evidence_and_reuses_chunks(tmp_path) -
     assert stored.canonical_manifest_json == first.canonical_manifest_json
     assert stored.rows == first.rows
     assert stored.actions == first.actions
-    assert repo.get(first.data_revision) == stored
+    with pytest.raises(EvidenceMissingError):
+        repo.get(first.data_revision)
+
+
+def test_active_v2_bounded_read_crosses_year_and_reports_chunk_counters(
+    tmp_path,
+) -> None:
+    repo = _repo(tmp_path)
+    first = _payload()
+    rows = (
+        {**first.rows[0], "session": "2024-12-30"},
+        {**first.rows[0], "session": "2025-01-02", "close": float(102).hex()},
+    )
+    actions = ({**first.actions[0], "session": "2024-12-30"},)
+    identity = json.loads(first.canonical_manifest_json)
+    identity["request"]["end"] = "2025-02-01"
+    identity["rows"] = list(rows)
+    identity["actions"] = list(actions)
+    payload = replace(
+        first,
+        end="2025-02-01",
+        request_contract={**first.request_contract, "end": "2025-02-01"},
+        rows=rows,
+        actions=actions,
+        data_revision=manifest_digest(identity),
+        canonical_manifest_json=canonical_json(identity),
+    )
+    repo.commit(payload)
+    repo.migrate_v1_to_v2()
+    repo.activate_v2(review_reference="bounded-read-test")
+
+    repo.reset_read_counters()
+    bounded = repo.open_read(payload.data_revision).bounded(
+        through=date(2025, 1, 2), limit=2
+    )
+
+    assert [row["session"] for row in bounded.rows] == [
+        "2024-12-30",
+        "2025-01-02",
+    ]
+    assert bounded.selected_price_chunk_years == (2024, 2025)
+    assert bounded.data_revision == payload.data_revision
+    assert repo.read_counters.complete_revision_materializations == 0
+    assert repo.read_counters.chunks_decompressed == 3
+    assert repo.read_counters.rows_retained == 2
+
+
+def test_active_format_never_falls_back_to_other_revision_or_format(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit_v2(payload)
+
+    with pytest.raises(EvidenceMissingError):
+        repo.open_read(payload.data_revision)
+
+
+def test_active_v2_missing_chunk_fails_closed(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit(payload)
+    repo.migrate_v1_to_v2()
+    repo.activate_v2(review_reference="bounded-read-test")
+    with db.session(repo._connect) as conn:
+        conn.execute("DROP TRIGGER historical_v2_mapping_immutable_delete")
+        conn.execute("DELETE FROM historical_price_v2_revision_chunks")
+
+    with pytest.raises((EvidenceMissingError, HistoricalEvidenceIntegrityError)):
+        repo.open_read(payload.data_revision).bounded(through=date(2024, 1, 2), limit=1)
 
 
 def test_v2_reader_rejects_corrupt_chunk(tmp_path) -> None:
@@ -168,6 +235,52 @@ def test_v2_reader_rejects_corrupt_chunk(tmp_path) -> None:
         conn.execute("UPDATE historical_price_v2_chunks SET compressed_payload=x'00'")
     with pytest.raises(HistoricalEvidenceIntegrityError, match="invalid v2 chunk"):
         repo.get_v2(payload.data_revision)
+
+
+def test_v2_reader_rejects_compressed_trailing_bytes(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit_v2(payload)
+    with db.session(repo._connect) as conn:
+        conn.execute("DROP TRIGGER historical_v2_chunk_immutable_update")
+        compressed = conn.execute(
+            "SELECT compressed_payload FROM historical_price_v2_chunks LIMIT 1"
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE historical_price_v2_chunks SET compressed_payload=?",
+            (bytes(compressed) + b"trailing-bytes",),
+        )
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="invalid v2 chunk"):
+        repo.get_v2(payload.data_revision)
+
+
+def test_v2_chunk_cache_rechecks_mapping_identity(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit(payload)
+    repo.migrate_v1_to_v2()
+    repo.activate_v2(review_reference="cache-identity-test")
+    handle = repo.open_read(payload.data_revision)
+    try:
+        with db.session(repo._connect) as conn:
+            revision_id = int(
+                conn.execute(
+                    "SELECT revision_id FROM historical_price_v2_revisions "
+                    "WHERE data_revision=?",
+                    (payload.data_revision,),
+                ).fetchone()[0]
+            )
+            mapping = next(
+                item
+                for item in repo._v2_mappings(conn, revision_id)
+                if item[0] == "rows"
+            )
+        repo._decode_v2_chunk(mapping, handle._chunk_cache)
+        tampered = ("actions", *mapping[1:])
+        with pytest.raises(HistoricalEvidenceIntegrityError, match="invalid v2 chunk"):
+            repo._decode_v2_chunk(tampered, handle._chunk_cache)
+    finally:
+        handle.close()
 
 
 def test_v2_reader_rejects_oversized_chunk_claim(tmp_path) -> None:

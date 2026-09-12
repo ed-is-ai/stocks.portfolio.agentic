@@ -46,8 +46,26 @@ class _View:
         index = [start + timedelta(days=offset) for offset in range(len(closes))]
         self._history = pd.DataFrame({"close": closes}, index=index)
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
-        return self._history.copy()
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._history.copy()
+        history = history.loc[
+            [
+                (index.date() if hasattr(index, "date") else index)
+                <= self.as_of_session
+                for index in history.index
+            ]
+        ]
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
 
     def scan_result(self, security_id: str) -> None:
         return None
@@ -131,7 +149,7 @@ def test_missing_malformed_and_stale_history_fail_closed() -> None:
     assert strategy.entry_signals(missing, PARAMETERS) == []
 
 
-def test_position_size_defers_buy_to_engine_and_sizes_full_integral_sell() -> None:
+def test_position_size_defers_buy_to_engine_and_sizes_full_sell() -> None:
     strategy = MovingAverageStrategy()
     view = _View([3, 2, 1, 4])
     buy = strategy.entry_signals(view, PARAMETERS)[0]
@@ -144,7 +162,9 @@ def test_position_size_defers_buy_to_engine_and_sizes_full_integral_sell() -> No
 
     assert strategy.position_size(buy, view, _portfolio(), PARAMETERS) == 0
     assert strategy.position_size(sell, view, _portfolio("7"), PARAMETERS) == 7
-    assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == 0
+    assert strategy.position_size(sell, view, _portfolio("7.5"), PARAMETERS) == Decimal(
+        "7.5"
+    )
     assert strategy.position_size(sell, view, _portfolio(), PARAMETERS) == 0
 
 
@@ -213,14 +233,32 @@ class _RegimeView:
     def __init__(self, inner: object, benchmark_closes: list[str]) -> None:
         self._inner = inner
         self.as_of_session = inner.as_of_session
+        closes = [Decimal(value) for value in benchmark_closes]
         self._benchmark = pd.DataFrame(
-            {"close": [Decimal(value) for value in benchmark_closes]}
+            {
+                "open": closes,
+                "high": closes,
+                "low": closes,
+                "close": closes,
+                "volume": closes,
+            }
         )
 
-    def price_history(self, security_id: str) -> pd.DataFrame:
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
         if security_id == _BENCHMARK_ID:
-            return self._benchmark.copy()
-        return self._inner.price_history(security_id)
+            history = self._benchmark.copy()
+            if limit is not None:
+                history = history.iloc[-limit:]
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+        return self._inner.price_history(security_id, limit=limit, columns=columns)
 
     def scan_result(self, security_id: str) -> object:
         return self._inner.scan_result(security_id)

@@ -82,8 +82,8 @@ RUN_INPUT_MANIFEST_V2_VERSION = "run_input_manifest.v2"
 #: ``execution_contract_digest`` computed against the pre-Story-2.4
 #: placeholder semantics is no longer comparable. Bump again the moment
 #: engine/protocol behavior changes.
-ENGINE_VERSION = "backtest_engine.v4"
-PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v3"
+ENGINE_VERSION = "backtest_engine.v6"
+PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v4"
 
 #: Story 2.4 landed ``backtest_engine.py`` as real, hashable source, so
 #: :func:`_ledger_action_metrics_digest` now hashes it via
@@ -322,6 +322,29 @@ class RunInputManifestV1(_RunInputModel):
 
     def execution_contract_digest(self) -> str:
         return manifest_digest(self.execution_contract_payload())
+
+
+def current_execution_contract_payload(project_root: Path) -> dict[str, str]:
+    """Return the execution identity fields of the installed runtime.
+
+    Workers use this to reject a pinned manifest created by an older source,
+    lockfile, calendar, or numeric-policy build even when the semantic version
+    literals have not changed.
+    """
+    return {
+        "engine_version": ENGINE_VERSION,
+        "protocol_schema_version": PROTOCOL_SCHEMA_VERSION,
+        "market_view_source_digest": _market_view_source_manifest(project_root).digest,
+        "ledger_action_metrics_digest": _ledger_action_metrics_digest(project_root),
+        "numeric_rounding_policy": PRICE_VOLUME_PLANE_VERSION,
+        "runtime_lock_digest": _runtime_lock_digest(project_root),
+        "calendar_session_table_digest": TradingCalendar().session_table_digest(),
+    }
+
+
+def current_execution_contract_digest(project_root: Path) -> str:
+    """Return the execution identity of the currently installed runtime."""
+    return manifest_digest(current_execution_contract_payload(project_root))
 
 
 class RunInputManifestV2(RunInputManifestV1):
@@ -651,6 +674,8 @@ __all__ = [
     "RunInputManifestError",
     "RunInputManifestV1",
     "RunInputManifestV2",
+    "current_execution_contract_payload",
+    "current_execution_contract_digest",
     "read_run_input_manifest",
     "build_run_input_manifest_v2",
     "build_run_input_manifest",
