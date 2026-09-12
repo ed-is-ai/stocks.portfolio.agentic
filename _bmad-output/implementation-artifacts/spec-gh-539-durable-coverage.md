@@ -119,6 +119,16 @@ Changed files: repository and coverage tests; app lifecycle, startup-status rout
 
 Verification: 68 focused tests pass, including six real Chromium splash scenarios. Ruff passes. Pyrefly retains only the 33 existing alert-agent errors. Final full-suite result recorded below. Review also exposed and fixed read-only benchmark compatibility: query-only diagnostics verify without attempting projection publication, while explicit preparation still requires persistence.
 
-Residual scope: initial or invalidated evidence still needs full verification, now performed at boot when active. Post-boot evidence mutations and unprepared pinned profiles can still require verification on demand. Bounded completed Result/member reads and full GH539 p95 acceptance remain open. Persisted projections and revision accounting share the trusted SQLite writer boundary; checksums do not authenticate malicious coordinated rewrites. No push or deployment.
+Residual scope: initial or invalidated evidence still needs full verification, now performed at boot when active. Post-boot evidence mutations and unprepared pinned profiles can still require verification on demand. Bounded completed Result/member reads and full GH539 p95 acceptance remained open at the time of this implementation. Persisted projections and revision accounting share the trusted SQLite writer boundary; checksums do not authenticate malicious coordinated rewrites. No push or deployment.
+
+### Closure addendum — 2026-09-12
+
+The previously open GH-539 completed-Result/member-read gate is satisfied by
+`gh-539-result-rendering.json`: the current-authority 241-month Result route
+returned HTTP 200 for all warm and cold samples, with p95 of 0.120 seconds warm
+and 3.325 seconds cold. Application startup is excluded from the cold route
+timing and OS page-cache state is recorded as uncontrolled. The durable coverage
+and boot preparation implementation therefore has its remaining GH-539
+acceptance evidence.
 
 Final verification: **3,077 passed**, 27 warnings, 121.62 seconds. Final fresh-process check after review: first landing 3.681 seconds; later landing ~75 ms (full regression suite running concurrently). Retained in `gh-539-durable-final-navigation.json`. Worktree diff whitespace check passes.

@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-09-01 (GH-455 total-value work consolidated into GH-463 dashboard refinement review)"
+last_updated: "2026-09-12 (GH-539 completed Result benchmark recorded)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -53,7 +53,7 @@ development_status:
   gh-536-historical-evidence-v2: backlog
   gh-537-evidence-migration-cutover-rollback: in-progress
   gh-538-reference-aware-evidence-gc: backlog
-  gh-539-bounded-backtest-result-reads: in-progress  # durable coverage and boot splash preparation
+  gh-539-bounded-backtest-result-reads: done  # durable coverage, boot splash preparation and Result p95 evidence complete
   gh-540-evidence-v2-rollout: backlog
   gh-493-strategy-manager-agent: review
   gh-503-preparation-liveness: review

@@ -1,0 +1,58 @@
+{
+  "code_revision": "2f0293e53a456e37411c5a8b255a000f4b8fcfbb",
+  "cold": {
+    "all_http_200": true,
+    "median_seconds": 3.295228834000227,
+    "p95_seconds": 3.325191834001089,
+    "samples_seconds": [
+      3.3087809159987955,
+      3.2501892500004033,
+      3.239620582999123,
+      3.325191834001089,
+      3.295228834000227
+    ]
+  },
+  "environment": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.6",
+    "sqlite": "3.53.3"
+  },
+  "method": "HTTP GET of a completed Result; 20 warm samples in one process; 5 cold samples in fresh processes; application startup excluded; OS page cache uncontrolled",
+  "profile_hash": "8c891e8547236cfd66639ab6bd7e9bae7ad8676d2ca9984b5325b669d9efab93",
+  "rendered_body_sha256": "28e0e5745df3134b85389a0a404d7b0ab716a1ae9ea30961f8b610e5f2502d34",
+  "run_id": "97c7accb-3b96-4e06-8c8c-b5bef3793c0e",
+  "snapshot_id": "gh539-current-2026-09-12",
+  "warm": {
+    "all_http_200": true,
+    "median_seconds": 0.07876779149955837,
+    "p95_seconds": 0.1203818339999998,
+    "samples_seconds": [
+      0.1203818339999998,
+      0.07804645800024446,
+      0.07890399999996589,
+      0.07682541699978174,
+      0.11777491700013343,
+      0.07863158299915085,
+      0.08410970799923234,
+      0.09442283299904375,
+      0.12338241700126673,
+      0.07901170800141699,
+      0.07214179199945647,
+      0.07175937499960128,
+      0.10342362499977753,
+      0.07151687499936088,
+      0.07092358299996704,
+      0.1048557920003077,
+      0.07157658300093317,
+      0.07137999999940803,
+      0.07239495900103066,
+      0.10664387500037265
+    ]
+  },
+  "warmup": {
+    "body_bytes": 769235,
+    "body_sha256": "28e0e5745df3134b85389a0a404d7b0ab716a1ae9ea30961f8b610e5f2502d34",
+    "seconds": 3.5318050000005314,
+    "status_code": 200
+  }
+}

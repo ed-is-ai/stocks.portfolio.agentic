@@ -74,7 +74,15 @@ github_issues: [444, 539]
 
 Independent invalidation triggers survive tests or recovery tooling dropping immutability triggers. Counter updates happen in the same transaction as source changes. A shared roster/alias generation conservatively invalidates all profile caches for infrequent shared changes; ordinary member/result writes invalidate only their profile. Worker heartbeats/job rows are not coverage inputs. Schema version adds conservative DDL invalidation; arbitrary file tampering or deliberately disabling accounting is outside cache trust, as before.
 
-The first valid cold read still runs full integrity verification. GH-539 stays open for persisted verified summaries and bounded cold Result access. User steering prioritizes this measured navigation bottleneck over GH-536, which has no dependency on GH-539.
+The first valid cold read still runs full integrity verification. GH-539 stayed open for persisted verified summaries and bounded cold Result access while this increment was implemented. User steering prioritizes this measured navigation bottleneck over GH-536, which has no dependency on GH-539.
+
+### Closure addendum — 2026-09-12
+
+The bounded cold completed-Result access gate described above is now closed by
+the current-authority 241-month Result benchmark in
+`gh-539-result-rendering.json`. Persisted coverage summaries and startup
+preparation remain the mechanism used before the route benchmark; no integrity
+shortcut was introduced.
 
 ## Verification
 

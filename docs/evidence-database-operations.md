@@ -209,7 +209,8 @@ Every measured request returned HTTP 200. These are navigation measurements,
 not successful completed Result benchmarks: pages may show readiness errors.
 In the initial navigation increment, first landing remained expensive (137.879 s
 before, 126.063 s after). The durable-summary increment below addresses reuse
-across restarts; bounded cold completed Result reads remain open under GH-539.
+across restarts. The completed Result benchmark below closes the remaining GH-539
+performance gate.
 Two warm samples establish the observed improvement, not a reliable p95.
 OS caches were uncontrolled; the historical price cache was empty and isolated.
 Workers and application lifespan were disabled.
@@ -264,6 +265,35 @@ correctly selected zero startup months and does not claim an active completed
 Result timing. The retained historical Results continue to use the existing
 on-demand integrity path. Source counts and selection evidence:
 `gh-539-member-revision-prewarm.json`.
+
+## Completed Result rendering benchmark (GH-539)
+
+The current-authority active profile
+`8c891e8547236cfd66639ab6bd7e9bae7ad8676d2ca9984b5325b669d9efab93` has a ready
+241-month interval from `2006-07` through `2026-07`. A deterministic Buy and Hold
+run (`97c7accb-3b96-4e06-8c8c-b5bef3793c0e`) was completed against one valid USD
+roster member on the offline copies identified by `gh539-current-2026-09-12`.
+The Result route returned the same 769,235-byte body for every sample.
+
+The repeatable benchmark command is:
+
+```sh
+python -m scripts.benchmark_result_rendering \
+  --run-id 97c7accb-3b96-4e06-8c8c-b5bef3793c0e \
+  --profile-hash 8c891e8547236cfd66639ab6bd7e9bae7ad8676d2ca9984b5325b669d9efab93 \
+  --backtest-db /absolute/offline/backtest.db \
+  --historical-db /absolute/offline/historical_price_cache.db \
+  --code-revision 2f0293e53a456e37411c5a8b255a000f4b8fcfbb \
+  --snapshot-id gh539-current-2026-09-12 \
+  --output result-rendering.json
+```
+
+The benchmark records 20 warm requests in one process and five requests in
+fresh processes; application startup is excluded from route timings and OS page
+cache state is recorded as uncontrolled. Warm p95 was **0.120 seconds** and cold
+p95 was **3.325 seconds**; all requests returned HTTP 200 and passed the normal
+Result integrity path. Raw evidence is in
+`gh-539-result-rendering.json` under `_bmad-output/implementation-artifacts/`.
 
 ## Historical evidence schema v2 (GH-536)
 

@@ -89,8 +89,17 @@ at startup by the previous increment.
 Verification: focused comparison/route suite 209 passed; full suite 3,081
 passed (27 warnings); Ruff and diff whitespace checks passed. Pyrefly retains
 the pre-existing 33 alert-agent errors. Review agents were unavailable due to
-their usage limit; manual review found no additional issue. GH-539 remains open
-for bounded cold Result/member reads.
+their usage limit; manual review found no additional issue. GH-539 remained open
+for bounded cold Result/member reads at the time of this implementation.
+
+### Closure addendum — 2026-09-12
+
+The remaining bounded completed-Result gate is now evidenced by
+`gh-539-result-rendering.json`: the current-authority profile has a ready
+241-month interval, and a completed Result rendered with HTTP 200 for every
+sample. Warm p95 was 0.120 seconds and cold p95 was 3.325 seconds. The cold
+measurement excludes application startup and records OS page-cache state as
+uncontrolled; both values are below the GH-539 thresholds. The story is complete.
 
 ## Design Notes
 
