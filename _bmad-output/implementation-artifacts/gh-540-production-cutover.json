@@ -1,0 +1,43 @@
+{
+  "issue": 540,
+  "date": "2026-09-12",
+  "code_revision": "33b04f3ee0bcb266b76e7b9f6be801201b064c57",
+  "authorization": "gh540-production-rollout-approved-2026-09-12",
+  "rollback_backup": {
+    "snapshot_id": "gh540-production-2026-09-12",
+    "historical_pages": 6686841,
+    "backtest_pages": 2584780,
+    "preserved": true
+  },
+  "migration": {
+    "source_revision_count": 6143,
+    "migrated_revision_count": 6143,
+    "completed": true,
+    "available_bytes": 23099936768,
+    "required_reserve_bytes": 6867806208
+  },
+  "replay_equality": {
+    "source_revisions": 6143,
+    "checked": 6143,
+    "mismatches": []
+  },
+  "activation": {
+    "active_format": "v2",
+    "activation_review": "gh540-production-rollout-approved-2026-09-12",
+    "completed": true
+  },
+  "post_cutover": {
+    "quick_check": "ok",
+    "v2_revision_count": 6143,
+    "referenced_revision_count": 4406,
+    "representative_reads": {
+      "active_format": "v2",
+      "loaded": 3,
+      "row_counts": [1759, 1759, 1759]
+    }
+  },
+  "retention": {
+    "production_execution": false,
+    "offline_rehearsal_artifact": "gh-540-rollout-rehearsal.json"
+  }
+}

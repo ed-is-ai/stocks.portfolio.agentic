@@ -82,7 +82,7 @@ stories:
         prerequisite_issues: [535]
       gh-540-evidence-v2-rollout:
         issue: 540
-        status: in-progress
+        status: done
         prerequisite_issues: [537, 538, 539]
   strategy-manager-agent:
     issue: 493

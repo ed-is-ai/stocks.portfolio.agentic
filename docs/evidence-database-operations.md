@@ -359,5 +359,23 @@ matched (6,142 checked, zero mismatches). After activation, rollback loaded thre
 representative v1 revisions successfully; reactivation preserved three
 representative referenced v2 reads. The reviewed retention plan reclaimed 1,570 v2
 revisions and 20,123 chunks while excluding 4,406 authoritative references and
-166 grace-period revisions. The production database was never activated or
-modified; production rollout remains explicitly operator-authorized work.
+166 grace-period revisions. The production database was never activated during
+the rehearsal.
+
+### Authorized production cutover (GH-540)
+
+Production activation was approved under review reference
+`gh540-production-rollout-approved-2026-09-12` on 2026-09-12 using code revision
+`33b04f3ee0bcb266b76e7b9f6be801201b064c57`. A fresh rollback backup was preserved
+before migration (historical: 6,686,841 SQLite pages; Backtest: 2,584,780
+pages). Migration completed all 6,143 revisions with 23,099,936,768 bytes
+available against a 6,867,806,208-byte reserve. Full v1/v2 replay equality
+checked all 6,143 revisions with zero mismatches.
+
+The production storage state is now v2. Three representative repository reads
+loaded successfully (1,759 rows each), all 6,143 v2 revision rows are present,
+and the 4,406 referenced revisions remain available. A post-cutover SQLite
+`quick_check` returned `ok`. The v1 data remains in place for rollback. No
+production retention deletion was executed; the reviewed offline retention
+execution remains recorded in `gh-540-rollout-rehearsal.json` for a separate,
+auditable operation.
