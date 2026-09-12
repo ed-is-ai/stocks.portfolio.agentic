@@ -74,15 +74,15 @@ stories:
         prerequisite_issues: [536]
       gh-538-reference-aware-evidence-gc:
         issue: 538
-        status: backlog
+        status: in-progress
         prerequisite_issues: [537]
       gh-539-bounded-backtest-result-reads:
         issue: 539
-        status: backlog
+        status: done
         prerequisite_issues: [535]
       gh-540-evidence-v2-rollout:
         issue: 540
-        status: backlog
+        status: in-progress
         prerequisite_issues: [537, 538, 539]
   strategy-manager-agent:
     issue: 493

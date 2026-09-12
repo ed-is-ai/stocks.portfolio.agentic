@@ -54,7 +54,7 @@ development_status:
   gh-537-evidence-migration-cutover-rollback: in-progress
   gh-538-reference-aware-evidence-gc: backlog
   gh-539-bounded-backtest-result-reads: done  # durable coverage, boot splash preparation and Result p95 evidence complete
-  gh-540-evidence-v2-rollout: backlog
+  gh-540-evidence-v2-rollout: in-progress  # offline backup/migration/replay/rollback/retention rehearsal complete; production authorization remains
   gh-493-strategy-manager-agent: review
   gh-503-preparation-liveness: review
   gh-492-price-evidence-backfill-stage: review

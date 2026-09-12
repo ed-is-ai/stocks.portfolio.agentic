@@ -1,0 +1,262 @@
+{
+  "activation": {
+    "active_format": "v2",
+    "available_bytes": 27506515968,
+    "completed": true,
+    "migrated_revision_count": 6142,
+    "required_reserve_bytes": 7019884544,
+    "source_database_bytes": 28079538176,
+    "source_revision_count": 6142
+  },
+  "after_inventory": {
+    "backtest": {
+      "file_bytes": 10562617344,
+      "free_bytes": 98304,
+      "journal_mode": "wal",
+      "logical_bytes": 10562617344,
+      "row_counts": {
+        "active_snapshot_profile": 1,
+        "backtest_enqueue_actions": 0,
+        "backtest_result_entry_selection": 1,
+        "backtest_result_entry_selection_decisions": 738,
+        "backtest_results": 7,
+        "backtest_staging": 4,
+        "backtest_staging_entry_selection": 0,
+        "backtest_staging_entry_selection_decisions": 0,
+        "bau_run_authority": 0,
+        "bootstrap_enqueue_actions": 31,
+        "bootstrap_runs": 31,
+        "equity_curve": 2070,
+        "historical_source_qualifications": 10,
+        "initialization_progress": 1,
+        "initialization_runs": 43,
+        "monthly_scan_results": 789655,
+        "notification_outbox": 115,
+        "preparation_enqueue_actions": 17,
+        "preparation_runs": 17,
+        "reconstruction_roster_lineages": 15,
+        "reconstruction_roster_members": 13197,
+        "reconstruction_roster_sources": 45,
+        "reconstruction_rosters": 15,
+        "run_input_manifests": 10,
+        "scan_reconstruction_cache": 2382811,
+        "security_alias_entries": 9054,
+        "security_alias_manifests": 10,
+        "security_identities": 957,
+        "security_identity_registry_revisions": 10,
+        "snapshot_coverage_profile_revisions": 0,
+        "snapshot_coverage_revision_state": 1,
+        "snapshot_coverage_summaries": 1,
+        "snapshot_member_revision_summaries": 1,
+        "snapshot_members": 1098596,
+        "snapshot_months": 1243,
+        "snapshot_profile_activation_history": 4,
+        "snapshot_profiles": 15,
+        "strategy_job_restart_actions": 27,
+        "strategy_jobs": 115,
+        "strategy_runs": 22,
+        "strategy_worker_lease": 1,
+        "trade_log": 10732
+      }
+    },
+    "historical": {
+      "file_bytes": 28079538176,
+      "free_bytes": 153423872,
+      "journal_mode": "wal",
+      "logical_bytes": 28079538176,
+      "row_counts": {
+        "historical_corporate_actions": 456421,
+        "historical_evidence_references": 1098596,
+        "historical_price_acquisitions": 6142,
+        "historical_price_observations": 44632019,
+        "historical_price_revisions": 6142,
+        "historical_price_storage_state": 1,
+        "historical_price_v2_chunks": 72526,
+        "historical_price_v2_migration_state": 1,
+        "historical_price_v2_revision_chunks": 232958,
+        "historical_price_v2_revisions": 4572,
+        "historical_v2_gc_audit": 1,
+        "historical_v2_gc_authorizations": 0,
+        "price_evidence_unavailable_attempts": 59
+      }
+    }
+  },
+  "backup": {
+    "backtest_pages": 2578764,
+    "historical_pages": 6685394,
+    "source_writers": "backup uses a consistent SQLite read snapshot; no source writes were made",
+    "sqlite_backup_completed": true
+  },
+  "before_inventory": {
+    "backtest": {
+      "file_bytes": 10562617344,
+      "free_bytes": 98304,
+      "journal_mode": "wal",
+      "logical_bytes": 10562617344,
+      "row_counts": {
+        "active_snapshot_profile": 1,
+        "backtest_enqueue_actions": 0,
+        "backtest_result_entry_selection": 1,
+        "backtest_result_entry_selection_decisions": 738,
+        "backtest_results": 7,
+        "backtest_staging": 4,
+        "backtest_staging_entry_selection": 0,
+        "backtest_staging_entry_selection_decisions": 0,
+        "bau_run_authority": 0,
+        "bootstrap_enqueue_actions": 31,
+        "bootstrap_runs": 31,
+        "equity_curve": 2070,
+        "historical_source_qualifications": 10,
+        "initialization_progress": 1,
+        "initialization_runs": 43,
+        "monthly_scan_results": 789655,
+        "notification_outbox": 115,
+        "preparation_enqueue_actions": 17,
+        "preparation_runs": 17,
+        "reconstruction_roster_lineages": 15,
+        "reconstruction_roster_members": 13197,
+        "reconstruction_roster_sources": 45,
+        "reconstruction_rosters": 15,
+        "run_input_manifests": 10,
+        "scan_reconstruction_cache": 2382811,
+        "security_alias_entries": 9054,
+        "security_alias_manifests": 10,
+        "security_identities": 957,
+        "security_identity_registry_revisions": 10,
+        "snapshot_coverage_profile_revisions": 0,
+        "snapshot_coverage_revision_state": 1,
+        "snapshot_coverage_summaries": 1,
+        "snapshot_member_revision_summaries": 1,
+        "snapshot_members": 1098596,
+        "snapshot_months": 1243,
+        "snapshot_profile_activation_history": 4,
+        "snapshot_profiles": 15,
+        "strategy_job_restart_actions": 27,
+        "strategy_jobs": 115,
+        "strategy_runs": 22,
+        "strategy_worker_lease": 1,
+        "trade_log": 10732
+      }
+    },
+    "historical": {
+      "file_bytes": 27383373824,
+      "free_bytes": 0,
+      "journal_mode": "wal",
+      "logical_bytes": 27383373824,
+      "row_counts": {
+        "historical_corporate_actions": 456421,
+        "historical_evidence_references": 1098596,
+        "historical_price_acquisitions": 6142,
+        "historical_price_observations": 44632019,
+        "historical_price_revisions": 6142,
+        "historical_price_storage_state": 1,
+        "historical_price_v2_chunks": 0,
+        "historical_price_v2_migration_state": 0,
+        "historical_price_v2_revision_chunks": 0,
+        "historical_price_v2_revisions": 0,
+        "price_evidence_unavailable_attempts": 59
+      }
+    }
+  },
+  "capacity": {
+    "migration_available_bytes": 28005978112,
+    "migration_required_reserve_bytes": 6867070976,
+    "v1_revision_count_retained_for_rollback": 6142,
+    "v2_physical_object_bytes_after_retention": 460853248,
+    "v2_revision_count_after_retention": 4572
+  },
+  "code_revision": "037d75e8510833177ad5379da261033d819679dc",
+  "issue": 540,
+  "migration": {
+    "complete": {
+      "active_format": "v1",
+      "available_bytes": 28005978112,
+      "completed": true,
+      "migrated_revision_count": 6142,
+      "required_reserve_bytes": 6867070976,
+      "source_database_bytes": 27468283904,
+      "source_revision_count": 6142
+    },
+    "first_checkpoint": {
+      "active_format": "v1",
+      "available_bytes": 28024938496,
+      "completed": false,
+      "migrated_revision_count": 10,
+      "required_reserve_bytes": 6866324480,
+      "source_database_bytes": 27465297920,
+      "source_revision_count": 6142
+    },
+    "replay_equality": {
+      "checked": 6142,
+      "mismatches": [],
+      "source_revisions": 6142
+    }
+  },
+  "offline_only": true,
+  "production_rollout": {
+    "active_format_changed_on_production": false,
+    "authorized": false,
+    "next_gate": "explicit operator authorization after review of this rehearsal"
+  },
+  "reactivation": {
+    "active_format": "v2",
+    "available_bytes": 27450052608,
+    "completed": true,
+    "migrated_revision_count": 6142,
+    "required_reserve_bytes": 7019884544,
+    "source_database_bytes": 28079538176,
+    "source_revision_count": 6142
+  },
+  "retention": {
+    "execution": {
+      "candidate_count": 1570,
+      "deleted_chunks": 20123,
+      "deleted_revisions": 1570,
+      "executed": true,
+      "grace_before": "2026-09-01T00:00:00+00:00"
+    },
+    "plan": {
+      "candidate_count": 1570,
+      "exclusion_counts": {
+        "authoritative_reference": 4406,
+        "within_grace_period": 166
+      },
+      "grace_before": "2026-09-01T00:00:00+00:00"
+    },
+    "retained_referenced_reads": {
+      "active_format": "v2",
+      "loaded": 3,
+      "retained_referenced_revisions": [
+        "0003d7927ffdac5d0cf94a08bc9d11830883699e98dc517ac96b65e49e494181",
+        "0003d7927ffdac5d0cf94a08bc9d11830883699e98dc517ac96b65e49e494181",
+        "0003d7927ffdac5d0cf94a08bc9d11830883699e98dc517ac96b65e49e494181"
+      ],
+      "row_counts": [
+        1759,
+        1759,
+        1759
+      ]
+    }
+  },
+  "rollback": {
+    "representative_reads": {
+      "active_format": "v1",
+      "loaded": 3,
+      "row_counts": [
+        1759,
+        3458,
+        9618
+      ],
+      "selected_revisions": [
+        "0003d7927ffdac5d0cf94a08bc9d11830883699e98dc517ac96b65e49e494181",
+        "8376999736d87269481174c6d0afac884761e2e6c1e585c3c9279e48c0a2fc65",
+        "ffedfad5a6496535e3d65d7c44c0101ac56638091c48b1e11d0546cc9528ea40"
+      ]
+    },
+    "state": {
+      "active_format": "v1",
+      "rolled_back": true
+    }
+  },
+  "snapshot_id": "gh540-main-2026-09-12"
+}

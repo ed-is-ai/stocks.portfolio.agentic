@@ -93,6 +93,8 @@ CREATE TABLE IF NOT EXISTS historical_evidence_references (
     created_at TEXT NOT NULL,
     PRIMARY KEY(consumer_type, consumer_id, data_revision)
 );
+CREATE INDEX IF NOT EXISTS idx_historical_evidence_references_revision
+ON historical_evidence_references(data_revision);
 
 CREATE TABLE IF NOT EXISTS historical_price_v2_revisions (
     revision_id INTEGER PRIMARY KEY,
@@ -119,6 +121,8 @@ CREATE TABLE IF NOT EXISTS historical_price_v2_revision_chunks (
     PRIMARY KEY(revision_id, chunk_order),
     UNIQUE(revision_id, chunk_kind, chunk_year)
 );
+CREATE INDEX IF NOT EXISTS idx_historical_v2_mapping_chunk
+ON historical_price_v2_revision_chunks(chunk_digest);
 CREATE TABLE IF NOT EXISTS historical_price_storage_state (
     singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1),
     active_format TEXT NOT NULL CHECK(active_format IN ('v1', 'v2')),
@@ -136,13 +140,28 @@ CREATE TABLE IF NOT EXISTS historical_price_v2_migration_state (
     migrated_revision_count INTEGER NOT NULL DEFAULT 0,
     completed_at TEXT
 );
+CREATE TABLE IF NOT EXISTS historical_v2_gc_authorizations (
+    singleton_id INTEGER PRIMARY KEY CHECK(singleton_id = 1)
+);
+CREATE TABLE IF NOT EXISTS historical_v2_gc_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    grace_before TEXT NOT NULL,
+    plan_digest TEXT NOT NULL,
+    review_reference TEXT NOT NULL,
+    deleted_revision_count INTEGER NOT NULL,
+    deleted_chunk_count INTEGER NOT NULL,
+    executed_at TEXT NOT NULL
+);
 
+DROP TRIGGER IF EXISTS historical_v2_revision_immutable_delete;
+DROP TRIGGER IF EXISTS historical_v2_chunk_immutable_delete;
+DROP TRIGGER IF EXISTS historical_v2_mapping_immutable_delete;
 CREATE TRIGGER IF NOT EXISTS historical_v2_revision_immutable_update BEFORE UPDATE ON historical_price_v2_revisions BEGIN SELECT RAISE(ABORT, 'historical v2 revision is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS historical_v2_revision_immutable_delete BEFORE DELETE ON historical_price_v2_revisions BEGIN SELECT RAISE(ABORT, 'historical v2 revision is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_revision_immutable_delete BEFORE DELETE ON historical_price_v2_revisions WHEN NOT EXISTS (SELECT 1 FROM historical_v2_gc_authorizations) BEGIN SELECT RAISE(ABORT, 'historical v2 revision is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS historical_v2_chunk_immutable_update BEFORE UPDATE ON historical_price_v2_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 chunk is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS historical_v2_chunk_immutable_delete BEFORE DELETE ON historical_price_v2_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 chunk is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_chunk_immutable_delete BEFORE DELETE ON historical_price_v2_chunks WHEN NOT EXISTS (SELECT 1 FROM historical_v2_gc_authorizations) BEGIN SELECT RAISE(ABORT, 'historical v2 chunk is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS historical_v2_mapping_immutable_update BEFORE UPDATE ON historical_price_v2_revision_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 mapping is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS historical_v2_mapping_immutable_delete BEFORE DELETE ON historical_price_v2_revision_chunks BEGIN SELECT RAISE(ABORT, 'historical v2 mapping is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS historical_v2_mapping_immutable_delete BEFORE DELETE ON historical_price_v2_revision_chunks WHEN NOT EXISTS (SELECT 1 FROM historical_v2_gc_authorizations) BEGIN SELECT RAISE(ABORT, 'historical v2 mapping is immutable'); END;
 
 CREATE TRIGGER IF NOT EXISTS historical_revision_immutable_update BEFORE UPDATE ON historical_price_revisions BEGIN SELECT RAISE(ABORT, 'historical revision is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS historical_revision_immutable_delete BEFORE DELETE ON historical_price_revisions BEGIN SELECT RAISE(ABORT, 'historical revision is immutable'); END;
@@ -264,6 +283,15 @@ class HistoricalEvidenceMigrationProgress:
     required_reserve_bytes: int
 
 
+@dataclass(frozen=True)
+class HistoricalEvidenceRetentionPlan:
+    """Offline, reviewable v2 retention decision for one grace cutoff."""
+
+    grace_before: str
+    candidates: tuple[str, ...]
+    exclusions: tuple[tuple[str, str], ...]
+
+
 class HistoricalPriceRepository:
     """Own the append-only historical price database and exact-reference reads."""
 
@@ -294,7 +322,9 @@ class HistoricalPriceRepository:
     ) -> HistoricalEvidenceMigrationProgress:
         """Migrate a bounded offline v1 batch, checkpointing every revision."""
         if max_revisions is not None and max_revisions < 1:
-            raise HistoricalEvidenceIntegrityError("migration batch size must be positive")
+            raise HistoricalEvidenceIntegrityError(
+                "migration batch size must be positive"
+            )
         self.ensure_schema()
         with session(self._connect) as conn:
             fingerprint, count = self._v1_source_identity(conn)
@@ -439,6 +469,86 @@ class HistoricalPriceRepository:
                    SET active_format='v1', activated_at=NULL, activation_review=NULL
                    WHERE singleton_id=1"""
             )
+
+    def plan_v2_retention(
+        self, *, grace_before: str
+    ) -> HistoricalEvidenceRetentionPlan:
+        """Report unreferenced v2 revisions eligible before ``grace_before``.
+
+        This is read-only: execution requires a separately reviewed plan.
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT v2.data_revision, v2.first_acquired_at,
+                          EXISTS(SELECT 1 FROM historical_evidence_references AS ref
+                                 WHERE ref.data_revision=v2.data_revision)
+                   FROM historical_price_v2_revisions AS v2
+                   ORDER BY v2.data_revision"""
+            ).fetchall()
+        candidates: list[str] = []
+        exclusions: list[tuple[str, str]] = []
+        for revision, acquired_at, referenced in rows:
+            if bool(referenced):
+                exclusions.append((str(revision), "authoritative_reference"))
+            elif str(acquired_at) >= grace_before:
+                exclusions.append((str(revision), "within_grace_period"))
+            else:
+                candidates.append(str(revision))
+        return HistoricalEvidenceRetentionPlan(
+            grace_before=grace_before,
+            candidates=tuple(candidates),
+            exclusions=tuple(exclusions),
+        )
+
+    def execute_v2_retention(
+        self, plan: HistoricalEvidenceRetentionPlan, *, review_reference: str
+    ) -> tuple[int, int]:
+        """Execute a reviewed plan after transactionally rechecking reachability."""
+        if not review_reference.strip():
+            raise HistoricalEvidenceIntegrityError("retention review is required")
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                "SELECT active_format FROM historical_price_storage_state WHERE singleton_id=1"
+            ).fetchone()
+            if active is None or active[0] != "v2":
+                raise HistoricalEvidenceIntegrityError(
+                    "v2 retention requires active v2"
+                )
+            current = self.plan_v2_retention(grace_before=plan.grace_before)
+            if current.candidates != plan.candidates:
+                raise HistoricalEvidenceIntegrityError("retention references changed")
+            conn.execute("INSERT INTO historical_v2_gc_authorizations VALUES (1)")
+            for revision in plan.candidates:
+                conn.execute(
+                    "DELETE FROM historical_price_v2_revision_chunks WHERE revision_id=(SELECT revision_id FROM historical_price_v2_revisions WHERE data_revision=?)",
+                    (revision,),
+                )
+                conn.execute(
+                    "DELETE FROM historical_price_v2_revisions WHERE data_revision=?",
+                    (revision,),
+                )
+            deleted_chunks = conn.execute(
+                "DELETE FROM historical_price_v2_chunks WHERE NOT EXISTS (SELECT 1 FROM historical_price_v2_revision_chunks AS m WHERE m.chunk_digest=historical_price_v2_chunks.chunk_digest)"
+            ).rowcount
+            conn.execute("DELETE FROM historical_v2_gc_authorizations")
+            digest = sha256(
+                canonical_json(
+                    {"grace_before": plan.grace_before, "candidates": plan.candidates}
+                ).encode()
+            ).hexdigest()
+            conn.execute(
+                "INSERT INTO historical_v2_gc_audit (grace_before, plan_digest, review_reference, deleted_revision_count, deleted_chunk_count, executed_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    plan.grace_before,
+                    digest,
+                    review_reference,
+                    len(plan.candidates),
+                    deleted_chunks,
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+        return len(plan.candidates), deleted_chunks
 
     @staticmethod
     def _database_path(conn: sqlite3.Connection) -> Path:

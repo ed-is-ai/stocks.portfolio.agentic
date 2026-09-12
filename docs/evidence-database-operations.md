@@ -320,3 +320,44 @@ so this is a compression and duplicate-representation result, not a measured
 deduplication benefit. It does not establish the whole-cache 70% migration
 target or a read-latency result. Raw sample evidence:
 `gh-536-v2-encoding-sample.json`.
+
+## Offline v2 rollout rehearsal (GH-540)
+
+Perform this sequence only on SQLite-backup copies with application writers
+stopped. Record the backup identifier, code revision, free space, command JSON,
+and before/after `benchmark_evidence_databases` inventory beside the copies.
+
+1. Run `python -m scripts.migrate_historical_evidence_v2 --historical-db COPY`
+   repeatedly until `completed` is true. It verifies each canonical revision,
+   checkpoints after each one, and refuses changed source revisions or inadequate
+   capacity.
+2. Review the reported size change and replay checks. Activation is permitted
+   only with an explicit evidence reference:
+   `--activate --activation-review REVIEW_ID`.
+3. Reopen the copy and verify representative pinned and unpinned revisions with
+   the normal repository read path. To prove rollback, run the same command with
+   `--rollback` and repeat those reads.
+4. Produce a retention dry run with
+   `python -m scripts.retain_historical_evidence_v2 --historical-db COPY
+   --grace-before UTC_TIMESTAMP`. Review candidates and exclusions. Execute only
+   the reviewed plan with `--execute --review-reference REVIEW_ID`; it rechecks
+   authoritative references under a write transaction and audits the result.
+
+Do not run activation or retention execution against the production database
+without a completed rehearsal, recorded capacity/restore evidence, and explicit
+operator authorization. A failed or interrupted migration is resumed by rerunning
+the migration command; a changed source is a stop condition, not a reason to
+override verification. Retention keeps v1 rollback data and only reclaims
+unreferenced v2 revisions and chunks.
+
+The offline rehearsal recorded in `gh-540-rollout-rehearsal.json` completed on
+2026-09-12 from consistent SQLite backup copies. The backup contained 6,685,394
+historical pages and 2,578,764 Backtest pages. Migration checkpointed 10 rows
+first and then completed all 6,142 historical revisions with 28,005,978,112
+bytes available against a 6,867,070,976-byte reserve. Every v1/v2 reconstruction
+matched (6,142 checked, zero mismatches). After activation, rollback loaded three
+representative v1 revisions successfully; reactivation preserved three
+representative referenced v2 reads. The reviewed retention plan reclaimed 1,570 v2
+revisions and 20,123 chunks while excluding 4,406 authoritative references and
+166 grace-period revisions. The production database was never activated or
+modified; production rollout remains explicitly operator-authorized work.

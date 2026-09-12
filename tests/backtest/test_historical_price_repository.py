@@ -269,6 +269,44 @@ def test_v2_activation_requires_a_review_reference(tmp_path) -> None:
         repo.activate_v2(review_reference=" ")
 
 
+def test_v2_retention_plan_reports_references_and_grace_exclusions(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    pinned, eligible = _payload(), _payload(close=102.0)
+    recent = _payload(
+        close=103.0, acquired_at=datetime(2026, 9, 9, tzinfo=timezone.utc)
+    )
+    for payload in (pinned, eligible, recent):
+        repo.commit(payload)
+    repo.migrate_v1_to_v2()
+    repo.pin("snapshot", "profile:2024-01", pinned.data_revision)
+
+    plan = repo.plan_v2_retention(grace_before="2026-09-01T00:00:00+00:00")
+
+    assert plan.candidates == (eligible.data_revision,)
+    assert dict(plan.exclusions) == {
+        pinned.data_revision: "authoritative_reference",
+        recent.data_revision: "within_grace_period",
+    }
+    repo.activate_v2(review_reference="test")
+    assert repo.execute_v2_retention(plan, review_reference="test") == (1, 1)
+    with pytest.raises(EvidenceMissingError):
+        repo.get_v2(eligible.data_revision)
+    assert repo.get_v2(pinned.data_revision).data_revision == pinned.data_revision
+
+
+def test_v2_retention_refuses_a_plan_after_references_change(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    payload = _payload()
+    repo.commit(payload)
+    repo.migrate_v1_to_v2()
+    repo.activate_v2(review_reference="test")
+    plan = repo.plan_v2_retention(grace_before="2026-09-01T00:00:00+00:00")
+    repo.pin("snapshot", "profile:2024-01", payload.data_revision)
+
+    with pytest.raises(HistoricalEvidenceIntegrityError, match="references changed"):
+        repo.execute_v2_retention(plan, review_reference="test")
+
+
 def test_v2_migration_refuses_insufficient_capacity_and_source_drift(tmp_path) -> None:
     repo = _repo(tmp_path)
     first, second = _payload(), _payload(close=102.0)
