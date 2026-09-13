@@ -402,18 +402,42 @@ class StrategyJobService:
         self, job_id: str, claim_token: str, version: int, detail: str
     ) -> None:
         try:
-            self._repository.fail_claimed_strategy_job(
-                job_id,
-                claim_token,
-                expected_version=version,
-                failure_code=JobFailureCode.WORKER_INTERRUPTED,
-                failed_month=None,
-                detail=detail,
-                lease=self._fence(),
-            )
+            job = self._repository.strategy_job(job_id)
+            if getattr(job, "cancel_requested_at", None) is not None:
+                self._repository.cancel_claimed_strategy_job(
+                    job_id,
+                    claim_token,
+                    expected_version=version,
+                    lease=self._fence(),
+                )
+            else:
+                self._repository.fail_claimed_strategy_job(
+                    job_id,
+                    claim_token,
+                    expected_version=version,
+                    failure_code=JobFailureCode.WORKER_INTERRUPTED,
+                    failed_month=None,
+                    detail=detail,
+                    lease=self._fence(),
+                )
         except StrategyJobConflict:
-            # A terminal worker write or newer owner won the race.
-            return
+            # A cancellation can win between the read and failure write.
+            current = self._repository.strategy_job(job_id)
+            if (
+                getattr(current, "status", None)
+                in {StrategyJobStatus.RUNNING, "running"}
+                and getattr(current, "claim_token", None) == claim_token
+                and getattr(current, "cancel_requested_at", None) is not None
+            ):
+                try:
+                    self._repository.cancel_claimed_strategy_job(
+                        job_id,
+                        claim_token,
+                        expected_version=current.status_version,
+                        lease=self._fence(),
+                    )
+                except StrategyJobConflict:
+                    pass
 
 
 __all__ = ["DEFAULT_LEASE_TTL_SECONDS", "StrategyJobService"]

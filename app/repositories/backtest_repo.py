@@ -25,6 +25,7 @@ from typing import (
 )
 from collections.abc import Iterable
 from uuid import uuid4
+import zlib
 
 from pydantic import ValidationError
 
@@ -109,6 +110,7 @@ if TYPE_CHECKING:
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 logger = logging.getLogger(__name__)
+_db_session = session
 
 
 @dataclass(frozen=True)
@@ -953,7 +955,33 @@ CREATE TABLE IF NOT EXISTS backtest_staging (
     events_json TEXT NOT NULL,
     equity_curve_json TEXT NOT NULL,
     final_cash_base TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    last_batch_sequence INTEGER NOT NULL DEFAULT 0
+        CHECK(last_batch_sequence >= 0),
+    last_session TEXT,
+    last_event_sequence INTEGER NOT NULL DEFAULT 0
+        CHECK(last_event_sequence >= 0),
+    last_equity_sequence INTEGER NOT NULL DEFAULT 0
+        CHECK(last_equity_sequence >= 0)
+);
+
+-- GH-616: one bounded, attempt-owned payload per published session. The
+-- checkpoint above remains the latest portfolio state; it never accumulates
+-- events/equity on the append path.
+CREATE TABLE IF NOT EXISTS backtest_staging_batches (
+    run_id TEXT NOT NULL REFERENCES backtest_staging(run_id) ON DELETE CASCADE,
+    batch_sequence INTEGER NOT NULL CHECK(batch_sequence > 0),
+    session TEXT NOT NULL CHECK(length(session) = 10),
+    payload_encoding TEXT NOT NULL CHECK(payload_encoding = 'json+zlib.v1'),
+    payload_blob BLOB NOT NULL CHECK(length(payload_blob) > 0),
+    uncompressed_bytes INTEGER NOT NULL CHECK(uncompressed_bytes > 0),
+    payload_digest TEXT NOT NULL CHECK(
+        length(payload_digest) = 64
+        AND payload_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, batch_sequence),
+    UNIQUE(run_id, session)
 );
 
 CREATE TABLE IF NOT EXISTS backtest_staging_entry_selection (
@@ -1186,6 +1214,7 @@ class BacktestIntegrityError(RuntimeError):
 #: text (AC 5) -- checked after ``html.escape`` (whose entity expansion can
 #: grow the text) and before persistence, never truncated silently.
 _NOTE_MAX_CODE_POINTS = 10_000
+_BACKTEST_STAGING_BATCH_ENCODING = "json+zlib.v1"
 
 
 @dataclass(frozen=True)
@@ -1223,6 +1252,37 @@ class BacktestStagingV1:
     events: tuple[TradeLogEvent, ...]
     equity_curve: tuple[EquityCurvePointV1, ...]
     final_cash_base: Decimal
+    updated_at: str
+    initial_entry_selection: InitialEntrySelectionV1 | None = None
+
+
+@dataclass(frozen=True)
+class BacktestStagingBatchV1:
+    """One decoded, ordered session delta from an attempt-owned batch."""
+
+    run_id: str
+    batch_sequence: int
+    session: date
+    events: tuple[TradeLogEvent, ...]
+    equity_point: EquityCurvePointV1
+    payload_encoding: str
+    uncompressed_bytes: int
+    payload_digest: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class BacktestStagingCheckpointV1:
+    """The latest portfolio checkpoint paired with published batches."""
+
+    run_id: str
+    state_schema_version: str
+    portfolio_state: dict[str, object]
+    final_cash_base: Decimal
+    last_batch_sequence: int
+    last_session: date | None
+    last_event_sequence: int
+    last_equity_sequence: int
     updated_at: str
     initial_entry_selection: InitialEntrySelectionV1 | None = None
 
@@ -1899,6 +1959,19 @@ class BacktestRepository:
                     "ALTER TABLE backtest_results ADD COLUMN result_schema_version "
                     "TEXT NOT NULL DEFAULT 'backtest_result.v1'"
                 )
+            staging_cols = {
+                str(x[1]) for x in conn.execute("PRAGMA table_info(backtest_staging)")
+            }
+            for definition in (
+                "last_batch_sequence INTEGER NOT NULL DEFAULT 0 CHECK(last_batch_sequence >= 0)",
+                "last_session TEXT",
+                "last_event_sequence INTEGER NOT NULL DEFAULT 0 CHECK(last_event_sequence >= 0)",
+                "last_equity_sequence INTEGER NOT NULL DEFAULT 0 CHECK(last_equity_sequence >= 0)",
+            ):
+                if definition.split()[0] not in staging_cols:
+                    conn.execute(
+                        f"ALTER TABLE backtest_staging ADD COLUMN {definition}"
+                    )
             # gh-468: additive adoption provenance on committed months and the
             # Update/Rebuild choice on initialization runs. Both are nullable
             # / defaulted so pre-existing databases migrate in place.
@@ -4080,8 +4153,8 @@ class BacktestRepository:
             raise ValueError("failure detail must contain 1-500 characters")
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
+            job_type = self._require_job_type(conn, job_id)
             if failed_month is not None:
-                job_type = self._require_job_type(conn, job_id)
                 if job_type is StrategyJobType.INITIALIZATION:
                     initialization = self._load_initialization(conn, job_id)
                     if failed_month not in initialization.requested_months:
@@ -4122,6 +4195,8 @@ class BacktestRepository:
             )
             if cursor.rowcount != 1:
                 raise StrategyJobConflict("worker failure ownership is stale")
+            if job_type is StrategyJobType.BACKTEST:
+                conn.execute("DELETE FROM backtest_staging WHERE run_id=?", (job_id,))
             job = self._load_strategy_job(conn, job_id)
             self._upsert_notification_outbox_on_connection(conn, job)
             return job
@@ -4318,6 +4393,582 @@ class BacktestRepository:
                     initial_entry_selection,
                 )
 
+    def append_backtest_staging_batch(
+        self,
+        run_id: str,
+        *,
+        claim_token: str,
+        expected_version: int,
+        batch_sequence: int,
+        session: date,
+        state_schema_version: str,
+        portfolio_state: Mapping[str, object],
+        events: tuple[TradeLogEvent, ...],
+        equity_point: EquityCurvePointV1,
+        final_cash_base: Decimal | None = None,
+        initial_entry_selection: InitialEntrySelectionV1 | None = None,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> None:
+        """Append one session delta and its matching portfolio checkpoint.
+
+        Serialization happens before the SQLite write lock. The append,
+        checkpoint update, and first entry-selection write share one
+        ``BEGIN IMMEDIATE`` transaction and the existing worker fence.
+        """
+        if type(batch_sequence) is not int or batch_sequence <= 0:
+            raise BacktestIntegrityError("staging batch sequence is invalid")
+        if not isinstance(session, date):
+            raise BacktestIntegrityError("staging batch session is invalid")
+        if not state_schema_version:
+            raise BacktestIntegrityError("staging state schema version is invalid")
+        try:
+            if final_cash_base is None:
+                final_cash_base = equity_point.cash_base
+            if not final_cash_base.is_finite():
+                raise ValueError("final cash is not finite")
+            if equity_point.session != session:
+                raise ValueError("equity point session does not match batch session")
+            event_sequences = [event.sequence for event in events]
+            if event_sequences != sorted(event_sequences) or len(
+                set(event_sequences)
+            ) != len(event_sequences):
+                raise ValueError("staging batch events are not strictly ordered")
+            if final_cash_base != equity_point.cash_base:
+                raise ValueError("staging final cash does not match equity point")
+            state_json = json.dumps(
+                dict(portfolio_state),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            payload, compressed, payload_digest = self._encode_backtest_staging_batch(
+                session, events, equity_point
+            )
+        except (AttributeError, TypeError, ValueError, OverflowError) as exc:
+            raise BacktestIntegrityError("backtest staging batch is invalid") from exc
+
+        now = self._job_now()
+        with _db_session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job = self._load_strategy_job(conn, run_id)
+            fence = _lease_fence_params(lease)
+            lease_matches = conn.execute(
+                f"SELECT 1 WHERE 1=1 {_LEASE_FENCE_SQL}", fence
+            ).fetchone()
+            if (
+                job.status is not StrategyJobStatus.RUNNING
+                or job.claim_token != claim_token
+                or job.status_version != expected_version
+                or job.cancel_requested_at is not None
+                or lease_matches is None
+            ):
+                raise StrategyJobConflict("staging batch append ownership is stale")
+
+            run_range = conn.execute(
+                "SELECT start_month, end_month FROM strategy_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
+            session_month = session.strftime("%Y-%m")
+            if run_range is None or not (
+                str(run_range[0]) <= session_month <= str(run_range[1])
+            ):
+                raise BacktestIntegrityError(
+                    "staging batch session is outside the pinned run range"
+                )
+
+            checkpoint = conn.execute(
+                """SELECT state_json, events_json, equity_curve_json,
+                          final_cash_base, last_batch_sequence, last_session,
+                          last_event_sequence, last_equity_sequence
+                   FROM backtest_staging WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if checkpoint is None:
+                last_batch_sequence = 0
+                last_session: date | None = None
+                last_event_sequence = 0
+                last_equity_sequence = 0
+            else:
+                if (
+                    str(checkpoint[1]) != "[]"
+                    or str(checkpoint[2]) != "[]"
+                    or str(checkpoint[0]) == ""
+                ):
+                    raise BacktestIntegrityError(
+                        "legacy cumulative staging must be discarded before append"
+                    )
+                try:
+                    last_batch_sequence = int(checkpoint[4])
+                    last_session = (
+                        None
+                        if checkpoint[5] is None
+                        else date.fromisoformat(str(checkpoint[5]))
+                    )
+                    last_event_sequence = int(checkpoint[6])
+                    last_equity_sequence = int(checkpoint[7])
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise BacktestIntegrityError(
+                        "backtest staging checkpoint is invalid"
+                    ) from exc
+
+            existing = conn.execute(
+                """SELECT run_id, batch_sequence, session, payload_encoding,
+                          payload_blob, uncompressed_bytes, payload_digest, created_at
+                   FROM backtest_staging_batches
+                   WHERE run_id=? AND (batch_sequence=? OR session=?)""",
+                (run_id, batch_sequence, session.isoformat()),
+            ).fetchone()
+            if existing is not None:
+                same_key = (
+                    int(existing[1]) == batch_sequence
+                    and str(existing[2]) == session.isoformat()
+                )
+                same_payload = (
+                    str(existing[3]) == _BACKTEST_STAGING_BATCH_ENCODING
+                    and int(existing[5]) == len(payload)
+                    and str(existing[6]) == payload_digest
+                )
+                if same_key and same_payload:
+                    self._decode_backtest_staging_batch(existing)
+                    stored_selection = self._load_entry_selection(
+                        conn,
+                        "backtest_staging_entry_selection",
+                        "backtest_staging_entry_selection_decisions",
+                        run_id,
+                    )
+                    requested_selection = (
+                        None
+                        if initial_entry_selection is None
+                        else initial_entry_selection.model_dump(mode="json")
+                    )
+                    stored_selection_payload = (
+                        None
+                        if stored_selection is None
+                        else stored_selection.model_dump(mode="json")
+                    )
+                    if requested_selection != stored_selection_payload:
+                        raise BacktestIntegrityError(
+                            "staging retry has a different initial selection"
+                        )
+                    if last_batch_sequence < batch_sequence:
+                        raise BacktestIntegrityError(
+                            "staging checkpoint is behind an existing batch"
+                        )
+                    if last_batch_sequence == batch_sequence and (
+                        str(checkpoint[0]) != state_json
+                        or Decimal(str(checkpoint[3])) != final_cash_base
+                    ):
+                        raise BacktestIntegrityError(
+                            "staging retry has a different checkpoint"
+                        )
+                    return
+                raise BacktestIntegrityError(
+                    "staging batch key has a different payload"
+                )
+
+            if batch_sequence != last_batch_sequence + 1:
+                raise BacktestIntegrityError(
+                    "staging batch sequence is not the next batch"
+                )
+            if last_session is not None and session <= last_session:
+                raise BacktestIntegrityError(
+                    "staging batch sessions are not increasing"
+                )
+            if event_sequences and event_sequences[0] <= last_event_sequence:
+                raise BacktestIntegrityError("staging event sequence is not increasing")
+            if equity_point.sequence <= last_equity_sequence:
+                raise BacktestIntegrityError(
+                    "staging equity sequence is not increasing"
+                )
+
+            if initial_entry_selection is not None:
+                if batch_sequence != 1:
+                    raise BacktestIntegrityError(
+                        "initial entry selection must be published with the first batch"
+                    )
+                strategy_run = self._load_strategy_run_row(conn, run_id)
+                selection = strategy_run.universe_selection
+                if selection is None:
+                    raise BacktestIntegrityError(
+                        "initial entry selection requires a pinned universe"
+                    )
+                try:
+                    initial_entry_selection = validate_initial_entry_selection(
+                        initial_entry_selection,
+                        pinned_security_ids=selection.canonical_security_ids,
+                        expected_session=session,
+                    )
+                except StrategyProtocolError as exc:
+                    raise BacktestIntegrityError(
+                        "staged initial entry selection is invalid",
+                        code=exc.code.value,
+                    ) from exc
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM backtest_staging_entry_selection WHERE run_id=?",
+                        (run_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise BacktestIntegrityError(
+                        "initial entry selection was already published"
+                    )
+
+            last_event_sequence = max(
+                last_event_sequence, max(event_sequences, default=0)
+            )
+            last_equity_sequence = equity_point.sequence
+            last_session_text = session.isoformat()
+            conn.execute(
+                """INSERT INTO backtest_staging (
+                       run_id, state_schema_version, state_json, events_json,
+                       equity_curve_json, final_cash_base, updated_at,
+                       last_batch_sequence, last_session, last_event_sequence,
+                       last_equity_sequence
+                   ) VALUES (?, ?, ?, '[]', '[]', ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(run_id) DO UPDATE SET
+                       state_schema_version=excluded.state_schema_version,
+                       state_json=excluded.state_json,
+                       events_json='[]', equity_curve_json='[]',
+                       final_cash_base=excluded.final_cash_base,
+                       updated_at=excluded.updated_at,
+                       last_batch_sequence=excluded.last_batch_sequence,
+                       last_session=excluded.last_session,
+                       last_event_sequence=excluded.last_event_sequence,
+                       last_equity_sequence=excluded.last_equity_sequence""",
+                (
+                    run_id,
+                    state_schema_version,
+                    state_json,
+                    str(final_cash_base),
+                    now,
+                    batch_sequence,
+                    last_session_text,
+                    last_event_sequence,
+                    last_equity_sequence,
+                ),
+            )
+            try:
+                conn.execute(
+                    """INSERT INTO backtest_staging_batches (
+                           run_id, batch_sequence, session, payload_encoding,
+                           payload_blob, uncompressed_bytes, payload_digest, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        run_id,
+                        batch_sequence,
+                        last_session_text,
+                        _BACKTEST_STAGING_BATCH_ENCODING,
+                        compressed,
+                        len(payload),
+                        payload_digest,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise BacktestIntegrityError(
+                    "backtest staging batch insert failed"
+                ) from exc
+            if initial_entry_selection is not None:
+                self._insert_entry_selection(
+                    conn,
+                    "backtest_staging_entry_selection",
+                    "backtest_staging_entry_selection_decisions",
+                    run_id,
+                    initial_entry_selection,
+                )
+
+    def delete_backtest_staging(
+        self,
+        run_id: str,
+        *,
+        claim_token: str,
+        expected_version: int,
+        lease: WorkerLeaseFenceV1 | None = None,
+    ) -> None:
+        """Fence and atomically remove one running attempt's staging."""
+        with _db_session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._load_strategy_job(conn, run_id)
+            fence = _lease_fence_params(lease)
+            owned = conn.execute(
+                f"""SELECT 1 FROM strategy_jobs
+                    WHERE id=? AND status='running' AND claim_token=?
+                      AND status_version=? {_LEASE_FENCE_SQL}""",
+                (run_id, claim_token, expected_version, *fence),
+            ).fetchone()
+            if owned is None:
+                raise StrategyJobConflict("staging cleanup ownership is stale")
+            conn.execute("DELETE FROM backtest_staging WHERE run_id=?", (run_id,))
+
+    def read_backtest_staging_batches(
+        self, run_id: str
+    ) -> tuple[BacktestStagingBatchV1, ...]:
+        """Read and strictly validate an attempt's batches in sequence order."""
+        with _db_session(self._connect) as conn:
+            return self._load_backtest_staging_batches_on_connection(conn, run_id)
+
+    def read_backtest_staging_checkpoint(
+        self, run_id: str
+    ) -> BacktestStagingCheckpointV1 | None:
+        """Read the latest portfolio checkpoint without cumulative history."""
+        with _db_session(self._connect) as conn:
+            return self._load_backtest_staging_checkpoint_on_connection(conn, run_id)
+
+    @classmethod
+    def _load_backtest_staging_batches_on_connection(
+        cls, conn: sqlite3.Connection, run_id: str
+    ) -> tuple[BacktestStagingBatchV1, ...]:
+        rows = conn.execute(
+            """SELECT run_id, batch_sequence, session, payload_encoding,
+                      payload_blob, uncompressed_bytes, payload_digest, created_at
+               FROM backtest_staging_batches
+               WHERE run_id=? ORDER BY batch_sequence""",
+            (run_id,),
+        ).fetchall()
+        batches = tuple(cls._decode_backtest_staging_batch(row) for row in rows)
+        cls._validate_backtest_staging_batch_order(conn, run_id, batches)
+        return batches
+
+    def _load_backtest_staging_checkpoint_on_connection(
+        self, conn: sqlite3.Connection, run_id: str
+    ) -> BacktestStagingCheckpointV1 | None:
+        row = conn.execute(
+            """SELECT run_id, state_schema_version, state_json,
+                          final_cash_base, last_batch_sequence, last_session,
+                          last_event_sequence, last_equity_sequence, updated_at
+                   FROM backtest_staging WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            state = json.loads(str(row[2]))
+            if not isinstance(state, dict):
+                raise ValueError("checkpoint state is not an object")
+            final_cash = Decimal(str(row[3]))
+            if not final_cash.is_finite():
+                raise ValueError("checkpoint cash is not finite")
+            last_session = None if row[5] is None else date.fromisoformat(str(row[5]))
+            values = tuple(int(row[index]) for index in (4, 6, 7))
+            if any(value < 0 for value in values):
+                raise ValueError("checkpoint high-water mark is negative")
+        except (
+            json.JSONDecodeError,
+            InvalidOperation,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise BacktestIntegrityError(
+                "backtest staging checkpoint is invalid"
+            ) from exc
+        return BacktestStagingCheckpointV1(
+            run_id=str(row[0]),
+            state_schema_version=str(row[1]),
+            portfolio_state=state,
+            final_cash_base=final_cash,
+            last_batch_sequence=values[0],
+            last_session=last_session,
+            last_event_sequence=values[1],
+            last_equity_sequence=values[2],
+            updated_at=str(row[8]),
+            initial_entry_selection=self._load_entry_selection(
+                conn,
+                "backtest_staging_entry_selection",
+                "backtest_staging_entry_selection_decisions",
+                run_id,
+            ),
+        )
+
+    @classmethod
+    def _encode_backtest_staging_batch(
+        cls,
+        batch_session: date,
+        events: tuple[TradeLogEvent, ...],
+        equity_point: EquityCurvePointV1,
+    ) -> tuple[bytes, bytes, str]:
+        payload = {
+            "events": [event.model_dump(mode="json") for event in events],
+            "equity_curve": [equity_point.model_dump(mode="json")],
+            "session": batch_session.isoformat(),
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return raw, zlib.compress(raw), sha256(raw).hexdigest()
+
+    @classmethod
+    def _decode_backtest_staging_batch(
+        cls, row: sqlite3.Row | tuple[object, ...]
+    ) -> BacktestStagingBatchV1:
+        try:
+            run_id = str(row[0])
+            batch_sequence = int(cast(Any, row[1]))
+            stored_session = str(row[2])
+            encoding = str(row[3])
+            compressed = row[4]
+            claimed_size = int(cast(Any, row[5]))
+            stored_digest = str(row[6])
+            created_at = str(row[7])
+            if (
+                batch_sequence <= 0
+                or encoding != _BACKTEST_STAGING_BATCH_ENCODING
+                or not isinstance(compressed, (bytes, bytearray, memoryview))
+                or claimed_size <= 0
+                or len(stored_digest) != 64
+            ):
+                raise ValueError("invalid batch metadata")
+            batch_session = date.fromisoformat(stored_session)
+            decompressor = zlib.decompressobj()
+            raw = decompressor.decompress(bytes(compressed), claimed_size + 1)
+            if (
+                decompressor.unconsumed_tail
+                or decompressor.unused_data
+                or not decompressor.eof
+                or len(raw) != claimed_size
+                or sha256(raw).hexdigest() != stored_digest
+            ):
+                raise ValueError("invalid batch compression or digest")
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict) or set(payload) != {
+                "events",
+                "equity_curve",
+                "session",
+            }:
+                raise ValueError("invalid batch payload shape")
+            if payload["session"] != stored_session:
+                raise ValueError("batch payload session mismatch")
+            event_payloads = payload["events"]
+            curve_payloads = payload["equity_curve"]
+            if not isinstance(event_payloads, list) or not isinstance(
+                curve_payloads, list
+            ):
+                raise ValueError("batch arrays are invalid")
+            if len(curve_payloads) != 1:
+                raise ValueError("batch must contain one equity point")
+            events = tuple(cls._parse_trade_log_event(item) for item in event_payloads)
+            equity_point = cls._parse_equity_curve_point(curve_payloads[0])
+            event_sequences = [event.sequence for event in events]
+            if event_sequences != sorted(event_sequences) or len(
+                set(event_sequences)
+            ) != len(event_sequences):
+                raise ValueError("batch events are unordered")
+            if equity_point.session != batch_session:
+                raise ValueError("batch equity session mismatch")
+            canonical, _compressed, _digest = cls._encode_backtest_staging_batch(
+                batch_session, events, equity_point
+            )
+            if canonical != raw:
+                raise ValueError("batch payload is not canonical")
+        except (
+            IndexError,
+            InvalidOperation,
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            UnicodeError,
+            ValidationError,
+            json.JSONDecodeError,
+            zlib.error,
+        ) as exc:
+            raise BacktestIntegrityError("invalid backtest staging batch") from exc
+        return BacktestStagingBatchV1(
+            run_id=run_id,
+            batch_sequence=batch_sequence,
+            session=batch_session,
+            events=events,
+            equity_point=equity_point,
+            payload_encoding=encoding,
+            uncompressed_bytes=claimed_size,
+            payload_digest=stored_digest,
+            created_at=created_at,
+        )
+
+    @staticmethod
+    def _validate_backtest_staging_batch_order(
+        conn: sqlite3.Connection,
+        run_id: str,
+        batches: tuple[BacktestStagingBatchV1, ...],
+    ) -> None:
+        run_range = conn.execute(
+            "SELECT start_month, end_month FROM strategy_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if run_range is None and batches:
+            raise BacktestIntegrityError("backtest staging run is missing")
+        last_session: date | None = None
+        last_event_sequence = 0
+        last_equity_sequence = 0
+        for expected_sequence, batch in enumerate(batches, start=1):
+            batch_month = batch.session.strftime("%Y-%m")
+            if run_range is not None and not (
+                str(run_range[0]) <= batch_month <= str(run_range[1])
+            ):
+                raise BacktestIntegrityError(
+                    "backtest staging batch session is outside the pinned run range"
+                )
+            if batch.batch_sequence != expected_sequence:
+                raise BacktestIntegrityError(
+                    "backtest staging batches are not contiguous"
+                )
+            if last_session is not None and batch.session <= last_session:
+                raise BacktestIntegrityError(
+                    "backtest staging sessions are not increasing"
+                )
+            event_sequences = [event.sequence for event in batch.events]
+            if event_sequences and event_sequences[0] <= last_event_sequence:
+                raise BacktestIntegrityError(
+                    "backtest staging events are not increasing"
+                )
+            if batch.equity_point.sequence <= last_equity_sequence:
+                raise BacktestIntegrityError(
+                    "backtest staging equity is not increasing"
+                )
+            last_session = batch.session
+            last_event_sequence = max(
+                last_event_sequence, max(event_sequences, default=0)
+            )
+            last_equity_sequence = batch.equity_point.sequence
+
+        checkpoint = conn.execute(
+            """SELECT last_batch_sequence, last_session, last_event_sequence,
+                      last_equity_sequence, final_cash_base
+               FROM backtest_staging WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if checkpoint is None:
+            if batches:
+                raise BacktestIntegrityError("backtest staging checkpoint is missing")
+            return
+        try:
+            checkpoint_values = (
+                int(checkpoint[0]),
+                None if checkpoint[1] is None else str(checkpoint[1]),
+                int(checkpoint[2]),
+                int(checkpoint[3]),
+                Decimal(str(checkpoint[4])),
+            )
+        except (InvalidOperation, TypeError, ValueError, OverflowError) as exc:
+            raise BacktestIntegrityError(
+                "backtest staging checkpoint is invalid"
+            ) from exc
+        if checkpoint_values[0] != len(batches):
+            raise BacktestIntegrityError(
+                "backtest staging checkpoint does not match batches"
+            )
+        if (
+            checkpoint_values[1]
+            != (None if last_session is None else last_session.isoformat())
+            or checkpoint_values[2] != last_event_sequence
+            or checkpoint_values[3] != last_equity_sequence
+        ):
+            raise BacktestIntegrityError(
+                "backtest staging checkpoint high-water mark is invalid"
+            )
+        if batches and checkpoint_values[4] != batches[-1].equity_point.cash_base:
+            raise BacktestIntegrityError(
+                "backtest staging checkpoint cash does not match latest batch"
+            )
+
     def complete_claimed_backtest_job(
         self,
         job_id: str,
@@ -4370,8 +5021,45 @@ class BacktestRepository:
 
             strategy_run = self._load_strategy_run_row(conn, job_id)
             staging = self._load_backtest_staging_row(conn, job_id)
-            if staging is None:
+            checkpoint = self._load_backtest_staging_checkpoint_on_connection(
+                conn, job_id
+            )
+            if staging is None or checkpoint is None:
                 raise StrategyJobConflict("no staging exists for this run")
+
+            batch_count = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?",
+                    (job_id,),
+                ).fetchone()[0]
+            )
+            if checkpoint.last_batch_sequence and not batch_count:
+                raise BacktestIntegrityError("backtest staging batches are missing")
+            if batch_count:
+                if staging.events or staging.equity_curve:
+                    raise BacktestIntegrityError(
+                        "backtest staging mixes legacy and batch payloads"
+                    )
+                batches = self._load_backtest_staging_batches_on_connection(
+                    conn, job_id
+                )
+                if checkpoint.initial_entry_selection is not None and (
+                    not batches
+                    or checkpoint.initial_entry_selection.session != batches[0].session
+                ):
+                    raise BacktestIntegrityError(
+                        "initial entry selection does not match first batch"
+                    )
+                staging = BacktestStagingV1(
+                    run_id=checkpoint.run_id,
+                    state_schema_version=checkpoint.state_schema_version,
+                    portfolio_state=checkpoint.portfolio_state,
+                    events=tuple(event for batch in batches for event in batch.events),
+                    equity_curve=tuple(batch.equity_point for batch in batches),
+                    final_cash_base=checkpoint.final_cash_base,
+                    updated_at=checkpoint.updated_at,
+                    initial_entry_selection=checkpoint.initial_entry_selection,
+                )
 
             closed_trades = tuple(
                 event for event in staging.events if isinstance(event, ExitFillEventV1)
@@ -5166,6 +5854,14 @@ class BacktestRepository:
                     (self._job_now(), str(row[0]), int(row[1])),
                 )
                 if cursor.rowcount == 1:
+                    if (
+                        self._require_job_type(conn, str(row[0]))
+                        is StrategyJobType.BACKTEST
+                    ):
+                        conn.execute(
+                            "DELETE FROM backtest_staging WHERE run_id=?",
+                            (str(row[0]),),
+                        )
                     job = self._load_strategy_job(conn, str(row[0]))
                     self._upsert_notification_outbox_on_connection(conn, job)
                     reconciled.append(job)
@@ -5349,6 +6045,9 @@ class BacktestRepository:
             if prior_child is not None:
                 raise StrategyJobConflict("strategy job already has a restart child")
             backtest = self._load_strategy_run(conn, source_job_id)
+            conn.execute(
+                "DELETE FROM backtest_staging WHERE run_id=?", (source_job_id,)
+            )
             now = self._job_now()
             sequence = int(
                 conn.execute(
@@ -6661,7 +7360,10 @@ class BacktestRepository:
             )
             if persisted is not None:
                 return persisted
-            if self._load_verified_snapshot_month(conn, profile_hash, snapshot_month) is None:
+            if (
+                self._load_verified_snapshot_month(conn, profile_hash, snapshot_month)
+                is None
+            ):
                 raise BacktestIntegrityError("snapshot month does not exist")
             rows = conn.execute(
                 """SELECT security_id, provider_data_revision FROM snapshot_members
@@ -7301,9 +8003,7 @@ class BacktestRepository:
             ):
                 return None
             revisions.append((item[0], item[1]))
-        if any(
-            left[0] >= right[0] for left, right in zip(revisions, revisions[1:])
-        ):
+        if any(left[0] >= right[0] for left, right in zip(revisions, revisions[1:])):
             return None
         return tuple(revisions)
 
@@ -7314,9 +8014,7 @@ class BacktestRepository:
         revisions: tuple[tuple[str, str], ...],
         revision: str,
     ) -> None:
-        payload = json.dumps(
-            revisions, ensure_ascii=False, separators=(",", ":")
-        )
+        payload = json.dumps(revisions, ensure_ascii=False, separators=(",", ":"))
         if len(payload.encode("utf-8")) > self._member_revision_summary_max_bytes:
             return
         try:

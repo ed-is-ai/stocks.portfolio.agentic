@@ -751,20 +751,12 @@ class _ClaimState:
 
 @dataclass
 class _StagingSink:
-    """Adapter satisfying ``backtest_engine.SessionBatchSink`` by calling
-    ``write_backtest_staging`` (Story 2.5) once per session.
-
-    ``write_backtest_staging`` is a full-replace compare-and-swap write,
-    not an append (Design Notes) -- this adapter accumulates the complete
-    session/event/curve history itself and republishes the whole thing on
-    every call.
-    """
+    """Persist one bounded, attempt-owned session batch at a time."""
 
     repository: BacktestRepository
     state: _ClaimState
     lease: WorkerLeaseFenceV1 | None = None
-    events: list[TradeLogEvent] = field(default_factory=list)
-    equity_curve: list[EquityCurvePointV1] = field(default_factory=list)
+    batch_sequence: int = 1
     open_positions: dict[str, Decimal] = field(default_factory=dict)
     initial_entry_selection: InitialEntrySelectionV1 | None = None
 
@@ -776,13 +768,11 @@ class _StagingSink:
         equity_point: EquityCurvePointV1,
         initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None:
-        del session  # already carried by equity_point.session
+        published_selection = initial_entry_selection
         if initial_entry_selection is not None:
             if self.initial_entry_selection is not None:
                 raise _BacktestEngineDefect("initial selection was published twice")
             self.initial_entry_selection = initial_entry_selection
-        self.events.extend(events)
-        self.equity_curve.append(equity_point)
         for event in events:
             if isinstance(event, EntryFillEventV1):
                 self.open_positions[event.security_id] = Decimal(event.shares)
@@ -800,20 +790,23 @@ class _StagingSink:
             ],
         }
         try:
-            self.repository.write_backtest_staging(
+            self.repository.append_backtest_staging_batch(
                 self.state.job_id,
                 claim_token=self.state.claim_token,
                 expected_version=self.state.status_version,
+                batch_sequence=self.batch_sequence,
+                session=session,
                 state_schema_version=_PORTFOLIO_STATE_SCHEMA_VERSION,
                 portfolio_state=portfolio_state,
-                events=tuple(self.events),
-                equity_curve=tuple(self.equity_curve),
+                events=events,
+                equity_point=equity_point,
                 final_cash_base=equity_point.cash_base,
-                initial_entry_selection=self.initial_entry_selection,
+                initial_entry_selection=published_selection,
                 lease=self.lease,
             )
+            self.batch_sequence += 1
         except StrategyJobConflict as exc:
-            # ``write_backtest_staging``'s own CAS predicate rejects any
+            # ``append_backtest_staging_batch``'s own CAS predicate rejects any
             # write once ``cancel_requested_at`` is set -- even mid-month,
             # before the next month-boundary check would otherwise notice
             # it. Distinguish that from a genuine ownership loss (a stale

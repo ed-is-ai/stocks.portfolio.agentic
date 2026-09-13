@@ -55,7 +55,7 @@ import pytest
 import uvicorn
 from playwright.sync_api import Browser, Dialog, Page, expect, sync_playwright
 
-from app.api.app import app
+from app.api.app import create_app
 from app.api.dependencies import (
     get_notifications_repository,
     get_portfolio_service,
@@ -63,6 +63,8 @@ from app.api.dependencies import (
 )
 from app.schemas.trade import Portfolio, SippImportResult
 from app.services.portfolio_service import PortfolioService
+
+app = create_app(strategy_jobs_enabled=False, prepare_strategy_coverage=lambda: None)
 
 # How long the mocked import "processing" takes server-side. Long enough
 # that Playwright's assertions can reliably observe the mid-flight disabled

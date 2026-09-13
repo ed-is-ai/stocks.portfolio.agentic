@@ -36,6 +36,7 @@ class FakeJob:
     status_version: int
     status: str = "running"
     claim_token: str = "claim-1"
+    cancel_requested_at: object | None = None
 
 
 @dataclass
@@ -201,6 +202,36 @@ def test_shutdown_terminates_only_owned_child_and_marks_interrupted() -> None:
 
     assert process.terminated and process.waited
     assert len(repo.failed) == 1
+
+
+def test_shutdown_finishes_a_pending_cancellation_instead_of_failing_it() -> None:
+    class CancelledRepository(FakeRepository):
+        def __init__(self) -> None:
+            super().__init__(FakeClaim(FakeJob("job-1", 2), "claim-1"))
+            self.cancelled: list[tuple[str, str, dict[str, object]]] = []
+
+        def strategy_job(self, job_id: str):
+            return FakeJob(
+                job_id,
+                3,
+                claim_token="claim-1",
+                cancel_requested_at=NOW,
+            )
+
+        def cancel_claimed_strategy_job(self, *args, **kwargs):
+            self.cancelled.append((str(args[0]), str(args[1]), kwargs))
+            return None
+
+    repo = CancelledRepository()
+    service = StrategyJobService(
+        repo, popen=lambda *_a, **_k: FakeProcess(), project_root=Path("/project")
+    )
+    assert service.dispatch_once() is True
+
+    service.shutdown()
+
+    assert len(repo.cancelled) == 1
+    assert not repo.failed
 
 
 def test_enqueue_requires_current_qualification_before_repository_write() -> None:

@@ -59,7 +59,7 @@ stories:
     status: in-progress
     feature_plan: feature-gh-444-database-storage-performance.md
     sub_issues: [535, 536, 537, 538, 539, 540]
-    follow_on_issues: [602]
+    follow_on_issues: [602, 616]
     stories:
       gh-535-database-baseline-contention-diagnostics:
         issue: 535
@@ -128,6 +128,26 @@ stories:
         issue: 613
         status: review
         prerequisite_issues: [611, 612, 606]
+  incremental-backtest-staging:
+    issue: 616
+    status: in-progress
+    parent_issue: 444
+    prerequisite_issues: [613]
+    feature_plan: feature-gh-616-incremental-backtest-staging.md
+    sub_issues: [617, 618, 619]
+    stories:
+      gh-616-1-add-append-only-session-batch-staging-contract:
+        issue: 617
+        status: review
+        prerequisite_issues: [613]
+      gh-616-2-wire-incremental-staging-through-worker-and-completion:
+        issue: 618
+        status: done
+        prerequisite_issues: [617]
+      gh-616-3-prove-aggregate-end-to-end-improvement:
+        issue: 619
+        status: in-progress
+        prerequisite_issues: [618]
   strategy-manager-agent:
     issue: 493
     status: review

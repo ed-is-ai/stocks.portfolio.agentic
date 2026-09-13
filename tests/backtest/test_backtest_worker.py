@@ -584,6 +584,20 @@ def test_worker_completes_a_real_backtest_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_strategy_resolution(monkeypatch)
+    appends: list[tuple[int, int]] = []
+    real_append = BacktestRepository.append_backtest_staging_batch
+
+    def record_append(self, _run_id: str, **kwargs: object) -> None:
+        batch_sequence = kwargs["batch_sequence"]
+        events = kwargs["events"]
+        assert isinstance(batch_sequence, int)
+        assert isinstance(events, tuple)
+        appends.append((batch_sequence, len(events)))
+        real_append(self, _run_id, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        BacktestRepository, "append_backtest_staging_batch", record_append
+    )
     repo = _repo(tmp_path / "backtest.db")
     prices = _price_repo(tmp_path)
     sessions = TradingCalendar().sessions_in_range(
@@ -607,6 +621,8 @@ def test_worker_completes_a_real_backtest_end_to_end(
 
     assert result.status is StrategyJobStatus.COMPLETE
     backtest_result = repo.backtest_result(enqueued.job.id)
+    assert [sequence for sequence, _ in appends] == list(range(1, len(sessions) + 1))
+    assert all(event_count <= len(backtest_result.events) for _, event_count in appends)
     assert len(backtest_result.events) > 0
     assert len(backtest_result.equity_curve) == len(sessions)
     with sqlite3.connect(tmp_path / "backtest.db") as conn:
@@ -658,7 +674,7 @@ def test_staging_sink_tracks_split_fraction_and_exact_exit_quantity() -> None:
     captured: list[dict[str, object]] = []
 
     class CaptureRepository:
-        def write_backtest_staging(self, _run_id: str, **kwargs: object) -> None:
+        def append_backtest_staging_batch(self, _run_id: str, **kwargs: object) -> None:
             captured.append(kwargs)
 
     sink = worker_module._StagingSink(
@@ -725,6 +741,10 @@ def test_staging_sink_tracks_split_fraction_and_exact_exit_quantity() -> None:
     sink.publish_session(
         session=date(2026, 6, 1), events=(entry,), equity_point=curve(1)
     )
+    assert not hasattr(sink, "events")
+    assert not hasattr(sink, "equity_curve")
+    assert captured[-1]["batch_sequence"] == 1
+    assert captured[-1]["events"] == (entry,)
     assert captured[-1]["portfolio_state"] == {
         "cash": "0",
         "positions": [{"security_id": "sec-a", "shares": "1"}],
@@ -732,18 +752,24 @@ def test_staging_sink_tracks_split_fraction_and_exact_exit_quantity() -> None:
     sink.publish_session(
         session=date(2026, 6, 2), events=(split,), equity_point=curve(2)
     )
+    assert captured[-1]["batch_sequence"] == 2
+    assert captured[-1]["events"] == (split,)
     assert captured[-1]["portfolio_state"]["positions"] == [  # type: ignore[index]
         {"security_id": "sec-a", "shares": "0.5"}
     ]
     sink.publish_session(
         session=date(2026, 6, 3), events=(mark,), equity_point=curve(3)
     )
+    assert captured[-1]["batch_sequence"] == 3
+    assert captured[-1]["events"] == (mark,)
     assert captured[-1]["portfolio_state"]["positions"] == [  # type: ignore[index]
         {"security_id": "sec-a", "shares": "0.5"}
     ]
     sink.publish_session(
         session=date(2026, 6, 4), events=(exit_event,), equity_point=curve(4)
     )
+    assert captured[-1]["batch_sequence"] == 4
+    assert captured[-1]["events"] == (exit_event,)
     assert captured[-1]["portfolio_state"] == {"cash": "0", "positions": []}
 
 

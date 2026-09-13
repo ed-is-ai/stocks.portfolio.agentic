@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 import json
 import sqlite3
+import zlib
 
 import pytest
 
@@ -22,6 +23,7 @@ from app.services.backtest.backtest_engine import (
     ExitFillEventV1,
     SkipReasonCode,
     SkippedSignalEventV1,
+    TradeLogEvent,
 )
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.metrics import BacktestMetricsV1
@@ -31,6 +33,7 @@ from app.services.backtest.run_input_manifest import (
     build_run_input_manifest_v2,
 )
 from app.services.backtest.strategy_job import (
+    JobFailureCode,
     RunUniverseSelectionV1,
     StrategyJobConflict,
     StrategyJobNotFound,
@@ -134,8 +137,13 @@ def _seed_backtest_run(
                    status_version, cancel_requested_at, created_at, updated_at
                ) VALUES (?, 'backtest', ?, ?, ?, NULL, ?, NULL, ?, ?)""",
             (
-                run_id, status, enqueue_seq, claim_token, status_version,
-                NOW.isoformat(), NOW.isoformat(),
+                run_id,
+                status,
+                enqueue_seq,
+                claim_token,
+                status_version,
+                NOW.isoformat(),
+                NOW.isoformat(),
             ),
         )
         conn.execute(
@@ -681,6 +689,313 @@ def test_concurrent_staging_writers_leave_exactly_one_committed_row(
     assert json.loads(state_json) == {"cash": final_cash_base, "positions": []}
 
 
+def _append_batch(
+    repo: BacktestRepository,
+    *,
+    batch_sequence: int = 1,
+    session: date = date(2026, 1, 2),
+    claim_token: str = CLAIM_TOKEN,
+    expected_version: int = 1,
+    events: tuple[TradeLogEvent, ...] | None = None,
+    final_cash: str = "10000",
+    initial_entry_selection: InitialEntrySelectionV1 | None = None,
+    lease: object | None = None,
+) -> None:
+    repo.append_backtest_staging_batch(
+        RUN_ID,
+        claim_token=claim_token,
+        expected_version=expected_version,
+        batch_sequence=batch_sequence,
+        session=session,
+        state_schema_version="backtest_portfolio_state.v1",
+        portfolio_state={"cash": final_cash, "positions": []},
+        events=tuple(
+            events if events is not None else (_entry(batch_sequence, session),)
+        ),
+        equity_point=_curve_point(batch_sequence, session, final_cash),
+        final_cash_base=Decimal(final_cash),
+        initial_entry_selection=initial_entry_selection,
+        lease=lease,  # type: ignore[arg-type]
+    )
+
+
+def test_session_batch_schema_is_idempotent_and_has_attempt_keys(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    repo.ensure_schema()
+
+    with sqlite3.connect(path) as conn:
+        columns = {
+            row[1]: row[3]
+            for row in conn.execute("PRAGMA table_info(backtest_staging_batches)")
+        }
+        assert columns["run_id"] == 1
+        assert columns["batch_sequence"] == 1
+        assert columns["payload_encoding"] == 1
+        assert columns["uncompressed_bytes"] == 1
+        assert columns["payload_digest"] == 1
+        assert (
+            conn.execute(
+                "PRAGMA foreign_key_list(backtest_staging_batches)"
+            ).fetchone()[2]
+            == "backtest_staging"
+        )
+        assert (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name='sqlite_autoindex_backtest_staging_batches_2'"
+            ).fetchone()
+            is not None
+        )
+
+
+def test_session_batch_append_stores_one_bounded_payload_and_latest_checkpoint(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+
+    _append_batch(repo)
+    _append_batch(
+        repo,
+        batch_sequence=2,
+        session=date(2026, 1, 5),
+        final_cash="10050",
+    )
+
+    batches = repo.read_backtest_staging_batches(RUN_ID)
+    assert [batch.batch_sequence for batch in batches] == [1, 2]
+    assert [batch.session for batch in batches] == [date(2026, 1, 2), date(2026, 1, 5)]
+    assert all(len(batch.events) == 1 for batch in batches)
+    assert all(batch.equity_point.session == batch.session for batch in batches)
+
+    with sqlite3.connect(path) as conn:
+        checkpoint = conn.execute(
+            "SELECT state_json, events_json, equity_curve_json, final_cash_base, "
+            "last_batch_sequence, last_session FROM backtest_staging WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone()
+        assert checkpoint == (
+            '{"cash":"10050","positions":[]}',
+            "[]",
+            "[]",
+            "10050",
+            2,
+            "2026-01-05",
+        )
+        rows = conn.execute(
+            "SELECT batch_sequence, session, uncompressed_bytes, payload_digest, "
+            "payload_blob FROM backtest_staging_batches WHERE run_id=? ORDER BY batch_sequence",
+            (RUN_ID,),
+        ).fetchall()
+    assert len(rows) == 2
+    for sequence, stored_session, size, digest, blob in rows:
+        raw = zlib.decompress(blob)
+        payload = json.loads(raw)
+        assert payload["session"] == stored_session
+        assert len(payload["events"]) == 1
+        assert len(payload["equity_curve"]) == 1
+        assert size == len(raw)
+        assert digest == __import__("hashlib").sha256(raw).hexdigest()
+        assert payload["equity_curve"][0]["sequence"] == sequence
+
+
+def test_session_batch_append_rejects_a_session_outside_the_pinned_run(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+
+    with pytest.raises(BacktestIntegrityError, match="outside the pinned run range"):
+        _append_batch(repo, session=date(2026, 2, 2))
+
+
+def test_session_batch_keeps_event_provenance_dates_separate_from_publish_session(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    event = _entry(1, date(2026, 1, 2)).model_copy(
+        update={"fill_session": date(2026, 1, 5)}
+    )
+
+    _append_batch(repo, events=(event,))
+
+    assert repo.read_backtest_staging_batches(RUN_ID)[0].events == (event,)
+
+
+def test_session_batch_append_is_fenced_and_atomic(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+
+    with pytest.raises(StrategyJobConflict):
+        _append_batch(repo, claim_token="wrong-token")
+    with pytest.raises(StrategyJobConflict):
+        _append_batch(repo, expected_version=99)
+
+    lease = repo.acquire_or_renew_worker_lease("worker-a", ttl_seconds=30)
+    with pytest.raises(StrategyJobConflict):
+        _append_batch(repo)
+    _append_batch(
+        repo,
+        claim_token=CLAIM_TOKEN,
+        expected_version=1,
+        lease=lease.fence,
+    )
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE strategy_jobs SET cancel_requested_at=?, status_version=2 WHERE id=?",
+            (NOW.isoformat(), RUN_ID),
+        )
+    with pytest.raises(StrategyJobConflict):
+        repo.append_backtest_staging_batch(
+            RUN_ID,
+            claim_token=CLAIM_TOKEN,
+            expected_version=1,
+            batch_sequence=2,
+            session=date(2026, 1, 5),
+            state_schema_version="backtest_portfolio_state.v1",
+            portfolio_state={"cash": "10050", "positions": []},
+            events=(_entry(2, date(2026, 1, 5)),),
+            equity_point=_curve_point(2, date(2026, 1, 5), "10050"),
+            final_cash_base=Decimal("10050"),
+            lease=lease.fence,
+        )
+
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT last_batch_sequence FROM backtest_staging WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (1,)
+
+
+def test_session_batch_retry_is_idempotent_but_divergence_fails_closed(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+
+    _append_batch(repo)
+    _append_batch(repo)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (1,)
+
+    with pytest.raises(BacktestIntegrityError, match="different payload"):
+        _append_batch(repo, events=(_skip(1, date(2026, 1, 2)),))
+
+
+def test_session_batch_retry_rejects_a_different_initial_selection(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_v2_backtest_run_for_initial_selection(path)
+    _append_batch(repo, initial_entry_selection=_initial_selection())
+
+    with pytest.raises(BacktestIntegrityError, match="different initial selection"):
+        _append_batch(
+            repo,
+            initial_entry_selection=_initial_selection().model_copy(
+                update={"metric_version": "v2"}
+            ),
+        )
+
+
+def test_session_batch_read_rejects_trailing_zlib_and_bad_typed_payload(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+
+    with sqlite3.connect(path) as conn:
+        blob = conn.execute(
+            "SELECT payload_blob FROM backtest_staging_batches WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone()[0]
+        conn.execute(
+            "UPDATE backtest_staging_batches SET payload_blob=? WHERE run_id=?",
+            (blob + b"trailing", RUN_ID),
+        )
+    with pytest.raises(BacktestIntegrityError):
+        repo.read_backtest_staging_batches(RUN_ID)
+
+
+def test_session_batch_read_normalizes_corrupt_checkpoint_cash(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE backtest_staging SET final_cash_base='not-a-decimal' WHERE run_id=?",
+            (RUN_ID,),
+        )
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.read_backtest_staging_batches(RUN_ID)
+
+    _repo(path).ensure_schema()
+    with sqlite3.connect(path) as conn:
+        blob = conn.execute(
+            "SELECT payload_blob FROM backtest_staging_batches WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone()[0]
+        payload = json.loads(zlib.decompress(blob))
+        payload["events"][0]["kind"] = "not-a-real-event"
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        conn.execute(
+            "UPDATE backtest_staging_batches SET payload_blob=?, uncompressed_bytes=?, "
+            "payload_digest=? WHERE run_id=?",
+            (
+                zlib.compress(raw),
+                len(raw),
+                __import__("hashlib").sha256(raw).hexdigest(),
+                RUN_ID,
+            ),
+        )
+    with pytest.raises(BacktestIntegrityError):
+        repo.read_backtest_staging_batches(RUN_ID)
+
+
+def test_session_batch_cleanup_cascades_without_touching_completed_results(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+
+    repo.delete_backtest_staging(
+        RUN_ID,
+        claim_token=CLAIM_TOKEN,
+        expected_version=1,
+    )
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (0,)
+
+    _write_staging(repo)
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+    assert repo.backtest_result(RUN_ID).run_id == RUN_ID
+
+
 # ---------------------------------------------------------------------------
 # Completion: atomic promotion, idempotency, divergence
 # ---------------------------------------------------------------------------
@@ -722,6 +1037,217 @@ def test_completion_promotes_result_trade_log_and_curve_and_deletes_staging(
     assert result.note_version == 1
 
 
+def test_completion_reconstructs_ordered_session_batches_atomically(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+    _append_batch(
+        repo,
+        batch_sequence=2,
+        session=date(2026, 1, 5),
+        final_cash="10050",
+    )
+
+    job = repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    assert job.status.value == "complete"
+    result = repo.backtest_result(RUN_ID)
+    assert [event.sequence for event in result.events] == [1, 2]
+    assert [point.sequence for point in result.equity_curve] == [1, 2]
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone() == (0,)
+
+
+def test_completion_rejects_missing_batch_without_partial_result_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+    _append_batch(
+        repo,
+        batch_sequence=2,
+        session=date(2026, 1, 5),
+        final_cash="10050",
+    )
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM backtest_staging_batches WHERE run_id=? AND batch_sequence=1",
+            (RUN_ID,),
+        )
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    with sqlite3.connect(path) as conn:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM backtest_results WHERE run_id=?", (RUN_ID,)
+            ).fetchone()
+            is None
+        )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (1,)
+
+
+def test_completion_rejects_mixed_legacy_and_batch_payloads_atomically(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "UPDATE backtest_staging SET events_json=? WHERE run_id=?",
+            (
+                json.dumps(
+                    [_entry(1, date(2026, 1, 2)).model_dump(mode="json")],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                RUN_ID,
+            ),
+        )
+
+    with pytest.raises(BacktestIntegrityError, match="mixes legacy and batch"):
+        repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    assert repo.strategy_job(RUN_ID).status.value == "running"
+    with sqlite3.connect(path) as conn:
+        assert (
+            conn.execute(
+                "SELECT 1 FROM backtest_results WHERE run_id=?", (RUN_ID,)
+            ).fetchone()
+            is None
+        )
+
+
+def test_completion_rejects_corrupt_batch_without_partial_result_rows(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+    with sqlite3.connect(path) as conn:
+        blob = conn.execute(
+            "SELECT payload_blob FROM backtest_staging_batches WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone()[0]
+        payload = json.loads(zlib.decompress(blob))
+        payload["events"][0]["kind"] = "not-a-real-event"
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        conn.execute(
+            "UPDATE backtest_staging_batches SET payload_blob=?, uncompressed_bytes=?, "
+            "payload_digest=? WHERE run_id=?",
+            (
+                zlib.compress(raw),
+                len(raw),
+                __import__("hashlib").sha256(raw).hexdigest(),
+                RUN_ID,
+            ),
+        )
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    assert repo.strategy_job(RUN_ID).status.value == "running"
+    with sqlite3.connect(path) as conn:
+        for table in ("backtest_results", "trade_log", "equity_curve"):
+            assert conn.execute(
+                f"SELECT COUNT(*) FROM {table} WHERE run_id=?", (RUN_ID,)
+            ).fetchone() == (0,)
+
+
+def test_failure_and_worker_interruption_delete_attempt_batches_atomically(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+
+    failed = repo.fail_claimed_strategy_job(
+        RUN_ID,
+        CLAIM_TOKEN,
+        expected_version=1,
+        failure_code=JobFailureCode.INTEGRITY_ERROR,
+        failed_month=None,
+        detail="batch failure",
+    )
+    assert failed.status.value == "failed"
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (0,)
+
+
+def test_cancel_restart_and_delete_leave_no_attempt_batches_or_shared_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo)
+
+    requested = repo.request_strategy_job_cancellation(RUN_ID, expected_version=1)
+    cancelled = repo.cancel_claimed_strategy_job(
+        RUN_ID,
+        CLAIM_TOKEN,
+        expected_version=requested.status_version,
+    )
+    assert cancelled.status.value == "cancelled"
+    replay = repo.restart_backtest_job(
+        RUN_ID,
+        expected_version=cancelled.status_version,
+        idempotency_key="review-replay",
+    )
+    deleted = repo.delete_strategy_job(
+        RUN_ID, expected_version=cancelled.status_version
+    )
+    assert deleted.deleted_at is not None
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (0,)
+        assert (
+            conn.execute("SELECT 1 FROM strategy_runs WHERE id=?", (RUN_ID,)).fetchone()
+            is None
+        )
+        assert (
+            conn.execute(
+                "SELECT 1 FROM strategy_runs WHERE id=?", (replay.job.id,)
+            ).fetchone()
+            is not None
+        )
+        assert (
+            conn.execute(
+                "SELECT 1 FROM run_input_manifests WHERE digest=?", (MANIFEST_DIGEST,)
+            ).fetchone()
+            is not None
+        )
+
+    interrupted_path = tmp_path / "interrupted.db"
+    interrupted_repo = _repo(interrupted_path)
+    _seed_backtest_run(interrupted_path, status="running", claim_token=CLAIM_TOKEN)
+    _append_batch(interrupted_repo)
+    reconciled = interrupted_repo.reconcile_interrupted_strategy_jobs()
+    assert [job.id for job in reconciled] == [RUN_ID]
+    with sqlite3.connect(interrupted_path) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?", (RUN_ID,)
+        ).fetchone() == (0,)
+
+
 def test_latest_completed_backtest_result_uses_valid_durable_result_order(
     tmp_path: Path,
 ) -> None:
@@ -729,10 +1255,14 @@ def test_latest_completed_backtest_result_uses_valid_durable_result_order(
     repo = _repo(path)
     _seed_backtest_run(path, run_id="backtest-run-1", enqueue_seq=2)
     _write_staging(repo, run_id="backtest-run-1")
-    repo.complete_claimed_backtest_job("backtest-run-1", CLAIM_TOKEN, expected_version=1)
+    repo.complete_claimed_backtest_job(
+        "backtest-run-1", CLAIM_TOKEN, expected_version=1
+    )
     _seed_backtest_run(path, run_id="backtest-run-2")
     _write_staging(repo, run_id="backtest-run-2")
-    repo.complete_claimed_backtest_job("backtest-run-2", CLAIM_TOKEN, expected_version=1)
+    repo.complete_claimed_backtest_job(
+        "backtest-run-2", CLAIM_TOKEN, expected_version=1
+    )
 
     assert repo.latest_completed_backtest_result().run_id == "backtest-run-2"  # type: ignore[union-attr]
 
