@@ -146,7 +146,7 @@ stories:
         prerequisite_issues: [617]
       gh-616-3-prove-aggregate-end-to-end-improvement:
         issue: 619
-        status: in-progress
+        status: done
         prerequisite_issues: [618]
   strategy-manager-agent:
     issue: 493

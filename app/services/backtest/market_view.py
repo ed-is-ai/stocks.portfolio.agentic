@@ -135,12 +135,18 @@ class MarketView:
     backtest_repo: BacktestRepository
     historical_price_repo: HistoricalPriceRepository
     prepared_planes: InitVar[Mapping[str, HistoricalMarketPlanes] | None] = None
+    prepared_plane_cache: InitVar[
+        MutableMapping[str, HistoricalMarketPlanes] | None
+    ] = None
     price_accesses: InitVar[Mapping[str, HistoricalEvidenceReadHandle] | None] = None
     scan_cache: InitVar[
         MutableMapping[tuple[str, str], HistoricalScanRecordV1 | None] | None
     ] = None
     scan_cache_month: InitVar[MutableMapping[str, str] | None] = None
     _prepared_planes: Mapping[str, HistoricalMarketPlanes] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+    _prepared_plane_cache: MutableMapping[str, HistoricalMarketPlanes] | None = field(
         default=None, init=False, repr=False, compare=False
     )
     _scan_cache: (
@@ -156,6 +162,7 @@ class MarketView:
     def __post_init__(
         self,
         prepared_planes: Mapping[str, HistoricalMarketPlanes] | None,
+        prepared_plane_cache: MutableMapping[str, HistoricalMarketPlanes] | None,
         price_accesses: Mapping[str, HistoricalEvidenceReadHandle] | None,
         scan_cache: MutableMapping[tuple[str, str], HistoricalScanRecordV1 | None]
         | None,
@@ -182,6 +189,7 @@ class MarketView:
             )
         else:
             object.__setattr__(self, "_prepared_planes", prepared_planes)
+        object.__setattr__(self, "_prepared_plane_cache", prepared_plane_cache)
         if price_accesses is not None and type(price_accesses) is not MappingProxyType:
             object.__setattr__(
                 self, "_price_accesses", MappingProxyType(dict(price_accesses))
@@ -272,6 +280,13 @@ class MarketView:
                     "integrity_error",
                     f"Prepared plane for {security_id!r} does not match its pinned revision.",
                 )
+        if plane is None and self._prepared_plane_cache is not None:
+            plane = self._prepared_plane_cache.get(security_id)
+            if plane is not None and plane.data_revision != revision:
+                raise MarketDataPolicyError(
+                    "integrity_error",
+                    f"Prepared plane for {security_id!r} does not match its pinned revision.",
+                )
         access = (
             None
             if self._price_accesses is None
@@ -295,14 +310,16 @@ class MarketView:
             raise MarketViewBoundError(
                 security_id=security_id, as_of_session=self.as_of_session
             )
-        if access is not None:
-            partial = access.bounded(through=self.as_of_session, limit=limit)
+        if plane is None and access is not None:
+            partial = access.bounded(through=access.end - timedelta(days=1))
             if not partial.rows:
                 return pd.DataFrame(
                     columns=requested_columns,
                     index=pd.Index([], dtype=object, name="session"),
                 )
             plane = HistoricalMarketPlanes.from_bounded_evidence(partial)
+            if self._prepared_plane_cache is not None:
+                self._prepared_plane_cache[security_id] = plane
         assert plane is not None
         rows = plane.split_continuous_window_as_of(self.as_of_session, limit=limit)
         if not rows:

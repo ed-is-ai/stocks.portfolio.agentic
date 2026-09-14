@@ -533,6 +533,52 @@ def test_price_history_uses_active_v2_bounded_access_without_complete_get(
     assert price_repo.read_counters.complete_revision_materializations == 0
 
 
+def test_price_history_reuses_lazy_prepared_plane_across_views(tmp_path, monkeypatch):
+    price_repo = _price_repo(tmp_path)
+    sessions = (date(2025, 1, 2), date(2025, 1, 3))
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2025, 1, 1),
+        end=date(2025, 2, 1),
+        sessions=sessions,
+        closes=(100.0, 101.0),
+    )
+    price_repo.migrate_v1_to_v2()
+    price_repo.activate_v2(review_reference="market-view-plane-cache-test")
+    access = price_repo.open_read(revision)
+    original_bounded = access.bounded
+    calls = 0
+
+    def counted(*, through, limit=None, columns=None):
+        nonlocal calls
+        calls += 1
+        return original_bounded(through=through, limit=limit, columns=columns)
+
+    monkeypatch.setattr(access, "bounded", counted)
+    cache = {}
+    common = {
+        "profile_hash": PROFILE_HASH,
+        "security_price_revisions": {SECURITY_ID: revision},
+        "selected_universe": (SECURITY_ID,),
+        "backtest_repo": _backtest_repo(tmp_path),
+        "historical_price_repo": price_repo,
+        "price_accesses": {SECURITY_ID: access},
+        "prepared_plane_cache": cache,
+    }
+
+    first = MarketView(as_of_session=date(2025, 1, 2), **common)
+    second = MarketView(as_of_session=date(2025, 1, 3), **common)
+
+    first.price_history(SECURITY_ID, limit=1, columns=("close",))
+    second.price_history(SECURITY_ID, limit=1, columns=("close",))
+
+    assert calls == 1
+    assert set(cache) == {SECURITY_ID}
+    access.close()
+
+
 def test_price_history_out_of_bound_evidence_raises_stable_error(tmp_path) -> None:
     price_repo = _price_repo(tmp_path)
     sessions = (date(2026, 6, 1), date(2026, 6, 2))

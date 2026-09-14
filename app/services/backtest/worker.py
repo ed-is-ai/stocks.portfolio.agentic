@@ -1088,6 +1088,7 @@ class BacktestExecutionEngine:
                 backtest_repo=self._repository,
                 historical_price_repo=self._prices,
                 prepared_planes=prepared_planes_view,
+                prepared_plane_cache=prepared_planes,
                 price_accesses=cast(
                     Mapping[str, HistoricalEvidenceReadHandle],
                     {

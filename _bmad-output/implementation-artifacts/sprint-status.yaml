@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-09-13 (GH-617 append-only staging contract implemented)"
+last_updated: "2026-09-13 (GH-619 performance gate passed)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -67,7 +67,7 @@ development_status:
   feature-gh-616-incremental-backtest-staging: in-progress
   gh-616-1-add-append-only-session-batch-staging-contract: review
   gh-616-2-wire-incremental-staging-through-worker-and-completion: done
-  gh-616-3-prove-aggregate-end-to-end-improvement: in-progress
+  gh-616-3-prove-aggregate-end-to-end-improvement: done
   gh-493-strategy-manager-agent: review
   gh-503-preparation-liveness: review
   gh-492-price-evidence-backfill-stage: review
