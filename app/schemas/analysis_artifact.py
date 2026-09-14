@@ -203,7 +203,10 @@ def read_analysis_artifact(path: Path) -> AnalysisArtifact | None:
     if not isinstance(payload, dict):
         return None
     try:
-        return AnalysisArtifact.model_validate(payload)
+        # ``model_dump(mode="json")`` persists dates/Decimals as JSON
+        # strings.  Re-enable the normal JSON coercions on read while the
+        # model validators still enforce the artifact contract and digest.
+        return AnalysisArtifact.model_validate(payload, strict=False)
     except Exception:
         return None
 

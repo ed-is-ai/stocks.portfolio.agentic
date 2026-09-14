@@ -5,8 +5,9 @@ Offline: records are built in memory — no artifact file, no network.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
+import json
 
 import pandas as pd
 import pytest
@@ -15,6 +16,8 @@ from app.agents.scanner.scanner_agent import _build_current_evidence
 from app.schemas.analysis_artifact import (
     CurrentAnalysisEvidenceV1,
     CurrentEvidenceSuccessV1,
+    build_analysis_payload,
+    read_analysis_artifact,
 )
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
@@ -177,6 +180,48 @@ def test_complete_current_bundle_exposes_typed_scan_coverage() -> None:
     assert result.vcp is not None
     assert view.evidence_capabilities == frozenset(EvidenceKind)
     assert view.evidence_coverage("AAA").kinds == frozenset(EvidenceKind)
+
+
+def test_complete_current_evidence_roundtrips_through_json_artifact(
+    tmp_path,
+) -> None:
+    sessions = TradingCalendar()._calendar("XNAS").sessions_window(
+        pd.Timestamp(SESSION), -252
+    )
+    frame = pd.DataFrame(
+        {
+            "open": [100.0 + index / 10 for index in range(252)],
+            "high": [101.0 + index / 10 for index in range(252)],
+            "low": [99.0 + index / 10 for index in range(252)],
+            "close": [100.5 + index / 10 for index in range(252)],
+            "volume": [1000.0 + index for index in range(252)],
+        },
+        index=sessions,
+    )
+    entry = _build_current_evidence("AAA", frame)
+    assert isinstance(entry, CurrentEvidenceSuccessV1)
+    evidence = CurrentAnalysisEvidenceV1.build(
+        run_id="run-a", as_of_session=SESSION, entries=(entry,)
+    )
+    path = tmp_path / "analysis.json"
+    path.write_text(
+        json.dumps(
+            build_analysis_payload(
+                [{"ticker": "AAA"}],
+                run_id="run-a",
+                generated_at=datetime.now(timezone.utc),
+                current_evidence=evidence,
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = read_analysis_artifact(path)
+    assert loaded is not None
+    assert loaded.current_evidence is not None
+    assert loaded.current_evidence.model_dump(mode="json") == evidence.model_dump(
+        mode="json"
+    )
 
 
 def test_stale_evidence_is_excluded_and_surfaced() -> None:
