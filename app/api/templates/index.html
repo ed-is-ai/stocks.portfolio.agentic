@@ -777,12 +777,6 @@
         </a>
       </li>
       <li class="nav-item">
-        <a class="nav-link" id="tab-history"
-           hx-get="/partials/history" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
-          <i class="bi bi-clock-history"></i>Trade History
-        </a>
-      </li>
-      <li class="nav-item">
         <a class="nav-link" id="tab-realised-pnl"
            hx-get="/partials/realised-pnl" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
            hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'>
@@ -790,15 +784,21 @@
         </a>
       </li>
       <li class="nav-item">
-        <a class="nav-link" id="tab-runlog"
-           hx-get="/partials/runlog" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
-          <i class="bi bi-journal-text"></i>Run Log
-        </a>
-      </li>
-      <li class="nav-item">
         <a class="nav-link" id="tab-strategy-manager"
            hx-get="/partials/strategy-manager" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
           <i class="bi bi-graph-up-arrow"></i>Strategy Manager
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" id="tab-history"
+           hx-get="/partials/history" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+          <i class="bi bi-clock-history"></i>Trade History
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" id="tab-runlog"
+           hx-get="/partials/runlog" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
+          <i class="bi bi-journal-text"></i>Run Log
         </a>
       </li>
       <li class="nav-item">

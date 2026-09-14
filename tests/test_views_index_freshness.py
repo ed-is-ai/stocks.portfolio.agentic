@@ -57,6 +57,30 @@ def test_index_renders_fresh_affordance_beside_refresh_control(
     assert "Last successful refresh" in markup
 
 
+def test_index_renders_primary_navigation_in_user_flow_order(
+    monkeypatch, tmp_path
+) -> None:
+    _use_artifact(monkeypatch, tmp_path, datetime.now(timezone.utc))
+
+    markup = client.get("/").text
+    tab_bar = markup.split('<ul class="nav nav-tabs" id="mainTabs">', 1)[1].split(
+        "</ul>", 1
+    )[0]
+    tab_ids = [
+        "tab-stock-scanner",
+        "tab-portfolio",
+        "tab-realised-pnl",
+        "tab-strategy-manager",
+        "tab-history",
+        "tab-runlog",
+        "tab-settings",
+    ]
+
+    assert [tab_bar.index(f'id="{tab_id}"') for tab_id in tab_ids] == sorted(
+        tab_bar.index(f'id="{tab_id}"') for tab_id in tab_ids
+    )
+
+
 def test_index_renders_stale_affordance_with_caution_sentence(
     monkeypatch, tmp_path
 ) -> None:
