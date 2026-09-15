@@ -255,6 +255,16 @@ def test_thin_history_holds_the_position_and_withholds_the_buy(env: Any) -> None
     assert result.coverage.exit_state == "degraded"
     assert result.coverage.degraded_securities == ("AAA", "BBB")
     assert not result.coverage.complete
+    assert [
+        (item.path, item.security_id, item.disposition)
+        for item in result.coverage.diagnostics
+    ] == [
+        ("entry", "AAA", "excluded"),
+        ("entry", "BBB", "excluded"),
+        ("exit", "AAA", "hold"),
+    ]
+    assert result.coverage.diagnostics[0].required_sessions == 500
+    assert result.coverage.diagnostics[0].available_sessions == 2
 
 
 def test_thin_history_on_entry_only_still_sells(env: Any) -> None:

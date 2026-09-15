@@ -19,7 +19,7 @@ never silently dropped.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from types import MappingProxyType
@@ -31,11 +31,15 @@ from app.core.ticker_identity import AmbiguousTickerAliasError, canonical_ticker
 from app.schemas.record import StockRecord
 from app.schemas.analysis_artifact import (
     CurrentAnalysisEvidenceV1,
+    CurrentEvidenceGapV1,
     CurrentEvidenceSuccessV1,
 )
 from app.schemas.trade import Position
 from app.services.backtest.market_planes import MarketDataPolicyError
-from app.services.backtest.market_view import PRICE_HISTORY_COLUMNS
+from app.services.backtest.market_view import (
+    PRICE_HISTORY_COLUMNS,
+    _missing_calendar_sessions,
+)
 from app.services.backtest.strategy_evidence import (
     EvidenceKind,
     SecurityEvidenceCoverageV1,
@@ -79,6 +83,8 @@ class CurrentScanMarketView:
     selected_universe: tuple[str, ...]
     _histories: Mapping[str, pd.DataFrame]
     _scan_results: Mapping[str, CurrentScanRecordView] = field(default_factory=dict)
+    _display_tickers: Mapping[str, str] = field(default_factory=dict)
+    _evidence_details: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         # Detach from caller-supplied collections so later mutation can
@@ -91,6 +97,30 @@ class CurrentScanMarketView:
             self,
             "_scan_results",
             MappingProxyType(dict(self._scan_results or {})),
+        )
+        object.__setattr__(
+            self,
+            "_display_tickers",
+            MappingProxyType(dict(self._display_tickers or {})),
+        )
+        object.__setattr__(
+            self,
+            "_evidence_details",
+            MappingProxyType(
+                {
+                    security_id: tuple(details)
+                    for security_id, details in (self._evidence_details or {}).items()
+                }
+            ),
+        )
+
+    def with_display_tickers(
+        self, display_tickers: Mapping[str, str]
+    ) -> "CurrentScanMarketView":
+        """Return this view with additional portfolio display identities."""
+        return replace(
+            self,
+            _display_tickers=dict(self._display_tickers) | dict(display_tickers),
         )
 
     def price_history(
@@ -181,9 +211,15 @@ class CurrentScanMarketView:
         """
         if not security_id:
             return _NO_COVERAGE
+        display_ticker = self._display_tickers.get(security_id, security_id)
         frame = self._histories.get(security_id)
         if frame is None or frame.empty:
-            return SecurityEvidenceCoverageV1(security_id=security_id)
+            return SecurityEvidenceCoverageV1(
+                security_id=security_id,
+                display_ticker=display_ticker,
+                evidence_details=self._evidence_details.get(security_id, ()),
+            )
+        session_dates = tuple(_session_date(session) for session in frame.index)
         kinds = {EvidenceKind.PRICE_HISTORY}
         scan = self._scan_results.get(security_id)
         if scan is not None:
@@ -195,9 +231,18 @@ class CurrentScanMarketView:
                 kinds.add(EvidenceKind.SCAN_VCP)
         return SecurityEvidenceCoverageV1(
             security_id=security_id,
+            display_ticker=display_ticker,
             kinds=frozenset(kinds),
             sessions=int(len(frame.index)),
             columns=tuple(str(column) for column in frame.columns),
+            session_dates=session_dates,
+            missing_sessions=_missing_calendar_sessions(
+                security_id,
+                session_dates,
+                self.as_of_session,
+                display_ticker,
+            ),
+            evidence_details=self._evidence_details.get(security_id, ()),
         )
 
 
@@ -212,6 +257,15 @@ def _empty_price_history() -> pd.DataFrame:
         columns=list(PRICE_HISTORY_COLUMNS),
         index=pd.Index([], dtype=object, name="session"),
     )
+
+
+def _session_date(value: object) -> date:
+    """Normalize pandas/date index values without changing the evidence."""
+    if isinstance(value, date) and not hasattr(value, "date"):
+        return value
+    if isinstance(value, date):
+        return value.date()  # type: ignore[union-attr]
+    return pd.Timestamp(value).date()
 
 
 def _history_frame(record: StockRecord) -> pd.DataFrame:
@@ -328,15 +382,30 @@ def build_scan_market_view(
         else:
             unresolved.append(security_id)
     scan_results: dict[str, CurrentScanRecordView] = {}
+    evidence_details: dict[str, tuple[str, ...]] = {}
     evidence_quarantined: set[str] = set()
+    evidence_seen: set[str] = set()
     if current_evidence is not None and current_evidence.as_of_session == session:
         for item in current_evidence.entries:
-            if not isinstance(item, CurrentEvidenceSuccessV1):
+            if not isinstance(item, (CurrentEvidenceGapV1, CurrentEvidenceSuccessV1)):
                 continue
             try:
                 security_id = canonical_ticker(item.security_id, aliases)
             except AmbiguousTickerAliasError:
                 unresolved.append(item.security_id)
+                continue
+            if security_id in evidence_quarantined:
+                unresolved.append(item.security_id)
+                continue
+            if security_id in evidence_seen:
+                unresolved.append(item.security_id)
+                evidence_quarantined.add(security_id)
+                scan_results.pop(security_id, None)
+                evidence_details.pop(security_id, None)
+                continue
+            evidence_seen.add(security_id)
+            if isinstance(item, CurrentEvidenceGapV1):
+                evidence_details[security_id] = (f"{item.reason}: {item.detail}",)
                 continue
             if (
                 security_id not in histories
@@ -362,6 +431,12 @@ def build_scan_market_view(
         selected_universe=tuple(universe),
         _histories=histories,
         _scan_results=scan_results,
+        _display_tickers={
+            security_id: ticker
+            for security_id, ticker in resolved_ticker.items()
+            if security_id in histories
+        },
+        _evidence_details=evidence_details,
     )
     return view, tuple(unresolved)
 

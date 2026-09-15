@@ -72,6 +72,8 @@
           </label>
           {% endif %}
           {% for choice in strategy_choices %}
+          {% set support = (strategy_support or {}).get(choice.strategy_id) %}
+          {% set support_diagnostics = (strategy_support_diagnostics or {}).get(choice.strategy_id, ()) %}
           <label class="d-flex align-items-start gap-2 border rounded p-2 mb-2"
                  style="cursor:pointer">
             <input type="radio" name="strategy_id" value="{{ choice.strategy_id }}"
@@ -81,7 +83,6 @@
             <span>
               <span class="fw-bold">{{ choice.display_name }}</span>
               <code class="ms-1" style="font-size:0.72rem">{{ choice.strategy_id }}</code>
-              {% set support = (strategy_support or {}).get(choice.strategy_id) %}
               {% if support == 'supported' %}
               <span class="badge text-bg-success ms-1" style="font-weight:400">Recommendations: supported</span>
               {% elif support == 'degraded' %}
@@ -99,6 +100,41 @@
               </span>
             </span>
           </label>
+          {% if support == 'degraded' and support_diagnostics %}
+          <details class="ms-4 mb-2" id="support-details-{{ choice.strategy_id }}">
+            <summary class="text-muted" style="cursor:pointer; font-size:0.76rem">
+              Explain limited evidence
+            </summary>
+            <div class="border rounded p-2 mt-1" role="region"
+                 aria-label="Limited recommendation evidence for {{ choice.display_name }}">
+              <ul class="mb-0 ps-3" style="font-size:0.74rem">
+                {% for diagnostic in support_diagnostics %}
+                <li class="mb-1">
+                  <code>{{ diagnostic.display_ticker }}</code>
+                  <span class="text-muted">({{ diagnostic.security_id }})</span>
+                  {{ diagnostic.path }} {{ diagnostic.cause }};
+                  Requirement: {{ diagnostic.requirement_kinds | join(', ') }};
+                  {{ diagnostic.available_sessions }}/{{ diagnostic.required_sessions }} sessions
+                  {% if diagnostic.first_evidenced_session %}
+                  from {{ diagnostic.first_evidenced_session.isoformat() }}
+                  to {{ diagnostic.last_evidenced_session.isoformat() }}
+                  {% endif %}.
+                  {% if diagnostic.missing_evidence %}
+                  Missing evidence: {{ diagnostic.missing_evidence | join(', ') }}.
+                  {% endif %}
+                  {% if diagnostic.missing_columns %}
+                  Missing columns: {{ diagnostic.missing_columns | join(', ') }}.
+                  {% endif %}
+                  {% if diagnostic.missing_session_ranges %}
+                  Missing sessions: {{ diagnostic.missing_session_ranges | join(', ') }}.
+                  {% endif %}
+                  Safe outcome: {{ diagnostic.disposition }}.
+                </li>
+                {% endfor %}
+              </ul>
+            </div>
+          </details>
+          {% endif %}
           {% endfor %}
           <div class="modal-footer px-0 pb-0">
             <button type="button" class="btn btn-sm btn-outline-secondary"

@@ -15,6 +15,7 @@ import pytest
 from app.agents.scanner.scanner_agent import _build_current_evidence
 from app.schemas.analysis_artifact import (
     CurrentAnalysisEvidenceV1,
+    CurrentEvidenceGapV1,
     CurrentEvidenceSuccessV1,
     build_analysis_payload,
     read_analysis_artifact,
@@ -136,6 +137,72 @@ def test_scan_result_projection_has_no_fabricated_fields() -> None:
     assert record.vcp is None
     assert record.technicals is None
     assert view.scan_result("BBB") is None
+
+
+def test_coverage_preserves_display_identity_and_current_gap_detail() -> None:
+    gap = CurrentEvidenceGapV1(
+        schema_version="current_scan_evidence_gap.v1",
+        security_id="AAA",
+        as_of_session=SESSION,
+        reason="insufficient_history",
+        detail="10 completed sessions; 252 required",
+    )
+    evidence = CurrentAnalysisEvidenceV1.build(
+        run_id="run-gap", as_of_session=SESSION, entries=(gap,)
+    )
+    view, unresolved = build_scan_market_view(
+        [_record("Friendly-A", _bars(PREVIOUS, SESSION))],
+        {"Friendly-A": "AAA"},
+        as_of_session=SESSION,
+        current_evidence=evidence,
+    )
+    # The gap is keyed to its canonical identity, while the record's spelling
+    # remains the display identity used by the diagnostic projection.
+    coverage = view.evidence_coverage("AAA")
+    assert unresolved == ()
+    assert coverage.display_ticker == "Friendly-A"
+    assert coverage.evidence_details == (
+        "insufficient_history: 10 completed sessions; 252 required",
+    )
+
+
+def test_current_gap_and_success_for_one_identity_are_quarantined() -> None:
+    sessions = tuple(
+        TradingCalendar()._calendar("XNAS").sessions_window(pd.Timestamp(SESSION), -252)
+    )
+    frame = pd.DataFrame(
+        {
+            name: [100.0 + index for index in range(len(sessions))]
+            for name in PRICE_HISTORY_COLUMNS
+        },
+        index=sessions,
+    )
+    success = _build_current_evidence("AAA", frame)
+    assert isinstance(success, CurrentEvidenceSuccessV1)
+    gap = CurrentEvidenceGapV1(
+        schema_version="current_scan_evidence_gap.v1",
+        security_id="AAA",
+        as_of_session=SESSION,
+        reason="detector_failure",
+        detail="duplicate current evidence entry",
+    )
+    evidence = CurrentAnalysisEvidenceV1.model_construct(
+        schema_version="current_analysis_evidence.v1",
+        run_id="run-conflict",
+        as_of_session=SESSION,
+        entries=(gap, success),
+        content_digest="a" * 64,
+    )
+    view, unresolved = build_scan_market_view(
+        [_record("AAA", _bars(*[stamp.date() for stamp in sessions]))],
+        {},
+        current_evidence=evidence,
+    )
+    assert view.selected_universe == ("AAA",)
+    scan = view.scan_result("AAA")
+    assert scan is not None
+    assert scan.stage is None and scan.vcp is None and scan.technicals is None
+    assert unresolved == ("AAA",)
 
 
 def test_complete_current_bundle_exposes_typed_scan_coverage() -> None:

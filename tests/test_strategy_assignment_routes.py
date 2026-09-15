@@ -11,6 +11,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Iterator
+from datetime import date
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -32,6 +33,7 @@ from app.repositories.portfolio_strategies_repo import (
 )
 from app.schemas.trade import Portfolio
 from app.services.backtest.skill_discovery import StrategyDiscoveryResultV1
+from app.services.backtest.strategy_evidence import EvidenceDiagnosticV1
 from app.services import strategy_assignment_service as svc_module
 from app.services.portfolio_service import PortfolioService
 from app.services.strategy_assignment_service import StrategyAssignmentService
@@ -425,6 +427,75 @@ def test_strategy_assign_partial_shows_recommendation_support_badges(
     assert resp.status_code == 200
     assert "Recommendations: supported" in resp.text
     assert "Recommendations: backtest only" in resp.text
+
+
+def test_strategy_assign_partial_expands_limited_evidence_details(
+    monkeypatch: pytest.MonkeyPatch, assignment_service: StrategyAssignmentService
+) -> None:
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    support = MagicMock()
+    support.strategy_support.return_value = {"alpha": "degraded"}
+    support.strategy_support_diagnostics.return_value = {
+        "alpha": (
+            EvidenceDiagnosticV1(
+                security_id="AAA",
+                display_ticker="Friendly AAA",
+                path="entry",
+                requirement_kinds=(),
+                required_sessions=201,
+                available_sessions=17,
+                first_evidenced_session=date(2026, 8, 1),
+                last_evidenced_session=date(2026, 8, 28),
+                cause="short_history",
+                disposition="excluded",
+            ),
+        )
+    }
+    app.dependency_overrides[get_strategy_assignment_service] = lambda: (
+        assignment_service
+    )
+    app.dependency_overrides[get_portfolio_recommendation_service] = lambda: support
+    try:
+        resp = client.get("/partials/strategy-assign?portfolio_id=7")
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Recommendations: limited" in html
+    assert 'id="support-details-alpha"' in html
+    assert "Friendly AAA" in html
+    assert "201" in html and "17" in html
+    assert "Safe outcome: excluded" in html
+
+
+def test_backtest_only_support_has_no_limited_detail_control(
+    monkeypatch: pytest.MonkeyPatch, assignment_service: StrategyAssignmentService
+) -> None:
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    support = MagicMock()
+    support.strategy_support.return_value = {"alpha": "backtest_only"}
+    support.strategy_support_diagnostics.return_value = {
+        "alpha": (
+            EvidenceDiagnosticV1(
+                security_id="AAA",
+                display_ticker="AAA",
+                path="entry",
+                cause="missing_evidence",
+                disposition="excluded",
+            ),
+        )
+    }
+    app.dependency_overrides[get_strategy_assignment_service] = lambda: (
+        assignment_service
+    )
+    app.dependency_overrides[get_portfolio_recommendation_service] = lambda: support
+    try:
+        resp = client.get("/partials/strategy-assign?portfolio_id=7")
+    finally:
+        app.dependency_overrides.clear()
+    assert resp.status_code == 200
+    assert "Recommendations: backtest only" in resp.text
+    assert "Explain limited evidence" not in resp.text
 
 
 def test_strategy_assign_partial_renders_when_support_lookup_fails(

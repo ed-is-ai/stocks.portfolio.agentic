@@ -32,6 +32,7 @@ from app.schemas.portfolio_recommendation import (
     EvidenceState,
     EvaluationUnavailable,
     NoAssignment,
+    RecommendationEvidenceDiagnosticV1,
     RecommendationReasonV1,
     RecommendationResultV1,
     RecommendationV1,
@@ -45,6 +46,7 @@ from app.services.backtest.scan_view import (
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.strategy_evidence import (
+    EvidenceDiagnosticV1,
     EvidencePreflightV1,
     StrategyEvidenceRequirementsV1,
     preflight_evidence,
@@ -174,6 +176,36 @@ def _coverage(
         exit_missing_evidence=tuple(kind.value for kind in preflight.exit_missing),
         evaluated_securities=evaluated_securities,
         degraded_securities=preflight.degraded_securities,
+        diagnostics=tuple(
+            _project_diagnostic(item)
+            for item in preflight.diagnostics
+            if (item.path == "entry" and preflight.entry_supported)
+            or (item.path == "exit" and preflight.exit_supported)
+        ),
+    )
+
+
+def _project_diagnostic(
+    diagnostic: EvidenceDiagnosticV1,
+) -> RecommendationEvidenceDiagnosticV1:
+    """Keep the public recommendation schema independent of backtest code."""
+    return RecommendationEvidenceDiagnosticV1(
+        security_id=diagnostic.security_id,
+        display_ticker=diagnostic.display_ticker,
+        path=diagnostic.path,
+        requirement_kinds=tuple(kind.value for kind in diagnostic.requirement_kinds),
+        required_sessions=diagnostic.required_sessions,
+        required_columns=diagnostic.required_columns,
+        available_sessions=diagnostic.available_sessions,
+        first_evidenced_session=diagnostic.first_evidenced_session,
+        last_evidenced_session=diagnostic.last_evidenced_session,
+        missing_evidence=tuple(kind.value for kind in diagnostic.missing_evidence),
+        missing_columns=diagnostic.missing_columns,
+        missing_sessions=diagnostic.missing_sessions,
+        missing_session_ranges=diagnostic.missing_session_ranges,
+        evidence_details=diagnostic.evidence_details,
+        cause=diagnostic.cause,
+        disposition=diagnostic.disposition,
     )
 
 
@@ -279,6 +311,12 @@ class PortfolioRecommendationService:
                 freshness=freshness,
             )
         held = self._held_positions(portfolio_id, aliases)
+        scan_view = scan_view.with_display_tickers(
+            {
+                security_id: position.display_symbol
+                for security_id, position in held.items()
+            }
+        )
         try:
             # The stored snapshot must never carry a stale universe: the
             # host-bound parameter always comes from the current scan.
@@ -391,16 +429,37 @@ class PortfolioRecommendationService:
         ``unknown`` rather than raising. Read-only — no fetch, no trade,
         no persistence.
         """
+        return self.strategy_support_with_diagnostics()[0]
+
+    def strategy_support_with_diagnostics(
+        self,
+    ) -> tuple[Mapping[str, str], Mapping[str, tuple[EvidenceDiagnosticV1, ...]]]:
+        """Evaluate labels and details against one scan-artifact snapshot."""
         try:
             choices = tuple(self._assignment_service.list_choices())
         except Exception:
             logger.exception("Strategy support lookup could not list choices")
-            return {}
+            return {}, {}
         view = self._support_scan_view()
-        return {
-            descriptor.strategy_id: self._support_for(descriptor, view)
-            for descriptor in choices
-        }
+        support: dict[str, str] = {}
+        details: dict[str, tuple[EvidenceDiagnosticV1, ...]] = {}
+        for descriptor in choices:
+            preflight = self._support_preflight(descriptor, view)
+            support[descriptor.strategy_id] = (
+                SUPPORT_UNKNOWN
+                if preflight is None
+                else strategy_support_label(preflight)
+            )
+            details[descriptor.strategy_id] = (
+                () if preflight is None else preflight.diagnostics
+            )
+        return support, details
+
+    def strategy_support_diagnostics(
+        self,
+    ) -> Mapping[str, tuple[EvidenceDiagnosticV1, ...]]:
+        """Return typed assignment-modal details without changing labels."""
+        return self.strategy_support_with_diagnostics()[1]
 
     # --- helpers ----------------------------------------------------------
 
@@ -432,8 +491,17 @@ class PortfolioRecommendationService:
         self, descriptor: StrategyDescriptorV1, view: CurrentScanMarketView | None
     ) -> str:
         """Label one Strategy's current recommendation support, fail-soft."""
-        if view is None:
+        preflight = self._support_preflight(descriptor, view)
+        if preflight is None:
             return SUPPORT_UNKNOWN
+        return strategy_support_label(preflight)
+
+    def _support_preflight(
+        self, descriptor: StrategyDescriptorV1, view: CurrentScanMarketView | None
+    ) -> EvidencePreflightV1 | None:
+        """Build the same generic preflight used by support labels/details."""
+        if view is None:
+            return None
         try:
             strategy = self._loader(self._skills_root / descriptor.runtime_path)
             parameters = dict(descriptor.default_parameters) | dict(
@@ -441,18 +509,17 @@ class PortfolioRecommendationService:
             )
             requirements = _declared_requirements(strategy, parameters)
             if not isinstance(requirements, StrategyEvidenceRequirementsV1):
-                return SUPPORT_UNKNOWN
+                return None
             # No portfolio is in play for a support label, so the exit
             # path is judged on the same candidate set as entry.
-            preflight = preflight_evidence(
+            return preflight_evidence(
                 requirements, view, view.selected_universe, view.selected_universe
             )
         except Exception:
             logger.exception(
                 "Strategy support lookup failed for %s", descriptor.strategy_id
             )
-            return SUPPORT_UNKNOWN
-        return strategy_support_label(preflight)
+            return None
 
     def _descriptor(self, strategy_id: str) -> StrategyDescriptorV1 | None:
         """Resolve one descriptor from the current discovery choices.

@@ -57,6 +57,31 @@ PRICE_HISTORY_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volum
 
 logger = logging.getLogger(__name__)
 
+
+def _missing_calendar_sessions(
+    security_id: str,
+    session_dates: tuple[date, ...],
+    as_of_session: date,
+    display_ticker: str | None = None,
+) -> tuple[date, ...]:
+    """Return established exchange sessions absent from one bounded series."""
+    if not session_dates:
+        return ()
+    # Calendar identity is canonical. A friendly import spelling such as
+    # ``HSFWA`` must not turn the London security ``0P00013P6I.L`` into an
+    # XNAS calendar.
+    identity = security_id
+    mic = "XLON" if identity.upper().endswith(".L") else "XNAS"
+    try:
+        expected = TradingCalendar().sessions_in_range(
+            mic, session_dates[0], as_of_session + timedelta(days=1)
+        )
+    except (ValueError, TypeError):
+        return ()
+    observed = set(session_dates)
+    return tuple(session for session in expected if session not in observed)
+
+
 #: The zero-coverage answer for an unusable security id — evidence
 #: coverage is a diagnostic, so it always answers with a value.
 _NO_COVERAGE = SecurityEvidenceCoverageV1(security_id="unknown")
@@ -437,7 +462,9 @@ class MarketView:
             frame = self.price_history(security_id)
         except Exception:
             logger.debug("No price coverage for %r", security_id, exc_info=True)
-            return SecurityEvidenceCoverageV1(security_id=security_id)
+            return SecurityEvidenceCoverageV1(
+                security_id=security_id, display_ticker=security_id
+            )
         kinds: set[EvidenceKind] = set()
         sessions = int(len(frame.index))
         columns = tuple(str(column) for column in frame.columns)
@@ -457,11 +484,19 @@ class MarketView:
                 kinds.add(EvidenceKind.SCAN_VCP)
             if getattr(record, "technicals", None) is not None:
                 kinds.add(EvidenceKind.SCAN_TECHNICALS)
+        session_dates = tuple(
+            value.date() if hasattr(value, "date") else value for value in frame.index
+        )
         return SecurityEvidenceCoverageV1(
             security_id=security_id,
+            display_ticker=security_id,
             kinds=frozenset(kinds),
             sessions=sessions,
             columns=columns,
+            session_dates=session_dates,
+            missing_sessions=_missing_calendar_sessions(
+                security_id, session_dates, self.as_of_session
+            ),
         )
 
 

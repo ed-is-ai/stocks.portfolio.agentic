@@ -24,6 +24,7 @@ from app.schemas.portfolio_recommendation import (
     EvaluationUnavailable,
     EvidenceState,
     NoAssignment,
+    RecommendationEvidenceDiagnosticV1,
     RecommendationReasonV1,
     RecommendationResultV1,
     RecommendationV1,
@@ -210,6 +211,136 @@ def test_degraded_evidence_names_the_affected_securities(
     # A degraded path IS invoked, so the honest empty wording stays.
     assert "No Buy signals." in resp.text
     assert "Signals unavailable" not in resp.text
+
+
+def test_degraded_evidence_renders_all_typed_diagnostics(
+    mocked: dict[str, Any],
+) -> None:
+    diagnostics = (
+        RecommendationEvidenceDiagnosticV1(
+            security_id="AAA",
+            display_ticker="Friendly AAA",
+            path="exit",
+            requirement_kinds=("price_history",),
+            required_sessions=201,
+            required_columns=("close",),
+            available_sessions=17,
+            first_evidenced_session=date(2026, 8, 1),
+            last_evidenced_session=SESSION,
+            missing_sessions=(date(2026, 8, 14), date(2026, 8, 17)),
+            missing_session_ranges=("2026-08-14", "2026-08-17"),
+            cause="short_history",
+            disposition="hold",
+        ),
+        RecommendationEvidenceDiagnosticV1(
+            security_id="BBB",
+            display_ticker="Friendly BBB",
+            path="entry",
+            requirement_kinds=("scan_stage",),
+            required_sessions=0,
+            available_sessions=252,
+            missing_evidence=("scan_stage",),
+            cause="missing_evidence",
+            disposition="excluded",
+        ),
+    )
+    result = _result().model_copy(
+        update={
+            "recommendations": (),
+            "coverage": EvaluationCoverageV1(
+                entry_state="degraded",
+                exit_state="degraded",
+                evaluated_securities=2,
+                degraded_securities=("AAA", "BBB"),
+                diagnostics=diagnostics,
+            ),
+        }
+    )
+    mocked["stub"].recommend.return_value = result
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'id="evidence-diagnostics"' in html
+    assert 'aria-label="Per-security evidence diagnostics"' in html
+    assert "Friendly AAA" in html and "Friendly BBB" in html
+    assert "201" in html and "17" in html
+    assert "2026-08-14" in html and "scan_stage" in html
+    assert "Safe outcome: hold" in html
+
+
+def test_complete_result_has_no_limited_diagnostic_control(
+    mocked: dict[str, Any],
+) -> None:
+    mocked["stub"].recommend.return_value = _result()
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    assert "evidence-diagnostics" not in resp.text
+
+
+def test_backtest_only_result_has_no_limited_diagnostic_control(
+    mocked: dict[str, Any],
+) -> None:
+    diagnostic = RecommendationEvidenceDiagnosticV1(
+        security_id="AAA",
+        display_ticker="AAA",
+        path="exit",
+        requirement_kinds=("scan_stage",),
+        missing_evidence=("scan_stage",),
+        cause="missing_evidence",
+        disposition="hold",
+    )
+    result = _incomplete_result().model_copy(
+        update={
+            "coverage": EvaluationCoverageV1(
+                entry_state="incompatible",
+                exit_state="incompatible",
+                entry_missing_evidence=("scan_stage",),
+                exit_missing_evidence=("scan_stage",),
+                diagnostics=(diagnostic,),
+            )
+        }
+    )
+    mocked["stub"].recommend.return_value = result
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    assert "Evidence incomplete" in resp.text
+    assert "evidence-diagnostics" not in resp.text
+
+
+def test_expanded_diagnostics_do_not_silently_cap_affected_securities(
+    mocked: dict[str, Any],
+) -> None:
+    diagnostics = tuple(
+        RecommendationEvidenceDiagnosticV1(
+            security_id=f"T{index:02d}",
+            display_ticker=f"Friendly T{index:02d}",
+            path="entry",
+            requirement_kinds=("price_history",),
+            required_sessions=201,
+            available_sessions=10,
+            cause="short_history",
+            disposition="excluded",
+        )
+        for index in range(12)
+    )
+    result = _result().model_copy(
+        update={
+            "recommendations": (),
+            "coverage": EvaluationCoverageV1(
+                entry_state="degraded",
+                exit_state="compatible",
+                evaluated_securities=12,
+                degraded_securities=tuple(item.security_id for item in diagnostics),
+                diagnostics=diagnostics,
+            ),
+        }
+    )
+    mocked["stub"].recommend.return_value = result
+    resp = client.get("/portfolios/7/recommendations")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "Friendly T11" in html
+    assert html.index("Friendly T00") < html.index("Friendly T11")
 
 
 def test_complete_evaluation_keeps_the_no_signals_wording(

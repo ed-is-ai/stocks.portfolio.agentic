@@ -1,10 +1,10 @@
 generated: 2026-08-20
-updated: 2026-09-12
+updated: 2026-09-14
 repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
   ux_design: embedded-relevant-text
-  github_issues_verified: 48
+  github_issues_verified: 52
 correct_course:
   proposal: sprint-change-proposal-2026-08-20.md
   status: approved-major-handoff
@@ -295,3 +295,32 @@ standalone_issues:
         issue: 442
         status: backlog
         prerequisite_issues: [441]
+  portfolio-recommendation-evidence-diagnostics:
+    issue: 624
+    status: done
+    related_issues: [441, 471, 472, 625]
+    feature_plan: feature-gh-624-limited-recommendation-evidence-diagnostics.md
+    sub_issues: [627, 628]
+    stories:
+      gh-624-1-add-deterministic-per-security-evidence-diagnostics:
+        issue: 627
+        status: done
+      gh-624-2-surface-limited-evidence-diagnostics:
+        issue: 628
+        status: done
+        prerequisite_issues: [627]
+  portfolio-history-for-held-securities:
+    issue: 625
+    status: backlog
+    prerequisite_issues: [624]
+    related_issues: [383, 441, 471, 624]
+    feature_plan: feature-gh-625-portfolio-history-for-held-securities.md
+    sub_issues: [629, 630]
+    stories:
+      gh-625-1-read-bounded-portfolio-history:
+        issue: 629
+        status: backlog
+      gh-625-2-use-portfolio-history-for-scan-absent-holdings:
+        issue: 630
+        status: backlog
+        prerequisite_issues: [629, 627]

@@ -23,6 +23,7 @@ therefore imports nothing but the standard library, pydantic, and
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from enum import StrEnum
 from typing import (
     Iterable,
@@ -101,12 +102,73 @@ class StrategyEvidenceRequirementsV1(_StrategyModel):
 
 
 class SecurityEvidenceCoverageV1(_StrategyModel):
-    """What one market view actually holds for one security today."""
+    """What one market view actually holds for one security today.
+
+    The optional facts are evidence supplied by the view, not inferred by a
+    Strategy or a presenter.  ``missing_sessions`` is already bounded by the
+    view's published artifact/calendar authority; the generic contract only
+    formats and carries it.
+    """
 
     security_id: str = Field(min_length=1)
+    display_ticker: str = ""
     kinds: frozenset[EvidenceKind] = frozenset()
     sessions: int = Field(default=0, ge=0)
     columns: tuple[str, ...] = ()
+    session_dates: tuple[date, ...] = ()
+    missing_sessions: tuple[date, ...] = ()
+    evidence_details: tuple[str, ...] = ()
+
+
+EvidenceDiagnosticCause = Literal[
+    "short_history", "missing_sessions", "missing_columns", "missing_evidence"
+]
+EvidenceDiagnosticPath = Literal["entry", "exit"]
+EvidenceDiagnosticDisposition = Literal["excluded", "hold"]
+
+
+class EvidenceDiagnosticV1(_StrategyModel):
+    """Deterministic explanation for one under-evidenced path/security."""
+
+    security_id: str = Field(min_length=1)
+    display_ticker: str = Field(min_length=1)
+    path: EvidenceDiagnosticPath
+    requirement_kinds: tuple[EvidenceKind, ...] = ()
+    required_sessions: int = Field(default=0, ge=0)
+    required_columns: tuple[str, ...] = ()
+    available_sessions: int = Field(default=0, ge=0)
+    first_evidenced_session: date | None = None
+    last_evidenced_session: date | None = None
+    missing_evidence: tuple[EvidenceKind, ...] = ()
+    missing_columns: tuple[str, ...] = ()
+    missing_sessions: tuple[date, ...] = ()
+    missing_session_ranges: tuple[str, ...] = ()
+    evidence_details: tuple[str, ...] = ()
+    cause: EvidenceDiagnosticCause
+    disposition: EvidenceDiagnosticDisposition
+
+
+def compact_date_ranges(sessions: Iterable[date]) -> tuple[str, ...]:
+    """Return sorted ISO dates/ranges using inclusive calendar-day ranges."""
+    ordered = sorted(set(sessions))
+    if not ordered:
+        return ()
+    ranges: list[str] = []
+    start = previous = ordered[0]
+    for session in ordered[1:]:
+        if session != previous + timedelta(days=1):
+            ranges.append(_format_date_range(start, previous))
+            start = session
+        previous = session
+    ranges.append(_format_date_range(start, previous))
+    return tuple(ranges)
+
+
+def _format_date_range(start: date, end: date) -> str:
+    """Format one date or inclusive ISO date range."""
+    if start == end:
+        return start.isoformat()
+    return f"{start.isoformat()}..{end.isoformat()}"
 
 
 class EvidenceCompatibility(StrEnum):
@@ -133,6 +195,8 @@ class EvidencePreflightV1(_StrategyModel):
     exit_missing: tuple[EvidenceKind, ...] = ()
     degraded_entry: Mapping[str, tuple[EvidenceKind, ...]] = {}
     degraded_exit: Mapping[str, tuple[EvidenceKind, ...]] = {}
+    entry_diagnostics: tuple[EvidenceDiagnosticV1, ...] = ()
+    exit_diagnostics: tuple[EvidenceDiagnosticV1, ...] = ()
 
     @property
     def entry_supported(self) -> bool:
@@ -164,6 +228,11 @@ class EvidencePreflightV1(_StrategyModel):
     def exit_degraded_for(self, security_id: str) -> bool:
         """True when ``security_id`` lacks evidence the exit path needs."""
         return security_id in self.degraded_exit
+
+    @property
+    def diagnostics(self) -> tuple[EvidenceDiagnosticV1, ...]:
+        """All path diagnostics in stable path/security order."""
+        return self.entry_diagnostics + self.exit_diagnostics
 
 
 @runtime_checkable
@@ -218,17 +287,22 @@ def preflight_evidence(
 
     def covered(securities: Iterable[str]) -> dict[str, SecurityEvidenceCoverageV1]:
         """Resolve one path's coverage, reading each security only once."""
-        ordered = tuple(sorted(set(securities)))
+        ordered = tuple(
+            sorted({security_id for security_id in securities if security_id})
+        )
         for security_id in ordered:
             if security_id not in coverage:
                 coverage[security_id] = view.evidence_coverage(security_id)
         return {security_id: coverage[security_id] for security_id in ordered}
 
+    capabilities = view.evidence_capabilities
+    entry_coverage = covered(entry_securities)
+    exit_coverage = covered(exit_securities)
     entry_state, entry_missing, degraded_entry = _evaluate_path(
-        requirements.entry, view.evidence_capabilities, covered(entry_securities)
+        requirements.entry, capabilities, entry_coverage
     )
     exit_state, exit_missing, degraded_exit = _evaluate_path(
-        requirements.exit, view.evidence_capabilities, covered(exit_securities)
+        requirements.exit, capabilities, exit_coverage
     )
     return EvidencePreflightV1(
         entry=entry_state,
@@ -237,6 +311,20 @@ def preflight_evidence(
         exit_missing=exit_missing,
         degraded_entry=degraded_entry,
         degraded_exit=degraded_exit,
+        entry_diagnostics=_diagnostics_for_path(
+            "entry",
+            requirements.entry,
+            capabilities,
+            entry_coverage,
+            "excluded",
+        ),
+        exit_diagnostics=_diagnostics_for_path(
+            "exit",
+            requirements.exit,
+            capabilities,
+            exit_coverage,
+            "hold",
+        ),
     )
 
 
@@ -279,7 +367,114 @@ def _falls_short(
         return True
     if coverage.sessions < requirement.minimum_sessions:
         return True
-    return any(column not in coverage.columns for column in requirement.columns)
+    if any(column not in coverage.columns for column in requirement.columns):
+        return True
+    return bool(_missing_sessions_for_requirement(requirement, coverage))
+
+
+def _missing_sessions_for_requirement(
+    requirement: EvidenceRequirementV1,
+    coverage: SecurityEvidenceCoverageV1,
+) -> tuple[date, ...]:
+    """Return calendar gaps inside the requirement's trailing session window."""
+    if (
+        requirement.kind is not EvidenceKind.PRICE_HISTORY
+        or requirement.minimum_sessions <= 0
+        or not coverage.missing_sessions
+    ):
+        return ()
+    expected = sorted(set(coverage.session_dates) | set(coverage.missing_sessions))
+    if not expected:
+        return ()
+    window = set(expected[-requirement.minimum_sessions :])
+    return tuple(session for session in coverage.missing_sessions if session in window)
+
+
+def _diagnostics_for_path(
+    path: EvidenceDiagnosticPath,
+    requirements: tuple[EvidenceRequirementV1, ...],
+    capabilities: frozenset[EvidenceKind],
+    coverage: Mapping[str, SecurityEvidenceCoverageV1],
+    disposition: EvidenceDiagnosticDisposition,
+) -> tuple[EvidenceDiagnosticV1, ...]:
+    """Build one immutable diagnostic per affected security, generically."""
+    if not requirements:
+        return ()
+    diagnostics: list[EvidenceDiagnosticV1] = []
+    required_sessions = max(
+        (requirement.minimum_sessions for requirement in requirements), default=0
+    )
+    requirement_kinds = tuple(requirement.kind for requirement in requirements)
+    required_columns = tuple(
+        dict.fromkeys(
+            column for requirement in requirements for column in requirement.columns
+        )
+    )
+    for security_id in sorted(coverage):
+        if not security_id:
+            continue
+        item = coverage[security_id]
+        missing_evidence = tuple(
+            requirement.kind
+            for requirement in requirements
+            if requirement.kind not in capabilities
+            or requirement.kind not in item.kinds
+        )
+        missing_columns = tuple(
+            sorted(
+                {
+                    column
+                    for requirement in requirements
+                    if requirement.kind in item.kinds
+                    for column in requirement.columns
+                    if column not in item.columns
+                }
+            )
+        )
+        missing_sessions = tuple(
+            sorted(
+                {
+                    session
+                    for requirement in requirements
+                    for session in _missing_sessions_for_requirement(requirement, item)
+                }
+            )
+        )
+        short_history = item.sessions < required_sessions
+        if not (
+            missing_evidence or missing_columns or missing_sessions or short_history
+        ):
+            continue
+        if missing_evidence:
+            cause: EvidenceDiagnosticCause = "missing_evidence"
+        elif missing_columns:
+            cause = "missing_columns"
+        elif short_history:
+            cause = "short_history"
+        else:
+            cause = "missing_sessions"
+        dates = tuple(sorted(set(item.session_dates)))
+        diagnostics.append(
+            EvidenceDiagnosticV1(
+                security_id=security_id,
+                display_ticker=item.display_ticker or security_id,
+                path=path,
+                requirement_kinds=requirement_kinds,
+                required_sessions=required_sessions,
+                required_columns=required_columns,
+                available_sessions=item.sessions,
+                first_evidenced_session=dates[0] if dates else None,
+                last_evidenced_session=dates[-1] if dates else None,
+                missing_evidence=missing_evidence,
+                missing_columns=missing_columns,
+                missing_sessions=missing_sessions,
+                missing_session_ranges=compact_date_ranges(missing_sessions),
+                evidence_details=tuple(sorted(set(item.evidence_details))),
+                cause=cause,
+                disposition=disposition,
+            )
+        )
+    return tuple(diagnostics)
 
 
 #: The three labels the assign-Strategy modal renders per choice.
@@ -304,6 +499,10 @@ __all__ = [
     "EVIDENCE_CONTRACT_VERSION",
     "EvidenceCapableViewV1",
     "EvidenceCompatibility",
+    "EvidenceDiagnosticV1",
+    "EvidenceDiagnosticCause",
+    "EvidenceDiagnosticDisposition",
+    "EvidenceDiagnosticPath",
     "EvidenceDeclaringStrategyV1",
     "EvidenceKind",
     "EvidencePreflightV1",
@@ -311,6 +510,7 @@ __all__ = [
     "SecurityEvidenceCoverageV1",
     "StrategyEvidenceRequirementsV1",
     "StrategySupportLabel",
+    "compact_date_ranges",
     "preflight_evidence",
     "strategy_support_label",
 ]

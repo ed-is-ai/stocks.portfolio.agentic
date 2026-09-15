@@ -106,7 +106,7 @@
 <div class="alert alert-warning border-0 d-flex align-items-start gap-2 mt-1 mb-3"
      role="status" id="evidence-incomplete-alert">
   <i class="bi bi-exclamation-triangle"></i>
-  <span>
+  <div class="flex-grow-1">
     <strong>Evidence incomplete.</strong>
     {% if entry_blocked or exit_blocked %}
     This Strategy needs evidence the current scan does not carry
@@ -125,7 +125,48 @@
     {% for ticker in shown_degraded %}<code class="me-1">{{ ticker }}</code>{% endfor %}
     {%- if extra_degraded > 0 %}<span class="text-muted">+{{ extra_degraded }} more</span>{% endif %}.
     {% endif %}
-  </span>
+    {% if result.coverage.supported_diagnostics %}
+    <details class="mt-2" id="evidence-diagnostics">
+      <summary style="cursor:pointer">
+        Explain limited evidence ({{ result.coverage.supported_diagnostic_securities | length }} securities)
+      </summary>
+      <div class="border rounded p-2 mt-1" role="region"
+           aria-label="Per-security evidence diagnostics">
+        <ul class="mb-0 ps-3" style="font-size:0.74rem">
+          {% for diagnostic in result.coverage.supported_diagnostics %}
+          <li class="mb-1">
+            <code>{{ diagnostic.display_ticker }}</code>
+            <span class="text-muted">({{ diagnostic.security_id }})</span>
+            <strong>{{ diagnostic.path }}</strong> {{ diagnostic.cause }};
+            Requirement: {{ diagnostic.requirement_kinds | join(', ') }};
+            {{ diagnostic.available_sessions }}/{{ diagnostic.required_sessions }} sessions
+            {% if diagnostic.first_evidenced_session %}
+            from {{ diagnostic.first_evidenced_session.isoformat() }}
+            to {{ diagnostic.last_evidenced_session.isoformat() }}
+            {% endif %}.
+            {% if diagnostic.required_columns %}
+            Required columns: {{ diagnostic.required_columns | join(', ') }}.
+            {% endif %}
+            {% if diagnostic.missing_evidence %}
+            Missing evidence: {{ diagnostic.missing_evidence | join(', ') }}.
+            {% endif %}
+            {% if diagnostic.missing_columns %}
+            Missing columns: {{ diagnostic.missing_columns | join(', ') }}.
+            {% endif %}
+            {% if diagnostic.missing_session_ranges %}
+            Missing sessions: {{ diagnostic.missing_session_ranges | join(', ') }}.
+            {% endif %}
+            {% for detail in diagnostic.evidence_details %}
+            <span class="text-muted">{{ detail }}</span>
+            {% endfor %}
+            Safe outcome: {{ diagnostic.disposition }}.
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+    </details>
+    {% endif %}
+  </div>
 </div>
 {% endif %}
 

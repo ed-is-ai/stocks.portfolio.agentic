@@ -25,12 +25,14 @@ from app.services.backtest.skill_discovery import (
 from app.services.backtest.strategy_evidence import (
     EVIDENCE_CONTRACT_VERSION,
     EvidenceCompatibility,
+    EvidenceDiagnosticV1,
     EvidenceKind,
     EvidenceRequirementV1,
     StrategyEvidenceRequirementsV1,
     preflight_evidence,
     strategy_support_label,
 )
+from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.worker import _load_strategy_instance
 
 SESSION = date(2026, 8, 28)
@@ -172,6 +174,205 @@ def test_thin_history_degrades_rather_than_disqualifies() -> None:
     assert strategy_support_label(preflight) == "degraded"
 
 
+def test_short_history_diagnostic_has_counts_and_bounds() -> None:
+    requirements = StrategyEvidenceRequirementsV1(
+        entry=(
+            EvidenceRequirementV1(
+                kind=EvidenceKind.PRICE_HISTORY, minimum_sessions=100
+            ),
+        )
+    )
+    preflight = preflight_evidence(
+        requirements, _ohlcv_view(sessions=10), (SECURITY,), ()
+    )
+    diagnostic = preflight.entry_diagnostics[0]
+    assert isinstance(diagnostic, EvidenceDiagnosticV1)
+    assert diagnostic.cause == "short_history"
+    assert diagnostic.required_sessions == 100
+    assert diagnostic.available_sessions == 10
+    assert diagnostic.first_evidenced_session is not None
+    assert diagnostic.last_evidenced_session == SESSION
+    assert diagnostic.disposition == "excluded"
+
+
+def test_calendar_gap_diagnostic_is_bounded_and_compacted() -> None:
+    sessions = tuple(
+        TradingCalendar()._calendar("XNAS").sessions_window(pd.Timestamp(SESSION), -7)
+    )
+    missing = sessions[-2].date()
+    observed = sessions[:-2] + sessions[-1:]
+    frame = pd.DataFrame(
+        {
+            name: [Decimal(100 + index) for index in range(len(observed))]
+            for name in PRICE_HISTORY_COLUMNS
+        },
+        index=observed,
+        columns=list(PRICE_HISTORY_COLUMNS),
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=(SECURITY,),
+        _histories={SECURITY: frame},
+    )
+    requirements = StrategyEvidenceRequirementsV1(
+        entry=(
+            EvidenceRequirementV1(kind=EvidenceKind.PRICE_HISTORY, minimum_sessions=5),
+        )
+    )
+    preflight = preflight_evidence(requirements, view, (SECURITY,), ())
+    diagnostic = preflight.entry_diagnostics[0]
+    assert diagnostic.cause == "missing_sessions"
+    assert diagnostic.missing_sessions == (missing,)
+    assert diagnostic.missing_session_ranges == (missing.isoformat(),)
+    assert diagnostic.last_evidenced_session == SESSION
+
+
+def test_calendar_uses_canonical_identity_not_friendly_display_ticker() -> None:
+    frame = pd.DataFrame(
+        {name: [Decimal("1"), Decimal("2")] for name in PRICE_HISTORY_COLUMNS},
+        index=pd.Index(
+            [date(2026, 7, 2), date(2026, 7, 6)],
+            dtype=object,
+            name="session",
+        ),
+    )
+    view = CurrentScanMarketView(
+        as_of_session=date(2026, 7, 6),
+        selected_universe=("0P00013P6I.L",),
+        _histories={"0P00013P6I.L": frame},
+        _display_tickers={"0P00013P6I.L": "HSFWA"},
+    )
+    coverage = view.evidence_coverage("0P00013P6I.L")
+    assert date(2026, 7, 3) in coverage.missing_sessions
+
+
+def test_empty_security_ids_do_not_create_invalid_diagnostics() -> None:
+    requirements = StrategyEvidenceRequirementsV1(
+        entry=(
+            EvidenceRequirementV1(kind=EvidenceKind.PRICE_HISTORY, minimum_sessions=2),
+        )
+    )
+    preflight = preflight_evidence(requirements, _ohlcv_view(), ("",), ())
+    assert preflight.entry is EvidenceCompatibility.COMPATIBLE
+    assert preflight.entry_diagnostics == ()
+
+
+def test_calendar_gaps_outside_trailing_requirement_window_are_ignored() -> None:
+    sessions = tuple(
+        TradingCalendar()._calendar("XNAS").sessions_window(pd.Timestamp(SESSION), -10)
+    )
+    observed = sessions[:1] + sessions[2:]
+    frame = pd.DataFrame(
+        {name: [Decimal("1")] * len(observed) for name in PRICE_HISTORY_COLUMNS},
+        index=pd.Index(observed, dtype=object, name="session"),
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=(SECURITY,),
+        _histories={SECURITY: frame},
+    )
+    requirements = StrategyEvidenceRequirementsV1(
+        entry=(
+            EvidenceRequirementV1(kind=EvidenceKind.PRICE_HISTORY, minimum_sessions=5),
+        )
+    )
+    preflight = preflight_evidence(requirements, view, (SECURITY,), ())
+    assert preflight.entry is EvidenceCompatibility.COMPATIBLE
+    assert preflight.entry_diagnostics == ()
+
+
+def test_non_price_requirements_do_not_report_price_calendar_gaps() -> None:
+    sessions = tuple(
+        TradingCalendar()._calendar("XNAS").sessions_window(pd.Timestamp(SESSION), -5)
+    )
+    observed = sessions[:2] + sessions[3:]
+    frame = pd.DataFrame(
+        {name: [Decimal("1")] * len(observed) for name in PRICE_HISTORY_COLUMNS},
+        index=pd.Index(observed, dtype=object, name="session"),
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=(SECURITY,),
+        _histories={SECURITY: frame},
+    )
+    preflight = preflight_evidence(
+        StrategyEvidenceRequirementsV1(
+            entry=(EvidenceRequirementV1(kind=EvidenceKind.SCAN_STAGE),)
+        ),
+        view,
+        (SECURITY,),
+        (),
+    )
+    diagnostic = preflight.entry_diagnostics[0]
+    assert diagnostic.cause == "missing_evidence"
+    assert diagnostic.missing_sessions == ()
+
+
+def test_missing_columns_and_fragments_have_distinct_causes() -> None:
+    frame = pd.DataFrame(
+        {"close": [Decimal("1"), Decimal("2")]},
+        index=pd.Index([date(2026, 8, 27), SESSION], dtype=object, name="session"),
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=(SECURITY,),
+        _histories={SECURITY: frame},
+    )
+    column_preflight = preflight_evidence(
+        StrategyEvidenceRequirementsV1(
+            entry=(
+                EvidenceRequirementV1(
+                    kind=EvidenceKind.PRICE_HISTORY, columns=("volume",)
+                ),
+            )
+        ),
+        view,
+        (SECURITY,),
+        (),
+    )
+    assert column_preflight.entry_diagnostics[0].cause == "missing_columns"
+    assert column_preflight.entry_diagnostics[0].missing_columns == ("volume",)
+
+    fragment_preflight = preflight_evidence(
+        StrategyEvidenceRequirementsV1(
+            entry=(EvidenceRequirementV1(kind=EvidenceKind.SCAN_STAGE),)
+        ),
+        view,
+        (SECURITY,),
+        (),
+    )
+    assert fragment_preflight.entry_diagnostics[0].cause == "missing_evidence"
+    assert fragment_preflight.entry_diagnostics[0].missing_evidence == (
+        EvidenceKind.SCAN_STAGE,
+    )
+
+
+def test_diagnostics_are_identity_aware_and_deterministically_ordered() -> None:
+    frame = pd.DataFrame(
+        {name: [Decimal("1")] for name in PRICE_HISTORY_COLUMNS},
+        index=pd.Index([SESSION], dtype=object, name="session"),
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=("BBB", "AAA"),
+        _histories={"BBB": frame, "AAA": frame},
+        _display_tickers={"AAA": "Friendly A", "BBB": "Friendly B"},
+    )
+    requirements = StrategyEvidenceRequirementsV1(
+        entry=(
+            EvidenceRequirementV1(kind=EvidenceKind.PRICE_HISTORY, minimum_sessions=2),
+        )
+    )
+    first = preflight_evidence(requirements, view, ("BBB", "AAA"), ())
+    second = preflight_evidence(requirements, view, ("AAA", "BBB"), ())
+    assert first.entry_diagnostics == second.entry_diagnostics
+    assert [item.security_id for item in first.entry_diagnostics] == ["AAA", "BBB"]
+    assert [item.display_ticker for item in first.entry_diagnostics] == [
+        "Friendly A",
+        "Friendly B",
+    ]
+
+
 #: Buy and Hold is a passive benchmark: it holds forever and never emits an
 #: ordinary exit, so an empty exit declaration is the honest answer. Every
 #: other Strategy must declare both paths — an empty declaration would
@@ -224,3 +425,5 @@ def test_per_path_security_sets_are_independent() -> None:
     assert exit_only.entry is EvidenceCompatibility.COMPATIBLE
     assert exit_only.exit is EvidenceCompatibility.DEGRADED
     assert exit_only.degraded_securities == (SECURITY,)
+    assert exit_only.entry_diagnostics == ()
+    assert exit_only.exit_diagnostics[0].disposition == "hold"

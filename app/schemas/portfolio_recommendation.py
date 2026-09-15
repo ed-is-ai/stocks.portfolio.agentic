@@ -25,6 +25,11 @@ RecommendationAction = Literal["sell", "hold", "buy"]
 #: ``EvidenceCompatibility`` values as plain strings, so this schema stays
 #: independent of that package while still rejecting an unknown state.
 EvidenceState = Literal["compatible", "degraded", "incompatible"]
+EvidenceDiagnosticPath = Literal["entry", "exit"]
+EvidenceDiagnosticCause = Literal[
+    "short_history", "missing_sessions", "missing_columns", "missing_evidence"
+]
+EvidenceDiagnosticDisposition = Literal["excluded", "hold"]
 
 
 class _RecommendationModel(BaseModel):
@@ -76,6 +81,27 @@ class RecommendationV1(_RecommendationModel):
     explanation: tuple[RecommendationReasonV1, ...] = ()
 
 
+class RecommendationEvidenceDiagnosticV1(_RecommendationModel):
+    """Screen/email-independent projection of one evidence shortfall."""
+
+    security_id: str = Field(min_length=1)
+    display_ticker: str = Field(min_length=1)
+    path: EvidenceDiagnosticPath
+    requirement_kinds: tuple[str, ...] = ()
+    required_sessions: int = Field(default=0, ge=0)
+    required_columns: tuple[str, ...] = ()
+    available_sessions: int = Field(default=0, ge=0)
+    first_evidenced_session: date | None = None
+    last_evidenced_session: date | None = None
+    missing_evidence: tuple[str, ...] = ()
+    missing_columns: tuple[str, ...] = ()
+    missing_sessions: tuple[date, ...] = ()
+    missing_session_ranges: tuple[str, ...] = ()
+    evidence_details: tuple[str, ...] = ()
+    cause: EvidenceDiagnosticCause
+    disposition: EvidenceDiagnosticDisposition
+
+
 class EvaluationCoverageV1(_RecommendationModel):
     """Typed evidence diagnostics for one evaluation (#471).
 
@@ -96,6 +122,7 @@ class EvaluationCoverageV1(_RecommendationModel):
     #: evaluated: a degraded security is counted here and skipped there.
     evaluated_securities: int = 0
     degraded_securities: tuple[str, ...] = ()
+    diagnostics: tuple[RecommendationEvidenceDiagnosticV1, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -111,6 +138,26 @@ class EvaluationCoverageV1(_RecommendationModel):
     def exit_supported(self) -> bool:
         """True when the exit path could be evaluated at all."""
         return self.exit_state != "incompatible"
+
+    @property
+    def diagnostic_securities(self) -> tuple[str, ...]:
+        """Canonical ids represented by the complete diagnostic projection."""
+        return tuple(sorted({item.security_id for item in self.diagnostics}))
+
+    @property
+    def supported_diagnostics(self) -> tuple[RecommendationEvidenceDiagnosticV1, ...]:
+        """Diagnostics for paths that were structurally invokable."""
+        return tuple(
+            item
+            for item in self.diagnostics
+            if (item.path == "entry" and self.entry_supported)
+            or (item.path == "exit" and self.exit_supported)
+        )
+
+    @property
+    def supported_diagnostic_securities(self) -> tuple[str, ...]:
+        """Canonical ids represented by supported-path diagnostics."""
+        return tuple(sorted({item.security_id for item in self.supported_diagnostics}))
 
 
 #: Parameter keys that carry a Strategy's *security universe* rather than a

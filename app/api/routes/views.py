@@ -2,6 +2,8 @@
 
 import csv
 import json
+import logging
+from collections.abc import Mapping
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -35,6 +37,7 @@ from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 PortfolioDep = Annotated[PortfolioService, Depends(get_portfolio_service)]
@@ -140,10 +143,38 @@ def partial_strategy_assign(
     in its threadpool rather than blocking the event loop.
     """
     pid = optional_int(portfolio_id)
-    try:
-        strategy_support = recommendations.strategy_support()
-    except Exception:
-        strategy_support = {}
+    strategy_support: Mapping[str, str] = {}
+    strategy_support_diagnostics: Mapping[str, tuple[object, ...]] = {}
+    bundle = getattr(recommendations, "strategy_support_with_diagnostics", None)
+    bundle_ok = False
+    if callable(bundle):
+        try:
+            bundled = bundle()
+            if not isinstance(bundled, tuple) or len(bundled) != 2:
+                raise TypeError("strategy support bundle must contain two mappings")
+            strategy_support, strategy_support_diagnostics = bundled
+            if not isinstance(strategy_support, Mapping):
+                strategy_support = {}
+            if not isinstance(strategy_support_diagnostics, Mapping):
+                strategy_support_diagnostics = {}
+            bundle_ok = True
+        except Exception:
+            logger.exception("Strategy support bundle lookup failed")
+    if not bundle_ok:
+        # Keep lightweight/test doubles and legacy callers compatible while
+        # isolating diagnostics failures from the existing support labels.
+        try:
+            strategy_support = recommendations.strategy_support()
+        except Exception:
+            logger.exception("Strategy support lookup failed")
+        try:
+            strategy_support_diagnostics = (
+                recommendations.strategy_support_diagnostics()
+            )
+            if not isinstance(strategy_support_diagnostics, Mapping):
+                strategy_support_diagnostics = {}
+        except Exception:
+            logger.exception("Strategy support diagnostics lookup failed")
     context = {
         "portfolio_id": pid,
         "strategy_choices": assignment.list_choices(),
@@ -153,6 +184,7 @@ def partial_strategy_assign(
         ),
         "strategy_freshness": assignment.freshness(),
         "strategy_support": strategy_support,
+        "strategy_support_diagnostics": strategy_support_diagnostics,
     }
     return templates.TemplateResponse(request, "_strategy_assign.html", context=context)
 
