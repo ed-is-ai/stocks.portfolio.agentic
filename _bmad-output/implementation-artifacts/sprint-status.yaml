@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-09-14 (GH-624 implementation complete; commit 9815014; GH-625 remains separate)"
+last_updated: "2026-09-15 (GH-632 follow-up story planned)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -71,9 +71,10 @@ development_status:
   feature-gh-624-limited-recommendation-evidence-diagnostics: done
   gh-624-1-add-deterministic-per-security-evidence-diagnostics: done
   gh-624-2-surface-limited-evidence-diagnostics: done
-  feature-gh-625-portfolio-history-for-held-securities: backlog
-  gh-625-1-read-bounded-portfolio-history: backlog
-  gh-625-2-use-portfolio-history-for-scan-absent-holdings: backlog
+  feature-gh-625-portfolio-history-for-held-securities: done
+  gh-625-1-read-bounded-portfolio-history: done
+  gh-625-2-use-portfolio-history-for-scan-absent-holdings: done
+  gh-625-3-repair-or-tolerate-portfolio-history-gaps: done
   gh-493-strategy-manager-agent: review
   gh-503-preparation-liveness: review
   gh-492-price-evidence-backfill-stage: review

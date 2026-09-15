@@ -311,7 +311,7 @@ standalone_issues:
         prerequisite_issues: [627]
   portfolio-history-for-held-securities:
     issue: 625
-    status: backlog
+    status: done
     prerequisite_issues: [624]
     related_issues: [383, 441, 471, 624]
     feature_plan: feature-gh-625-portfolio-history-for-held-securities.md
@@ -319,8 +319,14 @@ standalone_issues:
     stories:
       gh-625-1-read-bounded-portfolio-history:
         issue: 629
-        status: backlog
+        status: done
       gh-625-2-use-portfolio-history-for-scan-absent-holdings:
         issue: 630
-        status: backlog
+        status: done
         prerequisite_issues: [629, 627]
+  portfolio-history-repair-tolerance:
+    issue: 632
+    status: done
+    prerequisite_issues: [625]
+    related_issues: [383, 624, 625, 629, 630]
+    story_artifact: 625-3-repair-or-tolerate-portfolio-history-gaps.md

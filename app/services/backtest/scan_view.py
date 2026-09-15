@@ -20,7 +20,7 @@ never silently dropped.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Iterable, Mapping, Sequence, cast
@@ -35,7 +35,15 @@ from app.schemas.analysis_artifact import (
     CurrentEvidenceSuccessV1,
 )
 from app.schemas.trade import Position
-from app.services.backtest.market_planes import MarketDataPolicyError
+from app.repositories.historical_price_repo import (
+    EvidenceMissingError,
+    HistoricalEvidenceIntegrityError,
+    HistoricalPriceRepository,
+)
+from app.services.backtest.market_planes import (
+    HistoricalMarketPlanes,
+    MarketDataPolicyError,
+)
 from app.services.backtest.market_view import (
     PRICE_HISTORY_COLUMNS,
     _missing_calendar_sessions,
@@ -49,6 +57,9 @@ from app.services.backtest.strategy_protocol import (
     PortfolioView,
 )
 from app.services.backtest.historical_scan_record import StageV1, TechnicalsV1, VcpV1
+from app.services.backtest.trading_calendar import TradingCalendar
+
+_CARRY_FORWARD_POLICY = "portfolio_history_carry_forward_v1"
 
 
 @dataclass(frozen=True)
@@ -71,6 +82,242 @@ class CurrentScanRecordView:
 
 
 @dataclass(frozen=True)
+class PortfolioHistoryRead:
+    """One read-only, typed outcome for a held security's fallback history."""
+
+    security_id: str
+    display_ticker: str
+    history: pd.DataFrame | None = None
+    evidence_details: tuple[str, ...] = ()
+    error_code: str | None = None
+
+    @property
+    def available(self) -> bool:
+        return self.history is not None
+
+
+_PORTFOLIO_RAW_COLUMNS = (
+    "open",
+    "high",
+    "low",
+    "close",
+    "adj_close",
+    "volume",
+    "dividends",
+    "stock_splits",
+)
+
+
+def read_portfolio_history(
+    prices: HistoricalPriceRepository,
+    ticker: str,
+    aliases: Mapping[str, str],
+    *,
+    through: date,
+    minimum_sessions: int,
+    carry_forward_sessions: int = 0,
+    repair_outcome: str | None = None,
+) -> PortfolioHistoryRead:
+    """Read existing ``portfolio:<canonical>`` evidence through ``through``.
+
+    This boundary is deliberately read-only: it only uses the repository's
+    covering-revision and active-format bounded-read APIs. Invalid or absent
+    evidence becomes a stable typed outcome for recommendation preflight.
+    """
+    display_ticker = ticker
+
+    def failure_details(reason: str) -> tuple[str, ...]:
+        details = [f"portfolio_history: status=unavailable; reason={reason}"]
+        if repair_outcome is not None:
+            details.append(f"portfolio_history: repair_outcome={repair_outcome}")
+        return tuple(details)
+
+    try:
+        canonical = canonical_ticker(ticker, dict(aliases))
+    except (AmbiguousTickerAliasError, TypeError, ValueError):
+        return PortfolioHistoryRead(
+            ticker,
+            display_ticker,
+            error_code="identity_mismatch",
+            evidence_details=failure_details("identity_mismatch"),
+        )
+    if (
+        isinstance(minimum_sessions, bool)
+        or not isinstance(minimum_sessions, int)
+        or minimum_sessions < 0
+    ):
+        return PortfolioHistoryRead(
+            canonical,
+            display_ticker,
+            error_code="invalid_price_history_request",
+            evidence_details=failure_details("invalid_price_history_request"),
+        )
+    read_limit = max(1, minimum_sessions)
+
+    security_id = f"portfolio:{canonical}"
+    handle = None
+    try:
+        # Revision selection only needs the current bound; ``limit`` supplies
+        # the strategy window after a revision is found. Requiring the
+        # calendar-day lookback here would reject a valid revision whose first
+        # exchange session is later than that synthetic date.
+        start = through
+        end = through + timedelta(days=1)
+        revision = prices.covering_revision(
+            security_id=security_id,
+            requested_symbol=canonical,
+            start=start.isoformat(),
+            end=end.isoformat(),
+        )
+        if revision is None:
+            raise EvidenceMissingError("historical evidence is missing")
+        handle = prices.open_read(revision)
+        metadata = handle.metadata
+        if (
+            metadata.security_id != security_id
+            or metadata.requested_symbol != canonical
+            or metadata.observed_symbol != canonical
+        ):
+            raise HistoricalEvidenceIntegrityError(
+                "portfolio evidence identity does not match the canonical holding"
+            )
+        bounded = handle.bounded(
+            through=through,
+            limit=read_limit,
+            columns=_PORTFOLIO_RAW_COLUMNS,
+        )
+        plane = HistoricalMarketPlanes.from_bounded_evidence(bounded)
+        rows = plane.split_continuous_window_as_of(through, limit=read_limit)
+        if not rows:
+            raise HistoricalEvidenceIntegrityError(
+                "portfolio history has no usable observations"
+            )
+        scale = plane.quote_unit_scale
+        mic = "XLON" if canonical.upper().endswith(".L") else "XNYS"
+        try:
+            expected = TradingCalendar().sessions_in_range(
+                mic, rows[0].session, through + timedelta(days=1)
+            )
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise MarketDataPolicyError(
+                "integrity_error", "portfolio history session calendar is invalid"
+            ) from exc
+        if through not in expected:
+            raise MarketDataPolicyError(
+                "bound_violation", "portfolio history as-of is not an exchange session"
+            )
+        observed = {row.session for row in rows}
+        if any(session not in expected for session in observed):
+            raise MarketDataPolicyError(
+                "integrity_error", "portfolio history contains a non-session row"
+            )
+        missing = tuple(session for session in expected if session not in observed)
+        trailing = tuple(session for session in expected if session > rows[-1].session)
+        carry_limit = min(5, max(0, carry_forward_sessions))
+        if repair_outcome in {"identity_mismatch", "integrity_error"}:
+            carry_limit = 0
+        if missing:
+            if missing == trailing and len(missing) <= carry_limit and rows:
+                carried_sessions = missing
+            elif rows[-1].session == through and missing != trailing:
+                # Preserve an internal gap for generic preflight diagnostics;
+                # a later observed row proves it is not a carryable suffix.
+                carried_sessions = ()
+            else:
+                raise MarketDataPolicyError(
+                    "missing_sessions", "portfolio history has an unsafe session gap"
+                )
+        else:
+            carried_sessions = ()
+        projected: list[tuple[date, Decimal, Decimal, Decimal, Decimal, Decimal | None]] = []
+        for row in rows:
+            projected.append(
+                (
+                    row.session,
+                    row.open * scale,
+                    row.high * scale,
+                    row.low * scale,
+                    row.close * scale,
+                    row.volume,
+                )
+            )
+        for session in carried_sessions:
+            _, open_value, high, low, close, _ = projected[-1]
+            projected.append((session, open_value, high, low, close, None))
+        frame = pd.DataFrame(
+            {
+                "open": [row[1] for row in projected],
+                "high": [row[2] for row in projected],
+                "low": [row[3] for row in projected],
+                "close": [row[4] for row in projected],
+                "volume": [row[5] for row in projected],
+            },
+            index=pd.Index(
+                [row[0] for row in projected], dtype=object, name="session"
+            ),
+            columns=PRICE_HISTORY_COLUMNS,
+        )
+        details = (
+            "portfolio_history: "
+            f"revision={metadata.data_revision}; security_id={metadata.security_id}; "
+            f"requested_symbol={metadata.requested_symbol}; "
+            f"observed_symbol={metadata.observed_symbol}; "
+            f"bounds={metadata.start}..{metadata.end}; "
+            f"provider={metadata.provider}; quote_unit={metadata.quote_unit}; "
+            f"quote_unit_scale={metadata.quote_unit_scale}; "
+            f"alias_revision={metadata.alias_revision}; "
+            f"provider_version={metadata.provider_version}; "
+            f"request_contract_version={metadata.request_contract_version}; "
+            f"response_metadata_digest={metadata.response_metadata_digest}",
+        )
+        if repair_outcome is not None:
+            details += (f"portfolio_history: repair_outcome={repair_outcome}",)
+        if carried_sessions:
+            details += (
+                "portfolio_history: "
+                f"carry_forward_policy={_CARRY_FORWARD_POLICY}; "
+                f"source_revision={metadata.data_revision}; "
+                f"last_good_session={rows[-1].session.isoformat()}; "
+                "carried_sessions="
+                f"{','.join(session.isoformat() for session in carried_sessions)}",
+            )
+        return PortfolioHistoryRead(
+            canonical, display_ticker, frame, details
+        )
+    except EvidenceMissingError:
+        return PortfolioHistoryRead(
+            canonical,
+            display_ticker,
+            error_code="evidence_missing",
+            evidence_details=failure_details("evidence_missing"),
+        )
+    except HistoricalEvidenceIntegrityError:
+        return PortfolioHistoryRead(
+            canonical,
+            display_ticker,
+            error_code="integrity_error",
+            evidence_details=failure_details("integrity_error"),
+        )
+    except MarketDataPolicyError as exc:
+        return PortfolioHistoryRead(
+            canonical,
+            display_ticker,
+            error_code=exc.code,
+            evidence_details=failure_details(exc.code),
+        )
+    except Exception:
+        return PortfolioHistoryRead(
+            canonical,
+            display_ticker,
+            error_code="integrity_error",
+            evidence_details=failure_details("integrity_error"),
+        )
+    finally:
+        if handle is not None:
+            handle.close()
+
+
+@dataclass(frozen=True)
 class CurrentScanMarketView:
     """``MarketViewV1`` over one published scan artifact's evidence.
 
@@ -85,6 +332,8 @@ class CurrentScanMarketView:
     _scan_results: Mapping[str, CurrentScanRecordView] = field(default_factory=dict)
     _display_tickers: Mapping[str, str] = field(default_factory=dict)
     _evidence_details: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    _portfolio_history_ids: frozenset[str] = frozenset()
+    _portfolio_history_attempted: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         # Detach from caller-supplied collections so later mutation can
@@ -113,6 +362,12 @@ class CurrentScanMarketView:
                 }
             ),
         )
+        object.__setattr__(self, "_portfolio_history_ids", frozenset(self._portfolio_history_ids))
+        object.__setattr__(
+            self,
+            "_portfolio_history_attempted",
+            frozenset(self._portfolio_history_attempted),
+        )
 
     def with_display_tickers(
         self, display_tickers: Mapping[str, str]
@@ -121,6 +376,35 @@ class CurrentScanMarketView:
         return replace(
             self,
             _display_tickers=dict(self._display_tickers) | dict(display_tickers),
+        )
+
+    def with_portfolio_history(
+        self, outcomes: Iterable[PortfolioHistoryRead]
+    ) -> "CurrentScanMarketView":
+        """Attach fallback price history without changing scan authority."""
+        histories = dict(self._histories)
+        details = dict(self._evidence_details)
+        display_tickers = dict(self._display_tickers)
+        valid: set[str] = set(self._portfolio_history_ids)
+        attempted = set(self._portfolio_history_attempted)
+        for outcome in outcomes:
+            if outcome.security_id in self.selected_universe:
+                continue
+            attempted.add(outcome.security_id)
+            if outcome.display_ticker:
+                display_tickers.setdefault(outcome.security_id, outcome.display_ticker)
+            if outcome.history is not None:
+                histories[outcome.security_id] = outcome.history
+                valid.add(outcome.security_id)
+            if outcome.evidence_details:
+                details[outcome.security_id] = tuple(outcome.evidence_details)
+        return replace(
+            self,
+            _histories=histories,
+            _evidence_details=details,
+            _display_tickers=display_tickers,
+            _portfolio_history_ids=frozenset(valid),
+            _portfolio_history_attempted=frozenset(attempted),
         )
 
     def price_history(
@@ -234,7 +518,11 @@ class CurrentScanMarketView:
             display_ticker=display_ticker,
             kinds=frozenset(kinds),
             sessions=int(len(frame.index)),
-            columns=tuple(str(column) for column in frame.columns),
+            columns=tuple(
+                str(column)
+                for column in frame.columns
+                if bool(frame[column].notna().all())
+            ),
             session_dates=session_dates,
             missing_sessions=_missing_calendar_sessions(
                 security_id,

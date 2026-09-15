@@ -68,6 +68,34 @@ class _RaisingTicker:
         return {}
 
 
+class _TwoRowTicker:
+    """A complete two-session response used to prove repair bypasses coverage."""
+
+    def history(self, **_kwargs: object) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "Open": [100.0, 101.0],
+                "High": [102.0, 103.0],
+                "Low": [99.0, 100.0],
+                "Close": [101.0, 102.0],
+                "Adj Close": [100.5, 101.5],
+                "Volume": [1_000.0, 1_100.0],
+                "Dividends": [0.0, 0.0],
+                "Stock Splits": [0.0, 0.0],
+            },
+            index=pd.DatetimeIndex(
+                ["2024-01-02", "2024-01-03"], tz="America/New_York"
+            ),
+        )
+
+    def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
+        return {
+            "symbol": "AAPL",
+            "currency": "USD",
+            "exchangeTimezoneName": "America/New_York",
+        }
+
+
 class _DelistedTicker:
     """Raises the way yfinance actually does for a delisted/never-existed
     symbol -- not an empty frame, an exception before any frame is parsed
@@ -148,6 +176,37 @@ def test_same_day_round_trip_never_requests_an_empty_range(tmp_path) -> None:
         )
         is not None
     )
+
+
+def test_repair_bypasses_covering_revision_and_commits_complete_response(
+    tmp_path,
+) -> None:
+    service, repo = _service(tmp_path)
+    service.ensure_coverage("AAPL", date(2024, 1, 1), date(2024, 1, 4))
+    repair = PriceEvidenceBackfillService(
+        repo,
+        YFinanceHistoricalEvidenceAdapter(
+            lambda _: _TwoRowTicker(), sleeper=lambda _: None
+        ),
+    )
+
+    assert repair.repair_coverage(
+        "AAPL",
+        date(2024, 1, 2),
+        date(2024, 1, 4),
+        expected_sessions=(date(2024, 1, 2), date(2024, 1, 3)),
+    )
+    revision = repo.covering_revision(
+        security_id="portfolio:AAPL",
+        requested_symbol="AAPL",
+        start="2024-01-02",
+        end="2024-01-04",
+    )
+    assert revision is not None
+    assert {row["session"] for row in repo.get(revision).rows} == {
+        "2024-01-02",
+        "2024-01-03",
+    }
 
 
 def test_definitive_failure_is_recorded_unavailable_and_raised(tmp_path) -> None:

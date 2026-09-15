@@ -19,8 +19,16 @@ from __future__ import annotations
 from datetime import date, timedelta
 import logging
 
-from app.core.ticker_identity import canonicalize_or_fallback, load_aliases
-from app.repositories.historical_price_repo import HistoricalPriceRepository
+from app.core.ticker_identity import (
+    AmbiguousTickerAliasError,
+    canonical_ticker,
+    canonicalize_or_fallback,
+    load_aliases,
+)
+from app.repositories.historical_price_repo import (
+    HistoricalEvidenceIntegrityError,
+    HistoricalPriceRepository,
+)
 from app.services.backtest.historical_data_qualification import (
     FailureCode,
     ProviderFailure,
@@ -32,6 +40,7 @@ from app.services.backtest.historical_price_evidence import (
     fx_pair_for,
     fx_security_id_for,
 )
+from app.services.backtest.trading_calendar import TradingCalendar
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +74,14 @@ class PriceEvidenceUnavailable(RuntimeError):
     raising again, so a caller can tell "newly unavailable this run" (surface
     it) apart from "still unavailable, as expected" (stay quiet).
     """
+
+
+class PriceEvidenceRepairError(RuntimeError):
+    """A repair response failed identity or evidence-integrity validation."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
 
 
 class PriceEvidenceBackfillService:
@@ -144,6 +161,109 @@ class PriceEvidenceBackfillService:
                 raise PriceEvidenceUnavailable(str(exc)) from exc
             raise
         self._prices.commit(payload)
+        return True
+
+    def repair_coverage(
+        self,
+        ticker: str,
+        start: date,
+        end: date,
+        *,
+        expected_sessions: tuple[date, ...],
+    ) -> bool:
+        """Attempt one bounded, complete provider repair.
+
+        Unlike :meth:`ensure_coverage`, this deliberately bypasses an
+        interval-covering revision: that revision may contain a missing
+        exchange session. Partial provider responses are not committed; the
+        evaluation caller can then apply its ephemeral tolerance policy.
+        """
+        try:
+            symbol = canonical_ticker(ticker, self._aliases)
+        except (AmbiguousTickerAliasError, TypeError, ValueError) as exc:
+            raise PriceEvidenceRepairError("identity_mismatch") from exc
+        security_id = f"{_SECURITY_ID_PREFIX}{symbol}"
+        if self._prices.get_unavailable_attempt(security_id) is not None:
+            return False
+        expected = tuple(expected_sessions)
+        mic = "XLON" if symbol.upper().endswith(".L") else "XNYS"
+        try:
+            authoritative = TradingCalendar().sessions_in_range(mic, start, end)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise PriceEvidenceRepairError("integrity_error") from exc
+        if expected != authoritative or not expected or expected[-1] != end - timedelta(days=1):
+            raise PriceEvidenceRepairError("integrity_error")
+        expected_currency = expected_quote_unit = expected_timezone = None
+        existing = self._prices.covering_revision(
+            security_id=security_id,
+            requested_symbol=symbol,
+            start=start.isoformat(),
+            end=end.isoformat(),
+        )
+        if existing is not None:
+            handle = None
+            try:
+                handle = self._prices.open_read(existing)
+                metadata = handle.metadata
+                expected_currency = metadata.currency
+                expected_quote_unit = metadata.quote_unit
+                expected_timezone = metadata.exchange_timezone
+            except Exception as exc:
+                raise PriceEvidenceRepairError("integrity_error") from exc
+            finally:
+                if handle is not None:
+                    handle.close()
+        request = HistoricalEvidenceRequest(
+            security_id=security_id,
+            alias_revision=None,
+            symbol=symbol,
+            start=start,
+            end=end,
+            expected_sessions=expected,
+            allowed_observed_symbols=(symbol,),
+            expected_currency=expected_currency,
+            expected_quote_unit=expected_quote_unit,
+            expected_timezone=expected_timezone,
+            canonical_exchange_sessions=True,
+        )
+        try:
+            payload = self._adapter.fetch(request)
+            if (
+                payload.security_id != security_id
+                or payload.requested_symbol != symbol
+                or payload.observed_symbol != symbol
+            ):
+                raise PriceEvidenceRepairError("identity_mismatch")
+            if (
+                payload.provider != "yfinance"
+                or payload.start != start.isoformat()
+                or payload.end != end.isoformat()
+                or payload.request_contract.get("start") != start.isoformat()
+                or payload.request_contract.get("end") != end.isoformat()
+            ):
+                raise PriceEvidenceRepairError("integrity_error")
+            sessions = tuple(
+                date.fromisoformat(str(row["session"])) for row in payload.rows
+            )
+            if sessions != expected:
+                return False
+            self._prices.commit(payload)
+        except PriceEvidenceRepairError:
+            raise
+        except ProviderFailure as exc:
+            if exc.code is FailureCode.IDENTITY_AMBIGUOUS:
+                raise PriceEvidenceRepairError("identity_mismatch") from exc
+            if exc.code is FailureCode.PROVIDER_CONTRACT_ERROR:
+                raise PriceEvidenceRepairError("integrity_error") from exc
+            if exc.code is FailureCode.REQUIRED_DATA_MISSING:
+                self._prices.record_unavailable_attempt(
+                    security_id=security_id,
+                    requested_symbol=symbol,
+                    reason=str(exc),
+                )
+            return False
+        except (HistoricalEvidenceIntegrityError, KeyError, TypeError, ValueError) as exc:
+            raise PriceEvidenceRepairError("integrity_error") from exc
         return True
 
     def ensure_fx_coverage(self, start: date, end: date) -> bool:

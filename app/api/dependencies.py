@@ -7,6 +7,7 @@ module-level ``trader`` instance.
 """
 
 from functools import lru_cache
+import sqlite3
 from typing import Annotated
 
 from fastapi import Depends
@@ -36,6 +37,7 @@ from app.services.portfolio_recommendation_service import (
 from app.services.trader_service import TraderService
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.historical_price_evidence import YFinanceFxSeriesFetcher
+from app.services.snapshot_price_backfill import PriceEvidenceBackfillService
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
@@ -96,6 +98,19 @@ def get_historical_price_repository() -> HistoricalPriceRepository:
     )
     repo.ensure_schema()
     return repo
+
+
+@lru_cache
+def get_read_only_historical_price_repository() -> HistoricalPriceRepository:
+    """Return the recommendation-only historical repository without writes."""
+    path = config.HISTORICAL_PRICE_CACHE
+
+    def connect() -> sqlite3.Connection:
+        connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+        connection.execute("PRAGMA foreign_keys = ON")
+        return connection
+
+    return HistoricalPriceRepository(connect)
 
 
 @lru_cache
@@ -247,4 +262,10 @@ def get_portfolio_recommendation_service() -> PortfolioRecommendationService:
     return PortfolioRecommendationService(
         assignment_service=get_strategy_assignment_service(),
         trader=get_trader_service(),
+        historical_price_repo=get_read_only_historical_price_repository(),
+        # Construct the writable repair collaborator only when the post-scan
+        # evaluation path opts in; ordinary recommendation reads stay RO.
+        repair_factory=lambda: PriceEvidenceBackfillService(
+            get_historical_price_repository()
+        ),
     )

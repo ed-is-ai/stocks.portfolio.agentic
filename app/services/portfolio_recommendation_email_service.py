@@ -206,7 +206,14 @@ class PortfolioRecommendationEmailService:
         Returns the send outcome, or the typed non-result when there is
         nothing to send.
         """
-        outcome = self._recommendation_service.recommend(portfolio_id)
+        evaluate = getattr(
+            self._recommendation_service, "recommend_for_evaluation", None
+        )
+        outcome = (
+            evaluate(portfolio_id)
+            if callable(evaluate)
+            else self._recommendation_service.recommend(portfolio_id)
+        )
         if isinstance(outcome, NoAssignment | EvaluationUnavailable):
             return outcome
         view = self._assignment_service.assignment_view(portfolio_id)

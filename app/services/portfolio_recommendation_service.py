@@ -12,7 +12,7 @@ state the route renders as an actionable alert, never a 500.
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
@@ -39,14 +39,18 @@ from app.schemas.portfolio_recommendation import (
 )
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
+from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.backtest.scan_view import (
     CurrentScanMarketView,
+    PortfolioHistoryRead,
     build_portfolio_view,
     build_scan_market_view,
+    read_portfolio_history,
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.strategy_evidence import (
     EvidenceDiagnosticV1,
+    EvidenceKind,
     EvidencePreflightV1,
     StrategyEvidenceRequirementsV1,
     preflight_evidence,
@@ -61,8 +65,13 @@ from app.services.backtest.strategy_protocol import (
     validate_entry_signals,
     validate_exit_signals,
 )
+from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.portfolio_service import PortfolioService
 from app.services.strategy_assignment_service import StrategyAssignmentService
+from app.services.snapshot_price_backfill import (
+    PriceEvidenceBackfillService,
+    PriceEvidenceRepairError,
+)
 from app.services.trader_service import TraderService
 
 # Reuse the worker's single-class runtime loader verbatim — never a second
@@ -97,6 +106,7 @@ _RULE_REASONS: dict[str, str] = {
 #: The label used when a Strategy's recommendation support cannot be
 #: determined at all (discovery, runtime load, or scan evidence missing).
 SUPPORT_UNKNOWN = "unknown"
+_MAX_REPAIR_SESSIONS = 1000
 
 
 def _reason_for(rule_id: str) -> str:
@@ -225,6 +235,8 @@ class PortfolioRecommendationService:
         portfolio_service: PortfolioService | None = None,
         skills_root: Path | None = None,
         loader: Callable[[Path], StrategyProtocolV1] | None = None,
+        historical_price_repo: HistoricalPriceRepository | None = None,
+        repair_factory: Callable[[], PriceEvidenceBackfillService] | None = None,
     ) -> None:
         """Store dependencies; ``loader`` defaults to the worker's loader."""
         self._assignment_service = assignment_service
@@ -233,6 +245,8 @@ class PortfolioRecommendationService:
         self._skills_root = skills_root if skills_root is not None else SKILLS_DIR
         self._analysis_path = ANALYSIS_JSON
         self._loader = loader if loader is not None else _load_strategy_instance
+        self._historical_price_repo = historical_price_repo
+        self._repair_factory = repair_factory
 
     # --- typed outcome ----------------------------------------------------
 
@@ -244,6 +258,17 @@ class PortfolioRecommendationService:
         Deterministic: identical inputs (assignment, artifact, holdings)
         produce an identical result apart from the ``evaluated_at`` stamp.
         """
+        return self._recommend(portfolio_id, allow_repair=False)
+
+    def recommend_for_evaluation(
+        self, portfolio_id: int
+    ) -> RecommendationResultV1 | NoAssignment | EvaluationUnavailable:
+        """Evaluate after a published run, allowing bounded evidence repair."""
+        return self._recommend(portfolio_id, allow_repair=True)
+
+    def _recommend(
+        self, portfolio_id: int, *, allow_repair: bool
+    ) -> RecommendationResultV1 | NoAssignment | EvaluationUnavailable:
         assignment_view = self._assignment_service.assignment_view(portfolio_id)
         if assignment_view is None:
             return NO_ASSIGNMENT
@@ -318,23 +343,40 @@ class PortfolioRecommendationService:
             }
         )
         try:
-            # The stored snapshot must never carry a stale universe: the
-            # host-bound parameter always comes from the current scan.
-            # ``bind_universe`` validates that selection and raises for a
-            # malformed one — a typed state here, never a 500.
-            parameters = {
+            # The entry universe is always the published scan. Exits get a
+            # separate binding so first-party strategies can inspect held
+            # securities that the scan did not publish.
+            base_parameters = {
                 key: value
                 for key, value in assignment.parameters.items()
                 if key != descriptor.universe.parameter
-            } | dict(descriptor.bind_universe(scan_view.selected_universe))
+            }
+            parameters = base_parameters | dict(
+                descriptor.bind_universe(scan_view.selected_universe)
+            )
+            exit_parameters = base_parameters | dict(
+                descriptor.bind_universe(
+                    tuple(
+                        sorted(
+                            set(scan_view.selected_universe)
+                            | {
+                                security_id
+                                for security_id in held
+                                if security_id and security_id == security_id.strip()
+                            }
+                        )
+                    )
+                )
+            )
         except Exception as exc:
             logger.exception("Universe binding failed for portfolio %s", portfolio_id)
             return EvaluationUnavailable(
                 reason=f"Strategy universe could not be bound: {exc}",
                 freshness=freshness,
             )
-        requirements = _declared_requirements(strategy, parameters)
-        if requirements is None:
+        entry_requirements = _declared_requirements(strategy, parameters)
+        exit_requirements = _declared_requirements(strategy, exit_parameters)
+        if entry_requirements is None or exit_requirements is None:
             return EvaluationUnavailable(
                 reason=(
                     f"Strategy {descriptor.strategy_id} does not declare its "
@@ -342,8 +384,78 @@ class PortfolioRecommendationService:
                 ),
                 freshness=freshness,
             )
-        if isinstance(requirements, str):
-            return EvaluationUnavailable(reason=requirements, freshness=freshness)
+        if isinstance(entry_requirements, str) or isinstance(exit_requirements, str):
+            reason = (
+                entry_requirements
+                if isinstance(entry_requirements, str)
+                else exit_requirements
+            )
+            assert isinstance(reason, str)
+            return EvaluationUnavailable(reason=reason, freshness=freshness)
+        requirements = StrategyEvidenceRequirementsV1(
+            entry=entry_requirements.entry,
+            exit=exit_requirements.exit,
+        )
+        if self._historical_price_repo is not None and any(
+            requirement.kind is EvidenceKind.PRICE_HISTORY
+            for requirement in exit_requirements.exit
+        ):
+            minimum_sessions = max(
+                requirement.minimum_sessions
+                for requirement in exit_requirements.exit
+                if requirement.kind is EvidenceKind.PRICE_HISTORY
+            )
+            repair_service = None
+            repair_factory_error = False
+            if allow_repair and self._repair_factory is not None:
+                try:
+                    repair_service = self._repair_factory()
+                except Exception:
+                    logger.exception("Portfolio history repair is unavailable")
+                    repair_factory_error = True
+            outcomes = []
+            for security_id, _position in sorted(held.items()):
+                if security_id in scan_view.selected_universe:
+                    continue
+                existing = read_portfolio_history(
+                    self._historical_price_repo,
+                    security_id,
+                    aliases,
+                    through=scan_view.as_of_session,
+                    minimum_sessions=minimum_sessions,
+                )
+                needs_repair = self._portfolio_history_needs_repair(
+                    existing, security_id, scan_view.as_of_session
+                )
+                repair_outcome = None
+                if allow_repair and needs_repair:
+                    repair_outcome = (
+                        "repair_unavailable"
+                        if repair_factory_error
+                        else "repair_not_configured"
+                        if repair_service is None
+                        else self._attempt_portfolio_repair(
+                            repair_service,
+                            security_id,
+                            scan_view.as_of_session,
+                            minimum_sessions,
+                        )
+                    )
+                if not needs_repair:
+                    outcomes.append(existing)
+                    continue
+                outcomes.append(
+                    read_portfolio_history(
+                        self._historical_price_repo,
+                        security_id,
+                        aliases,
+                        through=scan_view.as_of_session,
+                        minimum_sessions=minimum_sessions,
+                        carry_forward_sessions=5 if allow_repair else 0,
+                        repair_outcome=repair_outcome,
+                    )
+                )
+            scan_view = scan_view.with_portfolio_history(outcomes)
         # Each path is preflighted only against the securities it can act
         # on: entry considers scan candidates, exit only the holdings. A
         # thin-history candidate must not degrade the exit path, and a
@@ -381,7 +493,9 @@ class PortfolioRecommendationService:
             # became a false Sell (#471).
             exits = (
                 validate_exit_signals(
-                    strategy.exit_signals(protocol_view, portfolio_view, parameters)
+                    strategy.exit_signals(
+                        protocol_view, portfolio_view, exit_parameters
+                    )
                 )
                 if preflight.exit_supported
                 else ()
@@ -430,6 +544,63 @@ class PortfolioRecommendationService:
         no persistence.
         """
         return self.strategy_support_with_diagnostics()[0]
+
+    @staticmethod
+    def _portfolio_history_needs_repair(
+        outcome: PortfolioHistoryRead, security_id: str, through: date
+    ) -> bool:
+        """Return whether the required bounded history is absent or gapped."""
+        if outcome.history is None or outcome.history.empty:
+            return True
+        sessions = tuple(cast(date, value) for value in outcome.history.index)
+        if not sessions:
+            return True
+        mic = "XLON" if security_id.upper().endswith(".L") else "XNYS"
+        try:
+            expected = TradingCalendar().sessions_in_range(
+                mic, sessions[0], through + timedelta(days=1)
+            )
+        except (OverflowError, TypeError, ValueError):
+            return True
+        return through not in expected or sessions != expected
+
+    @staticmethod
+    def _attempt_portfolio_repair(
+        repair_service: PriceEvidenceBackfillService,
+        security_id: str,
+        through: date,
+        minimum_sessions: int,
+    ) -> str:
+        """Run one bounded repair attempt and return deterministic provenance."""
+        canonical = security_id.strip()
+        mic = "XLON" if canonical.upper().endswith(".L") else "XNYS"
+        if minimum_sessions > _MAX_REPAIR_SESSIONS - 5:
+            return "repair_window_too_large"
+        target_sessions = max(1, minimum_sessions) + 5
+        lookback_days = target_sessions * 3
+        try:
+            calendar_start = through - timedelta(days=lookback_days)
+            all_sessions = TradingCalendar().sessions_in_range(
+                mic, calendar_start, through + timedelta(days=1)
+            )
+            expected_sessions = all_sessions[-target_sessions:]
+            if not expected_sessions:
+                return "repair_unavailable"
+            repaired = repair_service.repair_coverage(
+                canonical,
+                expected_sessions[0],
+                through + timedelta(days=1),
+                expected_sessions=expected_sessions,
+            )
+        except PriceEvidenceRepairError as exc:
+            logger.warning(
+                "Portfolio history repair rejected for %s: %s", canonical, exc.code
+            )
+            return exc.code
+        except Exception:
+            logger.exception("Portfolio history repair failed for %s", canonical)
+            return "repair_unavailable"
+        return "provider_repaired" if repaired else "repair_incomplete"
 
     def strategy_support_with_diagnostics(
         self,
@@ -635,9 +806,47 @@ class PortfolioRecommendationService:
         recommendations: list[RecommendationV1] = []
         for security_id, position in held.items():
             if security_id not in scan_view.selected_universe:
-                # Fail-safe first: a holding the scan cannot evidence is
-                # never a Sell, even if the runtime emitted an exit for it
-                # from portfolio-only data (AC #441.6).
+                if security_id in scan_view._portfolio_history_attempted:
+                    unsupported = _exit_evidence_gap(preflight, security_id)
+                    if unsupported is not None:
+                        rule_id, warnings = unsupported
+                        recommendations.append(
+                            RecommendationV1(
+                                action="hold",
+                                ticker=position.display_symbol,
+                                security_id=security_id,
+                                rule_id=rule_id,
+                                reason=_reason_for(rule_id),
+                                evidence_warnings=warnings,
+                            )
+                        )
+                        continue
+                    if security_id in scan_view._portfolio_history_ids:
+                        exit_signal = exit_by_security.get(security_id)
+                        if exit_signal is not None:
+                            recommendations.append(
+                                RecommendationV1(
+                                    action="sell",
+                                    ticker=position.display_symbol,
+                                    security_id=security_id,
+                                    rule_id=exit_signal.rule_id,
+                                    reason=_signal_reason(exit_signal),
+                                    explanation=_explanation_rows(exit_signal),
+                                )
+                            )
+                            continue
+                        recommendations.append(
+                            RecommendationV1(
+                                action="hold",
+                                ticker=position.display_symbol,
+                                security_id=security_id,
+                                rule_id="no_exit_signal",
+                                reason=_reason_for("no_exit_signal"),
+                            )
+                        )
+                        continue
+                # Fail-safe first: a holding the scan or fallback cannot
+                # evidence is never a Sell.
                 recommendations.append(
                     RecommendationV1(
                         action="hold",

@@ -269,6 +269,12 @@ graph LR
   evidence creates a new revision and never overwrites referenced evidence.
   Identity resolution uses AD-14's immutable effective-dated alias manifest;
   unknown/colliding aliases fail rather than being inferred from symbol text.
+  The portfolio recommendation evaluation path may request one bounded
+  provider repair and append a clearly labelled, in-memory trailing OHLC
+  carry-forward view for at most five exchange sessions when repair is
+  unavailable. This derived tolerance never becomes canonical evidence,
+  never supplies volume or scan facts, and is not used by ordinary read-only
+  recommendation requests or pinned Backtest replay.
 
 ### AD-7 — Strategy Parameters: declared once, validated once
 
