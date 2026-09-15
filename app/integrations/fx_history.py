@@ -141,7 +141,15 @@ def _default_request_get(
     url: str, params: Mapping[str, str], timeout: float
 ) -> HttpResponseLike:
     """Perform the HTTP GET via ``requests`` (the injectable default)."""
-    return cast(HttpResponseLike, requests.get(url, params=params, timeout=timeout))
+    return cast(
+        HttpResponseLike,
+        requests.get(
+            url,
+            params=params,
+            timeout=timeout,
+            headers={"User-Agent": "Agents.stocks/1.0 (historical FX backfill)"},
+        ),
+    )
 
 
 def _default_yahoo_exact(pair: str, as_of: str) -> Decimal | None:
