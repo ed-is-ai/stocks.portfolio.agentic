@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/static/css/theme.css">
   <link rel="stylesheet" href="/static/css/watchlist.css">
   <link rel="stylesheet" href="/static/css/splash.css">
+  <link rel="stylesheet" href="/static/css/data_quality.css">
   <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <style>
@@ -799,6 +800,13 @@
         <a class="nav-link" id="tab-runlog"
            hx-get="/partials/runlog" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
           <i class="bi bi-journal-text"></i>Run Log
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" id="tab-data-quality"
+           hx-get="/partials/data-quality" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
+           hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'>
+          <i class="bi bi-clipboard-data"></i>Data Quality
         </a>
       </li>
       <li class="nav-item">

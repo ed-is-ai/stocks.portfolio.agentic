@@ -23,10 +23,14 @@ from app.api.stock_scanner_context import (
     build_freshness_context,
     build_stock_scanner_context,
 )
+from app.services.evidence_funnel import parse_run_log_source_health
+from app.services.evidence_quality import (
+    FAULT_SEVERITY_RANK,
+    load_data_quality_view,
+)
 from app.core.config import PIPELINE_RUNS_CSV
 from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
-from app.schemas.source_health import SourceHealth
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
@@ -304,7 +308,7 @@ async def partial_history(
 async def partial_runlog(request: Request) -> HTMLResponse:
     runs: list[dict] = []
     if PIPELINE_RUNS_CSV.exists():
-        with open(PIPELINE_RUNS_CSV, newline="", encoding="utf-8") as fh:
+        with open(PIPELINE_RUNS_CSV, newline="", encoding="utf-8-sig") as fh:
             runs = list(csv.DictReader(fh))
     for run in runs:
         # Legacy CSV rows (written before a header field existed) simply
@@ -321,14 +325,32 @@ async def partial_runlog(request: Request) -> HTMLResponse:
             run.setdefault(field, "0")
         run.setdefault("errors", "")
         run.setdefault("sources", "")
-        try:
-            payload = json.loads(run.get("source_health_json") or "{}")
-            if not isinstance(payload, dict):
-                raise ValueError("source health must be an object")
-            run["source_health"] = [
-                SourceHealth.model_validate(value) for value in payload.values()
-            ]
-        except (TypeError, ValueError, json.JSONDecodeError):
-            run["source_health"] = []
+        run["source_health"] = parse_run_log_source_health(run)
     runs.reverse()  # most recent first
     return templates.TemplateResponse(request, "_runlog.html", context={"runs": runs})
+
+
+@router.get("/partials/data-quality", response_class=HTMLResponse)
+def partial_data_quality(
+    request: Request, portfolio_id: str | None = None
+) -> HTMLResponse:
+    """Render the read-only Data Quality tab (#639).
+
+    Both sub-tabs are rendered in one response and toggled client-side, so
+    nothing on the screen issues a request or writes anything. Declared
+    ``def`` so its blocking reads (artifact, run log, Strategy runtimes) run
+    in the threadpool rather than on the event loop.
+
+    ``portfolio_id`` arrives as a raw string for the same reason the
+    portfolio partial takes one: the client sends an empty ``portfolio_id=``
+    when no account is selected, which an ``int | None`` param 422s (#147).
+    It scopes the holdings the census accounts for.
+    """
+    return templates.TemplateResponse(
+        request,
+        "_evidence_census.html",
+        context={
+            "view": load_data_quality_view(optional_int(portfolio_id)),
+            "fault_rank": FAULT_SEVERITY_RANK,
+        },
+    )

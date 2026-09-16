@@ -1,0 +1,104 @@
+{# Strategy data sub-tab (#639) — shared run-level inputs plus one card per
+   discovered Strategy. Read-only: every figure comes from
+   build_shared_inputs_report. #}
+{% set shared = view.shared_inputs %}
+<section class="dq-section">
+  <h3 class="dq-heading">Shared inputs</h3>
+  <p class="dq-note">These belong to no single security: when one is short,
+    every affected security degrades at once.</p>
+  <div class="dq-rows">
+    <div class="dq-row">
+      <span class="dq-label">Base currency</span>
+      <span class="dq-value">{{ shared.base_currency }}</span>
+    </div>
+    <div class="dq-row">
+      <span class="dq-label">FX {{ shared.fx.pair }} usable session ceiling</span>
+      <span class="dq-value dq-sev-{{ 0 if shared.fx.available else 4 }}">
+        {{ shared.fx.usable_session_ceiling if shared.fx.available else 'unavailable' }}
+      </span>
+    </div>
+    <div class="dq-row">
+      <span class="dq-label">Securities needing FX / actually capped by it</span>
+      <span class="dq-value">{{ shared.fx.securities_affected }} / {{ shared.fx.securities_capped }}</span>
+    </div>
+    <div class="dq-row">
+      <span class="dq-label">Trading calendar digest</span>
+      <span class="dq-value">{{ shared.calendar.digest[:12] if shared.calendar.available else 'unavailable' }}</span>
+    </div>
+    <div class="dq-row">
+      <span class="dq-label">Trailing-year expected sessions (XNYS)</span>
+      <span class="dq-value">
+        {{ '—' if shared.calendar.expected_sessions is none else shared.calendar.expected_sessions }}
+      </span>
+    </div>
+    <div class="dq-row">
+      <span class="dq-label">Securities short of that reference length</span>
+      <span class="dq-value">{{ shared.calendar.securities_affected }}</span>
+    </div>
+    <div class="dq-row">
+      <span class="dq-label">Regime benchmark sessions</span>
+      <span class="dq-value dq-sev-{{ 4 if shared.benchmark.is_degraded else (0 if shared.benchmark.available else 2) }}">
+        {% if not shared.benchmark.available %}no snapshot
+        {% else %}{{ shared.benchmark.session_count }}{{ ' (degraded)' if shared.benchmark.is_degraded }}{% endif %}
+      </span>
+    </div>
+    <div class="dq-row">
+      <span class="dq-label">Strategies whose entry gate depends on it</span>
+      <span class="dq-value">{{ shared.benchmark.strategies_affected }}</span>
+    </div>
+  </div>
+  <p class="dq-note">
+    Provider credentials and source toggles live in
+    <a href="#" data-dq-goto="tab-settings">Settings</a>; cash reconciliation
+    lives in <a href="#" data-dq-goto="tab-portfolio">Portfolio</a>.
+  </p>
+</section>
+
+<section class="dq-section">
+  <h3 class="dq-heading">Strategies</h3>
+  {% if view.strategies_unreadable %}
+  <p class="dq-note dq-sev-2">{{ view.strategies_unreadable }} discovered
+    Strategy(ies) could not be read and are omitted below.</p>
+  {% endif %}
+  {% if view.strategies_unavailable %}
+  {# A failed discovery is a degraded read, never a finding about the system. #}
+  <p class="dq-note dq-sev-2">Strategy discovery is unavailable, so no roster
+    can be shown. This is a failed read, not a statement that no Strategy
+    declares evidence requirements.</p>
+  {% elif not shared.strategies %}
+  <p class="dq-note">No discoverable Strategy declares evidence requirements.</p>
+  {% else %}
+  <div class="dq-cards">
+    {% for strategy in shared.strategies %}
+    <article class="dq-card">
+      <h4>{{ strategy.display_name }}</h4>
+      <div class="dq-rows">
+        <div class="dq-row">
+          <span class="dq-label">Declared minimum sessions — entry / exit</span>
+          <span class="dq-value">{{ strategy.entry_minimum_sessions }} / {{ strategy.exit_minimum_sessions }}</span>
+        </div>
+        <div class="dq-row">
+          <span class="dq-label">Eligible — entry (of {{ shared.securities|length }}
+            scanned) / exit (of {{ view.holdings_count }} held)</span>
+          <span class="dq-value">{{ strategy.eligible_entry }} / {{ strategy.eligible_exit }}</span>
+        </div>
+        <div class="dq-row">
+          <span class="dq-label">Regime gate</span>
+          {% if not strategy.regime_filter_enabled %}
+          <span class="dq-value">off</span>
+          {% elif strategy.benchmark_satisfied is none %}
+          <span class="dq-value">on &middot; benchmark unassessed (no snapshot)</span>
+          {% else %}
+          <span class="dq-value dq-sev-{{ 0 if strategy.benchmark_satisfied else 3 }}">
+            on &middot; {{ strategy.benchmark_security_id or 'no benchmark' }}
+            &middot; MA {{ strategy.ma_length if strategy.ma_length is not none else '—' }}
+            &middot; {{ 'satisfied' if strategy.benchmark_satisfied else 'not satisfied' }}
+          </span>
+          {% endif %}
+        </div>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>

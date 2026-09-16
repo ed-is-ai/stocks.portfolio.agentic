@@ -1,0 +1,254 @@
+{# Data Quality tab (#639) — read-only. Both sub-tabs are rendered here and
+   toggled client-side, so no control on this screen issues a request. #}
+{% if not view.available %}
+<div class="alert alert-warning border-0 mt-1">
+  <i class="bi bi-exclamation-triangle-fill me-2"></i>
+  {{ view.unavailable_reason or "No published scan to account for." }}
+</div>
+{% else %}
+{% set census = view.census %}
+{% set funnel = view.funnel %}
+
+<div class="dq-controls">
+  <div class="dq-segmented" role="tablist" id="dqTabs">
+    <button type="button" role="tab" id="dq-tab-stock" aria-selected="true"
+            aria-controls="dq-stock" data-dq-panel="dq-stock">Stock data</button>
+    <button type="button" role="tab" id="dq-tab-strategy" aria-selected="false"
+            aria-controls="dq-strategy" data-dq-panel="dq-strategy">Strategy data</button>
+  </div>
+  <span class="dq-note">
+    Evidenced session {{ census.as_of_session }} &middot; every figure is read
+    from the published scan, never recomputed here.
+  </span>
+</div>
+
+<div id="dq-stock" role="tabpanel" tabindex="0" aria-labelledby="dq-tab-stock">
+
+  <section class="dq-section">
+    <h3 class="dq-heading">Run funnel</h3>
+    {% if not funnel.available %}
+    <p class="dq-note">Funnel is unavailable for this run — no run log row shares
+      this artifact's run id, so no stage count can be attributed to it.</p>
+    {% else %}
+    <div class="dq-rows">
+      {% for label, value in [
+          ('Tickers requested for market data', funnel.requested),
+          ('Tickers fetched', funnel.fetched),
+          ('Fetch failures', funnel.fetch_failures),
+          ('Artifact entries', funnel.artifact_entries),
+          ('Successes', funnel.successes),
+          ('Gaps', funnel.gaps),
+          ('Securities in universe', funnel.universe_size)] %}
+      <div class="dq-row">
+        <span class="dq-label">{{ label }}</span>
+        <span class="dq-value">{{ '—' if value is none else value }}</span>
+      </div>
+      {% endfor %}
+      <div class="dq-row{{ ' dq-residual' if funnel.unexplained }}">
+        <span class="dq-label">Unexplained residual (fetched − artifact entries)</span>
+        <span class="dq-value">{{ '—' if funnel.unexplained is none else funnel.unexplained }}</span>
+      </div>
+      <div class="dq-row{{ ' dq-residual' if funnel.universe_shortfall }}">
+        <span class="dq-label">Universe shortfall (successes − universe)</span>
+        <span class="dq-value">{{ '—' if funnel.universe_shortfall is none else funnel.universe_shortfall }}</span>
+      </div>
+    </div>
+    {% if funnel.discovery %}
+    <p class="dq-note">Discovery per source — these <strong>overlap</strong>: a
+      ticker found by two sources is counted by both, so they are an upper bound
+      on the requested count, not a stage that flows into it.</p>
+    <ul class="dq-chips">
+      {% for item in funnel.discovery %}
+      <li class="dq-chip">{{ item.source.value }} {{ item.count }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% endif %}
+  </section>
+
+  <section class="dq-section">
+    <h3 class="dq-heading">Evidence accounting — {{ census.total }} securities</h3>
+    {% set total = census.total or 1 %}
+    <div class="dq-bar" role="img"
+         aria-label="{{ census.clean }} usable, {{ census.faulted }} need attention, {{ census.dropped }} unusable">
+      <span class="dq-usable" style="width: {{ (100 * census.clean / total)|round(2) }}%"></span>
+      <span class="dq-attention" style="width: {{ (100 * census.faulted / total)|round(2) }}%"></span>
+      <span class="dq-unusable" style="width: {{ (100 * census.dropped / total)|round(2) }}%"></span>
+    </div>
+    <div class="dq-legend">
+      <span><span class="dq-swatch dq-usable" style="background: var(--green)"></span>Usable {{ census.clean }}</span>
+      <span><span class="dq-swatch dq-attention" style="background: var(--amber)"></span>Needs attention {{ census.faulted }}</span>
+      <span><span class="dq-swatch dq-unusable" style="background: var(--red)"></span>Unusable {{ census.dropped }}</span>
+    </div>
+    <p class="dq-note">These three account for every security exactly once and
+      sum to {{ census.total }}.</p>
+
+    {% if census.fault_counts %}
+    <p class="dq-note"><strong>Fault counts below overlap</strong> — one security
+      can be thin and gapped at once, so these deliberately sum higher than the
+      {{ census.faulted }} securities needing attention. They are not a second
+      breakdown of the bar above.</p>
+    <ul class="dq-chips">
+      {% for fault, count in census.fault_counts.items() %}
+      <li class="dq-chip dq-sev-{{ fault_rank.get(fault, 0) }}">{{ fault }} {{ count }}</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    <details class="dq-note">
+      <summary>Key</summary>
+      <p><strong>thin</strong> — fewer sessions than a declared minimum.
+         <strong>gapped</strong> — sessions missing inside the window.
+         <strong>missing_fragment</strong> — the history could not be read or a
+         detector failed. <strong>dropped</strong> — no usable evidence at all.
+         Faults are independent tests established at scan time and reported
+         verbatim; nothing is re-tested on this screen.</p>
+    </details>
+  </section>
+
+  <section class="dq-section">
+    <h3 class="dq-heading">Per-security census</h3>
+    <div class="dq-controls">
+      <input type="search" id="dq-search" placeholder="Filter securities…"
+             aria-label="Filter securities">
+      <select id="dq-fault" aria-label="Filter by fault">
+        <option value="">All faults</option>
+        <option value="none">No fault</option>
+        {% for fault in census.fault_counts %}
+        <option value="{{ fault }}">{{ fault }}</option>
+        {% endfor %}
+      </select>
+      <a href="#" class="dq-note" data-dq-goto="tab-portfolio">Per-security
+        evidence detail (Portfolio recommendations, GH-624) →</a>
+    </div>
+    <div class="tbl-wrap">
+      <table class="dq-table" id="dq-census">
+        <thead>
+          <tr>
+            {# Sortable by keyboard as well as pointer: each header is a
+               focusable columnheader that announces its own sort state. #}
+            {% for column in ['Security', 'Namespace', 'Sessions', 'Fault', 'Cause'] %}
+            <th data-dq-sort tabindex="0" aria-sort="none">{{ column }}</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in census.securities %}
+          {% set rank = fault_rank.get(row.faults[-1], 0) if row.faults else 0 %}
+          <tr data-dq-faults="{{ row.faults|join(' ') if row.faults else 'none' }}"
+              data-dq-text="{{ (row.display_ticker ~ ' ' ~ row.security_id)|lower }}">
+            {# Every data-sort is the value the cell displays, so no column
+               sorts by something the reader cannot see. Fault is the one
+               deliberate exception: it sorts by declared severity rank, the
+               escalation its own names encode. #}
+            <td data-sort="{{ row.display_ticker }}">{{ row.display_ticker }}</td>
+            <td data-sort="{{ row.namespace }}">{{ row.namespace }}</td>
+            <td data-sort="{{ row.sessions }}">{{ row.sessions }}</td>
+            <td data-sort="{{ rank }}"{% if rank %} class="dq-sev-{{ rank }}"{% endif %}>{{ row.faults|join(', ') if row.faults else 'clean' }}</td>
+            {% if row.cause %}
+            <td data-sort="{{ row.cause }}">{{ row.cause }}</td>
+            {% else %}
+            <td data-sort="" data-absent="1" class="dq-absent">—</td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="dq-note" id="dq-empty" hidden>No securities match this filter.</p>
+  </section>
+</div>
+
+<div id="dq-strategy" role="tabpanel" tabindex="0"
+     aria-labelledby="dq-tab-strategy" hidden>
+  {% include "_evidence_census_strategies.html" %}
+</div>
+
+<script>
+(function () {
+  const root = document.getElementById('dqTabs');
+  if (!root) { return; }
+  root.querySelectorAll('button[data-dq-panel]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      root.querySelectorAll('button[data-dq-panel]').forEach(function (other) {
+        const on = other === button;
+        other.setAttribute('aria-selected', on ? 'true' : 'false');
+        // A missing panel id must not throw and kill the whole toggle.
+        const panel = document.getElementById(other.dataset.dqPanel);
+        if (panel) { panel.hidden = !on; }
+      });
+    });
+  });
+
+  document.querySelectorAll('[data-dq-goto]').forEach(function (link) {
+    link.addEventListener('click', function (event) {
+      event.preventDefault();
+      const tab = document.getElementById(link.dataset.dqGoto);
+      if (tab) { tab.click(); }
+    });
+  });
+
+  const table = document.getElementById('dq-census');
+  if (!table) { return; }
+  const body = table.tBodies[0];
+  const empty = document.getElementById('dq-empty');
+
+  function compare(left, right, descending) {
+    // Absence is not zero: an absent value sorts last in both directions.
+    const absentLeft = left.dataset.absent === '1';
+    const absentRight = right.dataset.absent === '1';
+    if (absentLeft !== absentRight) { return absentLeft ? 1 : -1; }
+    if (absentLeft) { return 0; }
+    const a = left.dataset.sort;
+    const b = right.dataset.sort;
+    // Numeric columns compare numerically, text columns as text, so a
+    // ticker column never sorts by string-ified row position.
+    const numeric = a !== '' && b !== '' && !isNaN(a) && !isNaN(b);
+    const delta = numeric ? Number(a) - Number(b) : a.localeCompare(b);
+    return descending ? -delta : delta;
+  }
+
+  function sortBy(header, column) {
+    const descending = header.dataset.dqDir !== 'desc';
+    table.querySelectorAll('th[data-dq-sort]').forEach(function (other) {
+      delete other.dataset.dqDir;
+      other.setAttribute('aria-sort', 'none');
+    });
+    header.dataset.dqDir = descending ? 'desc' : 'asc';
+    header.setAttribute('aria-sort', descending ? 'descending' : 'ascending');
+    const rows = Array.prototype.slice.call(body.rows);
+    rows.sort(function (a, b) {
+      return compare(a.cells[column], b.cells[column], descending);
+    });
+    rows.forEach(function (row) { body.appendChild(row); });
+  }
+
+  table.querySelectorAll('th[data-dq-sort]').forEach(function (header, column) {
+    header.addEventListener('click', function () { sortBy(header, column); });
+    header.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        sortBy(header, column);
+      }
+    });
+  });
+
+  function applyFilters() {
+    const term = (document.getElementById('dq-search').value || '').toLowerCase();
+    const fault = document.getElementById('dq-fault').value;
+    let shown = 0;
+    Array.prototype.forEach.call(body.rows, function (row) {
+      const faults = row.dataset.dqFaults.split(' ');
+      const matchesFault = !fault || faults.indexOf(fault) !== -1;
+      const matchesTerm = !term || row.dataset.dqText.indexOf(term) !== -1;
+      row.hidden = !(matchesFault && matchesTerm);
+      if (!row.hidden) { shown += 1; }
+    });
+    // A header over an empty tbody reads as broken, not as "no matches".
+    if (empty) { empty.hidden = shown !== 0; }
+  }
+  document.getElementById('dq-search').addEventListener('input', applyFilters);
+  document.getElementById('dq-fault').addEventListener('change', applyFilters);
+})();
+</script>
+{% endif %}

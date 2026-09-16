@@ -1,0 +1,155 @@
+/* Data Quality tab (#639).
+   Tokens only — every colour is a var() from tokens.css, every structural
+   container is flat (radius 0) and divided by hairline --border rules,
+   and hierarchy is Inter weight, never size-as-decoration. */
+
+.dq-section {
+  border-top: 1px solid var(--border);
+  padding: 1rem 0;
+}
+.dq-section:first-of-type { border-top: 0; }
+.dq-heading {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  margin: 0 0 0.5rem;
+}
+.dq-note {
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin: 0.35rem 0 0;
+}
+
+/* ── Segmented control ─────────────────────────────── */
+.dq-segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--card);
+}
+.dq-segmented button {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 0.35rem 0.9rem;
+}
+.dq-segmented button:last-child { border-right: 0; }
+.dq-segmented button[aria-selected="true"] {
+  background: var(--primary);
+  color: var(--card);
+}
+
+/* ── Disjoint accounting bar ───────────────────────── */
+.dq-bar {
+  display: flex;
+  height: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  overflow: hidden;
+}
+.dq-bar span { display: block; }
+.dq-bar .dq-usable      { background: var(--green); }
+.dq-bar .dq-attention   { background: var(--amber); }
+.dq-bar .dq-unusable    { background: var(--red); }
+.dq-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  font-size: 0.75rem;
+  margin-top: 0.4rem;
+}
+.dq-legend .dq-swatch {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  margin-right: 0.35rem;
+  vertical-align: baseline;
+}
+
+/* ── Fault chips (overlapping counts) ──────────────── */
+.dq-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin: 0.4rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+.dq-chip {
+  border: 1px solid var(--border);
+  border-radius: 0;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  padding: 0.1rem 0.4rem;
+}
+.dq-sev-1, .dq-sev-2 { color: var(--amber); border-color: var(--amber); }
+.dq-sev-3, .dq-sev-4 { color: var(--red); border-color: var(--red); }
+.dq-sev-0 { color: var(--green); border-color: var(--green); }
+
+/* ── Funnel / shared-input rows ────────────────────── */
+.dq-rows { border-top: 1px solid var(--border); }
+.dq-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+  padding: 0.3rem 0;
+}
+.dq-row .dq-label { color: var(--muted); }
+.dq-row .dq-value { font-weight: 600; }
+.dq-row.dq-residual .dq-value { color: var(--amber); }
+
+/* ── Census table ──────────────────────────────────── */
+.dq-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+.dq-table th, .dq-table td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+}
+.dq-table thead th {
+  background: var(--primary);
+  color: var(--card);
+  cursor: pointer;
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Sorting is keyboard-reachable, so the focused header must be visible. */
+.dq-table thead th:focus-visible { outline: 2px solid var(--card); outline-offset: -2px; }
+.dq-table thead th[aria-sort="ascending"]::after { content: " \2191"; }
+.dq-table thead th[aria-sort="descending"]::after { content: " \2193"; }
+.dq-table td.dq-absent { color: var(--muted); }
+
+/* ── Strategy cards ────────────────────────────────── */
+.dq-cards {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--border);
+}
+.dq-card {
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0.6rem 0;
+}
+.dq-card h4 { font-size: 0.8125rem; font-weight: 700; margin: 0 0 0.3rem; }
+
+.dq-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-bottom: 0.5rem;
+}
+.dq-controls input, .dq-controls select {
+  border: 1px solid var(--border);
+  /* Form controls keep the shared input radius; "flat geometry" governs
+     structural containers -- cards, tables, bars -- not the controls. */
+  border-radius: var(--radius-input);
+  font-size: 0.8125rem;
+  padding: 0.2rem 0.4rem;
+}

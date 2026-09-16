@@ -620,3 +620,43 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-590-sortable-searchable-pnl-table.md`
   summary: The round-trip table's Stake / Buy price / Sell price columns sort by the raw native-currency amount, so a mixed-currency SIPP (USD + EUR + GBP) gets a misordered "by size" sort even though each cell now carries its own currency symbol.
   evidence: `_realised_pnl.html` sets `data-val="{{ entry_price * shares }}"` in native currency; `pnl-table.js compareRows` does a raw numeric compare. Result / P&L % columns are GBP and sort correctly, so two adjacent sortable columns use different money units. Fixing needs GBP-normalised stake/price values on `RoundTrip` (only `realised_pnl_gbp` exists today); #590's issue text explicitly specified native floats for these `data-val`s, so this is out of that story's intent.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-636-aggregate-evidence-census.md`
+  summary: `CurrentScanMarketView.evidence_coverage` builds an `exchange_calendars` session range per security to compute `missing_sessions`, which the evidence census never reads.
+  evidence: The census reads only `coverage.sessions` and `coverage.display_ticker`, but pays `_missing_calendar_sessions` for every row; across a full universe that is one calendar range construction per security for a value that is discarded. Pre-existing in `scan_view.py`, surfaced by the census calling it per row.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-637-reconcile-discovery-against-records.md`
+  summary: `find_run_log_row` rescans the entire append-only run log on every call, with no caching and no early exit, and GH-635.4 places it on a per-request dashboard path.
+  evidence: The function must return the *last* row matching a run id, so it reads the file to the end every time. The log only grows, and the Data Quality tab calls this per page render. An index or a bounded reverse read would bound the cost.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-637-reconcile-discovery-against-records.md`
+  summary: The market-data request count is recovered by regexing `SourceHealth.display_message` rather than read from a persisted integer.
+  evidence: `scanner_agent.py:934` formats `f"{yahoo_failures} ticker request(s) failed; ..."` and `evidence_funnel._FAILURE_COUNT` parses it back. A test now pins the two together, but `redact_display_message` can replace the whole message when a credential-shaped substring appears, which silently degrades `requested` to None. Persisting the count as a field removes the coupling entirely.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-638-report-shared-inputs.md`
+  summary: `evidence_shared_inputs` pins the single GBPUSD FX pair while the codebase has moved to per-currency FX series via `fx_pair_for` / `fx_security_id_for`.
+  evidence: `historical_price_evidence.py:38-45` provides per-currency FX identity (#516), but `FxSharedInputV1` hardcodes `FX_PAIR`/`FX_SERIES_SECURITY_ID` and `build_shared_inputs_report` takes one scalar `fx_sessions`. As soon as evidence currencies widen past GBP/USD, every currency's ceiling is attributed to GBPUSD.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-638-report-shared-inputs.md`
+  summary: `strategy_input_from` drops `StrategyDescriptorV1.universe`, so per-strategy eligible counts include securities the Strategy will never trade.
+  evidence: `skill_discovery.py:351` declares a per-Strategy universe, but `_strategy_impact` counts every security in the run against every Strategy's minimums. For a Strategy scoped to a subset, `eligible_entry`/`eligible_exit` are inflated.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-639-add-data-quality-tab.md`
+  summary: The Data Quality tab recomputes expensive per-security coverage twice per render and re-imports every Strategy runtime on every tab click, with no caching or measurement against its own page-budget criterion.
+  evidence: `view.evidence_coverage(security_id)` is called once in `_build_row` and again building `SecurityCurrencyInputV1`; it is not memoized and each call runs a per-column `notna().all()` plus `TradingCalendar()._calendar(mic)` and `sessions_in_range`. At ~700 securities that is ~1400 calendar range computations per request, on top of instantiating every discovered Strategy. The route is `def`, so it pins a threadpool worker for the duration.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-639-add-data-quality-tab.md`
+  summary: The FX usable-session ceiling is the revision's whole `observation_count`, not the sessions at or before `as_of_session`.
+  evidence: `_fx_sessions` reads `metadata.observation_count` and `_fx_impact` compares it against each security's windowed session count. An unwindowed FX total can only under-report `securities_capped`, so the screen says FX is fine in cases where it is not — and the field is labelled "usable session ceiling", which over-claims.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-639-add-data-quality-tab.md`
+  summary: Strategy gate state on the tab is read from `descriptor.default_parameters`, not from the portfolio's stored strategy assignment.
+  evidence: `strategy_input_from` reads the descriptor's defaults, but a portfolio's assignment stores its own validated parameter snapshot. "Regime gate: on · SPY · MA 200 · satisfied" may therefore not describe the configuration that produced the user's actual recommendations.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-639-add-data-quality-tab.md`
+  summary: The census table ships every row to the client with no server-side cap and no search debounce.
+  evidence: A universe of thousands yields a multi-MB partial, and the search input filters on every keystroke with a full-table scan. A server-side cap with a "showing N of M" note plus a debounce would bound both.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-639-add-data-quality-tab.md`
+  summary: The per-security evidence link required by the issue lands on the Portfolio tab generally rather than on GH-624's per-security detail, and is styled as a muted caption.
+  evidence: The anchor is `<a href="#" class="dq-note">`, rendered at 0.75rem in muted ink. The issue asks for per-security detail to link to #624.
