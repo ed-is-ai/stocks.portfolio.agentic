@@ -285,6 +285,17 @@ class StrategyBootstrapService:
                 stage="Profile activation",
             ) from exc
 
+    def reset_pending(self) -> bool:
+        """True when setup would discard the active profile's built snapshots.
+
+        Distinct from ``is_setup_required()``: that's also true on first-ever
+        setup (no active profile), which discards nothing.
+        """
+        return (
+            self._repository.active_snapshot_profile() is not None
+            and self._active_profile_needs_refresh()
+        )
+
     def _active_profile_needs_refresh(self) -> bool:
         active = self._repository.active_snapshot_profile()
         if active is None:

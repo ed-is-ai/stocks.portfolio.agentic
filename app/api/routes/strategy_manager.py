@@ -485,6 +485,33 @@ def _validate_months(start_month: str, end_month: str) -> dict[str, str]:
     return errors
 
 
+def _reset_warning_context(
+    backtest: BacktestRepository, bootstrap: StrategyBootstrapService
+) -> dict[str, object]:
+    """Reset-pending warning details for the setup confirmation page.
+
+    Setup silently reactivates a new snapshot profile (discarding the old
+    one's built snapshots) whenever code/detector versions have drifted from
+    the active profile. Surface that up front so confirming setup isn't a
+    surprise data-loss step.
+    """
+    if not bootstrap.reset_pending():
+        return {"reset_pending": False}
+    active = backtest.active_snapshot_profile()
+    coverage = None
+    if active is not None:
+        try:
+            coverage = backtest.snapshot_coverage(active.profile_hash)
+        except BacktestIntegrityError:
+            coverage = None
+    return {
+        "reset_pending": True,
+        "reset_snapshot_count": coverage.snapshot_count if coverage else 0,
+        "reset_earliest_month": coverage.earliest_month if coverage else None,
+        "reset_latest_month": coverage.latest_month if coverage else None,
+    }
+
+
 def _form_error_status(request: Request) -> int:
     """Let HTMX swap validation fragments while preserving HTTP semantics."""
     return 200 if is_htmx_request(request) else 422
@@ -583,6 +610,7 @@ async def strategy_setup(
             "setup_required": True,
             "is_fixture": bootstrap.is_fixture,
             "idempotency_key": str(uuid4()),
+            **_reset_warning_context(backtest, bootstrap),
         },
     )
 
@@ -596,6 +624,7 @@ async def submit_strategy_setup(
     backtest: BacktestDep,
     bootstrap: BootstrapDep,
     idempotency_key: Annotated[str | None, Form()] = None,
+    confirm_reset: Annotated[bool, Form()] = False,
 ) -> Response:
     """Enqueue one bootstrap job, redirect to activity."""
     if idempotency_key is None:
@@ -608,6 +637,22 @@ async def submit_strategy_setup(
                 "is_fixture": bootstrap.is_fixture,
                 "idempotency_key": str(uuid4()),
                 "error": "Enter a valid setup submission.",
+                **_reset_warning_context(backtest, bootstrap),
+            },
+            status_code=422,
+        )
+    if bootstrap.reset_pending() and not confirm_reset:
+        return template_response(
+            request,
+            "_strategy_setup.html",
+            {
+                "setup_required": True,
+                "already_set_up": False,
+                "is_fixture": bootstrap.is_fixture,
+                "idempotency_key": idempotency_key,
+                "error": "Confirm the reset before setup can discard the "
+                "existing snapshots.",
+                **_reset_warning_context(backtest, bootstrap),
             },
             status_code=422,
         )
@@ -625,6 +670,7 @@ async def submit_strategy_setup(
                 "is_fixture": bootstrap.is_fixture,
                 "idempotency_key": str(uuid4()),
                 "error": "Enter a valid setup submission.",
+                **_reset_warning_context(backtest, bootstrap),
             },
             status_code=422,
         )
@@ -640,6 +686,7 @@ async def submit_strategy_setup(
                 "is_fixture": bootstrap.is_fixture,
                 "idempotency_key": idempotency_key,
                 "error": "Unable to submit setup. Please try again.",
+                **_reset_warning_context(backtest, bootstrap),
             },
             status_code=422,
         )

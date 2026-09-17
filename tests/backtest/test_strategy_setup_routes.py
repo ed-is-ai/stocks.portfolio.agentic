@@ -44,9 +44,10 @@ NOW = datetime(2026, 8, 21, 9, 30, tzinfo=timezone.utc)
 class SetupFakeRepo(routes_helpers.FakeRepo):
     """FakeRepo that can simulate no active profile."""
 
-    def __init__(self, *, has_profile: bool = True) -> None:
+    def __init__(self, *, has_profile: bool = True, stale_profile: bool = False) -> None:
         super().__init__()
         self._has_profile = has_profile
+        self.stale_profile = stale_profile
         self._bootstrap_jobs: list[object] = []
         self._bootstrap_by_key: dict[str, StrategyJobV1] = {}
 
@@ -56,9 +57,11 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
         return routes_helpers.FakeActiveProfile()
 
     def stored_snapshot_profile(self, profile_hash):
+        if self.stale_profile:
+            return super().stored_snapshot_profile(profile_hash)
         return None
 
-    def create_bootstrap_job(self, submission):
+    def create_bootstrap_job(self, submission, *, allow_active_refresh: bool = False):
         existing = self._bootstrap_by_key.get(submission.idempotency_key)
         if existing is not None:
             return BootstrapEnqueueResultV1(
@@ -66,7 +69,7 @@ class SetupFakeRepo(routes_helpers.FakeRepo):
                 job=existing,
                 bootstrap=BootstrapRunV1(job_id=existing.id),
             )
-        if self._has_profile:
+        if self._has_profile and not allow_active_refresh:
             return BootstrapEnqueueResultV1(no_op=True)
         job = StrategyJobV1(
             id=str(uuid.uuid4()),
@@ -149,6 +152,67 @@ def test_setup_page_shows_already_set_up(setup_env_with_profile) -> None:
     response = client.get("/strategy-manager/setup")
     assert response.status_code == 200
     assert "already set up" in response.text.lower()
+
+
+@pytest.fixture
+def setup_env_stale_profile(monkeypatch):
+    repo = SetupFakeRepo(has_profile=True, stale_profile=True)
+    jobs = StrategyJobService(repo)
+    bootstrap = StrategyBootstrapService(repo, jobs=jobs)  # type: ignore[arg-type]
+    readiness = StrategyReadinessService(repo, clock=NOW)  # type: ignore[arg-type]
+    app.dependency_overrides[get_backtest_repository] = lambda: repo
+    app.dependency_overrides[get_strategy_job_service] = lambda: jobs
+    app.dependency_overrides[get_bootstrap_service] = lambda: bootstrap
+    app.dependency_overrides[get_readiness_service] = lambda: readiness
+    monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    try:
+        yield repo, jobs, bootstrap
+    finally:
+        app.dependency_overrides.pop(get_backtest_repository, None)
+        app.dependency_overrides.pop(get_strategy_job_service, None)
+        app.dependency_overrides.pop(get_bootstrap_service, None)
+        app.dependency_overrides.pop(get_readiness_service, None)
+
+
+def test_setup_page_warns_before_reset(setup_env_stale_profile) -> None:
+    response = client.get("/strategy-manager/setup")
+    assert response.status_code == 200
+    assert "reset your data version" in response.text.lower()
+    assert 'name="confirm_reset"' in response.text
+
+
+def test_setup_submit_without_confirm_reset_does_not_enqueue(
+    setup_env_stale_profile,
+) -> None:
+    repo, _jobs, _bootstrap = setup_env_stale_profile
+    page = client.get("/strategy-manager/setup")
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', page.text)
+    assert key is not None
+    response = client.post(
+        "/strategy-manager/setup",
+        headers={"X-Auth-Token": "s3cret"},
+        data={"idempotency_key": key.group(1)},
+        follow_redirects=False,
+    )
+    assert response.status_code == 422
+    assert "confirm the reset" in response.text.lower()
+    assert repo._bootstrap_jobs == []
+
+
+def test_setup_submit_with_confirm_reset_enqueues(
+    setup_env_stale_profile,
+) -> None:
+    page = client.get("/strategy-manager/setup")
+    key = re.search(r'name="idempotency_key" value="([^"]+)"', page.text)
+    assert key is not None
+    response = client.post(
+        "/strategy-manager/setup",
+        headers={"X-Auth-Token": "s3cret"},
+        data={"idempotency_key": key.group(1), "confirm_reset": "true"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "/strategy-manager/activities/" in response.headers.get("location", "")
 
 
 # ---------------------------------------------------------------------------
