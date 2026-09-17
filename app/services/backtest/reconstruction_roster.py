@@ -288,7 +288,11 @@ class ReconstructionRosterPolicyV1:
             provider_symbol, provider_symbol
         )
         if exchange == "LSE" and not provider_symbol.endswith(".L"):
-            provider_symbol = f"{provider_symbol}.L"
+            provider_symbol = f"{provider_symbol.rstrip('.')}.L"
+        if ".." in provider_symbol:
+            raise RosterCaptureError(
+                f"malformed provider symbol after normalization: {provider_symbol}"
+            )
         identity = MarketIdentityEvidence(
             mic=expected[0],
             currency=expected[1],
@@ -303,9 +307,7 @@ class ReconstructionRosterPolicyV1:
             self._calendar.calendar_name(identity.mic)
         except ValueError as exc:
             raise RosterCaptureError(str(exc), code="calendar_error") from exc
-        expected_currency = (
-            "USD" if identity.mic in {"BATS", "XNAS", "XNYS"} else "GBP"
-        )
+        expected_currency = "USD" if identity.mic in {"BATS", "XNAS", "XNYS"} else "GBP"
         expected_units = {"USD"} if expected_currency == "USD" else {"GBP", "GBp"}
         if (
             identity.currency != expected_currency

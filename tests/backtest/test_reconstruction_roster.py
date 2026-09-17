@@ -4,7 +4,6 @@ from datetime import datetime, timezone
 import json
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -118,35 +117,32 @@ def test_policy_uses_explicit_datahub_class_share_provider_symbols() -> None:
     assert {member.provider_symbol for member in members} >= {"BRK-B", "BF-B"}
 
 
-#: TradingView reports these LSE members with a bare trailing dot instead of
+#: TradingView reports some LSE members with a bare trailing dot instead of
 #: the usual ``.L`` suffix (a quirk of their symbol format, not this app's
-#: doing). Each one MUST have an entry in ``config/provider_symbol_aliases.json``
-#: -- without one, the LSE suffix-append step in ``_tradingview_identity``
-#: appends a second dot (``BP.`` + ``.L`` = ``BP..L``), producing a ticker no
-#: provider recognizes. ``BP.`` was missing from that file and broke exactly
-#: this way in production (halted every historical-data preparation run).
-REQUIRED_BARE_DOT_LSE_ALIASES: frozenset[str] = frozenset(
-    {"AV.", "BP.", "QQ.", "RR.", "UU."}
-)
-
-
-def test_real_provider_symbol_aliases_resolve_every_bare_dot_lse_symbol() -> None:
-    """Regression: every known bare-dot LSE symbol must be aliased to its
-    full ``.L`` form, or the suffix-append step below produces a double dot.
+#: doing) -- ``AV.``, ``BP.``, ``QQ.``, ``RR.``, ``UU.`` among the current
+#: roster. This used to require a matching entry in
+#: ``config/provider_symbol_aliases.json`` for every one -- ``BP.`` was
+#: missing and the LSE suffix-append step in ``_tradingview_identity``
+#: appended a second dot (``BP.`` + ``.L`` = ``BP..L``), producing a ticker
+#: no provider recognizes and halting every historical-data preparation
+#: run. ``_tradingview_identity`` now strips any trailing dots before
+#: appending ``.L``, so no alias-file entry is needed for this pattern at
+#: all -- verified below with no aliases passed in.
+def test_lse_bare_dot_symbols_resolve_without_any_alias_entry() -> None:
+    """Regression: a bare-dot LSE symbol must resolve to a clean ``.L``
+    form purely from the general suffix rule, with zero reliance on
+    ``config/provider_symbol_aliases.json``.
     """
-    aliases = json.loads(
-        Path(__file__)
-        .parents[2]
-        .joinpath("config", "provider_symbol_aliases.json")
-        .read_text()
-    )
-    missing = REQUIRED_BARE_DOT_LSE_ALIASES - aliases.keys()
-    assert not missing, f"config/provider_symbol_aliases.json is missing: {missing}"
-
     resolver = lambda _symbol, _row: MarketIdentityEvidence(  # noqa: E731
         "XNYS", "USD", "USD", "test", "e" * 64
     )
-    for source_symbol in REQUIRED_BARE_DOT_LSE_ALIASES:
+    cases = {
+        "BP.": "BP.L",  # the ticker that actually broke production
+        "XY.": "XY.L",  # never-aliased symbol -- the point of this fix
+        "AB..": "AB.L",  # multi-dot input -- proves rstrip, not a slice
+        "ULVR": "ULVR.L",  # plain symbol, no dot -- baseline unaffected
+    }
+    for source_symbol, expected in cases.items():
         payloads = (
             _payload(RosterSource.DATAHUB_SP500, [{"symbol": "AAPL"}]),
             _payload(
@@ -164,12 +160,33 @@ def test_real_provider_symbol_aliases_resolve_every_bare_dot_lse_symbol() -> Non
                 ],
             ),
         )
-        members = ReconstructionRosterPolicyV1(
-            provider_symbol_aliases=aliases
-        ).normalize(payloads, resolver)
+        members = ReconstructionRosterPolicyV1().normalize(payloads, resolver)
         uk_member = next(m for m in members if m.mic == "XLON")
         assert ".." not in uk_member.provider_symbol
-        assert uk_member.provider_symbol == aliases[source_symbol]
+        assert uk_member.provider_symbol == expected
+
+
+def test_malformed_provider_symbol_raises_instead_of_persisting() -> None:
+    """Defense-in-depth: if a future exchange/alias combination somehow
+    still produces a double dot, capture must fail loudly, not silently
+    write a malformed ticker into the immutable roster.
+    """
+    resolver = lambda _symbol, _row: MarketIdentityEvidence(  # noqa: E731
+        "XNYS", "USD", "USD", "test", "e" * 64
+    )
+    payloads = (
+        _payload(RosterSource.DATAHUB_SP500, [{"symbol": "AAPL"}]),
+        _payload(
+            RosterSource.TRADINGVIEW_US,
+            [{"symbol": "NASDAQ:AAPL", "exchange": "NASDAQ", "currency": "USD"}],
+        ),
+        _payload(
+            RosterSource.TRADINGVIEW_UK,
+            [{"symbol": "LSE:ULVR..L", "exchange": "LSE", "currency": "GBp"}],
+        ),
+    )
+    with pytest.raises(RosterCaptureError, match="malformed provider symbol"):
+        ReconstructionRosterPolicyV1().normalize(payloads, resolver)
 
 
 def test_policy_fails_on_wrong_order_empty_payload_or_identity_conflict() -> None:
