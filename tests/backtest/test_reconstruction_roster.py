@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from threading import Barrier
 
 import pytest
@@ -115,6 +116,60 @@ def test_policy_uses_explicit_datahub_class_share_provider_symbols() -> None:
 
     assert resolved == ["BRK-B", "BF-B"]
     assert {member.provider_symbol for member in members} >= {"BRK-B", "BF-B"}
+
+
+#: TradingView reports these LSE members with a bare trailing dot instead of
+#: the usual ``.L`` suffix (a quirk of their symbol format, not this app's
+#: doing). Each one MUST have an entry in ``config/provider_symbol_aliases.json``
+#: -- without one, the LSE suffix-append step in ``_tradingview_identity``
+#: appends a second dot (``BP.`` + ``.L`` = ``BP..L``), producing a ticker no
+#: provider recognizes. ``BP.`` was missing from that file and broke exactly
+#: this way in production (halted every historical-data preparation run).
+REQUIRED_BARE_DOT_LSE_ALIASES: frozenset[str] = frozenset(
+    {"AV.", "BP.", "QQ.", "RR.", "UU."}
+)
+
+
+def test_real_provider_symbol_aliases_resolve_every_bare_dot_lse_symbol() -> None:
+    """Regression: every known bare-dot LSE symbol must be aliased to its
+    full ``.L`` form, or the suffix-append step below produces a double dot.
+    """
+    aliases = json.loads(
+        Path(__file__)
+        .parents[2]
+        .joinpath("config", "provider_symbol_aliases.json")
+        .read_text()
+    )
+    missing = REQUIRED_BARE_DOT_LSE_ALIASES - aliases.keys()
+    assert not missing, f"config/provider_symbol_aliases.json is missing: {missing}"
+
+    resolver = lambda _symbol, _row: MarketIdentityEvidence(  # noqa: E731
+        "XNYS", "USD", "USD", "test", "e" * 64
+    )
+    for source_symbol in REQUIRED_BARE_DOT_LSE_ALIASES:
+        payloads = (
+            _payload(RosterSource.DATAHUB_SP500, [{"symbol": "AAPL"}]),
+            _payload(
+                RosterSource.TRADINGVIEW_US,
+                [{"symbol": "NASDAQ:AAPL", "exchange": "NASDAQ", "currency": "USD"}],
+            ),
+            _payload(
+                RosterSource.TRADINGVIEW_UK,
+                [
+                    {
+                        "symbol": f"LSE:{source_symbol}",
+                        "exchange": "LSE",
+                        "currency": "GBp",
+                    }
+                ],
+            ),
+        )
+        members = ReconstructionRosterPolicyV1(
+            provider_symbol_aliases=aliases
+        ).normalize(payloads, resolver)
+        uk_member = next(m for m in members if m.mic == "XLON")
+        assert ".." not in uk_member.provider_symbol
+        assert uk_member.provider_symbol == aliases[source_symbol]
 
 
 def test_policy_fails_on_wrong_order_empty_payload_or_identity_conflict() -> None:
@@ -318,11 +373,7 @@ def test_datahub_market_identity_resolver_requires_explicit_exchange_and_currenc
                 "exchangeName": "NMS",
                 "currency": "USD",
                 "tradingPeriods": pd.DataFrame(
-                    {
-                        "regular_start": [
-                            pd.Timestamp("2024-01-02T09:30:00-05:00")
-                        ]
-                    }
+                    {"regular_start": [pd.Timestamp("2024-01-02T09:30:00-05:00")]}
                 ),
             }
         )
