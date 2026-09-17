@@ -167,7 +167,7 @@ ALLOWED_RUNTIME_PREFIXES: tuple[str, ...] = (
 #: in ``app/services/backtest/regime_filter.py``.
 COMMON_BACKTEST_STRATEGY_PARAMETERS: tuple[StrategyParameterV1, ...] = (
     StrategyParameterV1(
-        name="regime_filter_enabled",
+        name="block_buy_on_downtrend_enabled",
         type="boolean",
         default=False,
         description=(

@@ -33,7 +33,7 @@ from app.services.backtest.historical_price_evidence import (
 from app.services.backtest.regime_filter import (
     MIN_MA_LENGTH,
     REGIME_FILTER_BENCHMARK_PARAM,
-    REGIME_FILTER_ENABLED_PARAM,
+    BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM,
     REGIME_FILTER_MA_LENGTH_PARAM,
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
@@ -258,7 +258,8 @@ def strategy_input_from(
     return StrategyImpactInputV1(
         strategy_id=descriptor.strategy_id,
         display_name=descriptor.display_name,
-        regime_filter_enabled=parameters.get(REGIME_FILTER_ENABLED_PARAM) is True,
+        regime_filter_enabled=parameters.get(BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM)
+        is True,
         benchmark_security_id=benchmark if isinstance(benchmark, str) else None,
         ma_length=_usable_ma_length(ma_length),
         entry_minimum_sessions=_minimum_sessions(requirements.entry),

@@ -46,7 +46,7 @@ LIVE_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
 #: The opt-in regime-filter parameters #388 injects into every
 #: ``kind: backtest-strategy`` descriptor at discovery time.
 COMMON_REGIME_FILTER_DEFAULTS = {
-    "regime_filter_enabled": False,
+    "block_buy_on_downtrend_enabled": False,
     "regime_filter_benchmark_security_id": "",
     "regime_filter_ma_length": 200,
 }
@@ -159,11 +159,11 @@ def test_live_backtest_strategies_expose_common_regime_filter_params() -> None:
         by_name = {p.name: p for p in descriptor.parameters}
         for name in COMMON_REGIME_FILTER_DEFAULTS:
             assert [p.name for p in descriptor.parameters].count(name) == 1
-        assert by_name["regime_filter_enabled"].type == "boolean"
-        assert by_name["regime_filter_enabled"].default is False
+        assert by_name["block_buy_on_downtrend_enabled"].type == "boolean"
+        assert by_name["block_buy_on_downtrend_enabled"].default is False
         assert by_name["regime_filter_benchmark_security_id"].default == ""
         assert by_name["regime_filter_ma_length"].default == 200
-        assert descriptor.default_parameters["regime_filter_enabled"] is False
+        assert descriptor.default_parameters["block_buy_on_downtrend_enabled"] is False
 
 
 @pytest.mark.parametrize("bad_top_x", [True, 0, -1, 1.5, "10"])
@@ -264,7 +264,7 @@ def test_discover_strategies_valid_strategy_descriptor_shape() -> None:
     assert parameter_names == [
         "watch_security_id",
         "fixed_shares",
-        "regime_filter_enabled",
+        "block_buy_on_downtrend_enabled",
         "regime_filter_benchmark_security_id",
         "regime_filter_ma_length",
     ]

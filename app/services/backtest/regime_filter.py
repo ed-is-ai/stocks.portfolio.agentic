@@ -26,7 +26,7 @@ from typing import Any
 from app.services.backtest.strategy_protocol import MarketViewV1, StrategyParameters
 
 #: Opt-in flag; entries are only gated when this parameter is exactly ``True``.
-REGIME_FILTER_ENABLED_PARAM = "regime_filter_enabled"
+BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM = "block_buy_on_downtrend_enabled"
 
 #: Canonical id of the benchmark security whose regime governs the gate.
 REGIME_FILTER_BENCHMARK_PARAM = "regime_filter_benchmark_security_id"
@@ -76,7 +76,7 @@ def entry_signals_permitted(
     """Return whether entry signals are permitted for the current session.
 
     Returns ``True`` immediately unless
-    ``parameters[REGIME_FILTER_ENABLED_PARAM]`` is exactly ``True`` -- so a
+    ``parameters[BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM]`` is exactly ``True`` -- so a
     Run that omits every ``regime_filter_*`` key, or sets the flag to
     anything other than ``True``, sees behaviour byte-identical to the
     pre-change strategy.
@@ -88,7 +88,7 @@ def entry_signals_permitted(
     yields fewer finite closes than the MA length. Otherwise it returns
     ``latest_close > trailing_sma``.
     """
-    if parameters.get(REGIME_FILTER_ENABLED_PARAM) is not True:
+    if parameters.get(BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM) is not True:
         return True
 
     benchmark = parameters.get(REGIME_FILTER_BENCHMARK_PARAM)

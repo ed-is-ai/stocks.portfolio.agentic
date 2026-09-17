@@ -63,16 +63,13 @@
         with no price change, which is why the digest is here.</p>
     </article>
 
-    {# Every regime-gated Strategy declares its own benchmark id; in
-       practice they agree, so show it once here when they do. Disagreement
-       is a real per-Strategy fact and stays on each Strategy's own card
-       rather than being papered over with a false shared label. #}
-    {% set gated_benchmarks = shared.strategies
-         | selectattr('regime_filter_enabled')
-         | map(attribute='benchmark_security_id') | select | unique | list %}
+    {# This shared input is always the SPY reading -- the regime snapshot
+       schema's own field is named spy_uptrend, not a general benchmark --
+       so the ticker is a fixed fact of the system, not something derived
+       from whichever Strategies currently happen to gate on it. #}
     <article class="dq-card{{ ' dq-blocked' if shared.benchmark.is_degraded else ('' if shared.benchmark.available else ' dq-warn') }}">
       <header>
-        <h4>benchmark{{ ' · ' + gated_benchmarks[0] if gated_benchmarks|length == 1 }}</h4>
+        <h4>benchmark · SPY</h4>
         {% if not shared.benchmark.available %}
         <span class="dq-badge dq-b-thin">no snapshot</span>
         {% elif shared.benchmark.is_degraded %}
@@ -151,18 +148,13 @@
         <div><dt>Eligible</dt>
           <dd>{{ strategy.eligible_entry }} of {{ scanned }} scanned ·
             {{ strategy.eligible_exit }} of {{ view.holdings_count }} held</dd></div>
-        <div><dt>Regime gate</dt>
+        <div><dt>Block buy on downtrend</dt>
           {% if not strategy.regime_filter_enabled %}
-          <dd class="dq-off-v">not enabled</dd>
-          {% elif strategy.benchmark_satisfied is none %}
-          <dd class="dq-off-v">on · benchmark unassessed (no snapshot)</dd>
+          <dd class="dq-off-v">No</dd>
           {% elif strategy.benchmark_satisfied %}
-          <dd class="dq-ok-v">{{ strategy.benchmark_security_id or 'benchmark' }}
-            {{ strategy.ma_length if strategy.ma_length is not none else '—' }}-MA — passes</dd>
+          <dd class="dq-ok-v">No</dd>
           {% else %}
-          <dd class="dq-bad-v">{{ strategy.benchmark_security_id or 'no benchmark' }}
-            {{ strategy.ma_length if strategy.ma_length is not none else '—' }}-MA —
-            {{ shared.benchmark.session_count }} sessions, not satisfied</dd>
+          <dd class="dq-bad-v">Yes</dd>
           {% endif %}
         </div>
         <div><dt>FX ceiling</dt>

@@ -322,7 +322,7 @@ def test_benchmark_in_universe_is_not_falsely_unsatisfied(monkeypatch) -> None:
     assert strategy.benchmark_satisfied is True
 
     body = _render(quality, monkeypatch)
-    assert "passes" in body
+    assert '<dd class="dq-ok-v">No</dd>' in body
 
 
 def test_loader_composes_from_a_published_artifact(monkeypatch, tmp_path) -> None:
@@ -349,6 +349,7 @@ def test_loader_composes_from_a_published_artifact(monkeypatch, tmp_path) -> Non
     monkeypatch.setattr(evidence_quality, "_descriptors", lambda: ())
     monkeypatch.setattr(evidence_quality, "_snapshot", lambda: None)
     monkeypatch.setattr(evidence_quality, "_fx_sessions", lambda session: 300)
+    monkeypatch.setattr(evidence_quality, "_holdings", lambda portfolio_id: ())
 
     quality = load_data_quality_view()
 

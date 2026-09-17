@@ -232,39 +232,42 @@
   {% if not trade_log.has_executed_fills %}
   <p>No executed simulated trades</p>
   {% endif %}
-  <div class="tbl-wrap mb-4" style="overflow-x:auto" tabindex="0" role="region" aria-label="Trade Log">
-    <table class="table table-hover align-middle mono-num">
-      <caption class="visually-hidden">Every persisted Trade Log event in sequence order</caption>
-      <thead>
-        <tr>
-          <th scope="col">#</th><th scope="col">Event</th><th scope="col">Security</th>
-          <th scope="col">Date</th><th scope="col">Shares</th><th scope="col">Price</th>
-          <th scope="col">P&amp;L</th><th scope="col">Rule</th><th scope="col">Detail</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for row in trade_log.rows %}
-        <tr>
-          <td>{{ row.sequence }}</td>
-          <td>{{ row.kind_label }}</td>
-          <td>
-            {{ row.security_label }}
-            <details class="mt-1">
-              <summary>Audit detail</summary>
-              <div class="mt-1">Security ID: {{ row.security_id }}</div>
-            </details>
-          </td>
-          <td>{{ row.date }}</td>
-          <td>{{ row.shares }}</td>
-          <td>{{ row.price }}</td>
-          <td>{{ row.pnl }}</td>
-          <td>{{ row.rule_id }}</td>
-          <td class="text-wrap">{{ row.detail }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
+  <details class="mb-4">
+    <summary>{{ trade_log.rows|length }} Trade Log events</summary>
+    <div class="tbl-wrap mt-2" style="overflow-x:auto" tabindex="0" role="region" aria-label="Trade Log">
+      <table class="table table-hover align-middle mono-num">
+        <caption class="visually-hidden">Every persisted Trade Log event in sequence order</caption>
+        <thead>
+          <tr>
+            <th scope="col">#</th><th scope="col">Event</th><th scope="col">Security</th>
+            <th scope="col">Date</th><th scope="col">Shares</th><th scope="col">Price</th>
+            <th scope="col">P&amp;L</th><th scope="col">Rule</th><th scope="col">Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in trade_log.rows %}
+          <tr>
+            <td>{{ row.sequence }}</td>
+            <td>{{ row.kind_label }}</td>
+            <td>
+              {{ row.security_label }}
+              <details class="mt-1">
+                <summary>Audit detail</summary>
+                <div class="mt-1">Security ID: {{ row.security_id }}</div>
+              </details>
+            </td>
+            <td>{{ row.date }}</td>
+            <td>{{ row.shares }}</td>
+            <td>{{ row.price }}</td>
+            <td>{{ row.pnl }}</td>
+            <td>{{ row.rule_id }}</td>
+            <td class="text-wrap">{{ row.detail }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
   {% endif %}
 
   <!-- Provenance -->

@@ -377,7 +377,7 @@ def test_empty_or_malformed_universe_emits_nothing() -> None:
 
 from app.services.backtest.regime_filter import (  # noqa: E402
     REGIME_FILTER_BENCHMARK_PARAM,
-    REGIME_FILTER_ENABLED_PARAM,
+    BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM,
     REGIME_FILTER_MA_LENGTH_PARAM,
 )
 
@@ -425,7 +425,7 @@ def _risk_off_params() -> dict[str, object]:
     return {
         **PARAMETERS,
         "selected_securities": ["sec-aapl", _BENCHMARK_ID],
-        REGIME_FILTER_ENABLED_PARAM: True,
+        BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: True,
         REGIME_FILTER_BENCHMARK_PARAM: _BENCHMARK_ID,
         REGIME_FILTER_MA_LENGTH_PARAM: 3,
     }
@@ -436,7 +436,7 @@ def test_regime_filter_absent_matches_explicitly_disabled() -> None:
 
     absent = strategy.initial_entry_selection(_View(), PARAMETERS)
     disabled = strategy.initial_entry_selection(
-        _View(), {**PARAMETERS, REGIME_FILTER_ENABLED_PARAM: False}
+        _View(), {**PARAMETERS, BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: False}
     )
 
     assert absent == disabled
@@ -462,7 +462,7 @@ def test_regime_filter_fails_closed_when_benchmark_not_in_universe() -> None:
     strategy = BuyAndHoldStrategy()
     params = {
         **PARAMETERS,
-        REGIME_FILTER_ENABLED_PARAM: True,
+        BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: True,
         REGIME_FILTER_BENCHMARK_PARAM: _BENCHMARK_ID,
         REGIME_FILTER_MA_LENGTH_PARAM: 3,
     }
@@ -476,7 +476,7 @@ def test_regime_filter_enabled_risk_on_does_not_alter_entries() -> None:
     """Gate permits: enabled + risk-on entries match the disabled path."""
     strategy = BuyAndHoldStrategy()
     enabled = _risk_off_params()
-    disabled = {**enabled, REGIME_FILTER_ENABLED_PARAM: False}
+    disabled = {**enabled, BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: False}
 
     assert strategy.initial_entry_selection(
         _RegimeView(_View(), ["1", "1", "100"]), enabled

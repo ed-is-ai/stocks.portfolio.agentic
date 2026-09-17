@@ -310,7 +310,7 @@ class _Descriptor:
 def test_strategy_input_from_reads_parameters_and_minimums() -> None:
     descriptor = _Descriptor(
         {
-            regime_filter.REGIME_FILTER_ENABLED_PARAM: True,
+            regime_filter.BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: True,
             regime_filter.REGIME_FILTER_BENCHMARK_PARAM: "SPY",
             regime_filter.REGIME_FILTER_MA_LENGTH_PARAM: 200,
         }
@@ -338,7 +338,7 @@ def test_strategy_input_from_reads_parameters_and_minimums() -> None:
 def test_strategy_input_from_rejects_unusable_ma_length(value: object) -> None:
     descriptor = _Descriptor(
         {
-            regime_filter.REGIME_FILTER_ENABLED_PARAM: True,
+            regime_filter.BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: True,
             regime_filter.REGIME_FILTER_MA_LENGTH_PARAM: value,
         }
     )

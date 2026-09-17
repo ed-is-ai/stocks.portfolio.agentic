@@ -16,7 +16,7 @@ from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.regime_filter import (
     MIN_MA_LENGTH,
     REGIME_FILTER_BENCHMARK_PARAM,
-    REGIME_FILTER_ENABLED_PARAM,
+    BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM,
     REGIME_FILTER_MA_LENGTH_PARAM,
     entry_signals_permitted,
 )
@@ -60,7 +60,7 @@ class _View:
 
 def _params(**overrides: JsonScalar) -> StrategyParameters:
     base: dict[str, JsonScalar] = {
-        REGIME_FILTER_ENABLED_PARAM: True,
+        BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: True,
         REGIME_FILTER_BENCHMARK_PARAM: BENCHMARK,
         REGIME_FILTER_MA_LENGTH_PARAM: 3,
     }
@@ -76,7 +76,7 @@ def test_disabled_when_flag_not_exactly_true_permits() -> None:
     view = _View([1.0, 2.0, 3.0])
     assert (
         entry_signals_permitted(
-            view, _params(**{REGIME_FILTER_ENABLED_PARAM: 1}), UNIVERSE
+            view, _params(**{BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: 1}), UNIVERSE
         )
         is True
     )

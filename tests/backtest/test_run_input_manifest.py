@@ -342,7 +342,7 @@ def test_execution_contract_digest_ignores_regime_filter_params() -> None:
         parameters={
             "lookback": 20,
             "watch": "sec-aapl",
-            "regime_filter_enabled": True,
+            "block_buy_on_downtrend_enabled": True,
             "regime_filter_benchmark_security_id": "sec-spy",
             "regime_filter_ma_length": 200,
         },
