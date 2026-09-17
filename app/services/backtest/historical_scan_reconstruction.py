@@ -595,10 +595,13 @@ class HistoricalScanReconstructor:
             or manifest.market_plane_policy_version != PRICE_VOLUME_PLANE_VERSION
             or manifest.calendar_dataset_version != CALENDAR_DATASET_VERSION
             or manifest.calendar_dataset_digest != canonical_calendar_digest()
-            or manifest.yfinance_ingestion_version
-            != yfinance_ingestion_source_manifest(_PROJECT_ROOT).digest
-            or manifest.record_composition_version
-            != record_composition_source_manifest(_PROJECT_ROOT).digest
+            or not yfinance_ingestion_source_manifest(
+                _PROJECT_ROOT
+            ).accepts_stored_digest(manifest.yfinance_ingestion_version)
+            or manifest.record_composition_version is None
+            or not record_composition_source_manifest(
+                _PROJECT_ROOT
+            ).accepts_stored_digest(manifest.record_composition_version)
         ):
             raise self._error(
                 request, "integrity_error", "input manifest does not bind request"
@@ -611,8 +614,9 @@ class HistoricalScanReconstructor:
             identity = manifest_detectors[detector.detector_id]
             if (
                 identity.detector_api_version != detector.detector_api_version
-                or identity.detector_version
-                != source_manifests[detector.detector_id].digest
+                or not source_manifests[detector.detector_id].accepts_stored_digest(
+                    identity.detector_version
+                )
                 or identity.configuration != detector.configuration
             ):
                 raise self._error(

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from hashlib import sha256
 from pathlib import Path
 
 import pandas as pd
@@ -1053,3 +1054,23 @@ def test_build_run_input_manifest_rejects_empty_securities(tmp_path) -> None:
         )
 
     assert exc_info.value.code == "invalid_securities"
+
+
+def test_python_runtime_is_recorded_but_never_hashed_into_the_digest() -> None:
+    """gh-641: the interpreter version must not fork replay identity."""
+    first = _manifest(python_runtime="3.12")
+    second = _manifest(python_runtime="3.14")
+
+    assert first.digest() == second.digest()
+    assert first.canonical_json() != second.canonical_json()
+    assert '"python_runtime":"3.12"' in first.canonical_json()
+
+
+def test_manifest_accepts_its_pre_gh_641_runtime_hashed_digest() -> None:
+    manifest = _manifest(python_runtime="3.14")
+    legacy = sha256(manifest.canonical_json().encode("utf-8")).hexdigest()
+
+    assert legacy != manifest.digest()
+    assert manifest.accepts_stored_digest(legacy)
+    assert manifest.accepts_stored_digest(manifest.digest())
+    assert not manifest.accepts_stored_digest("f" * 64)

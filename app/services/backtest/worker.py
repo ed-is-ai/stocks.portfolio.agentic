@@ -299,9 +299,10 @@ class PreparationStageEngine(StageWalkEngine):
                 if x.strategy_id == prep.strategy_id
             )
             s = prep.selection
-            if (desc.api_version, desc.source_digest) != (
-                prep.strategy_api_version,
-                prep.strategy_source_digest,
+            if (
+                desc.api_version != prep.strategy_api_version
+                or prep.strategy_source_digest is None
+                or not desc.accepts_source_digest(prep.strategy_source_digest)
             ) or (
                 desc.universe.schema_version,
                 desc.universe.mode,
@@ -1216,7 +1217,7 @@ class BacktestExecutionEngine:
                 JobFailureCode.INTEGRITY_ERROR,
                 f"Pinned run input manifest is invalid: {exc}",
             ) from exc
-        if manifest.digest() != self._backtest.run_input_manifest_digest:
+        if not manifest.accepts_stored_digest(self._backtest.run_input_manifest_digest):
             raise BacktestResolutionError(
                 JobFailureCode.INTEGRITY_ERROR,
                 "Pinned run input manifest does not match its own digest",
@@ -1253,7 +1254,9 @@ class BacktestExecutionEngine:
         descriptor = _resolve_strategy_descriptor(self._backtest.strategy_id)
         if (
             descriptor.api_version != self._backtest.strategy_api_version
-            or descriptor.source_digest != self._backtest.strategy_source_digest
+            or not descriptor.accepts_source_digest(
+                self._backtest.strategy_source_digest
+            )
         ):
             raise BacktestResolutionError(
                 JobFailureCode.INTEGRITY_ERROR,

@@ -2886,8 +2886,13 @@ class BacktestRepository:
                 )
                 if not readiness.ready or readiness.ordered_month_digest is None:
                     raise StrategyJobConflict("snapshot coverage is not Ready")
+                submitted_payload = json.loads(submission.canonical_manifest_json)
+                # gh-641: ``python_runtime`` is recorded in the stored
+                # rendering but never hashed -- mirror
+                # ``RunInputManifestV1.digest``.
+                submitted_payload.pop("python_runtime", None)
                 if (
-                    manifest_digest(json.loads(submission.canonical_manifest_json))
+                    manifest_digest(submitted_payload)
                     != submission.run_input_manifest_digest
                 ):
                     raise StrategyJobConflict(
@@ -5364,9 +5369,9 @@ class BacktestRepository:
                 )
 
                 parsed = read_run_input_manifest(str(manifest_row[1]))
-                if parsed.schema_version != str(row[13]) or parsed.digest() != str(
-                    row[11]
-                ):
+                if parsed.schema_version != str(
+                    row[13]
+                ) or not parsed.accepts_stored_digest(str(row[11])):
                     raise ValueError
                 if (
                     str(row[13]) == "run_input_manifest.v2"
@@ -6803,7 +6808,13 @@ class BacktestRepository:
                 actual_detectors = {
                     item.detector_id: (
                         item.detector_api_version,
-                        item.detector_version,
+                        # gh-641 shim: a capture sealed under the retired
+                        # runtime-hashed scheme still names this identity.
+                        runtime_manifests[item.detector_id].digest
+                        if runtime_manifests[item.detector_id].accepts_stored_digest(
+                            item.detector_version
+                        )
+                        else item.detector_version,
                         dict(item.configuration),
                     )
                     for item in manifest.detectors
@@ -6942,7 +6953,9 @@ class BacktestRepository:
         }
         if any(
             detector.detector_api_version != detector_apis[detector.detector_id]
-            or detector.detector_version != manifests[detector.detector_id].digest
+            or not manifests[detector.detector_id].accepts_stored_digest(
+                detector.detector_version
+            )
             for detector in profile.detectors
         ):
             raise BacktestIntegrityError(
@@ -6963,8 +6976,9 @@ class BacktestRepository:
         cls._validate_profile_authority(profile)
         if (
             profile.yfinance_request_contract_version != REQUEST_CONTRACT_VERSION
-            or profile.yfinance_ingestion_version
-            != yfinance_ingestion_source_manifest(_PROJECT_ROOT).digest
+            or not yfinance_ingestion_source_manifest(
+                _PROJECT_ROOT
+            ).accepts_stored_digest(profile.yfinance_ingestion_version)
             or profile.market_plane_policy_version != PRICE_VOLUME_PLANE_VERSION
             or profile.record_schema_version != "historical_scan_record.v1"
             or profile.reconstructability_policy_version != "reconstructability.v1"

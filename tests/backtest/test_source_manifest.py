@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 from pathlib import Path
 
 import pytest
 
+from app.repositories.backtest_repo import BacktestRepository
+from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.detectors import DETECTOR_REGISTRY
+from app.services.backtest.snapshot_profile import (
+    ProfileDetectorV1,
+    SnapshotProfileV1,
+)
+from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.source_manifest import (
     DetectorInputIdentityV1,
     ReconstructionInputManifestV1,
@@ -434,3 +442,101 @@ def test_strategy_source_manifest_rejects_bool_api_version(tmp_path: Path) -> No
             python_runtime="3.14",
             dependency_versions={},
         )
+
+
+def _example_manifest(
+    root: Path,
+    *,
+    python_runtime: str = "3.14",
+    pandas: str = "2.3.4",
+    body: str = "x=1",
+):
+    runtime = root / "app" / "runtime.py"
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    runtime.write_text(body)
+    return build_source_manifest(
+        project_root=root,
+        producer_id="example_v1",
+        api_version="1",
+        allowlist=("app/runtime.py",),
+        defaults={"window": 252},
+        python_runtime=python_runtime,
+        dependency_versions={"pandas": pandas, "pydantic": "2.13.4"},
+    )
+
+
+def test_python_runtime_is_recorded_but_never_hashed(tmp_path: Path) -> None:
+    """gh-641: a Python minor-version bump is not a change in identity."""
+    first = _example_manifest(tmp_path, python_runtime="3.12")
+    second = _example_manifest(tmp_path, python_runtime="3.14")
+
+    assert first.digest == second.digest
+    assert first.canonical_json == second.canonical_json
+    assert "python_runtime" not in first.manifest
+    assert (first.python_runtime, second.python_runtime) == ("3.12", "3.14")
+
+
+def test_detector_source_and_dependency_versions_still_change_the_digest(
+    tmp_path: Path,
+) -> None:
+    baseline = _example_manifest(tmp_path)
+
+    assert _example_manifest(tmp_path, body="x=2").digest != baseline.digest
+    assert _example_manifest(tmp_path, pandas="2.4.0").digest != baseline.digest
+
+
+def test_legacy_runtime_hashed_digests_still_validate(tmp_path: Path) -> None:
+    """A digest sealed while ``python_runtime`` was hashed stays acceptable."""
+    artifact = _example_manifest(tmp_path)
+    legacy = manifest_digest(
+        {**json.loads(artifact.canonical_json), "python_runtime": "3.14"}
+    )
+
+    assert legacy != artifact.digest
+    assert artifact.accepts_stored_digest(legacy)
+    assert artifact.accepts_stored_digest(artifact.digest)
+    assert not artifact.accepts_stored_digest("f" * 64)
+
+
+def test_snapshot_profile_with_legacy_detector_digests_still_validates() -> None:
+    """The stored-profile authority check accepts pre-gh-641 detector digests."""
+    manifests = detector_source_manifests(Path(__file__).resolve().parents[2])
+    calendar = TradingCalendar()
+    profile = SnapshotProfileV1.model_validate(
+        {
+            "schema_version": "snapshot_profile.v1",
+            "display_version": "Scanner data v1",
+            "record_schema_version": "historical_scan_record.v1",
+            "detectors": tuple(
+                ProfileDetectorV1(
+                    detector_id=detector.detector_id,
+                    detector_api_version=detector.detector_api_version,
+                    detector_version=manifest_digest(
+                        {
+                            **json.loads(
+                                manifests[detector.detector_id].canonical_json
+                            ),
+                            "python_runtime": "3.14",
+                        }
+                    ),
+                )
+                for detector in DETECTOR_REGISTRY
+            ),
+            "roster_policy_version": "ReconstructionRosterPolicyV1",
+            "roster_digest": DIGEST_A,
+            "identity_registry_version": "SecurityIdentityRegistryV1",
+            "alias_policy_version": "SecurityAliasManifestV1",
+            "source_policy_version": "FreeHistoricalSourcePolicyV1",
+            "calendar_policy_version": "PerExchangeMonthEndV1",
+            "calendar_dataset_version": "exchange-calendars-v1",
+            "calendar_dataset_digest": calendar.session_table_digest(),
+            "yfinance_request_contract_version": "yfinance-daily-v1",
+            "yfinance_ingestion_version": "ingestion-v1",
+            "market_plane_policy_version": "HistoricalMarketPlanesV1",
+            "reconstructability_policy_version": "reconstructability.v1",
+            "provenance_vocabulary": ("best_effort_reconstructed", "observed_bau"),
+            "cadence": "per-exchange month_end",
+        }
+    )
+
+    BacktestRepository._validate_profile_authority(profile)

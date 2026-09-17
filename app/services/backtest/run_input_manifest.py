@@ -149,6 +149,17 @@ class DetectorSourceDigestV1(_RunInputModel):
     source_digest: Digest
 
 
+def _encode_manifest(payload: Mapping[str, object]) -> str:
+    """Encode one manifest payload deterministically."""
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
 class PinnedSecurityEvidenceV1(_RunInputModel):
     """One security's exact pinned price/action/FX evidence for a Run.
 
@@ -279,6 +290,34 @@ class RunInputManifestV1(_RunInputModel):
         return payload
 
     def canonical_json(self) -> str:
+        """Return the exact stored rendering, ``python_runtime`` included."""
+        return _encode_manifest(self._json_payload())
+
+    def digest(self) -> str:
+        """The full cache-only replay identity -- see module docstring.
+
+        ``python_runtime`` is recorded in :meth:`canonical_json` but
+        deliberately excluded here (gh-641): two Runs pinned to the same
+        sources, dependencies and evidence replay identically on any
+        supported interpreter, so a Python minor-version bump must not
+        fork replay identity.
+        """
+        payload = self._json_payload()
+        payload.pop("python_runtime", None)
+        return sha256(_encode_manifest(payload).encode("utf-8")).hexdigest()
+
+    def accepts_stored_digest(self, stored_digest: str) -> bool:
+        """Return whether a persisted digest still names this manifest.
+
+        gh-641 compatibility: manifests pinned before ``python_runtime``
+        left the hash carry a digest of the full rendering. Retire this
+        together with ``source_manifest.legacy_runtime_digests`` once
+        every stored Run has been re-pinned.
+        """
+        legacy = sha256(self.canonical_json().encode("utf-8")).hexdigest()
+        return stored_digest in (self.digest(), legacy)
+
+    def _json_payload(self) -> dict[str, object]:
         # Strategy parameters are executable typed inputs.  The shared
         # evidence canonicalizer renders floats as hexadecimal strings,
         # which is appropriate for opaque evidence but would change a
@@ -288,17 +327,7 @@ class RunInputManifestV1(_RunInputModel):
         # values before the final deterministic encoding.
         payload = cast(dict[str, object], jsonable(self.canonical_payload()))
         payload["parameters"] = dict(self.parameters)
-        return json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-
-    def digest(self) -> str:
-        """The full cache-only replay identity -- see module docstring."""
-        return sha256(self.canonical_json().encode("utf-8")).hexdigest()
+        return payload
 
     def execution_contract_payload(self) -> dict[str, object]:
         """AD-20's narrower comparison-eligibility subset (AD-19).

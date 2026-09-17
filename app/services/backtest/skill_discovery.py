@@ -76,6 +76,7 @@ from app.services.backtest.run_universe import canonical_run_universe
 from app.services.backtest.source_manifest import (
     SOURCE_MANIFEST_VERSION,
     build_strategy_source_manifest,
+    legacy_runtime_digests,
 )
 from app.services.backtest.strategy_protocol import (
     JsonScalar,
@@ -341,6 +342,11 @@ class StrategyDescriptorV1(_DiscoveryModel):
     strategy_id: str = Field(min_length=1)
     source_manifest_version: str = Field(min_length=1)
     source_digest: str = Field(min_length=1)
+    #: gh-641 compatibility: the digests this same Skill source had while
+    #: ``python_runtime`` was still hashed into source identity. Never
+    #: written anywhere -- only used to keep already-pinned
+    #: ``strategy_runs.strategy_source_digest`` values resolvable.
+    source_digest_aliases: tuple[str, ...] = ()
     display_name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     api_version: int
@@ -356,6 +362,13 @@ class StrategyDescriptorV1(_DiscoveryModel):
         cls, value: Mapping[str, JsonScalar]
     ) -> Mapping[str, JsonScalar]:
         return MappingProxyType(dict(value))
+
+    def accepts_source_digest(self, stored_digest: str) -> bool:
+        """Return whether a pinned digest still names this Skill's sources."""
+        return (
+            stored_digest == self.source_digest
+            or stored_digest in self.source_digest_aliases
+        )
 
     def bind_universe(
         self, selected_security_ids: Iterable[object]
@@ -975,6 +988,9 @@ def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
         strategy_id=name,
         source_manifest_version=SOURCE_MANIFEST_VERSION,
         source_digest=manifest_artifact.digest,
+        source_digest_aliases=tuple(
+            sorted(legacy_runtime_digests(manifest_artifact.canonical_json))
+        ),
         display_name=display_name,
         description=description,
         api_version=api_version,

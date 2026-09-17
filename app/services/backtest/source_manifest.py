@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+import json
 from functools import lru_cache
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
@@ -82,11 +83,65 @@ class SourceManifestArtifact:
     _manifest: dict[str, Any]
     canonical_json: str
     digest: str
+    #: The interpreter this identity was built under. Recorded provenance
+    #: only -- deliberately absent from ``_manifest`` so it can never reach
+    #: ``digest`` (gh-641: a Python minor-version bump is not a change in
+    #: reproducibility identity).
+    python_runtime: str = ""
 
     @property
     def manifest(self) -> dict[str, Any]:
         """Return a detached view so callers cannot invalidate this identity."""
         return deepcopy(self._manifest)
+
+    def accepts_stored_digest(self, stored_digest: str) -> bool:
+        """Return whether a persisted digest still names this exact identity.
+
+        Accepts the current runtime-free digest, or any digest this same
+        manifest would have produced under the retired scheme that hashed
+        the interpreter version -- see :func:`legacy_runtime_digests`.
+        """
+        return stored_digest == self.digest or stored_digest in legacy_runtime_digests(
+            self.canonical_json
+        )
+
+
+# --- BACKWARD-COMPATIBILITY SHIM (gh-641) -----------------------------------
+# Until 2026-09-17 ``build_source_manifest`` hashed ``python_runtime`` into
+# every detector/strategy/ingestion/composition identity, so each stored
+# ``detector_version``, ``strategy_source_digest`` and
+# ``yfinance_ingestion_version`` in ``data/backtest.db`` is a digest of a
+# manifest that still carried that key. Recomputing those identities today
+# yields the runtime-free digest instead, which would invalidate every
+# already-committed snapshot profile, strategy run and backtest result.
+#
+# ``legacy_runtime_digests`` reconstructs what a manifest *would* have
+# hashed to under the retired scheme, for a bounded set of plausible
+# interpreters, so validation can keep accepting those stored values.
+# It is read-only compatibility: nothing new is ever written this way.
+#
+# RETIREMENT: delete this block, ``SourceManifestArtifact.accepts_stored_digest``
+# and its call sites once every snapshot profile and strategy run has been
+# recaptured under the runtime-free identity.
+_LEGACY_HASHED_RUNTIMES: tuple[str, ...] = tuple(f"3.{minor}" for minor in range(9, 16))
+
+
+@lru_cache(maxsize=512)
+def legacy_runtime_digests(canonical_json: str) -> frozenset[str]:
+    """Return the digests this manifest had while the runtime was hashed.
+
+    ``canonical_json`` is a current (runtime-free) source manifest
+    rendering; re-inserting ``python_runtime`` reproduces the exact
+    pre-gh-641 manifest, because dropping that key was the only change.
+    """
+    manifest = json.loads(canonical_json)
+    return frozenset(
+        manifest_digest({**manifest, "python_runtime": runtime})
+        for runtime in _LEGACY_HASHED_RUNTIMES
+    )
+
+
+# --- end compatibility shim -------------------------------------------------
 
 
 def _normalized_source_digest(path: Path) -> str:
@@ -146,13 +201,20 @@ def build_source_manifest(
         "producer_kind": "detector_or_strategy",
         "producer_id": producer_id,
         "api_version": api_version,
-        "python_runtime": python_runtime,
+        # ``python_runtime`` is deliberately NOT hashed (gh-641): the same
+        # sources, parameters and dependency versions reproduce the same
+        # numbers on any supported interpreter, so folding the Python
+        # minor version in invalidated every stored identity on upgrade.
+        # ``dependency_versions`` stays hashed -- pandas/pydantic really
+        # can change numerical output.
         "dependency_versions": dict(sorted(dependency_versions.items())),
         "defaults": dict(defaults),
         "files": files,
     }
     canonical = shared_canonical_json(manifest)
-    return SourceManifestArtifact(manifest, canonical, manifest_digest(manifest))
+    return SourceManifestArtifact(
+        manifest, canonical, manifest_digest(manifest), python_runtime
+    )
 
 
 def build_strategy_source_manifest(
@@ -409,6 +471,7 @@ __all__ = [
     "build_source_manifest",
     "build_strategy_source_manifest",
     "detector_source_manifests",
+    "legacy_runtime_digests",
     "record_composition_source_manifest",
     "yfinance_ingestion_source_manifest",
 ]
