@@ -314,3 +314,36 @@ def test_find_run_log_row_resolves_its_path_at_call_time(tmp_path) -> None:
     assert find_run_log_row("run-a", log) is not None
     assert find_run_log_row("absent", log) is None
     assert find_run_log_row("run-a", tmp_path / "nope.csv") is None
+
+
+def test_unrecorded_closes_the_balance_equation() -> None:
+    """requested - unrecorded == artifact_entries, and entries - gaps == successes."""
+    row = _row(
+        _health(
+            SourceName.YAHOO_MARKET_DATA,
+            2,
+            detail_code="partial_ticker_failures",
+            display_message="3 ticker request(s) failed",
+        )
+    )
+    funnel = build_evidence_funnel(_gap_evidence("AAA", "BBB"), row, 0)
+
+    assert funnel.requested == 5 and funnel.artifact_entries == 2
+    assert funnel.unrecorded == 3
+    assert funnel.requested - funnel.unrecorded == funnel.artifact_entries
+    assert funnel.artifact_entries - funnel.gaps == funnel.successes
+
+
+def test_unrecorded_stays_unknown_when_requested_is_unknown() -> None:
+    """An unknown stage must not read as a zero exclusion."""
+    row = _row(
+        _health(
+            SourceName.YAHOO_MARKET_DATA,
+            2,
+            detail_code="ticker_failures",
+            display_message="the count did not survive",
+        )
+    )
+    funnel = build_evidence_funnel(_gap_evidence("AAA"), row, 0)
+
+    assert funnel.requested is None and funnel.unrecorded is None

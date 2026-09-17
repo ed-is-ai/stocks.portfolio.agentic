@@ -147,6 +147,9 @@ def test_clean_census_renders_fully_usable(monkeypatch) -> None:
     body = _render(quality, monkeypatch)
     assert "Usable 1" in body
     assert "Needs attention 0" in body
+    # The head and the band key are part of the screen, not decoration.
+    assert "Evidence Census" in body
+    assert "as_of_session" in body
 
 
 def test_every_fault_present_renders_overlap_note(monkeypatch) -> None:
@@ -201,7 +204,6 @@ def test_unexplained_residual_is_flagged_not_hidden(monkeypatch) -> None:
 
     body = _render(quality, monkeypatch)
     assert "Unexplained residual" in body
-    assert "dq-residual" in body
 
 
 def test_missing_run_log_row_reads_unavailable_not_shortfall(monkeypatch) -> None:
@@ -252,14 +254,16 @@ def test_fault_severity_sort_values_and_absent_last(monkeypatch) -> None:
     )
     body = _render(quality, monkeypatch)
 
-    rows = re.findall(r"<tr data-dq-faults=.*?</tr>", body, re.S)
+    rows = re.findall(r"<tr data-dq-band=.*?</tr>", body, re.S)
     assert len(rows) == 2
     clean_row = next(row for row in rows if 'data-dq-faults="none"' in row)
-    faulted_row = next(row for row in rows if "dropped" in row)
-    # dropped outranks no fault, and the clean row's absent cause is marked.
+    faulted_row = next(row for row in rows if 'data-dq-band="dropped"' in row)
+    # dropped outranks no fault, on the Faults cell's own sort key.
     assert 'data-sort="4"' in faulted_row
-    assert 'data-absent="1"' in clean_row
-    assert 'data-absent="1"' not in faulted_row
+    # The cause cell is absent on the clean row and present on the faulted
+    # one, and absence is marked wherever it renders.
+    assert 'data-sort="" data-absent="1" class="dq-absent">—</td>' in clean_row
+    assert "dq-cause" in faulted_row and "dq-cause" not in clean_row
 
     # The comparator keeps absent rows last in both directions.
     assert "const absentLeft = left.dataset.absent === '1';" in body
@@ -318,7 +322,7 @@ def test_benchmark_in_universe_is_not_falsely_unsatisfied(monkeypatch) -> None:
     assert strategy.benchmark_satisfied is True
 
     body = _render(quality, monkeypatch)
-    assert "satisfied" in body
+    assert "passes" in body
 
 
 def test_loader_composes_from_a_published_artifact(monkeypatch, tmp_path) -> None:
@@ -410,9 +414,9 @@ def test_exit_eligibility_is_scoped_to_holdings(monkeypatch) -> None:
     assert quality.holdings_count == 1
 
     body = _render(quality, monkeypatch)
-    assert "3 / 1" in body
+    assert "3 of 3 scanned" in body
     # The card names both scopes, so neither count can be misread.
-    assert "scanned" in body and "held" in body
+    assert "1 of 1 held" in body
 
 
 def test_unreadable_alias_file_degrades_fail_soft(monkeypatch, tmp_path) -> None:
@@ -461,15 +465,17 @@ def test_each_column_sorts_by_what_it_displays(monkeypatch) -> None:
     )
     body = _render(quality, monkeypatch)
 
-    for row in re.findall(r"<tr data-dq-faults=.*?</tr>", body, re.S):
+    for row in re.findall(r"<tr data-dq-band=.*?</tr>", body, re.S):
         cells = re.findall(r"<td([^>]*)>(.*?)</td>", row, re.S)
-        for attributes, text in cells[:3] + cells[4:]:
+        assert len(cells) == 10
+        for attributes, text in cells:
             sort = re.search(r'data-sort="([^"]*)"', attributes)
             assert sort is not None
-            shown = text.strip()
+            shown = " ".join(re.sub(r"<[^>]+>", " ", text).split())
             if 'data-absent="1"' in attributes:
                 assert shown == "—" and sort.group(1) == ""
-            else:
+            elif "dq-num" in attributes:
+                # A number sorts by the number it shows, never by row order.
                 assert sort.group(1) == shown
 
     # Every em-dash cell in the table is marked absent, on whichever column
@@ -488,7 +494,7 @@ def test_sorting_is_keyboard_reachable_and_announced(monkeypatch) -> None:
     body = _render(build_data_quality_view(view, unresolved=unresolved), monkeypatch)
 
     headers = re.findall(r"<th[^>]*data-dq-sort[^>]*>", body)
-    assert len(headers) == 5
+    assert len(headers) == 10
     for header in headers:
         assert 'tabindex="0"' in header
         assert 'aria-sort="none"' in header
@@ -552,10 +558,11 @@ def test_clean_rows_are_not_coloured(monkeypatch) -> None:
     body = _render(build_data_quality_view(view, unresolved=unresolved), monkeypatch)
     clean_row = next(
         row
-        for row in re.findall(r"<tr data-dq-faults=.*?</tr>", body, re.S)
+        for row in re.findall(r"<tr data-dq-band=.*?</tr>", body, re.S)
         if 'data-dq-faults="none"' in row
     )
-    assert "dq-sev-0" not in clean_row
+    assert "dq-b-thin" not in clean_row
+    assert "dq-b-drop" not in clean_row
     assert "clean" in clean_row
 
 
@@ -574,4 +581,120 @@ def test_stylesheet_uses_tokens_and_flat_geometry() -> None:
     radii = re.findall(r"border-radius:\s*([^;]+);", body)
     assert radii
     # Structural containers are flat; form controls keep the shared token.
-    assert all(value.strip() in {"0", "var(--radius-input)"} for value in radii)
+    # Structural containers are flat; form controls keep the shared input
+    # token and badges the shared badge token (the project's own pattern).
+    assert all(
+        value.strip() in {"0", "var(--radius-input)", "var(--radius-sm)"}
+        for value in radii
+    )
+
+
+# --- mockup parity (#639) ---------------------------------------------
+
+
+def test_balance_equation_renders_every_term(monkeypatch) -> None:
+    """The funnel reads as an equation that closes, not a flat list."""
+    view, unresolved = _view([_record("AAA", SESSION, PREVIOUS)])
+    evidence = _evidence(_gap("ZZZ", "stale_session", "stale"))
+    quality = build_data_quality_view(
+        view,
+        current_evidence=evidence,
+        unresolved=unresolved,
+        run_log_row=_run_log_row(1),
+    )
+    body = _render(quality, monkeypatch)
+
+    for label in (
+        "discovered",
+        "excluded by criteria",
+        "with records",
+        "dropped with cause",
+        "in universe",
+        "unexplained",
+    ):
+        assert label in body
+    assert "dq-equation" in body
+
+
+def test_filter_chips_carry_their_own_counts(monkeypatch) -> None:
+    """The fault filter is a chip row with counts, not a bare select."""
+    records = [_record("AAA", SESSION, PREVIOUS), _record("BBB", SESSION, PREVIOUS)]
+    evidence = _evidence(_gap("BBB", "stale_session", "stale"))
+    view, unresolved = _view(records, evidence)
+    quality = build_data_quality_view(
+        view, current_evidence=evidence, unresolved=unresolved, holdings=("AAA",)
+    )
+    body = _render(quality, monkeypatch)
+
+    assert "<select" not in body
+    assert 'data-dq-filter="all"' in body
+    assert 'data-dq-filter="dropped"' in body
+    assert 'data-dq-filter="held"' in body
+    assert "Held 1" in body
+
+
+def test_subtotal_row_is_recalculated_client_side(monkeypatch) -> None:
+    """The tfoot describes the filtered rows, so it cannot be server-static."""
+    view, unresolved = _view([_record("AAA", SESSION, PREVIOUS)])
+    body = _render(build_data_quality_view(view, unresolved=unresolved), monkeypatch)
+
+    assert '<td colspan="10" id="dq-subtotal"></td>' in body
+    assert "subtotal.textContent" in body
+    assert "Showing ' + shown + ' of '" in body
+
+
+def test_row_shows_its_fx_ceiling_from_the_shared_inputs(monkeypatch) -> None:
+    """The per-security FX ceiling is joined in, never recomputed."""
+    view, unresolved = _view([_record("AAA", SESSION, PREVIOUS)])
+    quality = build_data_quality_view(
+        view,
+        unresolved=unresolved,
+        currencies={"AAA": "USD"},
+        fx_sessions=1,
+    )
+
+    assert quality.fx_by_security["AAA"].usable_sessions == 1
+    body = _render(quality, monkeypatch)
+    assert "dq-cap" in body  # capped below the security's own 2 sessions
+
+
+def test_strategy_tab_renders_cards_with_verdict_badges(monkeypatch) -> None:
+    """The strategy tab is cards with a headline verdict, not label rows."""
+    view, unresolved = _view([_record("AAA", SESSION, PREVIOUS)])
+    quality = build_data_quality_view(
+        view,
+        unresolved=unresolved,
+        fx_sessions=300,
+        strategy_inputs=(
+            StrategyImpactInputV1(
+                strategy_id="demo",
+                display_name="Demo",
+                entry_minimum_sessions=500,
+                exit_minimum_sessions=1,
+            ),
+        ),
+    )
+    body = _render(quality, monkeypatch)
+
+    assert "0 can enter" in body
+    assert "dq-blocked" in body
+    assert "Nothing can be bought." in body
+
+
+def test_corporate_actions_note_is_absent_not_invented(monkeypatch) -> None:
+    """The pipeline carries no actions evidence, so the card says so."""
+    view, unresolved = _view([_record("AAA", SESSION, PREVIOUS)])
+    body = _render(build_data_quality_view(view, unresolved=unresolved), monkeypatch)
+
+    assert "Corporate actions" in body
+    corporate = body.split("Corporate actions", 1)[1][:400]
+    assert "not available" in corporate
+
+
+def test_footnotes_name_the_modules_the_figures_come_from(monkeypatch) -> None:
+    view, unresolved = _view([_record("AAA", SESSION, PREVIOUS)])
+    body = _render(build_data_quality_view(view, unresolved=unresolved), monkeypatch)
+
+    assert "dq-footnotes" in body
+    for source in ("evidence_coverage", "evidence_requirements", "SourceHealth.count"):
+        assert source in body

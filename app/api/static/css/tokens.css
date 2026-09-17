@@ -34,6 +34,10 @@
   --red:         #c81e1e;   /* was #dc2626 */
   --red-bg:      #fbe6e6;   /* was #fee2e2 */
   --amber:       #a3560a;   /* was #b45309 */
+  /* Fill-strength rung of the same family: --amber is set for text
+     contrast and reads brown at swatch size, so marks (bars, swatches,
+     row stripes) use this instead. Text keeps --amber. */
+  --amber-mid:   #e2a01a;
   --amber-bg:    #f7ecd8;   /* was #fef3c7 */
   --blue:        #1d4ed8;   /* unchanged */
   --blue-bg:     #e2e9fb;   /* was #dbeafe */

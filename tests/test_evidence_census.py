@@ -358,3 +358,69 @@ def test_census_touches_no_repository_provider_or_clock(monkeypatch) -> None:
 
     assert census.as_of_session == SESSION
     _assert_accounting(census)
+
+
+# --- mockup-parity row detail (#639) ----------------------------------
+
+
+def test_row_carries_the_detail_the_census_table_shows() -> None:
+    """Range, kinds, currency and holding flag are reads of loaded data."""
+    view, _ = build_scan_market_view(
+        [_record("AAA", _bars(SESSION, PREVIOUS))], {}, as_of_session=SESSION
+    )
+    census = build_evidence_census(view, holdings=("AAA",), currencies={"AAA": "GBP"})
+
+    row = census.securities[0]
+    assert row.is_holding is True and census.held == 1
+    assert row.first_session == PREVIOUS and row.last_session == SESSION
+    assert "price_history" in row.evidence_kinds
+    assert row.currency == "GBP"
+    assert row.portfolio_sessions is None
+
+
+def test_portfolio_namespace_sessions_are_reported_when_read() -> None:
+    """A held security's portfolio-namespace count is its own column."""
+    view, _ = build_scan_market_view(
+        [_record("AAA", _bars(SESSION, PREVIOUS))], {}, as_of_session=SESSION
+    )
+    census = build_evidence_census(
+        view,
+        holdings=("AAA", "HELD"),
+        portfolio_reads=(_portfolio_read("AAA", 9), _portfolio_read("HELD", 4)),
+    )
+
+    rows = {row.security_id: row for row in census.securities}
+    # In the universe: the scan stays authoritative, the namespace is extra.
+    assert rows["AAA"].sessions == 2 and rows["AAA"].portfolio_sessions == 9
+    # Outside it: the namespace is the only history there is.
+    assert rows["HELD"].sessions == 4 and rows["HELD"].portfolio_sessions == 4
+
+
+def test_path_verdicts_collapse_to_the_worst_shortfall() -> None:
+    """The worst deficit names the row's reason; a met path stays None."""
+    view, _ = build_scan_market_view(
+        [_record("AAA", _bars(SESSION, PREVIOUS))], {}, as_of_session=SESSION
+    )
+    census = build_evidence_census(
+        view,
+        holdings=("AAA",),
+        strategies={
+            "mild": _strategy(entry=5, exit_=1),
+            "severe": _strategy(entry=200, exit_=1),
+        },
+    )
+
+    row = census.securities[0]
+    assert row.entry_shortfall is not None and "severe needs 200" in row.entry_shortfall
+    assert row.exit_shortfall is None
+
+
+def test_a_path_no_strategy_asks_about_reads_as_met() -> None:
+    """No requirement is not a failure the data caused."""
+    view, _ = build_scan_market_view(
+        [_record("AAA", _bars(SESSION, PREVIOUS))], {}, as_of_session=SESSION
+    )
+    census = build_evidence_census(view, strategies={})
+
+    row = census.securities[0]
+    assert row.entry_shortfall is None and row.exit_shortfall is None

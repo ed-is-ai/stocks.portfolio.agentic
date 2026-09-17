@@ -75,6 +75,13 @@ class EvidenceFunnelV1(BaseModel):
     universe_size: int | None = None
     unexplained: int | None = None
     universe_shortfall: int | None = None
+    # ``unrecorded`` is ``requested - artifact_entries``: every ticker the
+    # market-data stage was asked for that produced no artifact entry at
+    # all, whether it failed to fetch (``fetch_failures``) or was fetched
+    # and never recorded (``unexplained``). It is the single "excluded by
+    # criteria" term of the balance equation the tab renders:
+    # requested - unrecorded = artifact_entries - gaps = successes.
+    unrecorded: int | None = None
 
 
 def build_evidence_funnel(
@@ -132,6 +139,11 @@ def build_evidence_funnel(
         universe_size=universe_size,
         unexplained=unexplained,
         universe_shortfall=shortfall,
+        unrecorded=(
+            requested - entries
+            if requested is not None and entries is not None
+            else None
+        ),
     )
 
 

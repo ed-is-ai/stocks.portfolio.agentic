@@ -25,6 +25,7 @@ from app.api.stock_scanner_context import (
 )
 from app.services.evidence_funnel import parse_run_log_source_health
 from app.services.evidence_quality import (
+    CALENDAR_MIC,
     FAULT_SEVERITY_RANK,
     load_data_quality_view,
 )
@@ -352,5 +353,6 @@ def partial_data_quality(
         context={
             "view": load_data_quality_view(optional_int(portfolio_id)),
             "fault_rank": FAULT_SEVERITY_RANK,
+            "calendar_mic": CALENDAR_MIC,
         },
     )

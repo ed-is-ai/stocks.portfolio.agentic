@@ -8,13 +8,44 @@
 {% else %}
 {% set census = view.census %}
 {% set funnel = view.funnel %}
+{% set shared = view.shared_inputs %}
+{% set fault_labels = {
+     'thin': 'thin', 'gapped': 'gapped',
+     'missing_fragment': 'no fragment', 'dropped': 'dropped'} %}
+{% set fault_badges = {
+     'thin': 'dq-b-thin', 'gapped': 'dq-b-gap',
+     'missing_fragment': 'dq-b-frag', 'dropped': 'dq-b-drop'} %}
+{# Evidence kinds this view can carry at all, in reading order. A kind the
+   scan never produced for a security renders struck through rather than
+   silently absent. #}
+{% set kind_labels = [
+     ('price_history', 'price'), ('scan_technicals', 'tech'),
+     ('scan_stage', 'stage'), ('scan_vcp', 'vcp')] %}
+
+<div class="dq-shell">
+<div class="dq-head">
+  <h2>Evidence Census</h2>
+  <p class="dq-lead">Every security the scan found, accounted for once: usable
+    history, or a reason there is none. Plus the inputs that belong to no
+    single stock.</p>
+  <div class="dq-provenance">
+    <span><b>as_of_session</b> {{ census.as_of_session }}</span>
+    <span><b>analysis_run_id</b> {{ funnel.run_id or 'unknown' }}</span>
+    <span><b>base_currency</b> {{ shared.base_currency }}</span>
+    <span><b>calendar</b>
+      {{ shared.calendar.digest[:12] if shared.calendar.available else 'unavailable' }}</span>
+    <span><b>securities</b> {{ census.total }}</span>
+  </div>
+</div>
 
 <div class="dq-controls">
   <div class="dq-segmented" role="tablist" id="dqTabs">
     <button type="button" role="tab" id="dq-tab-stock" aria-selected="true"
-            aria-controls="dq-stock" data-dq-panel="dq-stock">Stock data</button>
+            aria-controls="dq-stock" data-dq-panel="dq-stock">Stock data
+      <span class="dq-tab-count">{{ census.total }} securities</span></button>
     <button type="button" role="tab" id="dq-tab-strategy" aria-selected="false"
-            aria-controls="dq-strategy" data-dq-panel="dq-strategy">Strategy data</button>
+            aria-controls="dq-strategy" data-dq-panel="dq-strategy">Strategy data
+      <span class="dq-tab-count">{{ shared.strategies|length }} strategies</span></button>
   </div>
   <span class="dq-note">
     Evidenced session {{ census.as_of_session }} &middot; every figure is read
@@ -30,38 +61,57 @@
     <p class="dq-note">Funnel is unavailable for this run — no run log row shares
       this artifact's run id, so no stage count can be attributed to it.</p>
     {% else %}
-    <div class="dq-rows">
-      {% for label, value in [
-          ('Tickers requested for market data', funnel.requested),
-          ('Tickers fetched', funnel.fetched),
-          ('Fetch failures', funnel.fetch_failures),
-          ('Artifact entries', funnel.artifact_entries),
-          ('Successes', funnel.successes),
-          ('Gaps', funnel.gaps),
-          ('Securities in universe', funnel.universe_size)] %}
-      <div class="dq-row">
-        <span class="dq-label">{{ label }}</span>
-        <span class="dq-value">{{ '—' if value is none else value }}</span>
+    {# The funnel's own field names and the balance equation's terms are not
+       the same vocabulary, so the mapping is stated once here:
+         discovered            = requested (tickers the market-data stage asked for)
+         excluded by criteria  = unrecorded (requested − artifact_entries:
+                                 fetch failures plus fetched-but-never-recorded)
+         with records          = artifact_entries
+         dropped with cause    = gaps (an artifact entry carrying a gap reason)
+         in universe           = successes
+         unexplained           = universe_shortfall (successes − universe_size)
+       Every term is read from EvidenceFunnelV1; none is recomputed here. #}
+    <div class="dq-equation">
+      {% for label, value, css in [
+          ('discovered', funnel.requested, ''),
+          ('excluded by criteria', funnel.unrecorded, ''),
+          ('with records', funnel.artifact_entries, ''),
+          ('dropped with cause', funnel.gaps, ''),
+          ('in universe', funnel.universe_size, 'dq-total')] %}
+      {% if loop.index0 == 1 %}<span class="dq-op">&minus;</span>
+      {% elif loop.index0 == 3 %}<span class="dq-op">&minus;</span>
+      {% elif loop.index0 > 0 %}<span class="dq-op">=</span>{% endif %}
+      <div class="dq-term {{ css }}">
+        <span class="dq-term-n">{{ '—' if value is none else value }}</span>
+        <span class="dq-term-l">{{ label }}</span>
       </div>
       {% endfor %}
-      <div class="dq-row{{ ' dq-residual' if funnel.unexplained }}">
-        <span class="dq-label">Unexplained residual (fetched − artifact entries)</span>
-        <span class="dq-value">{{ '—' if funnel.unexplained is none else funnel.unexplained }}</span>
-      </div>
-      <div class="dq-row{{ ' dq-residual' if funnel.universe_shortfall }}">
-        <span class="dq-label">Universe shortfall (successes − universe)</span>
-        <span class="dq-value">{{ '—' if funnel.universe_shortfall is none else funnel.universe_shortfall }}</span>
-      </div>
+      <p class="dq-delta{{ ' dq-residual' if funnel.universe_shortfall }}">
+        <span class="dq-big">{{ '—' if funnel.universe_shortfall is none else funnel.universe_shortfall }}</span>
+        <span>unexplained</span>
+      </p>
     </div>
+
     {% if funnel.discovery %}
-    <p class="dq-note">Discovery per source — these <strong>overlap</strong>: a
-      ticker found by two sources is counted by both, so they are an upper bound
-      on the requested count, not a stage that flows into it.</p>
-    <ul class="dq-chips">
+    <div class="dq-discovery">
+      <span class="dq-disc-l">Discovery this run</span>
       {% for item in funnel.discovery %}
-      <li class="dq-chip">{{ item.source.value }} {{ item.count }}</li>
+      <span class="dq-disc-i"><b>{{ item.count }}</b> {{ item.source.value }}</span>
       {% endfor %}
-    </ul>
+    </div>
+    {% endif %}
+
+    <p class="dq-note">Everything discovery found is accounted for, or is named
+      above as unexplained. Discovery counts <strong>overlap</strong>: a ticker
+      found by two sources is counted by both, so they are an upper bound on the
+      requested count, not a stage that flows into it.</p>
+    <p class="dq-note">Compared inside the run, not against the last one. The
+      screeners return a different list every day, so a day-to-day total always
+      moves — and it cancels out: new stocks arriving while others fail to fetch
+      nets to zero.</p>
+    {% if funnel.unexplained %}
+    <p class="dq-note dq-sev-2">Unexplained residual between fetch and
+      artifact: {{ funnel.unexplained }} (fetched − artifact entries).</p>
     {% endif %}
     {% endif %}
   </section>
@@ -76,83 +126,276 @@
       <span class="dq-unusable" style="width: {{ (100 * census.dropped / total)|round(2) }}%"></span>
     </div>
     <div class="dq-legend">
-      <span><span class="dq-swatch dq-usable" style="background: var(--green)"></span>Usable {{ census.clean }}</span>
-      <span><span class="dq-swatch dq-attention" style="background: var(--amber)"></span>Needs attention {{ census.faulted }}</span>
-      <span><span class="dq-swatch dq-unusable" style="background: var(--red)"></span>Unusable {{ census.dropped }}</span>
+      <span><span class="dq-swatch dq-usable"></span>Usable {{ census.clean }}</span>
+      <span><span class="dq-swatch dq-attention"></span>Needs attention {{ census.faulted }}</span>
+      <span><span class="dq-swatch dq-unusable"></span>Unusable {{ census.dropped }}</span>
     </div>
-    <p class="dq-note">These three account for every security exactly once and
-      sum to {{ census.total }}.</p>
+    <p class="dq-note">Green usable, amber needs attention, red unusable. These
+      three account for every security exactly once and sum to
+      {{ census.total }}. The fault counts below do not, because a security can
+      carry more than one.</p>
 
     {% if census.fault_counts %}
-    <p class="dq-note"><strong>Fault counts below overlap</strong> — one security
-      can be thin and gapped at once, so these deliberately sum higher than the
+    <div class="dq-legend">
+      {% for fault, count in census.fault_counts.items() %}
+      <span><span class="dq-swatch {{ 'dq-unusable' if fault == 'dropped' else 'dq-attention' }}"></span>{{ count }} {{ fault_labels.get(fault, fault) }}</span>
+      {% endfor %}
+    </div>
+    <p class="dq-note"><strong>Fault counts overlap</strong> — one security can
+      be thin and gapped at once, so these deliberately sum higher than the
       {{ census.faulted }} securities needing attention. They are not a second
       breakdown of the bar above.</p>
-    <ul class="dq-chips">
-      {% for fault, count in census.fault_counts.items() %}
-      <li class="dq-chip dq-sev-{{ fault_rank.get(fault, 0) }}">{{ fault }} {{ count }}</li>
-      {% endfor %}
-    </ul>
     {% endif %}
 
-    <details class="dq-note">
-      <summary>Key</summary>
-      <p><strong>thin</strong> — fewer sessions than a declared minimum.
-         <strong>gapped</strong> — sessions missing inside the window.
-         <strong>missing_fragment</strong> — the history could not be read or a
-         detector failed. <strong>dropped</strong> — no usable evidence at all.
-         Faults are independent tests established at scan time and reported
-         verbatim; nothing is re-tested on this screen.</p>
+    <details class="dq-key">
+      <summary><span class="dq-key-label">Key</span> — what each one means</summary>
+      <div class="dq-implications">
+        <div class="dq-imp">
+          <div class="dq-imp-head">
+            <span class="dq-imp-n dq-sev-0">{{ census.clean }}</span>
+            <span class="dq-imp-band dq-sev-0">clean</span>
+          </div>
+          <div>
+            <p class="dq-imp-what">Enough history for both buying and selling,
+              no missing sessions, every scan reading the strategies ask for
+              present.</p>
+            <p class="dq-imp-so">Only these can produce a Buy. A Hold here is the
+              strategy's opinion, not a data problem. The FX ceiling on the
+              Strategy data tab still applies.</p>
+          </div>
+        </div>
+        {% if 'thin' in census.fault_counts %}
+        <div class="dq-imp">
+          <div class="dq-imp-head">
+            <span class="dq-imp-n dq-sev-1">{{ census.fault_counts['thin'] }}</span>
+            <span class="dq-imp-band dq-sev-1">thin</span>
+          </div>
+          <div>
+            <p class="dq-imp-what">Fewer sessions than a declared minimum.
+              Buying usually needs more history than selling, so a security can
+              pass one path and fail the other.</p>
+            <p class="dq-imp-so">It drops out of whichever path it fails and the
+              recommendations screen will not say so. That is why this table
+              splits entry from exit.</p>
+          </div>
+        </div>
+        {% endif %}
+        {% if 'gapped' in census.fault_counts %}
+        <div class="dq-imp">
+          <div class="dq-imp-head">
+            <span class="dq-imp-n dq-sev-2">{{ census.fault_counts['gapped'] }}</span>
+            <span class="dq-imp-band dq-sev-2">gapped</span>
+          </div>
+          <div>
+            <p class="dq-imp-what">Enough trading days on paper, but sessions
+              are missing out of the middle of the window.</p>
+            <p class="dq-imp-so">The dangerous one. A 200-session average missing
+              8 sessions really reaches back 208. It still calculates, so Stage
+              and VCP come out wrong with no error anywhere.</p>
+          </div>
+        </div>
+        {% endif %}
+        {% if 'missing_fragment' in census.fault_counts %}
+        <div class="dq-imp">
+          <div class="dq-imp-head">
+            <span class="dq-imp-n dq-sev-3">{{ census.fault_counts['missing_fragment'] }}</span>
+            <span class="dq-imp-band dq-sev-3">missing fragment</span>
+          </div>
+          <div>
+            <p class="dq-imp-what">Price history is fine, something else is not:
+              the history could not be read, or a detector failed.</p>
+            <p class="dq-imp-so">More history will not help. The strategy asked
+              for a reading the scan never produced.</p>
+          </div>
+        </div>
+        {% endif %}
+        {% if 'dropped' in census.fault_counts %}
+        <div class="dq-imp">
+          <div class="dq-imp-head">
+            <span class="dq-imp-n dq-sev-4">{{ census.fault_counts['dropped'] }}</span>
+            <span class="dq-imp-band dq-sev-4">dropped</span>
+          </div>
+          <div>
+            <p class="dq-imp-what">Never got in at all. A stale session, an
+              ambiguous ticker, colliding identities, or no prices.</p>
+            <p class="dq-imp-so">Recommendations cannot see these. Hold one and
+              it is forced to Hold; do not and it never comes up. These are the
+              losses the funnel above can explain.</p>
+          </div>
+        </div>
+        {% endif %}
+      </div>
     </details>
+  </section>
+
+  {% set currencies = {} %}
+  {% for row in census.securities if row.currency %}
+  {% set _ = currencies.update({row.currency: currencies.get(row.currency, 0) + 1}) %}
+  {% endfor %}
+  <section class="dq-notes" aria-label="Census notes">
+    <div class="dq-note-card{{ '' if currencies else ' dq-absent' }}">
+      <span class="dq-note-l">Quote currency</span>
+      <span class="dq-note-v">
+        {%- if currencies -%}
+        {% for code, count in currencies.items() %}{{ count }} {{ code }}{{ ' · ' if not loop.last }}{% endfor %}
+        {%- else -%}not available{%- endif -%}
+      </span>
+      <p class="dq-note-so">Watch the split rather than the rows. The scanner
+        normalises LSE pence to pounds at its own boundary, so the artifact
+        carries the <b>currency</b> only — no quote unit or scale reaches this
+        screen to cross-check it against.</p>
+    </div>
+    <div class="dq-note-card dq-absent">
+      <span class="dq-note-l">Corporate actions</span>
+      <span class="dq-note-v">not available</span>
+      <p class="dq-note-so">Dividends and splits are not carried in the
+        published scan evidence, so nothing here can say whether they agree
+        with prices. Shown as absent rather than as zero divergence.</p>
+    </div>
+    <div class="dq-note-card">
+      <span class="dq-note-l">Held securities</span>
+      <span class="dq-note-v">{{ census.held }} accounted
+        &middot; {{ census.securities|selectattr('is_holding')|rejectattr('in_universe')|list|length }} outside the scan</span>
+      <p class="dq-note-so">A holding the scan never saw can still be sold on
+        what the portfolio namespace holds. It can never be bought.</p>
+    </div>
+    <div class="dq-note-card">
+      <span class="dq-note-l">Elsewhere</span>
+      <span class="dq-note-v">
+        <a href="#" data-dq-goto="tab-settings">Provider config</a> &middot;
+        <a href="#" data-dq-goto="tab-portfolio">Reconciliation</a>
+      </span>
+      <p class="dq-note-so">API keys and cash reconciliation have their own
+        screens.</p>
+    </div>
   </section>
 
   <section class="dq-section">
     <h3 class="dq-heading">Per-security census</h3>
     <div class="dq-controls">
-      <input type="search" id="dq-search" placeholder="Filter securities…"
-             aria-label="Filter securities">
-      <select id="dq-fault" aria-label="Filter by fault">
-        <option value="">All faults</option>
-        <option value="none">No fault</option>
-        {% for fault in census.fault_counts %}
-        <option value="{{ fault }}">{{ fault }}</option>
+      <div class="dq-filters" role="group" aria-label="Filter by fault">
+        <button type="button" class="dq-filter" data-dq-filter="all"
+                aria-pressed="true">All {{ census.total }}</button>
+        {% for fault, count in census.fault_counts.items() %}
+        <button type="button" class="dq-filter" data-dq-filter="{{ fault }}"
+                aria-pressed="false">{{ fault_labels.get(fault, fault) }} {{ count }}</button>
         {% endfor %}
-      </select>
+        <button type="button" class="dq-filter" data-dq-filter="held"
+                aria-pressed="false">Held {{ census.held }}</button>
+      </div>
+      <input type="search" id="dq-search" placeholder="Ticker, cause, currency…"
+             aria-label="Filter securities">
+      <p class="dq-rowcount" id="dq-count" aria-live="polite">{{ census.total }} rows</p>
       <a href="#" class="dq-note" data-dq-goto="tab-portfolio">Per-security
         evidence detail (Portfolio recommendations, GH-624) →</a>
     </div>
     <div class="tbl-wrap">
       <table class="dq-table" id="dq-census">
+        <caption><b>{{ census.total }}</b> securities.
+          <b>Sessions</b> is the scan's own evidenced history.
+          <b>Portfolio-ns</b> is what sits under <code>portfolio:&lt;symbol&gt;</code>,
+          read separately. <b>FX ceiling</b> is what stays usable after
+          conversion to {{ shared.base_currency }}. A row can carry more than
+          one fault.</caption>
         <thead>
           <tr>
             {# Sortable by keyboard as well as pointer: each header is a
                focusable columnheader that announces its own sort state. #}
-            {% for column in ['Security', 'Namespace', 'Sessions', 'Fault', 'Cause'] %}
-            <th data-dq-sort tabindex="0" aria-sort="none">{{ column }}</th>
+            {% for column in ['Security', 'Faults', 'Sessions', 'FX ceiling',
+                              'Portfolio-ns', 'First → last', 'Evidence held',
+                              'Currency', 'Entry / exit', 'Cause'] %}
+            <th data-dq-sort tabindex="0" aria-sort="none"
+                {% if column in ['Sessions', 'FX ceiling', 'Portfolio-ns'] %}class="dq-num"{% endif %}>{{ column }}</th>
             {% endfor %}
           </tr>
         </thead>
         <tbody>
           {% for row in census.securities %}
           {% set rank = fault_rank.get(row.faults[-1], 0) if row.faults else 0 %}
-          <tr data-dq-faults="{{ row.faults|join(' ') if row.faults else 'none' }}"
-              data-dq-text="{{ (row.display_ticker ~ ' ' ~ row.security_id)|lower }}">
+          {% set band = row.faults[-1] if row.faults else 'clean' %}
+          {% set fx = view.fx_by_security.get(row.security_id) %}
+          <tr data-dq-band="{{ band }}"
+              data-dq-held="{{ 1 if row.is_holding else 0 }}"
+              data-dq-faults="{{ row.faults|join(' ') if row.faults else 'none' }}"
+              data-dq-text="{{ (row.display_ticker ~ ' ' ~ row.security_id ~ ' ' ~ (row.cause or '') ~ ' ' ~ row.currency)|lower }}">
             {# Every data-sort is the value the cell displays, so no column
-               sorts by something the reader cannot see. Fault is the one
+               sorts by something the reader cannot see. Faults is the one
                deliberate exception: it sorts by declared severity rank, the
                escalation its own names encode. #}
-            <td data-sort="{{ row.display_ticker }}">{{ row.display_ticker }}</td>
-            <td data-sort="{{ row.namespace }}">{{ row.namespace }}</td>
-            <td data-sort="{{ row.sessions }}">{{ row.sessions }}</td>
-            <td data-sort="{{ rank }}"{% if rank %} class="dq-sev-{{ rank }}"{% endif %}>{{ row.faults|join(', ') if row.faults else 'clean' }}</td>
+            <td class="dq-sec" data-sort="{{ row.display_ticker }}">
+              <span class="dq-sec-id">{{ row.display_ticker }}</span>
+              {% if row.display_ticker != row.security_id %}
+              <span class="dq-sec-disp">{{ row.security_id }}</span>
+              {% endif %}
+              {% if row.is_holding %}<span class="dq-badge dq-b-held">held</span>{% endif %}
+            </td>
+            <td data-sort="{{ rank }}">
+              {% if row.faults %}
+              {% for fault in row.faults %}
+              <span class="dq-badge {{ fault_badges.get(fault, 'dq-b-thin') }}">{{ fault_labels.get(fault, fault) }}</span>
+              {% endfor %}
+              {% else %}
+              <span class="dq-badge dq-b-ok">clean</span>
+              {% endif %}
+            </td>
+            <td class="dq-num" data-sort="{{ row.sessions }}">{{ row.sessions }}</td>
+            {% if fx is not none and fx.fx_ceiling is not none %}
+            <td class="dq-num" data-sort="{{ fx.usable_sessions }}">
+              <span class="{{ 'dq-cap' if fx.usable_sessions < fx.sessions }}">{{ fx.usable_sessions }}</span>
+            </td>
+            {% else %}
+            <td class="dq-num dq-absent" data-sort="" data-absent="1">—</td>
+            {% endif %}
+            {% if row.portfolio_sessions is not none %}
+            <td class="dq-num" data-sort="{{ row.portfolio_sessions }}">{{ row.portfolio_sessions }}</td>
+            {% else %}
+            <td class="dq-num dq-absent" data-sort="" data-absent="1">—</td>
+            {% endif %}
+            {% if row.first_session and row.last_session %}
+            <td class="dq-mono" data-sort="{{ row.first_session }} → {{ row.last_session }}">{{ row.first_session }} → {{ row.last_session }}</td>
+            {% else %}
+            <td class="dq-mono dq-absent" data-sort="" data-absent="1">—</td>
+            {% endif %}
+            {% if row.evidence_kinds %}
+            <td class="dq-mono" data-sort="{{ row.evidence_kinds|join(' ') }}">
+              {%- for kind, label in kind_labels -%}
+              {%- if kind in row.evidence_kinds %}<span>{{ label }}</span>
+              {%- else %}<span class="dq-missing-kind">{{ label }}</span>{% endif -%}
+              {{ ' · ' if not loop.last }}
+              {%- endfor -%}
+            </td>
+            {% else %}
+            <td class="dq-mono dq-absent" data-sort="" data-absent="1">—</td>
+            {% endif %}
+            {% if row.currency %}
+            <td class="dq-mono" data-sort="{{ row.currency }}">{{ row.currency }}</td>
+            {% else %}
+            <td class="dq-mono dq-absent" data-sort="" data-absent="1">—</td>
+            {% endif %}
+            <td class="dq-paths" data-sort="{{ (0 if row.entry_shortfall else 1) + (0 if row.exit_shortfall else 1) }}">
+              {% if row.entry_shortfall %}
+              <span class="dq-short">entry ✗ {{ row.entry_shortfall }}</span>
+              {% else %}
+              <span class="dq-ok">entry ✓</span>
+              {% endif %}
+              <br>
+              {% if row.exit_shortfall %}
+              <span class="dq-short">exit ✗ {{ row.exit_shortfall }}</span>
+              {% else %}
+              <span class="dq-ok">exit ✓</span>
+              {% endif %}
+            </td>
             {% if row.cause %}
-            <td data-sort="{{ row.cause }}">{{ row.cause }}</td>
+            <td data-sort="{{ row.cause }}"><span class="dq-cause">{{ row.cause }}</span></td>
             {% else %}
             <td data-sort="" data-absent="1" class="dq-absent">—</td>
             {% endif %}
           </tr>
           {% endfor %}
         </tbody>
+        <tfoot>
+          <tr><td colspan="10" id="dq-subtotal"></td></tr>
+        </tfoot>
       </table>
     </div>
     <p class="dq-note" id="dq-empty" hidden>No securities match this filter.</p>
@@ -162,6 +405,23 @@
 <div id="dq-strategy" role="tabpanel" tabindex="0"
      aria-labelledby="dq-tab-strategy" hidden>
   {% include "_evidence_census_strategies.html" %}
+</div>
+
+<div class="dq-footnotes">
+  <p>No new storage. Sessions, evidence kinds, session range and missing
+    sessions come from <b>evidence_coverage</b> on the published scan view.
+    Drop reasons come from the artifact's own <b>current evidence gaps</b> and
+    from <b>unresolved</b> identities. Expected trading days come from the
+    pinned calendar. The FX ceiling comes from <b>fx:GBPUSD=X</b>. Entry and
+    exit thresholds come from each Strategy's declared
+    <b>evidence_requirements</b>. Discovery totals come from
+    <b>SourceHealth.count</b> on this run's log row.</p>
+  <p><b>Two kinds of requirement.</b> A Strategy asks for price history and
+    scan readings per security, with separate minimums for entry and exit. FX,
+    the calendar and the benchmark are not on that list; they are fixed per
+    run. So a Strategy can be stopped by something it has no way to ask for.</p>
+  <p>Per-security evidence detail belongs to GH-624 and links from the control
+    row above.</p>
 </div>
 
 <script>
@@ -192,6 +452,9 @@
   if (!table) { return; }
   const body = table.tBodies[0];
   const empty = document.getElementById('dq-empty');
+  const count = document.getElementById('dq-count');
+  const subtotal = document.getElementById('dq-subtotal');
+  let filter = 'all';
 
   function compare(left, right, descending) {
     // Absence is not zero: an absent value sorts last in both directions.
@@ -235,20 +498,56 @@
 
   function applyFilters() {
     const term = (document.getElementById('dq-search').value || '').toLowerCase();
-    const fault = document.getElementById('dq-fault').value;
     let shown = 0;
+    let clean = 0;
+    let dropped = 0;
+    const faultTotals = {};
     Array.prototype.forEach.call(body.rows, function (row) {
       const faults = row.dataset.dqFaults.split(' ');
-      const matchesFault = !fault || faults.indexOf(fault) !== -1;
+      // Faults overlap, so a row answers to every fault token it carries.
+      const matchesFault = filter === 'all' ||
+        (filter === 'held' ? row.dataset.dqHeld === '1' : faults.indexOf(filter) !== -1);
       const matchesTerm = !term || row.dataset.dqText.indexOf(term) !== -1;
       row.hidden = !(matchesFault && matchesTerm);
-      if (!row.hidden) { shown += 1; }
+      if (row.hidden) { return; }
+      shown += 1;
+      if (row.dataset.dqFaults === 'none') { clean += 1; }
+      else if (faults.indexOf('dropped') !== -1) { dropped += 1; }
+      faults.forEach(function (fault) {
+        if (fault === 'none') { return; }
+        faultTotals[fault] = (faultTotals[fault] || 0) + 1;
+      });
     });
     // A header over an empty tbody reads as broken, not as "no matches".
     if (empty) { empty.hidden = shown !== 0; }
+    if (count) {
+      count.textContent = shown === body.rows.length
+        ? shown + ' rows'
+        : shown + ' of ' + body.rows.length + ' rows';
+    }
+    if (subtotal) {
+      // The subtotal describes what is on screen now, not the whole census.
+      const overlaps = Object.keys(faultTotals).sort().map(function (fault) {
+        return faultTotals[fault] + ' ' + fault;
+      });
+      subtotal.textContent = 'Showing ' + shown + ' of ' + body.rows.length +
+        ' rows: ' + clean + ' clean, ' + (shown - clean - dropped) +
+        ' faulted, ' + dropped + ' dropped.' +
+        (overlaps.length ? ' Overlapping faults shown: ' + overlaps.join(', ') + '.' : '');
+    }
   }
+  document.querySelectorAll('.dq-filter').forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      document.querySelectorAll('.dq-filter').forEach(function (other) {
+        other.setAttribute('aria-pressed', other === chip ? 'true' : 'false');
+      });
+      filter = chip.dataset.dqFilter;
+      applyFilters();
+    });
+  });
   document.getElementById('dq-search').addEventListener('input', applyFilters);
-  document.getElementById('dq-fault').addEventListener('change', applyFilters);
+  applyFilters();
 })();
 </script>
+</div>{# /dq-shell #}
 {% endif %}

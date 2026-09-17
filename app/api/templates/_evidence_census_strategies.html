@@ -2,50 +2,107 @@
    discovered Strategy. Read-only: every figure comes from
    build_shared_inputs_report. #}
 {% set shared = view.shared_inputs %}
+{% set scanned = shared.securities|length %}
 <section class="dq-section">
   <h3 class="dq-heading">Shared inputs</h3>
-  <p class="dq-note">These belong to no single security: when one is short,
-    every affected security degrades at once.</p>
-  <div class="dq-rows">
-    <div class="dq-row">
-      <span class="dq-label">Base currency</span>
-      <span class="dq-value">{{ shared.base_currency }}</span>
-    </div>
-    <div class="dq-row">
-      <span class="dq-label">FX {{ shared.fx.pair }} usable session ceiling</span>
-      <span class="dq-value dq-sev-{{ 0 if shared.fx.available else 4 }}">
-        {{ shared.fx.usable_session_ceiling if shared.fx.available else 'unavailable' }}
-      </span>
-    </div>
-    <div class="dq-row">
-      <span class="dq-label">Securities needing FX / actually capped by it</span>
-      <span class="dq-value">{{ shared.fx.securities_affected }} / {{ shared.fx.securities_capped }}</span>
-    </div>
-    <div class="dq-row">
-      <span class="dq-label">Trading calendar digest</span>
-      <span class="dq-value">{{ shared.calendar.digest[:12] if shared.calendar.available else 'unavailable' }}</span>
-    </div>
-    <div class="dq-row">
-      <span class="dq-label">Trailing-year expected sessions (XNYS)</span>
-      <span class="dq-value">
-        {{ '—' if shared.calendar.expected_sessions is none else shared.calendar.expected_sessions }}
-      </span>
-    </div>
-    <div class="dq-row">
-      <span class="dq-label">Securities short of that reference length</span>
-      <span class="dq-value">{{ shared.calendar.securities_affected }}</span>
-    </div>
-    <div class="dq-row">
-      <span class="dq-label">Regime benchmark sessions</span>
-      <span class="dq-value dq-sev-{{ 4 if shared.benchmark.is_degraded else (0 if shared.benchmark.available else 2) }}">
-        {% if not shared.benchmark.available %}no snapshot
-        {% else %}{{ shared.benchmark.session_count }}{{ ' (degraded)' if shared.benchmark.is_degraded }}{% endif %}
-      </span>
-    </div>
-    <div class="dq-row">
-      <span class="dq-label">Strategies whose entry gate depends on it</span>
-      <span class="dq-value">{{ shared.benchmark.strategies_affected }}</span>
-    </div>
+  <p class="dq-note">Inputs no single security owns, fixed once per run. Every
+    security that depends on one inherits its state, so a problem here
+    multiplies by the <strong>Affects</strong> count.</p>
+  <div class="dq-cards">
+
+    <article class="dq-card{{ ' dq-blocked' if not shared.fx.available else (' dq-warn' if shared.fx.securities_capped else '') }}">
+      <header>
+        <h4>{{ shared.fx.pair }}</h4>
+        {% if not shared.fx.available %}
+        <span class="dq-badge dq-b-drop">unavailable</span>
+        {% elif shared.fx.securities_capped %}
+        <span class="dq-badge dq-b-thin">limits window</span>
+        {% else %}
+        <span class="dq-badge dq-b-ok">clears every row</span>
+        {% endif %}
+      </header>
+      <dl>
+        <div><dt>Sessions</dt>
+          <dd>{{ shared.fx.usable_session_ceiling if shared.fx.available else 'none' }}</dd></div>
+        <div><dt>Base currency</dt><dd>{{ shared.base_currency }}</dd></div>
+        <div><dt>Affects</dt>
+          <dd class="dq-warn-v">{{ shared.fx.securities_affected }} securities</dd></div>
+        <div><dt>Actually capped</dt>
+          <dd class="{{ 'dq-warn-v' if shared.fx.securities_capped else 'dq-off-v' }}">{{ shared.fx.securities_capped }}</dd></div>
+      </dl>
+      <p class="dq-card-so">
+        {%- if not shared.fx.available -%}
+        No FX series covers this session, so <b>nothing converts</b>: every
+        non-{{ shared.base_currency }} security reports a ceiling of zero
+        whatever its own history holds.
+        {%- else -%}
+        Non-{{ shared.base_currency }} securities cap out at
+        {{ shared.fx.usable_session_ceiling }} sessions whatever their own
+        history holds. For the {{ shared.fx.securities_capped }} capped rows,
+        <b>Sessions overstates what is usable</b> — FX ceiling is the real
+        figure.
+        {%- endif -%}
+      </p>
+    </article>
+
+    <article class="dq-card{{ '' if shared.calendar.available else ' dq-warn' }}">
+      <header>
+        <h4>calendar · {{ calendar_mic }}</h4>
+        <span class="dq-badge {{ 'dq-b-ok' if shared.calendar.available else 'dq-b-thin' }}">{{ 'pinned' if shared.calendar.available else 'unreadable' }}</span>
+      </header>
+      <dl>
+        <div><dt>Expected sessions</dt>
+          <dd>{{ '—' if shared.calendar.expected_sessions is none else shared.calendar.expected_sessions }}</dd></div>
+        <div><dt>Session table digest</dt>
+          <dd class="dq-mono">{{ shared.calendar.digest[:12] if shared.calendar.available else 'unavailable' }}</dd></div>
+        <div><dt>Affects</dt>
+          <dd class="dq-warn-v">{{ shared.calendar.securities_affected }} short of it</dd></div>
+      </dl>
+      <p class="dq-card-so">What missing sessions get counted against, measured
+        as a trailing year on {{ calendar_mic }}. Change it and gap counts move
+        with no price change, which is why the digest is here.</p>
+    </article>
+
+    {# Every regime-gated Strategy declares its own benchmark id; in
+       practice they agree, so show it once here when they do. Disagreement
+       is a real per-Strategy fact and stays on each Strategy's own card
+       rather than being papered over with a false shared label. #}
+    {% set gated_benchmarks = shared.strategies
+         | selectattr('regime_filter_enabled')
+         | map(attribute='benchmark_security_id') | select | unique | list %}
+    <article class="dq-card{{ ' dq-blocked' if shared.benchmark.is_degraded else ('' if shared.benchmark.available else ' dq-warn') }}">
+      <header>
+        <h4>benchmark{{ ' · ' + gated_benchmarks[0] if gated_benchmarks|length == 1 }}</h4>
+        {% if not shared.benchmark.available %}
+        <span class="dq-badge dq-b-thin">no snapshot</span>
+        {% elif shared.benchmark.is_degraded %}
+        <span class="dq-badge dq-b-drop">degraded</span>
+        {% else %}
+        <span class="dq-badge dq-b-ok">{{ shared.benchmark.session_count }} sessions</span>
+        {% endif %}
+      </header>
+      <dl>
+        <div><dt>Sessions</dt>
+          <dd>{{ shared.benchmark.session_count if shared.benchmark.available else '—' }}</dd></div>
+        <div><dt>Read at</dt>
+          <dd class="dq-mono">{{ shared.benchmark.generated_at[:10] or '—' }}</dd></div>
+        <div><dt>Affects</dt>
+          <dd class="dq-warn-v">{{ shared.benchmark.strategies_affected }} regime-gated strategies</dd></div>
+      </dl>
+      <p class="dq-card-so">
+        {%- if shared.benchmark.is_degraded -%}
+        A degraded reading <b>cannot satisfy any gate</b>, so every regime-gated
+        Strategy buys nothing and reads as a Strategy that did not trade.
+        {%- elif not shared.benchmark.available -%}
+        With no persisted snapshot no gate can be judged here at all — that is
+        a failed read, not a verdict.
+        {%- else -%}
+        A Strategy whose MA length exceeds {{ shared.benchmark.session_count }}
+        opens its gate for nothing, so it buys nothing. That <b>reads as a
+        Strategy that did not trade</b>.
+        {%- endif -%}
+      </p>
+    </article>
   </div>
   <p class="dq-note">
     Provider credentials and source toggles live in
@@ -55,7 +112,11 @@
 </section>
 
 <section class="dq-section">
-  <h3 class="dq-heading">Strategies</h3>
+  <h3 class="dq-heading">By strategy</h3>
+  <p class="dq-note">Each Strategy sets its own history minimums and required
+    scan readings, then inherits the shared inputs. Entry is counted over the
+    {{ scanned }} scanned securities, exit over the {{ view.holdings_count }}
+    held.</p>
   {% if view.strategies_unreadable %}
   <p class="dq-note dq-sev-2">{{ view.strategies_unreadable }} discovered
     Strategy(ies) could not be read and are omitted below.</p>
@@ -70,33 +131,65 @@
   {% else %}
   <div class="dq-cards">
     {% for strategy in shared.strategies %}
-    <article class="dq-card">
-      <h4>{{ strategy.display_name }}</h4>
-      <div class="dq-rows">
-        <div class="dq-row">
-          <span class="dq-label">Declared minimum sessions — entry / exit</span>
-          <span class="dq-value">{{ strategy.entry_minimum_sessions }} / {{ strategy.exit_minimum_sessions }}</span>
+    {% set blocked = strategy.eligible_entry == 0 %}
+    {% set ceiling = shared.fx.usable_session_ceiling %}
+    {% set fx_blocks = shared.fx.available and ceiling is not none
+                       and ceiling < strategy.entry_minimum_sessions %}
+    <article class="dq-card{{ ' dq-blocked' if blocked else (' dq-warn' if strategy.eligible_entry < scanned else '') }}">
+      <header>
+        <div>
+          <h4>{{ strategy.display_name }}</h4>
+          <span class="dq-card-slug dq-mono">{{ strategy.strategy_id }}</span>
         </div>
-        <div class="dq-row">
-          <span class="dq-label">Eligible — entry (of {{ shared.securities|length }}
-            scanned) / exit (of {{ view.holdings_count }} held)</span>
-          <span class="dq-value">{{ strategy.eligible_entry }} / {{ strategy.eligible_exit }}</span>
-        </div>
-        <div class="dq-row">
-          <span class="dq-label">Regime gate</span>
+        <span class="dq-badge {{ 'dq-b-drop' if blocked else ('dq-b-thin' if strategy.eligible_entry < scanned else 'dq-b-ok') }}">{{ strategy.eligible_entry }} can enter</span>
+      </header>
+      <dl>
+        <div><dt>Entry</dt>
+          <dd>{{ strategy.entry_minimum_sessions }} sessions{% for kind in strategy.entry_kinds %} · <span class="dq-mono">{{ kind }}</span>{% endfor %}</dd></div>
+        <div><dt>Exit</dt>
+          <dd>{{ strategy.exit_minimum_sessions }} sessions{% for kind in strategy.exit_kinds %} · <span class="dq-mono">{{ kind }}</span>{% endfor %}</dd></div>
+        <div><dt>Eligible</dt>
+          <dd>{{ strategy.eligible_entry }} of {{ scanned }} scanned ·
+            {{ strategy.eligible_exit }} of {{ view.holdings_count }} held</dd></div>
+        <div><dt>Regime gate</dt>
           {% if not strategy.regime_filter_enabled %}
-          <span class="dq-value">off</span>
+          <dd class="dq-off-v">not enabled</dd>
           {% elif strategy.benchmark_satisfied is none %}
-          <span class="dq-value">on &middot; benchmark unassessed (no snapshot)</span>
+          <dd class="dq-off-v">on · benchmark unassessed (no snapshot)</dd>
+          {% elif strategy.benchmark_satisfied %}
+          <dd class="dq-ok-v">{{ strategy.benchmark_security_id or 'benchmark' }}
+            {{ strategy.ma_length if strategy.ma_length is not none else '—' }}-MA — passes</dd>
           {% else %}
-          <span class="dq-value dq-sev-{{ 0 if strategy.benchmark_satisfied else 3 }}">
-            on &middot; {{ strategy.benchmark_security_id or 'no benchmark' }}
-            &middot; MA {{ strategy.ma_length if strategy.ma_length is not none else '—' }}
-            &middot; {{ 'satisfied' if strategy.benchmark_satisfied else 'not satisfied' }}
-          </span>
+          <dd class="dq-bad-v">{{ strategy.benchmark_security_id or 'no benchmark' }}
+            {{ strategy.ma_length if strategy.ma_length is not none else '—' }}-MA —
+            {{ shared.benchmark.session_count }} sessions, not satisfied</dd>
           {% endif %}
         </div>
-      </div>
+        <div><dt>FX ceiling</dt>
+          {% if not shared.fx.available %}
+          <dd class="dq-bad-v">no FX series</dd>
+          {% elif fx_blocks %}
+          <dd class="dq-bad-v">{{ ceiling }} under {{ strategy.entry_minimum_sessions }}</dd>
+          {% else %}
+          <dd class="dq-ok-v">{{ ceiling }} clears {{ strategy.entry_minimum_sessions }}</dd>
+          {% endif %}
+        </div>
+      </dl>
+      <p class="dq-card-so">
+        {%- if blocked -%}
+        <b>Nothing can be bought.</b>
+        {% if strategy.benchmark_satisfied == false %}The gate shuts before any
+        security is looked at, so runs come back flat and read as a poor
+        Strategy.{% else %}No scanned security clears
+        {{ strategy.entry_minimum_sessions }} usable sessions.{% endif %}
+        {%- else -%}
+        {{ scanned - strategy.eligible_entry }} of {{ scanned }} scanned
+        securities are short of {{ strategy.entry_minimum_sessions }} usable
+        sessions and drop out of entry;
+        {{ view.holdings_count - strategy.eligible_exit }} of the held are short
+        of {{ strategy.exit_minimum_sessions }} and drop out of exit.
+        {%- endif -%}
+      </p>
     </article>
     {% endfor %}
   </div>

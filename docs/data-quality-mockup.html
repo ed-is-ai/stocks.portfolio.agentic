@@ -1,0 +1,1057 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Evidence Census</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+<style>
+  /* Tokens copied verbatim from app/api/static/css/tokens.css — the
+     project's source of truth (Hallmark studied-DNA, Bloomberg UK).
+     Bootstrap's stylesheet and bootstrap-icons cannot load inside an
+     Artifact (CSP), so the small subset of .navbar / .nav-tabs / .table
+     rules this screen needs is reproduced from index.html instead.
+     Single-theme light, matching the app: tokens.css defines no dark set. */
+  :root {
+    --primary:     #111418;
+    --primary-2:   #1c2126;
+    --surface:     #f8f9fa;
+    --card:        #ffffff;
+    --border:      #dfe3e8;
+    --muted:       #5b6470;
+    --accent:      #111418;
+    --accent-2:    #2563eb;
+    --navbar-grad: #111418;
+
+    --green:   #0a7d34;  --green-bg:  #e3f3e8;
+    --red:     #c81e1e;  --red-bg:    #fbe6e6;
+    --amber:   #a3560a;  --amber-bg:  #f7ecd8;
+    /* Fill-strength rung of the same family: --amber is set for text
+       contrast and reads brown at swatch size. Marks use this instead. */
+    --amber-mid: #e2a01a;
+    --blue:    #1d4ed8;  --blue-bg:   #e2e9fb;
+    --purple:  #7c3aed;  --purple-bg: #ece6fb;
+    --orange:  #b8460e;  --orange-bg: #f9ece2;
+
+    --radius-sm: 4px;
+    --radius-card: 0px;
+    --radius-input: 4px;
+
+    --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+      Helvetica, Arial, sans-serif;
+    --font-num: "Inter", ui-monospace, "SF Mono", SFMono-Regular, Menlo,
+      Consolas, monospace;
+
+    --fs-2xs: 0.7rem;
+    --fs-xs: 0.74rem;
+    --fs-sm: 0.82rem;
+    --fs-base: 0.9rem;
+    --fs-md: 1rem;
+    --fs-lg: 1.15rem;
+    --fs-xl: 1.4rem;
+    --fs-2xl: 1.75rem;
+
+    --fw-normal: 400; --fw-medium: 500; --fw-semibold: 600; --fw-bold: 700;
+    --lh-tight: 1.25; --lh-base: 1.5; --tracking-tight: -0.011em;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+
+  body {
+    background: var(--surface);
+    color: var(--primary);
+    font-family: var(--font-ui);
+    font-size: var(--fs-base);
+    line-height: var(--lh-base);
+    letter-spacing: var(--tracking-tight);
+  }
+
+  h1, h2, h3, h4, h5, h6 { margin: 0; letter-spacing: var(--tracking-tight); }
+  h2 { font-size: var(--fs-xl); font-weight: var(--fw-bold); line-height: var(--lh-tight); }
+  h3 { font-size: var(--fs-md); font-weight: var(--fw-semibold); line-height: var(--lh-tight); }
+  h4 {
+    font-size: var(--fs-sm); font-weight: var(--fw-semibold); line-height: var(--lh-tight);
+    text-transform: uppercase; letter-spacing: 0.05em;
+  }
+
+  table, .mono-num, .sval { font-variant-numeric: tabular-nums lining-nums; }
+  .mono-num { font-family: var(--font-num); }
+
+  .icon { width: 0.86em; height: 0.86em; flex: none; vertical-align: -0.08em; }
+
+  /* ── Navbar — flat masthead, not a gradient banner ─────────────── */
+  .navbar {
+    background: var(--navbar-grad);
+    padding: 0.6rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 1rem;
+  }
+  .navbar-brand {
+    font-weight: var(--fw-bold); font-size: var(--fs-lg);
+    letter-spacing: -0.01em; color: #fff; text-decoration: none;
+    display: flex; align-items: center; gap: 0.55rem;
+  }
+  .brand-mark {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.6rem; height: 1.6rem;
+    border-radius: var(--radius-sm);
+    background: rgba(255,255,255,0.12);
+  }
+  .brand-mark .icon { width: 1rem; height: 1rem; color: #fff; }
+  .brand-name em { font-style: normal; color: rgba(255,255,255,0.6); }
+  .navbar-tag {
+    font-size: var(--fs-sm); color: rgba(255,255,255,0.55);
+    padding-left: 0.7rem; border-left: 1px solid rgba(255,255,255,0.16);
+  }
+
+  /* ── Tab bar — hairline underline, no active-tab gradient ───────── */
+  .tab-bar {
+    background: #fff; border-bottom: 1px solid var(--border);
+    padding: 0 0.5rem; display: flex; align-items: flex-end; overflow-x: auto;
+  }
+  .nav-tabs { display: flex; flex-wrap: nowrap; list-style: none; margin: 0; padding: 0; }
+  .nav-tabs li { margin-bottom: -1px; }
+  .nav-link {
+    display: flex; align-items: center; gap: 0.3rem;
+    border: none; border-bottom: 2px solid transparent; border-radius: 0;
+    background: none; font: inherit;
+    color: var(--muted); font-size: var(--fs-md); font-weight: var(--fw-medium);
+    padding: 0.65rem 1rem; white-space: nowrap; cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  .nav-link:hover { color: var(--primary); border-bottom-color: var(--border); }
+  .nav-link.active { color: var(--primary); font-weight: var(--fw-semibold); border-bottom-color: var(--primary); }
+  .nav-link:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+
+  .container-fluid { padding: 1rem 0.75rem 3rem; }
+  .shell { max-width: 1320px; margin: 0 auto; }
+
+  /* ── Content panel — flat, hairline border, no shadow/rounding ──── */
+  #tab-content {
+    background: #fff; border: 1px solid var(--border); border-top: none;
+    border-radius: 0; padding: 1.25rem 1.5rem; min-height: 420px;
+  }
+
+  /* ── Page head ──────────────────────────────────────────────────── */
+  .page-head { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 1.15rem; }
+  .page-head .lead { color: var(--muted); font-size: var(--fs-sm); max-width: 78ch; margin: 0; }
+  .provenance {
+    display: flex; flex-wrap: wrap; gap: 0.15rem 1.15rem;
+    font-size: var(--fs-2xs); color: var(--muted); margin-top: 0.35rem;
+  }
+  .provenance span { font-variant-numeric: tabular-nums; }
+  .provenance b { color: var(--primary); font-weight: var(--fw-semibold); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  /* ── Sub-tabs — segmented control, not a second underline row.
+     The masthead tab bar already owns the underline idiom, so reusing it
+     one level down reads as a label row rather than a control. ──────── */
+  .subtabs {
+    display: inline-flex; max-width: 100%; overflow-x: auto;
+    border: 1px solid var(--primary); background: #fff;
+    margin: 0 0 1.25rem;
+  }
+  .subtab {
+    border: none; border-right: 1px solid var(--primary); background: #fff; font: inherit;
+    color: var(--primary); font-size: var(--fs-base); font-weight: var(--fw-semibold);
+    padding: 0.5rem 1.05rem; cursor: pointer; white-space: nowrap;
+    display: flex; align-items: center; gap: 0.5rem;
+    transition: background-color .15s, color .15s;
+  }
+  .subtab:last-child { border-right: none; }
+  .subtab:hover { background: var(--surface); }
+  .subtab[aria-selected="true"] { background: var(--primary); color: #fff; }
+  .subtab[aria-selected="true"]:hover { background: var(--primary-2); }
+  .subtab:focus-visible { outline: 2px solid var(--accent-2); outline-offset: -3px; }
+  .subtab .icon { width: 0.95em; height: 0.95em; }
+  .subtab-n {
+    font-weight: var(--fw-normal); font-size: var(--fs-2xs); color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    border-left: 1px solid var(--border); padding-left: 0.5rem;
+  }
+  .subtab[aria-selected="true"] .subtab-n { color: rgba(255,255,255,0.65); border-left-color: rgba(255,255,255,0.28); }
+  .panel { display: flex; flex-direction: column; gap: 1.5rem; }
+
+  /* ── Section card — flat, hairline, no shadow ───────────────────── */
+  .card {
+    background: #fff; border: 1px solid var(--border); border-radius: var(--radius-card);
+    padding: 1rem 1.15rem;
+  }
+  .sec-head { margin-bottom: 0.75rem; }
+  .sec-head p { margin: 0.2rem 0 0; color: var(--muted); font-size: var(--fs-sm); max-width: 80ch; }
+
+  /* ── Balance equation ───────────────────────────────────────────── */
+  .balance { display: flex; flex-direction: column; gap: 1rem; }
+  .equation { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0.6rem 1.35rem; }
+  .term { display: flex; flex-direction: column; gap: 0.1rem; }
+  .term-n { font-size: var(--fs-2xl); font-weight: var(--fw-bold); line-height: 1; font-variant-numeric: tabular-nums lining-nums; }
+  .term-l { font-size: var(--fs-2xs); color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .op { font-size: var(--fs-lg); color: var(--muted); padding-bottom: 0.2rem; font-weight: var(--fw-medium); }
+  .term.total .term-n, .term.total .term-l { color: var(--primary); }
+  .term.total .term-n { border-bottom: 2px solid var(--primary); padding-bottom: 0.1rem; }
+  .delta {
+    align-self: center;
+    display: flex; align-items: baseline; gap: 0.4rem;
+    background: var(--green-bg); color: var(--green);
+    border-radius: var(--radius-sm); padding: 0.3rem 0.6rem;
+    font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: 0.03em; font-weight: var(--fw-bold);
+  }
+
+  /* Per-source discovery counts -- SourceHealth.count, already collected
+     per run and rendered as the pipeline's Discovery stage badges. */
+  .discovery {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.2rem 1rem;
+    padding: 0.5rem 0 0; border-top: 1px solid var(--border);
+    font-size: var(--fs-2xs); color: var(--muted);
+  }
+  .disc-l { text-transform: uppercase; letter-spacing: 0.05em; font-weight: var(--fw-semibold); color: var(--primary); }
+  .disc-i { font-variant-numeric: tabular-nums lining-nums; }
+  .disc-i b { color: var(--primary); font-weight: var(--fw-semibold); }
+  .disc-i.sep { border-left: 1px solid var(--border); padding-left: 1rem; }
+  .eq-so em { font-style: italic; }
+  .delta .big { font-size: var(--fs-md); font-variant-numeric: tabular-nums; }
+  .eq-so { margin: 0; font-size: var(--fs-sm); color: var(--muted); max-width: 86ch; }
+  .eq-so b { color: var(--primary); font-weight: var(--fw-semibold); }
+
+  /* ── Band bar ───────────────────────────────────────────────────── */
+  .bandbar { display: flex; flex-direction: column; gap: 0.5rem; }
+  .bar { display: flex; height: 0.7rem; background: var(--surface); border: 1px solid var(--border); }
+  .bar span { display: block; }
+  .b-clean { background: var(--green); }
+  .b-faulted { background: var(--amber-mid); }
+  .b-dropped { background: var(--red); }
+  .ticks { display: flex; flex-wrap: wrap; gap: 0.25rem 1.15rem; font-size: var(--fs-2xs); color: var(--muted); }
+  .tick { display: flex; align-items: center; gap: 0.4rem; font-variant-numeric: tabular-nums; text-transform: uppercase; letter-spacing: 0.04em; font-weight: var(--fw-semibold); }
+  .swatch { width: 0.55rem; height: 0.55rem; flex: none; }
+  .tick.clean .swatch { background: var(--green); }
+  .tick.thin .swatch { background: var(--amber-mid); }
+  .tick.gapped .swatch { background: var(--amber-mid); }
+  .tick.frag .swatch { background: var(--amber-mid); }
+  .tick.dropped .swatch { background: var(--red); }
+  .bar-note { font-size: var(--fs-sm); color: var(--muted); margin: 0; max-width: 86ch; }
+  .bar-note b { color: var(--primary); font-weight: var(--fw-semibold); }
+
+  /* ── Key (collapsed by default) ─────────────────────────────────── */
+  .key { border-top: 1px solid var(--border); padding-top: 0.7rem; }
+  .key > summary {
+    list-style: none; cursor: pointer; display: flex; flex-wrap: wrap;
+    align-items: baseline; gap: 0.2rem 0.55rem; color: var(--muted);
+  }
+  .key > summary::-webkit-details-marker { display: none; }
+  .key > summary::before { content: "+"; color: var(--primary); font-weight: var(--fw-bold); width: 1ch; }
+  .key[open] > summary::before { content: "\2013"; }
+  .key > summary:hover { color: var(--primary); }
+  .key > summary:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 3px; }
+  .key-label { font-size: var(--fs-sm); font-weight: var(--fw-semibold); text-transform: uppercase; letter-spacing: 0.05em; color: var(--primary); }
+  .key-hint { font-size: var(--fs-2xs); color: var(--muted); }
+  .implications { display: flex; flex-direction: column; margin-top: 0.5rem; }
+  .imp {
+    display: grid; grid-template-columns: 11rem 1fr; gap: 0.2rem 1.15rem;
+    padding: 0.7rem 0; border-bottom: 1px solid var(--border);
+  }
+  .imp:last-child { border-bottom: 0; padding-bottom: 0; }
+  .imp-head { display: flex; align-items: baseline; gap: 0.45rem; flex-wrap: wrap; }
+  .imp-n { font-size: var(--fs-lg); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+  .imp-band { font-size: var(--fs-2xs); text-transform: uppercase; letter-spacing: 0.05em; font-weight: var(--fw-bold); }
+  .imp.clean .imp-n, .imp.clean .imp-band { color: var(--green); }
+  .imp.thin .imp-n, .imp.thin .imp-band { color: var(--amber); }
+  .imp.gapped .imp-n, .imp.gapped .imp-band { color: var(--amber); }
+  .imp.frag .imp-n, .imp.frag .imp-band { color: var(--amber); }
+  .imp.dropped .imp-n, .imp.dropped .imp-band { color: var(--red); }
+  .imp-what { margin: 0; font-size: var(--fs-sm); max-width: 74ch; }
+  .imp-so { margin: 0.2rem 0 0; font-size: var(--fs-sm); color: var(--muted); max-width: 80ch; }
+  .imp-so b { color: var(--primary); font-weight: var(--fw-semibold); }
+
+  /* ── Note strip ─────────────────────────────────────────────────── */
+  .notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); }
+  .note { background: #fff; padding: 0.8rem 0.95rem; display: flex; flex-direction: column; gap: 0.2rem; }
+  .note-l { font-size: var(--fs-2xs); color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; font-weight: var(--fw-semibold); }
+  .note-v { font-size: var(--fs-sm); font-weight: var(--fw-semibold); font-variant-numeric: tabular-nums; }
+  .note.alert .note-v { color: var(--amber); }
+  .note-so { margin: 0.15rem 0 0; font-size: var(--fs-2xs); color: var(--muted); line-height: 1.45; }
+  .note-so b { color: var(--primary); font-weight: var(--fw-semibold); }
+  .note a { color: var(--accent-2); text-decoration: none; font-weight: var(--fw-semibold); }
+  .note a:hover { text-decoration: underline; }
+
+  /* ── Shared inputs ──────────────────────────────────────────────── */
+  .shared-rows, .strat-rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr)); gap: 0.75rem; }
+  .sh, .strat {
+    background: #fff; border: 1px solid var(--border); border-radius: var(--radius-card);
+    border-left: 3px solid var(--green); padding: 0.9rem 1rem;
+    display: flex; flex-direction: column; gap: 0.65rem;
+  }
+  .sh.warn, .strat.warn { border-left-color: var(--amber-mid); }
+  .strat.blocked { border-left-color: var(--red); }
+  .sh > header, .strat > header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 0.4rem; }
+  .sh-id { font-family: var(--font-num); font-size: var(--fs-sm); font-weight: var(--fw-bold); }
+  .strat-slug { display: block; font-size: var(--fs-2xs); color: var(--muted); font-family: var(--font-num); margin-top: 0.1rem; }
+  dl { margin: 0; display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+  dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; padding: 0.25rem 0; border-bottom: 1px solid var(--border); }
+  dl > div:last-child { border-bottom: 0; }
+  dt { font-size: var(--fs-2xs); color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-weight: var(--fw-semibold); flex: none; }
+  dd { margin: 0; font-size: var(--fs-xs); font-weight: var(--fw-semibold); text-align: right; font-variant-numeric: tabular-nums lining-nums; }
+  dd.amp { color: var(--amber); }
+  dd.bad { color: var(--red); }
+  dd.okd { color: var(--green); }
+  dd.offd { color: var(--muted); font-weight: var(--fw-normal); }
+  .sh-so, .strat-so { margin: 0; font-size: var(--fs-2xs); color: var(--muted); line-height: 1.5; }
+  .sh-so b, .strat-so b { color: var(--primary); font-weight: var(--fw-semibold); }
+  .kind { font-family: var(--font-num); color: var(--primary); font-weight: var(--fw-semibold); }
+
+  /* ── Badges — project pattern: 4px radius, uppercase, no pills ──── */
+  .badge {
+    display: inline-block; padding: 0.18rem 0.5rem; border-radius: var(--radius-sm);
+    font-size: 0.68rem; font-weight: var(--fw-bold);
+    text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap;
+  }
+  .b-ok { background: var(--green-bg); color: var(--green); }
+  .b-thin { background: var(--amber-bg); color: var(--amber); }
+  .b-gap { background: var(--amber-bg); color: var(--amber); }
+  .b-frag { background: var(--amber-bg); color: var(--amber); }
+  .b-drop { background: var(--red-bg); color: var(--red); }
+  .b-held { background: var(--blue-bg); color: var(--blue); }
+
+  /* ── Controls ───────────────────────────────────────────────────── */
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 0.7rem; }
+  .controls h4 { color: var(--muted); margin-right: 0.3rem; }
+  .chip {
+    font: inherit; font-size: var(--fs-2xs); font-weight: var(--fw-semibold);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    background: #fff; color: var(--muted);
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 0.22rem 0.55rem; cursor: pointer; font-variant-numeric: tabular-nums;
+  }
+  .chip:hover { color: var(--primary); border-color: var(--muted); }
+  .chip:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+  .chip[aria-pressed="true"] { background: var(--primary); border-color: var(--primary); color: #fff; }
+  .search { margin-left: auto; }
+  .search input {
+    font: inherit; font-size: var(--fs-sm); background: #fff; color: var(--primary);
+    border: 1px solid var(--border); border-radius: var(--radius-input);
+    padding: 0.25rem 0.5rem; width: 15rem; max-width: 100%;
+  }
+  .search input::placeholder { color: var(--muted); }
+  .search input:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 1px; }
+  .rowcount { font-size: var(--fs-2xs); color: var(--muted); margin: 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+  /* ── Table — hairline rules, flat ink header, no rounding ───────── */
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 0; background: #fff; }
+  table { border-collapse: collapse; width: 100%; min-width: 68rem; font-size: var(--fs-sm); margin: 0; }
+  caption { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--muted); font-size: var(--fs-2xs); }
+  caption b { color: var(--primary); font-weight: var(--fw-semibold); }
+  thead th { background: var(--primary); padding: 0; border: none; }
+  .sortbtn {
+    font: inherit; background: none; border: 0; cursor: pointer; width: 100%;
+    display: flex; align-items: center; gap: 0.3rem;
+    color: rgba(255,255,255,0.88); font-weight: var(--fw-semibold);
+    font-size: var(--fs-2xs); letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 0.58rem 0.75rem; text-align: left; white-space: nowrap;
+  }
+  th.num .sortbtn { justify-content: flex-end; }
+  .sortbtn:hover { color: #fff; }
+  .sortbtn:focus-visible { outline: 2px solid #fff; outline-offset: -2px; }
+  .sortbtn::after { content: "\2195"; opacity: 0.4; }
+  th[aria-sort="ascending"] .sortbtn, th[aria-sort="descending"] .sortbtn { color: #fff; }
+  th[aria-sort="ascending"] .sortbtn::after { content: "\2191"; opacity: 1; }
+  th[aria-sort="descending"] .sortbtn::after { content: "\2193"; opacity: 1; }
+
+  td { padding: 0.45rem 0.75rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tbody tr:hover td { background: var(--surface); }
+  .num { text-align: right; font-variant-numeric: tabular-nums lining-nums; }
+  td.sec { white-space: nowrap; border-left: 3px solid transparent; }
+  .sec-id { font-family: var(--font-num); font-weight: var(--fw-bold); }
+  .sec-disp { font-family: var(--font-num); font-size: var(--fs-2xs); color: var(--muted); }
+  td.mono { font-family: var(--font-num); font-size: var(--fs-xs); color: var(--muted); }
+  .zero { color: var(--muted); }
+  .cap { color: var(--amber); font-weight: var(--fw-semibold); }
+  .missing { color: var(--amber); text-decoration: line-through; }
+  td.paths { font-size: var(--fs-2xs); line-height: 1.7; white-space: nowrap; }
+  .ok { color: var(--green); font-weight: var(--fw-semibold); }
+  .short { color: var(--amber); font-weight: var(--fw-semibold); }
+  .cause { color: var(--red); font-size: var(--fs-2xs); font-weight: var(--fw-semibold); }
+
+  tr[data-band="clean"] td.sec { border-left-color: var(--green); }
+  tr[data-band="thin"] td.sec { border-left-color: var(--amber-mid); }
+  tr[data-band="gapped"] td.sec, tr[data-band="both"] td.sec { border-left-color: var(--amber-mid); }
+  tr[data-band="frag"] td.sec { border-left-color: var(--amber-mid); }
+  tr[data-band="dropped"] td.sec { border-left-color: var(--red); }
+
+  tfoot td { background: var(--surface); font-size: var(--fs-2xs); color: var(--muted); border-top: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  .empty { padding: 1.4rem 0.75rem; color: var(--muted); font-size: var(--fs-sm); margin: 0; }
+
+  .footnotes { border-top: 1px solid var(--border); padding-top: 0.85rem; }
+  .footnotes p { margin: 0 0 0.4rem; font-size: var(--fs-2xs); color: var(--muted); max-width: 90ch; line-height: 1.55; }
+  .footnotes b { color: var(--primary); font-weight: var(--fw-semibold); }
+  code { font-family: var(--font-num); font-size: 0.95em; color: var(--primary); }
+
+  @media (max-width: 40rem) {
+    #tab-content { padding: 1rem; }
+    .imp { grid-template-columns: 1fr; }
+    .delta { margin-left: 0; }
+    .search { margin-left: 0; width: 100%; }
+    .search input { width: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <g id="i-graph" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 13V3"/><path d="M2 13h12"/><path d="M4 11l3-4 2.5 2L13 4.5"/></g>
+    <g id="i-eye" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M1.5 8S4 4 8 4s6.5 4 6.5 4-2.5 4-6.5 4S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="1.9"/></g>
+    <g id="i-case" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="2" y="5" width="12" height="8.5"/><path d="M6 5V3.5h4V5"/><path d="M2 8.5h12"/></g>
+    <g id="i-list" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M5 4h9M5 8h9M5 12h9M2.5 4h.01M2.5 8h.01M2.5 12h.01"/></g>
+    <g id="i-coins" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="6.3" cy="6.3" r="3.6"/><path d="M9.2 9.1a3.6 3.6 0 1 0-2.8-2.8" transform="translate(2.4 2.4)"/></g>
+    <g id="i-journal" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="3" y="2.5" width="10" height="11"/><path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3"/></g>
+    <g id="i-sliders" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.5 5h11M2.5 11h11"/><circle cx="6" cy="5" r="1.6" fill="currentColor" stroke="none"/><circle cx="10.5" cy="11" r="1.6" fill="currentColor" stroke="none"/></g>
+    <g id="i-shield" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 14s5-2.2 5-6V3.6L8 2 3 3.6V8c0 3.8 5 6 5 6z"/><path d="M5.9 7.9l1.6 1.6 2.8-3"/></g>
+    <g id="i-gear" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.9v1.6M8 12.5v1.6M1.9 8h1.6M12.5 8h1.6M3.7 3.7l1.1 1.1M11.2 11.2l1.1 1.1M12.3 3.7l-1.1 1.1M4.8 11.2l-1.1 1.1" stroke-linecap="round"/></g>
+  </defs>
+</svg>
+
+<nav class="navbar">
+  <a class="navbar-brand" href="#">
+    <span class="brand-mark"><svg class="icon" viewBox="0 0 16 16"><use href="#i-graph"/></svg></span>
+    <span class="brand-name">Stock <em>Manager</em></span>
+  </a>
+  <span class="navbar-tag">Mockup &middot; not wired to live data</span>
+</nav>
+
+<div class="tab-bar">
+  <ul class="nav-tabs">
+    <li><button type="button" class="nav-link"><svg class="icon" viewBox="0 0 16 16"><use href="#i-eye"/></svg>Stock Scanner</button></li>
+    <li><button type="button" class="nav-link"><svg class="icon" viewBox="0 0 16 16"><use href="#i-case"/></svg>Portfolio</button></li>
+    <li><button type="button" class="nav-link"><svg class="icon" viewBox="0 0 16 16"><use href="#i-list"/></svg>Trade History</button></li>
+    <li><button type="button" class="nav-link"><svg class="icon" viewBox="0 0 16 16"><use href="#i-coins"/></svg>Realised P&amp;L</button></li>
+    <li><button type="button" class="nav-link"><svg class="icon" viewBox="0 0 16 16"><use href="#i-journal"/></svg>Run Log</button></li>
+    <li><button type="button" class="nav-link"><svg class="icon" viewBox="0 0 16 16"><use href="#i-sliders"/></svg>Strategy Manager</button></li>
+    <li><button type="button" class="nav-link active" aria-current="page"><svg class="icon" viewBox="0 0 16 16"><use href="#i-shield"/></svg>Data Quality</button></li>
+    <li><button type="button" class="nav-link"><svg class="icon" viewBox="0 0 16 16"><use href="#i-gear"/></svg>Settings</button></li>
+  </ul>
+</div>
+
+<div class="container-fluid">
+  <div class="shell">
+    <div id="tab-content">
+
+      <div class="page-head">
+        <h2>Evidence Census</h2>
+        <p class="lead">Every security the scan found, accounted for once: usable history, or a reason there is none. Plus the inputs that belong to no single stock.</p>
+        <div class="provenance">
+          <span><b>as_of_session</b> 2026-09-11</span>
+          <span><b>analysis_run_id</b> a7f3c2e1</span>
+          <span><b>version</b> v2026.09.11-1</span>
+          <span><b>base_currency</b> GBP</span>
+          <span><b>calendar</b> XLON + XNYS</span>
+        </div>
+      </div>
+
+      <div class="subtabs" role="tablist" aria-label="Census sections">
+        <button type="button" class="subtab" role="tab" id="tab-stock" aria-controls="panel-stock" aria-selected="true">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-list"/></svg>
+          Stock data <span class="subtab-n">702 securities</span>
+        </button>
+        <button type="button" class="subtab" role="tab" id="tab-strategy" aria-controls="panel-strategy" aria-selected="false" tabindex="-1">
+          <svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-sliders"/></svg>
+          Strategy data <span class="subtab-n">6 strategies</span>
+        </button>
+      </div>
+
+      <!-- ══ Stock data ══════════════════════════════════════════ -->
+      <div id="panel-stock" role="tabpanel" aria-labelledby="tab-stock" class="panel">
+
+        <section class="card balance" aria-label="Census balance">
+          <div class="equation">
+            <div class="term"><span class="term-n">1,046</span><span class="term-l">discovered</span></div>
+            <span class="op">&minus;</span>
+            <div class="term"><span class="term-n">344</span><span class="term-l">excluded by criteria</span></div>
+            <span class="op">=</span>
+            <div class="term"><span class="term-n">702</span><span class="term-l">with records</span></div>
+            <span class="op">&minus;</span>
+            <div class="term"><span class="term-n">12</span><span class="term-l">dropped with cause</span></div>
+            <span class="op">=</span>
+            <div class="term total"><span class="term-n">690</span><span class="term-l">in universe</span></div>
+            <p class="delta"><span class="big">0</span> <span>unexplained</span></p>
+          </div>
+
+          <div class="discovery">
+            <span class="disc-l">Discovery this run</span>
+            <span class="disc-i"><b>412</b> FMP VCP</span>
+            <span class="disc-i"><b>508</b> TradingView US</span>
+            <span class="disc-i"><b>190</b> TradingView UK</span>
+            <span class="disc-i sep"><b>&minus;64</b> overlapping</span>
+            <span class="disc-i sep"><b>1,046</b> distinct candidates</span>
+          </div>
+
+          <p class="eq-so">Everything discovery found is accounted for. Nothing vanished without a reason. No other check in the system would catch a screener or a price fetch quietly returning less than it should.</p>
+
+          <p class="eq-so">Compared inside the run, not against the last one. The screeners return a different list every day, so a day-to-day total always moves and you stop reading it. It also cancels out: 30 new stocks arriving while 30 fail to fetch nets to zero.</p>
+
+          <div class="bandbar">
+            <div class="bar" role="img" aria-label="Of 702 securities: 629 clean, 61 faulted, 12 dropped">
+              <span class="b-clean" style="width:89.60%"></span>
+              <span class="b-faulted" style="width:8.69%"></span>
+              <span class="b-dropped" style="width:1.71%"></span>
+            </div>
+            <div class="ticks">
+              <span class="tick clean"><i class="swatch"></i>629 clean</span>
+              <span class="tick thin"><i class="swatch"></i>61 faulted</span>
+              <span class="tick dropped"><i class="swatch"></i>12 dropped</span>
+            </div>
+            <p class="bar-note">Green usable, amber needs attention, red unusable. The three segments add up to 702. The fault counts below do not, because a stock can carry more than one.</p>
+            <div class="ticks">
+              <span class="tick thin"><i class="swatch"></i>27 thin</span>
+              <span class="tick gapped"><i class="swatch"></i>22 gapped</span>
+              <span class="tick frag"><i class="swatch"></i>31 missing fragment</span>
+              <span class="tick dropped"><i class="swatch"></i>12 dropped</span>
+            </div>
+          </div>
+
+          <details class="key">
+            <summary>
+              <span class="key-label">Key</span>
+              <span class="key-hint">what each one means</span>
+            </summary>
+            <div class="implications">
+              <div class="imp clean">
+                <div class="imp-head"><span class="imp-n">629</span><span class="imp-band">clean</span></div>
+                <div>
+                  <p class="imp-what">Enough history for both buying and selling, no missing days, every scan reading present.</p>
+                  <p class="imp-so">Only these can produce a Buy. A Hold here is the strategy&rsquo;s opinion, not a data problem. The FX ceiling on the Strategy data tab still applies.</p>
+                </div>
+              </div>
+              <div class="imp thin">
+                <div class="imp-head"><span class="imp-n">27</span><span class="imp-band">thin</span></div>
+                <div>
+                  <p class="imp-what">Enough data, not enough history. Buying needs more of it than selling, so a stock can pass one and fail the other.</p>
+                  <p class="imp-so">It drops out of whichever side it fails and the recommendations screen will not say so. A holding too short to buy can still be long enough to sell, which is why this table splits the two.</p>
+                </div>
+              </div>
+              <div class="imp gapped">
+                <div class="imp-head"><span class="imp-n">22</span><span class="imp-band">gapped</span></div>
+                <div>
+                  <p class="imp-what">Enough trading days on paper, but some are missing out of the middle.</p>
+                  <p class="imp-so">The dangerous one. A 200-day average missing 8 days really reaches back 208. It still calculates, so Stage and VCP come out wrong with no error anywhere.</p>
+                </div>
+              </div>
+              <div class="imp frag">
+                <div class="imp-head"><span class="imp-n">31</span><span class="imp-band">missing fragment</span></div>
+                <div>
+                  <p class="imp-what">Price history is fine, something else is not. Usually a VCP or Stage reading, sometimes volume on a fund.</p>
+                  <p class="imp-so">More history will not help. The strategy asked for it, the scan never produced it.</p>
+                </div>
+              </div>
+              <div class="imp dropped">
+                <div class="imp-head"><span class="imp-n">12</span><span class="imp-band">dropped</span></div>
+                <div>
+                  <p class="imp-what">Never got in at all. Wrong day&rsquo;s data, an ambiguous ticker, two tickers colliding, or no prices.</p>
+                  <p class="imp-so">Recommendations cannot see these. Hold one and it is forced to Hold; do not and it never comes up. These 12 are the losses we can explain, which is what the count at the top is for.</p>
+                </div>
+              </div>
+            </div>
+          </details>
+        </section>
+
+        <section class="notes" aria-label="Census notes">
+          <div class="note">
+            <span class="note-l">Quote units</span>
+            <span class="note-v">612 USD/1 &middot; 78 GBp/100</span>
+            <p class="note-so">Watch the split rather than the rows. A unit flip puts a price out by exactly 100&times;.</p>
+          </div>
+          <div class="note">
+            <span class="note-l">Corporate actions</span>
+            <span class="note-v">686 pinned &middot; 4 diverging</span>
+            <p class="note-so">Dividends and splits are stored apart from prices. Where the two diverge, total return drifts.</p>
+          </div>
+          <div class="note">
+            <span class="note-l">Held securities</span>
+            <span class="note-v">8 of 8 accounted &middot; 2 portfolio-only</span>
+            <p class="note-so">Both can be sold on what we hold. Neither can ever be bought, by design (GH-625).</p>
+          </div>
+          <div class="note">
+            <span class="note-l">Elsewhere</span>
+            <span class="note-v"><a href="#">Provider config</a> &middot; <a href="#">Reconciliation</a></span>
+            <p class="note-so">API keys and cash reconciliation have their own screens.</p>
+          </div>
+        </section>
+
+        <section aria-label="Census table">
+          <div class="controls">
+            <h4>Filter</h4>
+            <button type="button" class="chip" data-filter="all" aria-pressed="true">All 702</button>
+            <button type="button" class="chip" data-filter="thin" aria-pressed="false">Thin 27</button>
+            <button type="button" class="chip" data-filter="gapped" aria-pressed="false">Gapped 22</button>
+            <button type="button" class="chip" data-filter="frag" aria-pressed="false">No fragment 31</button>
+            <button type="button" class="chip" data-filter="dropped" aria-pressed="false">Dropped 12</button>
+            <button type="button" class="chip" data-filter="held" aria-pressed="false">Held 8</button>
+            <div class="search">
+              <label for="q" class="sr-only">Search the census</label>
+              <input type="search" id="q" placeholder="Ticker, cause, unit&hellip;" autocomplete="off">
+            </div>
+            <p class="rowcount" id="count" aria-live="polite">15 rows</p>
+          </div>
+
+          <div class="tbl-wrap">
+            <table>
+              <caption><b>15</b> of 702 sample rows. <b>Sessions</b> is the scan&rsquo;s own history. <b>Portfolio-ns</b> is what sits under <code>portfolio:&lt;symbol&gt;</code>, read separately. <b>FX ceiling</b> is what stays usable after conversion. A row can carry more than one fault.</caption>
+              <thead>
+                <tr>
+                  <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-col="0" data-type="text">Security</button></th>
+                  <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-col="1" data-type="band">Faults</button></th>
+                  <th scope="col" class="num" aria-sort="none"><button type="button" class="sortbtn" data-col="2" data-type="num">Sessions</button></th>
+                  <th scope="col" class="num" aria-sort="none"><button type="button" class="sortbtn" data-col="3" data-type="num">FX ceiling</button></th>
+                  <th scope="col" class="num" aria-sort="none"><button type="button" class="sortbtn" data-col="4" data-type="num">Portfolio-ns</button></th>
+                  <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-col="5" data-type="text">First &rarr; last</button></th>
+                  <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-col="6" data-type="text">Evidence held</button></th>
+                  <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-col="7" data-type="text">Unit</button></th>
+                  <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-col="8" data-type="text">Entry / exit</button></th>
+                  <th scope="col" aria-sort="none"><button type="button" class="sortbtn" data-col="9" data-type="text">Cause</button></th>
+                </tr>
+              </thead>
+              <tbody id="rows">
+                <tr data-band="clean" data-faults="clean">
+                  <td class="sec"><span class="sec-id">AAPL</span></td>
+                  <td><span class="badge b-ok">clean</span></td>
+                  <td class="num">702</td>
+                  <td class="num"><span class="cap">684</span></td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono">2023-11-20 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">USD/1</td>
+                  <td class="paths"><span class="ok">entry &check;</span><br><span class="ok">exit &check;</span></td>
+                  <td class="zero">&mdash;</td>
+                </tr>
+                <tr data-band="clean" data-faults="clean" data-held="1">
+                  <td class="sec"><span class="sec-id">MSFT</span> <span class="badge b-held">held</span></td>
+                  <td><span class="badge b-ok">clean</span></td>
+                  <td class="num">702</td>
+                  <td class="num"><span class="cap">684</span></td>
+                  <td class="num">702</td>
+                  <td class="mono">2023-11-20 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">USD/1</td>
+                  <td class="paths"><span class="ok">entry &check;</span><br><span class="ok">exit &check;</span></td>
+                  <td class="zero">&mdash;</td>
+                </tr>
+                <tr data-band="thin" data-faults="thin">
+                  <td class="sec"><span class="sec-id">SPY</span> <span class="badge b-held">benchmark</span></td>
+                  <td><span class="badge b-thin">thin</span></td>
+                  <td class="num">168</td>
+                  <td class="num">168</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono">2026-01-09 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">USD/1</td>
+                  <td class="paths"><span class="short">entry &cross; 200-MA &minus;32</span><br><span class="ok">exit &check;</span></td>
+                  <td><span class="cause">regime gate fails closed</span></td>
+                </tr>
+                <tr data-band="clean" data-faults="clean" data-held="1">
+                  <td class="sec"><span class="sec-id">BATS.L</span> <span class="badge b-held">held</span></td>
+                  <td><span class="badge b-ok">clean</span></td>
+                  <td class="num">698</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num">698</td>
+                  <td class="mono">2023-11-20 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">GBp/100</td>
+                  <td class="paths"><span class="ok">entry &check;</span><br><span class="ok">exit &check;</span></td>
+                  <td class="zero">&mdash;</td>
+                </tr>
+                <tr data-band="dropped" data-faults="dropped" data-held="1">
+                  <td class="sec"><span class="sec-id">WCOG.L</span> <span class="sec-disp">WCOG</span> <span class="badge b-held">held</span></td>
+                  <td><span class="badge b-drop">dropped</span></td>
+                  <td class="num zero">0</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num">86</td>
+                  <td class="mono">2026-05-08 &rarr; 2026-09-11</td>
+                  <td class="mono">price <span class="zero">(portfolio-ns only)</span> &middot; ohlcv</td>
+                  <td class="mono">GBp/100</td>
+                  <td class="paths"><span class="short">entry &cross; absent</span><br><span class="ok">exit &check; 86 &ge; 60</span></td>
+                  <td><span class="cause">absent from published scan</span></td>
+                </tr>
+                <tr data-band="dropped" data-faults="dropped" data-held="1">
+                  <td class="sec"><span class="sec-id">0P00013P6I.L</span> <span class="sec-disp">HSFWA</span> <span class="badge b-held">held</span></td>
+                  <td><span class="badge b-drop">dropped</span></td>
+                  <td class="num zero">0</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num">617</td>
+                  <td class="mono">2024-02-14 &rarr; 2026-09-11</td>
+                  <td class="mono">price <span class="zero">(portfolio-ns only)</span> &middot; <span class="missing">volume</span></td>
+                  <td class="mono">GBp/100</td>
+                  <td class="paths"><span class="short">entry &cross; absent</span><br><span class="short">exit &cross; no volume column</span></td>
+                  <td><span class="cause">absent from scan &middot; volume missing</span></td>
+                </tr>
+                <tr data-band="gapped" data-faults="gapped">
+                  <td class="sec"><span class="sec-id">AZN.L</span></td>
+                  <td><span class="badge b-gap">gapped</span></td>
+                  <td class="num">694</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono">2023-11-20 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">GBp/100</td>
+                  <td class="paths"><span class="short">entry &cross; 8 sessions missing</span><br><span class="short">exit &#9888; gap in window</span></td>
+                  <td><span class="cause">2026-06-02 &rarr; 2026-06-11</span></td>
+                </tr>
+                <tr data-band="gapped" data-faults="gapped" data-held="1">
+                  <td class="sec"><span class="sec-id">RIO.L</span> <span class="badge b-held">held</span></td>
+                  <td><span class="badge b-gap">gapped</span></td>
+                  <td class="num">699</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num">699</td>
+                  <td class="mono">2023-11-20 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">GBp/100</td>
+                  <td class="paths"><span class="short">entry &cross; 3 sessions missing</span><br><span class="short">exit &#9888; gap in window</span></td>
+                  <td><span class="cause">2026-08-25, 08-26, 09-01</span></td>
+                </tr>
+                <tr data-band="frag" data-faults="thin frag">
+                  <td class="sec"><span class="sec-id">ARM</span></td>
+                  <td><span class="badge b-thin">thin</span> <span class="badge b-frag">no vcp</span></td>
+                  <td class="num">142</td>
+                  <td class="num">142</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono">2026-02-17 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; <span class="missing">vcp</span> &middot; ohlcv</td>
+                  <td class="mono">USD/1</td>
+                  <td class="paths"><span class="short">entry &cross; 201-MA &minus;59 &middot; vcp required</span><br><span class="ok">exit &check;</span></td>
+                  <td><span class="cause">scan carried no vcp fragment</span></td>
+                </tr>
+                <tr data-band="thin" data-faults="thin">
+                  <td class="sec"><span class="sec-id">RDDT</span></td>
+                  <td><span class="badge b-thin">thin</span></td>
+                  <td class="num">188</td>
+                  <td class="num">188</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono">2025-12-12 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">USD/1</td>
+                  <td class="paths"><span class="short">entry &cross; 201-MA &minus;13</span><br><span class="ok">exit &check;</span></td>
+                  <td class="zero">&mdash;</td>
+                </tr>
+                <tr data-band="both" data-faults="thin gapped both">
+                  <td class="sec"><span class="sec-id">BIRK</span></td>
+                  <td><span class="badge b-thin">thin</span> <span class="badge b-gap">gapped</span></td>
+                  <td class="num">151</td>
+                  <td class="num">151</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono">2026-02-04 &rarr; 2026-09-11</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; ohlcv</td>
+                  <td class="mono">USD/1</td>
+                  <td class="paths"><span class="short">entry &cross; 201-MA &minus;50 &middot; 4 missing</span><br><span class="short">exit &#9888; gap in window</span></td>
+                  <td><span class="cause">2026-07-14 &rarr; 2026-07-17</span></td>
+                </tr>
+                <tr data-band="dropped" data-faults="dropped">
+                  <td class="sec"><span class="sec-id">TSCO.L</span></td>
+                  <td><span class="badge b-drop">dropped</span></td>
+                  <td class="num">641</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono">2023-11-20 &rarr; 2026-09-04</td>
+                  <td class="mono">price &middot; actions &middot; tech &middot; stage &middot; vcp &middot; ohlcv</td>
+                  <td class="mono">GBp/100</td>
+                  <td class="paths"><span class="short">entry &cross; stale</span><br><span class="short">exit &cross; stale</span></td>
+                  <td><span class="cause">stale session &middot; 09-04 &ne; 09-11</span></td>
+                </tr>
+                <tr data-band="dropped" data-faults="dropped">
+                  <td class="sec"><span class="sec-id">BRK.B</span> <span class="sec-disp">BRK-B</span></td>
+                  <td><span class="badge b-drop">dropped</span></td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="paths"><span class="short">entry &cross;</span><br><span class="short">exit &cross;</span></td>
+                  <td><span class="cause">ambiguous alias</span></td>
+                </tr>
+                <tr data-band="dropped" data-faults="dropped">
+                  <td class="sec"><span class="sec-id">SHEL.L</span> <span class="sec-disp">RDSA.L</span></td>
+                  <td><span class="badge b-drop">dropped</span></td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="paths"><span class="short">entry &cross;</span><br><span class="short">exit &cross;</span></td>
+                  <td><span class="cause">duplicate canonical id</span></td>
+                </tr>
+                <tr data-band="dropped" data-faults="dropped">
+                  <td class="sec"><span class="sec-id">PSHZF</span></td>
+                  <td><span class="badge b-drop">dropped</span></td>
+                  <td class="num zero">0</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="num zero">&mdash;</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="mono zero">none</td>
+                  <td class="mono zero">&mdash;</td>
+                  <td class="paths"><span class="short">entry &cross;</span><br><span class="short">exit &cross;</span></td>
+                  <td><span class="cause">zero evidence</span></td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="10">Sample subtotal: 15 rows accounted, 3 clean, 6 faulted, 6 dropped. Overlapping fault totals in the sample: 4 thin, 3 gapped, 1 missing fragment. The full census reconciles 702.</td>
+                </tr>
+              </tfoot>
+            </table>
+            <p class="empty" id="empty" hidden>No rows match this filter and search.</p>
+          </div>
+        </section>
+      </div>
+
+      <!-- ══ Strategy data ═══════════════════════════════════════ -->
+      <div id="panel-strategy" role="tabpanel" aria-labelledby="tab-strategy" class="panel" hidden>
+
+        <section>
+          <div class="sec-head">
+            <h3>Shared inputs</h3>
+            <p>Inputs no single stock owns, fixed once per run. Every stock that depends on one inherits its state, so a problem here multiplies by the <b>Affects</b> count.</p>
+          </div>
+          <div class="shared-rows">
+            <article class="sh warn">
+              <header>
+                <span class="sh-id">fx:GBPUSD=X</span>
+                <span class="badge b-thin">limits window</span>
+              </header>
+              <dl>
+                <div><dt>Sessions</dt><dd>684 of 702</dd></div>
+                <div><dt>Covers</dt><dd>2024-01-02 &rarr; 2026-09-11</dd></div>
+                <div><dt>Affects</dt><dd class="amp">612 securities</dd></div>
+              </dl>
+              <p class="sh-so">Non-GBP stocks cap out at 684 days whatever their own history holds. Ask for 701 and no US stock answers, though each shows 702 on the Stock data tab. Sessions overstates what is usable for 612 stocks; FX ceiling is the real figure.</p>
+            </article>
+
+            <article class="sh">
+              <header>
+                <span class="sh-id">calendar &middot; XLON + XNYS</span>
+                <span class="badge b-ok">pinned</span>
+              </header>
+              <dl>
+                <div><dt>Expected sessions</dt><dd>702</dd></div>
+                <div><dt>Session table digest</dt><dd>4c1e&middot;9fa2</dd></div>
+                <div><dt>Affects</dt><dd class="amp">all gap tests</dd></div>
+              </dl>
+              <p class="sh-so">What missing days get counted against. Change it and gap counts move with no price change, which is why the digest is here.</p>
+            </article>
+
+            <article class="sh warn">
+              <header>
+                <span class="sh-id">benchmark &middot; SPY</span>
+                <span class="badge b-thin">short</span>
+              </header>
+              <dl>
+                <div><dt>Sessions</dt><dd>168</dd></div>
+                <div><dt>Passes</dt><dd>50-MA, 150-MA</dd></div>
+                <div><dt>Affects</dt><dd class="amp">all regime-gated runs</dd></div>
+              </dl>
+              <p class="sh-so">At 200 days the gate opens for nothing, so those strategies buy nothing. Reads as a strategy that did not trade.</p>
+            </article>
+          </div>
+        </section>
+
+        <section>
+          <div class="sec-head">
+            <h3>By strategy</h3>
+            <p>Each strategy sets its own history minimums and scan readings, then inherits the shared inputs. The figure on the right is what survives both.</p>
+          </div>
+          <div class="strat-rows">
+
+            <article class="strat blocked">
+              <header>
+                <div><h3>Weinstein Stage 2</h3><span class="strat-slug">rtly-backtest-weinstein</span></div>
+                <span class="badge b-drop">0 can enter</span>
+              </header>
+              <dl>
+                <div><dt>Entry</dt><dd>220 sessions &middot; ohlcv &middot; <span class="kind">scan_stage</span></dd></div>
+                <div><dt>Exit</dt><dd>150 sessions &middot; ohlcv</dd></div>
+                <div><dt>Regime gate</dt><dd class="bad">SPY 200-MA &mdash; 168, &minus;32</dd></div>
+                <div><dt>FX ceiling</dt><dd class="okd">684 clears 220</dd></div>
+              </dl>
+              <p class="strat-so"><b>Nothing can be bought.</b> 638 stocks clear 220 days and Stage, but the gate shuts before any of them is looked at. Runs come back flat and read as a poor strategy.</p>
+            </article>
+
+            <article class="strat warn">
+              <header>
+                <div><h3>Minervini Trend Template</h3><span class="strat-slug">rtly-backtest-minervini</span></div>
+                <span class="badge b-thin">659 can enter</span>
+              </header>
+              <dl>
+                <div><dt>Entry</dt><dd>51 sessions &middot; <span class="kind">scan_stage</span> &middot; <span class="kind">scan_vcp</span></dd></div>
+                <div><dt>Exit</dt><dd>50 sessions &middot; ohlcv</dd></div>
+                <div><dt>Regime gate</dt><dd class="okd">SPY 150-MA &mdash; passes</dd></div>
+                <div><dt>FX ceiling</dt><dd class="okd">684 clears 51</dd></div>
+              </dl>
+              <p class="strat-so">31 stocks are out for a missing VCP reading, not for short history, so waiting will not help them. At 51 days, stocks Weinstein rejects pass here.</p>
+            </article>
+
+            <article class="strat warn">
+              <header>
+                <div><h3>Moving Average 50/200</h3><span class="strat-slug">rtly-backtest-moving-average</span></div>
+                <span class="badge b-thin">664 can enter</span>
+              </header>
+              <dl>
+                <div><dt>Entry</dt><dd>201 sessions &middot; ohlcv</dd></div>
+                <div><dt>Exit</dt><dd>201 sessions &middot; ohlcv</dd></div>
+                <div><dt>Regime gate</dt><dd class="offd">not enabled</dd></div>
+                <div><dt>FX ceiling</dt><dd class="okd">684 clears 201</dd></div>
+              </dl>
+              <p class="strat-so">26 stocks are under 201 days, ARM, RDDT and BIRK among them. No gate, so SPY being short costs nothing here.</p>
+            </article>
+
+            <article class="strat">
+              <header>
+                <div><h3>Turtle Trend 55/20</h3><span class="strat-slug">rtly-backtest-turtle-trend</span></div>
+                <span class="badge b-ok">683 can enter</span>
+              </header>
+              <dl>
+                <div><dt>Entry</dt><dd>56 sessions &middot; ohlcv</dd></div>
+                <div><dt>Exit</dt><dd>21 sessions &middot; ohlcv</dd></div>
+                <div><dt>Regime gate</dt><dd class="okd">SPY 50-MA &mdash; passes</dd></div>
+                <div><dt>FX ceiling</dt><dd class="okd">684 clears 56</dd></div>
+              </dl>
+              <p class="strat-so">Shortest windows of the six, so nearly everything passes. Missing days hurt more than short history: a 20-day exit window missing 3 is 15% short and says nothing.</p>
+            </article>
+
+            <article class="strat warn">
+              <header>
+                <div><h3>Darvas Box 130</h3><span class="strat-slug">rtly-backtest-darvas-box</span></div>
+                <span class="badge b-thin">672 can enter</span>
+              </header>
+              <dl>
+                <div><dt>Entry</dt><dd>130 sessions &middot; ohlcv</dd></div>
+                <div><dt>Exit</dt><dd>130 sessions &middot; ohlcv</dd></div>
+                <div><dt>Regime gate</dt><dd class="offd">not enabled</dd></div>
+                <div><dt>FX ceiling</dt><dd class="okd">684 clears 130</dd></div>
+              </dl>
+              <p class="strat-so">The window is a setting, so this figure moves with the box length. 18 stocks sit between 56 and 130 days.</p>
+            </article>
+
+            <article class="strat">
+              <header>
+                <div><h3>Buy and Hold</h3><span class="strat-slug">rtly-backtest-buy-and-hold</span></div>
+                <span class="badge b-ok">690 can enter</span>
+              </header>
+              <dl>
+                <div><dt>Entry</dt><dd>2 sessions &middot; ohlcv</dd></div>
+                <div><dt>Exit</dt><dd>2 sessions &middot; ohlcv</dd></div>
+                <div><dt>Regime gate</dt><dd class="offd">not enabled</dd></div>
+                <div><dt>FX ceiling</dt><dd class="okd">684 clears 2</dd></div>
+              </dl>
+              <p class="strat-so">The baseline. Anything with data passes. If a Buy and Hold comparison looks odd, it is the logic and not the data.</p>
+            </article>
+
+          </div>
+        </section>
+      </div>
+
+      <div class="footnotes">
+        <p>No new storage. Sessions, columns and readings from <code>evidence_coverage</code>. Drop reasons from <code>unresolved</code>. Expected trading days from the pinned calendar. The FX ceiling from <code>fx:GBPUSD=X</code>. Thresholds from each strategy&rsquo;s <code>evidence_requirements</code>. Discovery totals from <code>SourceHealth.count</code>.</p>
+        <p><b>Two kinds of requirement.</b> A strategy can ask for four things per stock: price history and the three scan readings, with separate minimums for buying and selling. FX, the calendar and the benchmark are not on that list; they are fixed per run. So a strategy can be stopped by something it has no way to ask for.</p>
+        <p>Per-stock detail belongs to GH-624 and links from each row.</p>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var chips = Array.prototype.slice.call(document.querySelectorAll(".chip"));
+    var body = document.getElementById("rows");
+    var rows = Array.prototype.slice.call(body.querySelectorAll("tr"));
+    var heads = Array.prototype.slice.call(document.querySelectorAll("thead th"));
+    var empty = document.getElementById("empty");
+    var count = document.getElementById("count");
+    var search = document.getElementById("q");
+
+    var filter = "all";
+    // Faults are a severity scale, not an alphabet -- sort them that way.
+    var RANK = { clean: 0, thin: 1, frag: 2, gapped: 3, both: 4, dropped: 5 };
+
+    function cell(row, i) { return (row.cells[i].textContent || "").trim(); }
+
+    function apply() {
+      var q = search.value.trim().toLowerCase();
+      var shown = 0;
+      rows.forEach(function (row) {
+        // Faults overlap, so a row answers to every fault token it carries.
+        var flags = (row.dataset.faults || row.dataset.band).split(" ");
+        var inBand = filter === "all" ||
+          (filter === "held" ? row.dataset.held === "1" : flags.indexOf(filter) !== -1);
+        var hit = !q || (row.textContent || "").toLowerCase().indexOf(q) !== -1;
+        var match = inBand && hit;
+        row.hidden = !match;
+        if (match) { shown++; }
+      });
+      empty.hidden = shown > 0;
+      count.textContent = shown === rows.length
+        ? shown + " rows"
+        : shown + " of " + rows.length + " rows";
+    }
+
+    function sort(th, btn) {
+      var dir = th.getAttribute("aria-sort") === "ascending" ? -1 : 1;
+      var col = Number(btn.dataset.col);
+      var type = btn.dataset.type;
+
+      heads.forEach(function (h) { h.setAttribute("aria-sort", "none"); });
+      th.setAttribute("aria-sort", dir === 1 ? "ascending" : "descending");
+
+      rows.slice().sort(function (a, b) {
+        if (type === "band") {
+          return dir * (RANK[a.dataset.band] - RANK[b.dataset.band]);
+        }
+        if (type === "num") {
+          // An em dash means no evidence in that namespace, not zero:
+          // it must never rank against a real session count.
+          var na = parseFloat(cell(a, col).replace(/[^\d.]/g, ""));
+          var nb = parseFloat(cell(b, col).replace(/[^\d.]/g, ""));
+          if (isNaN(na) && isNaN(nb)) { return 0; }
+          if (isNaN(na)) { return 1; }
+          if (isNaN(nb)) { return -1; }
+          return dir * (na - nb);
+        }
+        return dir * cell(a, col).localeCompare(cell(b, col), undefined, { numeric: true });
+      }).forEach(function (row) { body.appendChild(row); });
+    }
+
+    chips.forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        chips.forEach(function (c) { c.setAttribute("aria-pressed", String(c === chip)); });
+        filter = chip.dataset.filter;
+        apply();
+      });
+    });
+
+    heads.forEach(function (th) {
+      var btn = th.querySelector(".sortbtn");
+      if (btn) { btn.addEventListener("click", function () { sort(th, btn); }); }
+    });
+
+    var subtabs = Array.prototype.slice.call(document.querySelectorAll(".subtab"));
+    function selectTab(tab) {
+      subtabs.forEach(function (t) {
+        var on = t === tab;
+        t.setAttribute("aria-selected", String(on));
+        t.tabIndex = on ? 0 : -1;
+        document.getElementById(t.getAttribute("aria-controls")).hidden = !on;
+      });
+    }
+    subtabs.forEach(function (tab, i) {
+      tab.addEventListener("click", function () { selectTab(tab); });
+      tab.addEventListener("keydown", function (e) {
+        var step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+        if (!step) { return; }
+        e.preventDefault();
+        var next = subtabs[(i + step + subtabs.length) % subtabs.length];
+        selectTab(next);
+        next.focus();
+      });
+    });
+
+    search.addEventListener("input", apply);
+    apply();
+  })();
+</script>
+
+</body></html>

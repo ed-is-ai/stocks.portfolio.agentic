@@ -43,7 +43,9 @@ from app.services.backtest.historical_price_evidence import (
 )
 from app.services.backtest.scan_view import (
     CurrentScanMarketView,
+    PortfolioHistoryRead,
     build_scan_market_view,
+    read_portfolio_history,
 )
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.strategy_evidence import StrategyEvidenceRequirementsV1
@@ -56,6 +58,7 @@ from app.services.evidence_funnel import (
 )
 from app.services.evidence_shared_inputs import (
     SecurityCurrencyInputV1,
+    SecurityFxImpactV1,
     SharedInputsReportV1,
     StrategyImpactInputV1,
     build_shared_inputs_report,
@@ -69,6 +72,11 @@ logger = logging.getLogger(__name__)
 
 #: Base currency of the ledger, as ``build_portfolio_view`` pins it.
 BASE_CURRENCY = "GBP"
+
+#: Cap on the portfolio-namespace session read: a trading year is the
+#: widest window any declared Strategy minimum sits inside, so nothing on
+#: this screen is truncated by it.
+_PORTFOLIO_READ_SESSIONS = 260
 
 #: MIC whose sessions stand in for "a full trailing year of trading".
 CALENDAR_MIC = "XNYS"
@@ -95,6 +103,9 @@ class DataQualityViewV1(BaseModel):
     census: EvidenceCensusV1 | None = None
     funnel: EvidenceFunnelV1 = EvidenceFunnelV1(available=False)
     shared_inputs: SharedInputsReportV1 | None = None
+    #: The shared-inputs FX impact keyed by security id, so a census row
+    #: can show its own FX ceiling without the template re-deriving one.
+    fx_by_security: Mapping[str, SecurityFxImpactV1] = {}
     #: Discovered Strategies whose runtime or declaration could not be read.
     strategies_unreadable: int = 0
     #: Holdings the exit-side figures are scoped to -- the exit path is
@@ -122,6 +133,7 @@ def build_data_quality_view(
     snapshot: MarketRegimeSnapshotV1 | None = None,
     strategies_unreadable: int = 0,
     strategies_unavailable: bool = False,
+    portfolio_reads: Iterable[PortfolioHistoryRead] = (),
 ) -> DataQualityViewV1:
     """Compose the census, funnel and shared-inputs report for one scan.
 
@@ -134,22 +146,23 @@ def build_data_quality_view(
     holding_ids = frozenset(
         _canonical(ticker, alias_map) for ticker in holdings if ticker
     )
-    # ponytail: no ``portfolio_reads`` -- those are one repository read per
-    # holding, where the holding ids themselves are free. A holding the scan
-    # dropped therefore shows zero sessions rather than a portfolio-namespace
-    # history; pass ``portfolio_reads`` through when that detail is wanted.
+    currency_map = dict(currencies or {})
+    # ``portfolio_reads`` are bounded by the holdings (single digits), and
+    # each is a read of already-persisted ``portfolio:<symbol>`` evidence --
+    # no provider call and no write.
     census = build_evidence_census(
         view,
         current_evidence=current_evidence,
         unresolved=unresolved,
         holdings=holding_ids,
+        portfolio_reads=portfolio_reads,
         strategies=dict(strategy_requirements or {}),
         aliases=aliases,
+        currencies=currency_map,
     )
     funnel = build_evidence_funnel(
         current_evidence, run_log_row, len(view.selected_universe)
     )
-    currency_map = dict(currencies or {})
     shared_inputs = build_shared_inputs_report(
         base_currency=BASE_CURRENCY,
         securities=tuple(
@@ -173,6 +186,7 @@ def build_data_quality_view(
         census=census,
         funnel=funnel,
         shared_inputs=shared_inputs,
+        fx_by_security={row.security_id: row for row in shared_inputs.securities},
         holdings_count=len(holding_ids),
         strategies_unreadable=strategies_unreadable,
         strategies_unavailable=strategies_unavailable,
@@ -217,11 +231,13 @@ def load_data_quality_view(portfolio_id: int | None = None) -> DataQualityViewV1
             unavailable_reason="Scan artifact carries no usable price evidence."
         )
     requirements, inputs, unreadable, discovered = _strategies(view)
+    holdings = _holdings(portfolio_id)
     return build_data_quality_view(
         view,
         current_evidence=current_evidence,
         unresolved=unresolved,
-        holdings=_holdings(portfolio_id),
+        holdings=holdings,
+        portfolio_reads=_portfolio_reads(holdings, aliases, view.as_of_session),
         aliases=aliases,
         run_log_row=(
             find_run_log_row(current_evidence.run_id) if current_evidence else None
@@ -271,6 +287,48 @@ def _holdings(portfolio_id: int | None) -> tuple[str, ...]:
     except Exception:
         logger.exception("Holdings unreadable for Data Quality")
         return ()
+
+
+def _portfolio_reads(
+    holdings: Iterable[str],
+    aliases: Mapping[str, str],
+    as_of_session: date,
+) -> tuple[PortfolioHistoryRead, ...]:
+    """Read each holding's persisted ``portfolio:<symbol>`` history.
+
+    Bounded by the holdings, which are single digits, and read-only: every
+    call goes through the repository's covering-revision/bounded-read pair,
+    never a provider and never a repair. An unreadable repository degrades
+    to no reads at all, so the portfolio-namespace column reads "not read"
+    rather than a false zero.
+    """
+    from app.api.dependencies import get_read_only_historical_price_repository
+
+    tickers = tuple(dict.fromkeys(ticker for ticker in holdings if ticker))
+    if not tickers:
+        return ()
+    try:
+        repo = get_read_only_historical_price_repository()
+    except Exception:
+        logger.exception("Portfolio evidence unreadable for Data Quality")
+        return ()
+    reads: list[PortfolioHistoryRead] = []
+    for ticker in tickers:
+        try:
+            reads.append(
+                read_portfolio_history(
+                    repo,
+                    ticker,
+                    dict(aliases),
+                    through=as_of_session,
+                    # The longest window any row reports; the read is
+                    # bounded by what exists, so this only sets the cap.
+                    minimum_sessions=_PORTFOLIO_READ_SESSIONS,
+                )
+            )
+        except Exception:
+            logger.exception("Portfolio evidence unreadable for %s", ticker)
+    return tuple(reads)
 
 
 def _records(rows: list[dict] | None) -> list[StockRecord]:

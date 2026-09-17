@@ -43,7 +43,24 @@ class EvidenceCensusSecurityV1(_FrozenCensusModel):
     display_ticker: str = ""
     namespace: EvidenceCensusNamespace
     in_universe: bool
+    #: True when the security is one of the accounted holdings.
+    is_holding: bool = False
     sessions: int = Field(default=0, ge=0)
+    #: Sessions found under ``portfolio:<symbol>``, ``None`` when that
+    #: namespace was never read for this security (never zero-as-unknown).
+    portfolio_sessions: int | None = Field(default=None, ge=0)
+    #: Quote currency the published record carries, "" when unknown.
+    currency: str = ""
+    #: First and last evidenced session, from the coverage already read.
+    first_session: date | None = None
+    last_session: date | None = None
+    #: Evidence kinds the view actually holds, e.g. ``price_history``.
+    evidence_kinds: tuple[str, ...] = ()
+    #: Sessions the pinned calendar expected and the evidence does not hold.
+    missing_sessions: int = Field(default=0, ge=0)
+    #: Worst per-path shortfall reason, ``None`` when that path is met.
+    entry_shortfall: str | None = None
+    exit_shortfall: str | None = None
     gap_reason: str | None = None
     gap_detail: str | None = None
     cause: str | None = None
@@ -65,4 +82,7 @@ class EvidenceCensusV1(_FrozenCensusModel):
     clean: int = Field(default=0, ge=0)
     faulted: int = Field(default=0, ge=0)
     dropped: int = Field(default=0, ge=0)
+    #: Rows that are accounted holdings -- an overlapping count like the
+    #: faults, not a fourth disjoint band.
+    held: int = Field(default=0, ge=0)
     fault_counts: Mapping[str, int] = {}

@@ -61,6 +61,7 @@ def build_evidence_census(
     portfolio_reads: Iterable[PortfolioHistoryRead] = (),
     strategies: Mapping[str, StrategyEvidenceRequirementsV1] | None = None,
     aliases: Mapping[str, str] | None = None,
+    currencies: Mapping[str, str] | None = None,
 ) -> EvidenceCensusV1:
     """Return the census for ``view``, one row per security.
 
@@ -80,6 +81,7 @@ def build_evidence_census(
     gaps = _artifact_gaps(current_evidence, alias_map)
     unresolved_ids = {_canonical(item, alias_map) for item in unresolved if item}
     declared = dict(strategies or {})
+    currency_map = dict(currencies or {})
 
     rows = tuple(
         _build_row(
@@ -91,6 +93,7 @@ def build_evidence_census(
             gap=gaps.get(security_id),
             unresolved=security_id in unresolved_ids,
             strategies=declared,
+            currency=currency_map.get(security_id, ""),
         )
         for security_id in sorted(
             universe | holding_ids | set(gaps) | set(reads) | unresolved_ids
@@ -115,6 +118,7 @@ def build_evidence_census(
         clean=len(rows) - faulted - dropped,
         faulted=faulted,
         dropped=dropped,
+        held=sum(1 for row in rows if row.is_holding),
         fault_counts={fault: fault_counts[fault] for fault in sorted(fault_counts)},
     )
 
@@ -129,13 +133,18 @@ def _build_row(
     gap: CurrentEvidenceGapV1 | None,
     unresolved: bool,
     strategies: Mapping[str, StrategyEvidenceRequirementsV1],
+    currency: str = "",
 ) -> EvidenceCensusSecurityV1:
     """Return one accounted census row."""
     coverage = view.evidence_coverage(security_id)
     sessions = coverage.sessions
-    if sessions == 0 and read is not None and read.history is not None:
-        sessions = len(read.history.index)
+    portfolio_sessions = (
+        None if read is None or read.history is None else int(len(read.history.index))
+    )
+    if sessions == 0 and portfolio_sessions is not None:
+        sessions = portfolio_sessions
     in_universe = security_id in universe
+    is_holding = security_id in holding_ids
     # Outside the universe, any session at all came from the
     # ``portfolio:`` namespace -- whether read here or already merged
     # into the view -- so it is never reported as no coverage.
@@ -148,7 +157,7 @@ def _build_row(
         security_id,
         sessions=sessions,
         in_universe=in_universe,
-        is_holding=security_id in holding_ids,
+        is_holding=is_holding,
         strategies=strategies,
     )
     faults: list[str] = []
@@ -162,12 +171,22 @@ def _build_row(
     cause = f"{gap.reason}: {gap.detail}" if gap is not None else None
     if cause is None and unresolved:
         cause = _UNRESOLVED_CAUSE
+    entry_shortfall, exit_shortfall = _path_verdicts(shortfalls)
     return EvidenceCensusSecurityV1(
         security_id=security_id,
         display_ticker=display_ticker or security_id,
         namespace=namespace,
         in_universe=in_universe,
+        is_holding=is_holding,
         sessions=sessions,
+        portfolio_sessions=portfolio_sessions,
+        currency=currency,
+        first_session=coverage.session_dates[0] if coverage.session_dates else None,
+        last_session=coverage.session_dates[-1] if coverage.session_dates else None,
+        evidence_kinds=tuple(sorted(kind.value for kind in coverage.kinds)),
+        missing_sessions=len(coverage.missing_sessions),
+        entry_shortfall=entry_shortfall,
+        exit_shortfall=exit_shortfall,
         gap_reason=gap.reason if gap is not None else None,
         gap_detail=gap.detail if gap is not None else None,
         cause=cause,
@@ -217,6 +236,32 @@ def _shortfalls(
                     )
                 )
     return tuple(shortfalls)
+
+
+def _path_verdicts(
+    shortfalls: tuple[EvidenceCensusShortfallV1, ...],
+) -> tuple[str | None, str | None]:
+    """Collapse per-strategy shortfalls into one verdict per path.
+
+    A path is met (``None``) when no strategy declares a shortfall on it --
+    including when no strategy asks anything of that path at all, which is
+    reported as met rather than as a failure the data did not cause. When
+    several strategies fall short, the *worst* one wins: the largest
+    ``required - available`` deficit, and on a tie the alphabetically first
+    strategy, so the same census always names the same reason.
+    """
+
+    def worst(path: str) -> str | None:
+        candidates = [item for item in shortfalls if item.path == path]
+        if not candidates:
+            return None
+        item = min(
+            candidates,
+            key=lambda row: (row.available - row.required, row.strategy),
+        )
+        return f"{item.strategy} needs {item.required}, has {item.available}"
+
+    return worst("entry"), worst("exit")
 
 
 def _artifact_gaps(

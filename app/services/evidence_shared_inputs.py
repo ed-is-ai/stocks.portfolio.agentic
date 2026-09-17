@@ -66,6 +66,9 @@ class StrategyImpactInputV1(_FrozenInputModel):
     ma_length: int | None = None
     entry_minimum_sessions: int = Field(default=0, ge=0)
     exit_minimum_sessions: int = Field(default=0, ge=0)
+    #: Evidence kinds each path declares, verbatim from the requirements.
+    entry_kinds: tuple[str, ...] = ()
+    exit_kinds: tuple[str, ...] = ()
 
 
 class FxSharedInputV1(_FrozenInputModel):
@@ -127,6 +130,8 @@ class StrategyImpactV1(_FrozenInputModel):
     benchmark_satisfied: bool | None = None
     entry_minimum_sessions: int = Field(default=0, ge=0)
     exit_minimum_sessions: int = Field(default=0, ge=0)
+    entry_kinds: tuple[str, ...] = ()
+    exit_kinds: tuple[str, ...] = ()
     eligible_entry: int = Field(default=0, ge=0)
     eligible_exit: int = Field(default=0, ge=0)
 
@@ -258,6 +263,8 @@ def strategy_input_from(
         ma_length=_usable_ma_length(ma_length),
         entry_minimum_sessions=_minimum_sessions(requirements.entry),
         exit_minimum_sessions=_minimum_sessions(requirements.exit),
+        entry_kinds=_kinds(requirements.entry),
+        exit_kinds=_kinds(requirements.exit),
     )
 
 
@@ -320,6 +327,8 @@ def _strategy_impact(
         benchmark_satisfied=satisfied,
         entry_minimum_sessions=row.entry_minimum_sessions,
         exit_minimum_sessions=row.exit_minimum_sessions,
+        entry_kinds=row.entry_kinds,
+        exit_kinds=row.exit_kinds,
         eligible_entry=sum(
             1 for n in usable if n > 0 and n >= row.entry_minimum_sessions
         ),
@@ -339,6 +348,11 @@ def _minimum_sessions(requirements: tuple[EvidenceRequirementV1, ...]) -> int:
         ),
         default=0,
     )
+
+
+def _kinds(requirements: tuple[EvidenceRequirementV1, ...]) -> tuple[str, ...]:
+    """Evidence kind names one declared path asks for, ordered and unique."""
+    return tuple(sorted({item.kind.value for item in requirements}))
 
 
 def _normalise_currency(value: str) -> str:

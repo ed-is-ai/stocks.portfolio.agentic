@@ -1,7 +1,32 @@
 /* Data Quality tab (#639).
    Tokens only — every colour is a var() from tokens.css, every structural
    container is flat (radius 0) and divided by hairline --border rules,
-   and hierarchy is Inter weight, never size-as-decoration. */
+   and hierarchy is Inter weight, never size-as-decoration.
+   Three-step severity only: --green usable, --amber/--amber-mid needs
+   attention, --red unusable. */
+
+/* ── Shell — constrains width like the mockup; #tab-content itself
+   is full-bleed for every other tab. ─────────────────────────── */
+.dq-shell { max-width: 82.5rem; margin: 0 auto; }
+
+/* ── Page head ─────────────────────────────────────── */
+.dq-head { display: flex; flex-direction: column; gap: 0.3rem; margin-bottom: 1rem; }
+.dq-head h2 { margin: 0; }  /* inherits the site h2 scale (theme.css) */
+.dq-lead { color: var(--muted); font-size: var(--fs-sm); margin: 0; max-width: 78ch; }
+.dq-provenance {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 1.15rem;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  margin-top: 0.3rem;
+}
+.dq-provenance b {
+  color: var(--primary);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
 
 .dq-section {
   border-top: 1px solid var(--border);
@@ -9,21 +34,27 @@
 }
 .dq-section:first-of-type { border-top: 0; }
 .dq-heading {
-  font-size: 0.8125rem;
-  font-weight: 700;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-bold);
   letter-spacing: 0.01em;
   margin: 0 0 0.5rem;
 }
 .dq-note {
   color: var(--muted);
-  font-size: 0.75rem;
+  font-size: var(--fs-xs);
   margin: 0.35rem 0 0;
+  max-width: 86ch;
+}
+.dq-note b, .dq-note strong { color: var(--primary); font-weight: var(--fw-semibold); }
+.dq-mono {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums lining-nums;
 }
 
 /* ── Segmented control ─────────────────────────────── */
 .dq-segmented {
   display: inline-flex;
-  border: 1px solid var(--border);
+  border: 1px solid var(--primary);
   border-radius: 0;
   background: var(--card);
 }
@@ -31,45 +62,188 @@
   appearance: none;
   background: transparent;
   border: 0;
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--primary);
   border-radius: 0;
-  color: var(--muted);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  padding: 0.35rem 0.9rem;
+  color: var(--primary);
+  font-size: var(--fs-base);
+  font-weight: var(--fw-semibold);
+  padding: 0.5rem 1.05rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 .dq-segmented button:last-child { border-right: 0; }
 .dq-segmented button[aria-selected="true"] {
   background: var(--primary);
   color: var(--card);
 }
+.dq-segmented .dq-tab-count {
+  font-weight: var(--fw-normal);
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  border-left: 1px solid var(--border);
+  padding-left: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+.dq-segmented button[aria-selected="true"] .dq-tab-count {
+  color: var(--card);
+  opacity: 0.7;
+}
+
+/* ── Balance equation ──────────────────────────────── */
+.dq-equation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.6rem 1.35rem;
+}
+.dq-term { display: flex; flex-direction: column; gap: 0.1rem; }
+.dq-term-n {
+  font-size: var(--fs-2xl);
+  font-weight: var(--fw-bold);
+  line-height: 1;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+.dq-term-l {
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.dq-op { font-size: var(--fs-lg); color: var(--muted); padding-bottom: 0.2rem; }
+.dq-term.dq-total .dq-term-n {
+  border-bottom: 2px solid var(--primary);
+  padding-bottom: 0.1rem;
+}
+.dq-delta {
+  align-self: center;
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  background: var(--green-bg);
+  color: var(--green);
+  border-radius: 0;
+  padding: 0.3rem 0.6rem;
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-weight: var(--fw-bold);
+  margin: 0;
+}
+.dq-delta.dq-residual { background: var(--amber-bg); color: var(--amber); }
+.dq-delta .dq-big { font-size: var(--fs-md); font-variant-numeric: tabular-nums; }
+
+/* ── Per-source discovery counts ───────────────────── */
+.dq-discovery {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 1rem;
+  padding: 0.5rem 0 0;
+  margin-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+}
+.dq-discovery .dq-disc-l {
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--fw-semibold);
+  color: var(--primary);
+}
+.dq-disc-i { font-variant-numeric: tabular-nums lining-nums; }
+.dq-disc-i b { color: var(--primary); font-weight: var(--fw-semibold); }
 
 /* ── Disjoint accounting bar ───────────────────────── */
 .dq-bar {
   display: flex;
-  height: 0.75rem;
+  height: 0.7rem;
   border: 1px solid var(--border);
   border-radius: 0;
   overflow: hidden;
 }
 .dq-bar span { display: block; }
 .dq-bar .dq-usable      { background: var(--green); }
-.dq-bar .dq-attention   { background: var(--amber); }
+.dq-bar .dq-attention   { background: var(--amber-mid); }
 .dq-bar .dq-unusable    { background: var(--red); }
 .dq-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 1rem;
-  font-size: 0.75rem;
+  gap: 0.25rem 1.15rem;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
   margin-top: 0.4rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: var(--fw-semibold);
 }
+.dq-legend span { display: flex; align-items: center; gap: 0.4rem; }
 .dq-legend .dq-swatch {
   display: inline-block;
-  width: 0.625rem;
-  height: 0.625rem;
-  margin-right: 0.35rem;
-  vertical-align: baseline;
+  width: 0.55rem;
+  height: 0.55rem;
+  flex: none;
 }
+.dq-swatch.dq-usable { background: var(--green); }
+.dq-swatch.dq-attention { background: var(--amber-mid); }
+.dq-swatch.dq-unusable { background: var(--red); }
+
+/* ── Key: one card per band ────────────────────────── */
+.dq-key { border-top: 1px solid var(--border); padding-top: 0.7rem; margin-top: 0.75rem; }
+.dq-key > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-xs); }
+.dq-key > summary:hover { color: var(--primary); }
+.dq-key-label {
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--primary);
+}
+.dq-imp {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  gap: 0.2rem 1.15rem;
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.dq-imp:last-child { border-bottom: 0; padding-bottom: 0; }
+.dq-imp-head { display: flex; align-items: baseline; gap: 0.45rem; flex-wrap: wrap; }
+.dq-imp-n { font-size: var(--fs-lg); font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+.dq-imp-band {
+  font-size: var(--fs-2xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--fw-bold);
+}
+.dq-imp-what { margin: 0; font-size: var(--fs-sm); max-width: 74ch; }
+.dq-imp-so { margin: 0.2rem 0 0; font-size: var(--fs-sm); color: var(--muted); max-width: 80ch; }
+.dq-imp-so b { color: var(--primary); font-weight: var(--fw-semibold); }
+
+/* ── Note grid ─────────────────────────────────────── */
+.dq-notes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1px;
+  background: var(--border);
+  border: 1px solid var(--border);
+}
+.dq-note-card {
+  background: var(--card);
+  padding: 0.8rem 0.95rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.dq-note-l {
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: var(--fw-semibold);
+}
+.dq-note-v { font-size: var(--fs-sm); font-weight: var(--fw-semibold); font-variant-numeric: tabular-nums; }
+.dq-note-card.dq-absent .dq-note-v { color: var(--muted); font-weight: var(--fw-normal); }
+.dq-note-so { margin: 0.15rem 0 0; font-size: var(--fs-2xs); color: var(--muted); }
+.dq-note-so b { color: var(--primary); font-weight: var(--fw-semibold); }
 
 /* ── Fault chips (overlapping counts) ──────────────── */
 .dq-chips {
@@ -83,13 +257,53 @@
 .dq-chip {
   border: 1px solid var(--border);
   border-radius: 0;
-  font-size: 0.6875rem;
-  font-weight: 600;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
   padding: 0.1rem 0.4rem;
 }
 .dq-sev-1, .dq-sev-2 { color: var(--amber); border-color: var(--amber); }
 .dq-sev-3, .dq-sev-4 { color: var(--red); border-color: var(--red); }
 .dq-sev-0 { color: var(--green); border-color: var(--green); }
+
+/* ── Filter chips ──────────────────────────────────── */
+.dq-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+.dq-filter {
+  font: inherit;
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: var(--card);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  padding: 0.22rem 0.55rem;
+  font-variant-numeric: tabular-nums;
+}
+.dq-filter:hover { color: var(--primary); border-color: var(--muted); }
+.dq-filter[aria-pressed="true"] {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--card);
+}
+
+/* ── Badges ────────────────────────────────────────── */
+.dq-badge {
+  display: inline-block;
+  padding: 0.18rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+.dq-b-ok   { background: var(--green-bg); color: var(--green); }
+.dq-b-thin,
+.dq-b-gap,
+.dq-b-frag { background: var(--amber-bg); color: var(--amber); }
+.dq-b-drop { background: var(--red-bg); color: var(--red); }
+.dq-b-held { background: var(--blue-bg); color: var(--blue); }
 
 /* ── Funnel / shared-input rows ────────────────────── */
 .dq-rows { border-top: 1px solid var(--border); }
@@ -98,25 +312,34 @@
   justify-content: space-between;
   gap: 1rem;
   border-bottom: 1px solid var(--border);
-  font-size: 0.8125rem;
+  font-size: var(--fs-sm);
   padding: 0.3rem 0;
 }
 .dq-row .dq-label { color: var(--muted); }
-.dq-row .dq-value { font-weight: 600; }
+.dq-row .dq-value { font-weight: var(--fw-semibold); text-align: right; }
 .dq-row.dq-residual .dq-value { color: var(--amber); }
 
 /* ── Census table ──────────────────────────────────── */
-.dq-table { width: 100%; border-collapse: collapse; font-size: 0.8125rem; }
+.dq-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+.dq-table caption {
+  text-align: left;
+  padding: 0.6rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+}
+.dq-table caption b { color: var(--primary); font-weight: var(--fw-semibold); }
 .dq-table th, .dq-table td {
   border-bottom: 1px solid var(--border);
   padding: 0.3rem 0.5rem;
   text-align: left;
+  vertical-align: top;
 }
 .dq-table thead th {
   background: var(--primary);
   color: var(--card);
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--fw-semibold);
   white-space: nowrap;
 }
 /* Sorting is keyboard-reachable, so the focused header must be visible. */
@@ -124,19 +347,91 @@
 .dq-table thead th[aria-sort="ascending"]::after { content: " \2191"; }
 .dq-table thead th[aria-sort="descending"]::after { content: " \2193"; }
 .dq-table td.dq-absent { color: var(--muted); }
+.dq-table td.dq-num { text-align: right; font-variant-numeric: tabular-nums lining-nums; }
+.dq-table tfoot td {
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+  border-bottom: 0;
+}
+.dq-sec { white-space: nowrap; border-left: 3px solid transparent; }
+.dq-sec-id { font-weight: var(--fw-bold); }
+.dq-sec-disp { font-size: var(--fs-2xs); color: var(--muted); }
+.dq-table tbody tr[data-dq-band="clean"] .dq-sec { border-left-color: var(--green); }
+.dq-table tbody tr[data-dq-band="thin"] .dq-sec,
+.dq-table tbody tr[data-dq-band="gapped"] .dq-sec,
+.dq-table tbody tr[data-dq-band="missing_fragment"] .dq-sec { border-left-color: var(--amber-mid); }
+.dq-table tbody tr[data-dq-band="dropped"] .dq-sec { border-left-color: var(--red); }
+.dq-paths { font-size: var(--fs-2xs); line-height: 1.7; }
+.dq-ok { color: var(--green); font-weight: var(--fw-semibold); }
+.dq-short { color: var(--amber); font-weight: var(--fw-semibold); }
+.dq-cause { color: var(--red); font-size: var(--fs-2xs); font-weight: var(--fw-semibold); }
+.dq-cap { color: var(--amber); font-weight: var(--fw-semibold); }
+.dq-missing-kind { color: var(--amber); text-decoration: line-through; }
 
-/* ── Strategy cards ────────────────────────────────── */
+/* ── Strategy / shared-input cards ─────────────────── */
 .dq-cards {
   display: grid;
-  gap: 0;
-  border-top: 1px solid var(--border);
+  grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+  gap: 0.75rem;
 }
 .dq-card {
-  border-bottom: 1px solid var(--border);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--green);
   border-radius: 0;
-  padding: 0.6rem 0;
+  padding: 0.9rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
 }
-.dq-card h4 { font-size: 0.8125rem; font-weight: 700; margin: 0 0 0.3rem; }
+.dq-card.dq-warn { border-left-color: var(--amber-mid); }
+.dq-card.dq-blocked { border-left-color: var(--red); }
+.dq-card > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+.dq-card h4 { font-size: var(--fs-sm); font-weight: var(--fw-bold); margin: 0; }
+.dq-card-slug { display: block; font-size: var(--fs-2xs); color: var(--muted); }
+.dq-card dl { margin: 0; display: flex; flex-direction: column; border-top: 1px solid var(--border); }
+.dq-card dl > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.dq-card dl > div:last-child { border-bottom: 0; }
+.dq-card dt {
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: var(--fw-semibold);
+  flex: none;
+}
+.dq-card dd {
+  margin: 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  text-align: right;
+  font-variant-numeric: tabular-nums lining-nums;
+}
+.dq-card dd.dq-warn-v { color: var(--amber); }
+.dq-card dd.dq-bad-v { color: var(--red); }
+.dq-card dd.dq-ok-v { color: var(--green); }
+.dq-card dd.dq-off-v { color: var(--muted); font-weight: var(--fw-normal); }
+.dq-card-so { margin: 0; font-size: var(--fs-2xs); color: var(--muted); }
+.dq-card-so b { color: var(--primary); font-weight: var(--fw-semibold); }
+
+/* ── Footnotes ─────────────────────────────────────── */
+.dq-footnotes { border-top: 1px solid var(--border); padding-top: 0.85rem; margin-top: 1rem; }
+.dq-footnotes p { margin: 0 0 0.4rem; font-size: var(--fs-2xs); color: var(--muted); max-width: 90ch; }
+.dq-footnotes b { color: var(--primary); font-weight: var(--fw-semibold); }
 
 .dq-controls {
   display: flex;
@@ -150,6 +445,11 @@
   /* Form controls keep the shared input radius; "flat geometry" governs
      structural containers -- cards, tables, bars -- not the controls. */
   border-radius: var(--radius-input);
-  font-size: 0.8125rem;
+  font-size: var(--fs-sm);
   padding: 0.2rem 0.4rem;
+}
+.dq-rowcount { font-size: var(--fs-2xs); color: var(--muted); margin: 0; white-space: nowrap; }
+
+@media (max-width: 40rem) {
+  .dq-imp { grid-template-columns: 1fr; }
 }
