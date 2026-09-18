@@ -185,9 +185,7 @@ class StrategyBootstrapService:
                 if latest is None or not latest.failure_reason
                 else latest.failure_reason
             )
-            raise BootstrapStageFailure(
-                code, detail
-            )
+            raise BootstrapStageFailure(code, detail)
         self._qualification_contract_digest = contract.contract_digest
 
     def _capture_roster(
@@ -307,11 +305,23 @@ class StrategyBootstrapService:
         if profile is not None:
             current = self._providers.snapshot_profile(profile.roster_digest)
             if current.profile_hash != profile.profile_hash:
-                return True
+                # gh-653: a profile captured while the interpreter was hashed
+                # into every identity can never match the recomputed
+                # runtime-free hash, so the raw comparison alone reports a
+                # rebuild that nothing in the detector logic warrants. The
+                # authority validation accepts those retired digests and is
+                # the same check profile activation applies.
+                try:
+                    self._repository.validate_bau_profile_authority(profile)
+                except BacktestIntegrityError:
+                    return True
         aliases = load_provider_symbol_aliases()
-        for _security_id, provider_symbol, mic, _currency in (
-            self._repository.roster_member_identities(active.profile_hash)
-        ):
+        for (
+            _security_id,
+            provider_symbol,
+            mic,
+            _currency,
+        ) in self._repository.roster_member_identities(active.profile_hash):
             direct_mapping = aliases.get(provider_symbol)
             if direct_mapping is not None and direct_mapping != provider_symbol:
                 return True
@@ -353,7 +363,9 @@ class StrategyProviderBundleV1:
         fixture_path = _qualification_fixture_path()
         probes = _production_probes()
         provider_symbol_aliases = load_provider_symbol_aliases()
-        runner = QualificationRunner(repository, fixture_path, probes, calendar=calendar)
+        runner = QualificationRunner(
+            repository, fixture_path, probes, calendar=calendar
+        )
         roster = ReconstructionRosterCaptureService(
             repository,
             (
@@ -377,7 +389,14 @@ class StrategyProviderBundleV1:
                 schema_version="snapshot_profile.v1",
                 display_version="Scanner data v1",
                 record_schema_version="historical_scan_record.v1",
-                detectors=tuple(ProfileDetectorV1(detector_id=item.detector_id, detector_api_version=item.detector_api_version, detector_version=manifests[item.detector_id].digest) for item in DETECTOR_REGISTRY),
+                detectors=tuple(
+                    ProfileDetectorV1(
+                        detector_id=item.detector_id,
+                        detector_api_version=item.detector_api_version,
+                        detector_version=manifests[item.detector_id].digest,
+                    )
+                    for item in DETECTOR_REGISTRY
+                ),
                 roster_policy_version="ReconstructionRosterPolicyV1",
                 roster_digest=roster_digest,
                 identity_registry_version="SecurityIdentityRegistryV1",
@@ -387,7 +406,9 @@ class StrategyProviderBundleV1:
                 calendar_dataset_version="exchange-calendars-v1",
                 calendar_dataset_digest=calendar.session_table_digest(),
                 yfinance_request_contract_version="YFinanceDailyProviderNativeV1",
-                yfinance_ingestion_version=yfinance_ingestion_source_manifest(Path(__file__).resolve().parents[3]).digest,
+                yfinance_ingestion_version=yfinance_ingestion_source_manifest(
+                    Path(__file__).resolve().parents[3]
+                ).digest,
                 market_plane_policy_version=PRICE_VOLUME_PLANE_VERSION,
                 reconstructability_policy_version="reconstructability.v1",
                 provenance_vocabulary=("best_effort_reconstructed", "observed_bau"),
@@ -487,9 +508,7 @@ def _fetch_datahub_sp500() -> list[dict[str, object]] | None:
         {
             "symbol": row.get("Symbol", row.get("symbol", "")),
             "name": row.get("Security", row.get("Name", row.get("name", ""))),
-            "sector": row.get(
-                "GICS Sector", row.get("Sector", row.get("sector", ""))
-            ),
+            "sector": row.get("GICS Sector", row.get("Sector", row.get("sector", ""))),
         }
         for row in csv.DictReader(StringIO(response.text))
     ]
@@ -501,9 +520,7 @@ def _bootstrap_failure(
     """Project an internal failure into a safe, actionable activity message."""
     if isinstance(exc, requests.RequestException):
         response = exc.response
-        suffix = (
-            f" (HTTP {response.status_code})" if response is not None else ""
-        )
+        suffix = f" (HTTP {response.status_code})" if response is not None else ""
         return BootstrapStageFailure(
             JobFailureCode.PROVIDER_UNAVAILABLE,
             f"{stage} failed: required provider request was unavailable{suffix}",

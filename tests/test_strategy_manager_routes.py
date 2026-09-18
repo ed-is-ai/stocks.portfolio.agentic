@@ -202,6 +202,14 @@ class FakeRepo:
             )
         return None
 
+    def validate_bau_profile_authority(self, profile):
+        # gh-653: a hash that cannot match is no longer staleness on its own
+        # -- the retired runtime-hashed identity looks exactly like that. The
+        # authority check is what separates the two, so a stale fixture has
+        # to fail it rather than merely mismatch.
+        if self.stale_profile:
+            raise BacktestIntegrityError("stale provider map")
+
     def recent_job_failures(self, limit: int = 5):
         if self.readiness_error is not None:
             raise self.readiness_error

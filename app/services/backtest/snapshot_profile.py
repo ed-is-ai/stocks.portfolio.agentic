@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from datetime import date, datetime, timedelta, timezone
 import json
 import math
+from pathlib import Path
 from typing import Annotated, Literal, Protocol, cast
 
 from pydantic import Field, field_validator, model_validator
@@ -156,6 +157,37 @@ class SnapshotProfileV1(CanonicalModel):
         return {item.detector_id: item.detector_version for item in self.detectors}
 
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _names_same_identity(
+    stored: str, current: str, detector_id: str | None = None
+) -> bool:
+    """Return whether two identity digests name the same source identity.
+
+    gh-653: an identity captured before the interpreter stopped being hashed
+    is a digest of this same manifest plus a ``python_runtime`` key, so an
+    exact comparison reports a change that never happened in the source.
+    """
+    if stored == current:
+        return True
+    # Lazy import keeps the profile model off the detector/runtime graph.
+    from app.services.backtest.source_manifest import (
+        detector_source_manifests,
+        yfinance_ingestion_source_manifest,
+    )
+
+    try:
+        artifact = (
+            yfinance_ingestion_source_manifest(_PROJECT_ROOT)
+            if detector_id is None
+            else detector_source_manifests(_PROJECT_ROOT)[detector_id]
+        )
+    except (KeyError, ValueError):
+        return False
+    return artifact.digest == current and artifact.accepts_stored_digest(stored)
+
+
 def adoption_gate_failures(
     previous: "SnapshotProfileV1", current: "SnapshotProfileV1"
 ) -> tuple[str, ...]:
@@ -174,11 +206,19 @@ def adoption_gate_failures(
     }
     for item in current.detectors:
         prior = previous_detectors.get(item.detector_id)
-        if prior != (item.detector_api_version, item.detector_version):
+        if prior is None or prior[0] != item.detector_api_version:
             failures.append(
                 f"detector {item.detector_id} changed between data versions"
             )
-    if previous.yfinance_ingestion_version != current.yfinance_ingestion_version:
+        elif not _names_same_identity(
+            prior[1], item.detector_version, item.detector_id
+        ):
+            failures.append(
+                f"detector {item.detector_id} changed between data versions"
+            )
+    if not _names_same_identity(
+        previous.yfinance_ingestion_version, current.yfinance_ingestion_version
+    ):
         failures.append("the ingestion version changed")
     if previous.calendar_dataset_version != current.calendar_dataset_version:
         failures.append("the trading calendar dataset changed")

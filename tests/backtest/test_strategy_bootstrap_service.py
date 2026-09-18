@@ -221,10 +221,16 @@ class _UnavailableQualificationAdapter:
         raise ConnectionError(f"fixture provider unavailable for {definition.symbol}")
 
 
-def _payload(source: RosterSource, rows: list[dict[str, object]]) -> RosterSourcePayloadV1:
+def _payload(
+    source: RosterSource, rows: list[dict[str, object]]
+) -> RosterSourcePayloadV1:
     return RosterSourcePayloadV1.build(
-        source=source, rows=rows, retrieved_at=NOW, source_version="test-v1",
-        package_version="test", config_version="ReconstructionRosterPolicyV1",
+        source=source,
+        rows=rows,
+        retrieved_at=NOW,
+        source_version="test-v1",
+        package_version="test",
+        config_version="ReconstructionRosterPolicyV1",
     )
 
 
@@ -234,9 +240,16 @@ def _production_bundle(repo: BacktestRepository) -> StrategyProviderBundleV1:
             RosterSource.DATAHUB_SP500,
             [{"symbol": "AAPL", "name": "Apple", "sector": "Technology"}],
         ),
-        _payload(RosterSource.TRADINGVIEW_US, [{"symbol": "NASDAQ:AAPL", "exchange": "NASDAQ", "currency": "USD"}]),
-        _payload(RosterSource.TRADINGVIEW_UK, [{"symbol": "LSE:ULVR", "exchange": "LSE", "currency": "GBp"}]),
+        _payload(
+            RosterSource.TRADINGVIEW_US,
+            [{"symbol": "NASDAQ:AAPL", "exchange": "NASDAQ", "currency": "USD"}],
+        ),
+        _payload(
+            RosterSource.TRADINGVIEW_UK,
+            [{"symbol": "LSE:ULVR", "exchange": "LSE", "currency": "GBp"}],
+        ),
     )
+
     def datahub() -> RosterSourcePayloadV1:
         return payloads[0]
 
@@ -249,13 +262,23 @@ def _production_bundle(repo: BacktestRepository) -> StrategyProviderBundleV1:
     captures = ReconstructionRosterCaptureService(
         repo,
         (datahub, tradingview_us, tradingview_uk),
-        lambda _symbol, _row: MarketIdentityEvidence("XNAS", "USD", "USD", "test", "i" * 64),
+        lambda _symbol, _row: MarketIdentityEvidence(
+            "XNAS", "USD", "USD", "test", "i" * 64
+        ),
         clock=lambda: NOW,
     )
     production = StrategyProviderBundleV1.production(repo)
     return StrategyProviderBundleV1(
-        QualificationRunner(repo, QUALIFICATION_FIXTURE, _probes(), live_adapter=_FakeQualificationAdapter(), clock=lambda: NOW),
-        captures, SecurityAliasManifestV1.build((), created_at=NOW), production.snapshot_profile,
+        QualificationRunner(
+            repo,
+            QUALIFICATION_FIXTURE,
+            _probes(),
+            live_adapter=_FakeQualificationAdapter(),
+            clock=lambda: NOW,
+        ),
+        captures,
+        SecurityAliasManifestV1.build((), created_at=NOW),
+        production.snapshot_profile,
     )
 
 
@@ -944,3 +967,80 @@ def test_is_fixture_returns_false_in_production(monkeypatch, tmp_path: Path) -> 
     repo = _empty_repo(tmp_path / "backtest.db")
     service = StrategyBootstrapService(repo, jobs=None)  # type: ignore[arg-type]
     assert service.is_fixture is False
+
+
+def test_setup_not_required_for_a_profile_captured_under_the_retired_runtime(
+    tmp_path: Path,
+) -> None:
+    """gh-653: the retired runtime-hashed identity is not a reason to rebuild.
+
+    A profile captured while ``python_runtime`` was hashed can never match the
+    recomputed runtime-free hash, so comparing hashes alone reported setup as
+    required and silently discarded every committed snapshot behind it.
+    """
+    from app.services.backtest.canonical_manifest import manifest_digest
+    from app.services.backtest.snapshot_profile import ProfileDetectorV1
+    from app.services.backtest.source_manifest import (
+        detector_source_manifests,
+        yfinance_ingestion_source_manifest,
+    )
+    from app.services.backtest.strategy_bootstrap_service import (
+        StrategyProviderBundleV1,
+    )
+
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    root = Path(__file__).resolve().parents[2]
+    current = StrategyProviderBundleV1.production(repo).snapshot_profile(ROSTER_DIGEST)
+    manifests = detector_source_manifests(root)
+    legacy = current.model_copy(
+        update={
+            "detectors": tuple(
+                ProfileDetectorV1(
+                    detector_id=item.detector_id,
+                    detector_api_version=item.detector_api_version,
+                    detector_version=manifest_digest(
+                        {
+                            **manifests[item.detector_id].manifest,
+                            "python_runtime": "3.12",
+                        }
+                    ),
+                )
+                for item in current.detectors
+            ),
+            "yfinance_ingestion_version": manifest_digest(
+                {
+                    **yfinance_ingestion_source_manifest(root).manifest,
+                    "python_runtime": "3.12",
+                }
+            ),
+        }
+    )
+    assert legacy.profile_hash != current.profile_hash
+
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO snapshot_profiles
+               (profile_hash, canonical_profile_json, display_version,
+                roster_digest, scanner_schema_version,
+                calendar_dataset_version, calendar_dataset_digest, cadence)
+               VALUES (?, ?, 'Scanner data v1', ?, 'historical_scan_record.v1',
+                       'exchange-calendars-v1', ?, 'per-exchange month_end')""",
+            (
+                legacy.profile_hash,
+                legacy.canonical_json_bytes().decode(),
+                ROSTER_DIGEST,
+                TradingCalendar().session_table_digest(),
+            ),
+        )
+        conn.execute(
+            """UPDATE active_snapshot_profile
+               SET profile_hash=?, activation_seq=activation_seq + 1
+               WHERE singleton_id=1""",
+            (legacy.profile_hash,),
+        )
+
+    service = StrategyBootstrapService(repo, jobs=None)  # type: ignore[arg-type]
+
+    assert service.reset_pending() is False
+    assert service.is_setup_required() is False

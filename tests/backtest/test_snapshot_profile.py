@@ -15,6 +15,7 @@ from app.services.backtest.snapshot_profile import (
     LegitimateExclusionProofV1,
     MonthlySnapshotCommitV1,
     ProfileDetectorV1,
+    adoption_gate_failures,
     SnapshotContractError,
     SnapshotMemberV1,
     SnapshotProfileV1,
@@ -418,3 +419,94 @@ def test_observed_bau_source_run_identifier_cannot_be_empty() -> None:
             observed_at=datetime(2026, 8, 11, tzinfo=timezone.utc),
             committed_at=datetime(2026, 8, 11, tzinfo=timezone.utc),
         )
+
+
+# --- gh-653: retired runtime-hashed identities stay adoptable ----------------
+
+_ROOT = Path(__file__).resolve().parents[2]
+_RETIRED_RUNTIME = "3.12"
+
+
+def _runtime_identity_pair() -> tuple[SnapshotProfileV1, SnapshotProfileV1]:
+    """Return ``(legacy, current)`` differing only by the retired runtime key.
+
+    ``legacy`` carries the digests these exact manifests produced while
+    ``python_runtime`` was still hashed, which is what every profile
+    captured before gh-653 holds.
+    """
+    from app.services.backtest.detectors import DETECTOR_REGISTRY
+    from app.services.backtest.source_manifest import (
+        detector_source_manifests,
+        yfinance_ingestion_source_manifest,
+    )
+
+    manifests = detector_source_manifests(_ROOT)
+    ingestion = yfinance_ingestion_source_manifest(_ROOT)
+
+    def detectors(legacy: bool) -> tuple[ProfileDetectorV1, ...]:
+        return tuple(
+            ProfileDetectorV1(
+                detector_id=item.detector_id,
+                detector_api_version=item.detector_api_version,
+                detector_version=(
+                    manifest_digest(
+                        {
+                            **manifests[item.detector_id].manifest,
+                            "python_runtime": _RETIRED_RUNTIME,
+                        }
+                    )
+                    if legacy
+                    else manifests[item.detector_id].digest
+                ),
+            )
+            for item in DETECTOR_REGISTRY
+        )
+
+    current = _profile(
+        detectors=detectors(legacy=False),
+        yfinance_ingestion_version=ingestion.digest,
+    )
+    legacy = _profile(
+        detectors=detectors(legacy=True),
+        yfinance_ingestion_version=manifest_digest(
+            {**ingestion.manifest, "python_runtime": _RETIRED_RUNTIME}
+        ),
+    )
+    return legacy, current
+
+
+def test_adoption_allows_a_profile_captured_under_the_retired_runtime() -> None:
+    legacy, current = _runtime_identity_pair()
+
+    assert legacy.profile_hash != current.profile_hash
+    assert adoption_gate_failures(legacy, current) == ()
+
+
+def test_adoption_still_blocks_a_real_detector_change() -> None:
+    legacy, current = _runtime_identity_pair()
+    changed = _profile(
+        detectors=tuple(
+            ProfileDetectorV1(
+                detector_id=item.detector_id,
+                detector_api_version=item.detector_api_version,
+                detector_version=(
+                    DIGEST_B if item.detector_id == "vcp_v1" else item.detector_version
+                ),
+            )
+            for item in current.detectors
+        ),
+        yfinance_ingestion_version=current.yfinance_ingestion_version,
+    )
+
+    assert "detector vcp_v1 changed between data versions" in adoption_gate_failures(
+        changed, current
+    )
+
+
+def test_adoption_still_blocks_a_real_ingestion_change() -> None:
+    legacy, current = _runtime_identity_pair()
+    changed = _profile(
+        detectors=current.detectors, yfinance_ingestion_version="ingestion-v2"
+    )
+
+    assert "the ingestion version changed" in adoption_gate_failures(changed, current)
