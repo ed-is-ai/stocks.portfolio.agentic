@@ -67,11 +67,15 @@ from app.services.backtest.strategy_protocol import (
     JsonValue,
     validate_strategy_parameters,
 )
-from app.services.backtest.strategy_job import RunUniverseSelectionV1
+from app.services.backtest.strategy_job import (
+    RegimeBenchmarkPinV1,
+    RunUniverseSelectionV1,
+)
 from app.services.backtest.trading_calendar import TradingCalendar
 
 RUN_INPUT_MANIFEST_VERSION = "run_input_manifest.v1"
 RUN_INPUT_MANIFEST_V2_VERSION = "run_input_manifest.v2"
+RUN_INPUT_MANIFEST_V3_VERSION = "run_input_manifest.v3"
 
 #: Story 2.4 lands the real deterministic Backtest Engine and its
 #: concrete Strategy protocol semantics (fill/ledger/action processing
@@ -397,11 +401,47 @@ class RunInputManifestV2(RunInputManifestV1):
         return self
 
 
-def read_run_input_manifest(raw: str) -> RunInputManifestV1 | RunInputManifestV2:
+class RunInputManifestV3(RunInputManifestV2):
+    """V2's selected trade universe plus one separately pinned benchmark."""
+
+    schema_version: Literal["run_input_manifest.v3"]  # pyrefly: ignore [bad-override]
+    regime_benchmark: RegimeBenchmarkPinV1
+
+    @model_validator(mode="after")
+    def _reference_consistency(self) -> "RunInputManifestV3":
+        if self.parameters.get("regime_filter_enabled") is not True:
+            raise ValueError("V3 requires an enabled regime filter")
+        ma_length = self.parameters.get("regime_filter_ma_length", 200)
+        if isinstance(ma_length, bool) or not isinstance(ma_length, int) or ma_length < 2:
+            raise ValueError("regime benchmark moving-average length is invalid")
+        benchmark_id = self.parameters.get("regime_filter_benchmark_security_id")
+        if benchmark_id != self.regime_benchmark.security_id:
+            raise ValueError("regime benchmark pin does not match its parameter")
+        if self.regime_benchmark.security_id in self.universe_selection.canonical_security_ids:
+            raise ValueError("regime benchmark must remain outside the trade universe")
+        return self
+
+    def canonical_payload(self) -> dict[str, object]:
+        payload = super().canonical_payload()
+        payload["regime_benchmark"] = self.regime_benchmark.model_dump(mode="python")
+        return payload
+
+
+def read_run_input_manifest(
+    raw: str,
+) -> RunInputManifestV1 | RunInputManifestV2 | RunInputManifestV3:
     import json
 
     try:
-        payload = json.loads(raw)
+        def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            payload: dict[str, object] = {}
+            for key, value in pairs:
+                if key in payload:
+                    raise ValueError(f"duplicate manifest key: {key}")
+                payload[key] = value
+            return payload
+
+        payload = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
         schema = payload.get("schema_version") if isinstance(payload, dict) else None
     except (TypeError, ValueError) as exc:
         raise RunInputManifestError(
@@ -411,6 +451,8 @@ def read_run_input_manifest(raw: str) -> RunInputManifestV1 | RunInputManifestV2
         return RunInputManifestV1.model_validate_json(raw)
     if schema == RUN_INPUT_MANIFEST_V2_VERSION:
         return RunInputManifestV2.model_validate_json(raw)
+    if schema == RUN_INPUT_MANIFEST_V3_VERSION:
+        return RunInputManifestV3.model_validate_json(raw)
     raise RunInputManifestError(
         "unsupported_manifest_version", "run input manifest version is unsupported"
     )
@@ -427,6 +469,22 @@ def build_run_input_manifest_v2(
         schema_version=RUN_INPUT_MANIFEST_V2_VERSION,
         universe_selection=selection,
         source_preparation_job_id=source_preparation_job_id,
+    )
+
+
+def build_run_input_manifest_v3(
+    base: RunInputManifestV1,
+    *,
+    selection: RunUniverseSelectionV1,
+    source_preparation_job_id: str,
+    regime_benchmark: RegimeBenchmarkPinV1,
+) -> RunInputManifestV3:
+    return RunInputManifestV3(
+        **base.model_dump(mode="python", exclude={"schema_version"}),
+        schema_version=RUN_INPUT_MANIFEST_V3_VERSION,
+        universe_selection=selection,
+        source_preparation_job_id=source_preparation_job_id,
+        regime_benchmark=regime_benchmark,
     )
 
 

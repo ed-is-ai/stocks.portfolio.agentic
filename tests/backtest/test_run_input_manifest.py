@@ -37,10 +37,12 @@ from app.services.backtest.run_input_manifest import (
     RunInputManifestV1,
     build_run_input_manifest,
     build_run_input_manifest_v2,
+    build_run_input_manifest_v3,
     read_run_input_manifest,
+    RunInputManifestV3,
 )
 from app.services.backtest.run_universe import run_universe_digest
-from app.services.backtest.strategy_job import RunUniverseSelectionV1
+from app.services.backtest.strategy_job import RegimeBenchmarkPinV1, RunUniverseSelectionV1
 from app.services.backtest.skill_discovery import discover_strategies
 from app.services.backtest.snapshot_profile import (
     MonthlySnapshotCommitV1,
@@ -176,6 +178,101 @@ def test_v2_manifest_dispatch_and_runtime_selection_equality() -> None:
             _manifest(parameters={"symbols": ["other"]}),
             selection=s,
             source_preparation_job_id="prep",
+        )
+
+
+def test_v3_pins_one_reference_without_changing_trade_universe() -> None:
+    selection = RunUniverseSelectionV1(
+        profile_hash=DIGEST_A,
+        activation_seq=1,
+        universe_parameter="symbols",
+        canonical_security_ids=("sec-000",),
+        run_universe_digest=run_universe_digest(
+            ["sec-000"], parameter="symbols", profile_hash=DIGEST_A
+        ),
+    )
+    pin = RegimeBenchmarkPinV1(
+        security_id="spy-reference",
+        identity_registry_revision=DIGEST_A,
+        alias_revision=DIGEST_B,
+        price_revision=DIGEST_C,
+        action_revision=DIGEST_C,
+        evidence_digest=DIGEST_C,
+        request_start=date(1999, 1, 1),
+        request_end=date(2026, 9, 1),
+        session_policy="canonical_exchange_sessions_v2",
+        calendar_mic="XNYS",
+        calendar_session_table_digest=DIGEST_D,
+        price_plane_policy_version="HistoricalMarketPlanesV1",
+    )
+    manifest = build_run_input_manifest_v3(
+        _manifest(
+            parameters={
+                "symbols": ["sec-000"],
+                "regime_filter_enabled": True,
+                "regime_filter_benchmark_security_id": "spy-reference",
+                "regime_filter_ma_length": 200,
+            }
+        ),
+        selection=selection,
+        source_preparation_job_id="prep",
+        regime_benchmark=pin,
+    )
+
+    restored = read_run_input_manifest(manifest.canonical_json())
+
+    assert isinstance(restored, RunInputManifestV3)
+    assert tuple(item.security_id for item in restored.securities) == ("sec-000",)
+    assert restored.regime_benchmark == pin
+    assert restored.digest() == manifest.digest()
+    assert restored.universe_selection.run_universe_digest == selection.run_universe_digest
+
+
+def test_v3_rejects_reference_inside_trade_universe() -> None:
+    selection = RunUniverseSelectionV1(
+        profile_hash=DIGEST_A,
+        activation_seq=1,
+        universe_parameter="symbols",
+        canonical_security_ids=("spy-reference",),
+        run_universe_digest=run_universe_digest(
+            ["spy-reference"], parameter="symbols", profile_hash=DIGEST_A
+        ),
+    )
+    pin = RegimeBenchmarkPinV1(
+        security_id="spy-reference",
+        identity_registry_revision=DIGEST_A,
+        alias_revision=DIGEST_B,
+        price_revision=DIGEST_C,
+        action_revision=DIGEST_C,
+        evidence_digest=DIGEST_C,
+        request_start=date(1999, 1, 1),
+        request_end=date(2026, 9, 1),
+        session_policy="canonical_exchange_sessions_v2",
+        calendar_mic="XNYS",
+        calendar_session_table_digest=DIGEST_D,
+        price_plane_policy_version="HistoricalMarketPlanesV1",
+    )
+    with pytest.raises(ValueError, match="selected universe"):
+        build_run_input_manifest_v3(
+            _manifest(
+                parameters={
+                    "symbols": ["spy-reference"],
+                    "regime_filter_enabled": True,
+                    "regime_filter_benchmark_security_id": "spy-reference",
+                    "regime_filter_ma_length": 200,
+                }
+            ),
+            selection=selection,
+            source_preparation_job_id="prep",
+            regime_benchmark=pin,
+        )
+
+
+def test_manifest_reader_rejects_duplicate_reference_keys() -> None:
+    with pytest.raises(RunInputManifestError, match="invalid"):
+        read_run_input_manifest(
+            '{"schema_version":"run_input_manifest.v3",'
+            '"regime_benchmark":{},"regime_benchmark":{}}'
         )
 
 

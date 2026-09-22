@@ -290,6 +290,82 @@ def test_fx_rejects_incompatible_provider_request_contract() -> None:
     assert exc_info.value.code == "fx_ambiguous"
 
 
+def _boe_fx_evidence(
+    closes: tuple[tuple[str, float], ...] = (("2000-01-05", 1.65),),
+    **overrides: object,
+) -> StoredHistoricalEvidence:
+    from app.integrations.fx_history import BOE_FX_SERIES_REQUEST_CONTRACT_VERSION
+
+    values: dict[str, object] = {
+        "start": "2000-01-01",
+        "end": "2000-02-01",
+        "provider": "bank_of_england",
+        "provider_version": "boe_fx_series_v1",
+        "request_contract_version": BOE_FX_SERIES_REQUEST_CONTRACT_VERSION,
+        "request_contract": {
+            "provider_endpoint": (
+                "https://www.bankofengland.co.uk/boeapps/database/"
+                "fromshowcolumns.asp"
+            ),
+            "series_code": "XUDLUSS",
+            "start": "2000-01-01",
+            "end": "2000-02-01",
+        },
+    }
+    values.update(overrides)
+    return _fx_evidence(closes, **values)
+
+
+def test_bank_of_england_fx_evidence_is_accepted_pre_2003() -> None:
+    """A BoE-sourced GBPUSD=X series converts just like yfinance evidence.
+
+    Yahoo's FX history only starts 2003-12, so a 2000-01 backtest can only
+    resolve currency conversion through the Bank of England provider
+    (#gh-boe-fx); this locks in that _fx_closes accepts it.
+    """
+    result = convert_to_base(
+        value="10",
+        quote_currency="GBP",
+        quote_unit="GBP",
+        base_currency="USD",
+        valuation_session=date(2000, 1, 8),
+        completed_fx_through=date(2000, 1, 5),
+        fx_evidence=_boe_fx_evidence(),
+    )
+    assert result.base_amount == Decimal("16.50000000")
+    assert result.fx_rate == Decimal("1.65")
+
+
+def test_bank_of_england_fx_evidence_rejects_stale_contract_version() -> None:
+    with pytest.raises(CurrencyPolicyError) as exc_info:
+        convert_to_base(
+            value="10",
+            quote_currency="GBP",
+            quote_unit="GBP",
+            base_currency="USD",
+            valuation_session=date(2000, 1, 8),
+            completed_fx_through=date(2000, 1, 5),
+            fx_evidence=_boe_fx_evidence(
+                request_contract_version="boe_fx_series_request_contract_v0"
+            ),
+        )
+    assert exc_info.value.code == "fx_ambiguous"
+
+
+def test_fx_evidence_from_an_unsupported_provider_is_ambiguous() -> None:
+    with pytest.raises(CurrencyPolicyError) as exc_info:
+        convert_to_base(
+            value="10",
+            quote_currency="GBP",
+            quote_unit="GBP",
+            base_currency="USD",
+            valuation_session=date(2024, 1, 8),
+            completed_fx_through=date(2024, 1, 5),
+            fx_evidence=_fx_evidence(provider="some_other_provider"),
+        )
+    assert exc_info.value.code == "fx_ambiguous"
+
+
 def test_currency_arithmetic_ignores_ambient_rounding_and_traps() -> None:
     with localcontext() as context:
         context.prec = 4

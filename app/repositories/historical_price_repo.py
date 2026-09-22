@@ -33,7 +33,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS historical_price_revisions (
     data_revision TEXT PRIMARY KEY,
     security_id TEXT NOT NULL,
-    provider TEXT NOT NULL CHECK(provider = 'yfinance'),
+    provider TEXT NOT NULL CHECK(provider IN ('yfinance', 'bank_of_england')),
     provider_version TEXT NOT NULL,
     request_contract_version TEXT NOT NULL,
     requested_symbol TEXT NOT NULL,
@@ -194,6 +194,40 @@ _ADD_CONTRACT_VERSION = (
     "ALTER TABLE price_evidence_unavailable_attempts "
     "ADD COLUMN contract_version TEXT NOT NULL DEFAULT ''"
 )
+
+#: The pre-widening constraint text, used to detect a database written
+#: before the Bank of England FX provider was accepted (#gh-boe-fx).
+_LEGACY_PROVIDER_CHECK = "CHECK(provider = 'yfinance')"
+
+#: Widened replacement, built under a throwaway name so the original
+#: ``historical_price_revisions`` -- and the FOREIGN KEY clauses several
+#: other tables hold naming it -- is never renamed. Column-for-column
+#: identical to ``_SCHEMA``'s own definition of the table (#gh-boe-fx).
+_MIGRATE_REVISIONS_REPLACEMENT_TABLE = """
+CREATE TABLE historical_price_revisions_boe_fx_replacement (
+    data_revision TEXT PRIMARY KEY,
+    security_id TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider IN ('yfinance', 'bank_of_england')),
+    provider_version TEXT NOT NULL,
+    request_contract_version TEXT NOT NULL,
+    requested_symbol TEXT NOT NULL,
+    observed_symbol TEXT NOT NULL,
+    alias_revision TEXT,
+    currency TEXT NOT NULL,
+    quote_unit TEXT NOT NULL,
+    quote_unit_scale TEXT NOT NULL,
+    exchange_timezone TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    request_contract_json TEXT NOT NULL,
+    response_metadata_digest TEXT NOT NULL,
+    canonical_manifest_json TEXT NOT NULL,
+    observation_count INTEGER NOT NULL CHECK(observation_count > 0),
+    action_count INTEGER NOT NULL CHECK(action_count >= 0),
+    first_acquired_at TEXT NOT NULL,
+    CHECK(start_date < end_date)
+);
+"""
 
 
 #: SQLite's wording for the two ways an evidence-free cache presents itself:
@@ -601,6 +635,60 @@ class HistoricalPriceRepository:
             except sqlite3.OperationalError as exc:
                 if "duplicate column" not in str(exc).lower():
                     raise
+            self._migrate_provider_check(conn)
+
+    def _migrate_provider_check(self, conn: sqlite3.Connection) -> None:
+        """Widen ``historical_price_revisions.provider`` to accept BoE evidence.
+
+        A SQLite CHECK constraint can't be altered in place, and several
+        other tables (``historical_price_observations`` and friends) hold a
+        FOREIGN KEY naming ``historical_price_revisions`` -- ``ALTER TABLE
+        ... RENAME`` rewrites those references to follow the rename, so the
+        *original* table is never renamed. Instead the widened replacement
+        is built under a throwaway name, existing rows copied across, the
+        original dropped, and the replacement renamed into the original's
+        place -- restoring the exact name every FOREIGN KEY already expects,
+        with no reference ever pointed anywhere else. Idempotent -- a
+        database whose stored DDL no longer contains the legacy clause
+        (already migrated, or created fresh under the new ``_SCHEMA``) is
+        left untouched.
+        """
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='historical_price_revisions'"
+        ).fetchone()
+        if row is None or _LEGACY_PROVIDER_CHECK not in str(row[0]):
+            return
+        # SQLite only lets ``foreign_keys`` be toggled with no transaction
+        # pending, so any transaction left open by the schema/column
+        # migrations just above is closed first.
+        try:
+            conn.execute("COMMIT")
+        except sqlite3.OperationalError:
+            pass
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.executescript(_MIGRATE_REVISIONS_REPLACEMENT_TABLE)
+        conn.execute(
+            "INSERT INTO historical_price_revisions_boe_fx_replacement "
+            "SELECT * FROM historical_price_revisions"
+        )
+        conn.execute("DROP TRIGGER IF EXISTS historical_revision_immutable_update")
+        conn.execute("DROP TRIGGER IF EXISTS historical_revision_immutable_delete")
+        conn.execute("DROP TABLE historical_price_revisions")
+        conn.execute(
+            "ALTER TABLE historical_price_revisions_boe_fx_replacement "
+            "RENAME TO historical_price_revisions"
+        )
+        # Recreates this table's indexes/triggers (dropped along with it)
+        # and re-enables ``foreign_keys`` -- safe now that a table exists
+        # under the exact name every FOREIGN KEY clause already expects.
+        conn.executescript(_SCHEMA)
+        dangling = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if dangling:
+            raise HistoricalEvidenceIntegrityError(
+                "provider-check migration left dangling foreign keys"
+            )
+        conn.commit()
 
     def migrate_v1_to_v2(
         self, *, max_revisions: int | None = None, available_bytes: int | None = None

@@ -35,7 +35,16 @@ from app.services.backtest.historical_scan_record import (
     HistoricalScanRecordV1,
     HistoricalScanContractError,
 )
-from app.services.backtest.canonical_manifest import manifest_digest
+from app.services.backtest.canonical_manifest import (
+    canonical_json as render_canonical_json,
+    manifest_digest,
+)
+from app.services.backtest.security_identity import (
+    AliasEntryV1,
+    SecurityAliasManifestV1,
+    SecurityIdentityRegistryV1,
+    SecurityIdentityV1,
+)
 from app.services.backtest.snapshot_profile import (
     ActiveSnapshotProfileV1,
     CoverageIntervalV1,
@@ -69,6 +78,7 @@ from app.services.backtest.strategy_job import (
     PreparationRunV1,
     PreparationSubmissionV1,
     PreparationEnqueueResultV1,
+    RegimeBenchmarkPinV1,
     RunUniverseSelectionV1,
     RecoveryAction,
     RecentJobFailureV1,
@@ -203,6 +213,83 @@ CREATE TABLE IF NOT EXISTS security_alias_entries (
     PRIMARY KEY(alias_revision, provider, mic, observed_symbol, effective_from, effective_to, security_id),
     CHECK(effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to)
 );
+
+-- Reference-only instruments have a separate closed MIC contract.  Keeping
+-- this storage additive preserves the immutable tradable identity/alias
+-- tables and, especially, the snapshot-member MIC constraint.
+CREATE TABLE IF NOT EXISTS reference_identity_registry_revisions (
+    revision_digest TEXT PRIMARY KEY,
+    canonical_manifest_json TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reference_security_identities (
+    security_id TEXT PRIMARY KEY,
+    mic TEXT NOT NULL CHECK(mic = 'ARCX'),
+    provider_symbol TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    identity_registry_revision TEXT NOT NULL
+        REFERENCES reference_identity_registry_revisions(revision_digest),
+    created_at TEXT NOT NULL,
+    UNIQUE(mic, provider_symbol)
+);
+CREATE TABLE IF NOT EXISTS reference_alias_manifests (
+    alias_revision TEXT PRIMARY KEY,
+    canonical_manifest_json TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS reference_alias_entries (
+    alias_revision TEXT NOT NULL REFERENCES reference_alias_manifests(alias_revision),
+    security_id TEXT NOT NULL REFERENCES reference_security_identities(security_id),
+    provider TEXT NOT NULL,
+    mic TEXT NOT NULL CHECK(mic = 'ARCX'),
+    observed_symbol TEXT NOT NULL,
+    effective_from TEXT,
+    effective_to TEXT,
+    evidence_source TEXT NOT NULL,
+    evidence_digest TEXT NOT NULL,
+    provenance TEXT NOT NULL CHECK(provenance IN ('provider_evidence', 'manual_override')),
+    PRIMARY KEY(alias_revision, provider, mic, observed_symbol, effective_from, effective_to, security_id),
+    CHECK(effective_from IS NULL OR effective_to IS NULL OR effective_from < effective_to)
+);
+CREATE TRIGGER IF NOT EXISTS reference_identity_registry_immutable_update
+BEFORE UPDATE ON reference_identity_registry_revisions
+BEGIN SELECT RAISE(ABORT, 'reference identity registry is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_identity_registry_immutable_delete
+BEFORE DELETE ON reference_identity_registry_revisions
+BEGIN SELECT RAISE(ABORT, 'reference identity registry is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_security_identity_immutable_update
+BEFORE UPDATE ON reference_security_identities
+BEGIN SELECT RAISE(ABORT, 'reference security identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_security_identity_immutable_delete
+BEFORE DELETE ON reference_security_identities
+BEGIN SELECT RAISE(ABORT, 'reference security identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_alias_manifest_immutable_update
+BEFORE UPDATE ON reference_alias_manifests
+BEGIN SELECT RAISE(ABORT, 'reference alias manifest is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_alias_manifest_immutable_delete
+BEFORE DELETE ON reference_alias_manifests
+BEGIN SELECT RAISE(ABORT, 'reference alias manifest is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_alias_entry_immutable_update
+BEFORE UPDATE ON reference_alias_entries
+BEGIN SELECT RAISE(ABORT, 'reference alias entry is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_alias_entry_immutable_delete
+BEFORE DELETE ON reference_alias_entries
+BEGIN SELECT RAISE(ABORT, 'reference alias entry is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS reference_alias_no_overlap
+BEFORE INSERT ON reference_alias_entries
+WHEN EXISTS (
+    SELECT 1 FROM reference_alias_entries existing
+    WHERE existing.provider = NEW.provider
+      AND existing.alias_revision = NEW.alias_revision
+      AND existing.mic = NEW.mic
+      AND existing.observed_symbol = NEW.observed_symbol
+      AND COALESCE(existing.effective_from, '0001-01-01') < COALESCE(NEW.effective_to, '9999-12-31')
+      AND COALESCE(NEW.effective_from, '0001-01-01') < COALESCE(existing.effective_to, '9999-12-31')
+)
+BEGIN SELECT RAISE(ABORT, 'reference alias intervals overlap'); END;
+
 CREATE TABLE IF NOT EXISTS reconstruction_rosters (
     roster_digest TEXT PRIMARY KEY,
     policy_version TEXT NOT NULL,
@@ -818,7 +905,8 @@ WHEN NOT EXISTS (
 BEGIN SELECT RAISE(ABORT, 'bootstrap run is immutable'); END;
 
 CREATE TABLE IF NOT EXISTS preparation_runs (
-    job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id)
+    job_id TEXT PRIMARY KEY REFERENCES strategy_jobs(id),
+    regime_benchmark_json TEXT
 );
 CREATE TABLE IF NOT EXISTS preparation_enqueue_actions(idempotency_key TEXT PRIMARY KEY,submission_digest TEXT NOT NULL,job_id TEXT NOT NULL UNIQUE REFERENCES preparation_runs(job_id),created_at TEXT NOT NULL);
 
@@ -1204,6 +1292,16 @@ class RosterCaptureCommit:
     members: tuple[tuple[str, str, str, str, str, str, str], ...]
 
 
+@dataclass(frozen=True)
+class ReferenceIdentityRegistrationV1:
+    """The immutable revisions created for one reference-only instrument."""
+
+    identity: SecurityIdentityV1
+    alias: AliasEntryV1
+    identity_registry_revision: str
+    alias_revision: str
+
+
 class BacktestIntegrityError(RuntimeError):
     def __init__(self, message: str, *, code: str = "integrity_error") -> None:
         self.code = code
@@ -1238,6 +1336,7 @@ class _StrategyRunRow:
     manifest_version: str
     universe_selection: RunUniverseSelectionV1 | None
     source_preparation_job_id: str | None
+    regime_benchmark: "RegimeBenchmarkPinV1 | None" = None
 
 
 @dataclass(frozen=True)
@@ -1320,6 +1419,7 @@ class BacktestResultV1:
     manifest_version: str = "run_input_manifest.v1"
     universe_selection: RunUniverseSelectionV1 | None = None
     source_preparation_job_id: str | None = None
+    regime_benchmark: "RegimeBenchmarkPinV1 | None" = None
     initial_entry_selection: InitialEntrySelectionV1 | None = None
 
 
@@ -1927,6 +2027,7 @@ class BacktestRepository:
                 "end_month TEXT",
                 "base_currency TEXT",
                 "starting_capital TEXT",
+                "regime_benchmark_json TEXT",
             ):
                 if definition.split()[0] not in prep_cols:
                     conn.execute(
@@ -2029,6 +2130,30 @@ class BacktestRepository:
                        (NEW.manifest_version='run_input_manifest.v2'
                         AND length(NEW.run_universe_digest)=64
                         AND NEW.selection_json IS NOT NULL
+                        AND EXISTS(
+                            SELECT 1 FROM strategy_jobs j
+                            WHERE j.id=NEW.id AND (
+                                (NEW.source_preparation_job_id IS NOT NULL
+                                 AND j.parent_job_id IS NULL)
+                                OR
+                                (NEW.source_preparation_job_id IS NULL
+                                 AND j.parent_job_id IS NOT NULL)
+                            )
+                        ))
+                       OR
+                       (NEW.manifest_version='run_input_manifest.v3'
+                        AND length(NEW.run_universe_digest)=64
+                        AND NEW.selection_json IS NOT NULL
+                        AND json_valid(NEW.selection_json)
+                        AND EXISTS(
+                            SELECT 1 FROM run_input_manifests m
+                            WHERE m.digest=NEW.run_input_manifest_digest
+                              AND m.manifest_version='run_input_manifest.v3'
+                              AND json_valid(m.canonical_manifest_json)
+                              AND json_type(
+                                  json_extract(m.canonical_manifest_json, '$.regime_benchmark')
+                              )='object'
+                        )
                         AND EXISTS(
                             SELECT 1 FROM strategy_jobs j
                             WHERE j.id=NEW.id AND (
@@ -2289,6 +2414,236 @@ class BacktestRepository:
                    FROM security_identities ORDER BY security_id"""
             ).fetchall()
         return [tuple(str(value) for value in row) for row in rows]  # type: ignore[return-value]
+
+    def register_reference_identity(
+        self,
+        identity: SecurityIdentityV1,
+        alias: AliasEntryV1,
+        *,
+        created_at: datetime,
+    ) -> ReferenceIdentityRegistrationV1:
+        """Atomically register one non-tradable reference identity and alias.
+
+        Reference storage is intentionally separate from the roster identity
+        tables.  That keeps the recovered trading universe and snapshot-member
+        MIC CHECK immutable while retaining the same content-addressed,
+        append-only registration semantics.
+        """
+        if identity.mic != "ARCX" or alias.mic != "ARCX":
+            raise ValueError("reference identities currently require ARCX")
+        if alias.security_id != identity.security_id:
+            raise ValueError("reference alias does not match identity")
+        if alias.observed_symbol != identity.provider_symbol:
+            raise ValueError("reference alias does not match provider symbol")
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError("created_at must be timezone-aware")
+        registry = SecurityIdentityRegistryV1.build(
+            (identity,), created_at=created_at, allow_reference_mics=True
+        )
+        aliases = SecurityAliasManifestV1.build(
+            (alias,), created_at=created_at, allow_reference_mics=True
+        )
+        registry_json = render_canonical_json(
+            {
+                "schema_version": registry.schema_version,
+                "revision": registry.revision,
+                "evidence_digest": registry.evidence_digest,
+                "identities": registry.identities,
+            }
+        )
+        aliases_json = render_canonical_json(
+            {
+                "schema_version": aliases.schema_version,
+                "revision": aliases.revision,
+                "evidence_digest": aliases.evidence_digest,
+                "entries": aliases.entries,
+            }
+        )
+        captured_at = created_at.astimezone(timezone.utc).isoformat()
+        alias_values = (
+            alias.security_id,
+            alias.provider,
+            alias.mic,
+            alias.observed_symbol,
+            None if alias.effective_from is None else alias.effective_from.isoformat(),
+            None if alias.effective_to is None else alias.effective_to.isoformat(),
+            alias.evidence_source,
+            alias.evidence_digest,
+            alias.provenance,
+        )
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                """SELECT security_id, evidence_digest
+                   FROM reference_security_identities
+                   WHERE mic=? AND provider_symbol=?""",
+                (identity.mic, identity.provider_symbol),
+            ).fetchone()
+            by_id = conn.execute(
+                """SELECT mic, provider_symbol, evidence_digest
+                   FROM reference_security_identities WHERE security_id=?""",
+                (identity.security_id,),
+            ).fetchone()
+            expected_identity = (
+                identity.security_id,
+                identity.evidence_digest,
+            )
+            if existing is not None and tuple(str(value) for value in existing) != expected_identity:
+                raise sqlite3.IntegrityError(
+                    "reference identity conflicts with existing security"
+                )
+            if by_id is not None and tuple(str(value) for value in by_id) != (
+                identity.mic,
+                identity.provider_symbol,
+                identity.evidence_digest,
+            ):
+                raise sqlite3.IntegrityError(
+                    "reference security id conflicts with existing identity"
+                )
+            self._insert_or_verify(
+                conn,
+                "reference_identity_registry_revisions",
+                "revision_digest",
+                registry.revision,
+                "canonical_manifest_json",
+                registry_json,
+                """INSERT INTO reference_identity_registry_revisions
+                   (revision_digest, canonical_manifest_json, evidence_digest, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (registry.revision, registry_json, registry.evidence_digest, captured_at),
+            )
+            if existing is None and by_id is None:
+                conn.execute(
+                    """INSERT INTO reference_security_identities
+                       (security_id, mic, provider_symbol, evidence_digest,
+                        identity_registry_revision, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        identity.security_id,
+                        identity.mic,
+                        identity.provider_symbol,
+                        identity.evidence_digest,
+                        registry.revision,
+                        captured_at,
+                    ),
+                )
+            alias_existing = conn.execute(
+                "SELECT canonical_manifest_json FROM reference_alias_manifests "
+                "WHERE alias_revision=?",
+                (aliases.revision,),
+            ).fetchone()
+            if alias_existing is not None and str(alias_existing[0]) != aliases_json:
+                raise sqlite3.IntegrityError("reference alias manifest digest collision")
+            self._insert_or_verify(
+                conn,
+                "reference_alias_manifests",
+                "alias_revision",
+                aliases.revision,
+                "canonical_manifest_json",
+                aliases_json,
+                """INSERT INTO reference_alias_manifests
+                   (alias_revision, canonical_manifest_json, evidence_digest, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (aliases.revision, aliases_json, aliases.evidence_digest, captured_at),
+            )
+            alias_row = conn.execute(
+                """SELECT security_id, provider, mic, observed_symbol,
+                          effective_from, effective_to, evidence_source,
+                          evidence_digest, provenance
+                   FROM reference_alias_entries
+                   WHERE alias_revision=?""",
+                (aliases.revision,),
+            ).fetchone()
+            if alias_row is None:
+                conn.execute(
+                    """INSERT INTO reference_alias_entries
+                       (alias_revision, security_id, provider, mic, observed_symbol,
+                        effective_from, effective_to, evidence_source, evidence_digest,
+                        provenance)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (aliases.revision, *alias_values),
+                )
+            elif tuple(str(value) if value is not None else None for value in alias_row) != alias_values:
+                raise sqlite3.IntegrityError("reference alias conflicts with existing entry")
+        return ReferenceIdentityRegistrationV1(
+            identity=identity,
+            alias=alias,
+            identity_registry_revision=registry.revision,
+            alias_revision=aliases.revision,
+        )
+
+    def reference_identity_rows(self) -> list[tuple[str, str, str, str]]:
+        """Return reference identities without mixing them into the roster."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT security_id, mic, provider_symbol, evidence_digest
+                   FROM reference_security_identities ORDER BY security_id"""
+            ).fetchall()
+        return [tuple(str(value) for value in row) for row in rows]  # type: ignore[return-value]
+
+    def reference_alias_entry(self, alias_revision: str) -> AliasEntryV1:
+        """Resolve one immutable reference alias for later run pinning."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT security_id, provider, mic, observed_symbol,
+                          effective_from, effective_to, evidence_source,
+                          evidence_digest, provenance
+                   FROM reference_alias_entries
+                  WHERE alias_revision=?""",
+                (alias_revision,),
+            ).fetchone()
+        if row is None:
+            raise BacktestIntegrityError(
+                "reference alias revision is unavailable",
+                code="reference_alias_missing",
+            )
+        return AliasEntryV1(
+            security_id=str(row[0]),
+            provider=str(row[1]),
+            mic=str(row[2]),
+            observed_symbol=str(row[3]),
+            effective_from=None if row[4] is None else date.fromisoformat(str(row[4])),
+            effective_to=None if row[5] is None else date.fromisoformat(str(row[5])),
+            evidence_source=str(row[6]),
+            evidence_digest=str(row[7]),
+            provenance=cast(Literal["provider_evidence", "manual_override"], str(row[8])),
+        )
+
+    def reference_identity_details(
+        self, security_id: str
+    ) -> tuple[str, str, str, str]:
+        """Resolve one immutable reference identity and its registry revision."""
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT mic, provider_symbol, evidence_digest,
+                          identity_registry_revision
+                     FROM reference_security_identities
+                    WHERE security_id=?""",
+                (security_id,),
+            ).fetchone()
+        if row is None:
+            raise BacktestIntegrityError(
+                "reference identity is unavailable",
+                code="reference_identity_missing",
+            )
+        return tuple(str(value) for value in row)  # type: ignore[return-value]
+
+    def reference_alias_revision(self, security_id: str) -> str:
+        """Resolve the one registered yfinance alias for a reference security."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT alias_revision
+                     FROM reference_alias_entries
+                    WHERE security_id=? AND provider='yfinance'
+                      AND mic='ARCX' AND observed_symbol='SPY'""",
+                (security_id,),
+            ).fetchall()
+        if len(rows) != 1:
+            raise BacktestIntegrityError(
+                "reference alias is unavailable or ambiguous",
+                code="reference_alias_missing",
+            )
+        return str(rows[0][0])
 
     def roster_member_identities(
         self, profile_hash: str
@@ -2696,7 +3051,7 @@ class BacktestRepository:
                     (job_id, parent_job_id, seq, now, now),
                 )
                 conn.execute(
-                    """INSERT INTO preparation_runs(job_id,selection_json,strategy_id,strategy_api_version,strategy_source_digest,parameters_json,start_month,end_month,base_currency,starting_capital) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    """INSERT INTO preparation_runs(job_id,selection_json,strategy_id,strategy_api_version,strategy_source_digest,parameters_json,start_month,end_month,base_currency,starting_capital,regime_benchmark_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         job_id,
                         submission.selection.model_dump_json(),
@@ -2712,6 +3067,9 @@ class BacktestRepository:
                         submission.end_month,
                         submission.base_currency,
                         str(submission.starting_capital),
+                        None
+                        if submission.regime_benchmark is None
+                        else submission.regime_benchmark.model_dump_json(),
                     ),
                 )
                 conn.execute(
@@ -2986,17 +3344,19 @@ class BacktestRepository:
         expected_version: int,
         submission: BacktestSubmissionV1,
         lease: WorkerLeaseFenceV1 | None = None,
+        historical_price_repository: Any | None = None,
     ) -> BacktestEnqueueResultV1:
         from app.services.backtest.run_input_manifest import (
             RunInputManifestV2,
+            RunInputManifestV3,
             read_run_input_manifest,
         )
 
         if (
-            submission.manifest_version != "run_input_manifest.v2"
+            submission.manifest_version not in {"run_input_manifest.v2", "run_input_manifest.v3"}
             or submission.source_preparation_job_id != prep_id
         ):
-            raise StrategyJobConflict("invalid V2 seal")
+            raise StrategyJobConflict("invalid preparation seal")
         now = self._job_now()
         with session(self._connect) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -3024,9 +3384,62 @@ class BacktestRepository:
                 manifest = read_run_input_manifest(submission.canonical_manifest_json)
             except Exception as exc:
                 raise StrategyJobConflict("sealed manifest is invalid") from exc
+            if isinstance(manifest, RunInputManifestV3):
+                pin = manifest.regime_benchmark
+                if historical_price_repository is None:
+                    raise StrategyJobConflict(
+                        "V3 preparation requires a historical price repository"
+                    )
+                identity_row = conn.execute(
+                    """SELECT mic, provider_symbol, identity_registry_revision
+                         FROM reference_security_identities
+                        WHERE security_id=?""",
+                    (pin.security_id,),
+                ).fetchone()
+                alias_row = conn.execute(
+                    """SELECT security_id, provider, mic, observed_symbol
+                         FROM reference_alias_entries
+                        WHERE alias_revision=?""",
+                    (pin.alias_revision,),
+                ).fetchone()
+                if (
+                    identity_row is None
+                    or tuple(str(value) for value in identity_row)
+                    != ("ARCX", "SPY", pin.identity_registry_revision)
+                    or alias_row is None
+                    or tuple(str(value) for value in alias_row)
+                    != (pin.security_id, "yfinance", "ARCX", "SPY")
+                ):
+                    raise StrategyJobConflict("regime benchmark identity is unavailable")
+                try:
+                    price_evidence = historical_price_repository.verify(pin.price_revision)
+                    action_evidence = (
+                        price_evidence
+                        if pin.action_revision == pin.price_revision
+                        else historical_price_repository.verify(pin.action_revision)
+                    )
+                except Exception as exc:
+                    raise StrategyJobConflict(
+                        "regime benchmark evidence is unavailable"
+                    ) from exc
+                for evidence in (price_evidence, action_evidence):
+                    if (
+                        evidence.data_revision != pin.evidence_digest
+                        or evidence.security_id != pin.security_id
+                        or evidence.alias_revision != pin.alias_revision
+                        or evidence.provider != "yfinance"
+                        or evidence.currency != "USD"
+                        or evidence.quote_unit != "USD"
+                        or evidence.exchange_timezone != "America/New_York"
+                        or evidence.start != pin.request_start.isoformat()
+                        or evidence.end != pin.request_end.isoformat()
+                    ):
+                        raise StrategyJobConflict(
+                            "regime benchmark evidence identity mismatch"
+                        )
             s = prep.selection
             ok = (
-                isinstance(manifest, RunInputManifestV2)
+                isinstance(manifest, (RunInputManifestV2, RunInputManifestV3))
                 and submission.strategy_id == prep.strategy_id == manifest.strategy_id
                 and submission.strategy_api_version
                 == prep.strategy_api_version
@@ -3047,6 +3460,9 @@ class BacktestRepository:
                 == prep.starting_capital
                 == manifest.starting_capital
                 and submission.universe_selection == s == manifest.universe_selection
+                and submission.regime_benchmark == prep.regime_benchmark
+                and getattr(manifest, "regime_benchmark", None)
+                == prep.regime_benchmark
                 and manifest.source_preparation_job_id == prep_id
                 and manifest.digest() == submission.run_input_manifest_digest
                 and submission.execution_contract_digest
@@ -3098,7 +3514,7 @@ class BacktestRepository:
                     manifest.execution_contract_digest(),
                     manifest.canonical_json(),
                     now,
-                    "run_input_manifest.v2",
+                    manifest.schema_version,
                 ),
             )
             conn.execute(
@@ -3119,13 +3535,16 @@ class BacktestRepository:
                     str(manifest.starting_capital),
                     manifest.digest(),
                     manifest.execution_contract_digest(),
-                    "run_input_manifest.v2",
+                    manifest.schema_version,
                     s.run_universe_digest,
                     prep_id,
                     s.model_dump_json(),
                     now,
                 ),
             )
+            if isinstance(manifest, RunInputManifestV3):
+                for revision in {manifest.regime_benchmark.price_revision, manifest.regime_benchmark.action_revision}:
+                    historical_price_repository.pin("backtest", cid, revision)
             fence = _lease_fence_params(lease)
             cursor = conn.execute(
                 f"UPDATE strategy_jobs SET status='complete',claim_token=NULL,current_stage=NULL,owner_instance_id=NULL,lease_generation=NULL,status_version=status_version+1,updated_at=? WHERE id=? AND claim_token=? AND status_version=? {_LEASE_FENCE_SQL}",
@@ -3453,7 +3872,7 @@ class BacktestRepository:
         left_selection = left_result.universe_selection
         right_selection = right_result.universe_selection
         if (
-            left_result.manifest_version == "run_input_manifest.v2"
+            left_result.manifest_version in {"run_input_manifest.v2", "run_input_manifest.v3"}
             and left_selection is not None
             and right_selection is not None
             and left_selection.run_universe_digest
@@ -3464,6 +3883,18 @@ class BacktestRepository:
                 ComparisonIneligibleReason.EVIDENCE_DIGEST_MISMATCH,
                 "Backtests use different selected universes",
             )  # type: ignore[union-attr]
+        if left_result.manifest_version == "run_input_manifest.v3":
+            if (
+                left_result.regime_benchmark is None
+                or right_result.regime_benchmark is None
+                or left_result.regime_benchmark.digest()
+                != right_result.regime_benchmark.digest()
+            ):
+                return ComparisonEligibilityV1(
+                    False,
+                    ComparisonIneligibleReason.EVIDENCE_DIGEST_MISMATCH,
+                    "Backtests use different regime benchmark evidence",
+                )
         return self._compare_eligible_results(left_result, right_result)
 
     def _comparison_job_reason(self, run_id: str) -> ComparisonIneligibleReason | None:
@@ -5293,6 +5724,7 @@ class BacktestRepository:
             manifest_version=strategy_run.manifest_version,
             universe_selection=strategy_run.universe_selection,
             source_preparation_job_id=strategy_run.source_preparation_job_id,
+            regime_benchmark=strategy_run.regime_benchmark,
             initial_entry_selection=initial_entry_selection,
         )
 
@@ -5373,10 +5805,9 @@ class BacktestRepository:
                     row[13]
                 ) or not parsed.accepts_stored_digest(str(row[11])):
                     raise ValueError
-                if (
-                    str(row[13]) == "run_input_manifest.v2"
-                    and getattr(parsed, "universe_selection", None) != selection
-                ):
+                if str(row[13]) in {"run_input_manifest.v2", "run_input_manifest.v3"} and getattr(
+                    parsed, "universe_selection", None
+                ) != selection:
                     raise ValueError
             except Exception as exc:
                 raise BacktestIntegrityError(
@@ -5399,6 +5830,9 @@ class BacktestRepository:
             manifest_version=str(row[13]),
             universe_selection=selection,
             source_preparation_job_id=None if row[15] is None else str(row[15]),
+            regime_benchmark=getattr(parsed, "regime_benchmark", None)
+            if str(row[13]) == "run_input_manifest.v3"
+            else None,
         )
 
     @staticmethod
@@ -5423,11 +5857,16 @@ class BacktestRepository:
             run_input_manifest_digest=row.run_input_manifest_digest,
             execution_contract_digest=row.execution_contract_digest,
             manifest_version=cast(
-                Literal["run_input_manifest.v1", "run_input_manifest.v2"],
+                Literal[
+                    "run_input_manifest.v1",
+                    "run_input_manifest.v2",
+                    "run_input_manifest.v3",
+                ],
                 row.manifest_version,
             ),
             universe_selection=row.universe_selection,
             source_preparation_job_id=row.source_preparation_job_id,
+            regime_benchmark=row.regime_benchmark,
         )
 
     @classmethod
@@ -5487,8 +5926,10 @@ class BacktestRepository:
     def _load_preparation(
         self, conn: sqlite3.Connection, job_id: str
     ) -> PreparationRunV1:
+        from app.services.backtest.strategy_job import RegimeBenchmarkPinV1
+
         row = conn.execute(
-            "SELECT selection_json,strategy_id,strategy_api_version,strategy_source_digest,parameters_json,start_month,end_month,base_currency,starting_capital FROM preparation_runs WHERE job_id=?",
+            "SELECT selection_json,strategy_id,strategy_api_version,strategy_source_digest,parameters_json,start_month,end_month,base_currency,starting_capital,regime_benchmark_json FROM preparation_runs WHERE job_id=?",
             (job_id,),
         ).fetchone()
         if row is None:
@@ -5507,6 +5948,11 @@ class BacktestRepository:
                 end_month=str(row[6]),
                 base_currency=cast(Literal["GBP", "USD"], str(row[7])),
                 starting_capital=Decimal(str(row[8])),
+                regime_benchmark=(
+                    None
+                    if row[9] is None
+                    else RegimeBenchmarkPinV1.model_validate_json(str(row[9]))
+                ),
             )
         except Exception as exc:
             raise BacktestIntegrityError(

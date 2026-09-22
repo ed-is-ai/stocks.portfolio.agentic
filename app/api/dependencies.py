@@ -15,7 +15,7 @@ from fastapi import Depends
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.core import config
 from app.core.config import ALERTS_DB, TRADES_DB
-from app.integrations.fx_history import ChainedFxQuoteFetcher
+from app.integrations.fx_history import BankOfEnglandFxSeriesFetcher, ChainedFxQuoteFetcher
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.notifications_repo import NotificationsRepository
@@ -143,16 +143,18 @@ def get_fx_history_fetcher() -> ChainedFxQuoteFetcher:
 
 
 @lru_cache
-def get_fx_series_fetcher() -> YFinanceFxSeriesFetcher:
-    """Return the shared yfinance-backed GBPUSD=X daily series fetcher (#459).
+def get_fx_series_fetcher() -> BankOfEnglandFxSeriesFetcher:
+    """Return the shared Bank-of-England-backed GBPUSD=X series fetcher.
 
     Backs ``BacktestLaunchService``'s ``fx_pinning`` stage: the daily rate
     series spanning the Run window is ingested into the historical price
     cache as the ``fx:GBPUSD=X`` pseudo-security and its revision is what
     the manifest pins -- one process-wide instance, matching the other
-    cached providers in this module.
+    cached providers in this module. BoE's spot series covers back to
+    1975, unlike Yahoo's FX history (2003-12 onward), so it is the sole
+    provider rather than a fallback (#gh-boe-fx).
     """
-    return YFinanceFxSeriesFetcher()
+    return BankOfEnglandFxSeriesFetcher()
 
 
 @lru_cache
@@ -248,7 +250,15 @@ def get_bootstrap_service() -> StrategyBootstrapService:
 @lru_cache
 def get_readiness_service() -> StrategyReadinessService:
     """Return the shared readiness/diagnostics service (Story 4.4)."""
-    return StrategyReadinessService(get_backtest_repository())
+    from app.services.backtest.benchmark_evidence import BenchmarkEvidenceService
+
+    return StrategyReadinessService(
+        get_backtest_repository(),
+        benchmark_evidence=BenchmarkEvidenceService(
+            backtest_repository=get_backtest_repository(),
+            price_repository=get_historical_price_repository(),
+        ),
+    )
 
 
 @lru_cache

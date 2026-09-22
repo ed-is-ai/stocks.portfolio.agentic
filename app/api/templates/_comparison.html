@@ -324,6 +324,10 @@
       <p class="text-muted">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>
       {% endif %}
       {% endfor %}
+      {% if a.regime_benchmark %}
+      <p class="mt-2 mb-0">Regime benchmark (benchmark-only): <code>{{ a.regime_benchmark.security_id }}</code></p>
+      <p class="text-break mb-0">Evidence: {{ a.regime_benchmark.evidence_digest }}</p>
+      {% endif %}
     </div>
     <div class="col-md-6">
       <h3 class="h6">Result B</h3>
@@ -337,6 +341,10 @@
       <p class="text-muted">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>
       {% endif %}
       {% endfor %}
+      {% if b.regime_benchmark %}
+      <p class="mt-2 mb-0">Regime benchmark (benchmark-only): <code>{{ b.regime_benchmark.security_id }}</code></p>
+      <p class="text-break mb-0">Evidence: {{ b.regime_benchmark.evidence_digest }}</p>
+      {% endif %}
     </div>
   </div>
 

@@ -335,6 +335,8 @@ def test_readiness_page_returns_200(setup_env_no_profile) -> None:
     response = client.get("/strategy-manager/readiness")
     assert response.status_code == 200
     assert "Historical data check" in response.text
+    assert "Optional regime check" in response.text
+    assert "never added to the trade universe" in response.text
 
 
 def test_readiness_page_shows_missing_prerequisites(

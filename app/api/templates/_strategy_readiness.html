@@ -69,6 +69,26 @@
     </tbody>
   </table>
 
+  {% set benchmark_state_labels = {
+    'ready': 'Ready', 'missing': 'Not ready', 'unavailable': 'Not checked',
+    'integrity_error': 'Data error',
+  } %}
+  {% set benchmark_state_class = {
+    'ready': 'status-ok', 'missing': 'status-skip',
+    'unavailable': 'sm-muted-badge', 'integrity_error': 'status-error',
+  } %}
+  <section class="mt-4" aria-labelledby="regime-benchmark-heading">
+    <h2 id="regime-benchmark-heading" class="h5">Optional regime check</h2>
+    <p class="text-muted mb-2">SPY is an optional advisory check for strategies that enable “Block buys in downtrend”, using the planned 200-session moving average. Launch validation rechecks the selected strategy parameters. It is never added to the trade universe.</p>
+    <dl class="row mb-0 mono-num">
+      <dt class="col-sm-3">SPY regime reference</dt>
+      <dd class="col-sm-9">
+        <span class="badge-status {{ benchmark_state_class.get(regime_benchmark.state, 'sm-muted-badge') }}">{{ benchmark_state_labels.get(regime_benchmark.state, regime_benchmark.state|replace('_', ' ')|title) }}</span>
+        <span class="ms-2">{{ regime_benchmark.reason }}</span>
+      </dd>
+    </dl>
+  </section>
+
   <details id="advanced" class="mt-4"{% if open_advanced %} open{% endif %}>
     <summary class="h5 d-inline">Advanced / troubleshooting</summary>
     {% if readiness.recent_failures %}

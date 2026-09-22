@@ -58,6 +58,25 @@ class _View:
         return None
 
 
+class _ReferenceView(_View):
+    def __init__(self, closes: Sequence[object]) -> None:
+        super().__init__(closes)
+        self.reference_reads: list[str] = []
+
+    def regime_benchmark_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        del limit, columns
+        self.reference_reads.append(security_id)
+        if security_id != BENCHMARK:
+            raise LookupError("unrelated reference")
+        return self._history.copy()
+
+
 def _params(**overrides: JsonScalar) -> StrategyParameters:
     base: dict[str, JsonScalar] = {
         BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM: True,
@@ -129,6 +148,24 @@ def test_widens_until_older_finite_closes_are_visible() -> None:
 def test_benchmark_not_in_universe_fails_closed() -> None:
     view = _View([10.0, 10.0, 40.0])
     assert entry_signals_permitted(view, _params(), ("sec-aapl",)) is False
+
+
+def test_pinned_reference_can_gate_without_being_tradable() -> None:
+    view = _ReferenceView([10.0, 10.0, 40.0])
+    assert entry_signals_permitted(view, _params(), ("sec-aapl",)) is True
+    assert view.reference_reads == [BENCHMARK]
+
+
+def test_pinned_reference_surface_rejects_an_unrelated_id() -> None:
+    view = _ReferenceView([10.0, 10.0, 40.0])
+    assert (
+        entry_signals_permitted(
+            view,
+            _params(**{REGIME_FILTER_BENCHMARK_PARAM: "sec-other"}),
+            ("sec-aapl",),
+        )
+        is False
+    )
 
 
 def test_benchmark_empty_or_non_str_fails_closed() -> None:

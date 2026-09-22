@@ -6,7 +6,7 @@ diagnostics bounding, empty states, and the read-only guarantee.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -15,6 +15,7 @@ from typing import cast
 
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.historical_price_repo import EvidenceMissingError
 from app.services.backtest.canonical_manifest import manifest_digest
 from app.services.backtest.historical_data_qualification import (
     FIXTURE_CONTRACT_VERSION,
@@ -32,6 +33,7 @@ from app.services.backtest.snapshot_profile import SnapshotProfileV1
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
+from app.services.backtest.benchmark_evidence import BenchmarkEvidenceService
 from app.services.backtest.source_manifest import detector_source_manifests
 from app.services.backtest.trading_calendar import TradingCalendar
 import json
@@ -485,3 +487,103 @@ def test_diagnostics_includes_profile_delta(tmp_path: Path) -> None:
     diagnostics = service.diagnostics(empty_readiness)  # type: ignore[arg-type]
 
     assert diagnostics["profile_delta"] == service.profile_delta()
+
+
+def test_regime_benchmark_status_is_optional_and_ready_when_reference_covers_profile(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    repo.active_snapshot_profile = lambda: SimpleNamespace(
+        profile_hash=PROFILE_HASH, activation_seq=20
+    )
+    repo.snapshot_coverage = lambda _profile_hash: SimpleNamespace(
+        snapshot_count=320, earliest_month="2000-01", latest_month="2026-08"
+    )
+    repo.reference_identity_rows = lambda: [("spy-ref", "ARCX", "SPY", "e" * 64)]
+
+    class _Benchmark:
+        def resolve_existing(self, security_id, *, start, end, ma_length):
+            assert (security_id, start.isoformat(), end.isoformat(), ma_length) == (
+                "spy-ref",
+                "2000-01-01",
+                "2026-09-01",
+                200,
+            )
+            return SimpleNamespace(
+                request_start=date(1999, 3, 22), request_end=date(2026, 9, 1)
+            )
+
+    service = StrategyReadinessService(
+        repo, clock=NOW, benchmark_evidence=cast(BenchmarkEvidenceService, _Benchmark())
+    )
+    status = service.regime_benchmark_status()
+
+    assert status["state"] == "ready"
+    assert "200-session warm-up" in status["reason"]
+    assert status["required_for"] == "regime_filter_enabled=true"
+    assert [item["name"] for item in service.diagnostics()["prerequisites"]] == [
+        "qualification",
+        "roster",
+        "active_profile",
+        "coverage",
+        "discovery",
+    ]
+
+
+def test_regime_benchmark_status_does_not_make_disabled_regime_a_global_gate(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    repo.active_snapshot_profile = lambda: SimpleNamespace(profile_hash=PROFILE_HASH)
+    repo.snapshot_coverage = lambda _profile_hash: SimpleNamespace(
+        snapshot_count=320, earliest_month="2000-01", latest_month="2026-08"
+    )
+    repo.reference_identity_rows = lambda: []
+    service = StrategyReadinessService(repo, clock=NOW)
+
+    status = service.regime_benchmark_status()
+
+    assert status["state"] == "unavailable"
+    assert status["required_for"] == "regime_filter_enabled=true"
+
+
+def test_regime_benchmark_status_reports_missing_evidence_without_raising(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    repo.active_snapshot_profile = lambda: SimpleNamespace(profile_hash=PROFILE_HASH)
+    repo.snapshot_coverage = lambda _profile_hash: SimpleNamespace(
+        snapshot_count=320, earliest_month="2000-01", latest_month="2026-08"
+    )
+    repo.reference_identity_rows = lambda: [("spy-ref", "ARCX", "SPY", "e" * 64)]
+
+    class _Benchmark:
+        def resolve_existing(self, *_args, **_kwargs):
+            raise EvidenceMissingError("registered benchmark evidence is missing")
+
+    service = StrategyReadinessService(
+        repo, clock=NOW, benchmark_evidence=cast(BenchmarkEvidenceService, _Benchmark())
+    )
+
+    status = service.regime_benchmark_status()
+
+    assert status["state"] == "missing"
+    assert status["reason"] == "registered benchmark evidence is missing"
+
+
+def test_regime_benchmark_status_reports_invalid_coverage_bounds(
+    tmp_path: Path,
+) -> None:
+    repo = _empty_repo(tmp_path / "backtest.db")
+    repo.active_snapshot_profile = lambda: SimpleNamespace(profile_hash=PROFILE_HASH)
+    repo.snapshot_coverage = lambda _profile_hash: SimpleNamespace(snapshot_count=1)
+    repo.reference_identity_rows = lambda: [("spy-ref", "ARCX", "SPY", "e" * 64)]
+
+    service = StrategyReadinessService(
+        repo, clock=NOW, benchmark_evidence=cast(BenchmarkEvidenceService, object())
+    )
+
+    status = service.regime_benchmark_status()
+
+    assert status["state"] == "integrity_error"
+    assert status["reason"] == "Prepared-month coverage has no valid bounds"

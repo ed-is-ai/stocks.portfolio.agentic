@@ -208,3 +208,36 @@ The portfolio is maintained through quarterly SIPP (Self-Invested Personal Pensi
 - Verify the latest-dated Running Balance in the CSV matches your account statement (neither row order nor import order matters — the balance is taken from the newest date within a file, #158, and importing an older file after a newer one won't regress it, #160)
 - Check for duplicate entries in cash_flows table (reference must be unique)
 - Ensure no data corruption in CSV (look for hidden characters)
+
+## Historical Data Rebuild Guardrail
+
+`yfinance_ingestion_version` is a content hash computed by
+`yfinance_ingestion_source_manifest()` in
+`app/services/backtest/source_manifest.py`. If this digest changes between
+runs, `adoption_gate_failures()` (`app/services/backtest/snapshot_profile.py`)
+forces a full historical data **rebuild from scratch** for every strategy
+backtest month — no month can adopt cached data, even ones already
+committed. For a full 2000-2026 range across the full security universe,
+this can take multiple days of single-worker compute.
+
+Before making any of the following changes, **stop and ask the user for
+confirmation first**, since each one silently invalidates every previously
+computed historical snapshot:
+
+1. Editing any of these 7 files (even a comment/docstring counts, since the
+   manifest hashes their raw source bytes):
+   - `app/agents/scanner/scanner_agent.py`
+   - `app/services/backtest/canonical_manifest.py`
+   - `app/services/backtest/historical_data_qualification.py`
+   - `app/services/backtest/historical_price_evidence.py`
+   - `app/services/backtest/bau_capture_coordinator.py`
+   - `app/services/backtest/bau_run_envelope.py`
+   - `app/services/backtest/source_manifest.py`
+2. Changing `CANONICALIZER_VERSION` or `REQUEST_CONTRACT_VERSION`.
+3. Upgrading/adding `pandas` or `yfinance` via `uv add`/`uv add --upgrade-package`.
+4. Changing the pinned Python runtime (e.g. editing `.python-version`, or
+   any change that alters the interpreter's major.minor version).
+
+If asked to make one of these changes, warn the user that it will force a
+full historical rebuild (multi-day cost) and get explicit confirmation
+before proceeding.

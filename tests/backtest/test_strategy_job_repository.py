@@ -21,6 +21,7 @@ from app.services.backtest.strategy_job import (
     JobFailureCode,
     PreparationStage,
     PreparationSubmissionV1,
+    RegimeBenchmarkPinV1,
     RunUniverseSelectionV1,
     STAGE_VALUES,
     StrategyJobConflict,
@@ -34,6 +35,7 @@ from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
     build_run_input_manifest_v2,
+    build_run_input_manifest_v3,
 )
 from tests.backtest.test_run_input_manifest import _manifest
 from app.services.backtest.historical_data_qualification import (
@@ -411,6 +413,161 @@ def _claimed_v2(repo: BacktestRepository):
     return accepted, claim, sub
 
 
+def _benchmark_pin() -> RegimeBenchmarkPinV1:
+    return RegimeBenchmarkPinV1(
+        security_id="spy-reference",
+        identity_registry_revision="3" * 64,
+        alias_revision="4" * 64,
+        price_revision="5" * 64,
+        action_revision="5" * 64,
+        evidence_digest="5" * 64,
+        request_start=date(1999, 1, 1),
+        request_end=date(2026, 9, 1),
+        session_policy="canonical_exchange_sessions_v2",
+        calendar_mic="XNYS",
+        calendar_session_table_digest="6" * 64,
+        price_plane_policy_version="HistoricalMarketPlanesV1",
+    )
+
+
+class _ReferencePriceRepository:
+    def __init__(self) -> None:
+        self.pins: list[tuple[str, str, str]] = []
+
+    def verify(self, data_revision: str):
+        if data_revision != "5" * 64:
+            raise KeyError(data_revision)
+        return type(
+            "VerifiedReference",
+            (),
+            {
+                "data_revision": data_revision,
+                "security_id": "spy-reference",
+                "alias_revision": "4" * 64,
+                "provider": "yfinance",
+                "currency": "USD",
+                "quote_unit": "USD",
+                "exchange_timezone": "America/New_York",
+                "start": "1999-01-01",
+                "end": "2026-09-01",
+            },
+        )()
+
+    def pin(self, consumer_type: str, consumer_id: str, data_revision: str) -> None:
+        self.pins.append((consumer_type, consumer_id, data_revision))
+
+
+def _seed_reference_pin(path: Path) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """INSERT INTO reference_identity_registry_revisions
+               (revision_digest, canonical_manifest_json, evidence_digest, created_at)
+               VALUES (?, ?, ?, ?)""",
+            ("3" * 64, '{"identities":[]}', "7" * 64, NOW.isoformat()),
+        )
+        conn.execute(
+            """INSERT INTO reference_security_identities
+               (security_id, mic, provider_symbol, evidence_digest,
+                identity_registry_revision, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                "spy-reference",
+                "ARCX",
+                "SPY",
+                "8" * 64,
+                "3" * 64,
+                NOW.isoformat(),
+            ),
+        )
+        conn.execute(
+            """INSERT INTO reference_alias_manifests
+               (alias_revision, canonical_manifest_json, evidence_digest, created_at)
+               VALUES (?, ?, ?, ?)""",
+            ("4" * 64, '{"entries":[]}', "9" * 64, NOW.isoformat()),
+        )
+        conn.execute(
+            """INSERT INTO reference_alias_entries
+               (alias_revision, security_id, provider, mic, observed_symbol,
+                effective_from, effective_to, evidence_source, evidence_digest,
+                provenance)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                "4" * 64,
+                "spy-reference",
+                "yfinance",
+                "ARCX",
+                "SPY",
+                "1999-01-01",
+                None,
+                "fixture",
+                "a" * 64,
+                "manual_override",
+            ),
+        )
+
+
+def _claimed_v3(repo: BacktestRepository):
+    pin = _benchmark_pin()
+    base_submission = _prep("v3")
+    base_submission = base_submission.model_copy(
+        update={
+            "parameters": {
+                **base_submission.parameters,
+                "regime_filter_enabled": True,
+                "regime_filter_benchmark_security_id": pin.security_id,
+                "regime_filter_ma_length": 200,
+            },
+            "regime_benchmark": pin,
+        }
+    )
+    accepted = repo.create_preparation_job(base_submission)
+    claim = repo.claim_next_strategy_job()
+    assert claim
+    s = accepted.preparation.selection
+    assert s
+    base = _manifest(
+        strategy_id="momentum_v1",
+        strategy_api_version=1,
+        strategy_source_digest=BACKTEST_STRATEGY_SOURCE_DIGEST,
+        parameters=dict(accepted.preparation.parameters),
+        profile_hash=PROFILE_HASH,
+        start_month="2026-05",
+        end_month="2026-05",
+        ordered_month_digest=BACKTEST_ORDERED_MONTH_DIGEST,
+        base_currency="USD",
+        securities=(
+            PinnedSecurityEvidenceV1(
+                security_id="sec-001", price_revision="7" * 64, action_revision="7" * 64
+            ),
+        ),
+    )
+    m = build_run_input_manifest_v3(
+        base,
+        selection=s,
+        source_preparation_job_id=accepted.job.id,
+        regime_benchmark=pin,
+    )
+    sub = BacktestSubmissionV1(
+        strategy_id=m.strategy_id,
+        strategy_api_version=m.strategy_api_version,
+        strategy_source_digest=m.strategy_source_digest,
+        parameters=dict(m.parameters),
+        profile_hash=m.profile_hash,
+        start_month=m.start_month,
+        end_month=m.end_month,
+        base_currency=m.base_currency,
+        starting_capital=m.starting_capital,
+        run_input_manifest_digest=m.digest(),
+        execution_contract_digest=m.execution_contract_digest(),
+        canonical_manifest_json=m.canonical_json(),
+        manifest_version="run_input_manifest.v3",
+        universe_selection=s,
+        source_preparation_job_id=accepted.job.id,
+        regime_benchmark=pin,
+    )
+    return accepted, claim, sub
+
+
 def test_preparation_replay_divergence_and_deleted_target(tmp_path: Path) -> None:
     path = tmp_path / "prep.db"
     repo = _repo(path)
@@ -600,6 +757,40 @@ def test_selected_only_seal_result_restart_and_retry(tmp_path: Path) -> None:
         and restart.backtest.universe_selection == s.universe_selection
         and restart.backtest.source_preparation_job_id is None
     )
+
+
+def test_v3_seal_persists_reference_pin_and_replays_it(tmp_path: Path) -> None:
+    path = tmp_path / "v3.db"
+    repo = _repo(path)
+    _seed_selected_member(path)
+    _patch_ready(repo)
+    _seed_reference_pin(path)
+    accepted, claim, submission = _claimed_v3(repo)
+    prices = _ReferencePriceRepository()
+
+    child = repo.seal_preparation_and_create_backtest(
+        accepted.job.id,
+        claim.claim_token,
+        expected_version=claim.job.status_version,
+        submission=submission,
+        historical_price_repository=prices,
+    )
+
+    assert child.backtest.manifest_version == "run_input_manifest.v3"
+    assert child.backtest.regime_benchmark == _benchmark_pin()
+    assert len(prices.pins) == 1
+    assert repo.preparation_run(accepted.job.id).regime_benchmark == _benchmark_pin()
+    assert repo.run_input_manifest_json(child.backtest.run_input_manifest_digest)
+    cancelled = repo.request_strategy_job_cancellation(
+        child.job.id, expected_version=child.job.status_version
+    )
+    restart = repo.restart_backtest_job(
+        child.job.id,
+        expected_version=cancelled.status_version,
+        idempotency_key="v3-restart",
+    )
+    assert restart.backtest.manifest_version == "run_input_manifest.v3"
+    assert restart.backtest.regime_benchmark == _benchmark_pin()
 
 
 def test_malformed_preparation_and_run_selection_are_wrapped(tmp_path: Path) -> None:

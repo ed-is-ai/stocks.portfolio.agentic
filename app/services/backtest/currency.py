@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, DecimalException, InvalidOperation
 
+from app.integrations.fx_history import BOE_FX_SERIES_REQUEST_CONTRACT_VERSION
 from app.repositories.historical_price_repo import StoredHistoricalEvidence
 from app.services.backtest.market_planes import (
     MarketDataPolicyError,
@@ -18,6 +19,25 @@ from app.services.backtest.market_planes import (
 
 SUPPORTED_CURRENCIES = frozenset({"GBP", "USD"})
 CURRENCY_CONVERSION_POLICY_VERSION = "CurrencyConversionPolicyV1"
+
+#: FX evidence providers whose GBPUSD=X series ``_fx_closes`` will accept.
+#: Each has its own request-contract validation, honest to how it was
+#: actually fetched -- never a shared/fabricated shape (#gh-boe-fx).
+_SUPPORTED_FX_PROVIDERS = frozenset({"yfinance", "bank_of_england"})
+
+
+def _validate_fx_request_contract(evidence: StoredHistoricalEvidence) -> None:
+    """Dispatch to the request-contract check for ``evidence``'s provider."""
+    if evidence.provider == "bank_of_england":
+        if evidence.request_contract_version != BOE_FX_SERIES_REQUEST_CONTRACT_VERSION:
+            raise CurrencyPolicyError(
+                "fx_ambiguous", "Bank of England FX evidence contract is incompatible."
+            )
+        return
+    try:
+        validate_provider_native_request_contract(evidence)
+    except MarketDataPolicyError as exc:
+        raise CurrencyPolicyError("fx_ambiguous", exc.detail) from exc
 
 
 class CurrencyPolicyError(ValueError):
@@ -97,7 +117,7 @@ def _fx_closes(
     evidence: StoredHistoricalEvidence,
 ) -> tuple[tuple[date, Decimal], ...]:
     if (
-        evidence.provider != "yfinance"
+        evidence.provider not in _SUPPORTED_FX_PROVIDERS
         or evidence.requested_symbol != "GBPUSD=X"
         or evidence.observed_symbol != "GBPUSD=X"
         or evidence.currency != "USD"
@@ -109,10 +129,7 @@ def _fx_closes(
         raise CurrencyPolicyError(
             "fx_ambiguous", "FX evidence is not exact USD-per-GBP evidence."
         )
-    try:
-        validate_provider_native_request_contract(evidence)
-    except MarketDataPolicyError as exc:
-        raise CurrencyPolicyError("fx_ambiguous", exc.detail) from exc
+    _validate_fx_request_contract(evidence)
     try:
         start = date.fromisoformat(evidence.start)
         end = date.fromisoformat(evidence.end)

@@ -1,0 +1,652 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Agents.Stocks — AI Desk concept</title>
+  <style>
+    :root {
+      --ink: #111418;
+      --ink-2: #1c2126;
+      --paper: #f8f9fa;
+      --card: #ffffff;
+      --rule: #dfe3e8;
+      --muted: #5b6470;
+      --blue: #1d4ed8;
+      --blue-bg: #e2e9fb;
+      --green: #0a7d34;
+      --green-bg: #e3f3e8;
+      --red: #c81e1e;
+      --red-bg: #fbe6e6;
+      --amber: #8a4708;
+      --amber-bg: #f7ecd8;
+      --focus: #2563eb;
+      --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html { background: var(--paper); scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+      font-family: var(--font);
+      font-size: 14px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::selection { color: #fff; background: var(--blue); }
+    * { scrollbar-color: #9aa3ad var(--paper); scrollbar-width: thin; }
+    button, input, select { font: inherit; }
+    button, a, input, select { -webkit-tap-highlight-color: transparent; }
+    button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+    button { color: inherit; }
+
+    .skip-link {
+      position: fixed;
+      z-index: 50;
+      top: .5rem;
+      left: .5rem;
+      padding: .5rem .75rem;
+      color: #fff;
+      background: var(--ink);
+      transform: translateY(-160%);
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    .masthead {
+      min-height: 54px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: .65rem 1rem;
+      color: #fff;
+      background: var(--ink);
+      border-bottom: 1px solid #30363d;
+    }
+    .brand { display: flex; align-items: baseline; gap: .7rem; min-width: 0; }
+    .brand strong { font-size: 1.14rem; letter-spacing: -.02em; }
+    .brand span { color: #aeb6bf; font-size: .76rem; }
+    .system-state { display: flex; align-items: center; gap: .45rem; font-size: .76rem; color: #dce1e6; }
+    .system-state::before {
+      content: "";
+      width: .55rem;
+      height: .55rem;
+      background: #4ade80;
+      border: 1px solid #111418;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 0;
+      overflow-x: auto;
+      padding: 0 1rem;
+      background: #fff;
+      border-bottom: 1px solid var(--rule);
+    }
+    .tabs a {
+      flex: 0 0 auto;
+      padding: .78rem .7rem .7rem;
+      color: var(--muted);
+      border-bottom: 3px solid transparent;
+      font-size: .84rem;
+      font-weight: 600;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .tabs a:hover { color: var(--ink); }
+    .tabs a.active { color: var(--ink); border-bottom-color: var(--ink); }
+
+    .page {
+      width: min(100%, 1600px);
+      margin: 0 auto;
+      padding: 1.1rem 1rem 2rem;
+    }
+    .page-heading {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 1.5rem;
+      margin-bottom: 1rem;
+    }
+    .page-heading h1 { margin: 0; font-size: 1.75rem; line-height: 1.15; letter-spacing: -.025em; }
+    .page-heading p { max-width: 68ch; margin: .35rem 0 0; color: var(--muted); }
+    .concept-mark {
+      flex: 0 0 auto;
+      padding: .28rem .45rem;
+      color: var(--muted);
+      background: #fff;
+      border: 1px solid var(--rule);
+      font-size: .68rem;
+      font-weight: 700;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+    }
+
+    .context-bar {
+      display: flex;
+      align-items: center;
+      gap: .7rem;
+      flex-wrap: wrap;
+      min-height: 44px;
+      padding: .55rem .7rem;
+      background: #fff;
+      border: 1px solid var(--rule);
+      border-bottom: 0;
+    }
+    .field { display: inline-flex; align-items: center; gap: .4rem; }
+    .field label { color: var(--muted); font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .045em; }
+    select, input {
+      min-height: 34px;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid #b9c0c8;
+      border-radius: 4px;
+      padding: .38rem .5rem;
+    }
+    .context-note { margin-left: auto; color: var(--muted); font-size: .76rem; }
+    .safe { color: var(--green); font-weight: 700; }
+
+    .desk {
+      display: grid;
+      grid-template-columns: 225px minmax(480px, 1fr) minmax(310px, 370px);
+      min-height: 690px;
+      background: #fff;
+      border: 1px solid var(--rule);
+    }
+    .rail, .workspace, .inspector { min-width: 0; }
+    .rail { border-right: 1px solid var(--rule); background: #f5f6f7; }
+    .rail h2, .workspace h2, .inspector h2 { margin: 0; font-size: 1rem; }
+    .rail-header, .workspace-header, .inspector-header {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: .5rem;
+      padding: .8rem .9rem;
+      border-bottom: 1px solid var(--rule);
+    }
+    .rail-header span, .workspace-header span, .inspector-header span { color: var(--muted); font-size: .72rem; }
+
+    .workflow-list { margin: 0; padding: .35rem 0; list-style: none; }
+    .workflow-button {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 4px minmax(0, 1fr);
+      gap: .7rem;
+      align-items: stretch;
+      padding: 0;
+      text-align: left;
+      background: transparent;
+      border: 0;
+      cursor: pointer;
+    }
+    .workflow-button:hover { background: #eceff2; }
+    .workflow-button[aria-current="true"] { background: #fff; }
+    .workflow-bar { background: #aab1b9; }
+    .workflow-button[aria-current="true"] .workflow-bar { background: var(--ink); }
+    .workflow-copy { display: block; padding: .68rem .7rem .68rem 0; min-width: 0; }
+    .workflow-name { display: block; font-weight: 650; line-height: 1.25; }
+    .workflow-meta { display: flex; justify-content: space-between; gap: .5rem; margin-top: .22rem; color: var(--muted); font-size: .69rem; }
+    .workflow-state { font-weight: 700; }
+    .workflow-state.live { color: var(--green); }
+
+    .rail-foot {
+      margin: .7rem;
+      padding: .7rem;
+      color: var(--muted);
+      background: #fff;
+      border: 1px solid var(--rule);
+      font-size: .72rem;
+    }
+    .rail-foot strong { display: block; margin-bottom: .2rem; color: var(--ink); }
+
+    .workspace { border-right: 1px solid var(--rule); }
+    .workspace-header .summary-counts { display: flex; gap: .7rem; }
+    .count { font-variant-numeric: tabular-nums; }
+    .count strong { color: var(--ink); }
+    .count.urgent strong { color: var(--red); }
+    .count.warning strong { color: var(--amber); }
+
+    .queue { margin: 0; padding: 0; list-style: none; }
+    .queue-item {
+      width: 100%;
+      display: grid;
+      grid-template-columns: 72px minmax(0, 1fr) 112px;
+      gap: .8rem;
+      align-items: center;
+      min-height: 88px;
+      padding: .85rem .9rem;
+      text-align: left;
+      background: #fff;
+      border: 0;
+      border-bottom: 1px solid var(--rule);
+      cursor: pointer;
+    }
+    .queue-item:hover { background: #f7f8fa; }
+    .queue-item[aria-selected="true"] { background: var(--blue-bg); box-shadow: inset 3px 0 0 var(--blue); }
+    .priority { font-size: .68rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+    .priority.risk { color: var(--red); }
+    .priority.review { color: var(--amber); }
+    .priority.info { color: var(--blue); }
+    .priority.ready { color: var(--green); }
+    .queue-title { display: block; font-size: .91rem; font-weight: 700; }
+    .queue-summary { display: block; margin-top: .2rem; color: var(--muted); font-size: .77rem; line-height: 1.35; }
+    .queue-meta { text-align: right; color: var(--muted); font-size: .7rem; }
+    .queue-meta strong { display: block; color: var(--ink); font-size: .75rem; }
+
+    .portfolio-strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      margin: 1rem .9rem;
+      background: var(--rule);
+      border: 1px solid var(--rule);
+    }
+    .metric { min-width: 0; padding: .7rem; background: #fff; }
+    .metric span { display: block; color: var(--muted); font-size: .67rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+    .metric strong { display: block; margin-top: .22rem; font-size: 1rem; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+    .metric .negative { color: var(--red); }
+
+    .workspace-note {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      margin: 0 .9rem 1rem;
+      padding-top: .8rem;
+      color: var(--muted);
+      border-top: 1px solid var(--rule);
+      font-size: .72rem;
+    }
+
+    .inspector { background: #fbfbfc; }
+    .inspector-header .status-label { color: var(--green); font-weight: 700; }
+    .detail { padding: 1rem; }
+    .detail h3 { margin: 0; font-size: 1.18rem; line-height: 1.25; letter-spacing: -.015em; }
+    .detail .lead { margin: .45rem 0 .9rem; color: #303943; }
+    .signal-line { display: flex; gap: .45rem; align-items: center; margin-bottom: .8rem; }
+    .signal-tag {
+      padding: .2rem .38rem;
+      color: var(--red);
+      background: var(--red-bg);
+      border: 1px solid #e9baba;
+      font-size: .68rem;
+      font-weight: 800;
+      letter-spacing: .04em;
+      text-transform: uppercase;
+    }
+    .signal-time { color: var(--muted); font-size: .72rem; }
+    .fact-list { margin: 0; padding: 0; border-top: 1px solid var(--rule); list-style: none; }
+    .fact-list li {
+      display: grid;
+      grid-template-columns: 108px minmax(0, 1fr);
+      gap: .6rem;
+      padding: .58rem 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .fact-label { color: var(--muted); font-size: .71rem; }
+    .fact-value { text-align: right; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .evidence {
+      margin-top: 1rem;
+      padding: .75rem;
+      background: #fff;
+      border: 1px solid var(--rule);
+    }
+    .evidence h4 { margin: 0 0 .45rem; font-size: .76rem; }
+    .evidence ul { margin: 0; padding-left: 1rem; color: var(--muted); font-size: .72rem; }
+    .evidence code { font-family: var(--mono); color: var(--ink); }
+
+    .actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+    .button {
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: .4rem .65rem;
+      border: 1px solid var(--ink);
+      border-radius: 0;
+      font-size: .76rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .button.primary { color: #fff; background: var(--ink); }
+    .button.primary:hover { background: var(--ink-2); }
+    .button.secondary { color: var(--ink); background: #fff; border-color: #adb5bd; }
+    .button.secondary:hover { background: #f1f3f5; }
+    .button:disabled { cursor: not-allowed; opacity: .55; }
+
+    .ask {
+      margin: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--rule);
+    }
+    .ask h3 { margin: 0; font-size: .85rem; }
+    .ask p { margin: .25rem 0 .65rem; color: var(--muted); font-size: .72rem; }
+    .ask-row { display: grid; grid-template-columns: 1fr auto; gap: .4rem; }
+    .ask input { width: 100%; min-width: 0; }
+    .answer {
+      min-height: 64px;
+      margin-top: .65rem;
+      padding: .65rem;
+      color: #303943;
+      background: #fff;
+      border: 1px solid var(--rule);
+      font-size: .76rem;
+    }
+    .answer strong { color: var(--ink); }
+
+    dialog {
+      width: min(92vw, 560px);
+      padding: 0;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--ink);
+      border-radius: 0;
+      box-shadow: 0 18px 50px rgba(17, 20, 24, .2);
+    }
+    dialog::backdrop { background: rgba(17, 20, 24, .55); }
+    .dialog-head { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem; border-bottom: 1px solid var(--rule); }
+    .dialog-head h2 { margin: 0; font-size: 1.1rem; }
+    .close { width: 34px; height: 34px; border: 1px solid var(--rule); background: #fff; cursor: pointer; }
+    .dialog-body { padding: 1rem; }
+    .dialog-body p { margin-top: 0; }
+    .scope-table { width: 100%; border-collapse: collapse; font-size: .78rem; }
+    .scope-table th, .scope-table td { padding: .55rem 0; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+    .scope-table th { width: 36%; color: var(--muted); font-weight: 500; }
+    .approval-note { margin-top: .8rem; padding: .65rem; color: var(--amber); background: var(--amber-bg); border: 1px solid #e5cba6; font-size: .76rem; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: .5rem; padding: 1rem; border-top: 1px solid var(--rule); }
+
+    @media (max-width: 1100px) {
+      .desk { grid-template-columns: 205px minmax(420px, 1fr); }
+      .workspace { border-right: 0; }
+      .inspector { grid-column: 1 / -1; border-top: 1px solid var(--rule); }
+      .detail { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, .75fr); gap: 1rem; }
+      .detail > .detail-main, .detail > .detail-side { min-width: 0; }
+      .ask { grid-column: 1 / -1; }
+    }
+
+    @media (max-width: 720px) {
+      .masthead { align-items: flex-start; }
+      .brand span { display: none; }
+      .page { padding-inline: .65rem; }
+      .page-heading { display: block; }
+      .concept-mark { display: inline-block; margin-top: .65rem; }
+      .context-note { width: 100%; margin-left: 0; }
+      .desk { display: block; min-height: 0; }
+      .rail, .workspace { border-right: 0; border-bottom: 1px solid var(--rule); }
+      .workflow-list { display: flex; overflow-x: auto; padding: 0; }
+      .workflow-list li { flex: 0 0 180px; }
+      .workflow-button { min-height: 70px; border-right: 1px solid var(--rule); }
+      .rail-foot { display: none; }
+      .queue-item { grid-template-columns: 60px minmax(0, 1fr); }
+      .queue-meta { grid-column: 2; text-align: left; }
+      .portfolio-strip { grid-template-columns: repeat(2, 1fr); }
+      .detail { display: block; }
+      .detail-side { margin-top: 1rem; }
+      .workspace-note { display: block; }
+      .workspace-note span { display: block; margin-top: .3rem; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to AI Desk</a>
+
+  <header>
+    <div class="masthead">
+      <div class="brand"><strong>Agents.Stocks</strong><span>Research and portfolio decision support</span></div>
+      <div class="system-state">Published scan · 16 Sep 2026, 17:42</div>
+    </div>
+    <nav class="tabs" aria-label="Primary navigation">
+      <a href="#">Watchlist</a>
+      <a href="#">Portfolio</a>
+      <a href="#">Trade History</a>
+      <a href="#">Realised P&amp;L</a>
+      <a href="#">Run Log</a>
+      <a href="#">Strategy Manager</a>
+      <a class="active" href="#main" aria-current="page">AI Desk</a>
+      <a href="#">Settings</a>
+    </nav>
+  </header>
+
+  <main class="page" id="main">
+    <div class="page-heading">
+      <div>
+        <h1>AI Desk</h1>
+        <p>One evidence-grounded workspace for what needs attention, why it matters, and which next step requires your approval.</p>
+      </div>
+      <span class="concept-mark">Illustrative HTML concept</span>
+    </div>
+
+    <div class="context-bar" aria-label="Desk context">
+      <div class="field">
+        <label for="portfolio">Portfolio</label>
+        <select id="portfolio">
+          <option>SIPP Growth</option>
+          <option>ISA Momentum</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="session">Evidence</label>
+        <select id="session">
+          <option>Latest published scan</option>
+          <option>15 Sep 2026 close</option>
+        </select>
+      </div>
+      <div class="context-note"><span class="safe">Read-only</span> · No broker connection · Mutating jobs require approval</div>
+    </div>
+
+    <div class="desk">
+      <aside class="rail" aria-label="Agentic workflows">
+        <div class="rail-header"><h2>Workflows</h2><span>8 capabilities</span></div>
+        <ul class="workflow-list">
+          <li><button class="workflow-button" data-item="advisor" aria-current="false"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Portfolio advisor</span><span class="workflow-meta"><span>Actions</span><span class="workflow-state live">Live</span></span></span></button></li>
+          <li><button class="workflow-button" data-item="research" aria-current="false"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Research copilot</span><span class="workflow-meta"><span>Questions</span><span class="workflow-state">#641</span></span></span></button></li>
+          <li><button class="workflow-button" data-item="thesis" aria-current="true"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Thesis monitor</span><span class="workflow-meta"><span>3 changed</span><span class="workflow-state">#642</span></span></span></button></li>
+          <li><button class="workflow-button" data-item="recovery" aria-current="false"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Data recovery</span><span class="workflow-meta"><span>1 limited</span><span class="workflow-state">#643</span></span></span></button></li>
+          <li><button class="workflow-button" data-item="experiment" aria-current="false"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Strategy experiments</span><span class="workflow-meta"><span>1 draft</span><span class="workflow-state">#644</span></span></span></button></li>
+          <li><button class="workflow-button" data-item="risk" aria-current="false"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Portfolio risk</span><span class="workflow-meta"><span>2 findings</span><span class="workflow-state">#645</span></span></span></button></li>
+          <li><button class="workflow-button" data-item="review" aria-current="false"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Trade review</span><span class="workflow-meta"><span>Weekly</span><span class="workflow-state">#646</span></span></span></button></li>
+          <li><button class="workflow-button" data-item="triage" aria-current="false"><span class="workflow-bar"></span><span class="workflow-copy"><span class="workflow-name">Alert triage</span><span class="workflow-meta"><span>5 items</span><span class="workflow-state">#647</span></span></span></button></li>
+        </ul>
+        <div class="rail-foot"><strong>Agent boundary</strong>The model explains and proposes. Typed services calculate. You approve every state-changing job.</div>
+      </aside>
+
+      <section class="workspace" aria-labelledby="attention-heading">
+        <div class="workspace-header">
+          <h2 id="attention-heading">Today’s attention queue</h2>
+          <div class="summary-counts" aria-label="Queue summary">
+            <span class="count urgent"><strong>2</strong> urgent</span>
+            <span class="count warning"><strong>1</strong> limited</span>
+            <span class="count"><strong>2</strong> review</span>
+          </div>
+        </div>
+
+        <div class="queue" role="listbox" aria-label="Prioritised attention items">
+          <button class="queue-item" role="option" aria-selected="true" data-item="thesis">
+            <span class="priority risk">Risk</span>
+            <span><span class="queue-title">DOCS thesis invalidated after failed breakout</span><span class="queue-summary">Closed below the evidenced stop and lost the 50-day moving average on volume.</span></span>
+            <span class="queue-meta"><strong>Thesis monitor</strong>17:42 · fresh</span>
+          </button>
+          <button class="queue-item" role="option" aria-selected="false" data-item="risk">
+            <span class="priority risk">Risk</span>
+            <span><span class="queue-title">Technology exposure exceeds your 35% policy</span><span class="queue-summary">Four positions contribute 43.8% of current portfolio market value.</span></span>
+            <span class="queue-meta"><strong>Risk coach</strong>17:42 · fresh</span>
+          </button>
+          <button class="queue-item" role="option" aria-selected="false" data-item="recovery">
+            <span class="priority review">Limited</span>
+            <span><span class="queue-title">WCOG exit rules could not be evaluated</span><span class="queue-summary">Portfolio history ends 34 sessions before the Strategy’s required lookback.</span></span>
+            <span class="queue-meta"><strong>Data recovery</strong>1 repair ready</span>
+          </button>
+          <button class="queue-item" role="option" aria-selected="false" data-item="experiment">
+            <span class="priority info">Review</span>
+            <span><span class="queue-title">Relative-strength hypothesis is ready to test</span><span class="queue-summary">Draft changes one declared Minervini parameter against a pinned baseline.</span></span>
+            <span class="queue-meta"><strong>Experiment</strong>Needs approval</span>
+          </button>
+          <button class="queue-item" role="option" aria-selected="false" data-item="review">
+            <span class="priority ready">Ready</span>
+            <span><span class="queue-title">Weekly process review has 12 completed trades</span><span class="queue-summary">Two repeated late-entry deviations; profitability did not affect classification.</span></span>
+            <span class="queue-meta"><strong>Trade review</strong>Evidence complete</span>
+          </button>
+        </div>
+
+        <div class="portfolio-strip" aria-label="Portfolio risk summary">
+          <div class="metric"><span>Portfolio value</span><strong>£184,260</strong></div>
+          <div class="metric"><span>Open risk</span><strong>£3,980 · 2.16%</strong></div>
+          <div class="metric"><span>Risk findings</span><strong class="negative">2 urgent</strong></div>
+          <div class="metric"><span>Evidence</span><strong>18 / 19 complete</strong></div>
+        </div>
+        <div class="workspace-note">Ordered by deterministic risk policy, then evidence quality and opportunity.<span>All values are illustrative.</span></div>
+      </section>
+
+      <aside class="inspector" aria-labelledby="inspector-heading">
+        <div class="inspector-header"><h2 id="inspector-heading">Evidence review</h2><span class="status-label">Grounded</span></div>
+        <div id="detail" class="detail" aria-live="polite"></div>
+      </aside>
+    </div>
+  </main>
+
+  <dialog id="approval-dialog" aria-labelledby="approval-title">
+    <form method="dialog">
+      <div class="dialog-head"><h2 id="approval-title">Approve bounded evidence repair</h2><button class="close" value="cancel" aria-label="Close">×</button></div>
+      <div class="dialog-body">
+        <p>The recovery agent found one existing idempotent job that matches the diagnosed gap. Review its exact scope before it enters the durable job queue.</p>
+        <table class="scope-table">
+          <tr><th>Security</th><td>WCOG · SIPP Growth</td></tr>
+          <tr><th>Missing interval</th><td>30 Jul–16 Sep 2026 · 34 sessions</td></tr>
+          <tr><th>Action</th><td>Enqueue bounded portfolio-history backfill</td></tr>
+          <tr><th>Network source</th><td>Yahoo Finance via existing provider adapter</td></tr>
+          <tr><th>Writes</th><td>Versioned price evidence only; no trades or cash</td></tr>
+          <tr><th>Verification</th><td>Rerun WCOG exit-evidence diagnostic</td></tr>
+        </table>
+        <div class="approval-note">This is a concept interaction. Approving here does not run a real job.</div>
+      </div>
+      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button primary" value="approve">Approve repair</button></div>
+    </form>
+  </dialog>
+
+  <script>
+    const details = {
+      thesis: {
+        tag: "Invalidated", tone: "risk", title: "DOCS thesis invalidated",
+        lead: "The position no longer satisfies two user-approved invalidation rules. The model did not create either rule and cannot place an exit trade.",
+        facts: [["Close", "$52.14"], ["Evidenced stop", "$53.80 · breached"], ["50-day average", "$54.22 · below"], ["Volume", "1.7× average"], ["Strategy action", "Sell"]],
+        evidence: ["analysis run scan-2026-09-16-1742", "market session 2026-09-16", "thesis version 3 · approved 22 Aug", "rules stop_breach + ma50_loss"],
+        primary: "Open portfolio recommendation", secondary: "Review thesis history"
+      },
+      risk: {
+        tag: "Policy breach", tone: "risk", title: "Technology concentration is 43.8%",
+        lead: "The portfolio exceeds its approved 35% sector limit by 8.8 percentage points. This is a deterministic valuation finding, not an instruction to sell.",
+        facts: [["Current exposure", "£80,713 · 43.8%"], ["Policy limit", "35.0%"], ["Excess", "£16,222"], ["Largest contributor", "NVDA · 14.1%"], ["Data quality", "4 / 4 priced"]],
+        evidence: ["portfolio revision 184", "GBP valuation 16 Sep 17:42", "risk policy version 1", "sector map scan-2026-09-16-1742"],
+        primary: "Review affected positions", secondary: "Edit risk policy"
+      },
+      recovery: {
+        tag: "Evidence limited", tone: "review", title: "WCOG needs 34 more sessions",
+        lead: "Exit evaluation failed safe to Hold. The agent matched the gap to an existing bounded portfolio-history backfill and is waiting for approval.",
+        facts: [["Required lookback", "200 sessions"], ["Available", "166 sessions"], ["Missing", "34 sessions"], ["Current action", "Hold · limited"], ["Repair", "Idempotent backfill"]],
+        evidence: ["evidence census 16 Sep 17:42", "diagnostic price_history_short", "security identity WCOG", "no equivalent job running"],
+        primary: "Review repair plan", secondary: "Open data quality"
+      },
+      experiment: {
+        tag: "Approval needed", tone: "info", title: "Test a stronger relative-strength floor",
+        lead: "The draft changes one declared parameter from 70 to 80. Baseline and candidate will use the same pinned universe, dates, and immutable evidence.",
+        facts: [["Strategy", "Minervini v1"], ["Parameter", "min_rs: 70 → 80"], ["Universe", "S&P 500 active profile"], ["Period", "Jan 2021–Dec 2025"], ["Estimated jobs", "2 backtests"]],
+        evidence: ["baseline strategy digest 93b70c1f", "snapshot coverage v2", "comparison eligibility preflight passed", "hypothesis draft exp-17"],
+        primary: "Review experiment", secondary: "Discard draft"
+      },
+      review: {
+        tag: "Review ready", tone: "ready", title: "Late entries repeated twice this week",
+        lead: "Two entries were more than 5% above their evidenced pivot. Both are process deviations regardless of their eventual profit or loss.",
+        facts: [["Trades reviewed", "12"], ["Rules followed", "9"], ["Deviations", "2 late entries"], ["Unknown", "1 missing intent"], ["Look-ahead checks", "Passed"]],
+        evidence: ["FIFO round trips through 16 Sep", "historical evidence bounded per trade date", "strategy assignment history", "review policy version 1"],
+        primary: "Open weekly review", secondary: "Add trade note"
+      },
+      advisor: {
+        tag: "Current", tone: "ready", title: "Portfolio Strategy Advisor",
+        lead: "The assigned Minervini Strategy currently returns one Sell, seven Holds, and two Buys. Recommendations remain decision support only.",
+        facts: [["Sell", "1"], ["Hold", "7"], ["Buy", "2"], ["Assigned Strategy", "Minervini v1"], ["Freshness", "Published 17:42"]],
+        evidence: ["feature #439 delivered", "portfolio revision 184", "strategy digest 93b70c1f", "analysis scan-2026-09-16-1742"],
+        primary: "Open recommendations", secondary: "Manage Strategy"
+      },
+      research: {
+        tag: "Read-only", tone: "info", title: "Ask why a security qualified",
+        lead: "The copilot translates typed evidence into plain language and names every missing field. It cannot replace scores, fetch unbounded sources, or mutate the portfolio.",
+        facts: [["Example", "Why did NVDA qualify?"], ["Scope", "One security"], ["Tools", "Allowlisted reads"], ["Sources", "Published artifacts"], ["Audit", "Question + tool trace"]],
+        evidence: ["issue #641", "analysis artifacts", "Strategy explanations", "source-health diagnostics"],
+        primary: "Try a question below", secondary: "View tool policy"
+      },
+      triage: {
+        tag: "Risk first", tone: "info", title: "Five events reduced to one queue",
+        lead: "Deterministic policy sets severity and order. The model groups related items and writes the summary without hiding any source alert.",
+        facts: [["Source events", "9"], ["Queue items", "5"], ["Held-position risk", "2"], ["Evidence failures", "1"], ["New setups", "2"]],
+        evidence: ["issue #647", "alert cooldown state", "portfolio recommendations", "source-health findings"],
+        primary: "Inspect source alerts", secondary: "View triage policy"
+      }
+    };
+
+    const detail = document.getElementById("detail");
+    const dialog = document.getElementById("approval-dialog");
+
+    function renderDetail(key) {
+      const item = details[key] || details.thesis;
+      const toneClass = item.tone === "risk" ? "risk" : item.tone === "review" ? "review" : item.tone === "ready" ? "ready" : "info";
+      detail.innerHTML = `
+        <div class="detail-main">
+          <div class="signal-line"><span class="signal-tag" style="${toneClass === "risk" ? "" : toneClass === "review" ? "color:var(--amber);background:var(--amber-bg);border-color:#e5cba6" : toneClass === "ready" ? "color:var(--green);background:var(--green-bg);border-color:#b9d9c3" : "color:var(--blue);background:var(--blue-bg);border-color:#b8c5ee"}">${item.tag}</span><span class="signal-time">Latest published evidence</span></div>
+          <h3>${item.title}</h3>
+          <p class="lead">${item.lead}</p>
+          <ul class="fact-list">${item.facts.map(([label, value]) => `<li><span class="fact-label">${label}</span><span class="fact-value">${value}</span></li>`).join("")}</ul>
+        </div>
+        <div class="detail-side">
+          <div class="evidence"><h4>Evidence and provenance</h4><ul>${item.evidence.map(value => `<li><code>${value}</code></li>`).join("")}</ul></div>
+          <div class="actions"><button class="button primary" id="primary-action">${item.primary}</button><button class="button secondary">${item.secondary}</button></div>
+        </div>
+        <form class="ask" id="ask-form">
+          <h3>Ask the research copilot</h3>
+          <p>Answers use the selected portfolio and published evidence above.</p>
+          <div class="ask-row"><input id="question" aria-label="Question for research copilot" placeholder="Why did NVDA qualify?" required><button class="button primary" type="submit">Ask</button></div>
+          <div class="answer" id="answer"><strong>Example:</strong> “What evidence would invalidate this setup?”</div>
+        </form>`;
+
+      document.getElementById("primary-action").addEventListener("click", () => {
+        if (key === "recovery") dialog.showModal();
+      });
+      document.getElementById("ask-form").addEventListener("submit", event => {
+        event.preventDefault();
+        const question = document.getElementById("question").value;
+        document.getElementById("answer").innerHTML = `<strong>Grounded draft:</strong> I would answer “${escapeHtml(question)}” from the current analysis run, then list the exact rule facts and any unavailable evidence. No live model call is made in this concept.`;
+      });
+    }
+
+    function escapeHtml(value) {
+      return value.replace(/[&<>'"]/g, character => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"})[character]);
+    }
+
+    document.querySelectorAll("[data-item]").forEach(control => {
+      control.addEventListener("click", () => {
+        const key = control.dataset.item;
+        document.querySelectorAll(".queue-item").forEach(item => item.setAttribute("aria-selected", String(item.dataset.item === key)));
+        document.querySelectorAll(".workflow-button").forEach(item => item.setAttribute("aria-current", String(item.dataset.item === key)));
+        renderDetail(key);
+        if (control.classList.contains("workflow-button") && window.innerWidth < 721) {
+          document.getElementById("inspector-heading").scrollIntoView({behavior: "smooth"});
+        }
+      });
+    });
+
+    renderDetail("thesis");
+  </script>
+</body>
+</html>

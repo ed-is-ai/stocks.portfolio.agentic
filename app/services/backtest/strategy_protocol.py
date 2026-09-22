@@ -369,6 +369,19 @@ class MarketViewV1(Protocol):
         ...
 
 
+@runtime_checkable
+class RegimeBenchmarkViewV1(Protocol):
+    """Narrow read seam for a pinned, non-tradable regime reference."""
+
+    def regime_benchmark_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame: ...
+
+
 # ---------------------------------------------------------------------------
 # The versioned Strategy protocol
 # ---------------------------------------------------------------------------
@@ -942,6 +955,7 @@ __all__ = [
     "EvidenceUnit",
     "ExplanationFactV1",
     "MarketViewV1",
+    "RegimeBenchmarkViewV1",
     "PARAMETER_TYPES",
     "ParameterFieldErrorV1",
     "ParameterType",

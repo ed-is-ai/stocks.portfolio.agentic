@@ -18,11 +18,16 @@ from typing import cast
 import pytest
 import requests
 
+from datetime import date, datetime, timezone
+
 from app.integrations.fx_history import (
+    BOE_FX_SERIES_REQUEST_CONTRACT_VERSION,
+    BankOfEnglandFxSeriesFetcher,
     ChainedFxQuoteFetcher,
     FxProviderUnavailable,
     FxUnsupportedPair,
     HttpResponseLike,
+    fetch_boe_fx_series,
 )
 
 AS_OF = "2000-02-01"
@@ -332,3 +337,121 @@ def test_unsupported_pair_raises_without_any_fetch() -> None:
         fetcher.fetch("EURUSD=X", AS_OF)
     with pytest.raises(FxUnsupportedPair, match="EURUSD=X"):
         fetcher.fetch_on_or_before("EURUSD=X", AS_OF)
+
+
+#: Same fixture shape, spanning a full month with a 2-digit-year rollover
+#: (Jan 2000 -> Feb 2000) so century disambiguation is exercised too.
+BOE_RANGE_HTML = """\
+<html><body>
+<div id="cookie-banner">We use cookies. Accept all.</div>
+<table>
+<tr><th>Date</th><th>XUDLUSS</th></tr>
+<tr><td>31 Jan 00</td><td>1.6120</td></tr>
+<tr><td>01 Feb 00</td><td>1.6145</td></tr>
+<tr><td>02 Feb 00</td><td>1.6180</td></tr>
+</table>
+</body></html>
+"""
+
+
+def test_fetch_boe_fx_series_parses_every_row_in_window() -> None:
+    series = fetch_boe_fx_series(
+        "GBPUSD=X",
+        date(2000, 1, 1),
+        date(2000, 2, 2),
+        request_get=lambda *_args: _response(text=BOE_RANGE_HTML),
+    )
+
+    assert series == (
+        (date(2000, 1, 31), Decimal("1.6120")),
+        (date(2000, 2, 1), Decimal("1.6145")),
+    )
+
+
+def test_fetch_boe_fx_series_rejects_unsupported_pair() -> None:
+    with pytest.raises(FxUnsupportedPair):
+        fetch_boe_fx_series(
+            "EURUSD=X",
+            date(2000, 1, 1),
+            date(2000, 2, 1),
+            request_get=lambda *_args: _response(text=BOE_RANGE_HTML),
+        )
+
+
+def test_fetch_boe_fx_series_raises_on_transient_http_failure() -> None:
+    with pytest.raises(FxProviderUnavailable):
+        fetch_boe_fx_series(
+            "GBPUSD=X",
+            date(2000, 1, 1),
+            date(2000, 2, 1),
+            request_get=lambda *_args: _response(status_code=503, text="busy"),
+        )
+
+
+def test_fetch_boe_fx_series_raises_when_window_has_no_dates() -> None:
+    with pytest.raises(FxProviderUnavailable):
+        fetch_boe_fx_series(
+            "GBPUSD=X",
+            date(1990, 1, 1),
+            date(1990, 2, 1),
+            request_get=lambda *_args: _response(text=BOE_RANGE_HTML),
+        )
+
+
+def test_boe_series_fetcher_produces_evidence_currency_accepts() -> None:
+    from app.services.backtest.currency import CurrencyPolicyError, convert_to_base
+
+    fetcher = BankOfEnglandFxSeriesFetcher(
+        request_get=lambda *_args: _response(text=BOE_RANGE_HTML),
+        clock=lambda: datetime(2026, 9, 20, tzinfo=timezone.utc),
+    )
+
+    payload = fetcher.fetch(start=date(2000, 1, 1), end=date(2000, 2, 2))
+
+    assert payload.provider == "bank_of_england"
+    assert payload.requested_symbol == "GBPUSD=X"
+    assert payload.observed_symbol == "GBPUSD=X"
+    assert payload.currency == "USD"
+    assert payload.quote_unit == "USD"
+    assert payload.exchange_timezone == "Europe/London"
+    assert payload.request_contract_version == BOE_FX_SERIES_REQUEST_CONTRACT_VERSION
+    assert payload.security_id == "fx:GBPUSD=X"
+    assert len(payload.rows) == 2
+    assert payload.data_revision
+
+    # The evidence _fx_closes ultimately consumes must accept it outright.
+    from app.repositories.historical_price_repo import StoredHistoricalEvidence
+
+    evidence = StoredHistoricalEvidence(
+        data_revision=payload.data_revision,
+        security_id=payload.security_id,
+        provider=payload.provider,
+        provider_version=payload.provider_version,
+        request_contract_version=payload.request_contract_version,
+        requested_symbol=payload.requested_symbol,
+        observed_symbol=payload.observed_symbol,
+        alias_revision=payload.alias_revision,
+        currency=payload.currency,
+        quote_unit=payload.quote_unit,
+        quote_unit_scale=payload.quote_unit_scale,
+        exchange_timezone=payload.exchange_timezone,
+        start=payload.start,
+        end=payload.end,
+        request_contract=payload.request_contract,
+        response_metadata_digest=payload.response_metadata_digest,
+        canonical_manifest_json=payload.canonical_manifest_json,
+        rows=payload.rows,
+        actions=payload.actions,
+    )
+    try:
+        convert_to_base(
+            value="10",
+            quote_currency="GBP",
+            quote_unit="GBP",
+            base_currency="USD",
+            valuation_session=date(2000, 2, 3),
+            completed_fx_through=date(2000, 2, 1),
+            fx_evidence=evidence,
+        )
+    except CurrencyPolicyError as exc:
+        raise AssertionError(f"BoE evidence was rejected: {exc.detail}") from exc

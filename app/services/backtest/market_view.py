@@ -48,6 +48,7 @@ from app.services.backtest.strategy_evidence import (
     EvidenceKind,
     SecurityEvidenceCoverageV1,
 )
+from app.services.backtest.strategy_job import RegimeBenchmarkPinV1
 from app.services.backtest.trading_calendar import TradingCalendar
 
 #: Column order every ``MarketView.price_history`` DataFrame uses, whether
@@ -159,6 +160,8 @@ class MarketView:
     selected_universe: tuple[str, ...]
     backtest_repo: BacktestRepository
     historical_price_repo: HistoricalPriceRepository
+    regime_benchmark: RegimeBenchmarkPinV1 | None = None
+    regime_benchmark_access: HistoricalEvidenceReadHandle | None = None
     prepared_planes: InitVar[Mapping[str, HistoricalMarketPlanes] | None] = None
     prepared_plane_cache: InitVar[
         MutableMapping[str, HistoricalMarketPlanes] | None
@@ -182,6 +185,9 @@ class MarketView:
     )
     _price_accesses: Mapping[str, HistoricalEvidenceReadHandle] | None = field(
         default=None, init=False, repr=False, compare=False
+    )
+    _reference_plane_cache: MutableMapping[str, HistoricalMarketPlanes] = field(
+        default_factory=dict, init=False, repr=False, compare=False
     )
 
     def __post_init__(
@@ -366,6 +372,52 @@ class MarketView:
             columns=requested_columns,
         )
         return frame
+
+    def regime_benchmark_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: Sequence[str] | None = None,
+    ) -> pd.DataFrame:
+        """Read only the manifest-pinned, non-tradable benchmark history.
+
+        The temporary selected view reuses the ordinary bounded price-plane
+        implementation while leaving this view's trade-universe boundary
+        untouched.  It exposes no scan or signal surface for the reference.
+        """
+        pin = self.regime_benchmark
+        if pin is None or security_id != pin.security_id:
+            raise UnselectedSecurityError(
+                security_id=security_id, selected_universe=self.selected_universe
+            )
+        access = self.regime_benchmark_access
+        owns_access = False
+        if access is None:
+            access = self.historical_price_repo.open_read(pin.price_revision)
+            owns_access = True
+        try:
+            if access.data_revision != pin.price_revision or access.security_id != security_id:
+                raise MarketDataPolicyError(
+                    "integrity_error",
+                    "regime benchmark access does not match its pinned reference",
+                )
+            reference_view = MarketView(
+                as_of_session=self.as_of_session,
+                profile_hash=self.profile_hash,
+                security_price_revisions={security_id: pin.price_revision},
+                selected_universe=(security_id,),
+                backtest_repo=self.backtest_repo,
+                historical_price_repo=self.historical_price_repo,
+                prepared_plane_cache=self._reference_plane_cache,
+                price_accesses={security_id: access},
+            )
+            return reference_view.price_history(
+                security_id, limit=limit, columns=columns
+            )
+        finally:
+            if owns_access:
+                access.close()
 
     def scan_result(self, security_id: str) -> HistoricalScanRecordV1 | None:
         """Return the latest committed monthly scan record visible at

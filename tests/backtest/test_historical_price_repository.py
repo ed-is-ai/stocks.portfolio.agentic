@@ -559,3 +559,129 @@ def test_constraint_failure_is_integrity_error_and_rolls_back(tmp_path) -> None:
     assert exc_info.value.code == "integrity_error"
     with pytest.raises(EvidenceMissingError):
         repo.get(broken.data_revision)
+
+
+_LEGACY_REVISIONS_TABLE = """
+PRAGMA foreign_keys = ON;
+CREATE TABLE historical_price_revisions (
+    data_revision TEXT PRIMARY KEY,
+    security_id TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK(provider = 'yfinance'),
+    provider_version TEXT NOT NULL,
+    request_contract_version TEXT NOT NULL,
+    requested_symbol TEXT NOT NULL,
+    observed_symbol TEXT NOT NULL,
+    alias_revision TEXT,
+    currency TEXT NOT NULL,
+    quote_unit TEXT NOT NULL,
+    quote_unit_scale TEXT NOT NULL,
+    exchange_timezone TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    request_contract_json TEXT NOT NULL,
+    response_metadata_digest TEXT NOT NULL,
+    canonical_manifest_json TEXT NOT NULL,
+    observation_count INTEGER NOT NULL CHECK(observation_count > 0),
+    action_count INTEGER NOT NULL CHECK(action_count >= 0),
+    first_acquired_at TEXT NOT NULL,
+    CHECK(start_date < end_date)
+);
+-- A real pre-BoE database always has rows in these FK-child tables too;
+-- the migration must survive them still referencing the legacy revision
+-- (this is what the "rename aside, recreate, copy, drop" rebuild has to
+-- get right -- a first version of this migration passed with an empty
+-- child table and only failed against the real, populated database).
+CREATE TABLE historical_price_observations (
+    data_revision TEXT NOT NULL REFERENCES historical_price_revisions(data_revision),
+    session_date TEXT NOT NULL,
+    open_hex TEXT NOT NULL,
+    high_hex TEXT NOT NULL,
+    low_hex TEXT NOT NULL,
+    close_hex TEXT NOT NULL,
+    adj_close_hex TEXT,
+    volume_hex TEXT NOT NULL,
+    dividends_hex TEXT NOT NULL,
+    stock_splits_hex TEXT NOT NULL,
+    PRIMARY KEY(data_revision, session_date)
+);
+"""
+
+
+def test_provider_check_migration_preserves_rows_and_widens_constraint(
+    tmp_path,
+) -> None:
+    """A pre-BoE database's single-provider CHECK is loosened in place.
+
+    Simulates a database written before Bank of England FX evidence was
+    accepted: a bare ``historical_price_revisions`` table under the old
+    single-provider CHECK, with one legacy row already committed.
+    ``ensure_schema()`` must rebuild the table with the widened CHECK,
+    preserve that row byte-for-byte, and afterward accept a
+    ``bank_of_england`` row while still rejecting an unknown provider.
+    """
+    db_path = tmp_path / "legacy.db"
+    connect = db.make_connect(lambda: db_path)
+    conn = connect()
+    try:
+        conn.executescript(_LEGACY_REVISIONS_TABLE)
+        conn.execute(
+            """INSERT INTO historical_price_revisions VALUES (
+                'rev-legacy', 'security-1', 'yfinance', 'v1', 'contract-v1',
+                'AAPL', 'AAPL', 'alias-v1', 'USD', 'USD', '1',
+                'America/New_York', '2024-01-01', '2024-02-01', '{}',
+                'digest-1', '{}', 1, 0, '2026-08-11T00:00:00+00:00'
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO historical_price_observations VALUES (
+                'rev-legacy', '2024-01-02', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'
+            )"""
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    repo = HistoricalPriceRepository(connect)
+    repo.ensure_schema()
+
+    conn = repo._connect()
+    try:
+        assert conn.execute(
+            "SELECT data_revision, provider FROM historical_price_revisions "
+            "WHERE data_revision='rev-legacy'"
+        ).fetchone() == ("rev-legacy", "yfinance")
+        assert conn.execute(
+            "SELECT COUNT(*) FROM historical_price_observations "
+            "WHERE data_revision='rev-legacy'"
+        ).fetchone() == (1,)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        conn.execute(
+            """INSERT INTO historical_price_revisions VALUES (
+                'rev-boe', 'fx:GBPUSD=X', 'bank_of_england', 'boe-v1',
+                'boe-contract-v1', 'GBPUSD=X', 'GBPUSD=X', NULL, 'USD', 'USD',
+                '1', 'Europe/London', '2000-01-01', '2000-02-01', '{}',
+                'digest-2', '{}', 1, 0, '2026-08-11T00:00:00+00:00'
+            )"""
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                """INSERT INTO historical_price_revisions VALUES (
+                    'rev-bad', 'fx:GBPUSD=X', 'some_other_provider', 'v1',
+                    'contract-v1', 'GBPUSD=X', 'GBPUSD=X', NULL, 'USD', 'USD',
+                    '1', 'Europe/London', '2000-01-01', '2000-02-01', '{}',
+                    'digest-3', '{}', 1, 0, '2026-08-11T00:00:00+00:00'
+                )"""
+            )
+    finally:
+        conn.close()
+
+    # Idempotent: a second ensure_schema() call is a no-op for this table.
+    repo.ensure_schema()
+    conn = repo._connect()
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM historical_price_revisions"
+        ).fetchone() == (2,)
+    finally:
+        conn.close()

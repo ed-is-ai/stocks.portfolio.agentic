@@ -182,8 +182,9 @@ COMMON_BACKTEST_STRATEGY_PARAMETERS: tuple[StrategyParameterV1, ...] = (
         type="string",
         default="",
         description=(
-            "Canonical id of the benchmark security whose trend governs the "
-            "regime filter. Must be one of the Run's selected securities."
+            "Canonical id of the benchmark-only reference whose trend governs "
+            "the regime filter. The validated SPY reference is read for trend "
+            "only and is never tradable or part of the selected universe."
         ),
         required=False,
     ),

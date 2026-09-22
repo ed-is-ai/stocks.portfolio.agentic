@@ -36,13 +36,18 @@ import io
 import logging
 import re
 from collections.abc import Callable, Mapping
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Protocol, cast
 
 import requests
 
 from app.repositories.fx_quote_repo import FxQuote
+from app.services.backtest.canonical_manifest import canonical_json, manifest_digest
+from app.services.backtest.historical_price_evidence import (
+    HistoricalEvidencePayload,
+    fx_security_id_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -452,8 +457,234 @@ class ChainedFxQuoteFetcher:
         return None
 
 
+#: Version stamp for the Bank of England ranged-series request contract
+#: (#gh-boe-fx). Bumped whenever the BoE request shape below changes, so a
+#: stale pinned evidence row can be told apart from a current one -- the
+#: same role ``REQUEST_CONTRACT_VERSION`` plays for yfinance evidence.
+BOE_FX_SERIES_REQUEST_CONTRACT_VERSION = "boe_fx_series_request_contract_v1"
+
+#: Identity of this module's BoE parsing/encoding logic, stamped as evidence
+#: ``provider_version``. Bumped whenever the parsing or payload-building
+#: below changes in a way that could alter a previously produced digest.
+_BOE_FX_SERIES_PROVIDER_VERSION = "boe_fx_series_v1"
+
+
+def _boe_date_in_window(cell: str, start: date, end: date) -> date | None:
+    """Return the ``[start, end)`` calendar date ``cell`` names, or ``None``.
+
+    Generalizes :func:`_is_boe_date_for`'s exact-date match to an arbitrary
+    window: the BoE table's 2-digit year is disambiguated by picking
+    whichever century (19xx or 20xx) actually falls inside the requested
+    window, which is unambiguous for any window under a century wide.
+    """
+    match = _BOE_DATE_RE.fullmatch(cell)
+    if match is None:
+        return None
+    day, month_name, yy = match.groups()
+    month = _MONTH_ABBREVS.get(month_name[:3].lower())
+    if month is None:
+        return None
+    for century in (1900, 2000):
+        try:
+            candidate = date(century + int(yy), month, int(day))
+        except ValueError:
+            continue
+        if start <= candidate < end:
+            return candidate
+    return None
+
+
+def fetch_boe_fx_series(
+    pair: str,
+    start: date,
+    end: date,
+    *,
+    request_get: Callable[
+        [str, Mapping[str, str], float], HttpResponseLike
+    ] = _default_request_get,
+) -> tuple[tuple[date, Decimal], ...]:
+    """Fetch every Bank of England daily spot rate in ``[start, end)``.
+
+    One ranged request against the same statistical-database endpoint
+    :class:`ChainedFxQuoteFetcher` already uses for a single exact date
+    (``DAT=RNG`` widened to the full window) -- the BoE series covers
+    ``XUDLUSS`` (GBP/USD) back to 1975, well before Yahoo's FX history
+    starts (2003-12).
+
+    Raises :class:`FxUnsupportedPair` for an unconfigured pair and
+    :class:`FxProviderUnavailable` for any transient failure (HTTP error,
+    unparseable response, or a response that parsed but named no date in
+    the window at all -- most likely a changed table structure, not a
+    genuine data gap). A response that parsed fine but had rows for only
+    part of the window returns just those rows; the caller decides whether
+    a partial series is acceptable.
+    """
+    if pair not in _PAIR_SERIES:
+        raise FxUnsupportedPair(f"No supported FX pair for {pair!r}")
+    if start >= end:
+        raise FxProviderUnavailable("Malformed FX series window")
+    boe_series, _ = _PAIR_SERIES[pair]
+    last_day = end - timedelta(days=1)
+    params = {
+        "Travel": "NIxAZxSUx",
+        "FromSeries": "1",
+        "ToSeries": "50",
+        "DAT": "RNG",
+        "FD": str(start.day),
+        "FM": _ENGLISH_MONTHS[start.month - 1],
+        "FY": str(start.year),
+        "TD": str(last_day.day),
+        "TM": _ENGLISH_MONTHS[last_day.month - 1],
+        "TY": str(last_day.year),
+        "FNY": "Y",
+        "CSVF": "TT",
+        "html.x": "66",
+        "html.y": "26",
+        "SeriesCodes": boe_series,
+        "UsingCodes": "Y",
+        "Filter": "N",
+        "VPD": "Y",
+        "VFD": "N",
+    }
+    response = request_get(_BOE_URL, params, _REQUEST_TIMEOUT_SECONDS)
+    if response.status_code != 200:
+        raise FxProviderUnavailable(
+            f"Bank of England returned HTTP {response.status_code} for {boe_series}"
+        )
+    rows = _boe_rows(response.text)
+    if not rows:
+        raise FxProviderUnavailable(
+            f"Bank of England response for {boe_series} had no table rows"
+        )
+    series: dict[date, Decimal] = {}
+    saw_any_date = False
+    for cells in rows:
+        for index, cell in enumerate(cells[:-1]):
+            found = _boe_date_in_window(cell, start, end)
+            if found is None:
+                continue
+            saw_any_date = True
+            rate = _parse_rate(cells[index + 1])
+            if rate is not None:
+                series[found] = rate
+    if not saw_any_date:
+        raise FxProviderUnavailable(
+            f"Bank of England response for {boe_series} had no parseable date "
+            "cells"
+        )
+    return tuple(sorted(series.items()))
+
+
+class BankOfEnglandFxSeriesFetcher:
+    """Ranged BoE spot-rate fetch matching the ``FxSeriesFetcher`` protocol.
+
+    Produces one immutable, honestly-provenanced
+    :class:`HistoricalEvidencePayload` per call: ``provider`` is
+    ``"bank_of_england"`` (never ``"yfinance"``), and ``request_contract``
+    records the actual BoE HTTP parameters used -- not a fabricated
+    yfinance-shaped contract. Row values are hex-encoded the same way
+    ``historical_price_evidence.py``'s yfinance adapter encodes them, so
+    they decode identically through ``market_planes.provider_decimal``.
+    """
+
+    def __init__(
+        self,
+        *,
+        request_get: Callable[
+            [str, Mapping[str, str], float], HttpResponseLike
+        ] = _default_request_get,
+        clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    ) -> None:
+        self._request_get = request_get
+        self._clock = clock
+
+    def fetch(
+        self, *, start: date, end: date, currency: str = "USD"
+    ) -> HistoricalEvidencePayload:
+        if currency.strip().upper() != "USD":
+            raise FxUnsupportedPair(f"No supported FX pair for currency {currency!r}")
+        pair = "GBPUSD=X"
+        observations = fetch_boe_fx_series(
+            pair, start, end, request_get=self._request_get
+        )
+        if not observations:
+            raise FxProviderUnavailable(
+                f"Bank of England series for {pair} had no observations in "
+                f"[{start.isoformat()}, {end.isoformat()})"
+            )
+        security_id = fx_security_id_for(currency)
+        rows: list[dict[str, object]] = []
+        for session, rate in observations:
+            close_hex = float(rate).hex()
+            zero_hex = float(0.0).hex()
+            rows.append(
+                {
+                    "session": session.isoformat(),
+                    "open": close_hex,
+                    "high": close_hex,
+                    "low": close_hex,
+                    "close": close_hex,
+                    "adj_close": close_hex,
+                    "volume": zero_hex,
+                    "dividends": zero_hex,
+                    "stock_splits": zero_hex,
+                }
+            )
+        request_contract = {
+            "provider_endpoint": _BOE_URL,
+            "series_code": _PAIR_SERIES[pair][0],
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        }
+        acquired_at = self._clock()
+        identity: dict[str, object] = {
+            "canonicalizer_version": BOE_FX_SERIES_REQUEST_CONTRACT_VERSION,
+            "request_contract_version": BOE_FX_SERIES_REQUEST_CONTRACT_VERSION,
+            "request": request_contract,
+            "requested_symbol": pair,
+            "observed_symbol": pair,
+            "currency": "USD",
+            "quote_unit": "USD",
+            "quote_unit_scale": "1",
+            "exchange_timezone": "Europe/London",
+            "rows": rows,
+            "provider": "bank_of_england",
+            "provider_version": _BOE_FX_SERIES_PROVIDER_VERSION,
+            "security_id": security_id,
+            "alias_revision": None,
+            "actions": [],
+        }
+        manifest_json = canonical_json(identity)
+        response_digest = hashlib.sha256(manifest_json.encode("utf-8")).hexdigest()
+        return HistoricalEvidencePayload(
+            security_id=security_id,
+            alias_revision=None,
+            provider="bank_of_england",
+            provider_version=_BOE_FX_SERIES_PROVIDER_VERSION,
+            request_contract_version=BOE_FX_SERIES_REQUEST_CONTRACT_VERSION,
+            requested_symbol=pair,
+            observed_symbol=pair,
+            currency="USD",
+            quote_unit="USD",
+            quote_unit_scale="1",
+            exchange_timezone="Europe/London",
+            start=start.isoformat(),
+            end=end.isoformat(),
+            request_contract=request_contract,
+            rows=tuple(rows),
+            actions=(),
+            response_metadata_digest=response_digest,
+            data_revision=manifest_digest(identity),
+            canonical_manifest_json=manifest_json,
+            acquired_at=acquired_at.astimezone(timezone.utc).isoformat(),
+        )
+
+
 __all__ = [
+    "BOE_FX_SERIES_REQUEST_CONTRACT_VERSION",
+    "BankOfEnglandFxSeriesFetcher",
     "ChainedFxQuoteFetcher",
     "FxProviderUnavailable",
     "FxUnsupportedPair",
+    "fetch_boe_fx_series",
 ]

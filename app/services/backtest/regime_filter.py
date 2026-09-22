@@ -82,8 +82,9 @@ def entry_signals_permitted(
     pre-change strategy.
 
     When enabled, the gate fails closed (returns ``False``, never assuming
-    risk-on) whenever the benchmark id is empty / not a ``str`` / not in
-    ``universe``; the MA length is a ``bool``, a non-``int``, or
+    risk-on) whenever the benchmark id is empty / not a ``str`` / outside
+    the dedicated pinned-reference surface (or outside ``universe`` for
+    V1/V2 views); the MA length is a ``bool``, a non-``int``, or
     ``< MIN_MA_LENGTH``; ``view.price_history`` raises; or the benchmark
     yields fewer finite closes than the MA length. Otherwise it returns
     ``latest_close > trailing_sma``.
@@ -95,7 +96,11 @@ def entry_signals_permitted(
     selected = (
         tuple(universe) if isinstance(universe, (list, tuple, set, frozenset)) else ()
     )
-    if not isinstance(benchmark, str) or not benchmark or benchmark not in selected:
+    reference_history = getattr(view, "regime_benchmark_history", None)
+    if not isinstance(benchmark, str) or not benchmark:
+        return False
+    use_reference = benchmark not in selected
+    if use_reference and not callable(reference_history):
         return False
 
     ma_length = parameters.get(REGIME_FILTER_MA_LENGTH_PARAM)
@@ -107,7 +112,14 @@ def entry_signals_permitted(
         return False
 
     try:
-        history = view.price_history(benchmark, limit=ma_length, columns=("close",))
+        if use_reference:
+            history = reference_history(
+                benchmark, limit=ma_length, columns=("close",)
+            )
+        else:
+            history = view.price_history(
+                benchmark, limit=ma_length, columns=("close",)
+            )
     except Exception:
         return False
 
@@ -123,7 +135,14 @@ def entry_signals_permitted(
         if limit > 1_000_000:
             break
         try:
-            history = view.price_history(benchmark, limit=limit, columns=("close",))
+            if use_reference:
+                history = reference_history(
+                    benchmark, limit=limit, columns=("close",)
+                )
+            else:
+                history = view.price_history(
+                    benchmark, limit=limit, columns=("close",)
+                )
         except Exception:
             return False
         closes = _finite_closes(history)

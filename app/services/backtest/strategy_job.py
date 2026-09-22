@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -339,6 +339,38 @@ class RunUniverseSelectionV1(_LifecycleModel):
         return self
 
 
+class RegimeBenchmarkPinV1(_LifecycleModel):
+    """Immutable reference evidence bound to a V3 run manifest."""
+
+    security_id: Annotated[str, Field(min_length=1)]
+    identity_registry_revision: Digest
+    alias_revision: Digest
+    price_revision: Digest
+    action_revision: Digest
+    evidence_digest: Digest
+    request_start: date
+    request_end: date
+    session_policy: Annotated[str, Field(min_length=1)]
+    calendar_mic: Annotated[str, Field(min_length=1)]
+    calendar_session_table_digest: Digest
+    price_plane_policy_version: Annotated[str, Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def _valid_bounds(self) -> "RegimeBenchmarkPinV1":
+        if self.request_start >= self.request_end:
+            raise ValueError("regime benchmark request bounds are invalid")
+        if self.calendar_mic != "XNYS":
+            raise ValueError("regime benchmark must use the XNYS session calendar")
+        if self.session_policy != "canonical_exchange_sessions_v2":
+            raise ValueError("regime benchmark session policy is unsupported")
+        if self.price_plane_policy_version != "HistoricalMarketPlanesV1":
+            raise ValueError("regime benchmark price-plane policy is unsupported")
+        return self
+
+    def digest(self) -> str:
+        return manifest_digest(self.model_dump(mode="json"))
+
+
 class PreparationRunV1(_LifecycleModel):
     """One ``preparation`` job's subtype identity row.
 
@@ -356,6 +388,28 @@ class PreparationRunV1(_LifecycleModel):
     end_month: Month | None = None
     base_currency: Literal["GBP", "USD"] | None = None
     starting_capital: Decimal | None = None
+    regime_benchmark: RegimeBenchmarkPinV1 | None = None
+
+    @model_validator(mode="after")
+    def _benchmark_matches_parameters(self) -> "PreparationRunV1":
+        enabled = self.parameters.get("regime_filter_enabled") is True
+        if enabled != (self.regime_benchmark is not None):
+            raise ValueError(
+                "enabled regime filter requires exactly one benchmark reference pin"
+            )
+        if self.regime_benchmark is None:
+            return self
+        benchmark_id = self.parameters.get("regime_filter_benchmark_security_id")
+        if benchmark_id != self.regime_benchmark.security_id:
+            raise ValueError("regime benchmark pin does not match its parameter")
+        ma_length = self.parameters.get("regime_filter_ma_length", 200)
+        if isinstance(ma_length, bool) or not isinstance(ma_length, int) or ma_length < 2:
+            raise ValueError("regime benchmark moving-average length is invalid")
+        if self.selection is not None and (
+            self.regime_benchmark.security_id in self.selection.canonical_security_ids
+        ):
+            raise ValueError("regime benchmark must remain outside the trade universe")
+        return self
 
 
 class PreparationSubmissionV1(_LifecycleModel):
@@ -370,6 +424,7 @@ class PreparationSubmissionV1(_LifecycleModel):
     starting_capital: Decimal = Field(gt=Decimal(0))
     parent_job_id: str | None = None
     idempotency_key: Annotated[str, Field(min_length=1, max_length=200)]
+    regime_benchmark: RegimeBenchmarkPinV1 | None = None
 
     @model_validator(mode="after")
     def _runtime_matches_selection(self) -> "PreparationSubmissionV1":
@@ -378,6 +433,19 @@ class PreparationSubmissionV1(_LifecycleModel):
             self.selection.canonical_security_ids
         ):
             raise ValueError("runtime universe does not match selected universe")
+        enabled = self.parameters.get("regime_filter_enabled") is True
+        benchmark_id = self.parameters.get("regime_filter_benchmark_security_id")
+        if enabled != (self.regime_benchmark is not None):
+            raise ValueError(
+                "enabled regime filter requires exactly one benchmark reference pin"
+            )
+        if enabled and benchmark_id != self.regime_benchmark.security_id:
+            raise ValueError("regime benchmark pin does not match its parameter")
+        if self.regime_benchmark is not None and (
+            self.regime_benchmark.security_id
+            in self.selection.canonical_security_ids
+        ):
+            raise ValueError("regime benchmark must remain outside the trade universe")
         return self
 
     def content_digest(self) -> str:
@@ -441,11 +509,14 @@ class BacktestRunV1(_LifecycleModel):
     starting_capital: Decimal
     run_input_manifest_digest: Digest
     execution_contract_digest: Digest
-    manifest_version: Literal["run_input_manifest.v1", "run_input_manifest.v2"] = (
+    manifest_version: Literal[
+        "run_input_manifest.v1", "run_input_manifest.v2", "run_input_manifest.v3"
+    ] = (
         "run_input_manifest.v1"
     )
     universe_selection: RunUniverseSelectionV1 | None = None
     source_preparation_job_id: str | None = None
+    regime_benchmark: RegimeBenchmarkPinV1 | None = None
 
     def model_dump(self, **kwargs):  # preserve legacy V1 typed serialization
         if self.manifest_version == "run_input_manifest.v1":
@@ -454,6 +525,7 @@ class BacktestRunV1(_LifecycleModel):
                 "manifest_version",
                 "universe_selection",
                 "source_preparation_job_id",
+                "regime_benchmark",
             }
             return super().model_dump(exclude=exclude, **kwargs)
         return super().model_dump(**kwargs)
@@ -464,6 +536,7 @@ class BacktestRunV1(_LifecycleModel):
                 "manifest_version",
                 "universe_selection",
                 "source_preparation_job_id",
+                "regime_benchmark",
             }
             return super().model_dump_json(exclude=exclude, **kwargs)
         return super().model_dump_json(**kwargs)
@@ -479,17 +552,33 @@ class BacktestRunV1(_LifecycleModel):
             raise ValueError("backtest start_month must not be after end_month")
         if not self.starting_capital.is_finite() or self.starting_capital <= 0:
             raise ValueError("backtest starting_capital must be positive and finite")
-        is_v2 = self.manifest_version == "run_input_manifest.v2"
-        if is_v2 != (self.universe_selection is not None):
+        is_v2_or_v3 = self.manifest_version in {
+            "run_input_manifest.v2",
+            "run_input_manifest.v3",
+        }
+        if is_v2_or_v3 != (self.universe_selection is not None):
             raise ValueError("run version provenance is invalid")
         selection = self.universe_selection
         if (
-            is_v2
+            is_v2_or_v3
             and selection is not None
             and self.parameters.get(selection.universe_parameter)
             != list(selection.canonical_security_ids)
         ):
             raise ValueError("runtime universe does not match provenance")  # type: ignore[union-attr]
+        if self.manifest_version == "run_input_manifest.v3":
+            if self.regime_benchmark is None or self.parameters.get(
+                "regime_filter_enabled"
+            ) is not True:
+                raise ValueError("V3 run is missing its regime benchmark pin")
+            if self.parameters.get("regime_filter_benchmark_security_id") != (
+                self.regime_benchmark.security_id
+            ):
+                raise ValueError("V3 run benchmark does not match its parameter")
+            if self.universe_selection is not None and self.regime_benchmark.security_id in self.universe_selection.canonical_security_ids:
+                raise ValueError("V3 run benchmark must remain outside the trade universe")
+        elif self.regime_benchmark is not None:
+            raise ValueError("reference benchmark pins require V3")
         return self
 
 
@@ -625,13 +714,16 @@ class BacktestSubmissionV1(_LifecycleModel):
     run_input_manifest_digest: Digest
     execution_contract_digest: Digest
     canonical_manifest_json: Annotated[str, Field(min_length=1)]
-    manifest_version: Literal["run_input_manifest.v1", "run_input_manifest.v2"] = (
+    manifest_version: Literal[
+        "run_input_manifest.v1", "run_input_manifest.v2", "run_input_manifest.v3"
+    ] = (
         "run_input_manifest.v1"
     )
     universe_selection: RunUniverseSelectionV1 | None = None
     source_preparation_job_id: str | None = None
     parent_job_id: str | None = None
     idempotency_key: Annotated[str, Field(min_length=1, max_length=200)] | None = None
+    regime_benchmark: RegimeBenchmarkPinV1 | None = None
 
     @field_validator("parameters")
     @classmethod
@@ -643,21 +735,38 @@ class BacktestSubmissionV1(_LifecycleModel):
         TradingCalendar.months_inclusive(self.start_month, self.end_month)
         if not self.starting_capital.is_finite() or self.starting_capital <= 0:
             raise ValueError("backtest starting_capital must be positive and finite")
-        is_v2 = self.manifest_version == "run_input_manifest.v2"
-        if is_v2 != (self.universe_selection is not None):
+        is_v2_or_v3 = self.manifest_version in {
+            "run_input_manifest.v2",
+            "run_input_manifest.v3",
+        }
+        if is_v2_or_v3 != (self.universe_selection is not None):
             raise ValueError("manifest version provenance is invalid")
-        if is_v2 and (
+        if is_v2_or_v3 and (
             (self.source_preparation_job_id is None) == (self.parent_job_id is None)
         ):
             raise ValueError("V2 submission requires exactly one lineage")
         selection = self.universe_selection
         if (
-            is_v2
+            is_v2_or_v3
             and selection is not None
             and self.parameters.get(selection.universe_parameter)
             != list(selection.canonical_security_ids)
         ):
             raise ValueError("runtime universe does not match provenance")  # type: ignore[union-attr]
+        if self.manifest_version == "run_input_manifest.v3":
+            enabled = self.parameters.get("regime_filter_enabled") is True
+            if enabled is not True or self.regime_benchmark is None:
+                raise ValueError(
+                    "V3 requires exactly one enabled regime benchmark reference pin"
+                )
+            if self.parameters.get("regime_filter_benchmark_security_id") != (
+                self.regime_benchmark.security_id
+            ):
+                raise ValueError("regime benchmark pin does not match its parameter")
+            if self.universe_selection is not None and self.regime_benchmark.security_id in self.universe_selection.canonical_security_ids:
+                raise ValueError("regime benchmark must remain outside the trade universe")
+        elif self.regime_benchmark is not None:
+            raise ValueError("reference benchmark pins require V3")
         return self
 
 

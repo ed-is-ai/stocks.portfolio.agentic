@@ -715,6 +715,7 @@ async def strategy_readiness(
         "_strategy_readiness.html",
         {
             "readiness": result,
+            "regime_benchmark": readiness.regime_benchmark_status(),
             "profile_delta": readiness.profile_delta(),
             "open_advanced": section == "advanced",
         },
@@ -940,6 +941,8 @@ def _configuration_context(
     securities: list[tuple[str, str, str, str]] = []
     if active is not None:
         securities = backtest_repo.roster_member_identities(active.profile_hash)
+    reference_rows = getattr(backtest_repo, "reference_identity_rows", None)
+    reference_benchmarks = reference_rows() if callable(reference_rows) else []
     context: dict[str, object] = {
         "strategies": view.strategies,
         "warnings": view.warnings,
@@ -951,6 +954,7 @@ def _configuration_context(
         "enum_options": enum_options,
         "enum_default_tokens": enum_default_tokens,
         "securities": securities,
+        "reference_benchmarks": reference_benchmarks,
         "active_profile": active,
         "values": {
             "start_month": "",
@@ -1895,6 +1899,26 @@ def _roster_identity_map(
     }
 
 
+def _regime_benchmark_context(result: BacktestResultV1) -> dict[str, object] | None:
+    pin = result.regime_benchmark
+    if pin is None:
+        return None
+    return {
+        "security_id": pin.security_id,
+        "identity_registry_revision": pin.identity_registry_revision,
+        "alias_revision": pin.alias_revision,
+        "price_revision": pin.price_revision,
+        "action_revision": pin.action_revision,
+        "evidence_digest": pin.evidence_digest,
+        "request_start": pin.request_start,
+        "request_end": pin.request_end,
+        "session_policy": pin.session_policy,
+        "calendar_mic": pin.calendar_mic,
+        "calendar_session_table_digest": pin.calendar_session_table_digest,
+        "price_plane_policy_version": pin.price_plane_policy_version,
+    }
+
+
 def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
     """Build the Result page's full context from Story 2.5's aggregate
     alone -- every Metrics/Equity-Curve/Trade-Log/provenance value is
@@ -1943,6 +1967,7 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         "initial_basket": initial_basket_view(result, identities),
         "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
+        "regime_benchmark": _regime_benchmark_context(result),
         "note": note_view(result),
         "universe": universe,
         "tuning_parameters": tuning_parameters(
@@ -2297,6 +2322,7 @@ def _comparison_side_context(
         "metrics": metrics_view(result),
         "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
+        "regime_benchmark": _regime_benchmark_context(result),
     }
 
 

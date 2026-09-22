@@ -7,7 +7,7 @@ import gc
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Mapping, Protocol, cast
 from types import MappingProxyType
 
 from app.core import config
-from app.integrations.fx_history import ChainedFxQuoteFetcher
+from app.integrations.fx_history import BankOfEnglandFxSeriesFetcher, ChainedFxQuoteFetcher
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.historical_price_repo import (
@@ -39,10 +39,7 @@ from app.services.backtest.backtest_engine import (
     TradeLogEvent,
     run_simulation,
 )
-from app.services.backtest.historical_price_evidence import (
-    FxSeriesFetcher,
-    YFinanceFxSeriesFetcher,
-)
+from app.services.backtest.historical_price_evidence import FxSeriesFetcher
 from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.historical_initialization_engine import (
     CanonicalSnapshotMonthProcessor,
@@ -56,10 +53,12 @@ from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
     PROTOCOL_SCHEMA_VERSION,
     RunInputManifestV1,
+    RunInputManifestV3,
     current_execution_contract_digest,
     read_run_input_manifest,
     build_run_input_manifest,
     build_run_input_manifest_v2,
+    build_run_input_manifest_v3,
 )
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
@@ -70,6 +69,7 @@ from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
     BootstrapStage,
     JobFailureCode,
+    RegimeBenchmarkPinV1,
     STAGE_SEQUENCES,
     StrategyJobConflict,
     StrategyJobStatus,
@@ -84,6 +84,7 @@ from app.services.backtest.strategy_protocol import (
     StrategyProtocolV1,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
+from app.services.backtest.trading_calendar import TradingCalendar
 
 
 logger = logging.getLogger(__name__)
@@ -320,7 +321,7 @@ class PreparationStageEngine(StageWalkEngine):
                 # chained historical FX backfill fetcher is built inline.
                 fx_fetcher=ChainedFxQuoteFetcher(),
                 fx_series_fetcher=(
-                    self._fx_series_fetcher or YFinanceFxSeriesFetcher()
+                    self._fx_series_fetcher or BankOfEnglandFxSeriesFetcher()
                 ),
             )
             evidence: tuple[PinnedSecurityEvidenceV1, ...] | None = None
@@ -394,9 +395,19 @@ class PreparationStageEngine(StageWalkEngine):
                 securities=evidence,
             )
             base = base.model_copy(update={"parameters": prep.parameters})
-            manifest = build_run_input_manifest_v2(
-                base, selection=s, source_preparation_job_id=job_id
-            )
+            if prep.regime_benchmark is None:
+                manifest = build_run_input_manifest_v2(
+                    base, selection=s, source_preparation_job_id=job_id
+                )
+                manifest_version = "run_input_manifest.v2"
+            else:
+                manifest = build_run_input_manifest_v3(
+                    base,
+                    selection=s,
+                    source_preparation_job_id=job_id,
+                    regime_benchmark=prep.regime_benchmark,
+                )
+                manifest_version = "run_input_manifest.v3"
             self._repository.seal_preparation_and_create_backtest(
                 job_id,
                 claim_token,
@@ -415,10 +426,12 @@ class PreparationStageEngine(StageWalkEngine):
                     run_input_manifest_digest=manifest.digest(),
                     execution_contract_digest=manifest.execution_contract_digest(),
                     canonical_manifest_json=manifest.canonical_json(),
-                    manifest_version="run_input_manifest.v2",
+                    manifest_version=manifest_version,
                     universe_selection=s,
                     source_preparation_job_id=job_id,
+                    regime_benchmark=prep.regime_benchmark,
                 ),
+                historical_price_repository=self._prices,
             )
             return self._repository.strategy_job(job_id)
         except Exception as exc:
@@ -991,6 +1004,7 @@ class BacktestExecutionEngine:
         self._prices = prices
         self._project_root = project_root
         self._lease = lease
+        self._regime_benchmark_access: HistoricalEvidenceReadHandle | None = None
 
     def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
         job = self._repository.strategy_job(job_id)
@@ -1048,11 +1062,13 @@ class BacktestExecutionEngine:
             for item in security_market_data:
                 if item.price_access is not None:
                     item.price_access.close()
+            self._close_regime_benchmark_access()
             return job
         if job.cancel_requested_at is not None:
             for item in security_market_data:
                 if item.price_access is not None:
                     item.price_access.close()
+            self._close_regime_benchmark_access()
             return self._repository.cancel_claimed_strategy_job(
                 job_id,
                 claim_token,
@@ -1088,6 +1104,10 @@ class BacktestExecutionEngine:
                 ),
                 backtest_repo=self._repository,
                 historical_price_repo=self._prices,
+                regime_benchmark=manifest.regime_benchmark
+                if isinstance(manifest, RunInputManifestV3)
+                else None,
+                regime_benchmark_access=self._regime_benchmark_access,
                 prepared_planes=prepared_planes_view,
                 prepared_plane_cache=prepared_planes,
                 price_accesses=cast(
@@ -1169,6 +1189,7 @@ class BacktestExecutionEngine:
             for item in security_market_data:
                 if item.price_access is not None:
                     item.price_access.close()
+            self._close_regime_benchmark_access()
 
         job = self._repository.strategy_job(job_id)
         if not self._owns(job, claim_token):
@@ -1284,7 +1305,64 @@ class BacktestExecutionEngine:
                 if item.price_access is not None:
                     item.price_access.close()
             raise
+        if isinstance(manifest, RunInputManifestV3):
+            try:
+                self._regime_benchmark_access = self._resolve_regime_benchmark(
+                    manifest.regime_benchmark
+                )
+            except Exception:
+                for item in security_market_data:
+                    if item.price_access is not None:
+                        item.price_access.close()
+                raise
         return manifest, strategy, security_market_data, fx_evidence
+
+    def _resolve_regime_benchmark(
+        self, pin: "RegimeBenchmarkPinV1"
+    ) -> HistoricalEvidenceReadHandle:
+        access = self._prices.open_read(pin.price_revision)
+        try:
+            metadata = access.metadata
+            valid = (
+                access.data_revision == pin.price_revision == pin.evidence_digest
+                and access.security_id == pin.security_id
+                and metadata.alias_revision == pin.alias_revision
+                and metadata.provider == "yfinance"
+                and metadata.requested_symbol == "SPY"
+                and metadata.observed_symbol == "SPY"
+                and metadata.currency == "USD"
+                and metadata.quote_unit == "USD"
+                and metadata.exchange_timezone == "America/New_York"
+                and metadata.start == pin.request_start.isoformat()
+                and metadata.end == pin.request_end.isoformat()
+                and pin.calendar_session_table_digest
+                == TradingCalendar().session_table_digest()
+                and pin.price_plane_policy_version == "HistoricalMarketPlanesV1"
+            )
+            rows = access.bounded(
+                through=pin.request_end - timedelta(days=1)
+            ).rows
+            sessions = tuple(date.fromisoformat(str(row["session"])) for row in rows)
+            expected_sessions = TradingCalendar().sessions_in_range(
+                pin.calendar_mic, pin.request_start, pin.request_end
+            )
+            valid = valid and sessions == expected_sessions and len(sessions) >= 200
+        except Exception:
+            access.close()
+            raise
+        if not valid:
+            access.close()
+            raise BacktestResolutionError(
+                JobFailureCode.INTEGRITY_ERROR,
+                "Pinned regime benchmark evidence does not match its reference pin",
+            )
+        return access
+
+    def _close_regime_benchmark_access(self) -> None:
+        access = self._regime_benchmark_access
+        self._regime_benchmark_access = None
+        if access is not None:
+            access.close()
 
     def _resolve_security(self, item: PinnedSecurityEvidenceV1) -> SecurityMarketDataV1:
         access = self._prices.open_read(item.price_revision)

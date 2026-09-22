@@ -11,7 +11,10 @@ from app.services.backtest.canonical_manifest import manifest_digest
 
 IDENTITY_REGISTRY_VERSION = "SecurityIdentityRegistryV1"
 ALIAS_MANIFEST_VERSION = "SecurityAliasManifestV1"
-_SUPPORTED_MICS = {"BATS", "XNAS", "XNYS", "XLON"}
+# ARCX is reference-only for now.  It is deliberately not added to the
+# tradable snapshot-member contract; benchmark evidence uses the canonical
+# XNYS session table explicitly.
+_SUPPORTED_MICS = {"ARCX", "BATS", "XNAS", "XNYS", "XLON"}
 
 
 class IdentityAmbiguousError(ValueError):
@@ -42,6 +45,8 @@ class SecurityIdentityV1:
         )
         if not self.security_id or self.security_id in self.provider_symbol:
             raise ValueError("security_id must be opaque")
+        if not self.evidence_digest:
+            raise ValueError("security identity evidence is required")
 
 
 @dataclass(frozen=True)
@@ -54,9 +59,15 @@ class SecurityIdentityRegistryV1:
 
     @classmethod
     def build(
-        cls, identities: tuple[SecurityIdentityV1, ...], *, created_at: datetime
+        cls,
+        identities: tuple[SecurityIdentityV1, ...],
+        *,
+        created_at: datetime,
+        allow_reference_mics: bool = False,
     ) -> SecurityIdentityRegistryV1:
         ordered = tuple(sorted(identities, key=lambda item: item.security_id))
+        if not allow_reference_mics and any(item.mic == "ARCX" for item in ordered):
+            raise ValueError("ARCX is reference-only and cannot enter a tradable registry")
         if len({item.security_id for item in ordered}) != len(ordered):
             raise ValueError("duplicate security_id")
         keys = {(item.mic, item.provider_symbol) for item in ordered}
@@ -124,8 +135,14 @@ class SecurityAliasManifestV1:
 
     @classmethod
     def build(
-        cls, entries: tuple[AliasEntryV1, ...], *, created_at: datetime
+        cls,
+        entries: tuple[AliasEntryV1, ...],
+        *,
+        created_at: datetime,
+        allow_reference_mics: bool = False,
     ) -> SecurityAliasManifestV1:
+        if not allow_reference_mics and any(item.mic == "ARCX" for item in entries):
+            raise ValueError("ARCX is reference-only and cannot enter a tradable alias manifest")
         ordered = tuple(
             sorted(
                 entries,

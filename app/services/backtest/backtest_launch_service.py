@@ -36,6 +36,7 @@ from typing import Literal, Mapping, cast
 
 from app.core.config import ROOT_DIR, SKILLS_DIR
 from app.integrations.fx_history import (
+    BankOfEnglandFxSeriesFetcher,
     ChainedFxQuoteFetcher,
     FxProviderUnavailable,
     FxUnsupportedPair,
@@ -54,7 +55,10 @@ from app.services.backtest.historical_price_evidence import (
     FX_PAIR,
     FxSeriesFetcher,
     ProviderFailure,
-    YFinanceFxSeriesFetcher,
+)
+from app.services.backtest.benchmark_evidence import (
+    BenchmarkEvidenceError,
+    BenchmarkEvidenceService,
 )
 from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
@@ -72,6 +76,7 @@ from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
     PreparationSubmissionV1,
     PreparationEnqueueResultV1,
+    RegimeBenchmarkPinV1,
     RunUniverseSelectionV1,
     StrategyJobConflict,
 )
@@ -190,6 +195,7 @@ class BacktestLaunchCommandV1:
     parameters: Mapping[str, JsonValue]
     idempotency_key: str | None = None
     universe_selection: RunUniverseSelectionV1 | None = None
+    regime_benchmark: RegimeBenchmarkPinV1 | None = None
 
 
 def _fx_pair(base_currency: str, security_currency: str) -> str | None:
@@ -212,6 +218,7 @@ class BacktestLaunchService:
         project_root: Path = ROOT_DIR,
         fx_fetcher: ChainedFxQuoteFetcher | None = None,
         fx_series_fetcher: FxSeriesFetcher | None = None,
+        benchmark_evidence: BenchmarkEvidenceService | None = None,
     ) -> None:
         self._backtest_repo = backtest_repo
         self._historical_price_repo = historical_price_repo
@@ -220,7 +227,11 @@ class BacktestLaunchService:
         self._skills_root = skills_root
         self._project_root = project_root
         self._fx_fetcher = fx_fetcher or ChainedFxQuoteFetcher()
-        self._fx_series_fetcher = fx_series_fetcher or YFinanceFxSeriesFetcher()
+        self._fx_series_fetcher = fx_series_fetcher or BankOfEnglandFxSeriesFetcher()
+        self._benchmark_evidence = benchmark_evidence or BenchmarkEvidenceService(
+            backtest_repository=backtest_repo,
+            price_repository=historical_price_repo,
+        )
 
     def discover(self) -> StrategyDiscoveryResultV1:
         """Return one fresh Story 2.2 discovery result -- never cached."""
@@ -348,6 +359,56 @@ class BacktestLaunchService:
                     universe_parameter: bound_universe,
                 }
 
+        regime_benchmark = command.regime_benchmark
+        if (
+            not isinstance(validated_parameters, tuple)
+            and validated_parameters.get("regime_filter_enabled") is True
+        ):
+            benchmark_id = validated_parameters.get("regime_filter_benchmark_security_id")
+            if not isinstance(benchmark_id, str) or not benchmark_id:
+                references = [
+                    security_id
+                    for security_id, mic, symbol, _evidence in self._backtest_repo.reference_identity_rows()
+                    if mic == "ARCX" and symbol == "SPY"
+                ]
+                if len(references) != 1:
+                    errors.append(
+                        LaunchFieldError(
+                            "param__regime_filter_benchmark_security_id",
+                            "A single validated SPY benchmark reference is required.",
+                        )
+                    )
+                else:
+                    benchmark_id = references[0]
+                    validated_parameters = {
+                        **validated_parameters,
+                        "regime_filter_benchmark_security_id": benchmark_id,
+                    }
+            if isinstance(benchmark_id, str) and benchmark_id:
+                if regime_benchmark is None:
+                    try:
+                        regime_benchmark = self._benchmark_evidence.resolve_existing(
+                            benchmark_id,
+                            start=_month_start(command.start_month),
+                            end=_month_after(command.end_month),
+                            ma_length=int(
+                                validated_parameters.get("regime_filter_ma_length", 200)
+                            ),
+                        )
+                    except (BenchmarkEvidenceError, ValueError) as exc:
+                        errors.append(
+                            LaunchFieldError(
+                                "param__regime_filter_benchmark_security_id", str(exc)
+                            )
+                        )
+                elif regime_benchmark.security_id != benchmark_id:
+                    errors.append(
+                        LaunchFieldError(
+                            "param__regime_filter_benchmark_security_id",
+                            "The selected benchmark does not match the validated SPY reference.",
+                        )
+                    )
+
         if errors:
             raise BacktestLaunchValidationError(tuple(errors))
 
@@ -367,12 +428,13 @@ class BacktestLaunchService:
                         strategy_id=strategy.strategy_id,
                         strategy_api_version=strategy.api_version,
                         strategy_source_digest=strategy.source_digest,
-                        parameters=dict(command.parameters),
+                        parameters=dict(validated_parameters),
                         start_month=command.start_month,
                         end_month=command.end_month,
                         base_currency=command.base_currency,
                         starting_capital=command.starting_capital,
                         idempotency_key=command.idempotency_key,
+                        regime_benchmark=regime_benchmark,
                     )
                 )
             except (StrategyJobConflict, ValueError) as exc:

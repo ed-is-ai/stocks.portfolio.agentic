@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository, RosterCaptureCommit
+from app.services.backtest.security_identity import AliasEntryV1, SecurityIdentityV1
 
 
 NOW = datetime(2026, 8, 10, 12, tzinfo=timezone.utc).isoformat()
@@ -191,3 +192,71 @@ def test_conflicting_identity_rolls_back_entire_capture(tmp_path) -> None:
     with pytest.raises(sqlite3.IntegrityError):
         repo.commit_roster_capture(conflict)
     assert repo.roster_digest_for_lineage("lineage-2") is None
+
+
+def test_reference_identity_registration_is_idempotent_and_not_a_roster_member(
+    tmp_path,
+) -> None:
+    repo = BacktestRepository(db.make_connect(lambda: tmp_path / "backtest.db"))
+    repo.ensure_schema()
+    repo.commit_roster_capture(_commit())
+    identity = SecurityIdentityV1(
+        security_id="6f8d45e7-50a2-4b79-9a6c-7f9c3f0c1c62",
+        mic="ARCX",
+        provider_symbol="SPY",
+        evidence_digest="s" * 64,
+    )
+    alias = AliasEntryV1(
+        security_id=identity.security_id,
+        provider="yfinance",
+        mic="ARCX",
+        observed_symbol="SPY",
+        effective_from=date(1993, 1, 22),
+        effective_to=None,
+        evidence_source="issuer-listing-fixture",
+        evidence_digest="a" * 64,
+        provenance="manual_override",
+    )
+    first = repo.register_reference_identity(
+        identity, alias, created_at=datetime(2026, 9, 22, tzinfo=timezone.utc)
+    )
+    second = repo.register_reference_identity(
+        identity, alias, created_at=datetime(2026, 9, 23, tzinfo=timezone.utc)
+    )
+
+    assert first == second
+    assert repo.reference_alias_entry(first.alias_revision) == alias
+    assert repo.reference_identity_rows() == [
+        (identity.security_id, "ARCX", "SPY", "s" * 64)
+    ]
+    assert repo.identity_rows() == [
+        (
+            "7d16e313-2dd2-45a8-8a33-7b61b7df3fc8",
+            "XNAS",
+            "AAPL",
+            "d" * 64,
+        )
+    ]
+    conn = repo._connect()
+    try:
+        snapshot_sql = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name='snapshot_members'"
+            ).fetchone()[0]
+        )
+        assert "ARCX" not in snapshot_sql
+        with pytest.raises(sqlite3.IntegrityError, match="conflicts"):
+            repo.register_reference_identity(
+                replace(identity, security_id="another-reference-id"),
+                replace(alias, security_id="another-reference-id"),
+                created_at=datetime(2026, 9, 22, tzinfo=timezone.utc),
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="immutable"):
+            conn.execute(
+                "UPDATE reference_alias_entries SET observed_symbol='QQQ'"
+            )
+    finally:
+        conn.close()
+    assert repo.reference_identity_rows() == [
+        (identity.security_id, "ARCX", "SPY", "s" * 64)
+    ]

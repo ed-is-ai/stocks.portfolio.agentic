@@ -152,6 +152,12 @@ graph LR
   local Skills. Untrusted third-party execution and an external marketplace
   remain out of scope.
 
+  **GH-665 addendum:** a V3 run may pin one read-only regime benchmark outside
+  the selected trade universe. That reference is exposed only through the
+  bounded regime-filter path; it is excluded from selected-security
+  enumeration, ranking, signals, fills, and portfolio state. The selected
+  universe guard remains closed for ordinary reads and signals.
+
 ### AD-4 — Strategy job lifecycle has one ledger and race-safe writers
 
 - **Binds:** FR-8, FR-9, FR-16–FR-20, §7.1 Sequential execution & Observability (PRD)
@@ -921,6 +927,15 @@ graph LR
   selection, preparation, FIFO Backtest execution, and a completed provenance-
   bearing Result using supported surfaces only. Live-provider smoke is bounded,
   optional, and non-gating.
+
+  **GH-665 addendum:** V3 adds one immutable `RegimeBenchmarkPinV1` beside
+  the selected V2 evidence. The pin carries its reference identity and alias
+  revisions, price/action revisions, bounded request interval, session and
+  price-plane policies, and calendar-session digest. An enabled regime filter
+  must name that exact pin; disabled filtering remains V2 and acquires no
+  reference. V1/V2 canonical bytes and digests are unchanged, and V3
+  comparisons require equal benchmark pins in addition to the existing
+  comparison dimensions.
 
 ## Consistency Conventions
 

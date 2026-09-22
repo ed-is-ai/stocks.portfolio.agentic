@@ -74,6 +74,16 @@
       <dd class="col-sm-9 text-break">{{ result.run_input_manifest_digest }}</dd>
       <dt class="col-sm-3">Execution contract</dt>
       <dd class="col-sm-9 text-break">{{ result.execution_contract_digest }}</dd>
+      {% if regime_benchmark %}
+      <dt class="col-sm-3">Regime benchmark</dt>
+      <dd class="col-sm-9">{{ regime_benchmark.security_id }} (benchmark-only)</dd>
+      <dt class="col-sm-3">Benchmark evidence</dt>
+      <dd class="col-sm-9 text-break">{{ regime_benchmark.evidence_digest }}</dd>
+      <dt class="col-sm-3">Benchmark bounds</dt>
+      <dd class="col-sm-9">{{ regime_benchmark.request_start }}–{{ regime_benchmark.request_end }}; {{ regime_benchmark.calendar_mic }} / {{ regime_benchmark.session_policy }}</dd>
+      <dt class="col-sm-3">Benchmark price plane</dt>
+      <dd class="col-sm-9">{{ regime_benchmark.price_plane_policy_version }}</dd>
+      {% endif %}
     </dl>
   </details>
 

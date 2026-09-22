@@ -10,14 +10,23 @@ anything.
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+import sqlite3
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.core.config import SKILLS_DIR
 from app.repositories.backtest_repo import BacktestIntegrityError
+from app.repositories.historical_price_repo import (
+    EvidenceMissingError,
+    HistoricalEvidenceIntegrityError,
+)
 from app.services.backtest.skill_discovery import discover_strategies
 from app.services.backtest.snapshot_profile import adoption_gate_failures
+from app.services.backtest.benchmark_evidence import (
+    BenchmarkEvidenceError,
+    BenchmarkEvidenceService,
+)
 from app.services.backtest.strategy_job import (
     PrerequisiteItemV1,
     PrerequisiteState,
@@ -30,6 +39,18 @@ from app.services.backtest.strategy_job import (
 
 if TYPE_CHECKING:
     from app.repositories.backtest_repo import BacktestRepository
+
+
+def _month_start(month: str) -> date:
+    year, number = (int(part) for part in month.split("-"))
+    return date(year, number, 1)
+
+
+def _month_after(month: str) -> date:
+    value = _month_start(month)
+    if value.month == 12:
+        return date(value.year + 1, 1, 1)
+    return date(value.year, value.month + 1, 1)
 
 
 def _is_fixture_environment() -> bool:
@@ -88,10 +109,12 @@ class StrategyReadinessService:
         *,
         skills_root: Path | None = None,
         clock: "datetime | None" = None,
+        benchmark_evidence: BenchmarkEvidenceService | None = None,
     ) -> None:
         self._repository = repository
         self._skills_root = skills_root or SKILLS_DIR
         self._clock = clock
+        self._benchmark_evidence = benchmark_evidence
 
     def _now(self) -> datetime:
         if self._clock is not None:
@@ -159,6 +182,75 @@ class StrategyReadinessService:
                 for f in readiness.recent_failures
             ],
         }
+
+    def regime_benchmark_status(self) -> dict[str, str]:
+        """Project the optional SPY check used by regime-enabled launches.
+
+        This status is deliberately separate from the five global readiness
+        prerequisites: strategies with the regime filter disabled do not need
+        a benchmark reference. The launch service remains the enforcement
+        boundary for an enabled run.
+        """
+        result = {
+            "state": "unavailable",
+            "label": "SPY regime reference",
+            "required_for": "regime_filter_enabled=true",
+            "reason": "SPY evidence check is unavailable in this process",
+        }
+        if self._benchmark_evidence is None:
+            return result
+        try:
+            active = self._repository.active_snapshot_profile()
+            if active is None:
+                result["state"] = "missing"
+                result["reason"] = "No active profile defines a regime-filter window"
+                return result
+            coverage = self._repository.snapshot_coverage(active.profile_hash)
+            if not coverage.snapshot_count:
+                result["state"] = "missing"
+                result["reason"] = "No prepared months define a regime-filter window"
+                return result
+            references = [
+                security_id
+                for security_id, mic, symbol, _evidence in (
+                    self._repository.reference_identity_rows()
+                )
+                if mic == "ARCX" and symbol == "SPY"
+            ]
+            if len(references) != 1:
+                result["state"] = "missing"
+                result["reason"] = "A single registered SPY reference is required"
+                return result
+            earliest = getattr(coverage, "earliest_month", None)
+            latest = getattr(coverage, "latest_month", None)
+            if not isinstance(earliest, str) or not isinstance(latest, str):
+                result["state"] = "integrity_error"
+                result["reason"] = "Prepared-month coverage has no valid bounds"
+                return result
+            start = _month_start(earliest)
+            end = _month_after(latest)
+            pin = self._benchmark_evidence.resolve_existing(
+                references[0], start=start, end=end, ma_length=200
+            )
+            result["state"] = "ready"
+            result["reason"] = (
+                f"SPY evidence covers {pin.request_start.isoformat()} through "
+                f"{pin.request_end.isoformat()} with a 200-session warm-up"
+            )
+            return result
+        except (BenchmarkEvidenceError, EvidenceMissingError) as exc:
+            result["state"] = "missing"
+            result["reason"] = str(exc)
+            return result
+        except (
+            BacktestIntegrityError,
+            HistoricalEvidenceIntegrityError,
+            sqlite3.Error,
+            ValueError,
+        ) as exc:
+            result["state"] = "integrity_error"
+            result["reason"] = str(exc)
+            return result
 
     def _evaluate_qualification(self, now: datetime) -> PrerequisiteItemV1:
         digest = self._repository.current_qualification_contract_digest()

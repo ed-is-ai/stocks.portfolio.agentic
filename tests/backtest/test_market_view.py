@@ -46,6 +46,7 @@ from app.services.backtest.snapshot_profile import (
 )
 from app.services.backtest.source_manifest import detector_source_manifests
 from app.services.backtest.detectors import DETECTOR_REGISTRY
+from app.services.backtest.strategy_job import RegimeBenchmarkPinV1
 from app.services.backtest.trading_calendar import TradingCalendar
 
 DIGEST_A = "a" * 64
@@ -390,6 +391,63 @@ def test_price_history_returns_only_rows_on_or_before_the_bound(tmp_path) -> Non
 
     assert list(frame.index) == [date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)]
     assert tuple(frame.columns) == PRICE_HISTORY_COLUMNS
+
+
+def test_reference_history_is_bounded_without_widening_trade_reads(tmp_path) -> None:
+    price_repo = _price_repo(tmp_path)
+    sessions = (
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+        date(2026, 6, 3),
+        date(2026, 6, 4),
+    )
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id="reference-spy",
+        symbol="SPY",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=sessions,
+        closes=(100.0, 101.0, 102.0, 103.0),
+    )
+    pin = RegimeBenchmarkPinV1(
+        security_id="reference-spy",
+        identity_registry_revision=DIGEST_A,
+        alias_revision=DIGEST_B,
+        price_revision=revision,
+        action_revision=revision,
+        evidence_digest=revision,
+        request_start=date(2026, 6, 1),
+        request_end=date(2026, 6, 10),
+        session_policy="canonical_exchange_sessions_v2",
+        calendar_mic="XNYS",
+        calendar_session_table_digest=DIGEST_C,
+        price_plane_policy_version="HistoricalMarketPlanesV1",
+    )
+    access = price_repo.open_read(revision)
+    try:
+        view = MarketView(
+            as_of_session=date(2026, 6, 3),
+            profile_hash=PROFILE_HASH,
+            security_price_revisions={},
+            selected_universe=(SECURITY_ID,),
+            backtest_repo=_backtest_repo(tmp_path),
+            historical_price_repo=price_repo,
+            regime_benchmark=pin,
+            regime_benchmark_access=access,
+        )
+
+        frame = view.regime_benchmark_history(
+            "reference-spy", limit=10, columns=("close",)
+        )
+
+        assert list(frame.index) == list(sessions[:3])
+        with pytest.raises(UnselectedSecurityError):
+            view.price_history("reference-spy")
+        with pytest.raises(UnselectedSecurityError):
+            view.regime_benchmark_history("other-reference")
+    finally:
+        access.close()
 
 
 def test_price_history_returns_bounded_rows_and_requested_columns(tmp_path) -> None:

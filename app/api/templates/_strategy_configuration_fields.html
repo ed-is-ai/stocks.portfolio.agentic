@@ -15,6 +15,16 @@
 <div class="mb-3" data-param-default="{{ param_default_token(parameter) }}">
   <label for="{{ field_id }}" class="form-label">{{ parameter.name }}{% if parameter.required %} <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden">(required)</span>{% endif %}</label>
   <div id="{{ field_id }}-help" class="form-text">{{ parameter.description }}{% if parameter.minimum is not none or parameter.maximum is not none %} (range: {{ parameter.minimum if parameter.minimum is not none else '−∞' }}–{{ parameter.maximum if parameter.maximum is not none else '∞' }}){% endif %} Default: {{ parameter.default }}.</div>
+  {% if parameter.name == 'regime_filter_benchmark_security_id' %}
+  <div class="form-text" data-regime-benchmark-reference>
+    {% if reference_benchmarks %}
+      Validated benchmark-only references:
+      {% for benchmark in reference_benchmarks %}<code>{{ benchmark[2] }} ({{ benchmark[0] }})</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    {% else %}
+      No validated benchmark-only reference is registered yet.
+    {% endif %}
+  </div>
+  {% endif %}
   {% if parameter.type == 'boolean' %}
   {% set current = raw if raw is not none else ('true' if parameter.default else 'false') %}
   <div class="btn-group" role="radiogroup" aria-labelledby="{{ field_id }}-help">

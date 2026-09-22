@@ -13,6 +13,8 @@ from app.services.backtest.security_identity import (
     SecurityIdentityRegistryV1,
 )
 
+NOW = datetime(2026, 8, 10, tzinfo=timezone.utc)
+
 
 def _identity(security_id: str, symbol: str = "AAPL") -> SecurityIdentityV1:
     return SecurityIdentityV1(
@@ -60,6 +62,42 @@ def test_registry_revision_is_stable_and_security_ids_are_not_symbol_derived() -
         provider_symbol="CBOE",
         evidence_digest="b" * 64,
     ).mic == "BATS"
+
+
+def test_reference_arcx_identity_is_opaque() -> None:
+    identity = SecurityIdentityV1(
+        security_id="6f8d45e7-50a2-4b79-9a6c-7f9c3f0c1c62",
+        mic="ARCX",
+        provider_symbol="SPY",
+        evidence_digest="s" * 64,
+    )
+
+    assert (identity.mic, identity.provider_symbol) == ("ARCX", "SPY")
+    assert "SPY" not in identity.security_id
+
+
+def test_arcx_is_rejected_from_tradable_manifests() -> None:
+    identity = SecurityIdentityV1(
+        security_id="opaque-reference-id",
+        mic="ARCX",
+        provider_symbol="SPY",
+        evidence_digest="e" * 64,
+    )
+    alias = AliasEntryV1(
+        security_id=identity.security_id,
+        provider="yfinance",
+        mic="ARCX",
+        observed_symbol="SPY",
+        effective_from=date(1993, 1, 22),
+        effective_to=None,
+        evidence_source="issuer",
+        evidence_digest="a" * 64,
+        provenance="manual_override",
+    )
+    with pytest.raises(ValueError, match="reference-only"):
+        SecurityIdentityRegistryV1.build((identity,), created_at=NOW)
+    with pytest.raises(ValueError, match="reference-only"):
+        SecurityAliasManifestV1.build((alias,), created_at=NOW)
 
 
 def test_alias_resolution_uses_provider_mic_symbol_and_half_open_date() -> None:
