@@ -329,6 +329,22 @@ class BacktestLaunchService:
         universe_parameter = strategy.universe.parameter
         submitted_parameters = dict(command.parameters)
         bound_universe = submitted_parameters.pop(universe_parameter, None)
+        # ``regime_filter_enabled`` is a host-owned V3 switch.  The six
+        # runtimes also retain the older ``block_buy_on_downtrend_enabled``
+        # parameter for backwards-compatible manifests, but V3 preparation
+        # contracts use this explicit switch to bind the reference pin.
+        regime_filter_enabled = submitted_parameters.pop(
+            "regime_filter_enabled", None
+        )
+        if regime_filter_enabled is not None and not isinstance(
+            regime_filter_enabled, bool
+        ):
+            errors.append(
+                LaunchFieldError(
+                    "param__regime_filter_enabled",
+                    "regime_filter_enabled must be a boolean.",
+                )
+            )
         if bound_universe is not None and command.universe_selection is None:
             errors.append(
                 LaunchFieldError(
@@ -358,6 +374,14 @@ class BacktestLaunchService:
                     **validated_parameters,
                     universe_parameter: bound_universe,
                 }
+
+        if regime_filter_enabled is not None and not isinstance(
+            validated_parameters, tuple
+        ):
+            validated_parameters = {
+                **validated_parameters,
+                "regime_filter_enabled": regime_filter_enabled,
+            }
 
         regime_benchmark = command.regime_benchmark
         if (

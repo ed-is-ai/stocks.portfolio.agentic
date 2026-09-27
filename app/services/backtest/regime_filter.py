@@ -28,6 +28,10 @@ from app.services.backtest.strategy_protocol import MarketViewV1, StrategyParame
 #: Opt-in flag; entries are only gated when this parameter is exactly ``True``.
 BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM = "block_buy_on_downtrend_enabled"
 
+#: V3's explicit host-owned switch.  The legacy block flag remains accepted
+#: so older manifests replay with their original behavior.
+REGIME_FILTER_ENABLED_PARAM = "regime_filter_enabled"
+
 #: Canonical id of the benchmark security whose regime governs the gate.
 REGIME_FILTER_BENCHMARK_PARAM = "regime_filter_benchmark_security_id"
 
@@ -89,7 +93,10 @@ def entry_signals_permitted(
     yields fewer finite closes than the MA length. Otherwise it returns
     ``latest_close > trailing_sma``.
     """
-    if parameters.get(BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM) is not True:
+    if (
+        parameters.get(REGIME_FILTER_ENABLED_PARAM) is not True
+        and parameters.get(BLOCK_BUY_ON_DOWNTREND_ENABLED_PARAM) is not True
+    ):
         return True
 
     benchmark = parameters.get(REGIME_FILTER_BENCHMARK_PARAM)
