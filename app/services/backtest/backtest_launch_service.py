@@ -592,18 +592,70 @@ class BacktestLaunchService:
         addressing), so repeated preparations stay consistent.
         """
         try:
-            members = self._backtest_repo.snapshot_member_revisions(
-                profile_hash, snapshot_month
-            )
+            if selected_security_ids is None:
+                members = self._backtest_repo.snapshot_member_revisions(
+                    profile_hash, snapshot_month
+                )
+            else:
+                resolver = getattr(self._backtest_repo, "selected_member_revisions", None)
+                members = (
+                    resolver(profile_hash, snapshot_month, selected_security_ids)
+                    if resolver is not None
+                    else self._backtest_repo.snapshot_member_revisions(
+                        profile_hash, snapshot_month
+                    )
+                )
         except BacktestIntegrityError as exc:
             raise _RosterEvidenceError(str(exc)) from exc
-        if not members:
+        if not members and selected_security_ids is None:
             raise _RosterEvidenceError(
                 "The active profile's roster has no members for the chosen period."
             )
         if selected_security_ids is not None:
-            selected = set(selected_security_ids)
+            selected_order = tuple(dict.fromkeys(selected_security_ids))
+            selected = set(selected_order)
             members = tuple(item for item in members if item[0] in selected)
+            resolved_ids = {item[0] for item in members}
+            missing = tuple(
+                security_id
+                for security_id in selected_order
+                if security_id not in resolved_ids
+            )
+            if missing:
+                fallback = getattr(
+                    self._historical_price_repo,
+                    "latest_revisions_for_securities",
+                    None,
+                )
+                identities = {
+                    security_id: (symbol, currency)
+                    for security_id, symbol, _mic, currency in getattr(
+                        self._backtest_repo, "roster_member_identities", lambda _profile: ()
+                    )(profile_hash)
+                }
+                if fallback is not None:
+                    for security_id, revision in fallback(missing):
+                        expected = identities.get(security_id)
+                        try:
+                            evidence = self._historical_price_repo.get(revision)
+                        except EvidenceMissingError:
+                            continue
+                        if (
+                            expected is not None
+                            and evidence.security_id == security_id
+                            and evidence.provider == "yfinance"
+                            and evidence.requested_symbol == expected[0]
+                            and evidence.observed_symbol == expected[0]
+                            and evidence.currency == expected[1]
+                        ):
+                            members += ((security_id, revision),)
+                members = tuple(item for item in members if item[0] in selected)
+            member_by_security = dict(members)
+            members = tuple(
+                (security_id, member_by_security[security_id])
+                for security_id in selected_order
+                if security_id in member_by_security
+            )
             if {item[0] for item in members} != selected:
                 raise _RosterEvidenceError("Selected evidence is unavailable.")
         fx_as_of = f"{snapshot_month}-01"

@@ -709,8 +709,19 @@ def build_run_input_manifest(
             "unknown_roster", f"roster does not exist: {profile.roster_digest}"
         )
 
+    # ``regime_filter_enabled`` is a host-owned V3 contract switch.  Keep it
+    # in the sealed manifest, but do not require every Strategy descriptor to
+    # declare the host's runtime control as a user-authored parameter.
+    manifest_parameters = dict(submitted_parameters)
+    regime_filter_enabled = manifest_parameters.pop("regime_filter_enabled", None)
+    if regime_filter_enabled is not None and not isinstance(
+        regime_filter_enabled, bool
+    ):
+        raise RunInputManifestError(
+            "invalid_parameters", "regime_filter_enabled must be a boolean"
+        )
     validated = validate_strategy_parameters(
-        strategy.parameters, submitted_parameters, apply_defaults=True
+        strategy.parameters, manifest_parameters, apply_defaults=True
     )
     if isinstance(validated, tuple):
         detail = "; ".join(
@@ -719,6 +730,9 @@ def build_run_input_manifest(
         raise RunInputManifestError(
             "invalid_parameters", f"submitted parameters are invalid: {detail}"
         )
+
+    if isinstance(validated, dict) and regime_filter_enabled is not None:
+        validated["regime_filter_enabled"] = regime_filter_enabled
 
     for security in securities:
         _verify_pinned_evidence(historical_price_repo, security, base_currency)

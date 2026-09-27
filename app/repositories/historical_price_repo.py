@@ -1222,6 +1222,38 @@ class HistoricalPriceRepository:
                 return self._verify_v2_on_connection(conn, data_revision)
             return self._load_on_connection(conn, data_revision)
 
+    def latest_revisions_for_securities(
+        self, security_ids: tuple[str, ...]
+    ) -> tuple[tuple[str, str], ...]:
+        """Return the latest immutable price revision for each security."""
+        ids = tuple(dict.fromkeys(security_ids))
+        if not ids:
+            return ()
+        placeholders = ",".join("?" for _ in ids)
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"""SELECT security_id, data_revision
+                       FROM (
+                           SELECT security_id, data_revision,
+                                  ROW_NUMBER() OVER (
+                                      PARTITION BY security_id
+                                      ORDER BY end_date DESC,
+                                               first_acquired_at DESC,
+                                               data_revision DESC
+                                  ) AS revision_rank
+                             FROM historical_price_revisions
+                            WHERE security_id IN ({placeholders})
+                       )
+                      WHERE revision_rank=1""",
+                ids,
+            ).fetchall()
+        by_security = {str(row[0]): str(row[1]) for row in rows}
+        return tuple(
+            (security_id, by_security[security_id])
+            for security_id in ids
+            if security_id in by_security
+        )
+
     def open_read(self, data_revision: str) -> HistoricalEvidenceReadHandle:
         """Open an active-format, run-owned access handle for one revision."""
         with session(self._connect) as conn:
