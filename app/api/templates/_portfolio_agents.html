@@ -1,0 +1,30 @@
+{# GH-19 agent layer: out-of-band swaps only, onto the placeholders
+   _portfolio.html renders, scoped to the portfolio the view was built for.
+   Read-only; every figure comes from the typed PortfolioAgentView. #}
+{% set scope = view.portfolio_id if view.portfolio_id is not none else "none" %}
+{% macro cell(id, c) -%}
+<span id="{{ id }}" class="agent-cell" hx-swap-oob="true">
+  {%- if c.tone == "muted" %}<span>{{ c.text }}</span>
+  {%- else %}<span class="status {{ c.tone }}">{{ c.text }}</span>{% endif %}
+  {%- if c.note %}<small>{{ c.note }}</small>{% endif -%}
+</span>
+{%- endmacro %}
+{% for row in view.rows %}
+{{ cell("agent-" ~ scope ~ "-strategy-" ~ row.slug, row.strategy) }}
+{{ cell("agent-" ~ scope ~ "-risk-" ~ row.slug, row.risk) }}
+{{ cell("agent-" ~ scope ~ "-evidence-" ~ row.slug, row.evidence) }}
+{% endfor %}
+{{ cell("agent-" ~ scope ~ "-open-risk", view.open_risk) }}
+{% set count = view.attention | length %}
+{# A gap in any source makes the count partial, so it is never shown clear. #}
+{% set partial = view.unavailable | length > 0 %}
+<span id="agent-{{ scope }}-findings" class="agent-count{% if count %} neg{% endif %}" hx-swap-oob="true">{{ count }}{% if partial %} · partial{% endif %}</span>
+<div class="attention-strip{% if not count and not partial %} is-clear{% endif %}" id="agent-{{ scope }}-attention" role="status" hx-swap-oob="true">
+  {% if count %}
+  <strong>{{ count }} urgent finding{{ "s" if count != 1 }}.</strong>
+  <span>{{ view.attention | join("; ") }}</span>
+  {% else %}
+  <strong>No urgent findings.</strong>
+  {% endif %}
+  {% if partial %}<small>Partial — not counted: {{ view.unavailable | join(", ") }}.</small>{% endif %}
+</div>

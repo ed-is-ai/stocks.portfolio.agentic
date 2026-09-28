@@ -31,6 +31,12 @@ router = APIRouter()
 TraderDep = Annotated[TraderService, Depends(get_trader_service)]
 CopilotDep = Annotated[ResearchCopilotClient, Depends(get_research_copilot_client)]
 
+#: Where the panel may render: the scanner's offcanvas body (the default) or
+#: the Portfolio tab's aside (GH-19). Any other value (at most 32 characters;
+#: longer is a 422) falls back to the default.
+DEFAULT_TARGET = "#copilot-body"
+COPILOT_TARGETS = frozenset({DEFAULT_TARGET, "#portfolio-copilot-body"})
+
 
 @router.post(
     "/copilot/ask",
@@ -43,15 +49,25 @@ async def copilot_ask(
     client: CopilotDep,
     ticker: str = Form(..., max_length=32),
     question: str = Form("", max_length=500),
+    target: str = Form(DEFAULT_TARGET, max_length=32),
 ) -> HTMLResponse:
-    """Answer one question about one security and render the copilot panel."""
+    """Answer one question about one security and render the copilot panel.
+
+    ``target`` names the element the panel's follow-up form swaps into; it is
+    allowlisted because the template writes it into htmx attributes.
+    """
     if not ticker.strip():
         raise HTTPException(status_code=422, detail="ticker is required")
     outcome = await asyncio.to_thread(
         _ask, ticker, question.strip() or DEFAULT_QUESTION, trader, client
     )
     return templates.TemplateResponse(
-        request, "_copilot_panel.html", {"outcome": outcome}
+        request,
+        "_copilot_panel.html",
+        {
+            "outcome": outcome,
+            "target": target if target in COPILOT_TARGETS else DEFAULT_TARGET,
+        },
     )
 
 

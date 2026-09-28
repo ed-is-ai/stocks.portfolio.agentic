@@ -252,6 +252,51 @@
        a positioned parent with a fixed height, and hands off the canvas. */
     .portfolio-chart-canvas { height: clamp(13rem, 20vw, 16rem); position: relative; }
     .portfolio-dashboard :focus-visible { outline: 3px solid currentColor; outline-offset: 2px; }
+    /* Portfolio agent layer (GH-19): agent output sits beside the holdings it
+       judges -- agent columns, an attention strip, and a 340px read-only
+       copilot aside that stacks below the holdings at <=1080px. */
+    .attention-strip {
+      display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem 1rem;
+      padding: .65rem .85rem; margin-bottom: 1.25rem; font-size: var(--fs-sm);
+      color: var(--amber); background: var(--amber-bg); border: 1px solid var(--border);
+    }
+    .attention-strip.is-clear { color: var(--muted); background: var(--card); }
+    .attention-strip small { color: var(--muted); }
+    .portfolio-holdings-layout {
+      display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 1.25rem;
+      align-items: start;
+    }
+    .portfolio-holdings { min-width: 0; }
+    .portfolio-assistant { min-width: 0; background: var(--card); border: 1px solid var(--border); border-radius: 0; }
+    .portfolio-assistant .assistant-head { padding: .75rem .85rem; border-bottom: 1px solid var(--border); }
+    .portfolio-assistant h2 { margin: 0; font-size: var(--fs-md); font-weight: var(--fw-bold); }
+    .portfolio-assistant .assistant-body { padding: .9rem; }
+    .portfolio-assistant .context-label { margin: 0 0 .55rem; color: var(--muted); font-size: var(--fs-2xs); }
+    .portfolio-assistant .context-label strong { color: var(--primary); }
+    .portfolio-assistant .boundary {
+      margin: .8rem 0 0; padding-top: .7rem; border-top: 1px solid var(--border);
+      color: var(--muted); font-size: var(--fs-2xs);
+    }
+    .portfolio-assistant .boundary strong { color: var(--green); }
+    .agent-cell, .agent-count { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+    .agent-cell small { display: block; margin-top: .12rem; color: var(--muted); font-size: var(--fs-2xs); }
+    .agent-cell .status {
+      display: inline-block; padding: .18rem .32rem; border: 1px solid currentColor; border-radius: 0;
+      font-size: var(--fs-2xs); font-weight: var(--fw-bold); letter-spacing: .035em; text-transform: uppercase;
+    }
+    .agent-cell .status.risk { color: var(--red); background: var(--red-bg); }
+    .agent-cell .status.good { color: var(--green); background: var(--green-bg); }
+    .agent-cell .status.warn { color: var(--amber); background: var(--amber-bg); }
+    .agent-cell .status.info { color: var(--blue); background: var(--blue-bg); }
+    .portfolio-holdings tr:has(.agent-cell .status.risk) > td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+    .text-button {
+      padding: .2rem 0; color: var(--blue); background: transparent; border: 0;
+      font-size: var(--fs-xs); font-weight: var(--fw-bold);
+      text-decoration: underline; text-underline-offset: 3px;
+    }
+    @media (max-width: 1080px) {
+      .portfolio-holdings-layout { grid-template-columns: 1fr; }
+    }
     @media (max-width: 575.98px) {
       .portfolio-dashboard-controls { align-items: stretch; }
       .portfolio-context-group, .portfolio-actions { flex-basis: 100%; }
@@ -863,12 +908,32 @@
 </div>
 <script>
   // Reset the copilot panel to a one-line status (before a request, or when
-  // one fails) so an old answer is never shown under a new question.
-  function copilotStatus(text, cls) {
+  // one fails) so an old answer is never shown under a new question. The
+  // Portfolio tab's aside passes its own body as ``target`` (GH-19).
+  function copilotStatus(text, cls, target) {
     const line = document.createElement('p');
     line.className = 'small ' + (cls || 'text-muted');
     line.textContent = text;
-    document.getElementById('copilot-body').replaceChildren(line);
+    const body = document.querySelector(target || '#copilot-body');
+    if (!body) return;
+    body.replaceChildren(line);
+  }
+  // GH-19: any of this portfolio's agent placeholders the lazy agents
+  // request did not replace (every one of them when it fails) declares
+  // itself unavailable; another portfolio's placeholders are left alone.
+  function portfolioAgentsUnavailable(portfolioId) {
+    const scope = CSS.escape(String(portfolioId));
+    document.querySelectorAll(`[data-agent-placeholder="${scope}"]`).forEach((el) => {
+      el.textContent = 'Agent data unavailable';
+    });
+  }
+  // GH-19: once the aside stacks below the holdings, bring a row's Why?
+  // answer into view.
+  function revealPortfolioCopilot() {
+    const aside = document.getElementById('portfolio-assistant');
+    if (aside && window.matchMedia('(max-width: 1080px)').matches) {
+      aside.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }
   }
 </script>
 

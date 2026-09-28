@@ -461,8 +461,35 @@
       {% else %}—{% endif %}
     </div>
   </div>
+  {# GH-19 agent cards: filled out-of-band by /partials/portfolio/agents.
+     Every agent id and placeholder is scoped to this portfolio, so a late
+     response for another portfolio can never land here. #}
+  {% set agent_scope = portfolio_id if portfolio_id is not none else "none" %}
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-shield-exclamation me-1"></i>Open risk</div>
+    <div class="sval"><span id="agent-{{ agent_scope }}-open-risk" data-agent-placeholder="{{ agent_scope }}">Loading…</span></div>
+  </div>
+  <div class="stat-card">
+    <div class="slbl"><i class="bi bi-robot me-1"></i>Agent findings</div>
+    <div class="sval"><span id="agent-{{ agent_scope }}-findings" class="agent-count" data-agent-placeholder="{{ agent_scope }}">Loading…</span></div>
+  </div>
 </section>
 
+{# GH-19 agent layer. Everything agent-derived arrives in one lazy request
+   after first paint, as out-of-band swaps onto the placeholders below.
+   ``after-request`` fires on success and on response/send errors alike, so
+   any of this portfolio's placeholders the response did not replace -- all
+   of them on failure -- declares itself unavailable instead of staying
+   blank or stale. #}
+<div hx-get="/partials/portfolio/agents?portfolio_id={{ portfolio_id if portfolio_id is not none else '' }}"
+     hx-trigger="load" hx-swap="none" hx-sync="this:replace"
+     hx-on::after-request="portfolioAgentsUnavailable('{{ agent_scope }}')"></div>
+<div class="attention-strip" id="agent-{{ agent_scope }}-attention" role="status">
+  <span data-agent-placeholder="{{ agent_scope }}">Loading agent findings…</span>
+</div>
+
+<div class="portfolio-holdings-layout">
+<section class="portfolio-holdings" aria-label="Holdings">
 <div class="tbl-wrap">
   <table class="table table-hover align-middle">
     <thead>
@@ -479,6 +506,10 @@
         <th>Last Pivot</th>
         <th>Next Pivot</th>
         <th>Signal</th>
+        <th>Strategy</th>
+        <th>Thesis</th>
+        <th>Portfolio risk</th>
+        <th>Evidence</th>
         <th></th>
       </tr>
     </thead>
@@ -592,6 +623,24 @@
             </span>
           {% endif %}
         </td>
+        {% set slug = p.ticker | agent_slug %}
+        <td>
+          <span id="agent-{{ agent_scope }}-strategy-{{ slug }}" class="agent-cell" data-agent-placeholder="{{ agent_scope }}">Loading…</span>
+          {# Research Copilot (GH-13) in the aside, not the offcanvas. #}
+          <button class="text-button" type="button"
+                  aria-label="Why? Ask the Research Copilot about {{ p.display_symbol }}"
+                  hx-post="/copilot/ask"
+                  hx-vals='{{ {"ticker": p.ticker, "target": "#portfolio-copilot-body"} | tojson }}'
+                  hx-target="#portfolio-copilot-body" hx-swap="innerHTML"
+                  hx-sync="#portfolio-copilot-body:replace"
+                  hx-on::before-request="copilotStatus('Asking…', '', '#portfolio-copilot-body')"
+                  hx-on::response-error="copilotStatus('Copilot request failed.', 'text-danger', '#portfolio-copilot-body')"
+                  hx-on::send-error="copilotStatus('Copilot request failed.', 'text-danger', '#portfolio-copilot-body')"
+                  hx-on::after-request="revealPortfolioCopilot()">Why?</button>
+        </td>
+        <td><span class="agent-cell text-muted">Thesis monitor not available yet</span></td>
+        <td><span id="agent-{{ agent_scope }}-risk-{{ slug }}" class="agent-cell" data-agent-placeholder="{{ agent_scope }}">Loading…</span></td>
+        <td><span id="agent-{{ agent_scope }}-evidence-{{ slug }}" class="agent-cell" data-agent-placeholder="{{ agent_scope }}">Loading…</span></td>
         <td>
           {# Story 2.3: an oversold position's `shares` can be negative --
              never pre-fill that into these modals' shares field, since
@@ -624,6 +673,10 @@
         <td>—</td>
         <td>—</td>
         <td></td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
         <td></td>
       </tr>
       {% endif %}
@@ -633,6 +686,18 @@
 <small class="text-muted mt-2 d-block" style="font-size:0.74rem">
   {{ positions|length }} position(s) &middot; prices from last pipeline run &middot; hover signal badge for reason
 </small>
+</section>
+<aside class="portfolio-assistant" id="portfolio-assistant" aria-labelledby="portfolio-copilot-title">
+  <div class="assistant-head"><h2 id="portfolio-copilot-title">Research copilot</h2></div>
+  <div class="assistant-body">
+    <p class="context-label">Using context from <strong>Portfolio · {{ active_portfolio.name if active_portfolio else "Portfolio" }}</strong></p>
+    <div id="portfolio-copilot-body" aria-live="polite">
+      <p class="small text-muted">Portfolio-level answers are not available: the Research copilot explains one security at a time. Use Why? on a holding.</p>
+    </div>
+    <p class="boundary"><strong>Read-only.</strong> The model explains and proposes. Typed services calculate; state-changing jobs require approval.</p>
+  </div>
+</aside>
+</div>
 
 <!-- Portfolio Risk Coach (GH-16) — read-only, lazy-loaded. -->
 <div id="portfolio-risk"

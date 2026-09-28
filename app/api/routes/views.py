@@ -145,6 +145,30 @@ def partial_portfolio_risk(
     )
 
 
+@router.get("/partials/portfolio/agents", response_class=HTMLResponse)
+def partial_portfolio_agents(
+    request: Request,
+    portfolio: PortfolioDep,
+    recommendations: Annotated[
+        PortfolioRecommendationService, Depends(get_portfolio_recommendation_service)
+    ],
+    portfolio_id: str | None = None,
+) -> HTMLResponse:
+    """Out-of-band swaps for the Portfolio tab's agent layer (GH-19).
+
+    A plain ``def`` like ``partial_portfolio_risk``: the recommendation and
+    risk evaluation read the ledger, scan artifact and price cache, so they
+    run in the threadpool, lazily, after the tab has painted. Never mutates
+    trades, cash flows, portfolios or Strategy assignments; the risk
+    valuation may fetch and cache an FX quote exactly as the Portfolio tab
+    render does.
+    """
+    view = portfolio.agent_view(optional_int(portfolio_id), recommendations.recommend)
+    return templates.TemplateResponse(
+        request, "_portfolio_agents.html", context={"view": view}
+    )
+
+
 @router.get("/partials/strategy-assign", response_class=HTMLResponse)
 def partial_strategy_assign(
     request: Request,

@@ -12,7 +12,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 RiskSeverity = Literal["high", "medium", "info"]
 RiskConfidence = Literal["complete", "limited"]
@@ -62,3 +62,10 @@ class RiskReportV1(_FrozenRiskModel):
     limitations: tuple[str, ...]
     #: Priced positions in GBP plus the GBP cash snapshot (0 when unknown).
     total_value_gbp: Decimal
+    #: Each priced holding's weight, keyed by display symbol and rounded as
+    #: displayed; empty when the portfolio value is not positive (GH-19).
+    position_weights: dict[str, Decimal] = Field(default_factory=dict)
+    #: The capital-at-risk figure and its weight, as displayed; ``None`` when
+    #: no holding has an evidenced stop or the value is not positive (GH-19).
+    capital_at_risk_gbp: Decimal | None = None
+    capital_at_risk_pct: Decimal | None = None
