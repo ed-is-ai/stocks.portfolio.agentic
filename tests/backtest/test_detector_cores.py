@@ -267,6 +267,24 @@ def test_vcp_calculator_skips_a_local_low_above_its_swing_high() -> None:
     assert all(item["depth_pct"] >= 0 for item in contractions)
 
 
+def test_vcp_calculator_skips_a_backtracked_low_above_its_swing_high() -> None:
+    """GH-34: the duration-backtracked replacement low is guarded too."""
+    calculator = detector_module._calculator_module("vcp_pattern_calculator")
+
+    contractions = calculator._build_contractions_from(
+        (0, 100.0),
+        [(0, 100.0), (10, 98.0), (30, 99.0)],
+        [(5, 80.0), (12, 96.0), (20, 105.0)],
+        [0.0] * 40,
+        [0.0] * 40,
+        [f"d{i}" for i in range(40)],
+        min_contraction_days=5,
+    )
+
+    assert [item["depth_pct"] for item in contractions] == [20.0]
+    assert calculator._validate_vcp(contractions, 40, 2, 8.0, 0.75)["valid"] is False
+
+
 def test_vcp_adapter_rejects_coerced_or_missing_calculator_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
