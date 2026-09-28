@@ -37,7 +37,8 @@ def test_default_schedule_runs_after_the_us_close_on_weekdays(monkeypatch) -> No
     assert local.weekday() < 5
 
 
-def test_scheduled_job_calls_the_shared_run_path() -> None:
+def test_scheduled_job_calls_the_shared_run_path(monkeypatch) -> None:
+    monkeypatch.setattr(pipeline_scheduler.shutil, "which", lambda _: None)
     calls: list[str] = []
     scheduler = pipeline_scheduler.start_pipeline_scheduler(
         "0 0 1 1 *", "UTC", lambda: calls.append("run")
@@ -51,6 +52,43 @@ def test_scheduled_job_calls_the_shared_run_path() -> None:
     assert calls == ["run"]
     assert job.max_instances == 1
     assert job.coalesce is True
+
+
+def test_scheduler_rechecks_the_wall_clock_after_host_sleep() -> None:
+    scheduler = pipeline_scheduler.start_pipeline_scheduler(
+        "0 0 1 1 *", "UTC", lambda: None
+    )
+    assert scheduler is not None
+
+    resync = scheduler.get_job(pipeline_scheduler.RESYNC_JOB_ID)
+
+    assert resync is not None
+    assert resync.trigger.interval.total_seconds() == (
+        pipeline_scheduler.RESYNC_SECONDS
+    )
+
+
+def test_run_holds_the_host_awake_until_it_finishes(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeGuard:
+        def __init__(self, argv: list[str]) -> None:
+            events.append(f"hold {argv[1]}")
+
+        def terminate(self) -> None:
+            events.append("release")
+
+    def failing_run() -> None:
+        events.append("run")
+        raise RuntimeError("pipeline failed")
+
+    monkeypatch.setattr(pipeline_scheduler.shutil, "which", lambda _: "caffeinate")
+    monkeypatch.setattr(pipeline_scheduler.subprocess, "Popen", FakeGuard)
+
+    with pytest.raises(RuntimeError):
+        pipeline_scheduler._stay_awake(failing_run)()
+
+    assert events == ["hold -i", "run", "release"]
 
 
 def test_scheduled_run_refreshes_institutional_sources(monkeypatch) -> None:
