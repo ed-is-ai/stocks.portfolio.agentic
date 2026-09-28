@@ -4,6 +4,7 @@ import csv
 import json
 import logging
 from collections.abc import Mapping
+from datetime import date, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -305,6 +306,14 @@ async def partial_history(
     )
 
 
+def _run_date(start: str | None) -> date | None:
+    """Return the date of a run log ``start`` timestamp, None if unusable."""
+    try:
+        return datetime.fromisoformat(start or "").date()
+    except ValueError:
+        return None
+
+
 @router.get("/partials/runlog", response_class=HTMLResponse)
 async def partial_runlog(request: Request) -> HTMLResponse:
     runs: list[dict] = []
@@ -327,6 +336,8 @@ async def partial_runlog(request: Request) -> HTMLResponse:
         run.setdefault("errors", "")
         run.setdefault("sources", "")
         run["source_health"] = parse_run_log_source_health(run)
+        # Cached-source age is measured against the run's own date (GH-3).
+        run["run_date"] = _run_date(run.get("start"))
     runs.reverse()  # most recent first
     return templates.TemplateResponse(request, "_runlog.html", context={"runs": runs})
 

@@ -95,8 +95,11 @@
             {% call(source) macros.source_stage_groups(r.source_health) %}
               {% set is_stale = source.detail_code == 'stale_cache' %}
               {% set is_cached = source.detail_code in ('cached_input', 'cache_hit', 'stale_cache') %}
-              <span class="source-badge source-{{ source.state }}{% if is_cached %} source-cached{% endif %}" title="{{ source.display_message }}">
+              {% set cache_old_after_days = 7 %}
+              {% set cache_age = [0, (r.run_date - source.data_as_of).days]|max if source.detail_code == 'cached_input' and r.run_date and source.data_as_of else none %}
+              <span class="source-badge source-{{ source.state }}{% if is_cached %} source-cached{% endif %}{% if cache_age is not none and cache_age > cache_old_after_days %} source-cached-old{% endif %}" title="{{ source.display_message }}">
                 {{ source.label }}: {% if is_stale %}Stale{% elif is_cached %}Cached{% else %}{{ source.state_label }}{% endif %}
+                {% if source.detail_code == 'cached_input' %}&middot; {% if cache_age is none %}age unknown{% else %}{{ cache_age }}d{% endif %}{% endif %}
                 <span class="source-count{% if is_cached %} source-count-stale{% endif %}">&middot; {{ source.count }}</span>
               </span>
             {% endcall %}

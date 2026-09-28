@@ -1,6 +1,7 @@
 """Acceptance contracts for explicit external-source coverage (#40)."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+import os
 
 import pandas as pd
 import pytest
@@ -144,13 +145,62 @@ def test_overall_outcome_uses_usable_results_and_coverage() -> None:
 
 def test_cached_extraction_inputs_are_not_reported_as_freshly_ok() -> None:
     health = orchestrator._cached_extraction_health(
-        {"AAPL": (True, False), "MSFT": (False, True)}
+        {"AAPL": (True, False), "MSFT": (False, True)},
+        date(2026, 7, 17),
+        date(2026, 7, 19),
     )
 
     assert health[SourceName.STOCKTWITS].state is SourceState.SKIPPED
     assert health[SourceName.STOCKTWITS].count == 1
     assert health[SourceName.WHALE_WISDOM].state is SourceState.SKIPPED
     assert health[SourceName.WHALE_WISDOM].detail_code == "cached_input"
+
+
+def test_cached_extraction_health_states_the_cache_age() -> None:
+    """Both cached sources carry the file date and say how old it is (GH-3)."""
+    health = orchestrator._cached_extraction_health(
+        {"AAPL": (True, True)}, date(2026, 7, 17), date(2026, 7, 19)
+    )
+
+    for item in health.values():
+        assert item.data_as_of == date(2026, 7, 17)
+    assert health[SourceName.STOCKTWITS].display_message == (
+        "Using cached StockTwits input from 2026-07-17 (2 days old); "
+        "this source was not refreshed."
+    )
+    one_day = orchestrator._cached_extraction_health(
+        {}, date(2026, 7, 18), date(2026, 7, 19)
+    )
+    assert "(1 day old)" in one_day[SourceName.WHALE_WISDOM].display_message
+
+
+def test_cached_extraction_health_without_a_file_date_is_age_unknown() -> None:
+    health = orchestrator._cached_extraction_health({}, None, date(2026, 7, 19))
+
+    assert health[SourceName.STOCKTWITS].data_as_of is None
+    assert health[SourceName.STOCKTWITS].display_message == (
+        "Using cached StockTwits input (age unknown); this source was not refreshed."
+    )
+
+
+def test_cached_extraction_health_never_reports_a_negative_age() -> None:
+    """A file date after the run (clock skew, copied file) reads as 0 days."""
+    health = orchestrator._cached_extraction_health(
+        {}, date(2026, 7, 20), date(2026, 7, 19)
+    )
+
+    assert "(0 days old)" in health[SourceName.STOCKTWITS].display_message
+
+
+def test_extraction_cache_date_is_the_file_mtime_or_none(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "extraction_results.json"
+    monkeypatch.setattr(orchestrator, "EXTRACTION_RESULTS_JSON", path)
+    assert orchestrator._extraction_cache_date() is None
+
+    path.write_text("{}")
+    written = datetime(2026, 7, 17, 23, 30, tzinfo=timezone.utc).timestamp()
+    os.utime(path, (written, written))
+    assert orchestrator._extraction_cache_date() == date(2026, 7, 17)
 
 
 def test_legacy_run_log_is_migrated_with_structured_health(
