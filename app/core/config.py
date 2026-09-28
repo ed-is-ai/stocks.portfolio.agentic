@@ -123,6 +123,20 @@ def strategy_manager_worker_enabled() -> bool:
     )
 
 
+# US equities are scanned, so the schedule follows the US session whatever the
+# host's local timezone is.
+PIPELINE_SCHEDULE_TIMEZONE = "America/New_York"
+
+
+def pipeline_schedule_cron() -> str:
+    """Return the crontab for scheduled pipeline runs; empty disables them.
+
+    Defaults to weekdays 30 minutes after the US close, so each run sees the
+    completed daily bar and the monthly observed-capture date is not missed.
+    """
+    return os.getenv("PIPELINE_SCHEDULE_CRON", "30 16 * * mon-fri").strip()
+
+
 def ANALYST_LLM_SCORING_ENABLED() -> bool:
     """Return whether the analyst should score stocks via Foundry Local.
 

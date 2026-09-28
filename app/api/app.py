@@ -31,8 +31,13 @@ from app.core.config import STATIC_DIR
 from app.core import config
 from app.api.dependencies import (
     get_backtest_repository,
+    get_pipeline_service,
     get_strategy_job_service,
     get_strategy_notification_projector,
+)
+from app.services.pipeline_scheduler import (
+    start_pipeline_scheduler,
+    stop_pipeline_scheduler,
 )
 
 
@@ -48,6 +53,12 @@ def _prepare_strategy_coverage() -> None:
     repository = get_backtest_repository()
     if repository.active_snapshot_profile() is not None:
         repository.prepare_snapshot_coverage()
+
+
+def _run_scheduled_pipeline() -> None:
+    # Scheduled runs refresh institutional sources so observed scan records
+    # carry current enrichment (#2, #7).
+    get_pipeline_service().run_once(extract=True)
 
 
 def create_app(
@@ -83,6 +94,11 @@ def create_app(
             pass
         if service is not None:
             service.start_dispatcher()
+        start_pipeline_scheduler(
+            config.pipeline_schedule_cron(),
+            config.PIPELINE_SCHEDULE_TIMEZONE,
+            _run_scheduled_pipeline,
+        )
 
         async def prepare() -> None:
             try:
@@ -112,6 +128,7 @@ def create_app(
                     await preparation
                     raise
             finally:
+                stop_pipeline_scheduler()
                 if service is not None:
                     service.shutdown()
 

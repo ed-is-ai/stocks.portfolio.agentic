@@ -1,7 +1,8 @@
 """Pipeline service — runs the scan/analyse/alert workflow once.
 
-Both the web ``/refresh-data`` endpoint and the scheduler invoke the pipeline
-through here instead of duplicating the run wiring. It shells out to the
+Both the web ``/refresh-data`` endpoint and the in-process scheduler
+(``app.services.pipeline_scheduler``) invoke the pipeline through here instead
+of duplicating the run wiring. It shells out to the
 orchestrator's ``--once`` entry point so the run executes in its own process
 (matching the previous web behaviour).
 """

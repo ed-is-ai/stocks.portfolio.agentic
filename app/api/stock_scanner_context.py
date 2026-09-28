@@ -19,6 +19,7 @@ from app.schemas.analysis_artifact import read_analysis_artifact_meta
 from app.schemas.pipeline_status import PipelineState, PipelineStatus
 from app.schemas.source_health import SourceHealth, SourceName
 from app.services.freshness_service import Freshness, calculate_freshness
+from app.services.pipeline_scheduler import next_scheduled_run
 from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
@@ -57,6 +58,7 @@ def build_freshness_context() -> dict[str, Any]:
         "latest_attempt_error": (
             latest.error_summary if latest.state is PipelineState.FAILED else None
         ),
+        "next_scheduled_run": next_scheduled_run(),
     }
 
 
