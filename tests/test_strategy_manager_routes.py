@@ -1997,6 +1997,29 @@ def test_configuration_disclosure_splits_required_and_optional(launch):
     assert 'data-param-default="20"' in before_details  # lookback default, outside
 
 
+def test_configuration_renders_host_owned_position_cap_for_live_strategy(launch):
+    from app.core.config import SKILLS_DIR
+    from app.services.backtest.skill_discovery import discover_strategies
+
+    weinstein = next(
+        strategy
+        for strategy in discover_strategies(SKILLS_DIR).strategies
+        if strategy.strategy_id == "rtly-backtest-weinstein"
+    )
+    launch.strategies = (weinstein,)
+
+    response = client.get(
+        "/strategy-manager/configuration?strategy_id=rtly-backtest-weinstein"
+    )
+
+    assert response.status_code == 200
+    before_details, _, _ = response.text.partition(
+        '<details class="sm-param-disclosure"'
+    )
+    assert 'name="param__max_concurrent_positions"' in before_details
+    assert 'data-param-default="10"' in before_details
+
+
 def test_configuration_422_on_disclosed_param_opens_disclosure(launch):
     launch.launch_error = BacktestLaunchValidationError(
         (LaunchFieldError("param__threshold", "Outside the allowed range."),)

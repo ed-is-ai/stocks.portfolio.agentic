@@ -42,7 +42,10 @@ from app.services.backtest.run_input_manifest import (
     RunInputManifestV3,
 )
 from app.services.backtest.run_universe import run_universe_digest
-from app.services.backtest.strategy_job import RegimeBenchmarkPinV1, RunUniverseSelectionV1
+from app.services.backtest.strategy_job import (
+    RegimeBenchmarkPinV1,
+    RunUniverseSelectionV1,
+)
 from app.services.backtest.skill_discovery import discover_strategies
 from app.services.backtest.snapshot_profile import (
     MonthlySnapshotCommitV1,
@@ -225,7 +228,9 @@ def test_v3_pins_one_reference_without_changing_trade_universe() -> None:
     assert tuple(item.security_id for item in restored.securities) == ("sec-000",)
     assert restored.regime_benchmark == pin
     assert restored.digest() == manifest.digest()
-    assert restored.universe_selection.run_universe_digest == selection.run_universe_digest
+    assert (
+        restored.universe_selection.run_universe_digest == selection.run_universe_digest
+    )
 
 
 def test_v3_rejects_reference_inside_trade_universe() -> None:
@@ -310,7 +315,7 @@ def test_starting_capital_is_rendered_as_its_exact_decimal_string() -> None:
 
 
 def test_engine_and_protocol_schema_versions_bumped_for_real_engine_semantics() -> None:
-    assert ENGINE_VERSION == "backtest_engine.v6"
+    assert ENGINE_VERSION == "backtest_engine.v7"
     assert PROTOCOL_SCHEMA_VERSION == "strategy_protocol.v4"
 
 
@@ -384,7 +389,7 @@ def test_build_run_input_manifest_pins_the_real_ledger_action_metrics_digest(
 
     import app.services.backtest.run_input_manifest as run_input_manifest_module
 
-    assert manifest.engine_version == "backtest_engine.v6"
+    assert manifest.engine_version == "backtest_engine.v7"
     assert manifest.protocol_schema_version == "strategy_protocol.v4"
     assert manifest.ledger_action_metrics_digest == (
         run_input_manifest_module._ledger_action_metrics_digest(PROJECT_ROOT)

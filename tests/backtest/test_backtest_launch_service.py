@@ -582,6 +582,32 @@ def test_launch_applies_declared_defaults_for_omitted_parameters() -> None:
     assert jobs.submissions[0].parameters["fixed_shares"] == 1
 
 
+@pytest.mark.parametrize("bad_cap", [0, -1, 1001, True])
+def test_launch_rejects_invalid_max_concurrent_positions(bad_cap: object) -> None:
+    service, jobs = _service()
+
+    with pytest.raises(BacktestLaunchValidationError) as excinfo:
+        service.launch(
+            _command(
+                parameters={
+                    "watch_security_id": "sec-aapl",
+                    "max_concurrent_positions": bad_cap,
+                }
+            )
+        )
+
+    assert "param__max_concurrent_positions" in _field_errors(excinfo.value)
+    assert jobs.submissions == []
+
+
+def test_launch_defaults_max_concurrent_positions_to_ten() -> None:
+    service, jobs = _service()
+
+    service.launch(_command(parameters={"watch_security_id": "sec-aapl"}))
+
+    assert jobs.submissions[0].parameters["max_concurrent_positions"] == 10
+
+
 def test_launch_accepts_host_bound_universe_for_preparation() -> None:
     """The universe binding is runtime input, not a Strategy tuning field."""
     service, jobs = _service()

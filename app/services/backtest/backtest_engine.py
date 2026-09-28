@@ -161,6 +161,7 @@ class SkipReasonCode(StrEnum):
     POSITION_SIZE_ZERO = "position_size_zero"
     ALLOCATION_UNAFFORDABLE = "allocation_unaffordable"
     FILL_BEYOND_END = "fill_beyond_end"
+    MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +606,19 @@ class _Engine:
             manifest.start_month, manifest.end_month
         )
 
+        # Launch validation always supplies the cap; a manifest without the
+        # key runs uncapped.
+        cap = self.manifest_parameters.get("max_concurrent_positions")
+        if cap is not None and (
+            isinstance(cap, bool) or not isinstance(cap, int) or cap < 1
+        ):
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                self.start_date,
+                "max_concurrent_positions must be a positive integer",
+            )
+        self.max_concurrent_positions: int | None = cap
+
         if not isinstance(strategy, StrategyProtocolV1):
             raise _fatal(
                 SimulationErrorCode.INVALID_STRATEGY_IMPLEMENTATION,
@@ -996,6 +1010,18 @@ class _Engine:
                 SkipReasonCode.POSITION_CONFLICT,
                 "position already open at fill time",
             )
+        if (
+            self.max_concurrent_positions is not None
+            and len(self.positions) >= self.max_concurrent_positions
+        ):
+            # The slot was granted against a same-session SELL that has not
+            # (or could not) free it by this open.
+            return self._skip_order(
+                order,
+                session,
+                SkipReasonCode.MAX_CONCURRENT_POSITIONS,
+                "concurrent position limit reached at fill time",
+            )
         if order.allocation_target_base is None:
             raise _fatal(
                 SimulationErrorCode.INVARIANT_VIOLATION,
@@ -1193,7 +1219,10 @@ class _Engine:
     # -- signal processing ------------------------------------------------
 
     def _process_signals(
-        self, session: date, session_events: list[TradeLogEvent]
+        self,
+        session: date,
+        session_events: list[TradeLogEvent],
+        equity_base: Decimal,
     ) -> InitialEntrySelectionV1 | None:
         view = self.market_view_factory(session)
         if view.as_of_session != session:
@@ -1284,6 +1313,10 @@ class _Engine:
                     if skip is not None:
                         session_events.append(skip)
 
+                buy_candidates = self._apply_position_slots(
+                    buy_candidates, session, session_events
+                )
+
                 # Reserve every eligible candidate's equal target before any
                 # of their (potentially different-MIC) opens occur.  Pending
                 # targets are never debited early, but they are excluded from
@@ -1305,11 +1338,15 @@ class _Engine:
                             session,
                             "BUY reservations exceed simulated cash",
                         )
+                    target = unreserved / Decimal(len(buy_candidates))
+                    if self.max_concurrent_positions is not None:
+                        target = min(
+                            target,
+                            equity_base / Decimal(self.max_concurrent_positions),
+                        )
                     # A per-candidate target must never round up: doing so
                     # could reserve more than the available cash in aggregate.
-                    target = (unreserved / Decimal(len(buy_candidates))).quantize(
-                        Decimal("0.00000001"), rounding=ROUND_DOWN
-                    )
+                    target = target.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
                     for signal, fill_session in buy_candidates:
                         self.pending[signal.security_id] = PendingOrderV1(
                             security_id=signal.security_id,
@@ -1328,6 +1365,47 @@ class _Engine:
             return selection
         except StrategyProtocolError as exc:
             raise _fatal(exc.code, session, str(exc)) from exc
+
+    def _apply_position_slots(
+        self,
+        buy_candidates: list[tuple[Signal, date]],
+        session: date,
+        session_events: list[TradeLogEvent],
+    ) -> list[tuple[Signal, date]]:
+        """Keep only the BUY candidates that fit the free position slots.
+
+        Held positions and pending BUYs occupy slots. SELLs scheduled this
+        session are already pending, and a pending SELL frees its slot only
+        for a candidate filling on or after the SELL's own fill session (fills
+        run SELL-first within a session). Surplus candidates are skipped in
+        the engine's deterministic signal order.
+        """
+        cap = self.max_concurrent_positions
+        if cap is None:
+            return buy_candidates
+        sell_fill_sessions = [
+            order.fill_session
+            for order in self.pending.values()
+            if order.side is SignalSide.SELL
+        ]
+        occupied = len(self.positions) + sum(
+            1 for order in self.pending.values() if order.side is SignalSide.BUY
+        )
+        kept: list[tuple[Signal, date]] = []
+        for signal, fill_session in buy_candidates:
+            freed = sum(1 for sold in sell_fill_sessions if sold <= fill_session)
+            if occupied - freed + len(kept) < cap:
+                kept.append((signal, fill_session))
+                continue
+            session_events.append(
+                self._skip_signal(
+                    signal,
+                    session,
+                    SkipReasonCode.MAX_CONCURRENT_POSITIONS,
+                    "concurrent position limit reached",
+                )
+            )
+        return kept
 
     def _schedule_signal(
         self,
@@ -1524,7 +1602,9 @@ class _Engine:
         self._apply_actions(session, session_events)
         self._execute_fills(session, session_events)
         equity_point = self._value_state(session)
-        selection = self._process_signals(session, session_events)
+        selection = self._process_signals(
+            session, session_events, equity_point.total_equity_base
+        )
         if is_final:
             final_marks = self._mark_final_positions(session)
             session_events.extend(final_marks)

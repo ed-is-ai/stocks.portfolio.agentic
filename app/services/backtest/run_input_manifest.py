@@ -86,7 +86,7 @@ RUN_INPUT_MANIFEST_V3_VERSION = "run_input_manifest.v3"
 #: ``execution_contract_digest`` computed against the pre-Story-2.4
 #: placeholder semantics is no longer comparable. Bump again the moment
 #: engine/protocol behavior changes.
-ENGINE_VERSION = "backtest_engine.v6"
+ENGINE_VERSION = "backtest_engine.v7"
 PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v4"
 
 #: Story 2.4 landed ``backtest_engine.py`` as real, hashable source, so
@@ -412,12 +412,19 @@ class RunInputManifestV3(RunInputManifestV2):
         if self.parameters.get("regime_filter_enabled") is not True:
             raise ValueError("V3 requires an enabled regime filter")
         ma_length = self.parameters.get("regime_filter_ma_length", 200)
-        if isinstance(ma_length, bool) or not isinstance(ma_length, int) or ma_length < 2:
+        if (
+            isinstance(ma_length, bool)
+            or not isinstance(ma_length, int)
+            or ma_length < 2
+        ):
             raise ValueError("regime benchmark moving-average length is invalid")
         benchmark_id = self.parameters.get("regime_filter_benchmark_security_id")
         if benchmark_id != self.regime_benchmark.security_id:
             raise ValueError("regime benchmark pin does not match its parameter")
-        if self.regime_benchmark.security_id in self.universe_selection.canonical_security_ids:
+        if (
+            self.regime_benchmark.security_id
+            in self.universe_selection.canonical_security_ids
+        ):
             raise ValueError("regime benchmark must remain outside the trade universe")
         return self
 
@@ -433,6 +440,7 @@ def read_run_input_manifest(
     import json
 
     try:
+
         def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
             payload: dict[str, object] = {}
             for key, value in pairs:

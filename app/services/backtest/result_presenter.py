@@ -54,6 +54,7 @@ _SKIP_REASON_TEXT: dict[SkipReasonCode, str] = {
     SkipReasonCode.INSUFFICIENT_CASH: "Insufficient cash",
     SkipReasonCode.POSITION_SIZE_ZERO: "Position size zero",
     SkipReasonCode.FILL_BEYOND_END: "Fill beyond run end",
+    SkipReasonCode.MAX_CONCURRENT_POSITIONS: "Position limit reached",
 }
 
 _EXECUTED_FILL_KINDS = frozenset({"entry_fill", "exit_fill"})

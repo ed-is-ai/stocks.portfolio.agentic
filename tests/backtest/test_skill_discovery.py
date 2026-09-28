@@ -43,25 +43,27 @@ FIXTURES_ROOT = (
 )
 LIVE_SKILLS_ROOT = Path(__file__).resolve().parents[2] / "skills"
 
-#: The opt-in regime-filter parameters #388 injects into every
-#: ``kind: backtest-strategy`` descriptor at discovery time.
-COMMON_REGIME_FILTER_DEFAULTS = {
+#: The host-owned parameters injected into every ``kind: backtest-strategy``
+#: descriptor at discovery time: #388's opt-in regime filter and GH-33's
+#: position cap.
+COMMON_PARAMETER_DEFAULTS = {
     "block_buy_on_downtrend_enabled": False,
     "regime_filter_benchmark_security_id": "",
     "regime_filter_ma_length": 200,
+    "max_concurrent_positions": 10,
 }
 
 EXPECTED_LIVE_STRATEGY_DEFAULTS = {
     "rtly-backtest-buy-and-hold": {
         "entry_on_or_after": "2000-01-01",
         "top_x": 10,
-        **COMMON_REGIME_FILTER_DEFAULTS,
+        **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-darvas-box": {
         "box_lookback_sessions": 20,
         "maximum_box_depth_pct": 15.0,
         "volume_multiplier": 1.5,
-        **COMMON_REGIME_FILTER_DEFAULTS,
+        **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-minervini": {
         "minimum_vcp_score": 70,
@@ -71,17 +73,17 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "maximum_loss_pct": 8.0,
         "enable_position_upgrade": False,
         "upgrade_score_margin": 15,
-        **COMMON_REGIME_FILTER_DEFAULTS,
+        **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-moving-average": {
         "fast_window": 50,
         "slow_window": 200,
-        **COMMON_REGIME_FILTER_DEFAULTS,
+        **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-turtle-trend": {
         "entry_lookback_sessions": 20,
         "exit_lookback_sessions": 10,
-        **COMMON_REGIME_FILTER_DEFAULTS,
+        **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-weinstein": {
         "breakout_lookback_sessions": 50,
@@ -89,7 +91,7 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "maximum_loss_pct": 10.0,
         "enable_position_upgrade": False,
         "upgrade_score_margin_pct": 10.0,
-        **COMMON_REGIME_FILTER_DEFAULTS,
+        **COMMON_PARAMETER_DEFAULTS,
     },
 }
 
@@ -157,12 +159,13 @@ def test_live_backtest_strategies_expose_common_regime_filter_params() -> None:
     for strategy_id in EXPECTED_LIVE_STRATEGY_DEFAULTS:
         descriptor = strategies[strategy_id]
         by_name = {p.name: p for p in descriptor.parameters}
-        for name in COMMON_REGIME_FILTER_DEFAULTS:
+        for name in COMMON_PARAMETER_DEFAULTS:
             assert [p.name for p in descriptor.parameters].count(name) == 1
         assert by_name["block_buy_on_downtrend_enabled"].type == "boolean"
         assert by_name["block_buy_on_downtrend_enabled"].default is False
         assert by_name["regime_filter_benchmark_security_id"].default == ""
         assert by_name["regime_filter_ma_length"].default == 200
+        assert by_name["max_concurrent_positions"].default == 10
         assert descriptor.default_parameters["block_buy_on_downtrend_enabled"] is False
 
 
@@ -259,7 +262,7 @@ def test_discover_strategies_valid_strategy_descriptor_shape() -> None:
     assert len(descriptor.source_digest) == 64  # sha256 hex digest
 
     parameter_names = [parameter.name for parameter in descriptor.parameters]
-    # #388 injects the three opt-in regime-filter params after the
+    # The host-owned common params are injected after the
     # frontmatter-declared schema for every ``kind: backtest-strategy``.
     assert parameter_names == [
         "watch_security_id",
@@ -267,13 +270,14 @@ def test_discover_strategies_valid_strategy_descriptor_shape() -> None:
         "block_buy_on_downtrend_enabled",
         "regime_filter_benchmark_security_id",
         "regime_filter_ma_length",
+        "max_concurrent_positions",
     ]
 
     # Runnable defaults were already validated -- normalized and complete.
     assert descriptor.default_parameters == {
         "watch_security_id": "sec-aapl",
         "fixed_shares": 1,
-        **COMMON_REGIME_FILTER_DEFAULTS,
+        **COMMON_PARAMETER_DEFAULTS,
     }
 
 
@@ -770,6 +774,31 @@ def _write_skill(
         encoding="utf-8",
     )
     return folder
+
+
+def test_skill_redeclaring_max_concurrent_positions_fails_discovery(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "redeclares-cap",
+        parameters=(
+            "parameters:\n"
+            "  - name: max_concurrent_positions\n"
+            "    type: integer\n"
+            "    default: 5\n"
+            "    description: Shadowed cap.\n"
+            "    required: true\n"
+        ),
+    )
+
+    warning = _only_warning(root, "redeclares-cap")
+
+    assert warning.code == "invalid_parameter_schema"
+    assert "reserved common parameter name(s): max_concurrent_positions" in (
+        warning.message
+    )
 
 
 def _only_warning(root: Path, name: str) -> StrategyDiscoveryWarningV1:
