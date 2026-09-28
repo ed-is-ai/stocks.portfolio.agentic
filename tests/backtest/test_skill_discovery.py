@@ -66,7 +66,7 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-minervini": {
-        "minimum_vcp_score": 70,
+        "minimum_vcp_score": 0,
         "minimum_trend_score": 85.0,
         "minimum_relative_volume": 1.5,
         "maximum_pivot_extension_pct": 3.0,

@@ -2296,3 +2296,58 @@ def test_fx_evidence_revision_mismatch_against_pinned_fx_revision_aborts_fatal()
         )
 
     assert exc_info.value.code == "missing_pinned_evidence"
+
+
+# ---------------------------------------------------------------------------
+# GH-35: Signal.priority ranks candidates for scarce position slots
+# ---------------------------------------------------------------------------
+
+
+def _ranked_buy(security_id: str, session: date, priority: Decimal | None) -> Signal:
+    return _buy(security_id, session).model_copy(update={"priority": priority})
+
+
+def test_cap_fills_slots_by_priority_then_engine_order() -> None:
+    d0 = _MARCH_2024[0]
+    signals = [
+        _ranked_buy("sec-a", d0, None),
+        _ranked_buy("sec-b", d0, Decimal("60")),
+        _ranked_buy("sec-c", d0, Decimal("90")),
+        _ranked_buy("sec-d", d0, Decimal("60")),
+    ]
+
+    output = _run_capped(
+        security_ids=("sec-a", "sec-b", "sec-c", "sec-d"),
+        entries={d0: signals},
+        starting_capital=Decimal("2000"),
+        max_positions=2,
+    )
+
+    # sec-c outranks the tied sec-b/sec-d, whose tie keeps engine order; an
+    # unranked candidate goes last. Kept fills and skips stay in signal order.
+    assert [fill[0] for fill in _entry_fills(output)] == ["sec-b", "sec-c"]
+    assert _cap_skips(output) == ["sec-a", "sec-d"]
+
+
+def test_priority_is_inert_when_every_candidate_fits() -> None:
+    d0 = _MARCH_2024[0]
+    security_ids = ("sec-a", "sec-b")
+
+    def _run(signals: list[Signal]) -> backtest_engine.SimulationOutputV1:
+        return _run_capped(
+            security_ids=security_ids,
+            entries={d0: signals},
+            starting_capital=Decimal("2000"),
+            max_positions=10,
+        )
+
+    plain = _run([_buy(security_id, d0) for security_id in security_ids])
+    ranked = _run(
+        [
+            _ranked_buy("sec-a", d0, Decimal("1")),
+            _ranked_buy("sec-b", d0, Decimal("99")),
+        ]
+    )
+
+    assert _entry_fills(ranked) == _entry_fills(plain)
+    assert ranked.final_cash_base == plain.final_cash_base

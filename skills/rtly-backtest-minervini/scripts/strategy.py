@@ -415,7 +415,6 @@ class MinerviniStrategy:
         assert minimum_vcp_score is not None
         qualifies = (
             stage == "Stage 2"
-            and getattr(vcp, "valid_vcp", False) is True
             and getattr(vcp, "trend_template_passed", False) is True
             and getattr(vcp, "execution_state", None) in _ENTRY_SCAN_STATES
             and isinstance(score, int)
@@ -455,6 +454,8 @@ class MinerviniStrategy:
             session=view.as_of_session,
             rule_id=_ENTRY_RULE,
             explanation=_entry_explanation(qualification, view.as_of_session),
+            # A validated VCP ranks a candidate rather than gating it (#35).
+            priority=Decimal(qualification.score),
         )
 
     def _held_vcp_score(self, view: MarketViewV1, security_id: str) -> int | None:
