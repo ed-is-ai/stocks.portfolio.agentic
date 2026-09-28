@@ -480,6 +480,7 @@
       padding-bottom: .75rem; margin-bottom: .75rem; border-bottom: 1px solid var(--border);
     }
     .refresh-menu-freshness .local-time { font-variant-numeric: tabular-nums; }
+    .refresh-menu-schedule { margin-top: .35rem; }
     .refresh-dropdown.status-open .refresh-menu {
       padding-top: calc(var(--refresh-status-height, 4rem) + .75rem) !important;
     }
@@ -691,6 +692,12 @@
       <div class="dropdown-menu dropdown-menu-end refresh-menu p-3">
         <div class="refresh-menu-freshness">
           {{ macros.freshness_detail(freshness, latest_attempt_error) }}
+          {% if next_scheduled_run %}
+          <div class="refresh-menu-schedule">
+            Next scheduled refresh:
+            <time class="local-time" datetime="{{ next_scheduled_run.isoformat() }}">{{ next_scheduled_run.strftime('%Y-%m-%d %H:%M %Z') }}</time>
+          </div>
+          {% endif %}
         </div>
         {# Reduced-coverage warnings sit with the buttons that start a run, so
            the cost of running now is readable before the click rather than in

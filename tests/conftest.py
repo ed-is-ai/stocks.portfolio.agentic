@@ -12,6 +12,7 @@ from app.schemas import StockRecord, StockAnalysis, StockScan
 # Set before test modules create module-scoped FastAPI servers. The autouse
 # fixture below keeps per-test monkeypatch isolation as well.
 os.environ.setdefault("STRATEGY_MANAGER_WORKER_ENABLED", "false")
+os.environ.setdefault("PIPELINE_SCHEDULE_CRON", "")
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +92,8 @@ def isolate_notifications_db(tmp_path, monkeypatch):
     # Global FastAPI tests must never launch a real Strategy Manager child.
     # Dedicated lifespan tests opt in explicitly with an injected fake.
     monkeypatch.setenv("STRATEGY_MANAGER_WORKER_ENABLED", "false")
+    # Nor start a real scheduled pipeline run.
+    monkeypatch.setenv("PIPELINE_SCHEDULE_CRON", "")
 
 
 @pytest.fixture
