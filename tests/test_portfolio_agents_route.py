@@ -358,5 +358,21 @@ def test_every_swapped_element_is_marked_for_a_failed_refresh(stack) -> None:
     assert swapped
     assert all(f'data-agent-cell="{stack.pid}"' in tag for tag in swapped)
     # A failed request marks filled cells too; a success only leftovers.
-    assert "!(event && event.detail && event.detail.successful)" in index
+    assert "if (detail.successful) {" in index
     assert '[data-agent-cell="${scope}"]' in index
+
+
+def test_a_superseded_agents_request_is_not_marked_failed() -> None:
+    """hx-sync replace aborts the in-flight load; htmx fires after-request
+    then send-abort from xhr.onabort, so failures are marked in a microtask
+    only when no send-abort was recorded for that request's xhr."""
+    index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
+    handler = index.split("function portfolioAgentsUnavailable(", 1)[1]
+    handler = handler.split("\n  }\n", 1)[0]
+
+    assert "document.body.addEventListener('htmx:sendAbort'" in index
+    assert "abortedRequests.add(event.detail.xhr);" in index
+    failed = handler.split("queueMicrotask(() => {", 1)[1]
+    assert failed.index("abortedRequests.has(detail.xhr)) return;") < failed.index(
+        '[data-agent-cell="${scope}"]'
+    )

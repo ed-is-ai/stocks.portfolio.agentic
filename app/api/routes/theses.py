@@ -32,9 +32,10 @@ from app.schemas.position_thesis import (
     ThesisRuleV1,
     describe_rule,
 )
-from app.services.portfolio_agent_view import thesis_cell
+from app.services.portfolio_agent_view import EARLIER_RUN, thesis_cell
 from app.repositories.position_theses_repo import StaleDraftError
 from app.services.position_thesis_service import (
+    DraftSupersededError,
     NoAnalysisError,
     NotHeldError,
     PositionThesisService,
@@ -51,6 +52,9 @@ DRAFT_UNAVAILABLE = "AI draft unavailable"
 NOT_HELD = "This security is no longer held in this portfolio."
 NO_ANALYSIS = (
     "No published analysis for this holding yet, so there is nothing to draft from."
+)
+DRAFT_SUPERSEDED = (
+    "You saved while the draft was being written, so the draft was discarded."
 )
 _OUTCOME_TONES = {"fired": "risk", "clear": "good", "limited": "warn"}
 _PATH = "/portfolios/{portfolio_id}/theses/{security_id}"
@@ -85,6 +89,7 @@ def _render(
         "view": view,
         "body_only": body_only,
         "cell": thesis_cell(view.summary),
+        "earlier_run": EARLIER_RUN,
         "form": form if form is not None else view.summary.active,
         "message": message,
         "message_tone": message_tone,
@@ -186,7 +191,8 @@ def draft_thesis(
     """Ask Claude for an inactive draft from anonymised evidence.
 
     A plain ``def``, so the model call runs in the threadpool. When no draft
-    is available nothing is written and the editor says so.
+    is available (or the user saved meanwhile) nothing is written and the
+    editor says why.
     """
     try:
         draft = theses.draft(portfolio_id, security_id, client, load_source_health())
@@ -195,6 +201,8 @@ def draft_thesis(
         return _not_held(request, body_only=True)
     except NoAnalysisError:
         draft, unavailable = None, NO_ANALYSIS
+    except DraftSupersededError:
+        draft, unavailable = None, DRAFT_SUPERSEDED
     if draft is None:
         return _render(
             request,

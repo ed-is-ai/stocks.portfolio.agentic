@@ -750,7 +750,9 @@ def test_email_names_the_invalidating_rule_field_session_and_run(env: Any) -> No
         assert "Thesis status" in body or "THESIS STATUS" in body
         assert "Invalidated" in body
         assert citation in body
-    assert "AAA: Invalidated — " + citation in text
+    assert (
+        "AAA: Invalidated — Rule 1: Close below the 50-day SMA — " + citation
+    ) in text
 
 
 def test_email_still_sends_when_the_thesis_store_fails(env: Any) -> None:
@@ -865,6 +867,23 @@ def test_email_marks_a_thesis_result_of_an_earlier_run(env: Any) -> None:
     for body in (html, text):
         assert "Invalidated" not in body
         assert "close_below_sma (price, sma50)" not in body
+
+
+def test_email_carries_the_thesis_cell_note_with_the_status(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    thesis = make_thesis({"kind": "close_below_stop"})
+    confirmed = evaluate_thesis(thesis, make_record(), META, FRESH)
+    statuses = {
+        "AAA": ThesisSummary(
+            active=thesis, latest=confirmed, current=True, review_due=True
+        )
+    }
+
+    _, sent = env.dispatch(_thesis_service(env, lambda _pid: statuses))
+
+    _, html, text = sent[0]
+    assert "AAA: Confirmed — Review due" in text
+    assert "Confirmed — Review due" in html
 
 
 def _thesis_hook(env: Any, monkeypatch: pytest.MonkeyPatch, service: Any) -> list[Any]:

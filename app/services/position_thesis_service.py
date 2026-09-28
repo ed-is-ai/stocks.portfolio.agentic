@@ -46,6 +46,10 @@ class NoAnalysisError(LookupError):
     """The published analysis has no record for the holding to draft from."""
 
 
+class DraftSupersededError(RuntimeError):
+    """A newer version was saved during the model call; the draft was discarded."""
+
+
 @dataclass(frozen=True)
 class EvaluationRun:
     """What one scan-step evaluation pass did across every portfolio."""
@@ -173,8 +177,8 @@ class PositionThesisService:
 
         Raises :class:`NoAnalysisError` (no model call) when the published
         analysis has no record for the holding. A draft that returns after
-        a newer version was saved is discarded (None) rather than stored
-        over it.
+        a newer version was saved is discarded, not stored over it, and
+        raises :class:`DraftSupersededError` (nothing written).
         """
         position = self.held_position(portfolio_id, security_id)
         records, meta = self.published()
@@ -194,7 +198,7 @@ class PositionThesisService:
             return None
         if self._repo.latest_version(portfolio_id, security_id) != version:
             logger.info("Discarding thesis draft superseded during the model call")
-            return None
+            raise DraftSupersededError(f"{security_id} was saved during the draft")
         content = ThesisContentV1.model_validate(draft.model_dump())
         return self._repo.add_version(
             portfolio_id, security_id, content, "ai_draft", active=False

@@ -332,12 +332,16 @@ def test_editor_forms_swap_404s_and_disable_while_in_flight(stack) -> None:
     tab = (templates / "_portfolio.html").read_text(encoding="utf-8")
 
     handler = 'hx-on::before-swap="thesisSwapNotFound(event)"'
-    assert html.count("<form ") == html.count(handler) == 3
-    assert html.count('hx-disabled-elt="find button"') == 3
+    assert html.count("<form ") == html.count('hx-disabled-elt="find button"') == 3
+    # htmx fires before-swap on the swap target, not the requesting form or
+    # button, so the handler sits on the stable modal target they all swap
+    # into (or inside).
+    assert handler not in html
     row = tab.split('hx-get="/portfolios/{{ portfolio_id }}/theses/', 1)[1]
     row = row.split("</button>", 1)[0]
-    assert handler in row
+    assert handler not in row
     script = (templates / "index.html").read_text(encoding="utf-8")
+    assert handler in _modal_target(script)
     assert "function thesisSwapNotFound(event)" in script
     assert "event.detail.xhr.status === 404" in script
     assert "event.detail.shouldSwap = true;" in script
@@ -526,7 +530,12 @@ def test_draft_superseded_by_a_save_during_the_model_call_is_discarded(
 
     resp = client.post(_url(stack, "/draft"), headers=AUTH)
 
-    assert "AI draft unavailable" in resp.text
+    assert resp.status_code == 200
+    assert (
+        "You saved while the draft was being written, so the draft was discarded."
+    ) in resp.text
+    assert "AI draft unavailable" not in resp.text
+    assert "HX-Trigger" not in resp.headers
     assert [(row[2], row[3]) for row in _rows(stack)] == [("user", 1)]
     assert stack.service.statuses(stack.pid)["AAA"].pending is None
 
@@ -575,3 +584,131 @@ def test_score_threshold_of_one_is_rejected(stack) -> None:
 
     assert "alert-warning" in resp.text and "Rule 1:" in resp.text
     assert _rows(stack) == []
+
+
+TEMPLATES = Path(__file__).resolve().parents[1] / "app/api/templates"
+FAILED = "That thesis request failed. Nothing was changed on screen; try again."
+
+
+def _index() -> str:
+    return (TEMPLATES / "index.html").read_text(encoding="utf-8")
+
+
+def _modal_target(index: str) -> str:
+    """Return the opening tag of the stable thesis modal target."""
+    return index.split('<div id="thesis-editor-modal-target"', 1)[1].split(">")[0]
+
+
+def _header(html: str) -> str:
+    return html.split("<h6>Active thesis", 1)[1].split("</h6>", 1)[0]
+
+
+def _evidence_heading(html: str) -> str:
+    return html.split("<h6>Evidence", 1)[1].split("</h6>", 1)[0]
+
+
+def test_editor_header_carries_the_cell_note_and_dates_the_evidence(
+    stack,
+) -> None:
+    _save(stack, review_date="2020-01-01")  # evaluated against run-1
+    client.post(_url(stack, "/draft"), headers=AUTH)
+    current = client.get(_url(stack), headers=AUTH).text
+
+    assert "Review due" in _header(current)
+    assert "Draft to confirm" in _header(current)
+    assert "earlier run" not in _evidence_heading(current)
+
+    _publish(stack, "run-2")
+    stale = client.get(_url(stack), headers=AUTH).text
+
+    header = _header(stale)
+    assert "Evidence limited" in header
+    assert "last checked on an earlier run" in header
+    assert "last checked on an earlier run" in _evidence_heading(stale)
+
+
+def test_relative_volume_input_accepts_any_step(stack) -> None:
+    html = client.get(_url(stack), headers=AUTH).text
+    inputs = re.findall(r'<input[^>]*name="rule_min_rel_volume"[^>]*>', html)
+
+    assert inputs and all('step="any"' in tag for tag in inputs)
+    assert all('min="1"' in tag and 'max="10"' in tag for tag in inputs)
+    resp = _save(
+        stack,
+        rule_kind=["close_below_sma"],
+        rule_period=["50"],
+        rule_min_rel_volume=["1.25"],
+    )
+    assert "Thesis saved as version 1." in resp.text
+
+
+def test_failed_thesis_requests_show_an_alert() -> None:
+    index = _index()
+    tab = (TEMPLATES / "_portfolio.html").read_text(encoding="utf-8")
+    row = tab.split('hx-get="/portfolios/{{ portfolio_id }}/theses/', 1)[1]
+    row = row.split("</button>", 1)[0]
+
+    for tag in (_modal_target(index), row):
+        assert 'hx-on::response-error="thesisRequestFailed(event)"' in tag
+        assert 'hx-on::send-error="thesisRequestFailed(event)"' in tag
+    assert "function thesisRequestFailed(event)" in index
+    assert FAILED in index
+    # In the open editor the alert goes into its body; with no editor open
+    # (the row button failed) a minimal modal is shown instead.
+    assert "event.target.closest('#thesis-editor-body')" in index
+    template = index.split('<template id="thesis-error-modal">', 1)[1]
+    template = template.split("</template>", 1)[0]
+    assert 'id="thesis-editor-body"' in template
+    assert "modal.content.cloneNode(true)" in index
+    assert not re.search(r"#1[34]\b|GH-", FAILED)
+
+
+def test_only_html_404s_are_swapped(stack) -> None:
+    index = _index()
+    handler = index.split("function thesisSwapNotFound(event)", 1)[1]
+    handler = handler.split("\n  }\n", 1)[0]
+
+    assert "getResponseHeader('Content-Type')" in handler
+    assert "type.startsWith('text/html')" in handler
+    notice = client.get(_url(stack, ticker="ZZZ"), headers=AUTH)
+    assert notice.status_code == 404
+    assert notice.headers["content-type"].startswith("text/html")
+    unknown = client.get(_url(stack, "/nope"), headers=AUTH)
+    assert unknown.status_code == 404
+    assert unknown.headers["content-type"].startswith("application/json")
+
+
+def test_save_warns_that_it_replaces_a_pending_draft(stack) -> None:
+    note = "Saving replaces the pending AI draft."
+    assert note not in client.get(_url(stack), headers=AUTH).text
+
+    client.post(_url(stack, "/draft"), headers=AUTH)
+    html = client.get(_url(stack), headers=AUTH).text
+
+    edit = html.split('aria-label="Edit thesis"', 1)[1]
+    assert edit.index("Save thesis") < edit.index(note) < edit.index("Draft with AI")
+
+
+def test_editor_announces_swaps_and_manages_focus(stack) -> None:
+    html = client.get(_url(stack), headers=AUTH).text
+    body = client.post(_url(stack, "/draft"), headers=AUTH).text
+
+    # The live region is outside the swapped body, so it is never replaced.
+    status = re.search(r'<div[^>]*id="thesis-editor-status"[^>]*>', html)
+    assert status and 'aria-live="polite"' in status.group(0)
+    assert html.index('id="thesis-editor-status"') < html.index(
+        'id="thesis-editor-body"'
+    )
+    assert 'id="thesis-editor-status"' not in body
+    assert "aria-live" not in body
+    assert 'id="thesisEditorModalLabel" tabindex="-1"' in html
+    index = _index()
+    assert 'hx-on::after-swap="thesisEditorSwapped(event)"' in _modal_target(index)
+    swapped = index.split("function thesisEditorSwapped(event)", 1)[1]
+    swapped = swapped.split("\n  }\n", 1)[0]
+    assert "getElementById('thesis-editor-status')" in swapped
+    assert ".focus()" in swapped
+    # Closing returns focus to the row button that opened the editor.
+    assert "thesisOpener = event.target;" in index
+    assert "addEventListener('hidden.bs.modal'" in index
+    assert "thesisOpener.focus();" in index

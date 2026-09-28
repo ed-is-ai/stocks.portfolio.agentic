@@ -647,7 +647,8 @@
                   aria-label="Thesis for {{ p.display_symbol }}"
                   hx-get="/portfolios/{{ portfolio_id }}/theses/{{ p.ticker | urlencode }}"
                   hx-target="#thesis-editor-modal-target" hx-swap="innerHTML"
-                  hx-on::before-swap="thesisSwapNotFound(event)">Thesis</button>
+                  hx-on::response-error="thesisRequestFailed(event)"
+                  hx-on::send-error="thesisRequestFailed(event)">Thesis</button>
           {% endif %}
         </td>
         <td><span id="agent-{{ agent_scope }}-risk-{{ slug }}" class="agent-cell" data-agent-placeholder="{{ agent_scope }}">Loading…</span></td>
