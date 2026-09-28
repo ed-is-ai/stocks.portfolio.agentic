@@ -14,7 +14,7 @@ import os
 import tempfile
 import time
 import traceback
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -70,6 +70,7 @@ from app.core.config import (
     ANALYSIS_XLSX,
     BACKTEST_DB,
     BAU_RUN_ENVELOPES_DIR,
+    EXTRACTION_RESULTS_JSON,
     HISTORICAL_PRICE_CACHE,
     PIPELINE_RUN_TIMEOUT_SECONDS,
     PIPELINE_RUNS_CSV,
@@ -302,31 +303,51 @@ def _emit_bau_notification(
 
 def _cached_extraction_health(
     source_map: dict[str, tuple[bool, bool]],
+    data_as_of: date | None,
+    today: date,
 ) -> dict[SourceName, SourceHealth]:
     """Return SKIPPED health for extraction sources reused from a cached run.
 
     When ``pipeline(extract=False)`` runs, WhaleWisdom/StockTwits were not
     refreshed this run; their counts come from the cached extraction file so
-    they must not be reported as a freshly-successful "ok" source.
+    they must not be reported as a freshly-successful "ok" source. The
+    message states the cache's age so an old cache is visible (GH-3).
     """
+    if data_as_of is None:
+        age = "(age unknown)"
+    else:
+        days = max(0, (today - data_as_of).days)
+        plural = "" if days == 1 else "s"
+        age = f"from {data_as_of.isoformat()} ({days} day{plural} old)"
+
+    def cached(source: SourceName, count: int) -> SourceHealth:
+        return SourceHealth(
+            source=source,
+            state=SourceState.SKIPPED,
+            count=count,
+            detail_code="cached_input",
+            display_message=(
+                f"Using cached {source.label} input {age}; "
+                "this source was not refreshed."
+            ),
+            data_as_of=data_as_of,
+        )
+
     stocktwits = sum(stocktwits for stocktwits, _ in source_map.values())
     whale_wisdom = sum(whale for _, whale in source_map.values())
     return {
-        SourceName.WHALE_WISDOM: SourceHealth(
-            source=SourceName.WHALE_WISDOM,
-            state=SourceState.SKIPPED,
-            count=whale_wisdom,
-            detail_code="cached_input",
-            display_message="Using cached WhaleWisdom input; this source was not refreshed.",
-        ),
-        SourceName.STOCKTWITS: SourceHealth(
-            source=SourceName.STOCKTWITS,
-            state=SourceState.SKIPPED,
-            count=stocktwits,
-            detail_code="cached_input",
-            display_message="Using cached StockTwits input; this source was not refreshed.",
-        ),
+        SourceName.WHALE_WISDOM: cached(SourceName.WHALE_WISDOM, whale_wisdom),
+        SourceName.STOCKTWITS: cached(SourceName.STOCKTWITS, stocktwits),
     }
+
+
+def _extraction_cache_date() -> date | None:
+    """Return the UTC date the cached extraction file was last written."""
+    try:
+        mtime = EXTRACTION_RESULTS_JSON.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime, timezone.utc).date()
 
 
 _SEPA_LABELS = {
@@ -1089,7 +1110,13 @@ def pipeline(
         watchlist = load_watchlist()
         source_map = load_source_map()
         if not extract:
-            source_health.update(_cached_extraction_health(source_map))
+            source_health.update(
+                _cached_extraction_health(
+                    source_map,
+                    _extraction_cache_date(),
+                    start_dt.date(),
+                )
+            )
 
         bau_session = None
         try:

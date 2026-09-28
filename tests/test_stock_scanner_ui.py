@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -831,6 +831,62 @@ def test_runlog_renders_structured_partial_coverage_and_legacy_fallback(
     # it under a "Discovery" subheading (#108).
     assert "source-stage-label" in markup
     assert "Discovery" in markup
+
+
+def test_runlog_cached_badges_show_input_age(tmp_path, monkeypatch) -> None:
+    """Cached input badges state the cache age and flag old caches (GH-3)."""
+    import app.api.routes.views as views_module
+
+    def cached(source: SourceName, data_as_of: date | None) -> dict:
+        return SourceHealth(
+            source=source,
+            state=SourceState.SKIPPED,
+            count=4,
+            detail_code="cached_input",
+            data_as_of=data_as_of,
+        ).model_dump(mode="json", exclude_none=True)
+
+    fresh = SourceHealth(source=SourceName.VCP_FMP, state=SourceState.OK, count=3)
+    path = tmp_path / "runs.csv"
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["start", "source_health_json"])
+        writer.writeheader()
+        writer.writerow(
+            {
+                "start": "2026-07-19T12:00:00+00:00",
+                "source_health_json": json.dumps(
+                    {
+                        "stocktwits": cached(SourceName.STOCKTWITS, date(2026, 7, 17)),
+                        "whale_wisdom": cached(
+                            SourceName.WHALE_WISDOM, date(2026, 6, 19)
+                        ),
+                        "vcp_fmp": fresh.model_dump(mode="json"),
+                    }
+                ),
+            }
+        )
+        writer.writerow(
+            {
+                "start": "2026-07-20T12:00:00+00:00",
+                "source_health_json": json.dumps(
+                    {"stocktwits": cached(SourceName.STOCKTWITS, None)}
+                ),
+            }
+        )
+    monkeypatch.setattr(views_module, "PIPELINE_RUNS_CSV", path)
+
+    response = __import__("asyncio").run(partial_runlog(_request("/partials/runlog")))
+    markup = " ".join(response.body.decode().split())
+
+    assert "StockTwits: Cached &middot; 2d" in markup
+    assert "WhaleWisdom: Cached &middot; 30d" in markup
+    assert "StockTwits: Cached &middot; age unknown" in markup
+    assert markup.count("source-cached-old") == 1
+    old_badge = markup.split("source-cached-old", 1)[1].split("</span>", 1)[0]
+    assert "WhaleWisdom" in old_badge
+    # A refreshed (ok) source carries no age label.
+    assert markup.count("age unknown") == 1
+    assert "VCP / FMP: Ok <span" in markup
 
 
 def test_runlog_long_error_expands_without_hover(tmp_path, monkeypatch) -> None:

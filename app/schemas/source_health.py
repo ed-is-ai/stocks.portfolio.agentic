@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import StrEnum
 import re
 
@@ -120,6 +120,8 @@ class SourceHealth(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     duration_seconds: float | None = Field(default=None, ge=0)
+    # Date the reused input was last written, for cached sources (GH-3).
+    data_as_of: date | None = None
 
     @field_validator("display_message")
     @classmethod
