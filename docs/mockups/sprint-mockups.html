@@ -1,0 +1,818 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Sprint Mockups</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Tokens mirror app/api/static/css/tokens.css. The app is light-only, so
+     these mockups deliberately commit to the same single light look. */
+  :root {
+    --ink: #111418; --ink-2: #1c2126; --paper: #f8f9fa; --card: #ffffff;
+    --rule: #dfe3e8; --muted: #5b6470;
+    --green: #0a7d34; --green-bg: #e3f3e8; --red: #c81e1e; --red-bg: #fbe6e6;
+    --amber: #a3560a; --amber-bg: #f7ecd8; --blue: #1d4ed8; --blue-bg: #e2e9fb;
+    --purple: #7c3aed; --purple-bg: #ece6fb;
+    --pin: #2563eb;
+    --font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--paper); color: var(--ink); font-family: var(--font); font-size: 14px; line-height: 1.5; padding-inline: 16px; padding-block: 0 64px; -webkit-font-smoothing: antialiased; }
+  a { color: var(--blue); }
+  a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid var(--pin); outline-offset: 2px; }
+  h1, h2, h3 { text-wrap: balance; margin: 0; }
+  code, .path { font-family: var(--mono); font-size: 12px; }
+  .wrap { max-width: 1320px; margin: 0 auto; }
+
+  /* Page head */
+  .page-head { padding-block: 28px 18px; border-bottom: 1px solid var(--ink); display: grid; gap: 10px; }
+  .eyebrow { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .page-head h1 { font-size: 30px; letter-spacing: -.01em; }
+  .page-head p { margin: 0; max-width: 72ch; color: var(--ink-2); }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12.5px; color: var(--muted); padding-top: 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch-chg { width: 22px; height: 12px; border: 2px dashed var(--pin); }
+
+  /* Sprint nav */
+  .sprint-nav { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--paper); border-bottom: 1px solid var(--rule); display: flex; gap: 0; overflow-x: auto; margin-inline: -16px; padding-inline: 16px; }
+  .sprint-nav a { color: var(--muted); text-decoration: none; padding: 10px 14px; border-bottom: 2px solid transparent; white-space: nowrap; font-weight: 600; font-size: 13px; }
+  .sprint-nav a:hover { color: var(--ink); border-bottom-color: var(--rule); }
+
+  /* Sprint section */
+  .sprint { padding-block: 36px 8px; border-bottom: 1px solid var(--rule); }
+  .sprint-head { display: grid; gap: 8px; margin-bottom: 18px; }
+  .sprint-head .dates { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .sprint-head h2 { font-size: 22px; }
+  .sprint-head p { margin: 0; max-width: 80ch; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-size: 12px; border: 1px solid var(--rule); background: var(--card); padding: 2px 8px; border-radius: 4px; color: var(--ink); text-decoration: none; }
+  .chip.done { color: var(--muted); text-decoration: line-through; }
+  .review { background: var(--card); border: 1px solid var(--rule); border-left: 3px solid var(--ink); padding: 12px 14px; display: grid; gap: 6px; max-width: 110ch; }
+  .review strong { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+  .review ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+
+  .sprint-body { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; align-items: start; margin-top: 18px; }
+  @media (max-width: 1100px) { .sprint-body { grid-template-columns: 1fr; } }
+  .screens { display: grid; gap: 20px; }
+  .screen-label { font-size: 12px; color: var(--muted); margin-bottom: 6px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+  .screen-label b { color: var(--ink); }
+  .example { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--amber); font-weight: 700; }
+
+  /* App chrome (mirrors index.html: flat ink masthead, underline tabs) */
+  .app { background: var(--card); border: 1px solid var(--rule); overflow: hidden; font-size: 13px; }
+  .mh { background: var(--ink); color: #fff; display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; gap: 12px; }
+  .mh .brand { font-weight: 700; }
+  .mh .brand em { font-style: normal; color: rgba(255,255,255,.6); }
+  .mh .acts { display: flex; gap: 10px; align-items: center; font-size: 12px; color: rgba(255,255,255,.85); flex-wrap: wrap; justify-content: flex-end; }
+  .mh .bell { border: 1px solid rgba(255,255,255,.35); padding: 2px 8px; border-radius: 4px; }
+  .tabs { display: flex; overflow-x: auto; border-bottom: 1px solid var(--rule); padding-inline: 8px; background: var(--card); }
+  .tabs span { padding: 8px 10px; color: var(--muted); white-space: nowrap; border-bottom: 2px solid transparent; font-size: 12.5px; }
+  .tabs span.on { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+  .tabs span.new { color: var(--pin); font-weight: 600; }
+  .body { padding: 12px; display: grid; gap: 10px; }
+  .toolbar { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .toolbar h3 { font-size: 15px; }
+  .toolbar small, .sub { color: var(--muted); font-size: 12px; }
+  .btn { display: inline-block; font-size: 12px; padding: 3px 10px; border: 1px solid var(--rule); background: var(--card); border-radius: 4px; color: var(--ink); }
+  .btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .btn.ghost { border-color: transparent; color: var(--blue); padding-inline: 4px; }
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); border-top: 1px solid var(--rule); border-left: 1px solid var(--rule); }
+  .metric { padding: 8px 10px; border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); display: grid; gap: 2px; }
+  .metric span { font-size: 11px; color: var(--muted); }
+  .metric strong { font-variant-numeric: tabular-nums; font-size: 15px; }
+  .pos { color: var(--green); } .neg { color: var(--red); }
+  .tbl { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  td.r, th.r { text-align: right; }
+  td small { display: block; color: var(--muted); font-size: 11px; }
+  .st { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
+  .st.good { color: var(--green); background: var(--green-bg); }
+  .st.risk { color: var(--red); background: var(--red-bg); }
+  .st.warn { color: var(--amber); background: var(--amber-bg); }
+  .st.info { color: var(--blue); background: var(--blue-bg); }
+  .st.off { color: var(--muted); background: var(--paper); border: 1px dashed var(--rule); }
+  .form { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 12px; }
+  .field { display: grid; gap: 3px; }
+  .field label { font-size: 11px; color: var(--muted); font-weight: 600; }
+  .input { border: 1px solid var(--rule); border-radius: 4px; padding: 4px 8px; background: var(--card); font-variant-numeric: tabular-nums; min-height: 28px; }
+  .hint { font-size: 11px; color: var(--muted); }
+  .note { border: 1px solid var(--rule); background: var(--paper); padding: 8px 10px; font-size: 12px; }
+  .note.warn { background: var(--amber-bg); border-color: #ecd6ae; color: #5c3306; }
+  .note.risk { background: var(--red-bg); border-color: #f1c4c4; color: #6d1010; }
+  .strip { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .stage { font-size: 11.5px; padding: 2px 8px; border: 1px solid var(--rule); border-radius: 4px; background: var(--card); }
+  .stage.ok { color: var(--green); border-color: #bfe0c9; }
+  .stage.fail { color: var(--red); border-color: #f1c4c4; background: var(--red-bg); font-weight: 600; text-decoration: underline; }
+  .pop { border: 1px solid var(--ink); background: var(--card); padding: 8px 10px; box-shadow: 0 6px 18px rgba(17,20,24,.12); display: grid; gap: 4px; max-width: 460px; }
+  .pop code { white-space: pre-wrap; word-break: break-word; }
+  .modal { border: 1px solid var(--ink); background: var(--card); max-width: 520px; margin: 0 auto; box-shadow: 0 10px 30px rgba(17,20,24,.18); }
+  .modal header { padding: 10px 12px; border-bottom: 1px solid var(--rule); font-weight: 700; }
+  .modal .mbody { padding: 10px 12px; display: grid; gap: 8px; }
+  .modal footer { padding: 10px 12px; border-top: 1px solid var(--rule); display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+  .backdrop { background: rgba(17,20,24,.28); padding: 18px 12px; }
+  .cap { display: grid; grid-template-columns: 96px 1fr; gap: 2px 8px; font-size: 12px; }
+  .cap dt { color: var(--muted); } .cap dd { margin: 0; }
+  .split { display: grid; grid-template-columns: minmax(0,1fr) 250px; gap: 10px; }
+  @media (max-width: 720px) { .split { grid-template-columns: 1fr; } }
+  .aside { border: 1px solid var(--rule); padding: 10px; display: grid; gap: 6px; align-content: start; background: var(--card); }
+  .aside h4 { margin: 0; font-size: 13px; display: flex; justify-content: space-between; }
+  .aside ul { margin: 0; padding-left: 16px; font-size: 11.5px; color: var(--muted); }
+  .desk { display: grid; grid-template-columns: 170px minmax(0,1fr) 230px; border-top: 1px solid var(--rule); }
+  @media (max-width: 900px) { .desk { grid-template-columns: 1fr; } }
+  .desk > div { padding: 10px; border-right: 1px solid var(--rule); display: grid; gap: 6px; align-content: start; }
+  .desk > div:last-child { border-right: 0; }
+  .rail-item { display: flex; justify-content: space-between; gap: 6px; font-size: 12px; }
+  .q-item { border: 1px solid var(--rule); padding: 6px 8px; display: grid; gap: 2px; font-size: 12px; }
+  .q-item.sel { border-color: var(--ink); box-shadow: inset 3px 0 0 var(--ink); }
+  .chart { height: 70px; border: 1px solid var(--rule); background: linear-gradient(180deg, var(--paper), var(--card)); position: relative; overflow: hidden; }
+  .chart svg { width: 100%; height: 100%; display: block; }
+
+  /* Change annotations */
+  .chg { outline: 2px dashed var(--pin); outline-offset: 2px; position: relative; }
+  .pin { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 4px; background: var(--pin); color: #fff; font-size: 11px; font-weight: 700; border-radius: 4px; font-family: var(--font); vertical-align: middle; font-variant-numeric: tabular-nums; }
+
+  /* Change list */
+  .changes { display: grid; gap: 0; border-top: 1px solid var(--ink); }
+  .changes h3 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; padding-block: 10px 6px; }
+  .change { display: grid; grid-template-columns: 26px 1fr; gap: 4px 10px; padding-block: 10px; border-bottom: 1px solid var(--rule); }
+  .change .pin { margin-top: 2px; }
+  .change p { margin: 0; }
+  .change .where { grid-column: 2; display: grid; gap: 2px; }
+  .change .where .path { color: var(--ink-2); word-break: break-all; }
+  .change .tags { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px; }
+  .tag { font-size: 10.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 1px 6px; border-radius: 4px; }
+  .tag.iface { color: var(--purple); background: var(--purple-bg); }
+  .tag.guard { color: #fff; background: var(--red); }
+  .tag.block { color: var(--amber); background: var(--amber-bg); }
+  .tag.ui { color: var(--blue); background: var(--blue-bg); }
+  .tag.stale { color: var(--muted); background: var(--paper); border: 1px solid var(--rule); }
+  footer.page-foot { padding-block: 24px; color: var(--muted); font-size: 12px; }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="page-head">
+    <span class="eyebrow">stocks.portfolio.agentic · sprint review · 28 Sep 2026</span>
+    <h1>What each sprint changes on screen</h1>
+    <p>One section per sprint. Each shows the screens as they should look once the sprint lands, with every changed region outlined and numbered. The numbered list beside each set of screens says where the code changes, and flags anything that changes an interface or forces a historical rebuild.</p>
+    <div class="legend">
+      <span><span class="swatch-chg"></span> Changed or new on screen</span>
+      <span><b class="pin">1</b> Keyed to the change list</span>
+      <span><b class="tag iface">Interface</b> Route, schema, protocol or table contract</span>
+      <span><b class="tag guard">Rebuild</b> Forces a snapshot rebuild; needs sign-off</span>
+      <span><b class="tag block">Blocked</b> Waiting on another issue</span>
+      <span><b class="tag stale">Issue text outdated</b> The code has moved on since the issue was written</span>
+      <span><span class="example">Example data</span> Figures are illustrative, not portfolio data</span>
+    </div>
+  </header>
+
+  <nav class="sprint-nav" aria-label="Sprints">
+    <a href="#sprint-1">1 · Engine &amp; Minervini</a>
+    <a href="#sprint-2">2 · Pipeline reliability</a>
+    <a href="#sprint-3">3 · Cash, gilts &amp; strategies</a>
+    <a href="#sprint-4">4 · Agent foundations</a>
+    <a href="#sprint-5">5 · Agent workflows</a>
+    <a href="#sprint-6">6 · Agent surfaces</a>
+  </nav>
+
+  <!-- ───────────────────────── SPRINT 1 ───────────────────────── -->
+  <section class="sprint" id="sprint-1" aria-labelledby="s1-title">
+    <div class="sprint-head">
+      <span class="dates">Sprint 1 · 28 Sep – 11 Oct 2026</span>
+      <h2 id="s1-title">SPY benchmark &amp; six backtests</h2>
+      <p>SPY work and recovery are done (#22–#29 closed). What remains is making the six results trustworthy: the Minervini entry fix, a position cap across every strategy, and the storage epic.</p>
+      <div class="chips">
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/33">#33 Position cap</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/31">#31 Minervini entries</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/10">#10 Storage epic</a>
+        <span class="chip done">#22–#29</span>
+      </div>
+    </div>
+    <div class="review">
+      <strong>Review</strong>
+      <ul>
+        <li>Land <b>#33 before re-running anything</b>. Every current result, including the #31 retest, is superseded once the engine caps positions.</li>
+        <li>#35 (VCP as a rank boost, Sprint 3) only changes results when candidates exceed free slots. That only happens once #33 exists, so it depends on #33.</li>
+        <li>#10 is too big for two weeks. Its 70% reduction target was set against an 18 GB cache that is now 44 GB, so the target needs restating before work starts.</li>
+      </ul>
+    </div>
+    <div class="sprint-body">
+      <div class="screens">
+        <div>
+          <div class="screen-label"><b>Strategy Manager › Configure backtest (Minervini)</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Strategy Manager">
+            <div class="body">
+              <div class="toolbar"><h3>Configure backtest</h3><small>rtly-backtest-minervini · GBP · 2000-01 → 2026-08</small></div>
+              <div class="form">
+                <div class="field"><label>Minimum trend score</label><div class="input">85</div></div>
+                <div class="field"><label>Minimum relative volume</label><div class="input">1.5</div></div>
+                <div class="field"><label>Max pivot extension %</label><div class="input">3.0</div></div>
+                <div class="field"><label>Max loss %</label><div class="input">8.0</div></div>
+                <div class="field chg"><label>Max positions <b class="pin">1</b></label><div class="input">10</div><span class="hint">Applies to every strategy. Each new position is capped at 1/10 of equity (£1,000 of £10,000 at start).</span></div>
+                <div class="field"><label>Starting capital</label><div class="input">£10,000</div></div>
+              </div>
+              <div class="toolbar"><span class="sub">Parameters are pinned into the run manifest.</span><span class="btn primary">Run backtest</span></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Strategy Manager › Backtest result</b><span class="example">Example data: #31 retest, before #33</span></div>
+          <div class="app" data-tab="Strategy Manager">
+            <div class="body">
+              <div class="note warn chg">Superseded: this run predates the position cap. Re-run to compare like for like. <b class="pin">4</b> <span class="btn">Re-run with cap</span></div>
+              <div class="toolbar"><h3>Minervini · 2000-01 → 2026-08</h3><small>Opened in 0.4 s <b class="pin">6</b></small></div>
+              <div class="metrics">
+                <div class="metric"><span>Total return</span><strong class="pos">+59.79%</strong></div>
+                <div class="metric"><span>Sharpe</span><strong>0.23</strong></div>
+                <div class="metric"><span>Win rate</span><strong>39.7%</strong></div>
+                <div class="metric"><span>Max drawdown</span><strong class="neg">−29.8%</strong></div>
+                <div class="metric chg"><span>Entries <b class="pin">5</b></span><strong>59 <small class="sub">was 18</small></strong></div>
+                <div class="metric chg"><span>Largest position <b class="pin">3</b></span><strong>10.0%</strong></div>
+              </div>
+              <div class="sub chg">Cap: 10 positions · 212 entry signals skipped at the cap (reason: <code>position_limit</code>) <b class="pin">2</b></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="changes">
+        <h3>Where the code changes</h3>
+        <div class="change"><b class="pin">1</b><p><b>#33</b> A <code>max_concurrent_positions</code> parameter that the engine reserves, added to every strategy's closed parameter schema at discovery. No strategy's SKILL.md needs its own copy.</p>
+          <div class="where"><span class="path">app/services/backtest/skill_discovery.py</span><span class="path">app/services/backtest/strategy_protocol.py:859 validate_strategy_parameters</span><span class="path">app/api/templates/_strategy_configuration_fields.html</span></div>
+          <div class="tags"><span class="tag iface">Interface: parameter schema + run manifest</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">2</b><p><b>#33</b> The allocator caps each target at <code>equity ÷ max_concurrent_positions</code> and skips BUYs once open plus pending positions reach the cap. It records a skip event with a reason code.</p>
+          <div class="where"><span class="path">app/services/backtest/backtest_engine.py:1310</span></div>
+          <div class="tags"><span class="tag iface">Interface: skip-event reason vocabulary</span></div></div>
+        <div class="change"><b class="pin">3</b><p><b>#33</b> The result shows the largest position as a share of equity, so concentration can be seen without reading the trade log.</p>
+          <div class="where"><span class="path">app/api/templates/_backtest_result.html</span></div>
+          <div class="tags"><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">4</b><p><b>#33</b> Runs from before the cap are marked superseded. All six strategies are re-run after the engine change.</p>
+          <div class="where"><span class="path">app/api/templates/_backtest_results_list.html</span></div>
+          <div class="tags"><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">5</b><p><b>#31</b> Entry gates on intact-base scan states. This is already in PR #32 and needs no interface change. The strategy source digest changes, so older runs no longer match.</p>
+          <div class="where"><span class="path">skills/rtly-backtest-minervini/scripts/strategy.py</span></div></div>
+        <div class="change"><b class="pin">6</b><p><b>#10</b> Opening a result reads a stored coverage revision instead of hashing the whole profile (measured at 98.6 s cold). Historical evidence moves to schema v2 with compressed chunks and integer revision keys.</p>
+          <div class="where"><span class="path">app/repositories/backtest_repo.py</span><span class="path">app/repositories/historical_price_repo.py</span></div>
+          <div class="tags"><span class="tag iface">Interface: DB schema v2 + migration</span><span class="tag guard">Rebuild if evidence files change</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── SPRINT 2 ───────────────────────── -->
+  <section class="sprint" id="sprint-2" aria-labelledby="s2-title">
+    <div class="sprint-head">
+      <span class="dates">Sprint 2 · 12 – 25 Oct 2026</span>
+      <h2 id="s2-title">Pipeline reliability &amp; data visibility</h2>
+      <p>Run the pipeline on a schedule, show how stale each source is and why a run failed, and start recording observed month-end scans.</p>
+      <div class="chips">
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/7">#7 Observed scans</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/2">#2 Schedule</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/3">#3 Staleness</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/4">#4 Error drill-down</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/1">#1 Partial refresh</a>
+        <span class="chip done">#12</span>
+      </div>
+    </div>
+    <div class="review">
+      <strong>Review</strong>
+      <ul>
+        <li><b>#7 is the critical path for #8 and #9.</b> Capture fails silently: <code>prepare_for_run</code> returns nothing if the previous month already has a snapshot, which the #23 recovery created for every month up to 2026-08. It also returns nothing unless the run lands on the single eligible capture date after the close. All 1,217,809 stored scan records are reconstructed and <code>bau_run_authority</code> is empty.</li>
+        <li>#7 depends on #2: only a scheduled run will reliably hit the monthly capture date.</li>
+        <li>The fix for #7 touches <code>bau_capture_coordinator.py</code>, <code>bau_run_envelope.py</code> or <code>scanner_agent.py</code>, which are guardrail files. Get explicit sign-off before editing them.</li>
+        <li>Every recent run shows WhaleWisdom, StockTwits and FMP as skipped, so even observed records would carry null enrichment. #1 is where that becomes visible, so land it with #7.</li>
+      </ul>
+    </div>
+    <div class="sprint-body">
+      <div class="screens">
+        <div>
+          <div class="screen-label"><b>Masthead › pipeline status bar</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Stock Scanner">
+            <div class="body">
+              <div class="strip">
+                <span class="st risk">Failed</span>
+                <span class="stage ok">Extract ✓</span><span class="stage ok">Scan ✓</span>
+                <span class="stage fail chg">Analyse ✕ <b class="pin">1</b></span>
+                <span class="stage">Alert</span>
+                <span class="sub chg" style="margin-left:auto">Next scheduled run 21:30 · weekdays after US close <b class="pin">2</b></span>
+              </div>
+              <div class="pop chg" role="dialog" aria-label="Analyse stage error">
+                <b>Analyse failed at 17:42:09</b>
+                <code>sqlite3.OperationalError: database is locked (data/backtest.db) while writing analysis_artifacts</code>
+                <span><span class="btn">Copy error</span> <span class="btn ghost">Open in Run Log</span></span>
+              </div>
+              <div class="strip">
+                <span class="sub">Sources:</span>
+                <span class="st good">Yahoo · live</span>
+                <span class="st warn chg">StockTwits · cached, 174 days old <b class="pin">3</b></span>
+                <span class="st warn">WhaleWisdom · cached, 12 days old</span>
+                <span class="st off">FMP · not configured</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Run Log › failed run expanded</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Run Log">
+            <div class="body tbl">
+              <table>
+                <thead><tr><th>Started</th><th>Status</th><th class="r">Scanned</th><th>Sources</th></tr></thead>
+                <tbody>
+                  <tr><td>20 Oct 21:30<small>scheduled</small></td><td><span class="st good">OK</span></td><td class="r">925</td><td>8 ok · 2 cached</td></tr>
+                  <tr><td>19 Oct 21:30<small>scheduled</small></td><td class="chg"><details open><summary><span class="st risk">ERROR</span> <b class="pin">4</b></summary><code style="display:block;margin-top:4px;white-space:pre-wrap">Stage: Analyse
+sqlite3.OperationalError: database is locked (data/backtest.db)
+  while writing analysis_artifacts</code></details></td><td class="r">925</td><td>7 ok · 3 skipped</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Refresh › reduced-coverage confirmation</b></div>
+          <div class="app" data-tab="Stock Scanner">
+            <div class="backdrop">
+              <div class="modal chg" role="dialog" aria-labelledby="m1">
+                <header id="m1">Refresh with reduced coverage? <b class="pin">5</b></header>
+                <div class="mbody">
+                  <div class="note risk"><b>Analytical coverage</b>. FMP is not configured, so VCP scores and fundamentals will be missing from this run.</div>
+                  <div class="note warn"><b>Enrichment</b>. Alpha Vantage is not configured, so earnings data will be missing.</div>
+                  <div class="note"><b>Notification</b>. Email delivery is not configured. Results still appear here.</div>
+                  <span class="hint">Continuing gives usable but partial results.</span>
+                </div>
+                <footer><span class="btn">Configure integrations</span><span class="btn">Continue with partial refresh</span><span class="btn primary">Cancel</span></footer>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Data Quality › observed scan coverage</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Data Quality">
+            <div class="body">
+              <div class="metrics chg">
+                <div class="metric"><span>Observed months <b class="pin">6</b></span><strong>1</strong></div>
+                <div class="metric"><span>Reconstructed months</span><strong>320</strong></div>
+                <div class="metric"><span>Next capture window</span><strong>3 Nov, after close</strong></div>
+                <div class="metric"><span>Enrichment filled</span><strong>61%</strong></div>
+              </div>
+              <span class="sub">Enrichment-driven strategies (institutional flow, sector rotation) become testable as observed months accumulate.</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="changes">
+        <h3>Where the code changes</h3>
+        <div class="change"><b class="pin">1</b><p><b>#4</b> Stage pills become buttons that open a popover you can reach by keyboard. The error is attached to the stage that raised it, not only to the run.</p>
+          <div class="where"><span class="path">app/schemas/pipeline_status.py:53 StageStatus (+ error: str | None)</span><span class="path">app/api/templates/_pipeline_status.html:16</span></div>
+          <div class="tags"><span class="tag iface">Interface: status schema</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">2</b><p><b>#2</b> An in-process APScheduler job in the FastAPI lifespan calls <code>PipelineService.run_once(extract=True)</code>, so scheduled runs share the run lock and status record with manual refreshes. The schedule is set with <code>PIPELINE_SCHEDULE_CRON</code>.</p>
+          <div class="where"><span class="path">app/api/app.py (lifespan)</span><span class="path">app/services/pipeline_service.py:52</span><span class="path">app/core/config.py</span></div>
+          <div class="tags"><span class="tag iface">Interface: config env</span><span class="tag stale">Issue text outdated</span></div>
+          <p class="hint" style="grid-column:2">APScheduler is already a dependency. <code>orchestrator.py:1737</code> has a standalone scheduler, but it calls <code>pipeline()</code> directly, bypasses the service's lock and run ID, and nothing starts it.</p></div>
+        <div class="change"><b class="pin">3</b><p><b>#3</b> <code>SourceHealth</code> gains <code>data_as_of</code>, and cached sources show their age.</p>
+          <div class="where"><span class="path">app/schemas/source_health.py:112</span><span class="path">app/orchestration/orchestrator.py:303 _cached_extraction_health</span></div>
+          <div class="tags"><span class="tag iface">Interface: SourceHealth</span><span class="tag stale">Issue text outdated</span></div>
+          <p class="hint" style="grid-column:2">The "never passes --extract" half is fixed: "Include institutional data" posts <code>extract=true</code> (<code>index.html:724</code> → <code>pipeline_service.py:96</code>). The age display is still missing.</p></div>
+        <div class="change"><b class="pin">4</b><p><b>#4</b> The ERROR or PARTIAL badge becomes the <code>&lt;details&gt;</code> trigger, showing the full untruncated error.</p>
+          <div class="where"><span class="path">app/api/templates/_runlog.html:52, :112</span></div>
+          <div class="tags"><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">5</b><p><b>#1</b> A typed preflight, <code>RefreshPreflightV1</code>, lists capability warnings ordered by severity and carries a fingerprint. <code>POST /refresh-data</code> requires <code>confirm_fingerprint</code> for a partial run and re-checks capabilities on the server. The dialog uses a Bootstrap modal with focus trapping.</p>
+          <div class="where"><span class="path">app/api/routes/pipeline.py:36-76</span><span class="path">app/api/routes/settings.py (shared capability checks)</span><span class="path">app/api/templates/index.html:715-740</span></div>
+          <div class="tags"><span class="tag iface">Interface: route contract</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">6</b><p><b>#7</b> Observed scans get recorded on the capture date even when a reconstructed month already exists. The observed record wins, is never overwritten, and its coverage is shown.</p>
+          <div class="where"><span class="path">app/services/backtest/bau_capture_coordinator.py:211-235</span><span class="path">app/orchestration/orchestrator.py:1101</span><span class="path">app/api/templates/_evidence_census.html</span></div>
+          <div class="tags"><span class="tag guard">Rebuild: guardrail file</span><span class="tag iface">Interface: snapshot month provenance</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── SPRINT 3 ───────────────────────── -->
+  <section class="sprint" id="sprint-3" aria-labelledby="s3-title">
+    <div class="sprint-head">
+      <span class="dates">Sprint 3 · 26 Oct – 8 Nov 2026</span>
+      <h2 id="s3-title">Portfolio correctness &amp; new strategies</h2>
+      <p>Derive cash from a ledger, price gilts that no provider covers, add a mean-reversion strategy, and rework VCP.</p>
+      <div class="chips">
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/5">#5 Cash ledger</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/11">#11 Gilt prices</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/6">#6 Mean reversion</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/9">#9 Sector rotation</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/35">#35 VCP as rank</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/34">#34 VCP depth bug</a>
+      </div>
+    </div>
+    <div class="review">
+      <strong>Review</strong>
+      <ul>
+        <li><b>#34 forces a snapshot rebuild.</b> <code>vcp_pattern_calculator.py</code> is hashed into the <code>vcp_v1</code> detector version (<code>source_manifest.py:53-61</code>). Changing it fails <code>adoption_gate_failures</code> for every month. CLAUDE.md's list of seven guardrail files misses this, so add the detector files to that list. Batch any other detector changes into the same rebuild.</li>
+        <li>#9 is blocked by #7 and will still be blocked in this sprint. Either build it on a stated reference sector mapping (accepting survivorship bias) or move it to Sprint 6 or later.</li>
+        <li>#5 phase 3, where trades post cash legs, changes what "cash" means for existing portfolios. Ship phases 1–2 here and phase 3 only after the open questions are answered.</li>
+      </ul>
+    </div>
+    <div class="sprint-body">
+      <div class="screens">
+        <div>
+          <div class="screen-label"><b>Portfolio › Cash (new view)</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Portfolio">
+            <div class="body">
+              <div class="toolbar"><h3>Cash ledger</h3><span class="btn chg">+ Add cash movement <b class="pin">2</b></span></div>
+              <div class="metrics chg">
+                <div class="metric"><span>Derived cash <b class="pin">1</b></span><strong>£4,812.40</strong></div>
+                <div class="metric"><span>Provider running balance</span><strong>£4,790.10</strong></div>
+                <div class="metric"><span>Difference</span><strong class="neg">£22.30</strong></div>
+              </div>
+              <div class="note warn">The derived balance is £22.30 above the latest statement. <span class="btn">Review rows</span> <span class="btn">Accept adjusting entry</span></div>
+              <div class="tbl"><table>
+                <thead><tr><th>Date</th><th>Type</th><th class="r">Amount</th><th class="r">Derived balance</th></tr></thead>
+                <tbody>
+                  <tr><td>01 Jul</td><td>Opening balance</td><td class="r">£3,000.00</td><td class="r">£3,000.00</td></tr>
+                  <tr><td>15 Jul</td><td>Contribution</td><td class="r pos">+£2,000.00</td><td class="r">£5,000.00</td></tr>
+                  <tr><td>02 Aug</td><td>Dividend<small>USD 28.40 @ 1.27</small></td><td class="r pos">+£22.36</td><td class="r">£5,022.36</td></tr>
+                  <tr class="chg"><td>09 Aug</td><td>Buy · trade cash leg<small>phase 3</small></td><td class="r neg">−£210.00</td><td class="r">£4,812.36</td></tr>
+                </tbody>
+              </table></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Portfolio › Import › manual price file</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Portfolio">
+            <div class="body chg">
+              <div class="toolbar"><h3>Import manual prices <b class="pin">3</b></h3><small>For holdings no provider prices</small></div>
+              <div class="form">
+                <div class="field"><label>Security</label><div class="input">TICK119 · 6% Treasury 2028</div><span class="hint">Stored as <code>manual:TICK119</code></span></div>
+                <div class="field"><label>Source file</label><div class="input">tradeweb-closing-prices.csv</div></div>
+                <div class="field"><label>Quote unit</label><div class="input">Clean price per £100 nominal</div></div>
+                <div class="field"><label>When a provider price exists</label><div class="input">Fill gaps only</div></div>
+              </div>
+              <span class="sub">1,204 dated closes · 2021-03-01 → 2026-09-25 · 0 already stored</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Strategy Manager › choose a strategy</b></div>
+          <div class="app" data-tab="Strategy Manager">
+            <div class="body tbl">
+              <table>
+                <thead><tr><th>Strategy</th><th>Family</th><th>Status</th></tr></thead>
+                <tbody>
+                  <tr><td>Buy and Hold</td><td>Control</td><td><span class="st good">Ready</span></td></tr>
+                  <tr class="chg"><td>Mean Reversion <b class="pin">4</b><small>Buys oversold pullbacks inside an uptrend</small></td><td>Mean reversion</td><td><span class="st good">Ready</span></td></tr>
+                  <tr class="chg"><td>Minervini <b class="pin">5</b><small>VCP now raises rank instead of gating entry</small></td><td>Trend</td><td><span class="st good">Ready</span></td></tr>
+                  <tr class="chg"><td>Sector Rotation <b class="pin">7</b><small>Needs sector data</small></td><td>Rotation</td><td><span class="st off">Blocked by #7</span></td></tr>
+                  <tr><td>Weinstein</td><td>Trend</td><td><span class="st good">Ready</span></td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="changes">
+        <h3>Where the code changes</h3>
+        <div class="change"><b class="pin">1</b><p><b>#5 phases 1–2</b> A <code>balance(portfolio_id) -&gt; Decimal</code> method on the ledger, a new Cash view, and the difference between the derived balance and the provider snapshot.</p>
+          <div class="where"><span class="path">app/repositories/cash_flows_repo.py:23</span><span class="path">app/api/routes/views.py (GET /partials/portfolio/cash)</span><span class="path">app/api/templates/_portfolio.html</span></div>
+          <div class="tags"><span class="tag iface">Interface: repo + route</span><span class="tag stale">Issue text outdated</span></div>
+          <p class="hint" style="grid-column:2">The ledger is no longer write-only. <code>history()</code> and <code>dated_flows()</code> exist and are read by <code>snapshot_backfill.py:476</code> and <code>portfolio_service.py:1214</code>.</p></div>
+        <div class="change"><b class="pin">2</b><p><b>#5 phase 3</b> Trades post cash legs, cash can be entered by hand, and <code>get_cash_balance</code> is derived from the ledger. The provider's Running Balance becomes a check rather than the source of truth.</p>
+          <div class="where"><span class="path">app/agents/trader/trader_agent.py:1234 import_sipp, :2249-2253</span><span class="path">app/api/routes/portfolio.py (POST /portfolio/{id}/cash-flows)</span></div>
+          <div class="tags"><span class="tag iface">Interface: meaning of cash changes</span></div></div>
+        <div class="change"><b class="pin">3</b><p><b>#11</b> Import a manual price series into the existing immutable revision tables under <code>manual:&lt;ticker&gt;</code>. Re-importing the same file changes nothing. The contract states quotes are per £100 nominal.</p>
+          <div class="where"><span class="path">app/repositories/historical_price_repo.py (import_manual_series)</span><span class="path">app/api/routes/portfolio.py (POST /portfolio/{id}/manual-prices)</span><span class="path">app/services/snapshot_price_evidence.py:225 _symbols_for</span></div>
+          <div class="tags"><span class="tag iface">Interface: repo + route + quote-unit contract</span></div>
+          <p class="hint" style="grid-column:2">Contrary to the issue, <code>_symbols_for</code> only resolves aliases and the raw ticker. It needs the <code>manual:</code> identity added, or the valuation will never find the imported prices.</p></div>
+        <div class="change"><b class="pin">4</b><p><b>#6</b> A new strategy skill. <code>StrategyProtocolV1</code> does not change.</p>
+          <div class="where"><span class="path">skills/rtly-backtest-mean-reversion/</span></div></div>
+        <div class="change"><b class="pin">5</b><p><b>#35</b> Remove the VCP gates. <code>Signal</code> gains an optional <code>priority</code> that is kept out of <code>sort_key</code>. When there are more candidates than free slots, the engine fills slots by priority.</p>
+          <div class="where"><span class="path">skills/rtly-backtest-minervini/scripts/strategy.py:413, :419</span><span class="path">app/services/backtest/strategy_protocol.py:135 Signal</span><span class="path">app/services/backtest/backtest_engine.py (candidate order)</span></div>
+          <div class="tags"><span class="tag iface">Interface: Signal</span><span class="tag block">Needs #33</span></div></div>
+        <div class="change"><b class="pin">6</b><p><b>#34</b> Re-check the continuation guard on the replacement low after backtracking. There is no UI change.</p>
+          <div class="where"><span class="path">skills/vcp-screener/scripts/calculators/vcp_pattern_calculator.py:476-519</span></div>
+          <div class="tags"><span class="tag guard">Rebuild: vcp_v1 detector digest</span></div></div>
+        <div class="change"><b class="pin">7</b><p><b>#9</b> A new rotation skill that rebalances the portfolio on a cadence. It relies on #33's cap to size its top-N positions.</p>
+          <div class="where"><span class="path">skills/rtly-backtest-sector-rotation/</span></div>
+          <div class="tags"><span class="tag block">Blocked by #7</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── SPRINT 4 ───────────────────────── -->
+  <section class="sprint" id="sprint-4" aria-labelledby="s4-title">
+    <div class="sprint-head">
+      <span class="dates">Sprint 4 · 9 – 22 Nov 2026</span>
+      <h2 id="s4-title">Agent foundations</h2>
+      <p>Three read-only agents that cite their evidence: the research copilot, the risk coach and the thesis monitor. They get minimal entry points now; full surfaces come in Sprint 6.</p>
+      <div class="chips">
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/13">#13 Research copilot</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/16">#16 Risk coach</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/14">#14 Thesis monitor</a>
+      </div>
+    </div>
+    <div class="review">
+      <strong>Review</strong>
+      <ul>
+        <li><b>Decide the LLM stack before any agent work starts.</b> The only model integration today is the <code>openai</code> client pointed at a local Foundry <code>phi-4-mini</code> (<code>analyst_agent.py:46</code>). CLAUDE.md names Microsoft Agent Framework, which isn't a dependency. All six agents should share one client and one tool-allowlist pattern.</li>
+        <li>Define one shared <code>EvidenceRefV1</code> model here. #13–#18 all cite evidence and must use the same shape, or the AI Desk (#21) can't render their citations uniformly.</li>
+        <li>Each issue asks for a BMAD feature plan first. Three feature plans won't fit in two weeks alongside the code. Plan all three, then build #16's risk engine first: it is deterministic and needs no LLM.</li>
+      </ul>
+    </div>
+    <div class="sprint-body">
+      <div class="screens">
+        <div>
+          <div class="screen-label"><b>Stock Scanner › "Why?" on a row opens the copilot</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Stock Scanner">
+            <div class="body split">
+              <div class="tbl">
+                <table>
+                  <thead><tr><th>Ticker</th><th class="r">Score</th><th>State</th><th></th></tr></thead>
+                  <tbody>
+                    <tr><td><b>NVDA</b></td><td class="r">92</td><td><span class="st good">Breakout</span></td><td><span class="btn ghost chg">Why? <b class="pin">1</b></span></td></tr>
+                    <tr><td><b>CELH</b></td><td class="r">86</td><td><span class="st info">Pre-breakout</span></td><td><span class="btn ghost">Why?</span></td></tr>
+                    <tr><td><b>PLTR</b></td><td class="r">71</td><td><span class="st warn">Extended</span></td><td><span class="btn ghost">Why?</span></td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="aside chg">
+                <h4>Research copilot <span class="st good">Grounded</span></h4>
+                <b style="font-size:12px">Why did NVDA qualify?</b>
+                <span style="font-size:12px">It passed the Stage 2 trend template (8 of 8), scored 92 against a minimum of 85, and closed 1.2% above its pivot on 1.8× average volume.</span>
+                <ul><li>Analysis run · 3 Nov 2026 21:34</li><li>Rule · trend_template_v1</li><li>Unknown · StockTwits cached 174 days, not used</li></ul>
+                <div class="input" style="font-size:12px;color:var(--muted)">Ask about NVDA…</div>
+                <span class="hint"><b>Read-only.</b> Explains evidence; cannot change anything.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Portfolio › position thesis</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Portfolio">
+            <div class="body chg">
+              <div class="toolbar"><h3>Thesis · MSFT <b class="pin">2</b></h3><span class="st good">Confirmed · v3</span></div>
+              <div class="field"><label>Your rationale</label><div class="input">Stage 2 leader; cloud margin expansion; hold while above the 50-day line.</div></div>
+              <div class="field"><label>Invalidation rules (typed)</label>
+                <div class="input">Close below evidenced stop £312.40</div>
+                <div class="input">Close below 50-day MA on ≥ 1.5× average volume</div></div>
+              <div class="note"><span class="st info">AI draft</span> Suggested rule: exit if the Stage 2 classification is lost. <span class="btn">Accept</span> <span class="btn">Discard</span></div>
+              <span class="sub">History: Confirmed (3 Nov) · Weakened (21 Oct, volume rule near) · Confirmed (14 Oct)</span>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Settings › risk policy</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Settings">
+            <div class="body chg">
+              <div class="toolbar"><h3>Risk policy <b class="pin">3</b></h3><span class="btn primary">Save</span></div>
+              <div class="form">
+                <div class="field"><label>Max position %</label><div class="input">10</div></div>
+                <div class="field"><label>Max sector %</label><div class="input">25</div></div>
+                <div class="field"><label>Max portfolio risk %</label><div class="input">6</div></div>
+              </div>
+              <div class="note risk">NVDA is 14.1% of value, above your 10% limit. Inputs: £25,980 of £184,260 at the 3 Nov close.</div>
+              <div class="note warn">Sector concentration is unknown for 4 holdings with no sector recorded.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="changes">
+        <h3>Where the code changes</h3>
+        <div class="change"><b class="pin">1</b><p><b>#13</b> A new <code>app/agents/research/</code> package. The copilot can only call an allowlist of read-only tools that wrap existing services. <code>POST /copilot/ask</code> returns <code>CopilotAnswerV1</code> (answer, citations, unknowns, analysis run ID, model ID). Every question and answer is written to an append-only <code>copilot_audit</code> table.</p>
+          <div class="where"><span class="path">app/schemas/analysis_artifact.py:162 AnalysisArtifact (read)</span><span class="path">app/services/portfolio_recommendation_service.py:253 recommend (read)</span><span class="path">app/services/evidence_census.py:55 (read)</span><span class="path">app/api/templates/_stock_scanner.html</span></div>
+          <div class="tags"><span class="tag iface">Interface: route + schema + table</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">2</b><p><b>#14</b> A <code>position_theses</code> table (versioned, one active thesis per portfolio and security) and an append-only <code>thesis_evaluations</code> table. Rules use a closed vocabulary, <code>ThesisRuleV1</code>. Evaluation runs after a published scan, hooked into the orchestrator and not the scanner, which is a guardrail file.</p>
+          <div class="where"><span class="path">app/orchestration/orchestrator.py (post-analysis hook)</span><span class="path">app/api/routes/portfolio.py (GET/POST /portfolio/{id}/theses/{security_id})</span></div>
+          <div class="tags"><span class="tag iface">Interface: tables + routes</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">3</b><p><b>#16</b> <code>risk_engine.py</code> holds pure functions over Decimal that produce <code>RiskFindingV1</code> results from a <code>RiskPolicyV1</code>. The narrative text can't change severity. Sector data comes from live scans and is often missing, so a missing sector shows as unknown and is never treated as zero.</p>
+          <div class="where"><span class="path">app/services/risk_engine.py (new)</span><span class="path">app/api/routes/settings.py</span><span class="path">app/api/templates/_settings.html</span></div>
+          <div class="tags"><span class="tag iface">Interface: policy + finding schemas</span></div></div>
+        <div class="change"><b class="pin">★</b><p><b>Shared</b> One <code>EvidenceRefV1</code> model (kind, ID, session, observed timestamp) used by every agent.</p>
+          <div class="where"><span class="path">app/schemas/evidence_ref.py (new)</span></div>
+          <div class="tags"><span class="tag iface">Interface: shared citation model</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── SPRINT 5 ───────────────────────── -->
+  <section class="sprint" id="sprint-5" aria-labelledby="s5-title">
+    <div class="sprint-head">
+      <span class="dates">Sprint 5 · 23 Nov – 6 Dec 2026</span>
+      <h2 id="s5-title">Agent workflows</h2>
+      <p>Agents that act on the Sprint 4 foundations: bounded strategy experiments, process-focused trade review, and a risk-first daily attention queue.</p>
+      <div class="chips">
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/15">#15 Experiments</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/17">#17 Trade review</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/18">#18 Alert triage</a>
+      </div>
+    </div>
+    <div class="review">
+      <strong>Review</strong>
+      <ul>
+        <li>#15 depends on #33: experiment comparisons are only fair once every run uses the same position cap.</li>
+        <li>#17 needs a historically valid strategy assignment for each trade. If assignments aren't versioned by date today, add that first, or every review will come back unknown.</li>
+        <li>#18's <code>AttentionItemV1</code> is the queue the AI Desk (#21) renders. Freeze its shape in this sprint.</li>
+      </ul>
+    </div>
+    <div class="sprint-body">
+      <div class="screens">
+        <div>
+          <div class="screen-label"><b>Strategy Manager › approve an experiment</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Strategy Manager">
+            <div class="backdrop">
+              <div class="modal chg" role="dialog" aria-labelledby="m2">
+                <header id="m2">Approve experiment <b class="pin">1</b></header>
+                <div class="mbody">
+                  <span><b>Hypothesis:</b> allowing entries up to 5% above the pivot adds entries without lowering win rate.</span>
+                  <dl class="cap">
+                    <dt>Strategy</dt><dd>Minervini</dd>
+                    <dt>One change</dt><dd><code>maximum_pivot_extension_pct</code>: 3.0 → 5.0</dd>
+                    <dt>Baseline</dt><dd>Run 4d8639e1 (pinned evidence)</dd>
+                    <dt>Universe</dt><dd>925 securities · locked</dd>
+                    <dt>Period</dt><dd>2000-01 → 2026-08 · locked</dd>
+                    <dt>Jobs</dt><dd>1 new run; baseline reused</dd>
+                  </dl>
+                  <span class="hint">The result will not be assigned to any portfolio.</span>
+                </div>
+                <footer><span class="btn">Cancel</span><span class="btn primary">Approve and run</span></footer>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>History › process review column</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="History">
+            <div class="body">
+              <div class="note chg">Weekly review: 12 trades reviewed · 9 followed the rules · 2 deviated · 1 unknown. Two entries were late, more than 5% above the pivot. <b class="pin">2</b></div>
+              <div class="tbl"><table>
+                <thead><tr><th>Date</th><th>Ticker</th><th>Action</th><th class="r">P&amp;L</th><th>Process</th></tr></thead>
+                <tbody>
+                  <tr><td>14 Nov</td><td><b>PLTR</b></td><td>Buy</td><td class="r pos">+£310</td><td class="chg"><span class="st risk">Deviation</span><small>7.2% above pivot</small></td></tr>
+                  <tr><td>11 Nov</td><td><b>CELH</b></td><td>Buy</td><td class="r neg">−£84</td><td><span class="st good">Followed</span></td></tr>
+                  <tr><td>08 Nov</td><td><b>APP</b></td><td>Sell</td><td class="r pos">+£126</td><td><span class="st warn">Unknown</span><small>No evidence for that session</small></td></tr>
+                </tbody>
+              </table></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Daily email › needs attention</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Stock Scanner">
+            <div class="body chg">
+              <div class="toolbar"><h3>Needs attention today <b class="pin">3</b></h3><small>Ordered by risk, then evidence, then opportunity</small></div>
+              <div class="q-item"><span><span class="st risk">Risk</span> <b>MSFT thesis invalidated</b></span><span class="sub">Closed below the 50-day MA on 1.7× volume · thesis monitor · 3 Nov close</span></div>
+              <div class="q-item"><span><span class="st risk">Exit</span> <b>DOCS strategy says Sell</b></span><span class="sub">Minervini exit rule · 3 events grouped</span></div>
+              <div class="q-item"><span><span class="st warn">Limited</span> <b>WCOG history gap</b></span><span class="sub">166 of 200 sessions · evidence census</span></div>
+              <div class="q-item"><span><span class="st info">Setup</span> <b>NVDA breakout</b></span><span class="sub">Scanner alert · 3 Nov</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="changes">
+        <h3>Where the code changes</h3>
+        <div class="change"><b class="pin">1</b><p><b>#15</b> <code>ExperimentPlanV1</code> records the baseline run, a parameter change, the hypothesis, and the locked universe and dates. A draft is created and then approved, and approval launches the run through the existing launch service. Parameter changes are checked against the strategy's declared schema.</p>
+          <div class="where"><span class="path">app/services/backtest/backtest_launch_service.py (launch)</span><span class="path">app/services/backtest/strategy_protocol.py:859</span><span class="path">app/api/routes/strategy_manager.py (POST /strategy-manager/experiments, …/{id}/approve)</span></div>
+          <div class="tags"><span class="tag iface">Interface: plan schema + routes + table</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">2</b><p><b>#17</b> <code>TradeReviewV1</code> runs a checklist over FIFO round trips, using only evidence available on the decision date. Your notes go in a separate <code>trade_annotations</code> table, so the original trade record is never edited.</p>
+          <div class="where"><span class="path">app/repositories/historical_price_repo.py:1694 dated_close (read)</span><span class="path">app/api/templates/_history.html</span></div>
+          <div class="tags"><span class="tag iface">Interface: review schema + table</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">3</b><p><b>#18</b> <code>build_attention_queue(portfolio_id, analysis_run_id)</code> orders <code>AttentionItemV1</code> items deterministically and keeps the IDs of the source events. The same queue feeds the email and the dashboard. If the AI summary fails, the queue is shown without it.</p>
+          <div class="where"><span class="path">app/agents/alert/alert_agent.py:184</span><span class="path">app/agents/alert/templates/summary.html</span></div>
+          <div class="tags"><span class="tag iface">Interface: AttentionItemV1 (feeds #21)</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ───────────────────────── SPRINT 6 ───────────────────────── -->
+  <section class="sprint" id="sprint-6" aria-labelledby="s6-title">
+    <div class="sprint-head">
+      <span class="dates">Sprint 6 · 7 – 20 Dec 2026</span>
+      <h2 id="s6-title">Agent surfaces &amp; institutional flow</h2>
+      <p>Put the agents on screen: an AI Desk, agent columns on Portfolio, and experiments on the Strategy Manager landing view. Target designs are in <code>docs/agentic-ai-desk-concept.html</code> and <code>docs/agentic-ai-contextual-concept.html</code>.</p>
+      <div class="chips">
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/21">#21 AI Desk</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/19">#19 Portfolio surfaces</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/20">#20 Strategy Manager surfaces</a>
+        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/8">#8 Institutional flow</a>
+      </div>
+    </div>
+    <div class="review">
+      <strong>Review</strong>
+      <ul>
+        <li><b>Answer #21's notifications-bell question before the sprint starts.</b> Option (a), where the bell links to the Desk, is recommended.</li>
+        <li><b>#8 can be built but not usefully backtested by 20 December.</b> Even if #7 lands in Sprint 2, at most two or three observed months will exist. Ship it with its fail-closed tests, and treat backtest results as meaningless until at least about 12 months have accumulated.</li>
+        <li>The concepts list tabs as Watchlist and Trade History, but the app calls them Stock Scanner and History. Keep the app's names.</li>
+      </ul>
+    </div>
+    <div class="sprint-body">
+      <div class="screens">
+        <div>
+          <div class="screen-label"><b>AI Desk (new tab, own URL)</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="AI Desk" data-bell="AI Desk · 3">
+            <div class="desk chg">
+              <div>
+                <b style="font-size:12px">Workflows <b class="pin">1</b></b>
+                <span class="rail-item">Portfolio advisor <span class="st good">2</span></span>
+                <span class="rail-item">Research copilot <span class="st good">on</span></span>
+                <span class="rail-item">Thesis monitor <span class="st risk">1</span></span>
+                <span class="rail-item">Data recovery <span class="st warn">1</span></span>
+                <span class="rail-item">Experiments <span class="st info">1</span></span>
+                <span class="rail-item">Portfolio risk <span class="st risk">1</span></span>
+                <span class="rail-item">Trade review <span class="st good">0</span></span>
+                <span class="rail-item">Alert triage <span class="st good">on</span></span>
+                <span class="hint">Read-only. Jobs need approval. No broker connection.</span>
+              </div>
+              <div>
+                <span class="sub">2 urgent · 1 limited · 2 review</span>
+                <div class="q-item sel"><span><span class="st risk">Risk</span> <b>MSFT thesis invalidated</b></span><span class="sub">Thesis monitor · 3 Nov close</span></div>
+                <div class="q-item"><span><span class="st risk">Risk</span> <b>NVDA 14.1% of portfolio</b></span><span class="sub">Risk coach · policy limit 10%</span></div>
+                <div class="q-item"><span><span class="st warn">Limited</span> <b>WCOG history gap</b></span><span class="sub">Evidence census · 166 / 200</span></div>
+                <div class="q-item"><span><span class="st info">Review</span> <b>Experiment ready</b></span><span class="sub">Minervini extension 3 → 5%</span></div>
+                <span class="hint">Order: held-position risk → exits → evidence gaps → new setups.</span>
+              </div>
+              <div>
+                <span class="st risk" style="justify-self:start">Invalidated</span>
+                <b style="font-size:12px">MSFT closed below its 50-day MA on 1.7× volume</b>
+                <dl class="cap"><dt>Rule</dt><dd>Thesis v3, rule 2</dd><dt>Session</dt><dd>3 Nov 2026</dd><dt>Close</dt><dd>£309.10</dd></dl>
+                <span class="btn primary">Review position</span><span class="btn">Dismiss for today</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Portfolio › agent columns, chart kept</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Portfolio">
+            <div class="body">
+              <div class="toolbar"><h3>SIPP Growth</h3><small>19 positions · prices as of 3 Nov 2026, 21:34</small></div>
+              <div class="chart" aria-label="Portfolio value chart (unchanged)"><svg viewBox="0 0 400 70" preserveAspectRatio="none"><path d="M0 55 L40 50 L80 52 L120 42 L160 44 L200 34 L240 38 L280 26 L320 30 L360 18 L400 20 L400 70 L0 70 Z" fill="#e2e9fb"/><path d="M0 55 L40 50 L80 52 L120 42 L160 44 L200 34 L240 38 L280 26 L320 30 L360 18 L400 20" fill="none" stroke="#1d4ed8" stroke-width="1.5"/></svg></div>
+              <div class="tbl chg"><table>
+                <thead><tr><th>Ticker</th><th class="r">Value</th><th>Strategy <b class="pin">3</b></th><th>Thesis</th><th>Risk</th><th>Evidence</th></tr></thead>
+                <tbody>
+                  <tr><td><b>MSFT</b></td><td class="r">£19,760</td><td><span class="st good">Hold</span> <span class="btn ghost">Why?</span></td><td><span class="st risk">Invalidated</span></td><td>10.7%</td><td><span class="st good">Complete</span></td></tr>
+                  <tr><td><b>NVDA</b></td><td class="r">£25,980</td><td><span class="st good">Hold</span></td><td><span class="st good">Confirmed</span></td><td><span class="st warn">14.1%</span></td><td><span class="st good">Complete</span></td></tr>
+                  <tr><td><b>WCOG</b></td><td class="r">£4,220</td><td><span class="st warn">Hold</span><small>Exit unavailable</small></td><td><span class="st off">No thesis</span></td><td>2.3%</td><td><span class="st warn">166 / 200</span></td></tr>
+                </tbody>
+              </table></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div class="screen-label"><b>Strategy Manager › landing view</b><span class="example">Example data</span></div>
+          <div class="app" data-tab="Strategy Manager">
+            <div class="body">
+              <div class="note chg"><b>Experiment proposal</b> <span class="st info">Needs approval</span> <b class="pin">4</b><br>Minervini · one change: <code>maximum_pivot_extension_pct</code> 3.0 → 5.0 · same pinned evidence. <span class="btn">Discard draft</span> <span class="btn primary">Review experiment</span></div>
+              <div class="tbl"><table>
+                <thead><tr><th>Recent backtests</th><th class="r">Return</th><th>Status</th></tr></thead>
+                <tbody>
+                  <tr><td>Weinstein · capped at 10</td><td class="r">…</td><td><span class="st info">Running</span></td></tr>
+                  <tr class="chg"><td>Institutional flow <b class="pin">5</b><small>2 observed months; results not meaningful yet</small></td><td class="r">n/a</td><td><span class="st off">Insufficient data</span></td></tr>
+                </tbody>
+              </table></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="changes">
+        <h3>Where the code changes</h3>
+        <div class="change"><b class="pin">1</b><p><b>#21</b> A full page at <code>GET /desk</code>, with <code>GET /partials/desk/queue</code> and <code>GET /partials/desk/items/{id}</code> for the queue and inspector. It renders #18's <code>AttentionItemV1</code>. It gets its own tab in the main nav, and the masthead entry becomes a link that shows a count.</p>
+          <div class="where"><span class="path">app/api/routes/desk.py (new)</span><span class="path">app/api/templates/index.html:768-814 (tab bar), :667-675 (bell)</span></div>
+          <div class="tags"><span class="tag iface">Interface: new routes</span><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">2</b><p><b>#21</b> The notifications decision. Under option (a), the dropdown capped at <code>DROPDOWN_LIMIT = 15</code> is removed and the bell links to <code>/desk</code>.</p>
+          <div class="where"><span class="path">app/api/routes/notifications.py:36</span><span class="path">app/api/templates/_notifications.html</span></div>
+          <div class="tags"><span class="tag iface">Interface: removes a route</span></div></div>
+        <div class="change"><b class="pin">3</b><p><b>#19</b> Adds agent columns to the holdings table. Strategy and Evidence columns are live now. Thesis and Risk show real values if Sprints 4–5 landed, and otherwise a declared unavailable state. <code>_portfolio_chart.html</code> does not change.</p>
+          <div class="where"><span class="path">app/api/templates/_portfolio.html</span><span class="path">app/services/portfolio_service.py (view model)</span></div>
+          <div class="tags"><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">4</b><p><b>#20</b> The landing view only. Its proposal block reads #15's drafts, and "Review experiment" goes to the approval step. No sub-screen template changes.</p>
+          <div class="where"><span class="path">app/api/templates/_strategy_manager.html</span></div>
+          <div class="tags"><span class="tag ui">UI</span></div></div>
+        <div class="change"><b class="pin">5</b><p><b>#8</b> A new skill that does nothing when enrichment is null (never treating null as zero). It is tested on synthetic observed records.</p>
+          <div class="where"><span class="path">skills/rtly-backtest-institutional-flow/</span></div>
+          <div class="tags"><span class="tag block">Blocked by #7 + months of data</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="page-foot">Source: <code>docs/mockups/sprint-mockups.html</code> in ed-is-ai/stocks.portfolio.agentic. File and line references checked against <code>main</code> on 28 Sep 2026.</footer>
+</div>
+
+<script>
+  // Renders the shared app chrome (masthead + real tab names from index.html)
+  // into every mock so each screen only declares its body.
+  const TABS = ["Stock Scanner", "Portfolio", "Realised P&L", "Strategy Manager", "History", "Run Log", "Data Quality", "Settings"];
+  document.querySelectorAll(".app").forEach((app) => {
+    const active = app.dataset.tab;
+    const tabs = active === "AI Desk" ? [...TABS, "AI Desk"] : TABS;
+    const bell = app.dataset.bell
+      ? `<span class="bell chg">${app.dataset.bell} <b class="pin">2</b></span>`
+      : `<span class="bell">🔔 3</span>`;
+    const head = document.createElement("div");
+    head.innerHTML =
+      `<div class="mh"><span class="brand">Stock<em>Manager</em></span><span class="acts">${bell}<span>Refresh data</span></span></div>` +
+      `<div class="tabs">${tabs.map((t) => `<span class="${t === active ? "on" : ""}${t === "AI Desk" ? " new" : ""}">${t.replace("&", "&amp;")}</span>`).join("")}</div>`;
+    app.prepend(...head.childNodes);
+  });
+</script>
+</body>
+</html>
