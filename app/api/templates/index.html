@@ -289,6 +289,15 @@
     .agent-cell .status.warn { color: var(--amber); background: var(--amber-bg); }
     .agent-cell .status.info { color: var(--blue); background: var(--blue-bg); }
     .portfolio-holdings tr:has(.agent-cell .status.risk) > td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+    /* Thesis editor (GH-14): provenance labels and evidence figures. */
+    .thesis-editor section { padding: .75rem 0; border-top: 1px solid var(--border); }
+    .thesis-editor section:first-of-type { border-top: 0; }
+    .thesis-editor .provenance {
+      color: var(--muted); font-size: var(--fs-2xs); font-weight: var(--fw-bold);
+      letter-spacing: .035em; text-transform: uppercase;
+    }
+    .thesis-editor .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+    .thesis-editor .facts { color: var(--muted); font-size: var(--fs-2xs); }
     .text-button {
       padding: .2rem 0; color: var(--blue); background: transparent; border: 0;
       font-size: var(--fs-xs); font-weight: var(--fw-bold);
@@ -883,6 +892,9 @@
   <!-- Assign-Strategy modal target (#440) — lives OUTSIDE #tab-content so an
        htmx swap of the tab cannot detach the open modal mid-flight. -->
   <div id="strategy-assign-modal-target"></div>
+  <!-- Thesis editor modal target (GH-14) — outside #tab-content for the
+       same reason. -->
+  <div id="thesis-editor-modal-target"></div>
 
 </div>
 
@@ -919,13 +931,28 @@
     body.replaceChildren(line);
   }
   // GH-19: any of this portfolio's agent placeholders the lazy agents
-  // request did not replace (every one of them when it fails) declares
-  // itself unavailable; another portfolio's placeholders are left alone.
-  function portfolioAgentsUnavailable(portfolioId) {
+  // request did not replace declares itself unavailable. When the request
+  // failed, so does every cell an earlier load filled (data-agent-cell), so
+  // a failed refresh never leaves stale values looking current. Another
+  // portfolio's elements are left alone.
+  function portfolioAgentsUnavailable(portfolioId, event) {
     const scope = CSS.escape(String(portfolioId));
-    document.querySelectorAll(`[data-agent-placeholder="${scope}"]`).forEach((el) => {
+    const failed = !(event && event.detail && event.detail.successful);
+    const selector = failed
+      ? `[data-agent-placeholder="${scope}"], [data-agent-cell="${scope}"]`
+      : `[data-agent-placeholder="${scope}"]`;
+    document.querySelectorAll(selector).forEach((el) => {
+      el.classList.remove('is-clear');
       el.textContent = 'Agent data unavailable';
     });
+  }
+  // Thesis editor: a 404 (stale draft, security no longer held) carries a
+  // warning body; htmx 2 does not swap 4xx by default, so let this one in.
+  function thesisSwapNotFound(event) {
+    if (event.detail.xhr.status === 404) {
+      event.detail.shouldSwap = true;
+      event.detail.isError = false;
+    }
   }
   // GH-19: once the aside stacks below the holdings, bring a row's Why?
   // answer into view.

@@ -889,6 +889,53 @@ def _recover_bau_run_authority(
     return tuple(recovered)
 
 
+def evaluate_position_theses(run_id: str) -> None:
+    """Evaluate every active position thesis against the published run (GH-14).
+
+    Called after the analysis artifact publish and before the recommendation
+    emails, so the emails show this run's thesis status. Deterministic and
+    append-only (one evaluation per thesis per run); never touches trades.
+    Total-failure isolated like ``dispatch_recommendation_emails``: any
+    exception is recorded as a WARNING notification, never propagated.
+    """
+    try:
+        from app.api.dependencies import get_position_thesis_service
+
+        service = get_position_thesis_service()
+        records, meta = service.published()
+        if meta is None:
+            print("      Thesis evaluation skipped: no analysis run identity")
+            return
+        if meta.run_id != run_id:
+            print(
+                f"      Thesis evaluation keyed on artifact run {meta.run_id!r} "
+                f"(pipeline run {run_id!r})"
+            )
+        count = service.evaluate_all(records, meta)
+        print(f"      Thesis evaluations recorded: {count}")
+    except Exception as exc:
+        print(f"[Thesis evaluation warning] {exc}")
+        try:
+            from app.api.dependencies import get_notifications_repository as _gnr
+            from app.schemas.notification import (
+                NotificationCategory,
+                NotificationSeverity,
+            )
+
+            _gnr().record(
+                NotificationCategory.ALERT,
+                "thesis_evaluation_failed",
+                "Position thesis evaluation failed",
+                severity=NotificationSeverity.WARNING,
+                body=str(exc),
+                run_id=run_id,
+            )
+        except Exception:
+            print(
+                "[Thesis evaluation warning] could not record the failure notification"
+            )
+
+
 def dispatch_recommendation_emails(
     alerter: Any, trader: Any, run_id: str, market_narrative: object = None
 ) -> None:
@@ -905,6 +952,7 @@ def dispatch_recommendation_emails(
             get_notifications_repository,
             get_portfolio_dispatch_repository,
             get_portfolio_recommendation_service,
+            get_position_thesis_service,
             get_strategy_assignment_service,
         )
         from app.services.portfolio_recommendation_email_service import (
@@ -919,6 +967,7 @@ def dispatch_recommendation_emails(
             notifications=get_notifications_repository(),
             repo=get_portfolio_dispatch_repository(),
             market_narrative=market_narrative,
+            theses=get_position_thesis_service().statuses,
         )
         summary = dispatch_service.dispatch_all(run_id)
         print(
@@ -1455,6 +1504,10 @@ def pipeline(
         os.replace(scan_temporary, SCAN_OUTPUT)
         os.replace(excel_temporary, EXCEL_OUTPUT)
         os.replace(analysis_temporary, ANALYSIS_OUTPUT)
+
+        # Position theses (GH-14): check every active thesis against THIS
+        # run before the emails report their status. Failure-isolated.
+        evaluate_position_theses(run_id)
 
         # Per-portfolio Strategy recommendation emails (#442) — after the
         # artifact publish so recommend() reads THIS run's data and receipts

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import closing
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,9 @@ from tests.test_portfolio_recommendation_service import (
     _record,
 )
 from tests.test_strategy_assignment_service import _discovery_result
+from tests.test_thesis_evaluator import FRESH, META, make_record, make_thesis
+from app.agents.thesis.evaluator import evaluate_thesis
+from app.schemas.position_thesis import ThesisSummary
 
 _EMAIL = EmailConfig(
     host="localhost",
@@ -450,6 +454,11 @@ def test_orchestrator_hook_wires_and_isolates(
         "app.api.dependencies.get_portfolio_dispatch_repository",
         lambda: env.repo,
     )
+    # The thesis-status section reads its own store; keep it off the real DB.
+    monkeypatch.setattr(
+        "app.api.dependencies.get_position_thesis_service",
+        lambda: SimpleNamespace(statuses=lambda _pid: {}),
+    )
     # The hook must not raise even when the whole dispatch explodes...
     monkeypatch.setattr(
         "app.api.dependencies.get_portfolio_dispatch_repository",
@@ -701,3 +710,158 @@ def test_text_email_row_carries_both_identities(tmp_path: Path) -> None:
 
     assert "HSFWA (0P00013P6I.L)" in text
     assert text.count("BBB") == 1
+
+
+# ---------------------------------------------------------------------------
+# GH-14 -- thesis status in the recommendation email
+# ---------------------------------------------------------------------------
+
+
+def _thesis_service(env: Any, theses: Any) -> PortfolioRecommendationEmailService:
+    return PortfolioRecommendationEmailService(
+        assignment_service=env.assignment,
+        recommendation_service=env.recommendation,
+        trader=env.trader,
+        sender=AlertAgent(
+            db_path=str(env.tmp_path / "alerts.db"), email_config=_EMAIL
+        ).send_portfolio_recommendation_email,
+        notifications=env.notifications,
+        repo=env.repo,
+        analysis_path=env.artifact,
+        theses=theses,
+    )
+
+
+def test_email_names_the_invalidating_rule_field_session_and_run(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    thesis = make_thesis({"kind": "close_below_sma", "period": 50})
+    invalidated = evaluate_thesis(thesis, make_record(price=94.0), META, FRESH)
+    statuses = {"AAA": ThesisSummary(active=thesis, latest=invalidated, current=True)}
+
+    summary, sent = env.dispatch(_thesis_service(env, lambda _pid: statuses))
+
+    assert summary.sent == 1
+    _, html, text = sent[0]
+    citation = (
+        "rule 1 close_below_sma (price, sma50) · session 2026-09-25 · "
+        "analysis run run-1"
+    )
+    for body in (html, text):
+        assert "Thesis status" in body or "THESIS STATUS" in body
+        assert "Invalidated" in body
+        assert citation in body
+    assert "AAA: Invalidated — " + citation in text
+
+
+def test_email_still_sends_when_the_thesis_store_fails(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+
+    def broken(_pid: int) -> Any:
+        raise RuntimeError("thesis store down")
+
+    summary, sent = env.dispatch(_thesis_service(env, broken))
+
+    assert summary.sent == 1
+    _, html, text = sent[0]
+    assert "Thesis status unavailable." in html
+    assert "Thesis status unavailable." in text
+
+
+def test_email_has_no_thesis_section_without_theses(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+
+    _, sent = env.dispatch(_thesis_service(env, lambda _pid: {}))
+
+    assert "Thesis status" not in sent[0][1]
+    assert "THESIS STATUS" not in sent[0][2]
+
+
+def test_orchestrator_evaluates_theses_between_publish_and_emails() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "app/orchestration/orchestrator.py"
+    ).read_text(encoding="utf-8")
+    publish = source.index("os.replace(analysis_temporary, ANALYSIS_OUTPUT)")
+    evaluate = source.index("evaluate_position_theses(run_id)\n", publish)
+    emails = source.index("dispatch_recommendation_emails(alerter", publish)
+
+    assert publish < evaluate < emails
+
+
+def test_thesis_evaluation_hook_records_and_isolates(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook evaluates every active thesis once per published run, and a
+    total failure becomes a WARNING notification, never an exception."""
+    from app.orchestration.orchestrator import evaluate_position_theses
+    from app.repositories.position_theses_repo import PositionThesesRepository
+    from app.schemas.position_thesis import ThesisContentV1
+    from app.services.position_thesis_service import PositionThesisService
+
+    db_path = env.tmp_path / "trades.db"
+    repo = PositionThesesRepository(db.make_connect(lambda: db_path))
+    thesis = repo.add_version(
+        7,
+        "AAA",
+        ThesisContentV1.model_validate(
+            {
+                "rationale": "r",
+                "expected_setup": "s",
+                "rules": [{"kind": "stage_2_lost"}],
+            }
+        ),
+        "user",
+        active=True,
+    )
+    env.trader.list_portfolios.return_value = [SimpleNamespace(id=7)]
+    service = PositionThesisService(repo, env.trader, env.artifact)
+    monkeypatch.setattr(
+        "app.api.dependencies.get_position_thesis_service", lambda: service
+    )
+    monkeypatch.setattr(
+        "app.api.dependencies.get_notifications_repository",
+        lambda: env.notifications,
+    )
+
+    def ledger() -> list[Any]:
+        with closing(sqlite3.connect(db_path)) as conn:
+            return [
+                conn.execute(f"SELECT * FROM {table}").fetchall()
+                for table in ("trades", "cash_flows", "portfolios")
+            ]
+
+    before = ledger()
+
+    evaluate_position_theses("run-1")
+    evaluate_position_theses("run-1")  # idempotent per run
+
+    latest = repo.latest_evaluations([thesis.id])[thesis.id]
+    assert latest.analysis_run_id == "run-1"
+    assert len(repo.history(7, "AAA")) == 1
+    assert ledger() == before
+
+    monkeypatch.setattr(
+        "app.api.dependencies.get_position_thesis_service",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    evaluate_position_theses("run-2")  # swallowed
+    events = env.notifications.recent(limit=10)
+    assert any(
+        e.event_type == "thesis_evaluation_failed" and e.severity == "warning"
+        for e in events
+    )
+
+
+def test_email_marks_a_thesis_result_of_an_earlier_run(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    thesis = make_thesis({"kind": "close_below_sma", "period": 50})
+    invalidated = evaluate_thesis(thesis, make_record(price=94.0), META, FRESH)
+    statuses = {"AAA": ThesisSummary(active=thesis, latest=invalidated)}
+
+    _, sent = env.dispatch(_thesis_service(env, lambda _pid: statuses))
+
+    _, html, text = sent[0]
+    assert "AAA: Evidence limited — last checked on an earlier run" in text
+    assert "last checked on an earlier run" in html
+    for body in (html, text):
+        assert "Invalidated" not in body
+        assert "close_below_sma (price, sma50)" not in body

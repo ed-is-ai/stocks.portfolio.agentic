@@ -13,7 +13,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -31,6 +31,7 @@ from app.schemas.analysis_artifact import read_analysis_records
 from app.schemas.portfolio_import import ProviderOption
 from app.schemas.portfolio_recommendation import NO_ASSIGNMENT, EvaluationUnavailable
 from app.schemas.portfolio_risk import RiskReportV1
+from app.schemas.position_thesis import ThesisSummary
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
@@ -1701,19 +1702,21 @@ class PortfolioService:
         self,
         portfolio_id: int | None,
         recommend: Callable[[int], RecommendationOutcome],
+        theses: Callable[[int], Mapping[str, ThesisSummary]],
     ) -> PortfolioAgentView:
-        """Gather the Portfolio tab's agent layer (GH-19).
+        """Gather the Portfolio tab's agent layer (GH-19, GH-14).
 
         ``recommend`` is the injected ``PortfolioRecommendationService``'s
-        ``recommend`` (a callable, since that service imports this one). A
-        failing recommendation or risk report becomes a declared unavailable
-        state. Never mutates trades, cash flows, portfolios or Strategy
-        assignments; the risk valuation may fetch and cache an FX quote
-        exactly as the Portfolio tab render does.
+        ``recommend`` (a callable, since that service imports this one), and
+        ``theses`` the ``PositionThesisService.statuses``. A failing
+        recommendation, risk report or thesis store becomes a declared
+        unavailable state. Never mutates trades, cash flows, portfolios,
+        Strategy assignments or theses; the risk valuation may fetch and
+        cache an FX quote exactly as the Portfolio tab render does.
         """
         portfolios = self._trader.list_portfolios()
         if not portfolios:
-            return build_agent_view(None, (), NO_ASSIGNMENT, self._safe_risk(None))
+            return build_agent_view(None, (), NO_ASSIGNMENT, self._safe_risk(None), {})
         active_id = self._active_portfolio_id(portfolio_id, portfolios)
         snapshot = self.portfolio_input_snapshot(active_id, portfolios=portfolios)
         positions, _, _ = self._priced_positions(snapshot)
@@ -1724,8 +1727,13 @@ class PortfolioService:
             outcome = EvaluationUnavailable(
                 reason="Recommendations could not be evaluated — see the run log."
             )
+        try:
+            summaries: Mapping[str, ThesisSummary] | None = theses(active_id)
+        except Exception:
+            logger.exception("Thesis statuses failed for %s", active_id)
+            summaries = None
         return build_agent_view(
-            active_id, positions, outcome, self._safe_risk(active_id)
+            active_id, positions, outcome, self._safe_risk(active_id), summaries
         )
 
     def _safe_risk(self, portfolio_id: int | None) -> RiskReportV1 | None:

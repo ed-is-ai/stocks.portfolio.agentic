@@ -11,6 +11,7 @@ affects the others, the pipeline, or the consolidated digest.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -26,6 +27,8 @@ from app.schemas.portfolio_recommendation import (
     EvaluationUnavailable,
     NoAssignment,
 )
+from app.schemas.position_thesis import ThesisSummary
+from app.services.portfolio_agent_view import EARLIER_RUN, thesis_cell
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
@@ -37,6 +40,8 @@ logger = logging.getLogger(__name__)
 #: may bind ``market_narrative``/``portfolio_summary`` keywords via
 #: ``functools.partial``, so the signature is intentionally open (``...``).
 Sender = Callable[..., bool]
+#: ``PositionThesisService.statuses`` — each security's thesis state (GH-14).
+ThesisStatuses = Callable[[int], Mapping[str, ThesisSummary]]
 
 
 @dataclass(frozen=True)
@@ -66,8 +71,12 @@ class PortfolioRecommendationEmailService:
         repo: PortfolioDispatchRepository,
         market_narrative: object | None = None,
         analysis_path: Path | None = None,
+        theses: ThesisStatuses | None = None,
     ) -> None:
-        """Store dependencies; ``analysis_path`` defaults to the published artifact."""
+        """Store dependencies; ``analysis_path`` defaults to the published artifact.
+
+        ``theses`` adds the thesis-status section; None omits it.
+        """
         self._assignment_service = assignment_service
         self._recommendation_service = recommendation_service
         self._trader = trader
@@ -78,6 +87,7 @@ class PortfolioRecommendationEmailService:
         self._analysis_path = (
             analysis_path if analysis_path is not None else ANALYSIS_JSON
         )
+        self._theses = theses
 
     def dispatch_all(self, run_id: str | None = None) -> DispatchSummary:
         """Send one email per assigned portfolio for the published run.
@@ -227,6 +237,7 @@ class PortfolioRecommendationEmailService:
             self._portfolio_name(portfolio_id),
             display_name,
             portfolio_summary=self._portfolio_summary(portfolio_id),
+            thesis_status=self._thesis_status(portfolio_id),
         )
 
     def _portfolio_summary(self, portfolio_id: int) -> dict[str, Any] | None:
@@ -255,6 +266,40 @@ class PortfolioRecommendationEmailService:
             if position.shares > 0
         ]
         return {"rows": rows} if rows else None
+
+    def _thesis_status(self, portfolio_id: int) -> dict[str, Any] | None:
+        """Build the email's thesis-status rows for this portfolio's holdings.
+
+        One row per open holding with a thesis: display symbol, status and
+        the first fired rule's citation (or, for a result of an earlier run,
+        that it was last checked on one). A store (or trader) failure keeps
+        the section, marked unavailable, rather than blocking the email;
+        None when there is nothing to show.
+        """
+        if self._theses is None:
+            return None
+        try:
+            summaries = self._theses(portfolio_id)
+            positions = self._trader.get_portfolio(portfolio_id=portfolio_id)
+        except Exception:
+            logger.exception("Could not read thesis status for %s", portfolio_id)
+            return {"unavailable": True, "rows": []}
+        rows = []
+        for position in positions:
+            summary = summaries.get(position.ticker)
+            if position.shares <= 0 or summary is None:
+                continue
+            latest = summary.latest
+            stale = latest is not None and not summary.current
+            fired = latest.first_fired if latest and not stale else None
+            rows.append(
+                {
+                    "symbol": position.display_symbol,
+                    "status": thesis_cell(summary).text,
+                    "rule": EARLIER_RUN if stale else fired.citation if fired else "",
+                }
+            )
+        return {"unavailable": False, "rows": rows} if rows else None
 
     def _portfolio_name(self, portfolio_id: int) -> str:
         """Return the portfolio's display name, failing soft to a label."""

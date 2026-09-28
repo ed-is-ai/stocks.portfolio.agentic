@@ -13,15 +13,19 @@ from app.schemas.portfolio_recommendation import (
     RecommendationResultV1,
     RecommendationV1,
 )
+from app.agents.thesis.evaluator import evaluate_thesis
 from app.schemas.portfolio_risk import RiskFindingV1, RiskPolicyV1, RiskReportV1
+from app.schemas.position_thesis import ThesisSummary
 from app.schemas.trade import Position
 from app.services.portfolio_agent_view import (
     AgentCell,
     PortfolioAgentView,
     RecommendationOutcome,
+    ThesisStates,
     agent_slug,
     build_agent_view,
 )
+from tests.test_thesis_evaluator import FRESH, META, make_record, make_thesis
 
 
 def _position(ticker: str, display: str | None = None) -> Position:
@@ -112,9 +116,11 @@ def _risk(
 
 
 def _view(
-    outcome: RecommendationOutcome, risk: RiskReportV1 | None
+    outcome: RecommendationOutcome,
+    risk: RiskReportV1 | None,
+    theses: ThesisStates = {},  # noqa: B006 — read-only
 ) -> PortfolioAgentView:
-    return build_agent_view(1, POSITIONS, outcome, risk)
+    return build_agent_view(1, POSITIONS, outcome, risk, theses)
 
 
 def test_all_live_sources_join_onto_holdings() -> None:
@@ -176,7 +182,7 @@ def test_no_strategy_declares_itself_and_counts_risk_only() -> None:
 
 
 def test_without_holdings_no_strategy_is_not_a_missing_source() -> None:
-    view = build_agent_view(None, (), NO_ASSIGNMENT, _risk())
+    view = build_agent_view(None, (), NO_ASSIGNMENT, _risk(), {})
 
     assert view.unavailable == ()
 
@@ -253,9 +259,63 @@ def test_non_session_diagnostic_shows_its_cause_and_is_counted() -> None:
     assert "BBB: exit evidence gap (Missing evidence)" in view.attention
 
 
+def _thesis_view(summary: ThesisSummary | None) -> PortfolioAgentView:
+    return _view(_result(), _risk(), {} if summary is None else {"AAA": summary})
+
+
+def test_thesis_cell_states() -> None:
+    active = make_thesis({"kind": "close_below_sma", "period": 50})
+    draft = make_thesis(
+        {"kind": "stage_2_lost"}, id=2, version=2, active=False, text_source="ai_draft"
+    )
+    invalidated = evaluate_thesis(active, make_record(price=94.0), META, FRESH)
+    confirmed = evaluate_thesis(active, make_record(), META, FRESH)
+
+    assert _thesis_view(None).rows[0].thesis == AgentCell("No thesis")
+    assert _thesis_view(ThesisSummary(pending=draft)).rows[0].thesis == AgentCell(
+        "Draft to confirm", "info"
+    )
+    assert _thesis_view(ThesisSummary(active=active)).rows[0].thesis == AgentCell(
+        "Awaiting scan", "info"
+    )
+    assert _thesis_view(
+        ThesisSummary(active=active, latest=confirmed, review_due=True, current=True)
+    ).rows[0].thesis == AgentCell("Confirmed", "good", "Review due")
+    view = _thesis_view(
+        ThesisSummary(active=active, pending=draft, latest=invalidated, current=True)
+    )
+    assert view.rows[0].thesis == AgentCell(
+        "Invalidated",
+        "risk",
+        "Rule 1: Close below the 50-day SMA · Draft to confirm",
+    )
+    assert "AAA: thesis invalidated" in view.attention
+    assert len(view.attention) == len(_thesis_view(None).attention) + 1
+
+
+def test_thesis_store_failure_is_declared() -> None:
+    view = _view(_result(), _risk(), None)
+
+    assert {row.thesis.text for row in view.rows} == {"Thesis unavailable"}
+    assert "Thesis unavailable" in view.unavailable
+
+
 def test_slug_is_dom_safe_and_collision_free() -> None:
     slugs = {agent_slug(t) for t in ("BRK.B", "BRK-B", "BRK_2e_B", "^FTSE")}
 
     assert len(slugs) == 4
     assert all(s.replace("_", "").isalnum() for s in slugs)
     assert agent_slug("AAA") == "AAA"
+
+
+def test_thesis_result_of_an_earlier_run_is_limited_and_not_counted() -> None:
+    active = make_thesis({"kind": "close_below_sma", "period": 50})
+    invalidated = evaluate_thesis(active, make_record(price=94.0), META, FRESH)
+
+    view = _thesis_view(ThesisSummary(active=active, latest=invalidated))
+
+    assert view.rows[0].thesis == AgentCell(
+        "Evidence limited", "warn", "last checked on an earlier run"
+    )
+    assert "AAA: thesis invalidated" not in view.attention
+    assert view.attention == _thesis_view(None).attention

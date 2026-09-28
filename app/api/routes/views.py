@@ -14,6 +14,7 @@ from app.api.dependencies import (
     get_alerts_repository,
     get_portfolio_recommendation_service,
     get_portfolio_service,
+    get_position_thesis_service,
     get_realised_pnl_service,
     get_strategy_assignment_service,
     get_trader_service,
@@ -38,6 +39,7 @@ from app.services.portfolio_recommendation_service import (
 )
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
+from app.services.position_thesis_service import PositionThesisService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
@@ -152,18 +154,21 @@ def partial_portfolio_agents(
     recommendations: Annotated[
         PortfolioRecommendationService, Depends(get_portfolio_recommendation_service)
     ],
+    theses: Annotated[PositionThesisService, Depends(get_position_thesis_service)],
     portfolio_id: str | None = None,
 ) -> HTMLResponse:
-    """Out-of-band swaps for the Portfolio tab's agent layer (GH-19).
+    """Out-of-band swaps for the Portfolio tab's agent layer (GH-19, GH-14).
 
     A plain ``def`` like ``partial_portfolio_risk``: the recommendation and
     risk evaluation read the ledger, scan artifact and price cache, so they
     run in the threadpool, lazily, after the tab has painted. Never mutates
-    trades, cash flows, portfolios or Strategy assignments; the risk
+    trades, cash flows, portfolios, Strategy assignments or theses; the risk
     valuation may fetch and cache an FX quote exactly as the Portfolio tab
     render does.
     """
-    view = portfolio.agent_view(optional_int(portfolio_id), recommendations.recommend)
+    view = portfolio.agent_view(
+        optional_int(portfolio_id), recommendations.recommend, theses.statuses
+    )
     return templates.TemplateResponse(
         request, "_portfolio_agents.html", context={"view": view}
     )

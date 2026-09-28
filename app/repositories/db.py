@@ -255,6 +255,30 @@ CREATE TABLE IF NOT EXISTS portfolio_recommendation_dispatches (
     completed_at     TEXT,
     PRIMARY KEY (portfolio_id, analysis_run_id)
 );
+CREATE TABLE IF NOT EXISTS position_theses (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id   INTEGER NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    security_id    TEXT NOT NULL,
+    version        INTEGER NOT NULL,
+    rationale      TEXT NOT NULL,
+    expected_setup TEXT NOT NULL,
+    rules_json     TEXT NOT NULL,
+    review_date    TEXT,
+    text_source    TEXT NOT NULL CHECK(text_source IN ('user', 'ai_draft')),
+    active         INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0, 1)),
+    confirmed_at   TEXT,
+    created_at     TEXT NOT NULL,
+    UNIQUE (portfolio_id, security_id, version)
+);
+CREATE TABLE IF NOT EXISTS thesis_evaluations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    thesis_id       INTEGER NOT NULL REFERENCES position_theses(id) ON DELETE CASCADE,
+    analysis_run_id TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    facts_json      TEXT NOT NULL,
+    evaluated_at    TEXT NOT NULL,
+    UNIQUE (thesis_id, analysis_run_id)
+);
 """
 
 #: Name of the default portfolio existing single-portfolio data migrates into.
@@ -586,6 +610,11 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_import_receipts_batch "
         "ON portfolio_import_receipts(import_batch_id)"
+    )
+    # GH-14: at most one active thesis version per (portfolio, security).
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_position_theses_one_active "
+        "ON position_theses(portfolio_id, security_id) WHERE active = 1"
     )
 
     for table in ("trades", "cash_flows"):

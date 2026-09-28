@@ -705,3 +705,6 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-19-portfolio-agent-surfaces.md`
   summary: `RiskReportV1.position_weights` and risk findings are keyed by display symbol, while recommendations match on the canonical `p.ticker`; two positions sharing a display symbol would collide.
   evidence: `risk_engine.evaluate` keys weights by `display_symbol`; `portfolio_agent_view.build_agent_view` looks rows up by `p.display_symbol` for risk and `p.ticker` for Strategy/Evidence.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-14-position-thesis-monitor.md`
+  summary: The recommendation email's "Portfolio summary" block renders one row labelled "rows" with a Python list repr, because `_portfolio_summary` returns `{"rows": [...]}` while the template iterates `.items()`.
+  evidence: `PortfolioRecommendationEmailService._portfolio_summary` vs `app/agents/alert/templates/recommendations.html` Portfolio summary loop; no test pins the rendered rows.

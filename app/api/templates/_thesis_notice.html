@@ -1,0 +1,32 @@
+{# Thesis editor warning notice, returned with 404 (e.g. the security is no
+   longer held). The editor's before-swap handler lets htmx swap it: the
+   whole modal on GET, just #thesis-editor-body after a POST. #}
+{% if not body_only %}
+<div class="modal fade" id="thesisEditorModal" tabindex="-1"
+     aria-labelledby="thesisEditorModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="thesisEditorModalLabel">
+          <i class="bi bi-journal-check me-1"></i>Thesis
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"
+                aria-label="Close"></button>
+      </div>
+{% endif %}
+      <div class="modal-body thesis-editor" id="thesis-editor-body" aria-live="polite">
+        <div class="alert alert-warning border-0 py-2" role="status">{{ message }}</div>
+      </div>
+{% if not body_only %}
+    </div>
+  </div>
+</div>
+<script>
+  (function () {
+    var el = document.getElementById('thesisEditorModal');
+    if (el && window.bootstrap) {
+      bootstrap.Modal.getOrCreateInstance(el).show();
+    }
+  })();
+</script>
+{% endif %}

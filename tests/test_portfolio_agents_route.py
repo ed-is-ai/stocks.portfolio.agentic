@@ -16,8 +16,12 @@ from app.api.app import app
 from app.api.dependencies import (
     get_portfolio_recommendation_service,
     get_portfolio_service,
+    get_position_thesis_service,
     get_trader_service,
 )
+from app.repositories import db
+from app.repositories.position_theses_repo import PositionThesesRepository
+from app.schemas.position_thesis import ThesisContentV1
 from app.schemas.portfolio_recommendation import (
     NO_ASSIGNMENT,
     EvaluationCoverageV1,
@@ -27,6 +31,7 @@ from app.schemas.portfolio_recommendation import (
 )
 from app.services.portfolio_agent_view import RecommendationOutcome
 from app.services.portfolio_service import PortfolioService
+from app.services.position_thesis_service import PositionThesisService
 from app.services.trader_service import TraderService
 from tests.test_portfolio_risk_route import _dump, _record
 
@@ -95,13 +100,21 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "recommend": lambda _pid: _result()
     }
     recommendations = SimpleNamespace(recommend=lambda pid: outcome["recommend"](pid))
+    theses = PositionThesisService(
+        PositionThesesRepository(db.make_connect(lambda: agent.db_path)),
+        trader,
+        tmp_path / "no-artifact.json",
+    )
     app.dependency_overrides[get_trader_service] = lambda: trader
     app.dependency_overrides[get_portfolio_service] = lambda: service
     app.dependency_overrides[get_portfolio_recommendation_service] = lambda: (
         recommendations
     )
+    app.dependency_overrides[get_position_thesis_service] = lambda: theses
     try:
-        yield SimpleNamespace(agent=agent, pid=pf.id, service=service, outcome=outcome)
+        yield SimpleNamespace(
+            agent=agent, pid=pf.id, service=service, outcome=outcome, theses=theses
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -192,10 +205,48 @@ def test_no_portfolios_survives_a_failing_risk_report(
     monkeypatch.setattr(stack.service._trader, "list_portfolios", lambda: [])
     monkeypatch.setattr(stack.service, "risk_report", _raise)
 
-    view = stack.service.agent_view(None, _raise)
+    view = stack.service.agent_view(None, _raise, _raise)
 
     assert view.portfolio_id is None
     assert view.unavailable == ("Risk unavailable",)
+
+
+def test_thesis_cells_swap_in_and_count_nothing_by_default(stack) -> None:
+    content = ThesisContentV1.model_validate(
+        {
+            "rationale": "r",
+            "expected_setup": "s",
+            "rules": [{"kind": "stage_2_lost"}],
+        }
+    )
+    PositionThesesRepository(db.make_connect(lambda: stack.agent.db_path)).add_version(
+        stack.pid, "AAA", content, "user", active=True
+    )
+    body = _agents(stack)
+
+    assert "Awaiting scan" in _cell(stack, body, "thesis-AAA")
+    assert "No thesis" in _cell(stack, body, "thesis-BBB")
+    assert _cell(stack, body, "findings").strip() == "5"
+
+
+def test_thesis_store_failure_is_caught_and_partial(
+    stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(stack.theses, "statuses", _raise)
+    body = _agents(stack)
+
+    assert "Thesis unavailable" in _cell(stack, body, "thesis-AAA")
+    assert "Thesis unavailable" in _cell(stack, body, "thesis-BBB")
+    assert _cell(stack, body, "findings").strip() == "5 · partial"
+    assert "not counted: Thesis unavailable." in body
+
+
+def test_thesis_editor_modal_target_sits_outside_the_tab() -> None:
+    index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
+
+    assert index.index('id="tab-content"') < index.index(
+        'id="thesis-editor-modal-target"'
+    )
 
 
 def test_agents_partial_performs_no_writes(stack) -> None:
@@ -216,21 +267,29 @@ def test_tab_renders_scoped_placeholders_and_one_lazy_loader(stack) -> None:
     assert html.count("/partials/portfolio/agents?") == 1
     assert f'hx-get="/partials/portfolio/agents?portfolio_id={pid}"' in html
     assert 'hx-sync="this:replace"' in html
-    assert f"hx-on::after-request=\"portfolioAgentsUnavailable('{pid}')\"" in html
+    assert (
+        f"hx-on::after-request=\"portfolioAgentsUnavailable('{pid}', event)\"" in html
+    )
     # Every id and placeholder is scoped to this portfolio, so a late
     # response for another portfolio cannot match (or blank) them.
     for name in (
         "strategy-AAA",
         "risk-BBB",
         "evidence-BBB",
+        "thesis-BBB",
         "open-risk",
         "findings",
         "attention",
     ):
         assert f'id="agent-{pid}-{name}"' in html
-    assert html.count(f'data-agent-placeholder="{pid}"') == 3 * 2 + 3
+    assert html.count(f'data-agent-placeholder="{pid}"') == 4 * 2 + 3
     assert "data-agent-placeholder>" not in html
-    assert "Thesis monitor not available yet" in html
+    assert "Thesis monitor not available yet" not in html
+    # A static Thesis button per row opens the editor outside #tab-content,
+    # and a thesis write reloads the agent layer.
+    assert f'hx-get="/portfolios/{pid}/theses/AAA"' in html
+    assert html.count('hx-target="#thesis-editor-modal-target"') == 2
+    assert 'hx-trigger="load, portfolio-agents-refresh from:body"' in html
     assert not re.search(r"\(#1[34]\)", html)
     # The aside: context, declared portfolio-level gap, target, boundary.
     assert 'id="portfolio-copilot-body"' in html
@@ -271,7 +330,7 @@ def test_failure_fallback_and_chart_include_are_in_place() -> None:
     index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
     template = (ROOT / "app/api/templates/_portfolio.html").read_text(encoding="utf-8")
 
-    assert "function portfolioAgentsUnavailable(portfolioId)" in index
+    assert "function portfolioAgentsUnavailable(portfolioId, event)" in index
     assert '[data-agent-placeholder="${scope}"]' in index
     assert "'Agent data unavailable'" in index
     # copilotStatus tolerates a missing target; the aside scrolls into view
@@ -289,3 +348,15 @@ def test_failure_fallback_and_chart_include_are_in_place() -> None:
         < template.index('class="portfolio-summary-grid"')
         < template.index('class="portfolio-holdings-layout"')
     )
+
+
+def test_every_swapped_element_is_marked_for_a_failed_refresh(stack) -> None:
+    body = _agents(stack)
+    index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
+
+    swapped = re.findall(r"<[^>]*hx-swap-oob=\"true\"[^>]*>", body)
+    assert swapped
+    assert all(f'data-agent-cell="{stack.pid}"' in tag for tag in swapped)
+    # A failed request marks filled cells too; a success only leftovers.
+    assert "!(event && event.detail && event.detail.successful)" in index
+    assert '[data-agent-cell="${scope}"]' in index
