@@ -831,3 +831,33 @@ def test_runlog_renders_structured_partial_coverage_and_legacy_fallback(
     # it under a "Discovery" subheading (#108).
     assert "source-stage-label" in markup
     assert "Discovery" in markup
+
+
+def test_runlog_long_error_expands_without_hover(tmp_path, monkeypatch) -> None:
+    """The full error is reachable by click/tap/keyboard, not a tooltip (#4)."""
+    import app.api.routes.views as views_module
+
+    long_error = "Scanner failed: " + "x" * 120 + " END-OF-ERROR"
+    path = tmp_path / "runs.csv"
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["start", "status", "errors"])
+        writer.writeheader()
+        writer.writerow(
+            {"start": "2026-07-19T12:00:00+00:00", "status": "error", "errors": "x"}
+        )
+        writer.writerow(
+            {
+                "start": "2026-07-20T12:00:00+00:00",
+                "status": "error",
+                "errors": long_error,
+            }
+        )
+    monkeypatch.setattr(views_module, "PIPELINE_RUNS_CSV", path)
+
+    response = __import__("asyncio").run(partial_runlog(_request("/partials/runlog")))
+    markup = response.body.decode()
+
+    assert '<details class="rl-error">' in markup
+    assert f'<div class="rl-error-full">{long_error}</div>' in markup
+    assert f'title="{long_error}"' not in markup
+    assert markup.count('<details class="rl-error">') == 1
