@@ -65,7 +65,13 @@ This document contains critical information about working with this codebase. Fo
 
 ## System Architecture
 
-- use pydantic and MS agent framework
+- use pydantic; call LLMs through the Anthropic SDK directly (`claude-sonnet-5`),
+  following `app/integrations/anthropic_client.py`: JSON-schema output parsed into
+  pydantic, and any failure returns `None` so a deterministic fallback is used.
+  Do not add Microsoft Agent Framework.
+- data sent to an LLM is anonymised: securities as per-request labels mapped back
+  locally, money as percentages of portfolio value; never tickers, amounts, share
+  counts, cost basis or cash for the user's holdings
 - this project is a simple stock portfilio manager. Keep files for seaprate agents, orchestration
 
 
