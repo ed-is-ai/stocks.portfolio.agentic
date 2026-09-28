@@ -1,5 +1,5 @@
 ---
-name: market-narrative
+name: rtly-market-narrative
 description: Use this skill to produce a short, factual market-context blurb — one headline plus a few citation-backed bullets — for a stock-portfolio digest email or web banner. Use when generating a market narrative from a scan run's deterministic figures (sector allocation and its week-on-week shift, high-conviction 7/10+ prevalence, multi-year base breakouts, S&P 500 breadth, congressional net buying, FOMC cycle position) grounded in a supplied set of recent news headlines. Enforces strict citation guardrails so no outlet, event, or claim outside the supplied headlines is ever named, and always carries a not-financial-advice note.
 ---
 

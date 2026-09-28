@@ -317,7 +317,7 @@ Extraction sources ──> Scanner ──> Analyst ──> Alert
                               │         ├── technical-analyst criteria
                               │         └── breakout-trade-planner pricing
                               │
-                              └── market-narrative ──> dashboard and email context
+                              └── rtly-market-narrative ──> dashboard and email context
 
 market-top-detector (optional) ──> separate portfolio-risk context
 
@@ -331,7 +331,8 @@ rtly-backtest-* ──> Strategy Manager ──> reproducible local results
 | `vcp-screener` | Scanner and Analyst | The Scanner runs its S&P 500 screener to add VCP candidates to the universe. The Analyst imports its calculators directly to evaluate the Minervini trend template, contraction structure, volume dry-up, pivot proximity, and execution state. This is the most deeply integrated skill. |
 | `breakout-trade-planner` | Analyst | Once a valid pivot and final contraction low are available, the Analyst imports its risk calculator to derive signal entry, worst-case entry, stop loss, risk percentage, and 1R/2R/3R prices. The app uses the pricing logic, not the skill's optional broker-order templates. |
 | `technical-analyst` | Analyst methodology | Three chart-quality checks from this framework are implemented in the Analyst: higher-high/higher-low structure, up-volume versus down-volume confirmation, and SMA50/SMA150 compression. The image-analysis workflow itself is not run by the pipeline. |
-| `market-narrative` | Post-scan context | Packages the rules for turning sector allocation, high-conviction prevalence, multi-year breakouts, market breadth, congressional activity, FOMC-cycle position, portfolio weights, and recent headlines into the dashboard/email summary. Claude is used when configured; a deterministic builder is the fallback, and citation guardrails constrain model-written claims. |
+| `rtly-market-narrative` | Post-scan context | Packages the rules for turning sector allocation, high-conviction prevalence, multi-year breakouts, market breadth, congressional activity, FOMC-cycle position, portfolio weights, and recent headlines into the dashboard/email summary. Claude is used when configured; a deterministic builder is the fallback, and citation guardrails constrain model-written claims. |
+| `rtly-research-copilot` | On-demand explanation | Packages the rules for answering "why did this security get its recommendation?" from locally gathered, anonymised evidence. Claude rephrases the numbered evidence once and cites it; citations are filtered to the supplied ids and a deterministic evidence list is the fallback. |
 
 ### Optional and standalone skills
 
@@ -362,7 +363,7 @@ trades one configured internal `security_id`; see the
 [onboarding guide](docs/strategy-manager/onboarding.md#find-a-usable-security-id)
 before accepting the placeholder default in a live profile.
 
-In practical terms, the default automated path relies on `vcp-screener`, selected `technical-analyst` rules, `breakout-trade-planner`, and `market-narrative`. The other skills extend candidate discovery, confirmation, or market-risk analysis when a trader wants a deeper manual review.
+In practical terms, the default automated path relies on `vcp-screener`, selected `technical-analyst` rules, `breakout-trade-planner`, and `rtly-market-narrative`. The other skills extend candidate discovery, confirmation, or market-risk analysis when a trader wants a deeper manual review.
 
 Each skill has a `SKILL.md` containing its inputs, prerequisites, commands, methodology, and output format. Some standalone skills require additional dependencies or `FMP_API_KEY`; consult that file before running one independently.
 
