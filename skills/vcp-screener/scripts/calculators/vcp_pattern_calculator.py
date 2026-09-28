@@ -473,25 +473,10 @@ def _build_contractions_from(
         low_idx, low_val = next_low
         duration = low_idx - current_high_idx
 
-        # A local low above its prior swing high is a continuation, not a
-        # contraction.  Skip it rather than exposing a negative-depth Tn to
-        # the canonical detector adapter.
-        if low_val >= current_high_val:
-            next_high = next(
-                (
-                    (idx, val)
-                    for idx, val in swing_highs
-                    if idx > low_idx
-                ),
-                None,
-            )
-            if next_high is None:
-                break
-            current_high_idx, current_high_val = next_high
-            continue
-
-        # Skip contractions that are too short
-        if duration < min_contraction_days:
+        # Skip contractions that are too short. A continuation low goes
+        # straight to the guard below; ``not >=`` (rather than ``<``) keeps
+        # NaN prices on the duration path, as before.
+        if not low_val >= current_high_val and duration < min_contraction_days:
             # Find the next swing high after current_high to bound the search
             next_high_boundary = None
             for idx, val in swing_highs:
@@ -515,6 +500,20 @@ def _build_contractions_from(
                     break
             if not found_valid:
                 break
+
+        # A local low above its prior swing high is a continuation, not a
+        # contraction.  Skip it rather than exposing a negative-depth Tn to
+        # the canonical detector adapter.  This runs after the duration
+        # backtracking so a replacement low is guarded too (GH-34).
+        if low_val >= current_high_val:
+            next_high = next(
+                ((idx, val) for idx, val in swing_highs if idx > low_idx),
+                None,
+            )
+            if next_high is None:
+                break
+            current_high_idx, current_high_val = next_high
+            continue
 
         depth_pct = (
             (current_high_val - low_val) / current_high_val * 100
@@ -575,6 +574,15 @@ def _validate_vcp(
             "valid": False,
             "issues": [f"Need at least {min_contractions} contractions"],
         }
+
+    # A non-positive depth is a continuation, never a contraction (GH-34)
+    for contraction in contractions:
+        if contraction["depth_pct"] <= 0:
+            issues.append(
+                f"{contraction['label']} has non-positive depth "
+                f"({contraction['depth_pct']:.1f}%)"
+            )
+            valid = False
 
     # Check T1 depth (8-35% for large-caps)
     t1_depth = contractions[0]["depth_pct"]

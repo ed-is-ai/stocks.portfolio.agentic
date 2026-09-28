@@ -131,6 +131,14 @@ class TestVCPValidation:
         result = _validate_vcp(contractions, total_days=120)
         assert result["valid"] is True
 
+    def test_non_positive_depth_invalid(self):
+        """GH-34: T2=0% or T2=-7% is a continuation, not a contraction -> invalid"""
+        for depth in (0, -7.14):
+            contractions = _make_vcp_contractions([20, depth])
+            result = _validate_vcp(contractions, total_days=120)
+            assert result["valid"] is False
+            assert any("T2 has non-positive depth" in i for i in result["issues"])
+
 
 # ===========================================================================
 # Stale Price (Acquisition) Filter Tests

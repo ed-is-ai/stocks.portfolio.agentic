@@ -676,3 +676,10 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-33-max-concurrent-positions.md`
   summary: `SkipReasonCode.ALLOCATION_UNAFFORDABLE` has no entry in `result_presenter._SKIP_REASON_TEXT`, so the trade log shows the raw code.
   evidence: app/services/backtest/result_presenter.py:47-57 maps every other reason, but not `ALLOCATION_UNAFFORDABLE`; `_trade_log_row` falls back to `reason.value`.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-34-vcp-negative-depth.md`
+  summary: `_validate_vcp` accepts a contraction whose `depth_pct` is NaN, because `NaN <= 0` and the tightening ratio comparisons are all False.
+  evidence: NaN swing prices are reachable when a NaN ATR sends `_find_swing_points` to the fixed-window fallback, which selects NaN bars as swings; the pre-GH-34 code had the same gap.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-34-vcp-negative-depth.md`
+  summary: In `_build_contractions_from`, each continuation skip consumes one of the four `range(4)` iterations and moves `current_high` without re-checking it against the right-shoulder reference `h1_val`.
+  evidence: The first-candidate guard behaved this way before GH-34; choppy series can fall below `min_contractions` for no pattern reason.
