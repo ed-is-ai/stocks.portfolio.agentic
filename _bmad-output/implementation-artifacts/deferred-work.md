@@ -683,3 +683,10 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-34-vcp-negative-depth.md`
   summary: In `_build_contractions_from`, each continuation skip consumes one of the four `range(4)` iterations and moves `current_high` without re-checking it against the right-shoulder reference `h1_val`.
   evidence: The first-candidate guard behaved this way before GH-34; choppy series can fall below `min_contractions` for no pattern reason.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-16-portfolio-risk-coach.md`
+  summary: The risk report's price-staleness check uses the price cache's `prices_as_of`, but analysis-record prices override cached prices in `_priced_positions`, so the dated prices are not always the ones used.
+  evidence: `{**cached_prices, **analysis_prices}` in `PortfolioService._priced_positions`; the Portfolio tab's own "prices as of" label has the same mismatch.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-16-portfolio-risk-coach.md`
+  summary: The lazily loaded risk panel rebuilds the full `portfolio_input_snapshot` (chart, trades, cash flows, reconciliation) and reloads the price cache on every Portfolio-tab render, duplicating the tab's own work.
+  evidence: `PortfolioService.risk_report` calls `portfolio_input_snapshot` and `_priced_positions` independently of `default_portfolio_context`.

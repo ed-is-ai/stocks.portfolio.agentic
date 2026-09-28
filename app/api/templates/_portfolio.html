@@ -633,6 +633,11 @@
 <small class="text-muted mt-2 d-block" style="font-size:0.74rem">
   {{ positions|length }} position(s) &middot; prices from last pipeline run &middot; hover signal badge for reason
 </small>
+
+<!-- Portfolio Risk Coach (GH-16) — read-only, lazy-loaded. -->
+<div id="portfolio-risk"
+     hx-get="/partials/portfolio/risk?portfolio_id={{ portfolio_id if portfolio_id is not none else '' }}"
+     hx-trigger="load" hx-swap="innerHTML"></div>
 {% endif %}
 
 <!-- Non-GBP cash balances (Story 1.6, AC1/AC3). The legacy GBP-only CASH

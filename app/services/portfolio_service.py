@@ -28,11 +28,13 @@ from app.repositories import db
 from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.schemas.analysis_artifact import read_analysis_records
 from app.schemas.portfolio_import import ProviderOption
+from app.schemas.portfolio_risk import RiskReportV1
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_import.contract_registry import ContractRegistryError
 from app.services.portfolio_import.registry_loader import get_contract_registry
+from app.services.risk_engine import evaluate
 from app.services.series_downsample import downsample_last_per_bucket
 from app.services.snapshot_valuation import amount_in_gbp
 from app.services.strategy_assignment_service import StrategyAssignmentService
@@ -1608,22 +1610,11 @@ class PortfolioService:
                 "strategy_assignment": None,
                 "strategy_freshness": None,
             }
-        # Resolve the active portfolio: an unknown/None id falls back to the
-        # first (migrated SIPP) portfolio.
-        active_id = portfolio_id
-        if active_id is None or not any(p.id == active_id for p in portfolios):
-            active_id = portfolios[0].id
-
+        active_id = self._active_portfolio_id(portfolio_id, portfolios)
         snapshot = self.portfolio_input_snapshot(
             active_id, portfolios=portfolios, range_key=range_key
         )
-        cached_prices, prices_as_of, display_info = self._trader.load_price_cache()
-        analysis_prices = self.current_prices(snapshot.analysis_records)
-        prices = {**cached_prices, **analysis_prices}
-        positions = self.positions_from_input_snapshot(
-            snapshot, prices or None, display_info or None
-        )
-        gbpusd = cached_prices.get("__GBPUSD__")
+        positions, prices_as_of, gbpusd = self._priced_positions(snapshot)
         return self.portfolio_partial_context(
             positions,
             prices_as_of=prices_as_of,
@@ -1632,4 +1623,69 @@ class PortfolioService:
             portfolio_id=active_id,
             input_snapshot=snapshot,
             range_key=range_key,
+        )
+
+    @staticmethod
+    def _active_portfolio_id(portfolio_id: int | None, portfolios: list[Any]) -> int:
+        """Resolve the active portfolio: an unknown/None id falls back to the
+        first (migrated SIPP) portfolio. ``portfolios`` must be non-empty."""
+        if portfolio_id is None or not any(p.id == portfolio_id for p in portfolios):
+            return portfolios[0].id
+        return portfolio_id
+
+    def _priced_positions(
+        self, snapshot: PortfolioInputSnapshot
+    ) -> tuple[list[Position], str | None, float | None]:
+        """Value ``snapshot``'s positions from cached + analysis prices.
+
+        Returns ``(positions, prices_as_of, gbpusd)`` so the portfolio partial
+        and the risk report share one valuation of the same inputs.
+        """
+        cached_prices, prices_as_of, display_info = self._trader.load_price_cache()
+        analysis_prices = self.current_prices(snapshot.analysis_records)
+        prices = {**cached_prices, **analysis_prices}
+        positions = self.positions_from_input_snapshot(
+            snapshot, prices or None, display_info or None
+        )
+        return positions, prices_as_of, cached_prices.get("__GBPUSD__")
+
+    def risk_report(self, portfolio_id: int | None) -> RiskReportV1:
+        """Evaluate the active portfolio against the default risk policy (GH-16).
+
+        Reuses the Portfolio tab's inputs (positions, GBP cash snapshot,
+        price cache and analysis records). Never mutates trades, cash flows,
+        portfolios or Strategy assignments; a holding in a currency other
+        than GBP/GBp/USD may fetch and cache a same-day FX quote exactly as
+        the Portfolio tab render does.
+        """
+        portfolios = self._trader.list_portfolios()
+        if not portfolios:
+            return evaluate(
+                [],
+                sectors={},
+                scan_stops={},
+                cash_gbp=None,
+                gbpusd=None,
+                prices_as_of=None,
+                today=datetime.now(timezone.utc).date(),
+                gbp_valuation=self._gbp_valuation,
+            )
+        snapshot = self.portfolio_input_snapshot(
+            self._active_portfolio_id(portfolio_id, portfolios), portfolios=portfolios
+        )
+        positions, prices_as_of, gbpusd = self._priced_positions(snapshot)
+        records = snapshot.analysis_records
+        return evaluate(
+            positions,
+            sectors={r.ticker: r.sector for r in records},
+            scan_stops={
+                r.ticker: (r.analysis.stop_loss, r.currency)
+                for r in records
+                if r.analysis and r.analysis.stop_loss is not None
+            },
+            cash_gbp=snapshot.cash_balance,
+            gbpusd=gbpusd,
+            prices_as_of=prices_as_of,
+            today=datetime.now(timezone.utc).date(),
+            gbp_valuation=self._gbp_valuation,
         )

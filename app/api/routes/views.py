@@ -125,6 +125,26 @@ async def partial_portfolio_chart(
     return templates.TemplateResponse(request, "_portfolio_chart.html", context=context)
 
 
+@router.get("/partials/portfolio/risk", response_class=HTMLResponse)
+def partial_portfolio_risk(
+    request: Request,
+    portfolio: PortfolioDep,
+    portfolio_id: str | None = None,
+) -> HTMLResponse:
+    """Render the read-only Portfolio Risk Coach panel (GH-16).
+
+    A plain ``def`` for the same reason as ``partial_strategy_assign``: the
+    report reads the ledger, price cache and scan artifact, so FastAPI runs
+    it in its threadpool. Never mutates trades, cash flows, portfolios or
+    Strategy assignments; a holding in a currency other than GBP/GBp/USD may
+    fetch and cache an FX quote exactly as the Portfolio tab render does.
+    """
+    report = portfolio.risk_report(optional_int(portfolio_id))
+    return templates.TemplateResponse(
+        request, "_portfolio_risk.html", context={"report": report}
+    )
+
+
 @router.get("/partials/strategy-assign", response_class=HTMLResponse)
 def partial_strategy_assign(
     request: Request,
