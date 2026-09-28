@@ -693,3 +693,9 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-13-research-copilot.md`
   summary: `ResearchCopilotClient.draft` and `AnthropicNarrativeClient.generate_market_narrative` duplicate the structured-output call; a shared helper would keep model and SDK changes in one place.
   evidence: same model constant, import guard, `output_config` json_schema call, stop_reason check and pydantic parse.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-16-portfolio-risk-coach.md`
+  summary: The risk report's price-staleness check uses the price cache's `prices_as_of`, but analysis-record prices override cached prices in `_priced_positions`, so the dated prices are not always the ones used.
+  evidence: `{**cached_prices, **analysis_prices}` in `PortfolioService._priced_positions`; the Portfolio tab's own "prices as of" label has the same mismatch.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-16-portfolio-risk-coach.md`
+  summary: The lazily loaded risk panel rebuilds the full `portfolio_input_snapshot` (chart, trades, cash flows, reconciliation) and reloads the price cache on every Portfolio-tab render, duplicating the tab's own work.
+  evidence: `PortfolioService.risk_report` calls `portfolio_input_snapshot` and `_priced_positions` independently of `default_portfolio_context`.
