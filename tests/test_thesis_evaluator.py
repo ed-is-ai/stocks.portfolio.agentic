@@ -227,3 +227,19 @@ def test_non_positive_level_or_price_is_limited_not_clear(
 
     assert result.status == "evidence_limited"
     assert result.results[0].outcome == "limited"
+
+
+@pytest.mark.parametrize(
+    "scan",
+    [{"sma200": 0.0}, {"sma150": None}, {"sma200": float("nan")}],
+    ids=["sma200-zero", "sma150-missing", "sma200-nan"],
+)
+def test_stage_2_lost_without_long_smas_is_limited_not_invalidated(
+    scan: dict[str, Any],
+) -> None:
+    # The classifier reports "Stage 1" when it cannot compute the long SMAs.
+    thesis = make_thesis({"kind": "stage_2_lost"})
+    result = _evaluate(thesis, make_record(stage="Stage 1", **scan))
+
+    assert result.status == "evidence_limited"
+    assert result.results[0].outcome == "limited"

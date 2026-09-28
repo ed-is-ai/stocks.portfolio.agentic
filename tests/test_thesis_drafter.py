@@ -16,7 +16,11 @@ import pytest
 from app.agents.research.evidence import CURRENCY_AMOUNT, LABEL
 from app.agents.thesis import drafter
 from app.agents.thesis.drafter import ThesisDraftClient, draft_thesis
-from app.schemas.position_thesis import CloseBelowSmaRule, Stage2LostRule
+from app.schemas.position_thesis import (
+    CloseBelowSmaRule,
+    ScoreBelowRule,
+    Stage2LostRule,
+)
 from app.services.freshness_service import calculate_freshness
 from tests.test_research_copilot import ENTRY, NOW, PRICE, STOP, _meta, _record
 
@@ -193,14 +197,14 @@ def test_stray_parameters_are_dropped_not_the_rule() -> None:
 
 def test_only_the_first_six_valid_rules_are_kept() -> None:
     rules = [{"kind": "moon"}] + [
-        {"kind": "score_below", "min_score": n} for n in range(1, 9)
+        {"kind": "score_below", "min_score": n} for n in range(2, 10)
     ]
     client, _ = _client({**GOOD, "rules": rules})
 
     draft = _draft(client)
 
     assert draft is not None
-    assert [rule.min_score for rule in draft.rules] == [1, 2, 3, 4, 5, 6]
+    assert [rule.min_score for rule in draft.rules] == [2, 3, 4, 5, 6, 7]
 
 
 def test_label_is_revealed_as_the_imported_display_symbol() -> None:
@@ -216,3 +220,48 @@ def test_label_is_revealed_as_the_imported_display_symbol() -> None:
     )
 
     assert draft is not None and draft.rationale == "ZETA is a Stage 2 leader."
+
+
+def test_duplicate_rules_are_dropped_before_the_cap(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stage = {"kind": "stage_2_lost"}
+    scores = [{"kind": "score_below", "min_score": n} for n in range(2, 8)]
+    rules = [stage, {"kind": "moon"}, stage, *scores]
+    client, _ = _client({**GOOD, "rules": rules})
+
+    with caplog.at_level("INFO", logger=drafter.__name__):
+        draft = _draft(client)
+
+    assert draft is not None
+    assert draft.rules == (
+        Stage2LostRule(),
+        *(ScoreBelowRule(min_score=n) for n in range(2, 7)),
+    )
+    assert "(1 invalid, 1 duplicate, 1 over the cap)" in caplog.text
+
+
+def test_score_threshold_of_one_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        ScoreBelowRule.model_validate({"min_score": 1})
+    payload = {**GOOD, "rules": [{"kind": "score_below", "min_score": 1}]}
+    client, _ = _client(payload)
+
+    assert _draft(client) is None
+
+
+def test_prompt_states_the_validated_parameter_ranges() -> None:
+    prompt = drafter._SYSTEM_PROMPT
+
+    assert "which must be 50, 150 or 200" in prompt
+    assert "a number from 1.0 to 10.0, or omitted" in prompt
+    assert "a whole number from 2 to 10" in prompt
+
+
+@pytest.mark.parametrize(
+    "field", ["rationale", "expected_setup"], ids=["rationale", "setup"]
+)
+def test_wording_with_a_currency_amount_is_unavailable(field: str) -> None:
+    client, _ = _client({**GOOD, field: f"{LABEL} could reach £250 soon."})
+
+    assert _draft(client) is None

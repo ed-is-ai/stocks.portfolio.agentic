@@ -169,6 +169,14 @@ def _check(
     if isinstance(rule, ScoreBelowRule):
         fired = analysis.score < rule.min_score
         return ("fired" if fired else "clear"), {"score": analysis.score}, False
+    # Without SMA150/SMA200 the stage classifier falls back to price and
+    # reports "Stage 1", so the stage is not evidence the trend was lost.
+    smas: dict[str, float | None] = {
+        field: _finite(getattr(record, field)) if record else None
+        for field in ("sma150", "sma200")
+    }
+    if any(sma is None or sma <= 0 for sma in smas.values()):
+        return "limited", {"stage": analysis.stage, **smas}, False
     fired = analysis.stage != STAGE_2
     return ("fired" if fired else "clear"), {"stage": analysis.stage}, False
 

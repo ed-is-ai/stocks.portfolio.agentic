@@ -865,3 +865,93 @@ def test_email_marks_a_thesis_result_of_an_earlier_run(env: Any) -> None:
     for body in (html, text):
         assert "Invalidated" not in body
         assert "close_below_sma (price, sma50)" not in body
+
+
+def _thesis_hook(env: Any, monkeypatch: pytest.MonkeyPatch, service: Any) -> list[Any]:
+    """Run the thesis hook against ``service``; return its thesis notices."""
+    from app.orchestration.orchestrator import evaluate_position_theses
+
+    monkeypatch.setattr(
+        "app.api.dependencies.get_position_thesis_service", lambda: service
+    )
+    monkeypatch.setattr(
+        "app.api.dependencies.get_notifications_repository",
+        lambda: env.notifications,
+    )
+    evaluate_position_theses("run-1")
+    return [
+        e
+        for e in env.notifications.recent(limit=50)
+        if e.event_type.startswith("thesis_evaluation")
+    ]
+
+
+def test_thesis_hook_warns_once_naming_the_failed_portfolios(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services.position_thesis_service import EvaluationRun
+
+    service = SimpleNamespace(
+        published=lambda: ([], META),
+        evaluate_all=lambda _records, _meta: EvaluationRun(count=2, failed=(7, 8)),
+    )
+
+    [notice] = _thesis_hook(env, monkeypatch, service)
+
+    assert (notice.event_type, notice.severity) == (
+        "thesis_evaluation_failed",
+        "warning",
+    )
+    assert "7, 8" in notice.body
+
+
+def test_thesis_hook_warns_when_the_run_identity_is_missing(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def never(*_args: Any) -> Any:
+        raise AssertionError("nothing is evaluated without a run identity")
+
+    service = SimpleNamespace(published=lambda: ([], None), evaluate_all=never)
+
+    [notice] = _thesis_hook(env, monkeypatch, service)
+
+    assert (notice.event_type, notice.severity) == (
+        "thesis_evaluation_skipped",
+        "warning",
+    )
+
+
+def test_email_dispatch_survives_a_failing_thesis_provider(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.orchestration.orchestrator import dispatch_recommendation_emails
+
+    env.assignment.assign(7, "alpha")
+    for name, value in {
+        "get_strategy_assignment_service": env.assignment,
+        "get_portfolio_recommendation_service": env.recommendation,
+        "get_notifications_repository": env.notifications,
+        "get_portfolio_dispatch_repository": env.repo,
+    }.items():
+        monkeypatch.setattr(f"app.api.dependencies.{name}", lambda v=value: v)
+
+    def broken() -> Any:
+        raise RuntimeError("thesis store down")
+
+    monkeypatch.setattr("app.api.dependencies.get_position_thesis_service", broken)
+    monkeypatch.setattr(
+        "app.services.portfolio_recommendation_email_service.ANALYSIS_JSON",
+        env.artifact,
+    )
+    alerter = AlertAgent(db_path=str(env.tmp_path / "alerts.db"), email_config=_EMAIL)
+    sent: list[tuple[str, str, str]] = []
+
+    def capture(subject: str, html: str, text: str) -> bool:
+        sent.append((subject, html, text))
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=capture):
+        dispatch_recommendation_emails(alerter, env.trader, "run-1")
+
+    assert env.repo.status_of(7, "run-1") == "sent"
+    assert "Thesis status unavailable." in sent[0][1]

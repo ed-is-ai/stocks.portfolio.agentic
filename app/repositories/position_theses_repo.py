@@ -78,6 +78,15 @@ def _by_security(rows: Iterable[tuple[Any, ...]]) -> dict[str, PositionThesisV1]
     return theses
 
 
+def _evaluation(facts_json: str) -> ThesisEvaluationV1 | None:
+    """Parse one evaluation's facts, or None (logged) when unreadable."""
+    try:
+        return ThesisEvaluationV1.model_validate_json(facts_json)
+    except Exception:
+        logger.warning("Skipping unreadable thesis evaluation", exc_info=True)
+        return None
+
+
 class PositionThesesRepository:
     """Typed access to thesis versions and their evaluation history."""
 
@@ -162,13 +171,15 @@ class PositionThesesRepository:
             raise StaleDraftError(f"thesis {thesis_id} disappeared")
         return thesis
 
-    def deactivate(self, thesis_ids: Iterable[int]) -> None:
-        """Retire these versions (history is kept; they stop being checked)."""
+    def latest_version(self, portfolio_id: int, security_id: str) -> int:
+        """Return the holding's newest version number (0 when it has none)."""
         with session(self._connect) as conn:
-            conn.executemany(
-                "UPDATE position_theses SET active = 0 WHERE id = ?",
-                [(thesis_id,) for thesis_id in thesis_ids],
-            )
+            row = conn.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM position_theses "
+                "WHERE portfolio_id = ? AND security_id = ?",
+                (portfolio_id, security_id),
+            ).fetchone()
+        return int(row[0])
 
     def active_for_portfolio(self, portfolio_id: int) -> dict[str, PositionThesisV1]:
         """Return each security's active version for the portfolio."""
@@ -226,7 +237,9 @@ class PositionThesesRepository:
                 thesis_ids,
             ).fetchall()
         return {
-            int(row[0]): ThesisEvaluationV1.model_validate_json(row[1]) for row in rows
+            int(row[0]): evaluation
+            for row in rows
+            if (evaluation := _evaluation(row[1])) is not None
         }
 
     def history(
@@ -241,7 +254,7 @@ class PositionThesesRepository:
                 "ORDER BY e.id DESC LIMIT ?",
                 (portfolio_id, security_id, limit),
             ).fetchall()
-        return [ThesisEvaluationV1.model_validate_json(row[0]) for row in rows]
+        return [e for row in rows if (e := _evaluation(row[0])) is not None]
 
     @staticmethod
     def _deactivate(

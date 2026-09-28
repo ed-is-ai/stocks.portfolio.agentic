@@ -291,11 +291,11 @@ def test_portfolio_evaluation_appends_once_per_run(stack) -> None:
     assert meta is not None
 
     # Save already evaluated this run, so the scan step adds nothing new...
-    assert stack.service.evaluate_all(records, meta) == 0
+    assert stack.service.evaluate_all(records, meta).count == 0
     # ...until a new run is published.
     next_run = meta.model_copy(update={"run_id": "run-2"})
-    assert stack.service.evaluate_all(records, next_run) == 1
-    assert stack.service.evaluate_all(records, next_run) == 0
+    assert stack.service.evaluate_all(records, next_run).count == 1
+    assert stack.service.evaluate_all(records, next_run).count == 0
     assert _ledger(stack) == before
 
 
@@ -391,24 +391,25 @@ def test_ai_draft_reveals_the_holdings_display_symbol(
     assert stack.service.statuses(stack.pid)["AAA"].pending is not None
 
 
-def test_sold_holding_thesis_is_retired_so_a_rebuy_starts_fresh(stack) -> None:
+def test_unheld_thesis_is_skipped_and_stays_active_until_held_again(
+    stack,
+) -> None:
     _save(stack)
     stack.agent.record_sell("AAA", 10, 95.0, "2026-02-02", portfolio_id=stack.pid)
     records, meta = stack.service.published()
     assert meta is not None
 
     next_run = meta.model_copy(update={"run_id": "run-2"})
-    assert stack.service.evaluate_all(records, next_run) == 0
+    assert stack.service.evaluate_all(records, next_run).count == 0
 
-    assert [row[3] for row in _rows(stack)] == [0]  # kept, inactive
+    assert [row[3] for row in _rows(stack)] == [1]  # untouched, still active
     assert len(stack.service._repo.history(stack.pid, "AAA")) == 1
     stack.agent.record_buy("AAA", 5, 96.0, "2026-03-03", portfolio_id=stack.pid)
-    assert stack.service.statuses(stack.pid) == {}
-    html = client.get(_url(stack), headers=AUTH).text
-    assert "No active thesis for this holding yet." in html
+    assert stack.service.evaluate_all(records, next_run).count == 1
+    assert stack.service.statuses(stack.pid)["AAA"].latest is not None
 
 
-def test_failing_holdings_read_retires_nothing(
+def test_failing_holdings_read_raises_and_writes_nothing(
     stack, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _save(stack)
@@ -419,11 +420,14 @@ def test_failing_holdings_read_retires_nothing(
         raise RuntimeError("trades db down")
 
     monkeypatch.setattr(stack.service._trader, "get_portfolio", down)
+    next_run = meta.model_copy(update={"run_id": "run-2"})
     with pytest.raises(RuntimeError):
-        stack.service.evaluate_portfolio(stack.pid, records, meta)
-    # evaluate_all isolates the failing portfolio instead of raising.
-    assert stack.service.evaluate_all(records, meta) == 0
+        stack.service.evaluate_portfolio(stack.pid, records, next_run)
+    # evaluate_all isolates the failing portfolio and names it.
+    result = stack.service.evaluate_all(records, next_run)
+    assert (result.count, result.failed) == (0, (stack.pid,))
     assert [row[3] for row in _rows(stack)] == [1]
+    assert len(stack.service._repo.history(stack.pid, "AAA")) == 1
 
 
 def test_corrupt_row_and_failing_portfolio_do_not_stop_the_others(
@@ -455,7 +459,8 @@ def test_corrupt_row_and_failing_portfolio_do_not_stop_the_others(
     assert meta is not None
 
     next_run = meta.model_copy(update={"run_id": "run-2"})
-    assert stack.service.evaluate_all(records, next_run) == 1
+    result = stack.service.evaluate_all(records, next_run)
+    assert (result.count, result.failed) == (1, (other.id,))
     assert set(stack.service.statuses(stack.pid)) == {"AAA"}
 
 
@@ -485,3 +490,88 @@ def test_review_due_uses_the_local_date(stack, monkeypatch: pytest.MonkeyPatch) 
     assert stack.service.statuses(stack.pid)["AAA"].review_due is False
     _save(stack, review_date="2030-01-01")
     assert stack.service.statuses(stack.pid)["AAA"].review_due is True
+
+
+def test_corrupt_evaluation_row_is_skipped_by_statuses_and_editor(stack) -> None:
+    _save(stack)  # evaluated against run-1
+    conn = sqlite3.connect(stack.db)
+    conn.execute(
+        "INSERT INTO thesis_evaluations (thesis_id, analysis_run_id, status, "
+        "facts_json, evaluated_at) VALUES (1, 'run-0', 'confirmed', '{}', 'n')"
+    )
+    conn.execute(
+        "UPDATE thesis_evaluations SET facts_json = 'not json' "
+        "WHERE analysis_run_id = 'run-1'"
+    )
+    conn.commit()
+    conn.close()
+
+    assert stack.service.statuses(stack.pid)["AAA"].latest is None
+    assert stack.service.editor(stack.pid, "AAA").history == ()
+    assert client.get(_url(stack), headers=AUTH).status_code == 200
+
+
+def test_draft_superseded_by_a_save_during_the_model_call_is_discarded(
+    stack,
+) -> None:
+    def create(**_kwargs: Any) -> SimpleNamespace:
+        _save(stack)  # the user saves while Claude is drafting
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text=json.dumps(DRAFT))],
+        )
+
+    fake = SimpleNamespace(messages=SimpleNamespace(create=create))
+    stack.drafts["client"] = ThesisDraftClient(api_key="test-key", client=fake)
+
+    resp = client.post(_url(stack, "/draft"), headers=AUTH)
+
+    assert "AI draft unavailable" in resp.text
+    assert [(row[2], row[3]) for row in _rows(stack)] == [("user", 1)]
+    assert stack.service.statuses(stack.pid)["AAA"].pending is None
+
+
+def test_draft_without_an_analysis_record_says_so_and_writes_nothing(
+    stack,
+) -> None:
+    calls: list[Any] = []
+
+    def create(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        raise AssertionError("no model call without a record")
+
+    fake = SimpleNamespace(messages=SimpleNamespace(create=create))
+    stack.drafts["client"] = ThesisDraftClient(api_key="test-key", client=fake)
+    stack.agent.record_buy("BBB", 5, 50.0, "2026-01-02", portfolio_id=stack.pid)
+
+    resp = client.post(_url(stack, "/draft", ticker="BBB"), headers=AUTH)
+
+    assert resp.status_code == 200
+    assert (
+        "No published analysis for this holding yet, so there is nothing to draft from."
+    ) in resp.text
+    assert "AI draft unavailable" not in resp.text
+    assert "HX-Trigger" not in resp.headers
+    assert calls == [] and _rows(stack) == []
+
+
+def test_duplicate_rules_are_saved_once(stack) -> None:
+    resp = _save(
+        stack,
+        rule_kind=["close_below_sma", "stage_2_lost", "close_below_sma"],
+        rule_period=["50", "", "50"],
+    )
+
+    assert "Thesis saved as version 1." in resp.text
+    [(*_, rules)] = _rows(stack)
+    assert [rule["kind"] for rule in json.loads(rules)] == [
+        "close_below_sma",
+        "stage_2_lost",
+    ]
+
+
+def test_score_threshold_of_one_is_rejected(stack) -> None:
+    resp = _save(stack, rule_kind=["score_below"], rule_min_score=["1"])
+
+    assert "alert-warning" in resp.text and "Rule 1:" in resp.text
+    assert _rows(stack) == []

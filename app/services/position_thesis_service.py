@@ -42,6 +42,18 @@ class NotHeldError(LookupError):
     """The security is not an open holding of that portfolio."""
 
 
+class NoAnalysisError(LookupError):
+    """The published analysis has no record for the holding to draft from."""
+
+
+@dataclass(frozen=True)
+class EvaluationRun:
+    """What one scan-step evaluation pass did across every portfolio."""
+
+    count: int
+    failed: tuple[int, ...] = ()
+
+
 @dataclass(frozen=True)
 class ThesisEditorView:
     """Everything the thesis editor modal renders for one holding."""
@@ -157,10 +169,19 @@ class PositionThesisService:
         client: ThesisDraftClient,
         source_health: Mapping[SourceName, SourceHealth],
     ) -> PositionThesisV1 | None:
-        """Store an inactive AI draft, or return None (nothing written)."""
+        """Store an inactive AI draft, or return None (nothing written).
+
+        Raises :class:`NoAnalysisError` (no model call) when the published
+        analysis has no record for the holding. A draft that returns after
+        a newer version was saved is discarded (None) rather than stored
+        over it.
+        """
         position = self.held_position(portfolio_id, security_id)
         records, meta = self.published()
         record = next((r for r in records if r.ticker == security_id), None)
+        if record is None:
+            raise NoAnalysisError(f"no published analysis for {security_id}")
+        version = self._repo.latest_version(portfolio_id, security_id)
         draft = draft_thesis(
             record,
             client=client,
@@ -170,6 +191,9 @@ class PositionThesisService:
             display_symbol=position.display_symbol,
         )
         if draft is None:
+            return None
+        if self._repo.latest_version(portfolio_id, security_id) != version:
+            logger.info("Discarding thesis draft superseded during the model call")
             return None
         content = ThesisContentV1.model_validate(draft.model_dump())
         return self._repo.add_version(
@@ -181,8 +205,8 @@ class PositionThesisService:
     ) -> PositionThesisV1:
         """Activate the holding's pending draft; evaluate it now.
 
-        Raises ``StaleDraftError`` (from the repository) unless ``thesis_id`` is still the
-        holding's pending draft.
+        Raises ``StaleDraftError`` (from the repository) unless ``thesis_id``
+        is still the holding's pending draft.
         """
         self.held_position(portfolio_id, security_id)
         thesis = self._repo.activate_pending_draft(portfolio_id, security_id, thesis_id)
@@ -195,17 +219,15 @@ class PositionThesisService:
         records: Sequence[StockRecord],
         meta: AnalysisArtifactMeta,
     ) -> int:
-        """Append one evaluation per active thesis for this run; return new rows.
+        """Append one evaluation per held active thesis for this run.
 
-        An active thesis of a security no longer held is retired instead
-        (history kept), so a later re-buy starts without a thesis. A failing
-        holdings read raises before anything is written.
+        Returns the new rows. A thesis whose security is not currently held
+        is skipped and left active, so a wrong holdings read loses nothing
+        and a re-buy resumes it. A failing holdings read raises before
+        anything is written.
         """
-        held = self._held(portfolio_id)
         active = self._repo.active_for_portfolio(portfolio_id)
-        sold = [t.id for security, t in active.items() if security not in held]
-        if sold:
-            self._repo.deactivate(sold)
+        held = self._held(portfolio_id)
         by_ticker = {record.ticker: record for record in records}
         freshness = calculate_freshness(meta.generated_at)
         return sum(
@@ -218,22 +240,25 @@ class PositionThesisService:
 
     def evaluate_all(
         self, records: Sequence[StockRecord], meta: AnalysisArtifactMeta
-    ) -> int:
+    ) -> EvaluationRun:
         """Evaluate every portfolio's active theses once for this run.
 
-        Each portfolio is isolated: one failing is logged and skipped.
+        Each portfolio is isolated: one failing is logged, skipped and named
+        in the result's ``failed`` ids.
         """
         count = 0
+        failed: list[int] = []
         for portfolio in self._trader.list_portfolios():
             try:
                 count += self.evaluate_portfolio(portfolio.id, records, meta)
             except Exception:
+                failed.append(portfolio.id)
                 logger.warning(
                     "Thesis evaluation failed for portfolio %s",
                     portfolio.id,
                     exc_info=True,
                 )
-        return count
+        return EvaluationRun(count=count, failed=tuple(failed))
 
     def _evaluate_now(self, thesis: PositionThesisV1) -> None:
         """Evaluate a newly active version against the published artifact.

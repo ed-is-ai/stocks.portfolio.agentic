@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from app.schemas.evidence_ref import EvidenceRefV1
 
@@ -69,7 +69,8 @@ class ScoreBelowRule(BaseModel):
 
     model_config = _FROZEN
     kind: Literal["score_below"] = "score_below"
-    min_score: int = Field(ge=1, le=10)
+    #: The score is 1–10, so a threshold of 1 could never fire.
+    min_score: int = Field(ge=2, le=10)
 
 
 ThesisRuleV1 = Annotated[
@@ -103,6 +104,14 @@ class ThesisDraftV1(BaseModel):
     rationale: str = Field(min_length=1, max_length=2000)
     expected_setup: str = Field(min_length=1, max_length=1000)
     rules: tuple[ThesisRuleV1, ...] = Field(min_length=1, max_length=MAX_RULES)
+
+    @field_validator("rules")
+    @classmethod
+    def _distinct_rules(
+        cls, rules: tuple[ThesisRuleV1, ...]
+    ) -> tuple[ThesisRuleV1, ...]:
+        """Drop repeated rules (first kept), so none is checked or cited twice."""
+        return tuple(dict.fromkeys(rules))
 
 
 class ThesisContentV1(ThesisDraftV1):
