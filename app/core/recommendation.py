@@ -22,6 +22,8 @@ STAGE_2 = "Stage 2"
 BUY_SCORE_MIN = 7
 #: Minimum score for an approaching Stage 2 setup to count as "Stay Alert".
 STAY_ALERT_SCORE_MIN = 5
+#: Scores at or below this count as Sell/Avoid whatever the stage.
+AVOID_SCORE_MAX = 3
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,7 @@ def classify_recommendation(
     if a is None:
         return _NO_ANALYSIS
 
-    if a.stage in ("Stage 3", "Stage 4") or a.score <= 3:
+    if a.stage in ("Stage 3", "Stage 4") or a.score <= AVOID_SCORE_MAX:
         if is_portfolio_holding:
             return Recommendation("sell", "Sell", "rec-sell", "other")
         return Recommendation("avoid", "Avoid", "rec-avoid", "other")

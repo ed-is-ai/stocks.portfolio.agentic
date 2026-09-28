@@ -853,6 +853,25 @@
 <div id="strategy-activity-status" class="pipeline-status-bar"
      hx-get="/strategy-manager/activity-status" hx-trigger="load" hx-swap="innerHTML"></div>
 
+<!-- Research Copilot panel (GH-13): filled by a scanner row's "Why?" button. -->
+<div class="offcanvas offcanvas-end" tabindex="-1" id="copilotPanel" aria-labelledby="copilotPanelLabel">
+  <div class="offcanvas-header">
+    <h5 class="offcanvas-title" id="copilotPanelLabel"><i class="bi bi-chat-square-text me-2"></i>Research Copilot</h5>
+    <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body" id="copilot-body" aria-live="polite"></div>
+</div>
+<script>
+  // Reset the copilot panel to a one-line status (before a request, or when
+  // one fails) so an old answer is never shown under a new question.
+  function copilotStatus(text, cls) {
+    const line = document.createElement('p');
+    line.className = 'small ' + (cls || 'text-muted');
+    line.textContent = text;
+    document.getElementById('copilot-body').replaceChildren(line);
+  }
+</script>
+
 <!-- Buy Modal -->
 <div class="modal fade" id="buyModal" tabindex="-1">
   <div class="modal-dialog modal-dialog-scrollable modal-dialog-centered">

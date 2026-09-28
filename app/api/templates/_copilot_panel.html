@@ -1,0 +1,61 @@
+{# Research Copilot panel (GH-13): swapped into #copilot-body by POST /copilot/ask. #}
+{% set answer = outcome.answer %}
+<div class="copilot-panel small" data-status="{{ outcome.status.value }}">
+  <h6 class="fw-semibold mb-2">{{ outcome.ticker }}</h6>
+
+  {% if outcome.status == "no_analysis" %}
+    <div class="alert alert-secondary py-2">
+      No analysis for {{ outcome.ticker }} in the current run.
+    </div>
+  {% elif answer %}
+    <p class="mb-3">{{ answer.answer }}</p>
+    <div class="fw-semibold mb-1">Evidence cited</div>
+    {% if outcome.cited %}
+      <ul class="list-unstyled mb-3">
+        {% for item in outcome.cited %}
+        <li class="mb-1" data-citation="{{ item.ref.id }}">
+          <span class="badge text-bg-light border">{{ item.ref.id }}</span>
+          <span class="text-muted">{{ item.ref.kind }} · {{ item.ref.as_of or "date unknown" }} · {{ item.ref.source }}</span>
+          <div>{{ item.text }}</div>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="text-muted mb-3">The answer cited no supplied evidence.</p>
+    {% endif %}
+    {% if answer.unknowns %}
+      <div class="fw-semibold mb-1">Unknowns</div>
+      <ul class="mb-3">
+        {% for unknown in answer.unknowns %}<li>{{ unknown }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+  {% else %}
+    <div class="alert alert-warning py-2">Copilot unavailable — showing the evidence it would have used.</div>
+    <ul class="list-unstyled mb-3">
+      {% for item in outcome.evidence %}
+      <li class="mb-1{% if item.limitation %} text-warning-emphasis{% endif %}">
+        <span class="badge text-bg-light border">{{ item.ref.id }}</span>
+        <span class="text-muted">{{ item.ref.kind }} · {{ item.ref.as_of or "date unknown" }} · {{ item.ref.source }}</span>
+        <div>{{ item.text }}</div>
+      </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <div class="text-muted border-top pt-2 mb-3">
+    Model: {{ answer.model_id if answer else "none" }} · Analysis run: {{ outcome.run_id }}
+  </div>
+
+  <form hx-post="/copilot/ask" hx-target="#copilot-body" hx-swap="innerHTML"
+        hx-sync="#copilot-body:replace" hx-disabled-elt="find button[type='submit']"
+        hx-on::before-request="copilotStatus('Asking…')"
+        hx-on::response-error="copilotStatus('Copilot request failed.', 'text-danger')"
+        hx-on::send-error="copilotStatus('Copilot request failed.', 'text-danger')">
+    <input type="hidden" name="ticker" value="{{ outcome.ticker }}">
+    <div class="input-group input-group-sm">
+      <input class="form-control" name="question" maxlength="500"
+             placeholder="Ask about {{ outcome.ticker }}…" aria-label="Question">
+      <button class="btn btn-outline-primary" type="submit">Ask</button>
+    </div>
+  </form>
+</div>

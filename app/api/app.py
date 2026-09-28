@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import (
+    copilot,
     notifications,
     pipeline,
     portfolio,
@@ -154,6 +155,7 @@ def create_app(
     app.include_router(notifications.router)
     app.include_router(settings.router)
     app.include_router(strategy_manager.router)
+    app.include_router(copilot.router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app
 

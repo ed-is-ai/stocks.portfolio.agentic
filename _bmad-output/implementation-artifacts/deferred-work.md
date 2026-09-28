@@ -683,3 +683,13 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-34-vcp-negative-depth.md`
   summary: In `_build_contractions_from`, each continuation skip consumes one of the four `range(4)` iterations and moves `current_high` without re-checking it against the right-shoulder reference `h1_val`.
   evidence: The first-candidate guard behaved this way before GH-34; choppy series can fall below `min_contractions` for no pattern reason.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-13-research-copilot.md`
+  summary: The copilot cannot redact company names because the app has no company-name source; if analyst text ever becomes LLM-written or a name field is added, company names must join the ticker redaction.
+  evidence: `StockScan`/`StockAnalysis` have no name field; strengths/risks are currently templated by the analyst.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-13-research-copilot.md`
+  summary: `recommendation_reason` restates `classify_recommendation`'s rules as prose; the two can drift. `classify_recommendation` could return its own reason.
+  evidence: both branch on the same stage/zone/score/volume conditions in `app/agents/research/evidence.py` and `app/core/recommendation.py`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-13-research-copilot.md`
+  summary: `ResearchCopilotClient.draft` and `AnthropicNarrativeClient.generate_market_narrative` duplicate the structured-output call; a shared helper would keep model and SDK changes in one place.
+  evidence: same model constant, import guard, `output_config` json_schema call, stop_reason check and pydantic parse.

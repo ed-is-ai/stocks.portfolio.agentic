@@ -226,6 +226,34 @@ def read_analysis_artifact_meta(path: Path) -> AnalysisArtifactMeta | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    return _meta_from_payload(payload)
+
+
+def read_analysis_records(path: Path) -> list[dict[str, Any]]:
+    """Return the analysis records from *path*, supporting legacy bare lists."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return _records_from_payload(payload)
+
+
+def read_analysis_snapshot(
+    path: Path,
+) -> tuple[list[dict[str, Any]], AnalysisArtifactMeta | None]:
+    """Return records and meta from ONE read of *path*.
+
+    Two separate reads can straddle a promotion and pair one run's records
+    with another run's id; a single read guarantees both describe one run.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return [], None
+    return _records_from_payload(payload), _meta_from_payload(payload)
+
+
+def _meta_from_payload(payload: Any) -> AnalysisArtifactMeta | None:
     if not isinstance(payload, dict):
         return None
     meta = payload.get("meta")
@@ -237,12 +265,7 @@ def read_analysis_artifact_meta(path: Path) -> AnalysisArtifactMeta | None:
         return None
 
 
-def read_analysis_records(path: Path) -> list[dict[str, Any]]:
-    """Return the analysis records from *path*, supporting legacy bare lists."""
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
+def _records_from_payload(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return payload
     if isinstance(payload, dict) and isinstance(payload.get("records"), list):

@@ -355,6 +355,15 @@
                   onclick="openBuy('{{ r.ticker }}', {{ r.price }}, {{ a.entry_price if a and a.entry_price else 'null' }}, {{ a.stop_loss if a and a.stop_loss else 'null' }})">
             <i class="bi bi-plus-lg"></i> Record Buy
           </button>
+          {# Research Copilot (GH-13): explain this row in the side panel. #}
+          <button class="btn btn-outline-secondary btn-sm py-0 px-1 ms-1" type="button"
+                  title="Why? Ask the Research Copilot"
+                  hx-post="/copilot/ask" hx-vals='{{ {"ticker": r.ticker} | tojson }}'
+                  hx-target="#copilot-body" hx-swap="innerHTML" hx-sync="#copilot-body:replace"
+                  hx-on::before-request="copilotStatus('Asking…')"
+                  hx-on::response-error="copilotStatus('Copilot request failed.', 'text-danger')"
+                  hx-on::send-error="copilotStatus('Copilot request failed.', 'text-danger')"
+                  data-bs-toggle="offcanvas" data-bs-target="#copilotPanel">Why?</button>
         </td>
 
       </tr>
