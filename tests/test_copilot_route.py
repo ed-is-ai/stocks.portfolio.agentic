@@ -201,3 +201,39 @@ def test_why_button_and_ask_form_reset_panel_and_sync(post) -> None:
     _ui_assertions(panel)
     _ui_assertions(scanner)
     assert "hx-disabled-elt=\"find button[type='submit']\"" in panel
+
+
+def test_portfolio_target_keeps_the_panel_in_the_aside(post) -> None:
+    """GH-19: the Portfolio aside's follow-ups swap into its own body."""
+    send, _ = post
+    client, _ = _fake_client(None)
+    panel = send(client, {"ticker": "ZETA", "target": "#portfolio-copilot-body"}).text
+
+    assert 'hx-target="#portfolio-copilot-body"' in panel
+    assert 'hx-sync="#portfolio-copilot-body:replace"' in panel
+    assert 'name="target" value="#portfolio-copilot-body"' in panel
+    assert "copilotStatus('Asking…', '', '#portfolio-copilot-body')" in panel
+    assert 'hx-target="#copilot-body"' not in panel
+
+
+@pytest.mark.parametrize(
+    "target", ["#evil", "#tab-content", '#copilot-body" onclick="x']
+)
+def test_unknown_target_falls_back_to_the_offcanvas(post, target: str) -> None:
+    send, _ = post
+    client, _ = _fake_client(None)
+    panel = send(client, {"ticker": "ZETA", "target": target}).text
+
+    assert 'hx-target="#copilot-body"' in panel
+    assert target not in panel
+    _ui_assertions(panel)
+
+
+def test_overlong_target_is_rejected(post) -> None:
+    send, audit = post
+    client, calls = _fake_client(None)
+
+    response = send(client, {"ticker": "ZETA", "target": "#" + "x" * 32})
+
+    assert response.status_code == 422
+    assert calls == [] and not audit.exists()

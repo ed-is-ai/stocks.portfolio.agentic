@@ -30,6 +30,7 @@ STALE_PRICE_DAYS = 3
 _HUNDRED = Decimal(100)
 _ZERO = Decimal(0)
 _ONE_DP = Decimal("0.1")
+_PENNY = Decimal("0.01")
 _NO_STOP_REASON = "neither a BUY-trade stop nor a scan stop exists"
 _SEVERITY_RANK = {"high": 0, "medium": 1, "info": 2}
 
@@ -84,7 +85,8 @@ def evaluate(
             holdings.append(holding)
     cash = _ZERO if cash_gbp is None else Decimal(str(cash_gbp))
     total = sum((h.value for h in holdings), cash)
-    ranked += _stop_findings(holdings, total, policy)
+    stop_findings, at_risk = _stop_findings(holdings, total, policy)
+    ranked += stop_findings
     if total > 0:
         ranked += _position_findings(holdings, total, policy)
         ranked += _sector_findings(holdings, total, policy)
@@ -102,6 +104,15 @@ def evaluate(
         confidence="limited" if limitations else "complete",
         limitations=limitations,
         total_value_gbp=total,
+        position_weights=(
+            {h.ticker: _shown(h.value / total * _HUNDRED) for h in holdings}
+            if total > 0
+            else {}
+        ),
+        capital_at_risk_gbp=None if at_risk is None else at_risk.quantize(_PENNY),
+        capital_at_risk_pct=(
+            None if at_risk is None else _shown(at_risk / total * _HUNDRED)
+        ),
     )
 
 
@@ -278,11 +289,12 @@ def _unknown_sector_findings(
 
 def _stop_findings(
     holdings: list[_Holding], total: Decimal, policy: RiskPolicyV1
-) -> list[tuple[Decimal, RiskFindingV1]]:
+) -> tuple[list[tuple[Decimal, RiskFindingV1]], Decimal | None]:
     """Per-position stop findings plus the aggregate capital-at-risk finding.
 
     A position at or below its stop contributes 0 to the aggregate; one with
-    no evidenced stop is excluded from it.
+    no evidenced stop is excluded from it. Also returns the aggregate GBP at
+    risk, or ``None`` when no aggregate was computed.
     """
     findings: list[tuple[Decimal, RiskFindingV1]] = []
     at_risk: list[tuple[_Holding, Decimal]] = []
@@ -295,9 +307,11 @@ def _stop_findings(
             at_risk.append((h, _ZERO))
         else:
             at_risk.append((h, h.value - h.stop_value))
-    if at_risk and total > 0:
-        findings.append(_capital_at_risk(at_risk, total, policy))
-    return findings
+    if not (at_risk and total > 0):
+        return findings, None
+    risk = sum((amount for _, amount in at_risk), _ZERO)
+    findings.append(_capital_at_risk(at_risk, risk, total, policy))
+    return findings, risk
 
 
 def _no_stop(h: _Holding) -> RiskFindingV1:
@@ -337,9 +351,11 @@ def _below_stop(h: _Holding) -> RiskFindingV1:
 
 
 def _capital_at_risk(
-    at_risk: list[tuple[_Holding, Decimal]], total: Decimal, policy: RiskPolicyV1
+    at_risk: list[tuple[_Holding, Decimal]],
+    risk: Decimal,
+    total: Decimal,
+    policy: RiskPolicyV1,
 ) -> tuple[Decimal, RiskFindingV1]:
-    risk = sum((amount for _, amount in at_risk), _ZERO)
     pct = risk / total * _HUNDRED
     over = _shown(pct) > policy.max_capital_at_risk_pct
     at_stop = sorted(h.ticker for h, amount in at_risk if amount == 0)

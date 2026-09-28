@@ -13,6 +13,7 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -28,10 +29,16 @@ from app.repositories import db
 from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.schemas.analysis_artifact import read_analysis_records
 from app.schemas.portfolio_import import ProviderOption
+from app.schemas.portfolio_recommendation import NO_ASSIGNMENT, EvaluationUnavailable
 from app.schemas.portfolio_risk import RiskReportV1
 from app.schemas.record import StockRecord
 from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
+from app.services.portfolio_agent_view import (
+    PortfolioAgentView,
+    RecommendationOutcome,
+    build_agent_view,
+)
 from app.services.portfolio_import.contract_registry import ContractRegistryError
 from app.services.portfolio_import.registry_loader import get_contract_registry
 from app.services.risk_engine import evaluate
@@ -1689,3 +1696,42 @@ class PortfolioService:
             today=datetime.now(timezone.utc).date(),
             gbp_valuation=self._gbp_valuation,
         )
+
+    def agent_view(
+        self,
+        portfolio_id: int | None,
+        recommend: Callable[[int], RecommendationOutcome],
+    ) -> PortfolioAgentView:
+        """Gather the Portfolio tab's agent layer (GH-19).
+
+        ``recommend`` is the injected ``PortfolioRecommendationService``'s
+        ``recommend`` (a callable, since that service imports this one). A
+        failing recommendation or risk report becomes a declared unavailable
+        state. Never mutates trades, cash flows, portfolios or Strategy
+        assignments; the risk valuation may fetch and cache an FX quote
+        exactly as the Portfolio tab render does.
+        """
+        portfolios = self._trader.list_portfolios()
+        if not portfolios:
+            return build_agent_view(None, (), NO_ASSIGNMENT, self._safe_risk(None))
+        active_id = self._active_portfolio_id(portfolio_id, portfolios)
+        snapshot = self.portfolio_input_snapshot(active_id, portfolios=portfolios)
+        positions, _, _ = self._priced_positions(snapshot)
+        try:
+            outcome = recommend(active_id)
+        except Exception:
+            logger.exception("Recommendation evaluation failed for %s", active_id)
+            outcome = EvaluationUnavailable(
+                reason="Recommendations could not be evaluated — see the run log."
+            )
+        return build_agent_view(
+            active_id, positions, outcome, self._safe_risk(active_id)
+        )
+
+    def _safe_risk(self, portfolio_id: int | None) -> RiskReportV1 | None:
+        """``risk_report``, or ``None`` (declared unavailable) if it fails."""
+        try:
+            return self.risk_report(portfolio_id)
+        except Exception:
+            logger.exception("Risk report failed for %s", portfolio_id)
+            return None

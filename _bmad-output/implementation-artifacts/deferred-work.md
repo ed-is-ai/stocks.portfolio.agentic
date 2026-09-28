@@ -699,3 +699,9 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-16-portfolio-risk-coach.md`
   summary: The lazily loaded risk panel rebuilds the full `portfolio_input_snapshot` (chart, trades, cash flows, reconciliation) and reloads the price cache on every Portfolio-tab render, duplicating the tab's own work.
   evidence: `PortfolioService.risk_report` calls `portfolio_input_snapshot` and `_priced_positions` independently of `default_portfolio_context`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-19-portfolio-agent-surfaces.md`
+  summary: The agents partial builds the portfolio snapshot and evaluates the risk report again, separately from the risk panel, so one Portfolio-tab load runs the snapshot and risk evaluation twice alongside the tab's own render.
+  evidence: `PortfolioService.agent_view` calls `risk_report` itself; the risk panel lazily loads `/partials/portfolio/risk`, which calls it again.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-19-portfolio-agent-surfaces.md`
+  summary: `RiskReportV1.position_weights` and risk findings are keyed by display symbol, while recommendations match on the canonical `p.ticker`; two positions sharing a display symbol would collide.
+  evidence: `risk_engine.evaluate` keys weights by `display_symbol`; `portfolio_agent_view.build_agent_view` looks rows up by `p.display_symbol` for risk and `p.ticker` for Strategy/Evidence.

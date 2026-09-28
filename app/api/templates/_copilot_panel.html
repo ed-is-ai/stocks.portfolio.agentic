@@ -46,12 +46,17 @@
     Model: {{ answer.model_id if answer else "none" }} · Analysis run: {{ outcome.run_id }}
   </div>
 
-  <form hx-post="/copilot/ask" hx-target="#copilot-body" hx-swap="innerHTML"
-        hx-sync="#copilot-body:replace" hx-disabled-elt="find button[type='submit']"
-        hx-on::before-request="copilotStatus('Asking…')"
-        hx-on::response-error="copilotStatus('Copilot request failed.', 'text-danger')"
-        hx-on::send-error="copilotStatus('Copilot request failed.', 'text-danger')">
+  {# ``target`` is allowlisted by the route; the default (scanner offcanvas)
+     keeps the status helper's default target (GH-19). #}
+  {% set target = target or "#copilot-body" %}
+  {% set aside = target != "#copilot-body" %}
+  <form hx-post="/copilot/ask" hx-target="{{ target }}" hx-swap="innerHTML"
+        hx-sync="{{ target }}:replace" hx-disabled-elt="find button[type='submit']"
+        hx-on::before-request="copilotStatus('Asking…'{% if aside %}, '', '{{ target }}'{% endif %})"
+        hx-on::response-error="copilotStatus('Copilot request failed.', 'text-danger'{% if aside %}, '{{ target }}'{% endif %})"
+        hx-on::send-error="copilotStatus('Copilot request failed.', 'text-danger'{% if aside %}, '{{ target }}'{% endif %})">
     <input type="hidden" name="ticker" value="{{ outcome.ticker }}">
+    <input type="hidden" name="target" value="{{ target }}">
     <div class="input-group input-group-sm">
       <input class="form-control" name="question" maxlength="500"
              placeholder="Ask about {{ outcome.ticker }}…" aria-label="Question">
