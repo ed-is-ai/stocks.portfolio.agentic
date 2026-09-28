@@ -188,11 +188,10 @@
     <div class="sprint-head">
       <span class="dates">Sprint 1 · 28 Sep – 11 Oct 2026</span>
       <h2 id="s1-title">SPY benchmark &amp; six backtests</h2>
-      <p>SPY work and recovery are done (#22–#29 closed). What remains is making the six results trustworthy: the Minervini entry fix, a position cap across every strategy, and the storage epic.</p>
+      <p>SPY work and recovery are done (#22–#29 closed). What remains is making the six results trustworthy: the Minervini entry fix, and a position cap across every strategy.</p>
       <div class="chips">
         <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/33">#33 Position cap</a>
         <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/31">#31 Minervini entries</a>
-        <a class="chip" href="https://github.com/ed-is-ai/stocks.portfolio.agentic/issues/10">#10 Storage epic</a>
         <span class="chip done">#22–#29</span>
       </div>
     </div>
@@ -201,7 +200,6 @@
       <ul>
         <li>Land <b>#33 before re-running anything</b>. Every current result, including the #31 retest, is superseded once the engine caps positions.</li>
         <li>#35 (VCP as a rank boost, Sprint 3) only changes results when candidates exceed free slots. That only happens once #33 exists, so it depends on #33.</li>
-        <li>#10 is too big for two weeks. Its 70% reduction target was set against an 18 GB cache that is now 44 GB, so the target needs restating before work starts.</li>
       </ul>
     </div>
     <div class="sprint-body">
@@ -228,7 +226,7 @@
           <div class="app" data-tab="Strategy Manager">
             <div class="body">
               <div class="note warn chg">Superseded: this run predates the position cap. Re-run to compare like for like. <b class="pin">4</b> <span class="btn">Re-run with cap</span></div>
-              <div class="toolbar"><h3>Minervini · 2000-01 → 2026-08</h3><small>Opened in 0.4 s <b class="pin">6</b></small></div>
+              <div class="toolbar"><h3>Minervini · 2000-01 → 2026-08</h3></div>
               <div class="metrics">
                 <div class="metric"><span>Total return</span><strong class="pos">+59.79%</strong></div>
                 <div class="metric"><span>Sharpe</span><strong>0.23</strong></div>
@@ -258,9 +256,6 @@
           <div class="tags"><span class="tag ui">UI</span></div></div>
         <div class="change"><b class="pin">5</b><p><b>#31</b> Entry gates on intact-base scan states. This is already in PR #32 and needs no interface change. The strategy source digest changes, so older runs no longer match.</p>
           <div class="where"><span class="path">skills/rtly-backtest-minervini/scripts/strategy.py</span></div></div>
-        <div class="change"><b class="pin">6</b><p><b>#10</b> Opening a result reads a stored coverage revision instead of hashing the whole profile (measured at 98.6 s cold). Historical evidence moves to schema v2 with compressed chunks and integer revision keys.</p>
-          <div class="where"><span class="path">app/repositories/backtest_repo.py</span><span class="path">app/repositories/historical_price_repo.py</span></div>
-          <div class="tags"><span class="tag iface">Interface: DB schema v2 + migration</span><span class="tag guard">Rebuild if evidence files change</span></div></div>
       </div>
     </div>
   </section>
