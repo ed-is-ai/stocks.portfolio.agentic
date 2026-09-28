@@ -249,10 +249,10 @@ class TestMarketNarrativePersistence:
 
 
 def _skill_prompt_text() -> str:
-    """Extract the fenced prompt body from the market-narrative skill reference."""
+    """Extract the fenced prompt body from the rtly-market-narrative skill reference."""
     from app.core.config import SKILLS_DIR
 
-    ref = SKILLS_DIR / "market-narrative" / "references" / "system_prompt.md"
+    ref = SKILLS_DIR / "rtly-market-narrative" / "references" / "system_prompt.md"
     body = ref.read_text(encoding="utf-8")
     marker = "```text\n"
     start = body.index(marker) + len(marker)
@@ -263,7 +263,7 @@ def _skill_prompt_text() -> str:
 class TestSystemPromptDriftGuard:
     """The skill reference must mirror the live `_SYSTEM_PROMPT` verbatim.
 
-    The market-narrative skill (skills/market-narrative/) documents the prompt
+    The rtly-market-narrative skill (skills/rtly-market-narrative/) documents the prompt
     as the versioned source of truth; this asserts it never drifts from the
     prompt the pipeline actually sends.
     """

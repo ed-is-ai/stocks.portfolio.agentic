@@ -546,3 +546,15 @@ def test_sdk_client_is_short_timeout_and_closed(
     assert opened == [{"api_key": "k", "timeout": 30.0, "max_retries": 1}]
     assert closed == [True]
     assert "research copilot draft failed" in caplog.text
+
+
+def test_skill_reference_matches_live_prompt() -> None:
+    """skills/rtly-research-copilot must mirror the live `_SYSTEM_PROMPT` verbatim."""
+    from app.agents.research.copilot import _SYSTEM_PROMPT
+    from app.core.config import SKILLS_DIR
+
+    ref = SKILLS_DIR / "rtly-research-copilot" / "references" / "system_prompt.md"
+    body = ref.read_text(encoding="utf-8")
+    marker = "```text\n"
+    start = body.index(marker) + len(marker)
+    assert body[start : body.index("\n```", start)] == _SYSTEM_PROMPT

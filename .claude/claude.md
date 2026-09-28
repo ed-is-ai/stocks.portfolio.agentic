@@ -69,6 +69,10 @@ This document contains critical information about working with this codebase. Fo
   following `app/integrations/anthropic_client.py`: JSON-schema output parsed into
   pydantic, and any failure returns `None` so a deterministic fallback is used.
   Do not add Microsoft Agent Framework.
+- every prompt sent to Claude is a skill: `skills/rtly-<name>/SKILL.md` describes the
+  recipe and `references/system_prompt.md` holds the verbatim system prompt, kept
+  identical to the live constant by a drift-guard test (see `skills/rtly-market-narrative`,
+  `skills/rtly-research-copilot`)
 - data sent to an LLM is anonymised: securities as per-request labels mapped back
   locally, money as percentages of portfolio value; never tickers, amounts, share
   counts, cost basis or cash for the user's holdings
