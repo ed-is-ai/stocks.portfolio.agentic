@@ -860,6 +860,57 @@ def test_launch_all_gbp_run_never_fetches_the_fx_series() -> None:
     assert price_repo.committed == []
 
 
+def test_selected_universe_resolves_cross_month_and_cached_price_fallback() -> None:
+    class SelectedRepo(FakeBacktestRepo):
+        def selected_member_revisions(
+            self,
+            profile_hash: str,
+            snapshot_month: str,
+            selected_security_ids: tuple[str, ...],
+        ):
+            return (("sec-aapl", PRICE_REVISION),)
+
+        def roster_member_identities(self, profile_hash: str):
+            return [
+                ("sec-aapl", "AAPL", "XNAS", "USD"),
+                ("sec-msft", "MSFT", "XNAS", "USD"),
+            ]
+
+    class FallbackRepo(FakeHistoricalPriceRepo):
+        def latest_revisions_for_securities(self, security_ids: tuple[str, ...]):
+            return (("sec-msft", OTHER_REVISION),)
+
+        def get(self, revision: str):
+            if revision == OTHER_REVISION:
+                return SimpleNamespace(
+                    security_id="sec-msft",
+                    provider="yfinance",
+                    requested_symbol="MSFT",
+                    observed_symbol="MSFT",
+                    currency="USD",
+                )
+            return super().get(revision)
+
+    service, _ = _service(
+        backtest_repo=SelectedRepo(),
+        historical_price_repo=FallbackRepo(),
+    )
+    evidence = service._resolve_roster_evidence(
+        profile_hash=PROFILE_HASH,
+        snapshot_month="2026-02",
+        base_currency="USD",
+        start_month="2026-02",
+        end_month="2026-03",
+        selected_security_ids=("sec-aapl", "sec-msft"),
+        pin_fx=False,
+    )
+
+    assert [(item.security_id, item.price_revision) for item in evidence] == [
+        ("sec-aapl", PRICE_REVISION),
+        ("sec-msft", OTHER_REVISION),
+    ]
+
+
 def test_launch_fx_series_ingestion_is_idempotent() -> None:
     """Re-preparing the same window re-ingests the same content-addressed
     series revision -- the pinned ``fx_revision`` is stable across runs."""

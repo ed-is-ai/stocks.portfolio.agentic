@@ -7838,6 +7838,56 @@ class BacktestRepository:
         )
         return revisions
 
+    def selected_member_revisions(
+        self,
+        profile_hash: str,
+        snapshot_month: str,
+        selected_security_ids: tuple[str, ...],
+    ) -> tuple[tuple[str, str], ...]:
+        """Resolve selected roster members from verified profile snapshots.
+
+        A selected universe may span securities whose first valid scan was
+        committed after the run's start month.  Prefer the requested month,
+        then use each security's latest committed ``valid_scan`` month.  The
+        existing full-month validator remains the authority for every
+        returned revision; this method only chooses among immutable rows.
+        """
+        selected = tuple(dict.fromkeys(selected_security_ids))
+        if not selected:
+            return ()
+        preferred = dict(self.snapshot_member_revisions(profile_hash, snapshot_month))
+        resolved = {security_id: preferred[security_id] for security_id in selected if security_id in preferred}
+        missing = tuple(security_id for security_id in selected if security_id not in resolved)
+        if not missing:
+            return tuple((security_id, resolved[security_id]) for security_id in selected)
+
+        placeholders = ",".join("?" for _ in missing)
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"""SELECT security_id, MAX(snapshot_month)
+                       FROM snapshot_members
+                      WHERE profile_hash=? AND resolution='valid_scan'
+                        AND security_id IN ({placeholders})
+                      GROUP BY security_id""",
+                (profile_hash, *missing),
+            ).fetchall()
+        for row in rows:
+            security_id, month = str(row[0]), str(row[1])
+            try:
+                month_revisions = dict(
+                    self.snapshot_member_revisions(profile_hash, month)
+                )
+            except BacktestIntegrityError:
+                continue
+            revision = month_revisions.get(security_id)
+            if revision is not None:
+                resolved[security_id] = revision
+        return tuple(
+            (security_id, resolved[security_id])
+            for security_id in selected
+            if security_id in resolved
+        )
+
     def snapshot_month_write_set(
         self, profile_hash: str, snapshot_month: str
     ) -> tuple[tuple[SnapshotMemberV1, ...], tuple[HistoricalScanRecordV1, ...]] | None:
