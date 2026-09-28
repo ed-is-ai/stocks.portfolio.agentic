@@ -549,11 +549,11 @@ def test_sdk_client_is_short_timeout_and_closed(
 
 
 def test_skill_reference_matches_live_prompt() -> None:
-    """skills/research-copilot must mirror the live `_SYSTEM_PROMPT` verbatim."""
+    """skills/rtly-research-copilot must mirror the live `_SYSTEM_PROMPT` verbatim."""
     from app.agents.research.copilot import _SYSTEM_PROMPT
     from app.core.config import SKILLS_DIR
 
-    ref = SKILLS_DIR / "research-copilot" / "references" / "system_prompt.md"
+    ref = SKILLS_DIR / "rtly-research-copilot" / "references" / "system_prompt.md"
     body = ref.read_text(encoding="utf-8")
     marker = "```text\n"
     start = body.index(marker) + len(marker)

@@ -1,5 +1,5 @@
 ---
-name: research-copilot
+name: rtly-research-copilot
 description: Use this skill to answer a question about one Stock Scanner security — typically "why did this security get its current recommendation?" — in a few plain-English sentences that cite numbered, locally gathered evidence. Use when explaining a scanner or held-portfolio row from its published analysis, freshness and source-health evidence. The model sees only an anonymised label ("Security A"), percent distances and evidence text; never the ticker, a company name, a price or a currency amount.
 ---
 
