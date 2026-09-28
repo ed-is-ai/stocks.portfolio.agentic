@@ -16,8 +16,10 @@ strategy_universe:
 parameters:
   - name: minimum_vcp_score
     type: integer
-    default: 70
-    description: Inclusive minimum VCP score.
+    default: 0
+    description: >-
+      Inclusive minimum VCP score. The score ranks competing candidates; the
+      default floor of 0 only excludes a scan with no VCP score at all.
     required: true
     minimum: 0
     maximum: 100
@@ -76,10 +78,14 @@ session close, accepting the engine's next-session-open fill convention.
 Require current bounded daily history and visible monthly scan evidence; emit
 nothing for a security whose evidence is missing, stale, or too short.
 
-Enter only a Stage 2, valid, trend-template-passing VCP whose monthly scan
+Enter only a Stage 2, trend-template-passing security whose monthly scan
 state shows an intact base (`Pre-breakout`, `Breakout` or
-`Early-post-breakout`) and whose score, daily volume, pivot, and
-pivot-extension gates all qualify. The breakout itself is detected on the
+`Early-post-breakout`) and whose trend score, VCP score floor, daily volume,
+pivot, and pivot-extension gates all qualify. A validated multi-contraction
+VCP is not required: flat bases and other non-VCP setups qualify too. Each
+entry carries its VCP score as `Signal.priority`, so when the position cap
+leaves fewer free slots than candidates, higher VCP scores fill first and
+ties fall back to the engine's security order. The breakout itself is detected on the
 daily session, not from the scan's `Breakout` state, which only describes the
 snapshot session. Exit the
 full position on the configured loss threshold, a close below the current

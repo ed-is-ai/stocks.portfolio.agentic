@@ -152,6 +152,11 @@ class Signal(_StrategyModel):
     #: and deliberately absent from ``sort_key`` so adding one can never
     #: change signal ordering or execution.
     explanation: SignalExplanationV1 | None = None
+    #: Optional ranking input (#35). When the position cap leaves fewer free
+    #: slots than BUY candidates, higher priority fills first. Like
+    #: ``explanation`` it is absent from ``sort_key``, so it never changes
+    #: signal ordering when every candidate fits.
+    priority: Decimal | None = None
 
     @model_validator(mode="after")
     def _no_future_dated_evidence(self) -> "Signal":

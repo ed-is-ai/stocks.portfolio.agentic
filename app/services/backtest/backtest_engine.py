@@ -559,6 +559,13 @@ def _engine_signal_sort_key(signal: Signal) -> tuple[date, int, str, str]:
     return (signal.session, _SIDE_RANK[signal.side], signal.security_id, signal.rule_id)
 
 
+def _slot_rank(signal: Signal) -> tuple[bool, Decimal]:
+    """Position-slot order (#35): highest priority first, missing last."""
+    if signal.priority is None:
+        return (True, Decimal(0))
+    return (False, -signal.priority)
+
+
 def _fill_sort_key(order: PendingOrderV1) -> tuple[date, int, str, date, str]:
     """Fills materialize in ``(fill_session, side_rank, security_id,
     signal_session, deterministic_sort_key)`` order per the Determinism
@@ -1377,8 +1384,10 @@ class _Engine:
         Held positions and pending BUYs occupy slots. SELLs scheduled this
         session are already pending, and a pending SELL frees its slot only
         for a candidate filling on or after the SELL's own fill session (fills
-        run SELL-first within a session). Surplus candidates are skipped in
-        the engine's deterministic signal order.
+        run SELL-first within a session). Slots go to the highest
+        ``Signal.priority`` first (#35); a missing priority ranks last and
+        ties keep the engine's deterministic signal order. Kept and skipped
+        candidates are both returned or recorded in that signal order.
         """
         cap = self.max_concurrent_positions
         if cap is None:
@@ -1391,21 +1400,29 @@ class _Engine:
         occupied = len(self.positions) + sum(
             1 for order in self.pending.values() if order.side is SignalSide.BUY
         )
-        kept: list[tuple[Signal, date]] = []
-        for signal, fill_session in buy_candidates:
+        by_priority = sorted(
+            range(len(buy_candidates)),
+            key=lambda index: _slot_rank(buy_candidates[index][0]),
+        )
+        kept: set[int] = set()
+        for index in by_priority:
+            fill_session = buy_candidates[index][1]
             freed = sum(1 for sold in sell_fill_sessions if sold <= fill_session)
             if occupied - freed + len(kept) < cap:
-                kept.append((signal, fill_session))
-                continue
-            session_events.append(
-                self._skip_signal(
-                    signal,
-                    session,
-                    SkipReasonCode.MAX_CONCURRENT_POSITIONS,
-                    "concurrent position limit reached",
+                kept.add(index)
+        for index, (signal, _) in enumerate(buy_candidates):
+            if index not in kept:
+                session_events.append(
+                    self._skip_signal(
+                        signal,
+                        session,
+                        SkipReasonCode.MAX_CONCURRENT_POSITIONS,
+                        "concurrent position limit reached",
+                    )
                 )
-            )
-        return kept
+        return [
+            candidate for index, candidate in enumerate(buy_candidates) if index in kept
+        ]
 
     def _schedule_signal(
         self,

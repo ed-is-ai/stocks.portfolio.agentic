@@ -86,8 +86,8 @@ RUN_INPUT_MANIFEST_V3_VERSION = "run_input_manifest.v3"
 #: ``execution_contract_digest`` computed against the pre-Story-2.4
 #: placeholder semantics is no longer comparable. Bump again the moment
 #: engine/protocol behavior changes.
-ENGINE_VERSION = "backtest_engine.v7"
-PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v4"
+ENGINE_VERSION = "backtest_engine.v8"
+PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v5"
 
 #: Story 2.4 landed ``backtest_engine.py`` as real, hashable source, so
 #: :func:`_ledger_action_metrics_digest` now hashes it via

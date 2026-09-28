@@ -61,13 +61,14 @@ def _scan(
     score: int = 70,
     security_id: str = "sec-aapl",
     breakout_volume: bool = True,
+    valid_vcp: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         security_id=security_id,
         as_of_session_date=as_of,
         stage=SimpleNamespace(value=stage),
         vcp=SimpleNamespace(
-            valid_vcp=True,
+            valid_vcp=valid_vcp,
             score=score,
             trend_template_score=Decimal("85"),
             trend_template_passed=True,
@@ -137,6 +138,32 @@ def test_entry_qualifies_at_inclusive_score_volume_and_extension_bounds() -> Non
     assert [(item.side, item.rule_id) for item in first] == [
         (SignalSide.BUY, "minervini_vcp_breakout_v1")
     ]
+
+
+def test_unvalidated_vcp_still_enters_and_is_ranked_by_its_score() -> None:
+    """A validated VCP ranks a candidate rather than gating it (#35)."""
+    strategy = MinerviniStrategy()
+    view = _View(_history(), _scan(valid_vcp=False, score=42))
+
+    signals = validate_entry_signals(
+        strategy.entry_signals(view, {**PARAMETERS, "minimum_vcp_score": 0})
+    )
+
+    assert [(item.side, item.priority) for item in signals] == [
+        (SignalSide.BUY, Decimal("42"))
+    ]
+
+
+def test_scan_without_a_vcp_score_never_enters() -> None:
+    strategy = MinerviniStrategy()
+    scan = _scan()
+    scan.vcp.score = None
+
+    signals = strategy.entry_signals(
+        _View(_history(), scan), {**PARAMETERS, "minimum_vcp_score": 0}
+    )
+
+    assert signals == []
 
 
 def test_entry_fails_closed_for_short_stale_or_overextended_evidence() -> None:
