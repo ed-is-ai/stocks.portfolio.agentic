@@ -32,6 +32,11 @@ STRATEGY_API_VERSION = 1
 _ENTRY_RULE = "minervini_vcp_breakout_v1"
 _EXIT_RULE = "minervini_risk_exit_v1"
 _UPGRADE_EXIT_RULE = "minervini_upgrade_exit_v1"
+# Monthly scan states whose base is still intact.  A scan's ``Breakout``
+# describes only its own snapshot session, so requiring it limited entries to
+# breakouts that landed on the month-end snapshot (#31); the daily pivot,
+# extension and volume gates trigger the breakout instead.
+_ENTRY_SCAN_STATES = frozenset({"Pre-breakout", "Breakout", "Early-post-breakout"})
 
 
 UNIVERSE_PARAMETER = "selected_securities"
@@ -412,8 +417,7 @@ class MinerviniStrategy:
             stage == "Stage 2"
             and getattr(vcp, "valid_vcp", False) is True
             and getattr(vcp, "trend_template_passed", False) is True
-            and getattr(vcp, "execution_state", None) == "Breakout"
-            and getattr(vcp, "breakout_volume_detected", False) is True
+            and getattr(vcp, "execution_state", None) in _ENTRY_SCAN_STATES
             and isinstance(score, int)
             and not isinstance(score, bool)
             and score >= minimum_vcp_score

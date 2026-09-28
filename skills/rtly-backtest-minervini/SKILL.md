@@ -76,8 +76,12 @@ session close, accepting the engine's next-session-open fill convention.
 Require current bounded daily history and visible monthly scan evidence; emit
 nothing for a security whose evidence is missing, stale, or too short.
 
-Enter only a Stage 2, valid, trend-template-passing VCP in `Breakout` state
-whose score, volume, pivot, and pivot-extension gates all qualify. Exit the
+Enter only a Stage 2, valid, trend-template-passing VCP whose monthly scan
+state shows an intact base (`Pre-breakout`, `Breakout` or
+`Early-post-breakout`) and whose score, daily volume, pivot, and
+pivot-extension gates all qualify. The breakout itself is detected on the
+daily session, not from the scan's `Breakout` state, which only describes the
+snapshot session. Exit the
 full position on the configured loss threshold, a close below the current
 50-session SMA, a non-Stage-2 scan, or `Invalid`/`Damaged` VCP state.
 

@@ -60,6 +60,7 @@ def _scan(
     as_of: date = date(2026, 7, 31),
     score: int = 70,
     security_id: str = "sec-aapl",
+    breakout_volume: bool = True,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         security_id=security_id,
@@ -70,7 +71,7 @@ def _scan(
             score=score,
             trend_template_score=Decimal("85"),
             trend_template_passed=True,
-            breakout_volume_detected=True,
+            breakout_volume_detected=breakout_volume,
             pivot_price=Decimal("100"),
             execution_state=state,
         ),
@@ -178,6 +179,38 @@ def test_entry_fails_closed_for_missing_future_or_invalid_volume_evidence() -> N
     zero_volume = _history(current_volume="0")
     zero_volume.loc[:, "volume"] = Decimal("0")
     assert strategy.entry_signals(_View(zero_volume, _scan()), PARAMETERS) == []
+
+
+def test_daily_breakout_enters_from_an_intact_monthly_base() -> None:
+    """A month-end scan read before the breakout (#31) must not block entry.
+
+    ``Breakout`` in a scan describes only its snapshot session, so the daily
+    close/volume gates trigger the entry while the scan vouches for the base.
+    """
+    strategy = MinerviniStrategy()
+
+    for state in ("Pre-breakout", "Breakout", "Early-post-breakout"):
+        scan = _scan(state=state, breakout_volume=False)
+        signals = strategy.entry_signals(_View(_history(), scan), PARAMETERS)
+        assert [item.rule_id for item in signals] == ["minervini_vcp_breakout_v1"]
+
+
+def test_monthly_scan_state_still_rejects_extended_or_broken_bases() -> None:
+    strategy = MinerviniStrategy()
+
+    for state in ("Extended", "Overextended", "Damaged", "Invalid"):
+        view = _View(_history(), _scan(state=state))
+        assert strategy.entry_signals(view, PARAMETERS) == []
+
+
+def test_daily_gates_still_decide_the_breakout_from_an_intact_base() -> None:
+    strategy = MinerviniStrategy()
+    base = _scan(state="Pre-breakout", breakout_volume=False)
+
+    below_pivot = _history(current_close="99.99")
+    assert strategy.entry_signals(_View(below_pivot, base), PARAMETERS) == []
+    thin_volume = _history(current_volume="149.99")
+    assert strategy.entry_signals(_View(thin_volume, base), PARAMETERS) == []
 
 
 def test_exit_and_position_sizing_use_full_held_quantity() -> None:
