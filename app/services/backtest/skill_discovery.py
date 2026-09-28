@@ -158,13 +158,14 @@ ALLOWED_RUNTIME_PREFIXES: tuple[str, ...] = (
     "app.services.backtest.strategy_protocol",
 )
 
-#: Opt-in market-regime entry-filter parameters injected into every
-#: ``kind: backtest-strategy`` descriptor at discovery time (never authored
-#: per skill). One canonical definition keeps the default mapping, the
-#: launch validator, and the six runtimes in lock-step; a SKILL.md that
-#: also declares one of these names fails discovery with the existing
-#: ``duplicate_parameter_declaration`` error. The runtime derivation lives
-#: in ``app/services/backtest/regime_filter.py``.
+#: Host-owned parameters injected into every ``kind: backtest-strategy``
+#: descriptor at discovery time (never authored per skill): the opt-in
+#: market-regime entry filter (derived in
+#: ``app/services/backtest/regime_filter.py``) and the engine-enforced
+#: ``max_concurrent_positions`` slot cap. One canonical definition keeps the
+#: default mapping, the launch validator, and the six runtimes in
+#: lock-step; a SKILL.md that also declares one of these names fails
+#: discovery with the existing ``duplicate_parameter_declaration`` error.
 COMMON_BACKTEST_STRATEGY_PARAMETERS: tuple[StrategyParameterV1, ...] = (
     StrategyParameterV1(
         name="block_buy_on_downtrend_enabled",
@@ -199,6 +200,20 @@ COMMON_BACKTEST_STRATEGY_PARAMETERS: tuple[StrategyParameterV1, ...] = (
         required=False,
         minimum=2,
         maximum=400,
+    ),
+    StrategyParameterV1(
+        name="max_concurrent_positions",
+        type="integer",
+        default=10,
+        description=(
+            "Maximum number of positions held at once. Each new position is "
+            "sized at most total equity divided by this cap; unused slots "
+            "stay in cash. When more entries signal than slots are free, "
+            "they are taken in security-id order and the rest are skipped."
+        ),
+        required=True,
+        minimum=1,
+        maximum=1000,
     ),
 )
 
@@ -904,7 +919,7 @@ def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
         return _warning(name, "invalid_parameter_schema", str(exc), field="parameters")
 
     if parsed.get("kind") == _STRATEGY_KIND:
-        # Inject the opt-in regime-filter parameters exactly once, before
+        # Inject the host-owned common parameters exactly once, before
         # validation. A SKILL.md that also declares one of these reserved
         # names is rejected here rather than silently shadowed.
         declared = {parameter.name for parameter in schema}
@@ -915,7 +930,7 @@ def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
             return _warning(
                 name,
                 "invalid_parameter_schema",
-                f"'parameters' redeclares reserved regime-filter name(s): "
+                f"'parameters' redeclares reserved common parameter name(s): "
                 f"{', '.join(sorted(clash))}",
                 field="parameters",
             )

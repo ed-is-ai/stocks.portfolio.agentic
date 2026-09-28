@@ -660,3 +660,19 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-639-add-data-quality-tab.md`
   summary: The per-security evidence link required by the issue lands on the Portfolio tab generally rather than on GH-624's per-security detail, and is styled as a muted caption.
   evidence: The anchor is `<a href="#" class="dq-note">`, rendered at 0.75rem in muted ink. The issue asks for per-security detail to link to #624.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-33-max-concurrent-positions.md`
+  summary: When the book is full, a same-session swap sizes the new position from leftover cash only, because a same-session SELL's proceeds cannot fund that session's BUYs; the resulting small position then occupies a full slot until it exits.
+  evidence: Reservations use current cash at signal time (gh-368 contract), so with the cap at max and about £0 residual cash the swap-in target is min(leftover, equity/cap). Reproduced by `_swap_run` in tests/backtest/test_backtest_engine.py, where a $50 position takes a $1,000 slot. Estimating pending-SELL proceeds into the target would fix it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-33-max-concurrent-positions.md`
+  summary: The Weinstein and Minervini `enable_position_upgrade` swaps only fire when `portfolio.cash <= 0`, which a slot-capped run rarely reaches, so the upgrade feature goes quiet under the cap.
+  evidence: skills/rtly-backtest-weinstein/scripts/strategy.py:510-514 (the same guard is in Minervini) keys the upgrade to exhausted cash rather than full slots.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-33-max-concurrent-positions.md`
+  summary: The V3 launch path checks the stale parameter name `regime_filter_enabled`, so the SPY benchmark pin and auto-fill never trigger after the rename to `block_buy_on_downtrend_enabled`.
+  evidence: backtest_launch_service.py:365, strategy_job.py:395/436/571/757 and run_input_manifest.py:412 read `regime_filter_enabled`, which the closed validator rejects as an unknown field; the tests at tests/backtest/test_run_input_manifest.py:212,260 encode the stale name.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-33-max-concurrent-positions.md`
+  summary: `SkipReasonCode.ALLOCATION_UNAFFORDABLE` has no entry in `result_presenter._SKIP_REASON_TEXT`, so the trade log shows the raw code.
+  evidence: app/services/backtest/result_presenter.py:47-57 maps every other reason, but not `ALLOCATION_UNAFFORDABLE`; `_trade_log_row` falls back to `reason.value`.

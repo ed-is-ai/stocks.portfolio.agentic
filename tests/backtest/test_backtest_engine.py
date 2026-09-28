@@ -7,6 +7,7 @@ FX, final open marks, and determinism under reordered Strategy output."""
 from __future__ import annotations
 
 import ast
+import hashlib
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -248,6 +249,7 @@ def _manifest(
     end_month: str,
     base_currency: Literal["GBP", "USD"] = "USD",
     starting_capital: Decimal = Decimal("100000"),
+    parameters: Mapping[str, object] | None = None,
 ) -> RunInputManifestV1:
     return RunInputManifestV1(
         schema_version="run_input_manifest.v1",
@@ -264,7 +266,7 @@ def _manifest(
         strategy_api_version=1,
         strategy_source_digest=DIGEST_A,
         detector_source_digests=_detector_digests(),
-        parameters={},
+        parameters=dict(parameters or {}),
         alias_revision=DIGEST_A,
         securities=securities,
         profile_hash=DIGEST_A,
@@ -715,6 +717,332 @@ def test_buy_cohort_reserves_equal_targets_across_mic_fill_dates() -> None:
     ]
     assert [skip.security_id for skip in skips] == ["sec-later"]
     assert output.final_cash_base == Decimal("0.00000000")
+
+
+# ---------------------------------------------------------------------------
+# GH-33: max_concurrent_positions slot cap
+# ---------------------------------------------------------------------------
+
+
+def _buy(security_id: str, session: date) -> Signal:
+    return Signal(
+        security_id=security_id,
+        side=SignalSide.BUY,
+        session=session,
+        rule_id=f"buy-{security_id}",
+    )
+
+
+def _sell(security_id: str, session: date) -> Signal:
+    return Signal(
+        security_id=security_id,
+        side=SignalSide.SELL,
+        session=session,
+        rule_id=f"sell-{security_id}",
+    )
+
+
+def _run_capped(
+    *,
+    security_ids: tuple[str, ...],
+    entries: Mapping[date, list[Signal]],
+    exits: Mapping[date, list[Signal]] | None = None,
+    starting_capital: Decimal,
+    max_positions: int | None,
+    price_by_security: Mapping[str, float] | None = None,
+    overrides_by_security: Mapping[str, Mapping[date, tuple[float, float]]]
+    | None = None,
+) -> backtest_engine.SimulationOutputV1:
+    """Run one XNYS March-2024 simulation over flat-priced securities."""
+    start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
+    sessions = _sessions("XNYS", start, end_exclusive)
+    prices = price_by_security or {}
+    overrides = overrides_by_security or {}
+    built = [
+        _build_security(
+            security_id,
+            "XNYS",
+            sessions,
+            # Prepared planes are keyed by revision, so each needs its own.
+            revision=hashlib.sha256(security_id.encode()).hexdigest(),
+            open_price=prices.get(security_id, 100.0),
+            close_price=prices.get(security_id, 100.0),
+            price_overrides=overrides.get(security_id),
+        )
+        for security_id in security_ids
+    ]
+    parameters = (
+        {} if max_positions is None else {"max_concurrent_positions": max_positions}
+    )
+    manifest = _manifest(
+        securities=tuple(pinned for _, pinned in built),
+        start_month=_month_str(start),
+        end_month=_month_str(start),
+        starting_capital=starting_capital,
+        parameters=parameters,
+    )
+    return run_simulation(
+        manifest=manifest,
+        strategy=_ScriptedStrategy(entries=entries, exits=exits, default_size=-1),
+        market_view_factory=_market_view_factory(),
+        security_market_data=tuple(market for market, _ in built),
+    )
+
+
+def _cap_skips(output: backtest_engine.SimulationOutputV1) -> list[str]:
+    return [
+        event.security_id
+        for event in output.events
+        if isinstance(event, SkippedSignalEventV1)
+        and event.reason is SkipReasonCode.MAX_CONCURRENT_POSITIONS
+    ]
+
+
+def _entry_fills(
+    output: backtest_engine.SimulationOutputV1,
+) -> list[tuple[str, int, Decimal]]:
+    return [
+        (event.security_id, event.shares, event.cost_base)
+        for event in output.events
+        if isinstance(event, EntryFillEventV1)
+    ]
+
+
+_MARCH_2024 = _sessions("XNYS", date(2024, 3, 1), date(2024, 4, 1))
+
+
+def test_cap_sizes_lone_candidate_at_equity_slot_and_keeps_rest_in_cash() -> None:
+    d0 = _MARCH_2024[0]
+
+    output = _run_capped(
+        security_ids=("sec-a",),
+        entries={d0: [_buy("sec-a", d0)]},
+        starting_capital=Decimal("10000"),
+        max_positions=10,
+    )
+
+    assert _entry_fills(output) == [("sec-a", 10, Decimal("1000.00000000"))]
+    assert output.final_cash_base == Decimal("9000.00000000")
+
+
+def test_cap_skips_surplus_candidates_in_engine_order_deterministically() -> None:
+    d0 = _MARCH_2024[0]
+    security_ids = tuple(f"sec-{index:02d}" for index in range(12))
+    signals = [_buy(security_id, d0) for security_id in security_ids]
+
+    def _run(order: list[Signal]) -> backtest_engine.SimulationOutputV1:
+        return _run_capped(
+            security_ids=security_ids,
+            entries={d0: order},
+            starting_capital=Decimal("12000"),
+            max_positions=10,
+        )
+
+    forward = _run(signals)
+    shuffled = _run(signals[5:] + signals[:5][::-1])
+
+    assert _cap_skips(forward) == ["sec-10", "sec-11"]
+    assert [fill[0] for fill in _entry_fills(forward)] == list(security_ids[:10])
+    assert {fill[2] for fill in _entry_fills(forward)} == {Decimal("1200.00000000")}
+    assert forward.events == shuffled.events
+    assert forward.equity_curve == shuffled.equity_curve
+    assert forward.final_cash_base == shuffled.final_cash_base
+
+
+def test_cap_skips_buy_on_full_book_while_sells_still_schedule() -> None:
+    d0, d2, d3 = _MARCH_2024[0], _MARCH_2024[2], _MARCH_2024[3]
+    held = ("sec-a", "sec-b", "sec-c")
+
+    output = _run_capped(
+        security_ids=(*held, "sec-d"),
+        entries={
+            d0: [_buy(security_id, d0) for security_id in held],
+            d2: [_buy("sec-d", d2)],
+        },
+        exits={d3: [_sell("sec-a", d3)]},
+        starting_capital=Decimal("3000"),
+        max_positions=3,
+    )
+
+    assert _cap_skips(output) == ["sec-d"]
+    assert [fill[0] for fill in _entry_fills(output)] == list(held)
+    exits = [e.security_id for e in output.events if isinstance(e, ExitFillEventV1)]
+    assert exits == ["sec-a"]
+
+
+def _swap_run(max_positions: int = 3) -> backtest_engine.SimulationOutputV1:
+    d0, d2 = _MARCH_2024[0], _MARCH_2024[2]
+    held = ("sec-a", "sec-b", "sec-c")
+    # $3,050 leaves $50 after three whole-share $1,000 fills, so the swap-in
+    # (priced at 10) is affordable from unreserved cash alone.
+    return _run_capped(
+        security_ids=(*held, "sec-d"),
+        entries={
+            d0: [_buy(security_id, d0) for security_id in held],
+            d2: [_buy("sec-d", d2)],
+        },
+        exits={d2: [_sell("sec-a", d2)]},
+        starting_capital=Decimal("3050"),
+        max_positions=max_positions,
+        price_by_security={"sec-d": 10.0},
+    )
+
+
+def test_cap_same_session_exit_frees_its_slot_for_the_entry() -> None:
+    output = _swap_run()
+
+    assert _cap_skips(output) == []
+    assert ("sec-d", 5, Decimal("50.00000000")) in _entry_fills(output)
+    assert sorted(mark.security_id for mark in output.final_open_positions) == [
+        "sec-b",
+        "sec-c",
+        "sec-d",
+    ]
+
+
+def test_cap_skips_entry_fill_when_freeing_sell_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _failing_sell(
+        self: backtest_engine._Engine,
+        order: backtest_engine.PendingOrderV1,
+        plane: object,
+        price_native: object,
+        session: date,
+    ) -> SkippedSignalEventV1:
+        del plane, price_native
+        return self._skip_order(
+            order, session, SkipReasonCode.POSITION_CONFLICT, "forced failure"
+        )
+
+    monkeypatch.setattr(backtest_engine._Engine, "_execute_sell", _failing_sell)
+
+    output = _swap_run()
+
+    assert _cap_skips(output) == ["sec-d"]
+    assert "sec-d" not in [fill[0] for fill in _entry_fills(output)]
+    assert sorted(mark.security_id for mark in output.final_open_positions) == [
+        "sec-a",
+        "sec-b",
+        "sec-c",
+    ]
+
+
+def test_cap_target_is_limited_by_unreserved_cash_below_slot_size() -> None:
+    d0, d2 = _MARCH_2024[0], _MARCH_2024[2]
+    # sec-a: 50 shares bought at 60 ($3,000), marked at 140 on d2, so d2
+    # equity is $10,000 (slot $5,000) while only $3,000 cash is unreserved.
+    output = _run_capped(
+        security_ids=("sec-a", "sec-b"),
+        entries={d0: [_buy("sec-a", d0)], d2: [_buy("sec-b", d2)]},
+        starting_capital=Decimal("6000"),
+        max_positions=2,
+        price_by_security={"sec-a": 60.0},
+        overrides_by_security={"sec-a": {d2: (60.0, 140.0)}},
+    )
+
+    assert _entry_fills(output) == [
+        ("sec-a", 50, Decimal("3000.00000000")),
+        ("sec-b", 30, Decimal("3000.00000000")),
+    ]
+
+
+def test_manifest_without_cap_key_keeps_legacy_uncapped_allocation() -> None:
+    d0 = _MARCH_2024[0]
+    security_ids = tuple(f"sec-{index:02d}" for index in range(12))
+
+    lone = _run_capped(
+        security_ids=("sec-a",),
+        entries={d0: [_buy("sec-a", d0)]},
+        starting_capital=Decimal("10000"),
+        max_positions=None,
+    )
+    crowd = _run_capped(
+        security_ids=security_ids,
+        entries={d0: [_buy(security_id, d0) for security_id in security_ids]},
+        starting_capital=Decimal("12000"),
+        max_positions=None,
+    )
+
+    assert _entry_fills(lone) == [("sec-a", 100, Decimal("10000.00000000"))]
+    assert _cap_skips(crowd) == []
+    assert len(_entry_fills(crowd)) == 12
+
+
+def test_cap_sell_filling_after_the_buy_does_not_free_its_slot() -> None:
+    """Easter Monday 2024: XNYS reopens on 1 Apr, XLON only on 2 Apr. An
+    XLON exit signalled on 28 Mar cannot free a slot for an XNYS entry that
+    would fill a session before it, so the entry is refused at signal time
+    rather than granted and then dropped at its fill."""
+    start, end_exclusive = date(2024, 3, 1), date(2024, 5, 1)
+    xnys_sessions = _sessions("XNYS", start, end_exclusive)
+    xlon_sessions = _sessions("XLON", start, end_exclusive)
+    d0, swap = date(2024, 3, 1), date(2024, 3, 28)
+    assert date(2024, 4, 1) in xnys_sessions
+    assert date(2024, 4, 1) not in xlon_sessions
+    uk_market, uk_pinned = _build_security(
+        "sec-uk", "XLON", xlon_sessions, revision=DIGEST_A, open_price=100.0
+    )
+    us_market, us_pinned = _build_security(
+        "sec-us",
+        "XNYS",
+        xnys_sessions,
+        revision=DIGEST_B,
+        open_price=10.0,
+        close_price=10.0,
+    )
+    manifest = _manifest(
+        securities=(uk_pinned, us_pinned),
+        start_month=_month_str(start),
+        end_month="2024-04",
+        starting_capital=Decimal("1050"),
+        parameters={"max_concurrent_positions": 1},
+    )
+
+    output = run_simulation(
+        manifest=manifest,
+        strategy=_ScriptedStrategy(
+            entries={d0: [_buy("sec-uk", d0)], swap: [_buy("sec-us", swap)]},
+            exits={swap: [_sell("sec-uk", swap)]},
+            default_size=-1,
+        ),
+        market_view_factory=_market_view_factory(),
+        security_market_data=(uk_market, us_market),
+    )
+
+    cap_skips = [
+        event
+        for event in output.events
+        if isinstance(event, SkippedSignalEventV1)
+        and event.reason is SkipReasonCode.MAX_CONCURRENT_POSITIONS
+    ]
+    assert [(e.security_id, e.signal_session) for e in cap_skips] == [("sec-us", swap)]
+    assert cap_skips[0].detail == "concurrent position limit reached"
+    assert [fill[0] for fill in _entry_fills(output)] == ["sec-uk"]
+    exits = [e.fill_session for e in output.events if isinstance(e, ExitFillEventV1)]
+    assert exits == [date(2024, 4, 2)]
+
+
+@pytest.mark.parametrize("cap", [0, -1, True, "3", 2.5])
+def test_engine_rejects_invalid_max_concurrent_positions(cap: object) -> None:
+    sessions = _sessions("XNYS", date(2024, 3, 1), date(2024, 4, 1))
+    market, pinned = _build_security("sec-a", "XNYS", sessions, revision=DIGEST_A)
+    manifest = _manifest(
+        securities=(pinned,),
+        start_month="2024-03",
+        end_month="2024-03",
+        parameters={"max_concurrent_positions": cap},
+    )
+
+    with pytest.raises(SimulationError) as exc_info:
+        run_simulation(
+            manifest=manifest,
+            strategy=_ScriptedStrategy(entries={}),
+            market_view_factory=_market_view_factory(),
+            security_market_data=(market,),
+        )
+
+    assert exc_info.value.code == "invariant_violation"
 
 
 # ---------------------------------------------------------------------------
