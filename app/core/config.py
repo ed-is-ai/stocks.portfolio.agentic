@@ -71,6 +71,8 @@ PORTFOLIO_VALUE_CSV = ROOT_DIR / "data" / "portfolio_value.csv"
 IMPORTED_FILES_DIR = ROOT_DIR / "data" / "imported"
 PIPELINE_RUNS_CSV = ROOT_DIR / "logs" / "pipeline_runs.csv"
 PIPELINE_STATUS_JSON = ROOT_DIR / "logs" / "pipeline_status.json"
+# One JSON line per Research Copilot question (GH-13): the route's only write.
+COPILOT_AUDIT_JSONL = ROOT_DIR / "logs" / "copilot_audit.jsonl"
 PIPELINE_RUN_TIMEOUT_SECONDS = int(os.getenv("PIPELINE_RUN_TIMEOUT_SECONDS", "3600"))
 PIPELINE_STALE_GRACE_SECONDS = int(os.getenv("PIPELINE_STALE_GRACE_SECONDS", "60"))
 DEFAULT_PIPELINE_STALE_AFTER_HOURS = 24.0

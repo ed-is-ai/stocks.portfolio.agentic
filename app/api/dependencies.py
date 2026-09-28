@@ -12,6 +12,7 @@ from typing import Annotated
 
 from fastapi import Depends
 
+from app.agents.research.copilot import ResearchCopilotClient
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.core import config
 from app.core.config import ALERTS_DB, TRADES_DB
@@ -279,3 +280,12 @@ def get_portfolio_recommendation_service() -> PortfolioRecommendationService:
             get_historical_price_repository()
         ),
     )
+
+
+def get_research_copilot_client() -> ResearchCopilotClient:
+    """Return a Research Copilot client (GH-13).
+
+    Not cached: construction only reads ``ANTHROPIC_API_KEY``, so a key set
+    after startup takes effect on the next question.
+    """
+    return ResearchCopilotClient()
