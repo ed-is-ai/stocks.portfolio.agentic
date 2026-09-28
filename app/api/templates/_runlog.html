@@ -109,10 +109,15 @@
 
         <!-- Errors -->
         <td style="max-width:260px">
-          {% if r.errors %}
-            <span class="rl-error" title="{{ r.errors }}">
-              <i class="bi bi-exclamation-triangle-fill me-1"></i>{{ r.errors[:80] }}{% if r.errors|length > 80 %}…{% endif %}
-            </span>
+          {# Long errors expand on click, tap or keyboard rather than hiding
+             the full text in a hover-only tooltip (#4). #}
+          {% if r.errors|length > 80 %}
+            <details class="rl-error">
+              <summary><i class="bi bi-exclamation-triangle-fill me-1"></i>{{ r.errors[:80] }}…</summary>
+              <div class="rl-error-full">{{ r.errors }}</div>
+            </details>
+          {% elif r.errors %}
+            <span class="rl-error"><i class="bi bi-exclamation-triangle-fill me-1"></i>{{ r.errors }}</span>
           {% endif %}
         </td>
       </tr>
