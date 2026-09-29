@@ -3,16 +3,51 @@ Test configuration and fixtures for stock agent tests.
 """
 
 import os
+from pathlib import Path
 
 import pytest
 import pandas as pd
 
+from app.agents.trader.trader_agent import TraderAgent
+from app.core import config
 from app.schemas import StockRecord, StockAnalysis, StockScan
 
 # Set before test modules create module-scoped FastAPI servers. The autouse
 # fixture below keeps per-test monkeypatch isolation as well.
 os.environ.setdefault("STRATEGY_MANAGER_WORKER_ENABLED", "false")
 os.environ.setdefault("PIPELINE_SCHEDULE_CRON", "")
+
+
+_REAL_DBS = (config.TRADES_DB, config.BACKTEST_DB, config.HISTORICAL_PRICE_CACHE)
+
+
+def _mtimes() -> dict[Path, int]:
+    return {p: p.stat().st_mtime_ns for p in _REAL_DBS if p.exists()}
+
+
+@pytest.fixture(autouse=True, scope="session")
+def guard_real_databases():
+    """Fail the run if any test wrote to the developer's real databases."""
+    before = _mtimes()
+    yield
+    changed = [str(p) for p, mtime in _mtimes().items() if before.get(p) != mtime]
+    assert not changed, f"tests modified real databases: {changed}"
+
+
+@pytest.fixture(autouse=True)
+def isolate_trader_default_db(tmp_path, monkeypatch):
+    """Give ``TraderAgent()`` without a ``db_path`` a throwaway database.
+
+    Its field default is the real trades.db, and construction runs the schema
+    migrations on it before a test can re-point ``db_path``.
+    """
+    original = TraderAgent.__init__
+
+    def init(self, **data):
+        data.setdefault("db_path", tmp_path / "default-trades.db")
+        original(self, **data)
+
+    monkeypatch.setattr(TraderAgent, "__init__", init)
 
 
 @pytest.fixture(autouse=True)

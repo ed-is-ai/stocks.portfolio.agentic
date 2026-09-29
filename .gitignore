@@ -99,3 +99,5 @@ _bmad-output/
 
 # Local git worktrees created for parallel feature work (see .worktrees/*)
 .worktrees/
+*.db-wal
+*.db-shm
