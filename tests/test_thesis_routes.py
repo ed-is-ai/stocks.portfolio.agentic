@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from contextlib import closing
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,15 +19,18 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from markupsafe import escape
 
-from app.agents.research.evidence import LABEL
+from app.agents.research.evidence import CURRENCY_AMOUNT, LABEL
 from app.agents.thesis.drafter import ThesisDraftClient
 from app.agents.trader.trader_agent import TraderAgent
 from app.api.app import app
 from app.api.dependencies import get_position_thesis_service, get_thesis_draft_client
+from app.api.routes.theses import DRAFT_SUPERSEDED
 from app.repositories import db
 from app.repositories.position_theses_repo import PositionThesesRepository
 from app.schemas.analysis_artifact import build_analysis_payload
+from app.schemas.position_thesis import MAX_RULES
 from app.services.portfolio_agent_view import AgentCell, thesis_cell
 from app.services.position_thesis_service import PositionThesisService
 from app.services.trader_service import TraderService
@@ -96,36 +100,49 @@ def _url(stack: SimpleNamespace, suffix: str = "", ticker: str = "AAA") -> str:
 
 
 def _rows(stack: SimpleNamespace) -> list[tuple[Any, ...]]:
-    conn = sqlite3.connect(stack.db)
-    rows = conn.execute(
-        "SELECT id, version, text_source, active, confirmed_at IS NOT NULL, "
-        "rules_json FROM position_theses ORDER BY id"
-    ).fetchall()
-    conn.close()
-    return rows
+    with closing(sqlite3.connect(stack.db)) as conn:
+        return conn.execute(
+            "SELECT id, version, text_source, active, confirmed_at IS NOT NULL, "
+            "rules_json FROM position_theses ORDER BY id"
+        ).fetchall()
 
 
 def _ledger(stack: SimpleNamespace) -> list[list[tuple[Any, ...]]]:
-    conn = sqlite3.connect(stack.db)
-    dump = [
-        conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
-        for table in LEDGER_TABLES
-    ]
-    conn.close()
-    return dump
+    with closing(sqlite3.connect(stack.db)) as conn:
+        return [
+            conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in LEDGER_TABLES
+        ]
+
+
+def _dump(stack: SimpleNamespace) -> list[str]:
+    """Return the whole tmp trades.db as SQL, to prove a request wrote nothing."""
+    with closing(sqlite3.connect(stack.db)) as conn:
+        return list(conn.iterdump())
+
+
+def _pending_id(stack: SimpleNamespace) -> int:
+    pending = stack.service.statuses(stack.pid)["AAA"].pending
+    assert pending is not None
+    return pending.id
 
 
 def _save(stack: SimpleNamespace, **fields: Any) -> Any:
+    """Post the editor form; every rule list fills the form's MAX_RULES slots."""
     data: dict[str, Any] = {
         "rationale": "Stage 2 leader.",
         "expected_setup": "Holds its 50-day SMA.",
         "review_date": "",
-        "rule_kind": ["close_below_sma", "", ""],
-        "rule_period": ["50", "", ""],
-        "rule_min_rel_volume": ["", "", ""],
-        "rule_min_score": ["", "", ""],
+        "rule_kind": ["close_below_sma"],
+        "rule_period": ["50"],
+        "rule_min_rel_volume": [],
+        "rule_min_score": [],
         **fields,
     }
+    for name, value in data.items():
+        if isinstance(value, list):
+            assert len(value) <= MAX_RULES, name
+            data[name] = [*value, *[""] * (MAX_RULES - len(value))]
     return client.post(_url(stack), data=data, headers=AUTH)
 
 
@@ -152,6 +169,22 @@ def test_editor_renders_the_modal_read_only(stack) -> None:
     assert _rows(stack) == [] and _ledger(stack) == before
 
 
+def test_editor_never_evaluates_a_newly_published_run(stack) -> None:
+    _save(stack)  # an active thesis evaluated against run-1
+    _publish(stack, "run-2")
+    before = _dump(stack)
+    assert any("thesis_evaluations" in line for line in before)
+
+    resp = client.get(_url(stack), headers=AUTH)
+
+    assert resp.status_code == 200
+    assert "last checked on an earlier run" in resp.text
+    assert _dump(stack) == before
+    assert [
+        e.analysis_run_id for e in stack.service._repo.history(stack.pid, "AAA")
+    ] == ["run-1"]
+
+
 def test_save_adds_an_active_version_evaluated_now(stack) -> None:
     before = _ledger(stack)
     resp = _save(stack, review_date="2020-01-01")
@@ -169,9 +202,11 @@ def test_save_adds_an_active_version_evaluated_now(stack) -> None:
         "rule 1 close_below_sma (price, sma50) · session 2026-09-25 · "
         "analysis run run-1"
     ) in resp.text
+    active = stack.service.statuses(stack.pid)["AAA"].active
+    assert active is not None
     assert _rows(stack) == [
         (
-            1,
+            active.id,
             1,
             "user",
             1,
@@ -185,12 +220,23 @@ def test_save_adds_an_active_version_evaluated_now(stack) -> None:
 @pytest.mark.parametrize(
     ("fields", "message"),
     [
-        ({"rule_kind": ["", ""]}, "Add at least one rule"),
-        ({"rule_kind": ["moon_phase"]}, "Rule 1:"),
-        ({"rule_period": ["20"]}, "Rule 1:"),
-        ({"rule_kind": ["score_below"], "rule_min_score": ["11"]}, "Rule 1:"),
-        ({"rationale": ""}, "rationale"),
-        ({"review_date": "not-a-date"}, "review date"),
+        ({"rule_kind": [], "rule_period": []}, "Add at least one rule (up to 6)."),
+        (
+            {"rule_kind": ["moon_phase"]},
+            "Rule 1: Input tag 'moon_phase' found using 'kind' does not match "
+            "any of the expected tags: 'close_below_stop', 'close_below_sma', "
+            "'stage_2_lost', 'score_below'",
+        ),
+        (
+            {"rule_period": ["20"]},
+            "Rule 1: close_below_sma.period: Input should be 50, 150 or 200",
+        ),
+        (
+            {"rule_kind": ["score_below"], "rule_min_score": ["11"]},
+            "Rule 1: score_below.min_score: Input should be less than or equal to 10",
+        ),
+        ({"rationale": ""}, "rationale: String should have at least 1 character"),
+        ({"review_date": "not-a-date"}, "The review date is not a valid date."),
     ],
     ids=["no-rules", "unknown-kind", "period-20", "score-11", "blank", "date"],
 )
@@ -201,7 +247,8 @@ def test_invalid_save_rerenders_with_the_error_and_writes_nothing(
 
     assert resp.status_code == 200
     assert "HX-Trigger" not in resp.headers
-    assert "alert-warning" in resp.text and message in resp.text
+    assert "alert-warning" in resp.text
+    assert str(escape(message)) in resp.text
     assert _rows(stack) == []
 
 
@@ -241,28 +288,33 @@ def test_ai_draft_unavailable_writes_nothing(stack, payload: Any) -> None:
 def test_confirm_makes_the_draft_the_only_active_version(stack) -> None:
     _save(stack)
     client.post(_url(stack, "/draft"), headers=AUTH)
+    [saved_id, draft_id] = [row[0] for row in _rows(stack)]
+    assert _pending_id(stack) == draft_id
     before = _ledger(stack)
 
-    resp = client.post(_url(stack, "/confirm"), data={"thesis_id": "2"}, headers=AUTH)
+    resp = client.post(
+        _url(stack, "/confirm"), data={"thesis_id": str(draft_id)}, headers=AUTH
+    )
 
     assert resp.status_code == 200
     assert resp.headers["HX-Trigger"] == "portfolio-agents-refresh"
     assert "Draft confirmed" in resp.text
     assert [(row[0], row[3], row[4]) for row in _rows(stack)] == [
-        (1, 0, 1),
-        (2, 1, 1),
+        (saved_id, 0, 1),
+        (draft_id, 1, 1),
     ]
     summary = stack.service.statuses(stack.pid)["AAA"]
     assert summary.pending is None
-    assert summary.latest is not None and summary.latest.thesis_id == 2
+    assert summary.latest is not None and summary.latest.thesis_id == draft_id
     assert _ledger(stack) == before
 
 
 def test_confirming_a_stale_version_is_404(stack) -> None:
     client.post(_url(stack, "/draft"), headers=AUTH)
     _save(stack)  # a later save supersedes the draft
+    [draft_id, saved_id] = [row[0] for row in _rows(stack)]
 
-    for thesis_id in (1, 2, 99):
+    for thesis_id in (draft_id, saved_id, saved_id + 1):
         resp = client.post(
             _url(stack, "/confirm"), data={"thesis_id": str(thesis_id)}, headers=AUTH
         )
@@ -312,8 +364,11 @@ def test_not_held_and_stale_404s_carry_a_swappable_warning(stack) -> None:
     get = client.get(_url(stack, ticker="ZZZ"), headers=AUTH)
     post = client.post(_url(stack, "/draft", ticker="ZZZ"), headers=AUTH)
     client.post(_url(stack, "/draft"), headers=AUTH)
+    draft_id = _pending_id(stack)
     _save(stack)
-    stale = client.post(_url(stack, "/confirm"), data={"thesis_id": "1"}, headers=AUTH)
+    stale = client.post(
+        _url(stack, "/confirm"), data={"thesis_id": str(draft_id)}, headers=AUTH
+    )
 
     notice = "This security is no longer held in this portfolio."
     assert get.status_code == 404 and notice in get.text
@@ -349,11 +404,16 @@ def test_editor_forms_swap_404s_and_disable_while_in_flight(stack) -> None:
 
 
 def test_absurd_relative_volume_is_rejected(stack) -> None:
-    for volume in ("inf", "nan", "10.5"):
+    for volume, reason in (
+        ("inf", "Input should be a finite number"),
+        ("nan", "Input should be a finite number"),
+        ("10.5", "Input should be less than or equal to 10"),
+    ):
         resp = _save(stack, rule_min_rel_volume=[volume])
 
         assert resp.status_code == 200
-        assert "alert-warning" in resp.text and "Rule 1:" in resp.text
+        assert "alert-warning" in resp.text
+        assert f"Rule 1: close_below_sma.min_rel_volume: {reason}" in resp.text
     assert _rows(stack) == []
 
 
@@ -367,7 +427,9 @@ def test_save_survives_a_failing_immediate_evaluation(
     resp = _save(stack)
     client.post(_url(stack, "/draft"), headers=AUTH)
     confirm = client.post(
-        _url(stack, "/confirm"), data={"thesis_id": "2"}, headers=AUTH
+        _url(stack, "/confirm"),
+        data={"thesis_id": str(_pending_id(stack))},
+        headers=AUTH,
     )
 
     assert resp.status_code == 200 and "Thesis saved as version 1." in resp.text
@@ -440,16 +502,15 @@ def test_corrupt_row_and_failing_portfolio_do_not_stop_the_others(
     stack.agent.record_buy("BBB", 5, 50.0, "2026-01-02", portfolio_id=stack.pid)
     other = stack.agent.create_portfolio("GIA")
     _save(stack)
-    conn = sqlite3.connect(stack.db)
-    conn.execute(
-        "INSERT INTO position_theses (portfolio_id, security_id, version, "
-        "rationale, expected_setup, rules_json, text_source, active, "
-        "created_at) VALUES (?, 'BBB', 1, 'r', 's', '[{\"kind\": 1}]', "
-        "'user', 1, 'n')",
-        (stack.pid,),
-    )
-    conn.commit()
-    conn.close()
+    with closing(sqlite3.connect(stack.db)) as conn:
+        conn.execute(
+            "INSERT INTO position_theses (portfolio_id, security_id, version, "
+            "rationale, expected_setup, rules_json, text_source, active, "
+            "created_at) VALUES (?, 'BBB', 1, 'r', 's', '[{\"kind\": 1}]', "
+            "'user', 1, 'n')",
+            (stack.pid,),
+        )
+        conn.commit()
     trader = stack.service._trader
     real = trader.get_portfolio
 
@@ -498,17 +559,19 @@ def test_review_due_uses_the_local_date(stack, monkeypatch: pytest.MonkeyPatch) 
 
 def test_corrupt_evaluation_row_is_skipped_by_statuses_and_editor(stack) -> None:
     _save(stack)  # evaluated against run-1
-    conn = sqlite3.connect(stack.db)
-    conn.execute(
-        "INSERT INTO thesis_evaluations (thesis_id, analysis_run_id, status, "
-        "facts_json, evaluated_at) VALUES (1, 'run-0', 'confirmed', '{}', 'n')"
-    )
-    conn.execute(
-        "UPDATE thesis_evaluations SET facts_json = 'not json' "
-        "WHERE analysis_run_id = 'run-1'"
-    )
-    conn.commit()
-    conn.close()
+    active = stack.service.statuses(stack.pid)["AAA"].active
+    assert active is not None
+    with closing(sqlite3.connect(stack.db)) as conn:
+        conn.execute(
+            "INSERT INTO thesis_evaluations (thesis_id, analysis_run_id, status, "
+            "facts_json, evaluated_at) VALUES (?, 'run-0', 'confirmed', '{}', 'n')",
+            (active.id,),
+        )
+        conn.execute(
+            "UPDATE thesis_evaluations SET facts_json = 'not json' "
+            "WHERE analysis_run_id = 'run-1'"
+        )
+        conn.commit()
 
     assert stack.service.statuses(stack.pid)["AAA"].latest is None
     assert stack.service.editor(stack.pid, "AAA").history == ()
@@ -531,9 +594,7 @@ def test_draft_superseded_by_a_save_during_the_model_call_is_discarded(
     resp = client.post(_url(stack, "/draft"), headers=AUTH)
 
     assert resp.status_code == 200
-    assert (
-        "You saved while the draft was being written, so the draft was discarded."
-    ) in resp.text
+    assert DRAFT_SUPERSEDED in resp.text
     assert "AI draft unavailable" not in resp.text
     assert "HX-Trigger" not in resp.headers
     assert [(row[2], row[3]) for row in _rows(stack)] == [("user", 1)]
@@ -582,7 +643,10 @@ def test_duplicate_rules_are_saved_once(stack) -> None:
 def test_score_threshold_of_one_is_rejected(stack) -> None:
     resp = _save(stack, rule_kind=["score_below"], rule_min_score=["1"])
 
-    assert "alert-warning" in resp.text and "Rule 1:" in resp.text
+    assert "alert-warning" in resp.text
+    assert (
+        "Rule 1: score_below.min_score: Input should be greater than or equal to 2"
+    ) in resp.text
     assert _rows(stack) == []
 
 
@@ -712,3 +776,101 @@ def test_editor_announces_swaps_and_manages_focus(stack) -> None:
     assert "thesisOpener = event.target;" in index
     assert "addEventListener('hidden.bs.modal'" in index
     assert "thesisOpener.focus();" in index
+
+
+def test_save_between_the_model_reply_and_the_insert_discards_the_draft(
+    stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supersede check runs in the draft insert's own transaction."""
+    repo = stack.service._repo
+    real = repo.add_version
+
+    def add_version(pid: int, sid: str, content: Any, source: Any, **kw: Any) -> Any:
+        if source == "ai_draft":  # the user's save commits first
+            real(pid, sid, content, "user", active=True)
+        return real(pid, sid, content, source, **kw)
+
+    monkeypatch.setattr(repo, "add_version", add_version)
+
+    resp = client.post(_url(stack, "/draft"), headers=AUTH)
+
+    assert resp.status_code == 200
+    assert DRAFT_SUPERSEDED in resp.text
+    assert "HX-Trigger" not in resp.headers
+    assert [(row[2], row[3]) for row in _rows(stack)] == [("user", 1)]
+    assert stack.service.statuses(stack.pid)["AAA"].pending is None
+
+
+#: Distinctive levels, so a leaked figure cannot collide with a percentage.
+_PRIVATE_LEVELS = {
+    "price": 187.37,
+    "stop": 171.93,
+    "sma50": 190.61,
+    "sma150": 163.29,
+    "sma200": 152.47,
+    "high_52w": 211.83,
+    "low_52w": 131.59,
+}
+_SHARES, _COST, _CASH = 4321, 143.71, 98765.43
+
+
+def test_draft_request_carries_no_position_data(
+    stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole serialised model request holds none of the holding's
+    identity, size, cost, cash or price levels in any rendered format."""
+    stack.agent.record_buy("QZX", _SHARES, _COST, "2026-01-02", portfolio_id=stack.pid)
+    stack.agent.set_cash_balance(_CASH, stack.pid)
+    level = _PRIVATE_LEVELS
+    record = make_record(
+        level["price"],
+        stop=level["stop"],
+        ticker="QZX",
+        sma50=level["sma50"],
+        sma150=level["sma150"],
+        sma200=level["sma200"],
+        high_52w=level["high_52w"],
+        low_52w=level["low_52w"],
+    )
+    payload = build_analysis_payload(
+        [record.model_dump(mode="json")],
+        run_id="run-1",
+        generated_at=datetime.now(UTC),
+    )
+    stack.artifact.write_text(json.dumps(payload), encoding="utf-8")
+    trader = stack.service._trader
+    real = trader.get_portfolio
+    monkeypatch.setattr(
+        trader,
+        "get_portfolio",
+        lambda **kw: [
+            p.model_copy(update={"display_ticker": "QZXD.L"}) for p in real(**kw)
+        ],
+    )
+    calls: list[dict[str, Any]] = []
+
+    def create(**kwargs: Any) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            stop_reason="end_turn",
+            content=[SimpleNamespace(type="text", text=json.dumps(DRAFT))],
+        )
+
+    fake = SimpleNamespace(messages=SimpleNamespace(create=create))
+    stack.drafts["client"] = ThesisDraftClient(api_key="test-key", client=fake)
+
+    resp = client.post(_url(stack, "/draft", ticker="QZX"), headers=AUTH)
+
+    assert "QZXD.L leads its group." in resp.text  # revealed locally only
+    [call] = calls
+    request = json.dumps(
+        {key: call[key] for key in ("system", "messages", "output_config")},
+        ensure_ascii=False,
+    )
+    assert f"{LABEL} is currently held in a portfolio." in request
+    for private in ("QZX", "QZXD", str(_SHARES)):
+        assert private not in request
+    for value in (*_PRIVATE_LEVELS.values(), _COST, _CASH, _SHARES * _COST):
+        for text in (str(value), f"{value:.1f}", f"{value:.2f}", f"{value:,.2f}"):
+            assert text not in request, text
+    assert CURRENCY_AMOUNT.search(request) is None

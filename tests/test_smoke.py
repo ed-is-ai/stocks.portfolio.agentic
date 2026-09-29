@@ -3,18 +3,84 @@ Smoke tests for the stock agent pipeline.
 These tests verify end-to-end functionality works correctly.
 """
 
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from datetime import datetime
+from functools import partial
 import json
 import os
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch, MagicMock
 
+from app.agents.trader.trader_agent import TraderAgent
+from app.api import dependencies
+from app.core.config import TRADES_DB
 from app.orchestration.orchestrator import pipeline
 from app.workflows.momentum import build_momentum_pipeline
 from app.integrations.tv_screener import ScreenerResult
 from app.schemas.record import StockRecord
 from app.schemas.source_health import SourceName, SourceResult, SourceState
+
+
+@contextmanager
+def _isolated_trades_db(tmp: str, analysis_out: str) -> Iterator[Path]:
+    """Point every trades.db writer a pipeline run reaches at ``tmp``.
+
+    The orchestrator's own ``TraderAgent`` (portfolio snapshots), the DI
+    providers binding ``TRADES_DB`` at call time (thesis store, dispatch
+    receipts, Strategy assignments) and the shared trader service all
+    default to the developer's real ``trades.db``; the thesis service also
+    reads the published artifact, so point it at this run's ``analysis_out``.
+    The DI trader singleton is cleared on both sides so neither a real-DB
+    instance nor this throwaway one outlives the test.
+    """
+    import app.orchestration.orchestrator as orchestrator
+
+    trades_db = Path(tmp) / "trades.db"
+    isolated_trader = partial(TraderAgent, db_path=trades_db)
+    dependencies.get_trader_service.cache_clear()
+    try:
+        with (
+            # The snapshot repair stage writes to whatever trades.db it
+            # is pointed at, so point it at a throwaway: an unisolated
+            # smoke test otherwise repairs the developer's own
+            # portfolio history (#549).
+            patch.object(orchestrator, "TRADES_DB", str(trades_db)),
+            patch.object(orchestrator, "TraderAgent", isolated_trader),
+            patch("app.services.trader_service.TraderAgent", isolated_trader),
+            patch.object(dependencies, "TRADES_DB", trades_db),
+            patch(
+                "app.services.position_thesis_service.ANALYSIS_JSON",
+                Path(analysis_out),
+            ),
+        ):
+            yield trades_db
+    finally:
+        dependencies.get_trader_service.cache_clear()
+
+
+def _sqlite_file(connection: object) -> Path:
+    """Return the resolved main-database file of an open sqlite connection."""
+    import sqlite3
+
+    assert isinstance(connection, sqlite3.Connection)
+    with closing(connection) as conn:
+        [(_seq, _name, path)] = conn.execute("PRAGMA database_list").fetchall()
+    return Path(path).resolve()
+
+
+def _assert_thesis_store_isolated(tmp: str, analysis_out: str) -> None:
+    """The pipeline's thesis service must never resolve to the real trades.db."""
+    root = Path(tmp).resolve()
+    # Built by the run's thesis step (not by this check).
+    assert dependencies.get_position_thesis_service.cache_info().currsize == 1
+    service = dependencies.get_position_thesis_service()
+    store = _sqlite_file(service._repo._connect())
+    trader_db = Path(service._trader._agent.db_path).resolve()
+    assert store.is_relative_to(root) and store != TRADES_DB.resolve()
+    assert trader_db.is_relative_to(root) and trader_db != TRADES_DB.resolve()
+    assert Path(service._analysis_path) == Path(analysis_out)
 
 
 class TestSmokeTests:
@@ -127,6 +193,7 @@ class TestSmokeTests:
                 alert_lifecycle.append((by_stage["alerts"], by_stage["export"]))
 
             with (
+                _isolated_trades_db(tmp, analysis_out),
                 patch.object(
                     orchestrator, "load_watchlist", return_value=smoke_watchlist
                 ),
@@ -135,11 +202,6 @@ class TestSmokeTests:
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
                 patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
-                # The snapshot repair stage writes to whatever trades.db it
-                # is pointed at, so point it at a throwaway: an unisolated
-                # smoke test otherwise repairs the developer's own
-                # portfolio history (#549).
-                patch.object(orchestrator, "TRADES_DB", os.path.join(tmp, "trades.db")),
                 patch.object(
                     orchestrator.AlertAgent,
                     "send_summary_email",
@@ -147,6 +209,7 @@ class TestSmokeTests:
                 ),
             ):
                 pipeline(force=True)
+                _assert_thesis_store_isolated(tmp, analysis_out)
 
             # Verify output files were created
             assert os.path.exists(scan_out)
@@ -236,6 +299,7 @@ class TestSmokeTests:
                 return result
 
             with (
+                _isolated_trades_db(tmp, analysis_out),
                 patch.object(
                     orchestrator, "load_watchlist", return_value=smoke_watchlist
                 ),
@@ -244,11 +308,6 @@ class TestSmokeTests:
                 patch.object(orchestrator, "ANALYSIS_OUTPUT", analysis_out),
                 patch.object(orchestrator, "EXCEL_OUTPUT", excel_out),
                 patch.object(orchestrator, "PIPELINE_STATUS_JSON", status_out),
-                # The snapshot repair stage writes to whatever trades.db it
-                # is pointed at, so point it at a throwaway: an unisolated
-                # smoke test otherwise repairs the developer's own
-                # portfolio history (#549).
-                patch.object(orchestrator, "TRADES_DB", os.path.join(tmp, "trades.db")),
                 patch.object(
                     orchestrator.os, "replace", side_effect=_replace_then_crash
                 ),
@@ -288,6 +347,7 @@ class TestSmokeTests:
 
             failed_status_out = os.path.join(tmp, "failed_pipeline_status.json")
             with (
+                _isolated_trades_db(tmp, analysis_out),
                 patch.object(
                     orchestrator, "load_watchlist", return_value=smoke_watchlist
                 ),

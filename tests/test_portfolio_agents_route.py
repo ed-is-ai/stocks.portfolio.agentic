@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.agents.thesis.evaluator import evaluate_thesis
 from app.agents.trader.trader_agent import TraderAgent
 from app.api.app import app
 from app.api.dependencies import (
@@ -21,7 +24,9 @@ from app.api.dependencies import (
 )
 from app.repositories import db
 from app.repositories.position_theses_repo import PositionThesesRepository
+from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.position_thesis import ThesisContentV1
+from app.schemas.record import StockRecord
 from app.schemas.portfolio_recommendation import (
     NO_ASSIGNMENT,
     EvaluationCoverageV1,
@@ -34,6 +39,7 @@ from app.services.portfolio_service import PortfolioService
 from app.services.position_thesis_service import PositionThesisService
 from app.services.trader_service import TraderService
 from tests.test_portfolio_risk_route import _dump, _record
+from tests.test_thesis_evaluator import FRESH, META, make_record
 
 client = TestClient(app)
 ROOT = Path(__file__).resolve().parents[1]
@@ -100,10 +106,11 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "recommend": lambda _pid: _result()
     }
     recommendations = SimpleNamespace(recommend=lambda pid: outcome["recommend"](pid))
+    artifact = tmp_path / "no-artifact.json"
     theses = PositionThesisService(
         PositionThesesRepository(db.make_connect(lambda: agent.db_path)),
         trader,
-        tmp_path / "no-artifact.json",
+        artifact,
     )
     app.dependency_overrides[get_trader_service] = lambda: trader
     app.dependency_overrides[get_portfolio_service] = lambda: service
@@ -113,7 +120,12 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     app.dependency_overrides[get_position_thesis_service] = lambda: theses
     try:
         yield SimpleNamespace(
-            agent=agent, pid=pf.id, service=service, outcome=outcome, theses=theses
+            agent=agent,
+            pid=pf.id,
+            service=service,
+            outcome=outcome,
+            theses=theses,
+            artifact=artifact,
         )
     finally:
         app.dependency_overrides.clear()
@@ -241,12 +253,111 @@ def test_thesis_store_failure_is_caught_and_partial(
     assert "not counted: Thesis unavailable." in body
 
 
+class _Ancestors(HTMLParser):
+    """Record the element ids enclosing every element with id ``target``."""
+
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link"}
+    VOID |= {"meta", "source", "track", "wbr"}
+
+    def __init__(self, target: str) -> None:
+        super().__init__()
+        self.target = target
+        self.open: list[tuple[str, str | None]] = []
+        self.ancestors: list[str | None] = []
+        self.seen = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        element_id = dict(attrs).get("id")
+        if element_id == self.target:
+            self.seen = True
+            self.ancestors += [open_id for _tag, open_id in self.open]
+        if tag not in self.VOID:
+            self.open.append((tag, element_id))
+
+    def handle_endtag(self, tag: str) -> None:
+        for depth in range(len(self.open) - 1, -1, -1):
+            if self.open[depth][0] == tag:
+                del self.open[depth:]
+                return
+
+
+def _ancestor_ids(html: str, target: str) -> list[str | None]:
+    parser = _Ancestors(target)
+    parser.feed(html)
+    assert parser.seen, target
+    return parser.ancestors
+
+
 def test_thesis_editor_modal_target_sits_outside_the_tab() -> None:
     index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
+    target = "thesis-editor-modal-target"
 
-    assert index.index('id="tab-content"') < index.index(
-        'id="thesis-editor-modal-target"'
+    assert "tab-content" not in _ancestor_ids(index, target)
+    # The walk does see nesting: the same target inside the tab is caught.
+    nested = f'<div id="tab-content"><p><br><div id="{target}"></div></p></div>'
+    assert "tab-content" in _ancestor_ids(nested, target)
+
+
+def _publish(stack: SimpleNamespace, run_id: str) -> None:
+    payload = build_analysis_payload([], run_id=run_id, generated_at=datetime.now(UTC))
+    stack.artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _seed_thesis(
+    stack: SimpleNamespace, rule: dict[str, object], record: StockRecord
+) -> None:
+    """Store an active AAA thesis evaluated against the published run-1."""
+    repo = PositionThesesRepository(db.make_connect(lambda: stack.agent.db_path))
+    content = ThesisContentV1.model_validate(
+        {"rationale": "r", "expected_setup": "s", "rules": [rule]}
     )
+    thesis = repo.add_version(stack.pid, "AAA", content, "user", active=True)
+    assert repo.append_evaluation(evaluate_thesis(thesis, record, META, FRESH))
+    _publish(stack, META.run_id)
+
+
+def _thesis_status(stack: SimpleNamespace, body: str) -> tuple[str, str]:
+    """Return the AAA Thesis cell's (tone, status text)."""
+    match = re.search(
+        rf'id="agent-{stack.pid}-thesis-AAA"[^>]*>\s*'
+        r'<span class="status (\w+)">([^<]+)</span>',
+        body,
+    )
+    assert match is not None
+    return match.group(1), match.group(2)
+
+
+def test_current_invalidated_thesis_is_an_urgent_finding(stack) -> None:
+    _seed_thesis(
+        stack, {"kind": "close_below_sma", "period": 50}, make_record(price=94.0)
+    )
+    body = _agents(stack)
+
+    assert _thesis_status(stack, body) == ("risk", "Invalidated")
+    assert _cell(stack, body, "findings").strip() == "6"
+    assert "6 urgent findings." in body
+    assert "AAA: thesis invalidated" in body
+
+
+@pytest.mark.parametrize(
+    ("record", "status"),
+    [
+        (make_record(price=91.8, stop=90.0), "Weakened"),
+        (make_record(stop=None), "Evidence limited"),
+    ],
+    ids=["weakened", "evidence-limited"],
+)
+def test_current_warning_thesis_is_warn_toned_and_not_counted(
+    stack, record: StockRecord, status: str
+) -> None:
+    _seed_thesis(stack, {"kind": "close_below_stop"}, record)
+    body = _agents(stack)
+
+    assert _thesis_status(stack, body) == ("warn", status)
+    assert "earlier run" not in _cell(stack, body, "thesis-AAA")
+    assert _cell(stack, body, "findings").strip() == "5"
+    assert "5 urgent findings." in body
+    assert "AAA: thesis" not in body
 
 
 def test_agents_partial_performs_no_writes(stack) -> None:
@@ -255,6 +366,18 @@ def test_agents_partial_performs_no_writes(stack) -> None:
         assert (
             client.get("/partials/portfolio/agents", params=params).status_code == 200
         )
+    assert _dump(stack.agent.db_path) == before
+
+
+def test_agents_partial_never_evaluates_a_newly_published_run(stack) -> None:
+    _seed_thesis(stack, {"kind": "stage_2_lost"}, make_record())
+    _publish(stack, "run-2")
+    before = _dump(stack.agent.db_path)
+    assert any("thesis_evaluations" in line for line in before)
+
+    body = _agents(stack)
+
+    assert "last checked on an earlier run" in _cell(stack, body, "thesis-AAA")
     assert _dump(stack.agent.db_path) == before
 
 

@@ -45,6 +45,10 @@ class StaleDraftError(LookupError):
     """The version id is not that holding's pending draft."""
 
 
+class VersionConflictError(RuntimeError):
+    """The holding's newest version is not the one the caller expected."""
+
+
 def _utc_now() -> str:
     """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
@@ -101,11 +105,15 @@ class PositionThesesRepository:
         text_source: ThesisTextSource,
         *,
         active: bool,
+        expected_latest_version: int | None = None,
     ) -> PositionThesisV1:
         """Insert the holding's next version; an active one supersedes others.
 
-        Deactivation and insert share one transaction, so the one-active
-        index never sees two active rows.
+        Deactivation and insert share one ``BEGIN IMMEDIATE`` transaction, so
+        the one-active index never sees two active rows. With
+        ``expected_latest_version``, raises :class:`VersionConflictError`
+        (nothing written) when the newest version differs, checked in that
+        same transaction.
         """
         now = _utc_now()
         rules = json.dumps(
@@ -113,6 +121,14 @@ class PositionThesesRepository:
             separators=(",", ":"),
         )
         with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if expected_latest_version is not None:
+                latest = self._latest(conn, portfolio_id, security_id)
+                if latest != expected_latest_version:
+                    raise VersionConflictError(
+                        f"newest version is {latest}, "
+                        f"expected {expected_latest_version}"
+                    )
             if active:
                 self._deactivate(conn, portfolio_id, security_id)
             cur = conn.execute(
@@ -174,12 +190,7 @@ class PositionThesesRepository:
     def latest_version(self, portfolio_id: int, security_id: str) -> int:
         """Return the holding's newest version number (0 when it has none)."""
         with session(self._connect) as conn:
-            row = conn.execute(
-                "SELECT COALESCE(MAX(version), 0) FROM position_theses "
-                "WHERE portfolio_id = ? AND security_id = ?",
-                (portfolio_id, security_id),
-            ).fetchone()
-        return int(row[0])
+            return self._latest(conn, portfolio_id, security_id)
 
     def active_for_portfolio(self, portfolio_id: int) -> dict[str, PositionThesisV1]:
         """Return each security's active version for the portfolio."""
@@ -265,6 +276,15 @@ class PositionThesesRepository:
             "WHERE portfolio_id = ? AND security_id = ? AND active = 1",
             (portfolio_id, security_id),
         )
+
+    @staticmethod
+    def _latest(conn: sqlite3.Connection, portfolio_id: int, security_id: str) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(version), 0) FROM position_theses "
+            "WHERE portfolio_id = ? AND security_id = ?",
+            (portfolio_id, security_id),
+        ).fetchone()
+        return int(row[0])
 
     @staticmethod
     def _get(conn: sqlite3.Connection, thesis_id: int) -> PositionThesisV1 | None:

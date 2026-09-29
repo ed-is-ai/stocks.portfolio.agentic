@@ -193,5 +193,7 @@ def _price_level(
         return "limited", observed, False
     if price < trigger:
         return "fired", observed, False
-    near = (price / trigger - 1) * 100 <= WEAKENED_MARGIN_PCT
+    # Compare against the scaled trigger: (price / trigger - 1) * 100 reads
+    # exactly 3% as 3.0000000000000027 and misses the boundary.
+    near = price <= trigger * (1 + WEAKENED_MARGIN_PCT / 100)
     return "clear", observed, near

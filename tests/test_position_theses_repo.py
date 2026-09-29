@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from app.repositories import db
 from app.repositories.position_theses_repo import (
     PositionThesesRepository,
     StaleDraftError,
+    VersionConflictError,
 )
 from app.schemas.position_thesis import ThesisContentV1
 from tests.test_thesis_evaluator import FRESH, META, make_record
@@ -28,13 +30,12 @@ CONTENT = ThesisContentV1.model_validate(
 @pytest.fixture
 def db_path(tmp_path: Path) -> Path:
     path = tmp_path / "trades.db"
-    conn = db.connect(path)
-    db.init_trades_db(conn)
-    conn.execute(
-        "INSERT INTO portfolios (id, name, created_at) VALUES (7, 'SIPP', 'n')"
-    )
-    conn.commit()
-    conn.close()
+    with closing(db.connect(path)) as conn:
+        db.init_trades_db(conn)
+        conn.execute(
+            "INSERT INTO portfolios (id, name, created_at) VALUES (7, 'SIPP', 'n')"
+        )
+        conn.commit()
     return path
 
 
@@ -44,12 +45,17 @@ def repo(db_path: Path) -> PositionThesesRepository:
 
 
 def _active_rows(db_path: Path) -> list[tuple[int, int]]:
-    conn = sqlite3.connect(db_path)
-    rows = conn.execute(
-        "SELECT id, version FROM position_theses WHERE active = 1"
-    ).fetchall()
-    conn.close()
-    return rows
+    with closing(sqlite3.connect(db_path)) as conn:
+        return conn.execute(
+            "SELECT id, version FROM position_theses WHERE active = 1"
+        ).fetchall()
+
+
+_INSERT = (
+    "INSERT INTO position_theses (portfolio_id, security_id, version, "
+    "rationale, expected_setup, rules_json, text_source, active, "
+    "created_at) VALUES (7, ?, ?, 'r', 's', '[]', 'user', ?, 'n')"
+)
 
 
 def test_activating_two_versions_in_turn_leaves_exactly_one_active(
@@ -71,21 +77,23 @@ def test_activating_two_versions_in_turn_leaves_exactly_one_active(
 def test_partial_unique_index_rejects_a_second_active_row(
     repo: PositionThesesRepository, db_path: Path
 ) -> None:
-    repo.add_version(7, "AAA", CONTENT, "user", active=True)
-    conn = sqlite3.connect(db_path)
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(
-            "INSERT INTO position_theses (portfolio_id, security_id, version, "
-            "rationale, expected_setup, rules_json, text_source, active, "
-            "created_at) VALUES (7, 'AAA', 9, 'r', 's', '[]', 'user', 1, 'n')"
-        )
-    # Inactive versions and other holdings are unaffected.
-    conn.execute(
-        "INSERT INTO position_theses (portfolio_id, security_id, version, "
-        "rationale, expected_setup, rules_json, text_source, active, "
-        "created_at) VALUES (7, 'BBB', 1, 'r', 's', '[]', 'user', 1, 'n')"
-    )
-    conn.close()
+    active = repo.add_version(7, "AAA", CONTENT, "user", active=True)
+    with closing(sqlite3.connect(db_path)) as conn:
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(_INSERT, ("AAA", 9, 1))
+        # An inactive AAA version beside the active one, and another
+        # holding's active version, are both allowed.
+        conn.execute(_INSERT, ("AAA", 10, 0))
+        other = conn.execute(_INSERT, ("BBB", 1, 1)).lastrowid
+        conn.commit()
+
+    assert sorted(_active_rows(db_path)) == sorted([(active.id, 1), (other, 1)])
+    with closing(sqlite3.connect(db_path)) as conn:
+        inactive = conn.execute(
+            "SELECT version FROM position_theses "
+            "WHERE security_id = 'AAA' AND active = 0"
+        ).fetchall()
+    assert inactive == [(10,)]
 
 
 def test_user_save_supersedes_the_active_version(
@@ -139,14 +147,13 @@ def test_deleting_the_portfolio_cascades(
 ) -> None:
     thesis = repo.add_version(7, "AAA", CONTENT, "user", active=True)
     repo.append_evaluation(evaluate_thesis(thesis, make_record(), META, FRESH))
-    conn = db.connect(db_path)
-    conn.execute("DELETE FROM portfolios WHERE id = 7")
-    conn.commit()
-    counts = [
-        conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        for table in ("position_theses", "thesis_evaluations")
-    ]
-    conn.close()
+    with closing(db.connect(db_path)) as conn:
+        conn.execute("DELETE FROM portfolios WHERE id = 7")
+        conn.commit()
+        counts = [
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("position_theses", "thesis_evaluations")
+        ]
 
     assert counts == [0, 0]
 
@@ -168,15 +175,34 @@ def test_corrupt_rows_are_skipped_not_raised(
     repo: PositionThesesRepository, db_path: Path
 ) -> None:
     good = repo.add_version(7, "AAA", CONTENT, "user", active=True)
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "INSERT INTO position_theses (portfolio_id, security_id, version, "
-        "rationale, expected_setup, rules_json, text_source, active, "
-        "created_at) VALUES (7, 'BBB', 1, 'r', 's', 'not json', 'user', 1, 'n'), "
-        "(7, 'CCC', 1, 'r', 's', 'not json', 'ai_draft', 0, 'n')"
-    )
-    conn.commit()
-    conn.close()
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(
+            "INSERT INTO position_theses (portfolio_id, security_id, version, "
+            "rationale, expected_setup, rules_json, text_source, active, "
+            "created_at) VALUES "
+            "(7, 'BBB', 1, 'r', 's', 'not json', 'user', 1, 'n'), "
+            "(7, 'CCC', 1, 'r', 's', 'not json', 'ai_draft', 0, 'n')"
+        )
+        conn.commit()
 
     assert repo.active_for_portfolio(7) == {"AAA": good}
     assert repo.pending_drafts(7) == {}
+
+
+def test_insert_expecting_an_older_newest_version_writes_nothing(
+    repo: PositionThesesRepository, db_path: Path
+) -> None:
+    saved = repo.add_version(7, "AAA", CONTENT, "user", active=True)
+
+    with pytest.raises(VersionConflictError):
+        repo.add_version(
+            7, "AAA", CONTENT, "ai_draft", active=False, expected_latest_version=0
+        )
+    assert repo.latest_version(7, "AAA") == 1
+    assert repo.pending_drafts(7) == {}
+
+    draft = repo.add_version(
+        7, "AAA", CONTENT, "ai_draft", active=False, expected_latest_version=1
+    )
+    assert draft.version == 2
+    assert _active_rows(db_path) == [(saved.id, 1)]

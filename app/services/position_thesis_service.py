@@ -17,7 +17,10 @@ from typing import Any
 from app.agents.thesis.drafter import ThesisDraftClient, draft_thesis
 from app.agents.thesis.evaluator import evaluate_thesis
 from app.core.config import ANALYSIS_JSON
-from app.repositories.position_theses_repo import PositionThesesRepository
+from app.repositories.position_theses_repo import (
+    PositionThesesRepository,
+    VersionConflictError,
+)
 from app.schemas.analysis_artifact import (
     AnalysisArtifactMeta,
     read_analysis_artifact_meta,
@@ -196,13 +199,21 @@ class PositionThesisService:
         )
         if draft is None:
             return None
-        if self._repo.latest_version(portfolio_id, security_id) != version:
-            logger.info("Discarding thesis draft superseded during the model call")
-            raise DraftSupersededError(f"{security_id} was saved during the draft")
         content = ThesisContentV1.model_validate(draft.model_dump())
-        return self._repo.add_version(
-            portfolio_id, security_id, content, "ai_draft", active=False
-        )
+        try:
+            return self._repo.add_version(
+                portfolio_id,
+                security_id,
+                content,
+                "ai_draft",
+                active=False,
+                expected_latest_version=version,
+            )
+        except VersionConflictError as exc:
+            logger.info("Discarding thesis draft superseded during the model call")
+            raise DraftSupersededError(
+                f"{security_id} was saved during the draft"
+            ) from exc
 
     def confirm(
         self, portfolio_id: int, security_id: str, thesis_id: int

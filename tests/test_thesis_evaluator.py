@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+from app.agents.research.evidence import UNKNOWN_RUN_ID
 from app.agents.thesis.evaluator import WEAKENED_MARGIN_PCT, evaluate_thesis
 from app.schemas.analysis_artifact import AnalysisArtifactMeta
 from app.schemas.position_thesis import (
@@ -110,6 +111,27 @@ def test_weakened_when_price_is_near_the_stop() -> None:
     assert result.status == "weakened"
 
 
+@pytest.mark.parametrize(
+    ("price", "stop", "status"),
+    [
+        (100.0, 100.0, "weakened"),
+        (103.0, 100.0, "weakened"),
+        (92.7, 90.0, "weakened"),
+        (206.0, 200.0, "weakened"),
+        (103.5, 100.0, "confirmed"),
+    ],
+    ids=["at-trigger", "3pct-100", "3pct-90", "3pct-200", "3.5pct"],
+)
+def test_weakened_margin_boundary_is_inclusive(
+    price: float, stop: float, status: str
+) -> None:
+    result = _evaluate(
+        make_thesis({"kind": "close_below_stop"}), make_record(price, stop=stop)
+    )
+
+    assert result.status == status
+
+
 def test_confirmed_when_every_rule_is_clear_and_fresh() -> None:
     thesis = make_thesis(
         {"kind": "close_below_stop"},
@@ -193,6 +215,65 @@ def test_sma_rule_needs_its_volume_to_fire() -> None:
     # Below the SMA without the volume: clear, but right at its trigger.
     assert unconfirmed.results[0].outcome == "clear"
     assert unconfirmed.status == "weakened"
+
+
+def test_rel_volume_equal_to_its_minimum_fires() -> None:
+    thesis = make_thesis(
+        {"kind": "close_below_sma", "period": 50, "min_rel_volume": 1.5}
+    )
+
+    result = _evaluate(thesis, make_record(price=94.0, rel_volume=1.5))
+
+    assert result.results[0].outcome == "fired"
+    assert result.status == "invalidated"
+
+
+@pytest.mark.parametrize("volume", [None, float("nan")], ids=["none", "nan"])
+def test_missing_rel_volume_below_the_sma_is_limited(volume: float | None) -> None:
+    thesis = make_thesis(
+        {"kind": "close_below_sma", "period": 50, "min_rel_volume": 1.5}
+    )
+
+    # The schema requires a float, so None arrives only unvalidated.
+    record = make_record(price=94.0).model_copy(update={"rel_volume": volume})
+
+    result = _evaluate(thesis, record)
+
+    assert result.results[0].outcome == "limited"
+    assert result.results[0].observed["rel_volume"] is None
+    assert result.status == "evidence_limited"
+
+
+def test_score_equal_to_min_score_is_clear() -> None:
+    thesis = make_thesis({"kind": "score_below", "min_score": 6})
+
+    result = _evaluate(thesis, make_record(score=6))
+
+    assert result.results[0].outcome == "clear"
+    assert result.status == "confirmed"
+
+
+def test_unknown_run_identity_is_evidence_limited() -> None:
+    thesis = make_thesis({"kind": "stage_2_lost"})
+
+    result = evaluate_thesis(thesis, make_record(), None, FRESH)
+
+    assert result.analysis_run_id == UNKNOWN_RUN_ID
+    assert result.limitations == ("The analysis run identity is unknown.",)
+    assert result.status == "evidence_limited"
+    assert result.results[0].evidence[0].source == f"analysis run {UNKNOWN_RUN_ID}"
+
+
+def test_malformed_as_of_leaves_the_session_unknown() -> None:
+    thesis = make_thesis({"kind": "close_below_sma", "period": 50})
+
+    result = _evaluate(thesis, make_record(price=94.0, as_of="not-a-date"))
+
+    assert result.session is None
+    fired = result.first_fired
+    assert fired is not None
+    assert all(ref.as_of is None for ref in fired.evidence)
+    assert "· session unknown ·" in fired.citation
 
 
 def test_same_inputs_give_identical_facts_json() -> None:

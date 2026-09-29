@@ -83,14 +83,13 @@ def _write_artifact(
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     """Two portfolios, a tmp artifact (AAA falling, BBB rising), full wiring."""
     db_path = tmp_path / "trades.db"
-    conn = sqlite3.connect(db_path)
-    db.init_trades_db(conn)
-    conn.executemany(
-        "INSERT INTO portfolios (id, name, created_at) VALUES (?, ?, 'now')",
-        _PORTFOLIOS,
-    )
-    conn.commit()
-    conn.close()
+    with closing(sqlite3.connect(db_path)) as conn:
+        db.init_trades_db(conn)
+        conn.executemany(
+            "INSERT INTO portfolios (id, name, created_at) VALUES (?, ?, 'now')",
+            _PORTFOLIOS,
+        )
+        conn.commit()
 
     artifact = tmp_path / "analysis.json"
     records = [_record("AAA", [12.0, 10.0]), _record("BBB", [10.0, 12.0])]
@@ -717,11 +716,14 @@ def test_text_email_row_carries_both_identities(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _thesis_service(env: Any, theses: Any) -> PortfolioRecommendationEmailService:
+def _thesis_service(
+    env: Any, theses: Any, trader: Any = None
+) -> PortfolioRecommendationEmailService:
+    """The email service with ``theses``; ``trader`` feeds only the email."""
     return PortfolioRecommendationEmailService(
         assignment_service=env.assignment,
         recommendation_service=env.recommendation,
-        trader=env.trader,
+        trader=trader if trader is not None else env.trader,
         sender=AlertAgent(
             db_path=str(env.tmp_path / "alerts.db"), email_config=_EMAIL
         ).send_portfolio_recommendation_email,
@@ -789,12 +791,12 @@ def test_orchestrator_evaluates_theses_between_publish_and_emails() -> None:
     assert publish < evaluate < emails
 
 
-def test_thesis_evaluation_hook_records_and_isolates(
-    env: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The hook evaluates every active thesis once per published run, and a
-    total failure becomes a WARNING notification, never an exception."""
-    from app.orchestration.orchestrator import evaluate_position_theses
+#: The only trader calls the thesis monitor may make: holdings reads.
+_THESIS_TRADER_READS = {"list_portfolios", "get_portfolio"}
+
+
+def _seeded_thesis_service(env: Any) -> tuple[Any, Any, Any]:
+    """Return (repo, thesis, service): one active AAA thesis in portfolio 7."""
     from app.repositories.position_theses_repo import PositionThesesRepository
     from app.schemas.position_thesis import ThesisContentV1
     from app.services.position_thesis_service import PositionThesisService
@@ -815,7 +817,89 @@ def test_thesis_evaluation_hook_records_and_isolates(
         active=True,
     )
     env.trader.list_portfolios.return_value = [SimpleNamespace(id=7)]
-    service = PositionThesisService(repo, env.trader, env.artifact)
+    return repo, thesis, PositionThesisService(repo, env.trader, env.artifact)
+
+
+def _spy_forbidden(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record any drafting or Strategy recommendation call (both forbidden)."""
+    from app.agents.thesis.drafter import ThesisDraftClient
+
+    calls: list[str] = []
+
+    def spy(name: str) -> Any:
+        def record(*_args: Any, **_kwargs: Any) -> Any:
+            calls.append(name)
+            raise AssertionError(f"{name} must not be called")
+
+        return record
+
+    monkeypatch.setattr(
+        "app.services.position_thesis_service.draft_thesis", spy("draft_thesis")
+    )
+    monkeypatch.setattr(
+        "app.api.dependencies.get_thesis_draft_client", spy("draft client")
+    )
+    monkeypatch.setattr(ThesisDraftClient, "__init__", spy("ThesisDraftClient()"))
+    monkeypatch.setattr(ThesisDraftClient, "draft", spy("ThesisDraftClient.draft"))
+    monkeypatch.setattr(PortfolioRecommendationService, "recommend", spy("recommend"))
+    return calls
+
+
+def _thesis_failures(env: Any) -> list[Any]:
+    return [
+        e
+        for e in env.notifications.recent(limit=50)
+        if e.event_type == "thesis_evaluation_failed"
+    ]
+
+
+def test_thesis_evaluation_hook_records_and_isolates(
+    env: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The hook evaluates every active thesis once per published run, only
+    reads holdings, never drafts or recommends, and a total failure becomes
+    exactly one WARNING notification, never an exception."""
+    from app.orchestration.orchestrator import evaluate_position_theses
+
+    repo, thesis, service = _seeded_thesis_service(env)
+    monkeypatch.setattr(
+        "app.api.dependencies.get_position_thesis_service", lambda: service
+    )
+    monkeypatch.setattr(
+        "app.api.dependencies.get_notifications_repository",
+        lambda: env.notifications,
+    )
+    forbidden = _spy_forbidden(monkeypatch)
+
+    evaluate_position_theses("run-1")
+    evaluate_position_theses("run-1")  # idempotent per run
+
+    latest = repo.latest_evaluations([thesis.id])[thesis.id]
+    assert latest.analysis_run_id == "run-1"
+    assert len(repo.history(7, "AAA")) == 1
+    # No record_buy/record_sell, import, cash or delete call: reads only.
+    assert {call[0] for call in env.trader.mock_calls} == _THESIS_TRADER_READS
+    assert forbidden == []
+    assert _thesis_failures(env) == []
+
+    monkeypatch.setattr(
+        "app.api.dependencies.get_position_thesis_service",
+        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    evaluate_position_theses("run-2")  # swallowed
+
+    [notice] = _thesis_failures(env)
+    assert (notice.severity, notice.run_id, notice.body) == ("warning", "run-2", "boom")
+
+
+def test_thesis_hook_keys_evaluations_on_the_artifact_run(
+    env: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pipeline run id that differs from the published artifact's is
+    reported, and the evaluation is keyed on the artifact's run."""
+    from app.orchestration.orchestrator import evaluate_position_theses
+
+    repo, _thesis, service = _seeded_thesis_service(env)
     monkeypatch.setattr(
         "app.api.dependencies.get_position_thesis_service", lambda: service
     )
@@ -824,33 +908,76 @@ def test_thesis_evaluation_hook_records_and_isolates(
         lambda: env.notifications,
     )
 
-    def ledger() -> list[Any]:
-        with closing(sqlite3.connect(db_path)) as conn:
-            return [
-                conn.execute(f"SELECT * FROM {table}").fetchall()
-                for table in ("trades", "cash_flows", "portfolios")
-            ]
+    evaluate_position_theses("pipeline-9")
 
-    before = ledger()
+    assert [e.analysis_run_id for e in repo.history(7, "AAA")] == ["run-1"]
+    assert (
+        "Thesis evaluation keyed on artifact run 'run-1' (pipeline run 'pipeline-9')"
+    ) in capsys.readouterr().out
+    assert _thesis_failures(env) == []
 
-    evaluate_position_theses("run-1")
-    evaluate_position_theses("run-1")  # idempotent per run
 
-    latest = repo.latest_evaluations([thesis.id])[thesis.id]
-    assert latest.analysis_run_id == "run-1"
-    assert len(repo.history(7, "AAA")) == 1
-    assert ledger() == before
-
-    monkeypatch.setattr(
-        "app.api.dependencies.get_position_thesis_service",
-        lambda: (_ for _ in ()).throw(RuntimeError("boom")),
+def _email_trader(positions: list[Position]) -> Any:
+    """A trader serving ``positions`` to the email service only."""
+    trader = MagicMock()
+    trader.get_portfolio.side_effect = lambda portfolio_id=None: list(positions)
+    trader.get_portfolio_meta.side_effect = lambda portfolio_id: SimpleNamespace(
+        name="SIPP"
     )
-    evaluate_position_theses("run-2")  # swallowed
-    events = env.notifications.recent(limit=10)
-    assert any(
-        e.event_type == "thesis_evaluation_failed" and e.severity == "warning"
-        for e in events
+    return trader
+
+
+def test_email_thesis_section_is_unavailable_when_holdings_fail(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    trader = _email_trader([])
+    trader.get_portfolio.side_effect = RuntimeError("trades db down")
+    thesis = make_thesis({"kind": "close_below_stop"})
+    statuses = {"AAA": ThesisSummary(active=thesis)}
+
+    summary, sent = env.dispatch(_thesis_service(env, lambda _pid: statuses, trader))
+
+    assert summary.sent == 1
+    _, html, text = sent[0]
+    assert "Thesis status unavailable." in html
+    assert "Thesis status unavailable." in text
+    assert "AAA: Awaiting scan" not in text
+
+
+def test_email_shows_a_draft_only_holding_as_draft_to_confirm(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    draft = make_thesis(
+        {"kind": "close_below_stop"}, text_source="ai_draft", active=False
     )
+    statuses = {"AAA": ThesisSummary(pending=draft)}
+
+    _, sent = env.dispatch(_thesis_service(env, lambda _pid: statuses))
+
+    _, html, text = sent[0]
+    assert "  AAA: Draft to confirm\n" in text + "\n"
+    assert "Draft to confirm" in html
+
+
+def test_email_skips_sold_holdings_and_names_the_display_symbol(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    sold = _position("AAA").model_copy(update={"shares": 0.0})
+    aliased = _position("CCC").model_copy(update={"display_ticker": "CCC.L"})
+    statuses = {
+        ticker: ThesisSummary(
+            active=(thesis := make_thesis({"kind": "close_below_stop"}, **ids)),
+            latest=evaluate_thesis(thesis, make_record(ticker=ticker), META, FRESH),
+            current=True,
+        )
+        for ticker, ids in (("AAA", {}), ("CCC", {"id": 2, "security_id": "CCC"}))
+    }
+    trader = _email_trader([sold, aliased])
+
+    _, sent = env.dispatch(_thesis_service(env, lambda _pid: statuses, trader))
+
+    _, html, text = sent[0]
+    assert "  CCC.L: Confirmed" in text
+    assert "CCC: Confirmed" not in text
+    assert "AAA: Confirmed" not in text
+    assert "CCC.L" in html
 
 
 def test_email_marks_a_thesis_result_of_an_earlier_run(env: Any) -> None:
