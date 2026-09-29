@@ -1,7 +1,8 @@
 {# AI Desk inspector for one DeskItem ``d`` (GH-21): the finding, its fact
    table, every evidence ref and original event, and links to where the
-   user acts today. No mutating control here: the thesis button opens the
-   same editor as the Portfolio tab's Thesis button, where saving happens. #}
+   user acts today. The one change it makes is Dismiss on a notice (the
+   notification's own guarded route, which re-renders the Desk); the thesis
+   button opens the same editor as the Portfolio tab's Thesis button. #}
 <div class="desk-detail">
   <div class="desk-signal">
     <span class="desk-tag is-{{ d.tone }}">{{ d.chip }}</span>
@@ -30,7 +31,7 @@
       {% endfor %}
     </ol>
   </section>
-  {% if d.actions %}
+  {% if d.actions or d.notification_ids %}
   <div class="desk-actions">
     {% for a in d.actions %}
     {% if a.kind == "thesis" %}
@@ -43,6 +44,12 @@
     {% else %}
     <a class="desk-action" href="/" data-desk-tab="{{ a.target }}">{{ a.label }}</a>
     {% endif %}
+    {% endfor %}
+    {% for nid in d.notification_ids %}
+    <button type="button" class="desk-action desk-dismiss"
+            hx-post="/notifications/{{ nid }}/dismiss" hx-swap="none"
+            hx-on::response-error="thesisRequestFailed(event)"
+            hx-on::send-error="thesisRequestFailed(event)">Dismiss notice</button>
     {% endfor %}
   </div>
   {% endif %}

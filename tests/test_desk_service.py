@@ -26,6 +26,7 @@ from app.schemas.portfolio_recommendation import NO_ASSIGNMENT
 from app.schemas.trade_review import ReviewRuleV1, TradeCheckV1, TradeReviewV1
 from app.services import portfolio_service as portfolio_service_module
 from app.services.desk_service import (
+    ACTIVITY_LIMIT,
     AGENT_BOUNDARY,
     AUDIT_TAIL_BYTES,
     DeskService,
@@ -585,10 +586,68 @@ def test_chip_counts_partition_the_list(desk_stack) -> None:
     assert sum(view.chip_counts.values()) == len(view.items)
 
 
-def test_the_boundary_wording_says_the_desk_changes_nothing_itself() -> None:
-    assert "The Desk itself changes nothing" in AGENT_BOUNDARY
+def test_the_boundary_wording_names_dismiss_as_the_only_change() -> None:
+    assert "only change is dismissing a notice" in AGENT_BOUNDARY
     assert "open the screens where you act" in AGENT_BOUNDARY
     assert "nothing here changes" not in AGENT_BOUNDARY
+
+
+def test_a_notification_item_can_be_dismissed_and_others_cannot(desk_stack) -> None:
+    note = _note(desk_stack, "Import rejected", portfolio_id=desk_stack.pid)
+
+    items = _view(desk_stack).items
+
+    by_ids = {d.notification_ids for d in items}
+    assert (note,) in by_ids
+    assert all(
+        d.notification_ids == ()
+        for d in items
+        if not any(r.kind == "notification" for r in d.evidence)
+    )
+
+
+def test_recent_activity_lists_this_portfolios_info_notices(desk_stack) -> None:
+    done = _note(
+        desk_stack,
+        "Backtest complete",
+        NotificationSeverity.INFO,
+        category=NotificationCategory.BACKTEST,
+        event_type="strategy_job_completed",
+    )
+    _note(
+        desk_stack,
+        "Other portfolio import",
+        NotificationSeverity.INFO,
+        portfolio_id=desk_stack.pid + 1,
+    )
+    _note(
+        desk_stack,
+        "AAA breakout",
+        NotificationSeverity.INFO,
+        category=NotificationCategory.ALERT,
+        event_type="breakout",
+        ticker="AAA",
+    )
+    _note(desk_stack, "An error", portfolio_id=desk_stack.pid)
+
+    view = _view(desk_stack)
+
+    assert [(a.note.id, a.note.title) for a in view.activity] == [
+        (done, "Backtest complete")
+    ]
+    assert view.activity[0].action.label and view.activity[0].label
+    assert not view.activity_unavailable
+
+
+def test_recent_activity_is_capped_and_unavailable_on_failure(desk_stack) -> None:
+    for i in range(ACTIVITY_LIMIT + 3):
+        _note(desk_stack, f"Import {i}", NotificationSeverity.INFO)
+
+    assert len(_view(desk_stack).activity) == ACTIVITY_LIMIT
+
+    desk_stack.notifications.recent_info = _raise
+    view = _view(desk_stack)
+    assert view.activity == () and view.activity_unavailable
 
 
 def _review_service(ids: list[int]) -> TradeReviewService:

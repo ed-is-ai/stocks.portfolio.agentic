@@ -287,7 +287,9 @@ def test_desk_markup_has_no_mutating_control_or_approval_dialog(stack) -> None:
     )
     body = _desk(stack)
 
-    assert "hx-post" not in body and "<form" not in body
+    posts = re.findall(r'hx-post="([^"]+)"', body)
+    assert posts and all(re.fullmatch(r"/notifications/\d+/dismiss", p) for p in posts)
+    assert "<form" not in body
     assert "<dialog" not in body and "Approve" not in body
 
 
@@ -447,8 +449,23 @@ def test_the_queue_shows_raised_by_as_human_labels(stack) -> None:
 def test_the_boundary_text_is_accurate(stack) -> None:
     body = _desk(stack)
 
-    assert "The Desk itself changes nothing" in body
+    assert "only change is dismissing a notice" in body
     assert "nothing here changes trades" not in body
+
+
+def test_recent_activity_renders_with_a_dismiss_per_notice(stack) -> None:
+    note = stack.notifications.record(
+        NotificationCategory.BACKTEST,
+        "strategy_job_completed",
+        "Backtest complete",
+        severity=NotificationSeverity.INFO,
+    )
+
+    body = _desk(stack)
+
+    section = body[body.index('id="desk-activity-heading"') :]
+    assert "Backtest complete" in section
+    assert f'hx-post="/notifications/{note}/dismiss"' in section
 
 
 def test_a_detached_thesis_opener_returns_focus_to_the_selected_option() -> None:

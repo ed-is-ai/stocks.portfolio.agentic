@@ -392,6 +392,22 @@ table,
   margin: 0 .9rem 1rem; padding-top: .7rem; color: var(--muted);
   font-size: var(--fs-2xs); border-top: 1px solid var(--border);
 }
+.desk-activity { margin: 0 .9rem 1rem; }
+.desk-activity h3 {
+  margin: 0 0 .4rem; font-size: var(--fs-2xs); color: var(--muted);
+  text-transform: uppercase; letter-spacing: .04em;
+}
+.desk-activity ul { list-style: none; margin: 0; padding: 0; }
+.desk-activity li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .6rem;
+  padding: .35rem 0; border-top: 1px solid var(--border); font-size: var(--fs-xs);
+}
+.desk-activity-title { flex: 1 1 12rem; min-width: 0; }
+.desk-dismiss {
+  border: 1px solid var(--border); background: var(--card); color: var(--muted);
+  font-size: var(--fs-2xs); padding: .05rem .5rem;
+}
+.desk-dismiss:hover { color: var(--primary); border-color: var(--primary); }
 .desk-inspector { background: var(--surface); }
 .desk-detail { padding: 1rem; }
 .desk-signal { display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; margin-bottom: .7rem; }
