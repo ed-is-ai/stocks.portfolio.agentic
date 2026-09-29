@@ -54,4 +54,30 @@
     <div><dt>Evidence</dt><dd>{{ done }} / {{ total }} complete</dd></div>
   </dl>
   <p class="desk-note">{{ ordering_note }}</p>
+
+  <section class="desk-activity" aria-labelledby="desk-activity-heading">
+    <h3 id="desk-activity-heading">Recent activity</h3>
+    {% if view.activity_unavailable %}
+    <p class="desk-empty">Recent activity unavailable.</p>
+    {% elif view.activity %}
+    <ul>
+      {% for a in view.activity %}
+      <li>
+        <time class="local-time desk-num" datetime="{{ a.note.created_at.isoformat() }}">{{ a.note.created_at.strftime('%Y-%m-%d %H:%M') }}</time>
+        <span class="desk-activity-title">{{ a.note.title }}</span>
+        <small>{{ a.label }}</small>
+        {% if a.action.kind == "href" %}<a href="{{ a.action.target }}">{{ a.action.label }}</a>
+        {% else %}<a href="/" data-desk-tab="{{ a.action.target }}">{{ a.action.label }}</a>{% endif %}
+        <button type="button" class="desk-dismiss"
+                hx-post="/notifications/{{ a.note.id }}/dismiss" hx-swap="none"
+                hx-on::response-error="thesisRequestFailed(event)"
+                hx-on::send-error="thesisRequestFailed(event)"
+                aria-label="Dismiss {{ a.note.title }}">Dismiss</button>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="desk-empty">No recent activity.</p>
+    {% endif %}
+  </section>
 </section>

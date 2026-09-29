@@ -109,3 +109,28 @@ def test_record_prunes_expired_rows(tmp_path) -> None:
     repo.record(NotificationCategory.ALERT, "breakout", "new")
 
     assert [n.title for n in repo.recent()] == ["new"]
+
+
+def test_recent_info_returns_undismissed_info_since(tmp_path) -> None:
+    repo = NotificationsRepository(db.make_connect(lambda: str(tmp_path / "n.db")))
+    repo.ensure_schema()
+    kept = repo.record(
+        NotificationCategory.BACKTEST,
+        "done",
+        "Done",
+        severity=NotificationSeverity.INFO,
+    )
+    gone = repo.record(
+        NotificationCategory.BACKTEST,
+        "done",
+        "Gone",
+        severity=NotificationSeverity.INFO,
+    )
+    repo.record(
+        NotificationCategory.BACKTEST, "bad", "Bad", severity=NotificationSeverity.ERROR
+    )
+    repo.dismiss(gone)
+
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    assert [n.id for n in repo.recent_info(since)] == [kept]
+    assert repo.recent_info(datetime.now(timezone.utc) + timedelta(days=1)) == []

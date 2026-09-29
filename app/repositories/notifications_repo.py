@@ -251,6 +251,22 @@ class NotificationsRepository:
             ).fetchall()
         return [_row_to_notification(row) for row in rows]
 
+    def recent_info(self, since: datetime, limit: int = 50) -> list[Notification]:
+        """Return undismissed INFO notices created at or after ``since``,
+        newest first (the AI Desk's recent activity, GH-21)."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(_COLUMNS)} FROM notifications"
+                " WHERE dismissed_at IS NULL AND created_at >= ?"
+                " AND severity = ? ORDER BY id DESC LIMIT ?",
+                (
+                    since.astimezone(timezone.utc).isoformat(),
+                    str(NotificationSeverity.INFO),
+                    limit,
+                ),
+            ).fetchall()
+        return [_row_to_notification(row) for row in rows]
+
     def unread_count(self) -> int:
         """Return the number of unread, non-dismissed notifications."""
         with session(self._connect) as conn:

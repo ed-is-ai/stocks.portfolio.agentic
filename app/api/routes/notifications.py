@@ -34,6 +34,10 @@ NotificationsDep = Annotated[
 DeskDep = Annotated[DeskService, Depends(get_desk_service)]
 
 
+#: Response header that makes the AI Desk re-render after a dismiss.
+DESK_REFRESH = {"HX-Trigger": "portfolio-agents-refresh"}
+
+
 @router.get("/notifications/count", response_class=HTMLResponse)
 def notifications_count(
     request: Request, desk: DeskDep, portfolio_id: str | None = None
@@ -92,4 +96,5 @@ async def dismiss_notification(
 ) -> HTMLResponse:
     """Dismiss one notification so it leaves the AI Desk queue."""
     notifications.dismiss(notification_id)
-    return HTMLResponse(status_code=204)
+    # The AI Desk re-renders on this event, so the dismissed notice leaves it.
+    return HTMLResponse(status_code=204, headers=DESK_REFRESH)

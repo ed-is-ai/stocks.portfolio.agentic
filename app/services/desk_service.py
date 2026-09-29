@@ -21,7 +21,11 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
-from app.agents.triage.sources import NOTIFICATION_WINDOW, notification_events
+from app.agents.triage.sources import (
+    NOTIFICATION_LABELS,
+    NOTIFICATION_WINDOW,
+    notification_events,
+)
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.attention import (
     AttentionCategory,
@@ -31,7 +35,7 @@ from app.schemas.attention import (
     run_key,
 )
 from app.schemas.evidence_ref import EvidenceRefV1
-from app.schemas.notification import Notification
+from app.schemas.notification import Notification, NotificationCategory
 from app.schemas.position_thesis import ThesisSummary
 from app.schemas.source_health import SourceHealth, SourceName
 from app.schemas.trade_review import iso_week
@@ -74,14 +78,16 @@ ORDERING_NOTE = (
     "evidence, then new setups."
 )
 AGENT_BOUNDARY = (
-    "The Desk itself changes nothing: agents explain and propose, typed "
-    "services calculate, and its links open the screens where you act "
+    "Agents explain and propose; typed services calculate. The Desk's only "
+    "change is dismissing a notice; its links open the screens where you act "
     "(the thesis editor there can save or draft)."
 )
 CONTEXT_NOTE = (
-    "Desk is read-only; its links open where you act · No broker connection · "
+    "Desk changes nothing but dismissed notices · No broker connection · "
     "Job approvals arrive with Strategy experiments"
 )
+#: Recent-activity notices shown under the queue.
+ACTIVITY_LIMIT = 10
 MISSING_ITEM = "That item is no longer in the queue; showing the first item."
 UNAVAILABLE = "Unavailable"
 LIVE = "Live"
@@ -144,11 +150,26 @@ class DeskItem:
     evidence: tuple[EvidenceRefV1, ...]
     facts: tuple[tuple[str, str], ...]
     actions: tuple[DeskAction, ...]
+    #: Notifications behind this item, which the inspector can dismiss.
+    notification_ids: tuple[int, ...] = ()
 
     @property
     def tone(self) -> str:
         """The chip's colour tone."""
         return CHIP_TONES[self.chip]
+
+
+@dataclass(frozen=True)
+class ActivityNote:
+    """One INFO notice (a job finished, an import done) and its link."""
+
+    note: Notification
+    action: DeskAction
+
+    @property
+    def label(self) -> str:
+        """The notice's category, as the queue labels notification events."""
+        return NOTIFICATION_LABELS[self.note.category]
 
 
 @dataclass(frozen=True)
@@ -174,6 +195,9 @@ class DeskView:
     workflows: tuple[Workflow, ...]
     freshness: Freshness
     evidence_complete: tuple[int, int]
+    activity: tuple[ActivityNote, ...] = ()
+    #: True when the recent-activity read failed (shown as unavailable).
+    activity_unavailable: bool = False
 
     @property
     def queue(self) -> AttentionQueueV1:
@@ -258,6 +282,7 @@ class DeskService:
         queue = agent.attention
         items = tuple(_desk_item(queue, i, names, notes) for i in queue.items)
         selected = _find(items, item_id, queue.analysis_run_id)
+        activity = self._activity(agent.portfolio_id)
         return DeskView(
             portfolios=portfolios,
             portfolio_id=agent.portfolio_id,
@@ -271,6 +296,27 @@ class DeskService:
                 sum(r.evidence.text == "Complete" for r in agent.rows),
                 len(agent.rows),
             ),
+            activity=activity or (),
+            activity_unavailable=activity is None,
+        )
+
+    def _activity(self, portfolio_id: int | None) -> tuple[ActivityNote, ...] | None:
+        """This window's INFO notices for the portfolio or the whole app,
+        newest first; per-security alerts are left to the queue. None when
+        the read fails."""
+        try:
+            notes = self._notifications.recent_info(self._now() - NOTIFICATION_WINDOW)
+        except Exception:
+            logger.warning("Recent activity unavailable", exc_info=True)
+            return None
+        kept = [
+            n
+            for n in notes
+            if n.portfolio_id in (None, portfolio_id)
+            and not (n.category == NotificationCategory.ALERT and n.ticker)
+        ]
+        return tuple(
+            ActivityNote(n, _notification_action(n)) for n in kept[:ACTIVITY_LIMIT]
         )
 
     def _agent_view(
@@ -467,6 +513,14 @@ def _desk_item(
         ),
         facts=_facts(item, events, portfolios, notes),
         actions=_actions(events, notes),
+        notification_ids=tuple(
+            dict.fromkeys(
+                int(r.id)
+                for e in events
+                for r in e.evidence
+                if r.kind == "notification" and r.id.isdigit()
+            )
+        ),
     )
 
 

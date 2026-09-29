@@ -94,6 +94,8 @@ def test_dismiss_removes_from_feed(repo) -> None:
 
     assert response.status_code == 204
     assert repo.recent() == []
+    # The AI Desk re-renders on this event, so the notice leaves it.
+    assert response.headers["HX-Trigger"] == "portfolio-agents-refresh"
 
 
 def test_the_dropdown_panel_is_gone(repo) -> None:
