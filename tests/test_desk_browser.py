@@ -68,6 +68,8 @@ def page(
             tab = browser.new_page(viewport={"width": 1400, "height": 900})
             tab.goto(f"{base_url}/desk?portfolio_id={desk_stack.pid}")
             tab.locator("#desk [role=option]").first.wait_for()
+            # The boot splash stays up for at least 800ms; users act after it.
+            tab.locator("#boot-splash").wait_for(state="hidden")
             yield tab
         finally:
             browser.close()
@@ -85,8 +87,11 @@ def test_selecting_an_item_swaps_the_inspector_without_a_request(page) -> None:
     assert page.locator("#desk-inspector-body .desk-finding").inner_text() == title
     assert page.locator("#desk-announcer").inner_text() == f"Selected: {title}"
     assert not [u for u in requests if "/partials/desk" in u]
-    # replaceState is debounced (250ms): wait for the URL to follow.
-    page.wait_for_function("location.search.includes('item=')")
+    # replaceState is debounced (250ms): wait for the URL to follow the click.
+    page.wait_for_function(
+        "id => new URLSearchParams(location.search).get('item') === id",
+        arg=last.get_attribute("data-item-id"),
+    )
     assert page.url.split("?")[0].endswith("/desk")
 
 
@@ -105,7 +110,10 @@ def test_arrow_keys_move_the_selection(page) -> None:
 def test_a_reload_stays_on_the_desk_and_tabs_switch_the_url(page) -> None:
     page.locator("#desk [role=option]").last.click()
     selected = page.locator("#desk [role=option]").last.get_attribute("data-item-id")
-    page.wait_for_function("location.search.includes('item=')")
+    # The URL already carries the first item; wait for the clicked one.
+    page.wait_for_function(
+        "id => new URLSearchParams(location.search).get('item') === id", arg=selected
+    )
 
     page.reload()
     page.locator("#desk [role=option]").first.wait_for()

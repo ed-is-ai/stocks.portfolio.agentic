@@ -88,3 +88,35 @@ def test_preparation_ready_preserves_font_and_tab_gates(first_gate):
             page.locator("#boot-splash").wait_for(state="hidden", timeout=1500)
         finally:
             browser.close()
+
+
+def test_a_fast_failed_startup_still_shows_the_splash_briefly():
+    """Preparation failing at once must not flash the splash away."""
+    template = (ROOT / "app/api/templates/index.html").read_text()
+    splash = template.split('<div id="boot-splash"', 1)[1].split("</script>", 1)[0]
+    css = (ROOT / "app/api/static/css/splash.css").read_text()
+    html = (
+        f"<html><head><style>{css}</style></head><body>"
+        '<div id="boot-preparation-warning" hidden></div>'
+        f'<div id="boot-splash"{splash}</script><div id="tab-content"></div>'
+        "<script>document.querySelector('#tab-content').dispatchEvent("
+        "new Event('htmx:afterSwap', {bubbles: true}));</script></body></html>"
+    )
+    with playwright.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://boot.test/**",
+                lambda route: (
+                    route.fulfill(json={"status": "failed"})
+                    if route.request.url.endswith("/startup-status")
+                    else route.fulfill(content_type="text/html", body=html)
+                ),
+            )
+            page.goto("http://boot.test/")
+            page.wait_for_timeout(400)
+            assert page.locator("#boot-splash").is_visible()
+            page.locator("#boot-splash").wait_for(state="hidden", timeout=1500)
+        finally:
+            browser.close()
