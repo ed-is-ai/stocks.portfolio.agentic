@@ -15,6 +15,7 @@ from unittest.mock import patch, MagicMock
 
 from app.agents.trader.trader_agent import TraderAgent
 from app.api import dependencies
+from app.core import config
 from app.core.config import TRADES_DB
 from app.orchestration.orchestrator import pipeline
 from app.workflows.momentum import build_momentum_pipeline
@@ -50,6 +51,14 @@ def _isolated_trades_db(tmp: str, analysis_out: str) -> Iterator[Path]:
             patch.object(orchestrator, "TraderAgent", isolated_trader),
             patch("app.services.trader_service.TraderAgent", isolated_trader),
             patch.object(dependencies, "TRADES_DB", trades_db),
+            # Price backfill and BAU capture otherwise open the real
+            # historical price and backtest stores (ensure_schema writes).
+            patch.object(
+                orchestrator, "HISTORICAL_PRICE_CACHE", Path(tmp) / "prices.db"
+            ),
+            patch.object(orchestrator, "BACKTEST_DB", Path(tmp) / "backtest.db"),
+            patch.object(config, "HISTORICAL_PRICE_CACHE", Path(tmp) / "prices.db"),
+            patch.object(config, "BACKTEST_DB", Path(tmp) / "backtest.db"),
             patch(
                 "app.services.position_thesis_service.ANALYSIS_JSON",
                 Path(analysis_out),
