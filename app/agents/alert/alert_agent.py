@@ -58,6 +58,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _thesis_status_text(thesis_status: dict[str, Any]) -> str:
+    """Plain-text thesis-status section for the recommendation email (GH-14)."""
+    lines = ["THESIS STATUS"]
+    if thesis_status.get("unavailable"):
+        lines.append("  Thesis status unavailable.")
+    for row in thesis_status.get("rows", []):
+        rule = f" — {row['rule']}" if row["rule"] else ""
+        lines.append(f"  {row['symbol']}: {row['status']}{rule}")
+    return "\n".join(lines)
+
+
 EMAIL_CONFIG = EmailConfig(
     host=os.getenv("EMAIL_HOST", "smtp.gmail.com"),
     port=_env_int("EMAIL_PORT", 587),
@@ -1647,13 +1658,16 @@ class AlertAgent(Agent):
         strategy_display_name: str,
         market_narrative: MarketNarrative | None = None,
         portfolio_summary: dict[str, str] | None = None,
+        thesis_status: dict[str, Any] | None = None,
     ) -> bool:
         """Send one portfolio's Strategy recommendation email (#442).
 
         Renders the already-evaluated ``RecommendationResultV1`` — action
         rules are never recalculated here — and dispatches via the shared
         ``send_email`` transport, returning its bool. No
-        ``_buy_alerts``/``_sell_alerts`` mutation.
+        ``_buy_alerts``/``_sell_alerts`` mutation. ``thesis_status`` (GH-14)
+        is ``{"unavailable": bool, "rows": [{symbol, status, rule}]}`` or
+        None to omit the section.
         """
         sells = [r for r in result.recommendations if r.action == "sell"]
         holds = [r for r in result.recommendations if r.action == "hold"]
@@ -1673,6 +1687,7 @@ class AlertAgent(Agent):
             freshness=result.freshness,
             market_narrative=market_narrative,
             portfolio_summary=portfolio_summary,
+            thesis_status=thesis_status,
             sells=sells,
             holds=holds,
             buys=buys,
@@ -1685,6 +1700,8 @@ class AlertAgent(Agent):
         text_body = self._recommendation_text_body(
             result, portfolio_name, strategy_display_name, today
         )
+        if thesis_status:
+            text_body += "\n\n" + _thesis_status_text(thesis_status)
         return self.send_email(subject, html_body, text_body)
 
 

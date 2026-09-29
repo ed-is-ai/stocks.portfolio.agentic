@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.agents.thesis.evaluator import evaluate_thesis
 from app.agents.trader.trader_agent import TraderAgent
 from app.api.app import app
 from app.api.dependencies import (
     get_portfolio_recommendation_service,
     get_portfolio_service,
+    get_position_thesis_service,
     get_trader_service,
 )
+from app.repositories import db
+from app.repositories.position_theses_repo import PositionThesesRepository
+from app.schemas.analysis_artifact import build_analysis_payload
+from app.schemas.position_thesis import ThesisContentV1
+from app.schemas.record import StockRecord
 from app.schemas.portfolio_recommendation import (
     NO_ASSIGNMENT,
     EvaluationCoverageV1,
@@ -27,8 +36,10 @@ from app.schemas.portfolio_recommendation import (
 )
 from app.services.portfolio_agent_view import RecommendationOutcome
 from app.services.portfolio_service import PortfolioService
+from app.services.position_thesis_service import PositionThesisService
 from app.services.trader_service import TraderService
 from tests.test_portfolio_risk_route import _dump, _record
+from tests.test_thesis_evaluator import FRESH, META, make_record
 
 client = TestClient(app)
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,13 +106,27 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "recommend": lambda _pid: _result()
     }
     recommendations = SimpleNamespace(recommend=lambda pid: outcome["recommend"](pid))
+    artifact = tmp_path / "no-artifact.json"
+    theses = PositionThesisService(
+        PositionThesesRepository(db.make_connect(lambda: agent.db_path)),
+        trader,
+        artifact,
+    )
     app.dependency_overrides[get_trader_service] = lambda: trader
     app.dependency_overrides[get_portfolio_service] = lambda: service
     app.dependency_overrides[get_portfolio_recommendation_service] = lambda: (
         recommendations
     )
+    app.dependency_overrides[get_position_thesis_service] = lambda: theses
     try:
-        yield SimpleNamespace(agent=agent, pid=pf.id, service=service, outcome=outcome)
+        yield SimpleNamespace(
+            agent=agent,
+            pid=pf.id,
+            service=service,
+            outcome=outcome,
+            theses=theses,
+            artifact=artifact,
+        )
     finally:
         app.dependency_overrides.clear()
 
@@ -192,10 +217,147 @@ def test_no_portfolios_survives_a_failing_risk_report(
     monkeypatch.setattr(stack.service._trader, "list_portfolios", lambda: [])
     monkeypatch.setattr(stack.service, "risk_report", _raise)
 
-    view = stack.service.agent_view(None, _raise)
+    view = stack.service.agent_view(None, _raise, _raise)
 
     assert view.portfolio_id is None
     assert view.unavailable == ("Risk unavailable",)
+
+
+def test_thesis_cells_swap_in_and_count_nothing_by_default(stack) -> None:
+    content = ThesisContentV1.model_validate(
+        {
+            "rationale": "r",
+            "expected_setup": "s",
+            "rules": [{"kind": "stage_2_lost"}],
+        }
+    )
+    PositionThesesRepository(db.make_connect(lambda: stack.agent.db_path)).add_version(
+        stack.pid, "AAA", content, "user", active=True
+    )
+    body = _agents(stack)
+
+    assert "Awaiting scan" in _cell(stack, body, "thesis-AAA")
+    assert "No thesis" in _cell(stack, body, "thesis-BBB")
+    assert _cell(stack, body, "findings").strip() == "5"
+
+
+def test_thesis_store_failure_is_caught_and_partial(
+    stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(stack.theses, "statuses", _raise)
+    body = _agents(stack)
+
+    assert "Thesis unavailable" in _cell(stack, body, "thesis-AAA")
+    assert "Thesis unavailable" in _cell(stack, body, "thesis-BBB")
+    assert _cell(stack, body, "findings").strip() == "5 · partial"
+    assert "not counted: Thesis unavailable." in body
+
+
+class _Ancestors(HTMLParser):
+    """Record the element ids enclosing every element with id ``target``."""
+
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link"}
+    VOID |= {"meta", "source", "track", "wbr"}
+
+    def __init__(self, target: str) -> None:
+        super().__init__()
+        self.target = target
+        self.open: list[tuple[str, str | None]] = []
+        self.ancestors: list[str | None] = []
+        self.seen = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        element_id = dict(attrs).get("id")
+        if element_id == self.target:
+            self.seen = True
+            self.ancestors += [open_id for _tag, open_id in self.open]
+        if tag not in self.VOID:
+            self.open.append((tag, element_id))
+
+    def handle_endtag(self, tag: str) -> None:
+        for depth in range(len(self.open) - 1, -1, -1):
+            if self.open[depth][0] == tag:
+                del self.open[depth:]
+                return
+
+
+def _ancestor_ids(html: str, target: str) -> list[str | None]:
+    parser = _Ancestors(target)
+    parser.feed(html)
+    assert parser.seen, target
+    return parser.ancestors
+
+
+def test_thesis_editor_modal_target_sits_outside_the_tab() -> None:
+    index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
+    target = "thesis-editor-modal-target"
+
+    assert "tab-content" not in _ancestor_ids(index, target)
+    # The walk does see nesting: the same target inside the tab is caught.
+    nested = f'<div id="tab-content"><p><br><div id="{target}"></div></p></div>'
+    assert "tab-content" in _ancestor_ids(nested, target)
+
+
+def _publish(stack: SimpleNamespace, run_id: str) -> None:
+    payload = build_analysis_payload([], run_id=run_id, generated_at=datetime.now(UTC))
+    stack.artifact.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _seed_thesis(
+    stack: SimpleNamespace, rule: dict[str, object], record: StockRecord
+) -> None:
+    """Store an active AAA thesis evaluated against the published run-1."""
+    repo = PositionThesesRepository(db.make_connect(lambda: stack.agent.db_path))
+    content = ThesisContentV1.model_validate(
+        {"rationale": "r", "expected_setup": "s", "rules": [rule]}
+    )
+    thesis = repo.add_version(stack.pid, "AAA", content, "user", active=True)
+    assert repo.append_evaluation(evaluate_thesis(thesis, record, META, FRESH))
+    _publish(stack, META.run_id)
+
+
+def _thesis_status(stack: SimpleNamespace, body: str) -> tuple[str, str]:
+    """Return the AAA Thesis cell's (tone, status text)."""
+    match = re.search(
+        rf'id="agent-{stack.pid}-thesis-AAA"[^>]*>\s*'
+        r'<span class="status (\w+)">([^<]+)</span>',
+        body,
+    )
+    assert match is not None
+    return match.group(1), match.group(2)
+
+
+def test_current_invalidated_thesis_is_an_urgent_finding(stack) -> None:
+    _seed_thesis(
+        stack, {"kind": "close_below_sma", "period": 50}, make_record(price=94.0)
+    )
+    body = _agents(stack)
+
+    assert _thesis_status(stack, body) == ("risk", "Invalidated")
+    assert _cell(stack, body, "findings").strip() == "6"
+    assert "6 urgent findings." in body
+    assert "AAA: thesis invalidated" in body
+
+
+@pytest.mark.parametrize(
+    ("record", "status"),
+    [
+        (make_record(price=91.8, stop=90.0), "Weakened"),
+        (make_record(stop=None), "Evidence limited"),
+    ],
+    ids=["weakened", "evidence-limited"],
+)
+def test_current_warning_thesis_is_warn_toned_and_not_counted(
+    stack, record: StockRecord, status: str
+) -> None:
+    _seed_thesis(stack, {"kind": "close_below_stop"}, record)
+    body = _agents(stack)
+
+    assert _thesis_status(stack, body) == ("warn", status)
+    assert "earlier run" not in _cell(stack, body, "thesis-AAA")
+    assert _cell(stack, body, "findings").strip() == "5"
+    assert "5 urgent findings." in body
+    assert "AAA: thesis" not in body
 
 
 def test_agents_partial_performs_no_writes(stack) -> None:
@@ -204,6 +366,18 @@ def test_agents_partial_performs_no_writes(stack) -> None:
         assert (
             client.get("/partials/portfolio/agents", params=params).status_code == 200
         )
+    assert _dump(stack.agent.db_path) == before
+
+
+def test_agents_partial_never_evaluates_a_newly_published_run(stack) -> None:
+    _seed_thesis(stack, {"kind": "stage_2_lost"}, make_record())
+    _publish(stack, "run-2")
+    before = _dump(stack.agent.db_path)
+    assert any("thesis_evaluations" in line for line in before)
+
+    body = _agents(stack)
+
+    assert "last checked on an earlier run" in _cell(stack, body, "thesis-AAA")
     assert _dump(stack.agent.db_path) == before
 
 
@@ -216,21 +390,29 @@ def test_tab_renders_scoped_placeholders_and_one_lazy_loader(stack) -> None:
     assert html.count("/partials/portfolio/agents?") == 1
     assert f'hx-get="/partials/portfolio/agents?portfolio_id={pid}"' in html
     assert 'hx-sync="this:replace"' in html
-    assert f"hx-on::after-request=\"portfolioAgentsUnavailable('{pid}')\"" in html
+    assert (
+        f"hx-on::after-request=\"portfolioAgentsUnavailable('{pid}', event)\"" in html
+    )
     # Every id and placeholder is scoped to this portfolio, so a late
     # response for another portfolio cannot match (or blank) them.
     for name in (
         "strategy-AAA",
         "risk-BBB",
         "evidence-BBB",
+        "thesis-BBB",
         "open-risk",
         "findings",
         "attention",
     ):
         assert f'id="agent-{pid}-{name}"' in html
-    assert html.count(f'data-agent-placeholder="{pid}"') == 3 * 2 + 3
+    assert html.count(f'data-agent-placeholder="{pid}"') == 4 * 2 + 3
     assert "data-agent-placeholder>" not in html
-    assert "Thesis monitor not available yet" in html
+    assert "Thesis monitor not available yet" not in html
+    # A static Thesis button per row opens the editor outside #tab-content,
+    # and a thesis write reloads the agent layer.
+    assert f'hx-get="/portfolios/{pid}/theses/AAA"' in html
+    assert html.count('hx-target="#thesis-editor-modal-target"') == 2
+    assert 'hx-trigger="load, portfolio-agents-refresh from:body"' in html
     assert not re.search(r"\(#1[34]\)", html)
     # The aside: context, declared portfolio-level gap, target, boundary.
     assert 'id="portfolio-copilot-body"' in html
@@ -271,7 +453,7 @@ def test_failure_fallback_and_chart_include_are_in_place() -> None:
     index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
     template = (ROOT / "app/api/templates/_portfolio.html").read_text(encoding="utf-8")
 
-    assert "function portfolioAgentsUnavailable(portfolioId)" in index
+    assert "function portfolioAgentsUnavailable(portfolioId, event)" in index
     assert '[data-agent-placeholder="${scope}"]' in index
     assert "'Agent data unavailable'" in index
     # copilotStatus tolerates a missing target; the aside scrolls into view
@@ -288,4 +470,32 @@ def test_failure_fallback_and_chart_include_are_in_place() -> None:
         template.index(include)
         < template.index('class="portfolio-summary-grid"')
         < template.index('class="portfolio-holdings-layout"')
+    )
+
+
+def test_every_swapped_element_is_marked_for_a_failed_refresh(stack) -> None:
+    body = _agents(stack)
+    index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
+
+    swapped = re.findall(r"<[^>]*hx-swap-oob=\"true\"[^>]*>", body)
+    assert swapped
+    assert all(f'data-agent-cell="{stack.pid}"' in tag for tag in swapped)
+    # A failed request marks filled cells too; a success only leftovers.
+    assert "if (detail.successful) {" in index
+    assert '[data-agent-cell="${scope}"]' in index
+
+
+def test_a_superseded_agents_request_is_not_marked_failed() -> None:
+    """hx-sync replace aborts the in-flight load; htmx fires after-request
+    then send-abort from xhr.onabort, so failures are marked in a microtask
+    only when no send-abort was recorded for that request's xhr."""
+    index = (ROOT / "app/api/templates/index.html").read_text(encoding="utf-8")
+    handler = index.split("function portfolioAgentsUnavailable(", 1)[1]
+    handler = handler.split("\n  }\n", 1)[0]
+
+    assert "document.body.addEventListener('htmx:sendAbort'" in index
+    assert "abortedRequests.add(event.detail.xhr);" in index
+    failed = handler.split("queueMicrotask(() => {", 1)[1]
+    assert failed.index("abortedRequests.has(detail.xhr)) return;") < failed.index(
+        '[data-agent-cell="${scope}"]'
     )

@@ -13,6 +13,7 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.agents.research.copilot import ResearchCopilotClient
+from app.agents.thesis.drafter import ThesisDraftClient
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.core import config
 from app.core.config import ALERTS_DB, TRADES_DB
@@ -27,9 +28,11 @@ from app.repositories.portfolio_strategies_repo import (
     PortfolioStrategiesRepository,
 )
 from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
+from app.repositories.position_theses_repo import PositionThesesRepository
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
+from app.services.position_thesis_service import PositionThesisService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.portfolio_recommendation_service import (
@@ -289,3 +292,24 @@ def get_research_copilot_client() -> ResearchCopilotClient:
     after startup takes effect on the next question.
     """
     return ResearchCopilotClient()
+
+
+@lru_cache
+def get_position_theses_repository() -> PositionThesesRepository:
+    """Return the shared position-thesis repository (GH-14, ``trades.db``)."""
+    return PositionThesesRepository(db.make_connect(lambda: str(TRADES_DB)))
+
+
+@lru_cache
+def get_position_thesis_service() -> PositionThesisService:
+    """Return the shared position-thesis service (GH-14)."""
+    return PositionThesisService(get_position_theses_repository(), get_trader_service())
+
+
+def get_thesis_draft_client() -> ThesisDraftClient:
+    """Return a thesis draft client (GH-14).
+
+    Not cached, like ``get_research_copilot_client``: a key set after
+    startup takes effect on the next draft.
+    """
+    return ThesisDraftClient()

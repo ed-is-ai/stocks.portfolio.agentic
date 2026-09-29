@@ -1,0 +1,178 @@
+{# Position thesis editor (GH-14).
+
+   GET loads the whole modal into #thesis-editor-modal-target; save, draft
+   and confirm swap only #thesis-editor-body, so the open modal is never
+   detached. Wording provenance is always labelled: "Your wording",
+   "AI-drafted wording", and "Evidence" for the deterministic check.
+   The stable #thesis-editor-modal-target (index.html) handles every thesis
+   request's events: an HTML 404 (stale draft, security no longer held) is
+   swapped in, any other failure shows an alert, and after a body swap its
+   first alert is announced in #thesis-editor-status and focus moves to the
+   title. Each form disables its button while in flight so a click cannot
+   write twice. #}
+{% set s = view.summary %}
+{% set active = s.active %}
+{% set pending = s.pending %}
+{% set base = "/portfolios/" ~ view.portfolio_id ~ "/theses/" ~ (view.position.ticker | urlencode) %}
+{% set source_labels = {"user": "Your wording", "ai_draft": "AI-drafted wording"} %}
+{% macro wording(t) -%}
+<p class="provenance mb-1">{{ source_labels[t.text_source] }} · version <span class="num">{{ t.version }}</span></p>
+<p class="mb-1">{{ t.rationale }}</p>
+<p class="mb-1"><strong>Expected setup.</strong> {{ t.expected_setup }}</p>
+<ol class="mb-1">
+  {% for rule in t.rules %}<li>{{ describe_rule(rule) }} <code>{{ rule.kind }}</code></li>{% endfor %}
+</ol>
+{% if t.review_date %}<p class="facts mb-0">Review by <span class="num">{{ t.review_date.isoformat() }}</span></p>{% endif %}
+{%- endmacro %}
+{% macro evaluation(e) -%}
+<p class="facts mb-1">
+  Session <span class="num">{{ e.session.isoformat() if e.session else "unknown" }}</span>
+  · analysis run <span class="num">{{ e.analysis_run_id }}</span>
+  · version <span class="num">{{ e.thesis_version }}</span>
+</p>
+<ul class="list-unstyled mb-1">
+  {% for r in e.results %}
+  <li class="mb-1">
+    <span class="agent-cell"><span class="status {{ outcome_tones[r.outcome] }}">{{ r.outcome }}</span></span>
+    Rule <span class="num">{{ r.index }}</span> <code>{{ r.rule.kind }}</code> — {{ describe_rule(r.rule) }}
+    <span class="facts d-block">
+      {% for ref in r.evidence %}{{ ref.id }} <span class="num">{{ r.observed[ref.id] if r.observed[ref.id] is not none else "missing" }}</span>{% if not loop.last %}, {% endif %}{% endfor %}
+      · {{ r.citation }}
+    </span>
+  </li>
+  {% endfor %}
+</ul>
+{% for limit in e.limitations %}<p class="facts mb-0">{{ limit }}</p>{% endfor %}
+{%- endmacro %}
+{% if not body_only %}
+<div class="modal fade" id="thesisEditorModal" tabindex="-1"
+     aria-labelledby="thesisEditorModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="thesisEditorModalLabel" tabindex="-1">
+          <i class="bi bi-journal-check me-1"></i>Thesis — {{ view.position.display_symbol }}
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"
+                aria-label="Close"></button>
+      </div>
+      <div class="visually-hidden" id="thesis-editor-status" role="status"
+           aria-live="polite" aria-atomic="true"></div>
+{% endif %}
+      <div class="modal-body thesis-editor" id="thesis-editor-body">
+        {% if message %}
+        <div class="alert alert-{{ message_tone }} border-0 py-2" role="status">{{ message }}</div>
+        {% endif %}
+        {% if s.review_due %}
+        <div class="alert alert-warning border-0 py-2" role="status">Review due: this thesis passed its review date.</div>
+        {% endif %}
+
+        <section aria-label="Active thesis">
+          <h6>Active thesis
+            <span class="agent-cell"><span class="status {{ cell.tone if cell.tone != 'muted' else '' }}">{{ cell.text }}</span>
+              {%- if cell.note %}<small>{{ cell.note }}</small>{% endif %}</span>
+          </h6>
+          {% if active %}{{ wording(active) }}{% else %}<p class="text-muted mb-0">No active thesis for this holding yet.</p>{% endif %}
+        </section>
+
+        {% if pending %}
+        <section aria-label="Draft to confirm">
+          <h6>Draft to confirm</h6>
+          {{ wording(pending) }}
+          <p class="facts">Drafted from anonymised scan evidence. It is not monitored until you confirm it.</p>
+          <form hx-post="{{ base }}/confirm" hx-target="#thesis-editor-body" hx-swap="outerHTML"
+                hx-disabled-elt="find button">
+            <input type="hidden" name="thesis_id" value="{{ pending.id }}">
+            <button type="submit" class="btn btn-sm btn-primary">Confirm draft</button>
+          </form>
+        </section>
+        {% endif %}
+
+        <section aria-label="Evidence">
+          <h6>Evidence{% if s.latest and not s.current %} <span class="facts">· {{ earlier_run }}</span>{% endif %}</h6>
+          {% if s.latest %}{{ evaluation(s.latest) }}
+          {% else %}<p class="text-muted mb-0">No evaluation yet. The thesis is checked after each published scan.</p>{% endif %}
+        </section>
+
+        {% if view.history %}
+        <section aria-label="Evaluation history">
+          <h6>History</h6>
+          <table class="table table-sm mb-0">
+            <thead><tr><th>Session</th><th>Run</th><th>Version</th><th>Status</th></tr></thead>
+            <tbody>
+              {% for e in view.history %}
+              <tr>
+                <td class="num">{{ e.session.isoformat() if e.session else "—" }}</td>
+                <td class="num">{{ e.analysis_run_id }}</td>
+                <td class="num">{{ e.thesis_version }}</td>
+                <td>{{ status_labels[e.status] }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </section>
+        {% endif %}
+
+        <section aria-label="Edit thesis">
+          <h6>Edit thesis <span class="provenance">saved as your wording</span></h6>
+          <form hx-post="{{ base }}" hx-target="#thesis-editor-body" hx-swap="outerHTML"
+                hx-disabled-elt="find button">
+            <label class="form-label mb-1" for="thesis-rationale">Rationale</label>
+            <textarea class="form-control form-control-sm mb-2" id="thesis-rationale" name="rationale"
+                      rows="3" maxlength="2000" required>{{ form.rationale if form else "" }}</textarea>
+            <label class="form-label mb-1" for="thesis-setup">Expected setup</label>
+            <textarea class="form-control form-control-sm mb-2" id="thesis-setup" name="expected_setup"
+                      rows="2" maxlength="1000" required>{{ form.expected_setup if form else "" }}</textarea>
+            <label class="form-label mb-1" for="thesis-review">Review date (optional)</label>
+            <input class="form-control form-control-sm mb-2" type="date" id="thesis-review" name="review_date"
+                   value="{{ form.review_date if form and form.review_date else '' }}">
+            <p class="form-label mb-1">Invalidation rules (1 to {{ max_rules }})</p>
+            {% set form_rules = form.rules if form else [] %}
+            {% for i in range(max_rules) %}
+            {% set r = form_rules[i] if i < form_rules | length else none %}
+            <div class="d-flex flex-wrap gap-1 mb-1" role="group" aria-label="Rule {{ i + 1 }}">
+              <select class="form-select form-select-sm w-auto" name="rule_kind" aria-label="Rule {{ i + 1 }} kind">
+                <option value="">—</option>
+                {% for kind in rule_kinds %}
+                <option value="{{ kind }}" {% if r and r.kind == kind %}selected{% endif %}>{{ kind }}</option>
+                {% endfor %}
+              </select>
+              <select class="form-select form-select-sm w-auto" name="rule_period" aria-label="Rule {{ i + 1 }} SMA period">
+                <option value="">SMA period</option>
+                {% for period in sma_periods %}
+                <option value="{{ period }}" {% if r and r.period | string == period | string %}selected{% endif %}>{{ period }}</option>
+                {% endfor %}
+              </select>
+              <input class="form-control form-control-sm w-auto num" type="number" step="any" min="1" max="10"
+                     name="rule_min_rel_volume" placeholder="min rel. volume" aria-label="Rule {{ i + 1 }} minimum relative volume"
+                     value="{{ r.min_rel_volume if r and r.min_rel_volume is not none and r.min_rel_volume is defined else '' }}">
+              <input class="form-control form-control-sm w-auto num" type="number" step="1" min="2" max="10"
+                     name="rule_min_score" placeholder="min score" aria-label="Rule {{ i + 1 }} minimum score"
+                     value="{{ r.min_score if r and r.min_score is defined and r.min_score is not none else '' }}">
+            </div>
+            {% endfor %}
+            <div class="d-flex gap-2 mt-2">
+              <button type="submit" class="btn btn-sm btn-primary">Save thesis</button>
+              {% if pending %}<span class="facts align-self-center">Saving replaces the pending AI draft.</span>{% endif %}
+            </div>
+          </form>
+          <form class="mt-2" hx-post="{{ base }}/draft" hx-target="#thesis-editor-body" hx-swap="outerHTML"
+                hx-disabled-elt="find button">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">Draft with AI</button>
+            <span class="facts">Claude sees only anonymised scan evidence. A draft is inactive until you confirm it.</span>
+          </form>
+        </section>
+      </div>
+{% if not body_only %}
+    </div>
+  </div>
+</div>
+<script>
+  (function () {
+    var el = document.getElementById('thesisEditorModal');
+    if (el && window.bootstrap) {
+      bootstrap.Modal.getOrCreateInstance(el).show();
+    }
+  })();
+</script>
+{% endif %}

@@ -10,7 +10,7 @@ named unavailable state rather than a guess.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -22,13 +22,22 @@ from app.schemas.portfolio_recommendation import (
     RecommendationV1,
 )
 from app.schemas.portfolio_risk import RiskFindingV1, RiskReportV1
+from app.schemas.position_thesis import STATUS_LABELS, ThesisSummary, describe_rule
 from app.schemas.trade import Position
 
 Tone = Literal["risk", "good", "warn", "info", "muted"]
 RecommendationOutcome = RecommendationResultV1 | NoAssignment | EvaluationUnavailable
+#: Each held security's thesis state; ``None`` means the store failed.
+ThesisStates = Mapping[str, ThesisSummary] | None
 
 _ACTION_TONE: dict[str, Tone] = {"sell": "risk", "hold": "good", "buy": "info"}
 _SEVERITY_TONE: dict[str, Tone] = {"high": "risk", "medium": "warn"}
+_THESIS_TONE: dict[str, Tone] = {
+    "invalidated": "risk",
+    "weakened": "warn",
+    "evidence_limited": "warn",
+    "confirmed": "good",
+}
 #: Findings about one holding. Portfolio-wide ones (capital at risk, sector
 #: concentration) name every holding they cover, so they must not flag each row.
 _POSITION_KINDS = frozenset(
@@ -38,6 +47,12 @@ NO_STRATEGY = "No Strategy assigned"
 STRATEGY_UNAVAILABLE = "Strategy unavailable"
 RISK_UNAVAILABLE = "Risk unavailable"
 NOT_EVALUATED = "Not evaluated"
+THESIS_UNAVAILABLE = "Thesis unavailable"
+NO_THESIS = "No thesis"
+DRAFT_TO_CONFIRM = "Draft to confirm"
+AWAITING_SCAN = "Awaiting scan"
+REVIEW_DUE = "Review due"
+EARLIER_RUN = "last checked on an earlier run"
 
 
 @dataclass(frozen=True)
@@ -57,6 +72,7 @@ class HoldingAgentRow:
     strategy: AgentCell
     risk: AgentCell
     evidence: AgentCell
+    thesis: AgentCell
 
 
 @dataclass(frozen=True)
@@ -87,11 +103,13 @@ def build_agent_view(
     positions: Sequence[Position],
     outcome: RecommendationOutcome,
     risk: RiskReportV1 | None,
+    theses: ThesisStates,
 ) -> PortfolioAgentView:
-    """Join ``outcome`` and ``risk`` (``None`` = failed) onto ``positions``.
+    """Join ``outcome``, ``risk`` and ``theses`` (``None`` = failed) onto
+    ``positions``.
 
-    A Strategy gap only makes the count partial when there are holdings for
-    the Strategy to judge.
+    A Strategy or thesis gap only makes the count partial when there are
+    holdings for it to judge.
     """
     rows = tuple(
         HoldingAgentRow(
@@ -99,6 +117,7 @@ def build_agent_view(
             strategy=_strategy_cell(p, outcome),
             risk=_risk_cell(p, risk),
             evidence=_evidence_cell(p, outcome),
+            thesis=_thesis_for(p, theses),
         )
         for p in positions
     )
@@ -111,13 +130,14 @@ def build_agent_view(
                 bool(positions) and isinstance(outcome, EvaluationUnavailable),
             ),
             (RISK_UNAVAILABLE, risk is None),
+            (THESIS_UNAVAILABLE, bool(positions) and theses is None),
         )
         if missing
     )
     return PortfolioAgentView(
         portfolio_id=portfolio_id,
         rows=rows,
-        attention=_attention(positions, outcome, risk),
+        attention=_attention(positions, outcome, risk, theses),
         unavailable=unavailable,
         open_risk=_open_risk(risk),
     )
@@ -208,11 +228,14 @@ def _attention(
     positions: Sequence[Position],
     outcome: RecommendationOutcome,
     risk: RiskReportV1 | None,
+    theses: ThesisStates,
 ) -> tuple[str, ...]:
-    """High risk findings, Sell recommendations and exit evidence gaps.
+    """High risk findings, Sell recommendations, exit evidence gaps and
+    invalidated theses.
 
     Every exit diagnostic the Evidence cell shows as a warning is counted,
-    so a cell's tone and the count always agree.
+    and every invalidated thesis the Thesis cell shows, so a cell's tone and
+    the count always agree.
     """
     findings: tuple[RiskFindingV1, ...] = risk.findings if risk else ()
     items = [f.title for f in findings if f.severity == "high"]
@@ -228,7 +251,47 @@ def _attention(
                 items.append(
                     f"{p.display_symbol}: exit evidence gap ({_diagnostic_text(d)})"
                 )
+    for p in positions:
+        summary = theses.get(p.ticker) if theses else None
+        latest = summary.latest if summary and summary.current else None
+        if latest is not None and latest.status == "invalidated":
+            items.append(f"{p.display_symbol}: thesis invalidated")
     return tuple(items)
+
+
+def _thesis_for(p: Position, theses: ThesisStates) -> AgentCell:
+    if theses is None:
+        return AgentCell(THESIS_UNAVAILABLE)
+    return thesis_cell(theses.get(p.ticker))
+
+
+def thesis_cell(summary: ThesisSummary | None) -> AgentCell:
+    """The Thesis cell: evaluated status, else awaiting scan, draft or none.
+
+    An active thesis's status wins over a pending draft (noted instead), so
+    an invalidated thesis is never hidden behind a new draft. An evaluation
+    of an earlier run than the published one is shown as evidence limited.
+    """
+    if summary is None or (summary.active is None and summary.pending is None):
+        return AgentCell(NO_THESIS)
+    if summary.active is None:
+        return AgentCell(DRAFT_TO_CONFIRM, "info")
+    notes = [DRAFT_TO_CONFIRM] if summary.pending else []
+    if summary.review_due:
+        notes.append(REVIEW_DUE)
+    latest = summary.latest
+    if latest is None:
+        return AgentCell(AWAITING_SCAN, "info", " · ".join(notes))
+    if not summary.current:
+        return AgentCell(
+            STATUS_LABELS["evidence_limited"], "warn", " · ".join([EARLIER_RUN, *notes])
+        )
+    fired = latest.first_fired
+    if fired is not None:
+        notes.insert(0, f"Rule {fired.index}: {describe_rule(fired.rule)}")
+    return AgentCell(
+        STATUS_LABELS[latest.status], _THESIS_TONE[latest.status], " · ".join(notes)
+    )
 
 
 def _open_risk(risk: RiskReportV1 | None) -> AgentCell:

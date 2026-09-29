@@ -289,6 +289,15 @@
     .agent-cell .status.warn { color: var(--amber); background: var(--amber-bg); }
     .agent-cell .status.info { color: var(--blue); background: var(--blue-bg); }
     .portfolio-holdings tr:has(.agent-cell .status.risk) > td:first-child { box-shadow: inset 3px 0 0 var(--red); }
+    /* Thesis editor (GH-14): provenance labels and evidence figures. */
+    .thesis-editor section { padding: .75rem 0; border-top: 1px solid var(--border); }
+    .thesis-editor section:first-of-type { border-top: 0; }
+    .thesis-editor .provenance {
+      color: var(--muted); font-size: var(--fs-2xs); font-weight: var(--fw-bold);
+      letter-spacing: .035em; text-transform: uppercase;
+    }
+    .thesis-editor .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+    .thesis-editor .facts { color: var(--muted); font-size: var(--fs-2xs); }
     .text-button {
       padding: .2rem 0; color: var(--blue); background: transparent; border: 0;
       font-size: var(--fs-xs); font-weight: var(--fw-bold);
@@ -883,6 +892,33 @@
   <!-- Assign-Strategy modal target (#440) — lives OUTSIDE #tab-content so an
        htmx swap of the tab cannot detach the open modal mid-flight. -->
   <div id="strategy-assign-modal-target"></div>
+  <!-- Thesis editor modal target (GH-14) — outside #tab-content for the
+       same reason. htmx fires before-swap/after-swap on the swap target, so
+       the editor's handlers live on this stable element; the editor forms'
+       errors bubble up to it too. -->
+  <div id="thesis-editor-modal-target"
+       hx-on::before-swap="thesisSwapNotFound(event)"
+       hx-on::after-swap="thesisEditorSwapped(event)"
+       hx-on::response-error="thesisRequestFailed(event)"
+       hx-on::send-error="thesisRequestFailed(event)"></div>
+  <!-- Shown when the row's Thesis button fails before any editor is open. -->
+  <template id="thesis-error-modal">
+    <div class="modal fade" id="thesisEditorModal" tabindex="-1"
+         aria-labelledby="thesisEditorModalLabel" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="thesisEditorModalLabel">
+              <i class="bi bi-journal-check me-1"></i>Thesis
+            </h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"
+                    aria-label="Close"></button>
+          </div>
+          <div class="modal-body thesis-editor" id="thesis-editor-body"></div>
+        </div>
+      </div>
+    </div>
+  </template>
 
 </div>
 
@@ -919,14 +955,91 @@
     body.replaceChildren(line);
   }
   // GH-19: any of this portfolio's agent placeholders the lazy agents
-  // request did not replace (every one of them when it fails) declares
-  // itself unavailable; another portfolio's placeholders are left alone.
-  function portfolioAgentsUnavailable(portfolioId) {
+  // request did not replace declares itself unavailable. When the request
+  // failed, so does every cell an earlier load filled (data-agent-cell), so
+  // a failed refresh never leaves stale values looking current. Another
+  // portfolio's elements are left alone. A request aborted because a newer
+  // one replaced it (hx-sync="this:replace") is not a failure: htmx fires
+  // after-request and then send-abort in the same xhr.onabort, so a failure
+  // is only marked in a microtask, once any send-abort has been recorded.
+  const abortedRequests = new WeakSet();
+  document.body.addEventListener('htmx:sendAbort', (event) => {
+    abortedRequests.add(event.detail.xhr);
+  });
+  function portfolioAgentsUnavailable(portfolioId, event) {
     const scope = CSS.escape(String(portfolioId));
-    document.querySelectorAll(`[data-agent-placeholder="${scope}"]`).forEach((el) => {
+    const detail = (event && event.detail) || {};
+    const mark = (selector) => document.querySelectorAll(selector).forEach((el) => {
+      el.classList.remove('is-clear');
       el.textContent = 'Agent data unavailable';
     });
+    if (detail.successful) {
+      mark(`[data-agent-placeholder="${scope}"]`);
+      return;
+    }
+    queueMicrotask(() => {
+      if (detail.xhr && abortedRequests.has(detail.xhr)) return;
+      mark(`[data-agent-placeholder="${scope}"], [data-agent-cell="${scope}"]`);
+    });
   }
+  // Thesis editor: a 404 (stale draft, security no longer held) carries an
+  // HTML warning body; htmx 2 does not swap 4xx by default, so let that one
+  // in. Any other 404 (e.g. FastAPI's JSON) falls to thesisRequestFailed.
+  function thesisSwapNotFound(event) {
+    const type = event.detail.xhr.getResponseHeader('Content-Type') || '';
+    if (event.detail.xhr.status === 404 && type.startsWith('text/html')) {
+      event.detail.shouldSwap = true;
+      event.detail.isError = false;
+    }
+  }
+  // Thesis editor: any other failed request (5xx, 422, network error) shows
+  // an alert in the open editor, or, when the row's Thesis button failed
+  // and no editor is open, in a minimal modal.
+  const THESIS_REQUEST_FAILED =
+    'That thesis request failed. Nothing was changed on screen; try again.';
+  function thesisRequestFailed(event) {
+    const note = document.createElement('div');
+    note.className = 'alert alert-danger border-0 py-2';
+    note.setAttribute('role', 'alert');
+    note.dataset.thesisError = '';
+    note.textContent = THESIS_REQUEST_FAILED;
+    let body = event.target.closest('#thesis-editor-body');
+    if (!body) {
+      const target = document.getElementById('thesis-editor-modal-target');
+      const modal = document.getElementById('thesis-error-modal');
+      target.replaceChildren(modal.content.cloneNode(true));
+      body = target.querySelector('#thesis-editor-body');
+      bootstrap.Modal.getOrCreateInstance(target.querySelector('.modal')).show();
+    }
+    body.querySelectorAll('[data-thesis-error]').forEach((el) => el.remove());
+    body.prepend(note);
+  }
+  // Thesis editor accessibility: after a POST swaps the body, announce its
+  // first alert in the stable #thesis-editor-status region and move focus
+  // to the title (the clicked button was removed). Closing the modal
+  // returns focus to the row's Thesis button that opened it.
+  let thesisOpener = null;
+  function thesisEditorSwapped(event) {
+    if (event.target.id !== 'thesis-editor-body') return;
+    const alert = event.target.querySelector('.alert');
+    const status = document.getElementById('thesis-editor-status');
+    if (status) {
+      status.textContent = alert ? alert.textContent.trim() : 'Thesis editor updated.';
+    }
+    const title = document.getElementById('thesisEditorModalLabel');
+    (title || event.target).focus();
+  }
+  document.body.addEventListener('htmx:beforeRequest', (event) => {
+    const target = event.detail.target;
+    if (target && target.id === 'thesis-editor-modal-target') {
+      thesisOpener = event.target;
+    }
+  });
+  document.addEventListener('hidden.bs.modal', (event) => {
+    if (event.target.id === 'thesisEditorModal' && thesisOpener && thesisOpener.isConnected) {
+      thesisOpener.focus();
+    }
+  });
   // GH-19: once the aside stacks below the holdings, bring a row's Why?
   // answer into view.
   function revealPortfolioCopilot() {
