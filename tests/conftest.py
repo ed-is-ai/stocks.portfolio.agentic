@@ -27,10 +27,15 @@ def _mtimes() -> dict[Path, int]:
 
 @pytest.fixture(autouse=True, scope="session")
 def guard_real_databases():
-    """Fail the run if any test wrote to the developer's real databases."""
+    """Fail the run if any test wrote to the developer's real databases.
+
+    Only databases that existed before the run count: on a fresh checkout
+    (CI) app start-up in the browser tests creates them, which harms nothing.
+    """
     before = _mtimes()
     yield
-    changed = [str(p) for p, mtime in _mtimes().items() if before.get(p) != mtime]
+    after = _mtimes()
+    changed = [str(p) for p, mtime in before.items() if after.get(p) != mtime]
     assert not changed, f"tests modified real databases: {changed}"
 
 
