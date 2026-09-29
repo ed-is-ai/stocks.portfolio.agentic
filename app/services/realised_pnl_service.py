@@ -388,6 +388,25 @@ class RealisedPnlService:
         ticker_skips = [s for s in skipped if s.ticker == trace.ticker]
         return trace.model_copy(update={"skipped_invalid_date_trades": ticker_skips})
 
+    def fifo_lots(
+        self, portfolio_id: int
+    ) -> tuple[list[Trade], dict[int, MatchTrace], frozenset[int]]:
+        """Return the replayed trades, each SELL's trace and open BUY ids (GH-17).
+
+        One fresh ``_replay_fifo`` run: the trades in replay order, every
+        SELL's ``MatchTrace`` (its closed lots' BUY ids) keyed by the sell's
+        id, and the ids of BUYs with a lot still open.
+        """
+        trades, _ = self._sorted_valid_trades(portfolio_id)
+        _, open_lots, _, traces = self._replay_fifo(trades, portfolio_id)
+        open_ids = frozenset(
+            lot.trade_id
+            for lots in open_lots.values()
+            for lot in lots
+            if lot.trade_id is not None
+        )
+        return trades, traces, open_ids
+
     def opening_lot_status(
         self, trade_id: int, portfolio_id: int
     ) -> Literal["unconsumed", "consumed"] | None:

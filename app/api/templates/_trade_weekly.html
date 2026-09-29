@@ -1,0 +1,97 @@
+{# Weekly process summary strip, in three visibly separate parts: Facts
+   (deterministic counts), Your annotations (verbatim) and Model
+   interpretation (only on a click; Claude sees anonymised facts only and
+   nothing is stored). With interpretation_only, renders just the
+   interpretation result for the button's target. #}
+{% if interpretation_only %}
+{% if interpretation %}
+<p class="provenance mb-1">Model interpretation · not stored</p>
+<p class="mb-1">{{ interpretation.summary }}</p>
+{% if interpretation.patterns %}
+<ul class="mb-0">{% for p in interpretation.patterns %}<li>{{ p }}</li>{% endfor %}</ul>
+{% endif %}
+{% else %}
+<p class="text-muted mb-0" role="status">{{ unavailable }}</p>
+{% endif %}
+{% else %}
+<section id="trade-weekly" class="trade-weekly" aria-label="Weekly process summary"
+         hx-get="/partials/history/weekly?week={{ view.week or '' }}"
+         hx-trigger="trade-process-refresh from:body" hx-swap="outerHTML">
+  {% if not view.week %}
+  <p class="text-muted mb-0" role="status">{{ unavailable or "No reviewed trades yet." }}</p>
+  {% else %}
+  <header class="trade-weekly-nav">
+    <button type="button" class="btn btn-sm btn-outline-secondary"
+            {% if view.previous %}hx-get="/partials/history/weekly?week={{ view.previous }}"
+            hx-target="#trade-weekly" hx-swap="outerHTML"{% else %}disabled{% endif %}>
+      <i class="bi bi-chevron-left"></i> Previous week
+    </button>
+    <h6 class="mb-0">Process review · week <span class="num">{{ view.week }}</span></h6>
+    <button type="button" class="btn btn-sm btn-outline-secondary"
+            {% if view.next %}hx-get="/partials/history/weekly?week={{ view.next }}"
+            hx-target="#trade-weekly" hx-swap="outerHTML"{% else %}disabled{% endif %}>
+      Next week <i class="bi bi-chevron-right"></i>
+    </button>
+  </header>
+  <div class="trade-weekly-parts">
+    <section aria-labelledby="trade-weekly-facts">
+      <h6 id="trade-weekly-facts">Facts</h6>
+      <ul class="list-unstyled facts mb-2">
+        {% for r in view.reviews %}
+        <li>{{ view.labels[r.trade_id] }} — {{ r.ticker }} {{ r.action }} <span class="num">{{ r.trade_date.isoformat() }}</span></li>
+        {% endfor %}
+      </ul>
+      <table class="table table-sm mb-2">
+        <thead><tr><th>Check</th>{% for s in status_labels.values() %}<th class="num">{{ s }}</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for kind, counts in view.facts.counts.items() %}
+          <tr>
+            <td>{{ check_labels[kind] }}</td>
+            {% for status in status_labels %}<td class="num">{{ counts[status] }}</td>{% endfor %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if view.facts.recurring %}
+      <p class="mb-0"><strong>Recurring deviations:</strong></p>
+      <ul class="mb-0">
+        {% for r in view.facts.recurring %}
+        <li>{{ r.wording }} <code>{{ r.rule_id }}</code> · <span class="num">{{ r.count }}</span> times</li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="facts mb-0">No rule deviated twice this week.</p>
+      {% endif %}
+    </section>
+    <section aria-labelledby="trade-weekly-annotations">
+      <h6 id="trade-weekly-annotations">Your annotations</h6>
+      {% if view.annotations %}
+      <ul class="list-unstyled mb-0">
+        {% for a in view.annotations %}
+        <li class="mb-1">
+          <span class="provenance">{{ view.labels[a.trade_id] }}</span>
+          {% if a.intent %}<p class="mb-0">{{ a.intent }}</p>{% endif %}
+          {% if a.stated_stop is not none %}<p class="facts mb-0">Stated stop <span class="num">{{ a.stated_stop }}</span></p>{% endif %}
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="text-muted mb-0">No annotations on this week's trades.</p>
+      {% endif %}
+    </section>
+    <section aria-labelledby="trade-weekly-model">
+      <h6 id="trade-weekly-model">Model interpretation</h6>
+      <p class="facts">Claude's reading of this week's facts, from anonymised labels and percentages only. Your annotations are not sent.</p>
+      <div id="trade-weekly-interpretation" aria-live="polite">
+        <button type="button" class="btn btn-sm btn-outline-secondary"
+                hx-post="/partials/history/weekly/interpretation?week={{ view.week }}"
+                hx-target="#trade-weekly-interpretation" hx-swap="innerHTML"
+                hx-disabled-elt="this"
+                hx-on::response-error="this.parentElement.textContent = 'Interpretation unavailable'"
+                hx-on::send-error="this.parentElement.textContent = 'Interpretation unavailable'">Interpret with AI</button>
+      </div>
+    </section>
+  </div>
+  {% endif %}
+</section>
+{% endif %}

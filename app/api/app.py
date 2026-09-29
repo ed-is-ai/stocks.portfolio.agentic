@@ -26,6 +26,7 @@ from app.api.routes import (
     settings,
     strategy_manager,
     theses,
+    trade_review,
     trades,
     views,
 )
@@ -158,6 +159,7 @@ def create_app(
     app.include_router(strategy_manager.router)
     app.include_router(copilot.router)
     app.include_router(theses.router)
+    app.include_router(trade_review.router)
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app
 

@@ -708,3 +708,9 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-14-position-thesis-monitor.md`
   summary: The recommendation email's "Portfolio summary" block renders one row labelled "rows" with a Python list repr, because `_portfolio_summary` returns `{"rows": [...]}` while the template iterates `.items()`.
   evidence: `PortfolioRecommendationEmailService._portfolio_summary` vs `app/agents/alert/templates/recommendations.html` Portfolio summary loop; no test pins the rendered rows.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-17-trade-review.md`
+  summary: `tests/test_smoke.py` runs the pipeline against the real `data/historical_price_cache.db`, because the orchestrator binds `HISTORICAL_PRICE_CACHE` at import and calls `ensure_schema()` on it; `_isolated_trades_db` does not patch that path.
+  evidence: the 47 GB store's mtime changes on every smoke run (observed 2026-09-29); orchestrator.py ~1610.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-17-trade-review.md`
+  summary: Test helpers that construct `TraderAgent()` with the default path (e.g. `_make_service_with_agent` in `tests/test_realised_pnl_service.py`) run `_init_db()` against the real `app/agents/trader/trades.db` before re-pointing `db_path`, applying schema migrations to the user's database.
+  evidence: the real trades.db received this branch's new tables during a test run; `TraderAgent.__init__` calls `_init_db()` on its default path.
