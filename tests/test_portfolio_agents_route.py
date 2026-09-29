@@ -544,7 +544,8 @@ def _view_with(stack: SimpleNamespace, **health: object):
 
 
 def _publish_records(stack: SimpleNamespace, *records: StockRecord) -> datetime:
-    at = datetime(2026, 9, 28, 21, tzinfo=UTC)
+    # Published "now": a fixed date turns stale a day later and flips setups.
+    at = datetime.now(UTC).replace(microsecond=0)
     rows = [r.model_dump(mode="json") for r in records]
     payload = build_analysis_payload(rows, run_id="run-7", generated_at=at)
     stack.artifact.write_text(json.dumps(payload), encoding="utf-8")
