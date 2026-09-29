@@ -63,11 +63,9 @@ from app.services.risk_engine import evaluate
 from app.services.series_downsample import downsample_last_per_bucket
 from app.services.snapshot_valuation import amount_in_gbp
 from app.services.stop_suggestion import (
-    MAX_LOSS_PARAM,
-    STOP_RULES,
     StopSuggestion,
+    needs_descriptor_defaults,
     suggest_stop,
-    valid_max_loss_pct,
 )
 from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
@@ -1295,9 +1293,10 @@ class PortfolioService:
         ``unavailable`` (the assignment lookup failed) or a Strategy missing
         from discovery gives no suggestion ("Strategy unavailable").
         Descriptor defaults are read (metadata-only discovery, cached) only
-        when the stored maximum-loss setting is missing or unusable; a failed
-        read leaves them None, which ``suggest_stop`` declares as a note.
-        The newest record date is the as-of a 50-day average is aged against.
+        when a stored setting the stop rule reads is missing or unusable; a
+        failed read leaves them None, which ``suggest_stop`` declares as a note.
+        The newest record date is the as-of a record's averages and price
+        history are aged against.
         """
         if unavailable or (view is not None and not view.available):
             return lambda _pos, _rec: StopSuggestion(note="Strategy unavailable")
@@ -1305,9 +1304,7 @@ class PortfolioService:
             return partial(suggest_stop, strategy_id=None, parameters={}, defaults=None)
         assignment = view.assignment
         defaults = None
-        if assignment.strategy_id in STOP_RULES and (
-            valid_max_loss_pct(assignment.parameters.get(MAX_LOSS_PARAM)) is None
-        ):
+        if needs_descriptor_defaults(assignment.strategy_id, assignment.parameters):
             defaults = self._descriptor_defaults(assignment.strategy_id)
         return partial(
             suggest_stop,

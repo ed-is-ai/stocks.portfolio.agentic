@@ -7,8 +7,10 @@ these are the only tests that exercise the template's real conditionals.
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from app.api.templating import templates
-from app.services.stop_suggestion import StopSuggestion
+from app.services.stop_suggestion import BUY_AND_HOLD_NOTE, StopSuggestion
 
 
 def _render(
@@ -1044,6 +1046,30 @@ def test_suggestion_uses_row_symbol_and_flags_price_at_or_below() -> None:
     assert "+5.6%" in row
     assert "Price at or below the suggested stop" in row
     assert "Note X" in row
+
+
+@pytest.mark.parametrize(
+    ("rule", "note"),
+    [
+        ("150-day avg", None),
+        ("box bottom (20-day low)", None),
+        ("10-day low", None),
+        ("50/200 crossover price", None),
+        ("default risk stop 10%", BUY_AND_HOLD_NOTE),
+    ],
+)
+def test_each_strategy_rule_labels_its_suggestion(rule: str, note: str | None) -> None:
+    html = _render(
+        None,
+        positions=[_fake_position()],
+        suggested_stops={"AAPL": _suggestion(rule=rule, note=note)},
+        portfolio_id=7,
+    )
+    row = _position_row(html, "AAPL")
+
+    assert f"{rule} · -5.0%" in row
+    assert note is None or note in row
+    assert 'hx-post="/portfolios/7/positions/AAPL/stop"' in row
 
 
 def test_declared_reason_shows_without_level_or_use() -> None:

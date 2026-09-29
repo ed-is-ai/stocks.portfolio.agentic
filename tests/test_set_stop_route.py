@@ -25,11 +25,12 @@ from app.core.ticker_identity import AliasFileUnreadableError
 from app.schemas.record import StockRecord
 from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_service import PortfolioService
+from app.services.stop_suggestion import DARVAS_BOX
 from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 from tests.test_portfolio_service import _NoFxValuation
 from tests.test_risk_engine import _kind, _run
-from tests.test_stop_suggestion import _FakeAssignments
+from tests.test_stop_suggestion import _bar, _FakeAssignments, _newest_first
 
 client = TestClient(app)
 _AUTH = {"X-Auth-Token": "s3cret"}
@@ -407,6 +408,34 @@ def test_route_accepts_a_ticker_with_a_slash(
     assert resp.status_code == 200
     assert trade.id is not None
     assert _stops(agent.db_path)[trade.id] == 96.0
+
+
+def test_use_accepts_a_price_history_suggestion(
+    stack: PortfolioService,
+    agent: TraderAgent,
+    seeded: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Darvas box bottom is recomputed server-side and accepted exactly."""
+    pid = seeded["pid"]
+    stack._assignment_service = cast(
+        StrategyAssignmentService,
+        _FakeAssignments({"box_lookback_sessions": 3}, strategy_id=DARVAS_BOX),
+    )
+    bars = [_bar(10.0), _bar(97.0), _bar(96.5), _bar(98.0)]
+    record = _record("AAA", 95.0).model_copy(
+        update={"ohlcv_history": _newest_first(bars)}
+    )
+    monkeypatch.setattr(stack, "load_analysis", lambda: [record])
+    tab = client.get(f"/partials/portfolio?portfolio_id={pid}").text
+    assert """hx-vals='{"stop_loss": "96.5"}'""" in tab
+    assert "box bottom (3-day low)" in tab
+
+    assert _post(pid, "AAA", "95.0").status_code == 409
+    resp = _post(pid, "AAA", "96.5")
+
+    assert resp.status_code == 200
+    assert _stops(agent.db_path)[seeded["latest"]] == 96.5
 
 
 def test_route_compares_small_levels_at_full_precision(
