@@ -7,6 +7,17 @@
 <div class="tbl-toolbar">
   <span><i class="bi bi-clock-history me-1"></i>{{ trades|length }} trade(s) recorded</span>
 </div>
+{# Process review: the weekly strip and the Process column load lazily after
+   first paint. The column arrives as out-of-band swaps onto the per-row
+   placeholders; any placeholder a response did not fill -- every cell when
+   the request failed -- declares itself instead of staying blank. #}
+<section id="trade-weekly" class="trade-weekly" hx-get="/partials/history/weekly"
+         hx-trigger="load" hx-swap="outerHTML" aria-label="Weekly process summary">
+  <span class="text-muted">Loading weekly process review…</span>
+</section>
+<div hx-get="/partials/history/process" hx-trigger="load, trade-process-refresh from:body"
+     hx-swap="none" hx-sync="this:replace"
+     hx-on::after-request="tradeProcessUnavailable(event)"></div>
 <div class="tbl-wrap">
   <table class="table table-hover align-middle">
     <thead>
@@ -19,6 +30,7 @@
         <th>Price</th>
         <th>Total</th>
         <th>Notes</th>
+        <th>Process</th>
         <th></th>
       </tr>
     </thead>
@@ -46,6 +58,7 @@
         <td>${{ "%.2f"|format(t.price) }}</td>
         <td class="fw-semibold">${{ "%.2f"|format(t.shares * t.price) }}</td>
         <td class="text-muted" style="font-size:0.76rem">{{ t.notes }}</td>
+        <td><span id="process-{{ t.id }}" class="agent-cell" data-process-placeholder>Loading…</span></td>
         <td>
           {% if t.source == 'opening_lot' %}
             {% if ol_status == 'unconsumed' %}

@@ -1,0 +1,100 @@
+{# Trade process review modal.
+
+   GET loads the whole modal into #trade-review-modal-target; the annotation
+   form swaps only #trade-review-body, so the open modal is never detached.
+   Every check shows its status, rule, evidence (source and session) and the
+   one-line calculation. Annotations are the user's own words, appended;
+   the trade itself is never edited. A stop stated after the trade is cited
+   as such, never as evidence read before it. The stable
+   #trade-review-modal-target (index.html) handles every request's events:
+   an HTML 404 is swapped in, any other failure shows an alert. #}
+{% if not body_only %}
+<div class="modal fade" id="tradeReviewModal" tabindex="-1"
+     aria-labelledby="tradeReviewModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="tradeReviewModalLabel" tabindex="-1">
+          <i class="bi bi-clipboard-check me-1"></i>Process review
+          {% if review %}— {{ review.ticker }} {{ review.action }} <span class="num">{{ review.trade_date.isoformat() }}</span>{% endif %}
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"
+                aria-label="Close"></button>
+      </div>
+{% endif %}
+      <div class="modal-body trade-review" id="trade-review-body">
+        {% if message %}
+        <div class="alert alert-success border-0 py-2" role="status">{{ message }}</div>
+        {% endif %}
+        {% if warning %}
+        <div class="alert alert-warning border-0 py-2" role="alert">{{ warning }}</div>
+        {% endif %}
+        {% if not review %}
+        <p class="text-muted mb-0">No process review for this trade.</p>
+        {% else %}
+        <section aria-label="Checks">
+          <h6>Checks <span class="facts">· evidence read before the trade date{% if stated_after %}, except a stop you stated after it{% endif %}</span></h6>
+          <ul class="list-unstyled mb-0">
+            {% for c in review.checks %}
+            <li class="check">
+              <span class="agent-cell"><span class="{{ 'status ' ~ status_tones[c.status] if status_tones[c.status] != 'muted' else 'text-muted' }}">{{ status_labels[c.status] }}</span></span>
+              <strong>{{ check_labels[c.kind] }}</strong>{% if c.note %} — {{ c.note }}{% endif %}
+              <span class="facts d-block">{{ c.rule.wording }} <code>{{ c.rule.id }}</code></span>
+              <span class="facts d-block num">{{ c.calculation }}</span>
+              {% if c.evidence %}
+              <span class="facts d-block">Evidence:
+                {% for ref in c.evidence %}{{ ref.source }}{% if ref.as_of %} · session <span class="num">{{ ref.as_of.isoformat() }}</span>{% endif %}{% if not loop.last %}; {% endif %}{% endfor %}
+              </span>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ul>
+        </section>
+        {% endif %}
+
+        <section aria-label="Your annotations">
+          <h6>Your annotations</h6>
+          {% if annotations %}
+          <ol class="list-unstyled mb-0">
+            {% for a in annotations %}
+            <li class="mb-1">
+              <span class="provenance">{{ "Current" if loop.first else "Earlier" }} · <span class="num">{{ a.created_at[:10] }}</span></span>
+              {% if a.intent %}<p class="mb-0">{{ a.intent }}</p>{% endif %}
+              {% if a.stated_stop is not none %}<p class="facts mb-0">Stated stop <span class="num">{{ a.stated_stop }}</span></p>{% endif %}
+            </li>
+            {% endfor %}
+          </ol>
+          {% else %}
+          <p class="text-muted mb-0">No annotations yet.</p>
+          {% endif %}
+        </section>
+
+        {% if review %}
+        <section aria-label="Annotate">
+          <h6>Annotate <span class="provenance">your wording · the trade is not changed</span></h6>
+          <form hx-post="/trades/{{ trade_id }}/annotations" hx-target="#trade-review-body"
+                hx-swap="outerHTML" hx-disabled-elt="find button">
+            <label class="form-label mb-1" for="trade-intent">Intent</label>
+            <textarea class="form-control form-control-sm mb-2" id="trade-intent" name="intent"
+                      rows="3" maxlength="{{ max_intent }}">{{ form.intent or "" }}</textarea>
+            <label class="form-label mb-1" for="trade-stop">Stated stop (optional)</label>
+            <input class="form-control form-control-sm mb-2 num w-auto" type="number" step="any" min="0"
+                   id="trade-stop" name="stated_stop" value="{{ form.stated_stop or '' }}">
+            <button type="submit" class="btn btn-sm btn-primary">Save annotation</button>
+          </form>
+        </section>
+        {% endif %}
+      </div>
+{% if not body_only %}
+    </div>
+  </div>
+</div>
+<script>
+  (function () {
+    var el = document.getElementById('tradeReviewModal');
+    if (el && window.bootstrap) {
+      bootstrap.Modal.getOrCreateInstance(el).show();
+    }
+  })();
+</script>
+{% endif %}

@@ -14,6 +14,7 @@ from fastapi import Depends
 
 from app.agents.research.copilot import ResearchCopilotClient
 from app.agents.thesis.drafter import ThesisDraftClient
+from app.agents.trade_review.weekly import TradeReviewClient
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.core import config
 from app.core.config import ALERTS_DB, TRADES_DB
@@ -29,6 +30,7 @@ from app.repositories.portfolio_strategies_repo import (
 )
 from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.repositories.position_theses_repo import PositionThesesRepository
+from app.repositories.trade_annotations_repo import TradeAnnotationsRepository
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
@@ -38,6 +40,7 @@ from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
+from app.services.trade_review_service import TradeReviewService
 from app.services.trader_service import TraderService
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.historical_price_evidence import YFinanceFxSeriesFetcher
@@ -313,3 +316,25 @@ def get_thesis_draft_client() -> ThesisDraftClient:
     startup takes effect on the next draft.
     """
     return ThesisDraftClient()
+
+
+@lru_cache
+def get_trade_review_service() -> TradeReviewService:
+    """Return the shared trade-review service (GH-17).
+
+    Cached so its in-process review cache is shared. Annotations and the
+    Strategy history live in ``trades.db``; the evidence stores are opened
+    read-only per computation from the configured paths.
+    """
+    connect = db.make_connect(lambda: str(TRADES_DB))
+    return TradeReviewService(
+        get_trader_service(),
+        get_realised_pnl_service(),
+        TradeAnnotationsRepository(connect),
+        PortfolioStrategiesRepository(connect),
+    )
+
+
+def get_trade_review_client() -> TradeReviewClient:
+    """Return a weekly-interpretation client (GH-17); not cached, like drafts."""
+    return TradeReviewClient()

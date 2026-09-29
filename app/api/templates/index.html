@@ -305,6 +305,23 @@
     }
     .thesis-editor .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
     .thesis-editor .facts { color: var(--muted); font-size: var(--fs-2xs); }
+    /* Trade process review: weekly strip parts and the review modal. */
+    .trade-weekly { margin: 0 0 1rem; padding: .75rem 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .trade-weekly-nav { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; margin-bottom: .75rem; }
+    .trade-weekly-parts { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; }
+    .trade-weekly-parts > section + section { border-left: 1px solid var(--border); padding-left: 1rem; }
+    .trade-weekly .num, .trade-review .num { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+    .trade-weekly .facts, .trade-review .facts { color: var(--muted); font-size: var(--fs-2xs); }
+    .trade-weekly .provenance, .trade-review .provenance {
+      color: var(--muted); font-size: var(--fs-2xs); font-weight: var(--fw-bold);
+      letter-spacing: .035em; text-transform: uppercase;
+    }
+    .trade-review section { padding: .75rem 0; border-top: 1px solid var(--border); }
+    .trade-review section:first-of-type { border-top: 0; }
+    .trade-review .check { padding: .35rem 0; }
+    @media (max-width: 575.98px) {
+      .trade-weekly-parts > section + section { border-left: 0; padding-left: 0; border-top: 1px solid var(--border); padding-top: .75rem; }
+    }
     .text-button {
       padding: .2rem 0; color: var(--blue); background: transparent; border: 0;
       font-size: var(--fs-xs); font-weight: var(--fw-bold);
@@ -908,6 +925,32 @@
        hx-on::after-swap="thesisEditorSwapped(event)"
        hx-on::response-error="thesisRequestFailed(event)"
        hx-on::send-error="thesisRequestFailed(event)"></div>
+  <!-- Trade process review modal target — outside #tab-content for the
+       same reason; the annotation form swaps only its body. Its handlers
+       mirror the thesis editor's: an HTML 404 is swapped in, any other
+       failure shows an alert. -->
+  <div id="trade-review-modal-target"
+       hx-on::before-swap="thesisSwapNotFound(event)"
+       hx-on::response-error="tradeReviewRequestFailed(event)"
+       hx-on::send-error="tradeReviewRequestFailed(event)"></div>
+  <!-- Shown when a row's Process button fails before any review is open. -->
+  <template id="trade-review-error-modal">
+    <div class="modal fade" id="tradeReviewModal" tabindex="-1"
+         aria-labelledby="tradeReviewModalLabel" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="tradeReviewModalLabel">
+              <i class="bi bi-clipboard-check me-1"></i>Process review
+            </h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal"
+                    aria-label="Close"></button>
+          </div>
+          <div class="modal-body trade-review" id="trade-review-body"></div>
+        </div>
+      </div>
+    </div>
+  </template>
   <!-- Shown when the row's Thesis button fails before any editor is open. -->
   <template id="thesis-error-modal">
     <div class="modal fade" id="thesisEditorModal" tabindex="-1"
@@ -989,6 +1032,23 @@
       mark(`[data-agent-placeholder="${scope}"], [data-agent-cell="${scope}"]`);
     });
   }
+  // History Process column: after the lazy review request, any row it did
+  // not fill says so. When the request failed (or was not aborted by a newer
+  // one), every Process cell -- including ones an earlier load filled --
+  // reads "Review unavailable", so stale reviews never pass as current.
+  function tradeProcessUnavailable(event) {
+    const detail = (event && event.detail) || {};
+    const mark = (selector, text) => document.querySelectorAll(selector)
+      .forEach((el) => { el.textContent = text; });
+    if (detail.successful) {
+      mark('[data-process-placeholder]', 'Not reviewed');
+      return;
+    }
+    queueMicrotask(() => {
+      if (detail.xhr && abortedRequests.has(detail.xhr)) return;
+      mark('[data-process-placeholder], [data-process-cell]', 'Review unavailable');
+    });
+  }
   // Thesis editor: a 404 (stale draft, security no longer held) carries an
   // HTML warning body; htmx 2 does not swap 4xx by default, so let that one
   // in. Any other 404 (e.g. FastAPI's JSON) falls to thesisRequestFailed.
@@ -1019,6 +1079,29 @@
       bootstrap.Modal.getOrCreateInstance(target.querySelector('.modal')).show();
     }
     body.querySelectorAll('[data-thesis-error]').forEach((el) => el.remove());
+    body.prepend(note);
+  }
+  // Trade process review: a failed request (5xx, 422, network error) shows
+  // an alert in the open review, or, when the row's Process button failed
+  // and no review is open, in a minimal modal. HTML 404s are swapped in by
+  // thesisSwapNotFound on the stable target.
+  const TRADE_REVIEW_REQUEST_FAILED =
+    'That review request failed. Nothing was changed on screen; try again.';
+  function tradeReviewRequestFailed(event) {
+    const note = document.createElement('div');
+    note.className = 'alert alert-danger border-0 py-2';
+    note.setAttribute('role', 'alert');
+    note.dataset.tradeReviewError = '';
+    note.textContent = TRADE_REVIEW_REQUEST_FAILED;
+    let body = event.target.closest('#trade-review-body');
+    if (!body) {
+      const target = document.getElementById('trade-review-modal-target');
+      const modal = document.getElementById('trade-review-error-modal');
+      target.replaceChildren(modal.content.cloneNode(true));
+      body = target.querySelector('#trade-review-body');
+      bootstrap.Modal.getOrCreateInstance(target.querySelector('.modal')).show();
+    }
+    body.querySelectorAll('[data-trade-review-error]').forEach((el) => el.remove());
     body.prepend(note);
   }
   // Thesis editor accessibility: after a POST swaps the body, announce its

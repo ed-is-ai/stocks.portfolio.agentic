@@ -84,7 +84,21 @@ def session(connect: "Connect") -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-_SCHEMA = """
+#: GH-17 annotations: no foreign key on ``trade_id`` (see
+#: ``_migrate_trade_annotations``); ``trade_fingerprint`` re-attaches a note
+#: to its trade after a correction re-inserts it.
+_TRADE_ANNOTATIONS_TABLE = """CREATE TABLE IF NOT EXISTS trade_annotations (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id      INTEGER NOT NULL,
+    trade_id          INTEGER NOT NULL,
+    intent            TEXT NOT NULL CHECK(length(intent) <= 1000),
+    stated_stop       REAL CHECK(stated_stop IS NULL OR stated_stop > 0),
+    created_at        TEXT NOT NULL,
+    trade_fingerprint TEXT NOT NULL DEFAULT ''
+);"""
+
+_SCHEMA = (
+    """
 CREATE TABLE IF NOT EXISTS portfolios (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT NOT NULL,
@@ -280,6 +294,17 @@ CREATE TABLE IF NOT EXISTS thesis_evaluations (
     UNIQUE (thesis_id, analysis_run_id)
 );
 """
+    + _TRADE_ANNOTATIONS_TABLE
+    + """
+CREATE TABLE IF NOT EXISTS portfolio_strategy_history (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    portfolio_id    INTEGER NOT NULL REFERENCES portfolios(id) ON DELETE CASCADE,
+    strategy_id     TEXT,
+    parameters_json TEXT NOT NULL,
+    recorded_at     TEXT NOT NULL
+);
+"""
+)
 
 #: Name of the default portfolio existing single-portfolio data migrates into.
 DEFAULT_PORTFOLIO_NAME = "SIPP"
@@ -348,6 +373,52 @@ def _rebuild_cash_flows(conn: sqlite3.Connection) -> None:
     )
     conn.execute("DROP TABLE cash_flows")
     conn.execute("ALTER TABLE cash_flows_new RENAME TO cash_flows")
+
+
+def _migrate_trade_annotations(conn: sqlite3.Connection) -> None:
+    """Drop the annotations' trade foreign key and add trade fingerprints.
+
+    A table created by an earlier GH-17 build has ``trade_id REFERENCES
+    trades(id) ON DELETE CASCADE``, so a trade correction (delete and
+    re-insert) silently deleted its notes. The table is rebuilt without the
+    key, keeping every row, and each row's fingerprint is filled from its
+    trade where that still exists. Idempotent: a table with no foreign key
+    and a fingerprint column is left alone.
+    """
+    keyed = conn.execute("PRAGMA foreign_key_list(trade_annotations)").fetchall()
+    if not keyed and _has_column(conn, "trade_annotations", "trade_fingerprint"):
+        return
+    # Lazy: the repository imports this module.
+    from app.repositories.trade_annotations_repo import (
+        ticker_aliases,
+        trade_fingerprint,
+    )
+
+    conn.commit()
+    conn.execute("BEGIN")  # one transaction: the rows are never half-moved
+    conn.execute("ALTER TABLE trade_annotations RENAME TO trade_annotations_old")
+    conn.execute("DROP INDEX IF EXISTS idx_trade_annotations_trade")
+    conn.execute(_TRADE_ANNOTATIONS_TABLE)
+    conn.execute(
+        "INSERT INTO trade_annotations "
+        "(id, portfolio_id, trade_id, intent, stated_stop, created_at) "
+        "SELECT id, portfolio_id, trade_id, intent, stated_stop, created_at "
+        "FROM trade_annotations_old"
+    )
+    conn.execute("DROP TABLE trade_annotations_old")
+    aliases = ticker_aliases()
+    rows = conn.execute(
+        "SELECT a.id, t.portfolio_id, t.ticker, t.action, t.date, t.shares, "
+        "t.price FROM trade_annotations a JOIN trades t ON t.id = a.trade_id"
+    ).fetchall()
+    conn.executemany(
+        "UPDATE trade_annotations SET trade_fingerprint = ? WHERE id = ?",
+        [
+            (trade_fingerprint(pid, ticker, action, day, shares, price, aliases), aid)
+            for aid, pid, ticker, action, day, shares, price in rows
+        ],
+    )
+    conn.commit()
 
 
 def _migrate_default_portfolio(conn: sqlite3.Connection) -> None:
@@ -615,6 +686,26 @@ def init_trades_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_position_theses_one_active "
         "ON position_theses(portfolio_id, security_id) WHERE active = 1"
+    )
+    _migrate_trade_annotations(conn)
+    # GH-17: append-only review inputs, read latest-first per trade/portfolio.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_trade_annotations_trade "
+        "ON trade_annotations(trade_id, id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_strategy_history_portfolio "
+        "ON portfolio_strategy_history(portfolio_id, recorded_at)"
+    )
+    # Seed the Strategy history once from any assignment made before it
+    # existed; a portfolio that already has history is left alone.
+    conn.execute(
+        "INSERT INTO portfolio_strategy_history "
+        "(portfolio_id, strategy_id, parameters_json, recorded_at) "
+        "SELECT s.portfolio_id, s.strategy_id, s.parameters_json, s.updated_at "
+        "FROM portfolio_strategies s WHERE NOT EXISTS ("
+        "SELECT 1 FROM portfolio_strategy_history h "
+        "WHERE h.portfolio_id = s.portfolio_id)"
     )
 
     for table in ("trades", "cash_flows"):

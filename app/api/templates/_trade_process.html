@@ -1,0 +1,16 @@
+{# Process column: out-of-band swaps only, onto the placeholders
+   _history.html renders per trade row. Read-only; each cell opens that
+   trade's review modal. data-process-cell lets a failed refresh mark every
+   filled cell unavailable so stale values never pass as current. #}
+{% for trade_id, cell in cells.items() %}
+<span id="process-{{ trade_id }}" class="agent-cell" data-process-cell hx-swap-oob="true">
+  <button type="button" class="btn btn-link btn-sm p-0 text-decoration-none"
+          hx-get="/partials/history/process/{{ trade_id }}"
+          hx-target="#trade-review-modal-target" hx-swap="innerHTML"
+          hx-on::response-error="tradeReviewRequestFailed(event)"
+          hx-on::send-error="tradeReviewRequestFailed(event)"
+          aria-label="Process review details">
+    <span class="{{ 'status ' ~ cell.tone if cell.tone != 'muted' else 'text-muted' }}">{{ cell.text }}</span>
+  </button>
+</span>
+{% endfor %}
