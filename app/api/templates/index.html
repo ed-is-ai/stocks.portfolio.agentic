@@ -262,6 +262,13 @@
     }
     .attention-strip.is-clear { color: var(--muted); background: var(--card); }
     .attention-strip small { color: var(--muted); }
+    /* Attention queue: risk-first items, each expandable to its source events. */
+    .attention-aside { flex-basis: 100%; color: var(--muted); font-size: var(--fs-2xs); font-weight: var(--fw-bold); letter-spacing: .035em; text-transform: uppercase; }
+    .attention-queue { flex-basis: 100%; display: grid; gap: .4rem; margin: 0; padding: 0; list-style: none; color: var(--primary); }
+    .attention-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: .2rem .6rem; }
+    .attention-item time { font-family: var(--font-num); font-variant-numeric: tabular-nums; color: var(--muted); font-size: var(--fs-2xs); }
+    .attention-item details { flex-basis: 100%; font-size: var(--fs-2xs); }
+    .attention-item details ul { margin: .25rem 0 0; padding-left: 1.1rem; }
     .portfolio-holdings-layout {
       display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 1.25rem;
       align-items: start;
@@ -280,14 +287,14 @@
     .portfolio-assistant .boundary strong { color: var(--green); }
     .agent-cell, .agent-count { font-family: var(--font-num); font-variant-numeric: tabular-nums; }
     .agent-cell small { display: block; margin-top: .12rem; color: var(--muted); font-size: var(--fs-2xs); }
-    .agent-cell .status {
+    .agent-cell .status, .attention-item .status {
       display: inline-block; padding: .18rem .32rem; border: 1px solid currentColor; border-radius: 0;
       font-size: var(--fs-2xs); font-weight: var(--fw-bold); letter-spacing: .035em; text-transform: uppercase;
     }
-    .agent-cell .status.risk { color: var(--red); background: var(--red-bg); }
-    .agent-cell .status.good { color: var(--green); background: var(--green-bg); }
-    .agent-cell .status.warn { color: var(--amber); background: var(--amber-bg); }
-    .agent-cell .status.info { color: var(--blue); background: var(--blue-bg); }
+    .agent-cell .status.risk, .attention-item .status.risk { color: var(--red); background: var(--red-bg); }
+    .agent-cell .status.good, .attention-item .status.good { color: var(--green); background: var(--green-bg); }
+    .agent-cell .status.warn, .attention-item .status.warn { color: var(--amber); background: var(--amber-bg); }
+    .agent-cell .status.info, .attention-item .status.info { color: var(--blue); background: var(--blue-bg); }
     .portfolio-holdings tr:has(.agent-cell .status.risk) > td:first-child { box-shadow: inset 3px 0 0 var(--red); }
     /* Thesis editor (GH-14): provenance labels and evidence figures. */
     .thesis-editor section { padding: .75rem 0; border-top: 1px solid var(--border); }

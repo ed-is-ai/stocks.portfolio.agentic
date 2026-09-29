@@ -28,6 +28,27 @@
 {% for snapshot in snapshots %}{{ snap.snapshot_card(snapshot) }}{% endfor %}
 {% endif %}
 
+{% if attention is not none %}
+{% set severity_color = {"high": "#c0392b", "medium": "#b45309", "info": "#2980b9"} %}
+<div style="margin:20px 0">
+  <h3 style="color:#1e3a5f;margin-bottom:12px">Needs attention</h3>
+  {% if attention.items %}
+  <ol style="margin:0;padding-left:20px">
+    {% for item in attention.items %}
+    <li style="margin-bottom:8px">
+      <span style="color:{{ severity_color[item.severity] }};font-weight:bold;text-transform:uppercase;font-size:0.8em">{{ item.severity }}</span>
+      <strong>{{ item.title }}</strong><br>
+      <span style="color:#64748b;font-size:0.9em">{{ item.summary }}</span>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p style="color:#64748b;font-style:italic">No urgent findings.</p>
+  {% endif %}
+  <p style="color:#64748b;font-size:0.85em">{{ attention_note }}</p>
+</div>
+{% endif %}
+
 {% if cta_active %}
 {{ cta.cta_box(cta_groups, cta_not_advice) }}
 {% else %}

@@ -13,7 +13,7 @@ import logging
 import math
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -22,21 +22,35 @@ from functools import lru_cache
 from typing import Any, ClassVar, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
+from app.agents.triage.sources import (
+    freshness_events,
+    record_setups,
+    setup_events,
+    source_health_events,
+)
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
 from app.core.money import Money
 from app.core.ticker_identity import canonicalize_or_fallback, load_aliases
 from app.repositories import db
 from app.repositories.fx_quote_repo import FxQuoteRepository
-from app.schemas.analysis_artifact import read_analysis_records
+from app.schemas.analysis_artifact import (
+    read_analysis_records,
+    read_analysis_snapshot,
+)
 from app.schemas.portfolio_import import ProviderOption
 from app.schemas.portfolio_recommendation import NO_ASSIGNMENT, EvaluationUnavailable
 from app.schemas.portfolio_risk import RiskReportV1
 from app.schemas.position_thesis import ThesisSummary
 from app.schemas.record import StockRecord
+from app.schemas.source_health import SourceHealth, SourceName
 from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
+from app.services.freshness_service import FreshnessState, calculate_freshness
 from app.services.portfolio_agent_view import (
+    NO_PUBLISHED_ANALYSIS,
+    PUBLISHED_EVIDENCE_UNAVAILABLE,
     PortfolioAgentView,
+    PublishedEvidence,
     RecommendationOutcome,
     build_agent_view,
 )
@@ -187,13 +201,7 @@ class PortfolioService:
             data = read_analysis_records(ANALYSIS_JSON)
         except Exception:
             return []
-        records: list[StockRecord] = []
-        for row in data:
-            try:
-                records.append(StockRecord.model_validate(row))
-            except Exception:
-                continue
-        return records
+        return _valid_records(data)
 
     @staticmethod
     def current_prices(records: list[StockRecord]) -> dict[str, float]:
@@ -1703,23 +1711,33 @@ class PortfolioService:
         portfolio_id: int | None,
         recommend: Callable[[int], RecommendationOutcome],
         theses: Callable[[int], Mapping[str, ThesisSummary]],
+        source_health: Callable[[], Mapping[SourceName, SourceHealth]] = dict,
     ) -> PortfolioAgentView:
-        """Gather the Portfolio tab's agent layer (GH-19, GH-14).
+        """Gather the Portfolio tab's agent layer (GH-19, GH-14, GH-18).
 
         ``recommend`` is the injected ``PortfolioRecommendationService``'s
         ``recommend`` (a callable, since that service imports this one), and
         ``theses`` the ``PositionThesisService.statuses``. A failing
         recommendation, risk report or thesis store becomes a declared
-        unavailable state. Never mutates trades, cash flows, portfolios,
+        unavailable state. ``source_health`` loads the published run's
+        source health for the attention queue; a failure reading the
+        published evidence only drops those events. Never mutates trades, cash flows, portfolios,
         Strategy assignments or theses; the risk valuation may fetch and
         cache an FX quote exactly as the Portfolio tab render does.
         """
         portfolios = self._trader.list_portfolios()
         if not portfolios:
-            return build_agent_view(None, (), NO_ASSIGNMENT, self._safe_risk(None), {})
+            return build_agent_view(
+                None,
+                (),
+                NO_ASSIGNMENT,
+                self._safe_risk(None),
+                {},
+                self._published_evidence(None, source_health),
+            )
         active_id = self._active_portfolio_id(portfolio_id, portfolios)
         snapshot = self.portfolio_input_snapshot(active_id, portfolios=portfolios)
-        positions, _, _ = self._priced_positions(snapshot)
+        positions, prices_as_of, _ = self._priced_positions(snapshot)
         try:
             outcome = recommend(active_id)
         except Exception:
@@ -1733,7 +1751,12 @@ class PortfolioService:
             logger.exception("Thesis statuses failed for %s", active_id)
             summaries = None
         return build_agent_view(
-            active_id, positions, outcome, self._safe_risk(active_id), summaries
+            active_id,
+            positions,
+            outcome,
+            self._safe_risk(active_id),
+            summaries,
+            self._published_evidence(prices_as_of, source_health),
         )
 
     def _safe_risk(self, portfolio_id: int | None) -> RiskReportV1 | None:
@@ -1743,3 +1766,64 @@ class PortfolioService:
         except Exception:
             logger.exception("Risk report failed for %s", portfolio_id)
             return None
+
+    def _published_evidence(
+        self,
+        prices_as_of: str | None,
+        source_health: Callable[[], Mapping[SourceName, SourceHealth]],
+    ) -> PublishedEvidence:
+        """The published run's source health, freshness and breakouts on
+        securities held in no portfolio, as attention events (GH-18).
+
+        Records, run id and time come from one artifact read, so they
+        describe one run. No artifact at all is declared unavailable rather
+        than queued as unknown freshness; any failure drops the events and
+        declares the published evidence unavailable.
+        """
+        try:
+            rows, meta = read_analysis_snapshot(ANALYSIS_JSON)
+            if meta is None and not rows:
+                return PublishedEvidence(
+                    prices_as_of=prices_as_of, unavailable=(NO_PUBLISHED_ANALYSIS,)
+                )
+            run_id = meta.run_id if meta else None
+            generated_at = meta.generated_at if meta else None
+            freshness = calculate_freshness(generated_at)
+            try:
+                health = source_health()
+            except Exception:
+                logger.exception("Source health failed for the attention queue")
+                health = {}
+            setups = record_setups(_valid_records(rows), self._trader.held_tickers())
+            events = (
+                *source_health_events(health, run_id=run_id),
+                *freshness_events(freshness, run_id=run_id),
+                *setup_events(
+                    setups,
+                    run_id=run_id,
+                    observed_at=generated_at,
+                    stale=freshness.state is not FreshnessState.FRESH,
+                ),
+            )
+        except Exception:
+            logger.warning("Published evidence failed for the queue", exc_info=True)
+            return PublishedEvidence(
+                prices_as_of=prices_as_of, unavailable=(PUBLISHED_EVIDENCE_UNAVAILABLE,)
+            )
+        return PublishedEvidence(
+            run_id=run_id,
+            generated_at=generated_at,
+            prices_as_of=prices_as_of,
+            events=events,
+        )
+
+
+def _valid_records(rows: Sequence[Any]) -> list[StockRecord]:
+    """Validate analysis rows, skipping any malformed one."""
+    records: list[StockRecord] = []
+    for row in rows:
+        try:
+            records.append(StockRecord.model_validate(row))
+        except Exception:
+            continue
+    return records

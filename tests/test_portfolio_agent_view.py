@@ -14,12 +14,16 @@ from app.schemas.portfolio_recommendation import (
     RecommendationV1,
 )
 from app.agents.thesis.evaluator import evaluate_thesis
+from app.agents.triage.sources import freshness_events, source_health_events
 from app.schemas.portfolio_risk import RiskFindingV1, RiskPolicyV1, RiskReportV1
 from app.schemas.position_thesis import ThesisSummary
+from app.schemas.source_health import SourceHealth, SourceName, SourceState
 from app.schemas.trade import Position
+from app.services.freshness_service import Freshness, FreshnessState
 from app.services.portfolio_agent_view import (
     AgentCell,
     PortfolioAgentView,
+    PublishedEvidence,
     RecommendationOutcome,
     ThesisStates,
     agent_slug,
@@ -145,8 +149,14 @@ def test_all_live_sources_join_onto_holdings() -> None:
     # Only the exit path counts for a holding; an entry diagnostic is ignored.
     assert aaa.evidence == AgentCell("Complete", "good")
     assert bbb.evidence.text == "166 / 200"
-    # 2 high findings + 1 Sell + 1 exit evidence gap.
-    assert len(view.attention) == 4
+    # 2 high findings + 1 Sell + 1 exit evidence gap, risk first.
+    assert view.attention.urgent_count == 4
+    assert [i.kind for i in view.attention.items] == [
+        "held_risk",
+        "held_risk",
+        "exit",
+        "evidence",
+    ]
     assert view.unavailable == ()
     assert view.open_risk == AgentCell("£150.00 · 7.5%", "risk")
 
@@ -177,7 +187,7 @@ def test_no_strategy_declares_itself_and_counts_risk_only() -> None:
     for row in view.rows:
         assert row.strategy.text == "No Strategy assigned"
         assert row.evidence.text == "No Strategy assigned"
-    assert view.attention == ("AAA is at or below its stop",)
+    assert _titles(view) == ["AAA is at or below its stop"]
     assert view.unavailable == ("No Strategy assigned",)
 
 
@@ -218,7 +228,7 @@ def test_zero_findings() -> None:
     info = _finding("cash", "info", "Cash: £1,000.00")
     view = _view(result, _risk(info, at_risk=("10", "0.5")))
 
-    assert view.attention == ()
+    assert view.attention.items == []
     assert view.open_risk.tone == "muted"
     # A holding the Strategy returned no row for is not invented, and its
     # evidence is not "Complete" either.
@@ -256,7 +266,15 @@ def test_non_session_diagnostic_shows_its_cause_and_is_counted() -> None:
     assert view.rows[1].evidence == AgentCell(
         "Missing evidence", "warn", "exit evidence"
     )
-    assert "BBB: exit evidence gap (Missing evidence)" in view.attention
+    assert "BBB: exit evidence gap (Missing evidence)" in _titles(view)
+
+
+def _titles(view: PortfolioAgentView) -> list[str]:
+    return [item.title for item in view.attention.items]
+
+
+def _event_titles(view: PortfolioAgentView) -> list[str]:
+    return [event.title for event in view.attention.events]
 
 
 def _thesis_view(summary: ThesisSummary | None) -> PortfolioAgentView:
@@ -289,8 +307,11 @@ def test_thesis_cell_states() -> None:
         "risk",
         "Rule 1: Close below the 50-day SMA · Draft to confirm",
     )
-    assert "AAA: thesis invalidated" in view.attention
-    assert len(view.attention) == len(_thesis_view(None).attention) + 1
+    assert "AAA: thesis invalidated" in _event_titles(view)
+    # The invalidation joins AAA's Sell as one exit item with both events.
+    assert view.attention.urgent_count == _thesis_view(None).attention.urgent_count
+    exit_item = next(i for i in view.attention.items if i.kind == "exit")
+    assert len(exit_item.source_event_ids) == 2
 
 
 def test_thesis_store_failure_is_declared() -> None:
@@ -308,7 +329,7 @@ def test_slug_is_dom_safe_and_collision_free() -> None:
     assert agent_slug("AAA") == "AAA"
 
 
-def test_thesis_result_of_an_earlier_run_is_limited_and_not_counted() -> None:
+def test_thesis_result_of_an_earlier_run_is_limited_and_queued_stale() -> None:
     active = make_thesis({"kind": "close_below_sma", "period": 50})
     invalidated = evaluate_thesis(active, make_record(price=94.0), META, FRESH)
 
@@ -317,5 +338,41 @@ def test_thesis_result_of_an_earlier_run_is_limited_and_not_counted() -> None:
     assert view.rows[0].thesis == AgentCell(
         "Evidence limited", "warn", "last checked on an earlier run"
     )
-    assert "AAA: thesis invalidated" not in view.attention
-    assert view.attention == _thesis_view(None).attention
+    stale = next(e for e in view.attention.events if e.kind == "thesis_invalidated")
+    assert stale.stale
+    assert stale.title == "Stale: AAA: thesis invalidated"
+    # Grouped with AAA's fresh Sell, the item is not described as stale.
+    exit_item = view.attention.items[-1]
+    assert "(includes stale evidence)" in exit_item.summary
+    assert not exit_item.title.startswith("Stale:")
+
+
+def test_failed_sources_queue_the_rest_and_are_listed_unavailable() -> None:
+    view = _view(_result(_diagnostic("0P0.L", 166)), None, None)
+
+    assert [item.kind for item in view.attention.items] == ["exit", "evidence"]
+    assert view.attention.unavailable == ["Risk unavailable", "Thesis unavailable"]
+    assert view.attention.analysis_run_id == "run-1"
+
+
+def test_published_evidence_joins_the_queue() -> None:
+    source = SourceHealth(source=SourceName.CONGRESS, state=SourceState.FAILED)
+    stale = Freshness(
+        state=FreshnessState.STALE, refreshed_at=datetime(2026, 9, 20, tzinfo=UTC)
+    )
+    published = PublishedEvidence(
+        run_id="run-9",
+        events=(
+            *source_health_events({SourceName.CONGRESS: source}, run_id="run-9"),
+            *freshness_events(stale, run_id="run-9"),
+        ),
+    )
+    view = build_agent_view(1, POSITIONS, NO_ASSIGNMENT, _risk(), {}, published)
+
+    assert [item.title for item in view.attention.items] == [
+        "Analysis is stale (as of 2026-09-20)",
+        "Congress source failed",
+    ]
+    assert view.attention.analysis_run_id == "run-9"
+    # Run-wide evidence is listed but never counted against this portfolio.
+    assert view.attention.urgent_count == 0

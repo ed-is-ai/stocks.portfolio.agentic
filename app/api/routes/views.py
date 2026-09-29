@@ -24,6 +24,7 @@ from app.api.templating import templates
 from app.api.stock_scanner_context import (
     build_freshness_context,
     build_stock_scanner_context,
+    load_source_health,
 )
 from app.services.evidence_funnel import parse_run_log_source_health
 from app.services.evidence_quality import (
@@ -157,7 +158,8 @@ def partial_portfolio_agents(
     theses: Annotated[PositionThesisService, Depends(get_position_thesis_service)],
     portfolio_id: str | None = None,
 ) -> HTMLResponse:
-    """Out-of-band swaps for the Portfolio tab's agent layer (GH-19, GH-14).
+    """Out-of-band swaps for the Portfolio tab's agent layer (GH-19, GH-14,
+    GH-18).
 
     A plain ``def`` like ``partial_portfolio_risk``: the recommendation and
     risk evaluation read the ledger, scan artifact and price cache, so they
@@ -167,7 +169,10 @@ def partial_portfolio_agents(
     render does.
     """
     view = portfolio.agent_view(
-        optional_int(portfolio_id), recommendations.recommend, theses.statuses
+        optional_int(portfolio_id),
+        recommendations.recommend,
+        theses.statuses,
+        load_source_health,
     )
     return templates.TemplateResponse(
         request, "_portfolio_agents.html", context={"view": view}

@@ -12,8 +12,18 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
+from app.agents.triage.queue import build_attention_queue
+from app.agents.triage.sources import (
+    POSITION_KINDS,
+    diagnostic_text,
+    recommendation_events,
+    risk_events,
+    thesis_events,
+)
+from app.schemas.attention import AttentionEventV1, AttentionQueueV1
 from app.schemas.portfolio_recommendation import (
     EvaluationUnavailable,
     NoAssignment,
@@ -21,7 +31,7 @@ from app.schemas.portfolio_recommendation import (
     RecommendationResultV1,
     RecommendationV1,
 )
-from app.schemas.portfolio_risk import RiskFindingV1, RiskReportV1
+from app.schemas.portfolio_risk import RiskReportV1
 from app.schemas.position_thesis import STATUS_LABELS, ThesisSummary, describe_rule
 from app.schemas.trade import Position
 
@@ -38,11 +48,6 @@ _THESIS_TONE: dict[str, Tone] = {
     "evidence_limited": "warn",
     "confirmed": "good",
 }
-#: Findings about one holding. Portfolio-wide ones (capital at risk, sector
-#: concentration) name every holding they cover, so they must not flag each row.
-_POSITION_KINDS = frozenset(
-    {"position_concentration", "below_stop", "unpriced", "no_stop"}
-)
 NO_STRATEGY = "No Strategy assigned"
 STRATEGY_UNAVAILABLE = "Strategy unavailable"
 RISK_UNAVAILABLE = "Risk unavailable"
@@ -53,6 +58,8 @@ DRAFT_TO_CONFIRM = "Draft to confirm"
 AWAITING_SCAN = "Awaiting scan"
 REVIEW_DUE = "Review due"
 EARLIER_RUN = "last checked on an earlier run"
+NO_PUBLISHED_ANALYSIS = "Published analysis"
+PUBLISHED_EVIDENCE_UNAVAILABLE = "Published evidence"
 
 
 @dataclass(frozen=True)
@@ -82,11 +89,28 @@ class PortfolioAgentView:
     #: The portfolio the view was built for; scopes every swapped DOM id.
     portfolio_id: int | None
     rows: tuple[HoldingAgentRow, ...]
-    #: One line per urgent item; its length is the count.
-    attention: tuple[str, ...]
+    #: The risk-first attention queue; its high + medium items are the count.
+    attention: AttentionQueueV1
     #: Sources that could not be read, so the count is known to be partial.
     unavailable: tuple[str, ...]
     open_risk: AgentCell
+
+
+@dataclass(frozen=True)
+class PublishedEvidence:
+    """What the published run adds to the queue beyond the agents' outputs:
+    its id and time, source-health / freshness / setup events, the
+    price-cache date the risk report valued holdings at, and what of it
+    could not be read."""
+
+    run_id: str | None = None
+    generated_at: datetime | None = None
+    events: tuple[AttentionEventV1, ...] = ()
+    prices_as_of: str | None = None
+    unavailable: tuple[str, ...] = ()
+
+
+NO_PUBLISHED_EVIDENCE = PublishedEvidence()
 
 
 def agent_slug(ticker: str) -> str:
@@ -104,9 +128,10 @@ def build_agent_view(
     outcome: RecommendationOutcome,
     risk: RiskReportV1 | None,
     theses: ThesisStates,
+    published: PublishedEvidence = NO_PUBLISHED_EVIDENCE,
 ) -> PortfolioAgentView:
     """Join ``outcome``, ``risk`` and ``theses`` (``None`` = failed) onto
-    ``positions``.
+    ``positions``, and queue them with ``published`` for attention.
 
     A Strategy or thesis gap only makes the count partial when there are
     holdings for it to judge.
@@ -121,23 +146,28 @@ def build_agent_view(
         )
         for p in positions
     )
-    unavailable = tuple(
-        reason
-        for reason, missing in (
-            (NO_STRATEGY, bool(positions) and isinstance(outcome, NoAssignment)),
-            (
-                STRATEGY_UNAVAILABLE,
-                bool(positions) and isinstance(outcome, EvaluationUnavailable),
-            ),
-            (RISK_UNAVAILABLE, risk is None),
-            (THESIS_UNAVAILABLE, bool(positions) and theses is None),
-        )
-        if missing
+    unavailable = (
+        *(
+            reason
+            for reason, missing in (
+                (NO_STRATEGY, bool(positions) and isinstance(outcome, NoAssignment)),
+                (
+                    STRATEGY_UNAVAILABLE,
+                    bool(positions) and isinstance(outcome, EvaluationUnavailable),
+                ),
+                (RISK_UNAVAILABLE, risk is None),
+                (THESIS_UNAVAILABLE, bool(positions) and theses is None),
+            )
+            if missing
+        ),
+        *published.unavailable,
     )
     return PortfolioAgentView(
         portfolio_id=portfolio_id,
         rows=rows,
-        attention=_attention(positions, outcome, risk, theses),
+        attention=_attention(
+            portfolio_id, positions, outcome, risk, theses, published, unavailable
+        ),
         unavailable=unavailable,
         open_risk=_open_risk(risk),
     )
@@ -173,20 +203,13 @@ def _exit_diagnostic(
     )
 
 
-def _diagnostic_text(d: RecommendationEvidenceDiagnosticV1) -> str:
-    """``available / required`` for a session shortfall, else the cause."""
-    if 0 < d.required_sessions and d.available_sessions < d.required_sessions:
-        return f"{d.available_sessions} / {d.required_sessions}"
-    return d.cause.replace("_", " ").capitalize()
-
-
 def _evidence_cell(p: Position, outcome: RecommendationOutcome) -> AgentCell:
     """Exit-path evidence; "Complete" only when nothing says otherwise."""
     if not isinstance(outcome, RecommendationResultV1):
         return _strategy_cell(p, outcome)
     diagnostic = _exit_diagnostic(p, outcome)
     if diagnostic is not None:
-        return AgentCell(_diagnostic_text(diagnostic), "warn", "exit evidence")
+        return AgentCell(diagnostic_text(diagnostic), "warn", "exit evidence")
     if _recommendation(p, outcome) is None:
         return AgentCell(NOT_EVALUATED)
     coverage = outcome.coverage
@@ -208,11 +231,7 @@ def _risk_cell(p: Position, risk: RiskReportV1 | None) -> AgentCell:
     # Findings arrive ordered high -> medium -> info, so the first match is
     # the most severe.
     own = next(
-        (
-            f
-            for f in named
-            if f.kind in _POSITION_KINDS and f.severity in _SEVERITY_TONE
-        ),
+        (f for f in named if f.kind in POSITION_KINDS and f.severity in _SEVERITY_TONE),
         None,
     )
     if own is not None:
@@ -225,38 +244,46 @@ def _risk_cell(p: Position, risk: RiskReportV1 | None) -> AgentCell:
 
 
 def _attention(
+    portfolio_id: int | None,
     positions: Sequence[Position],
     outcome: RecommendationOutcome,
     risk: RiskReportV1 | None,
     theses: ThesisStates,
-) -> tuple[str, ...]:
-    """High risk findings, Sell recommendations, exit evidence gaps and
-    invalidated theses.
+    published: PublishedEvidence,
+    unavailable: Sequence[str],
+) -> AttentionQueueV1:
+    """The risk-first queue: high risk findings, Sell recommendations,
+    invalidated theses, exit evidence gaps, published evidence and setups.
 
-    Every exit diagnostic the Evidence cell shows as a warning is counted,
-    and every invalidated thesis the Thesis cell shows, so a cell's tone and
-    the count always agree.
+    Every exit diagnostic the Evidence cell shows as a warning and every
+    invalidated thesis are queued, so a cell's tone and the queue agree.
     """
-    findings: tuple[RiskFindingV1, ...] = risk.findings if risk else ()
-    items = [f.title for f in findings if f.severity == "high"]
+    events = [*published.events]
+    if risk is not None:
+        events += risk_events(
+            risk,
+            portfolio_id=portfolio_id,
+            positions=positions,
+            prices_as_of=published.prices_as_of,
+        )
     if isinstance(outcome, RecommendationResultV1):
-        items += [
-            f"{r.ticker}: Strategy says Sell"
-            for r in outcome.recommendations
-            if r.action == "sell"
-        ]
-        for p in positions:
-            d = _exit_diagnostic(p, outcome)
-            if d is not None:
-                items.append(
-                    f"{p.display_symbol}: exit evidence gap ({_diagnostic_text(d)})"
-                )
-    for p in positions:
-        summary = theses.get(p.ticker) if theses else None
-        latest = summary.latest if summary and summary.current else None
-        if latest is not None and latest.status == "invalidated":
-            items.append(f"{p.display_symbol}: thesis invalidated")
-    return tuple(items)
+        events += recommendation_events(outcome, positions=positions)
+    if theses:
+        events += thesis_events(
+            theses,
+            portfolio_id=portfolio_id,
+            positions=positions,
+            observed_at=published.generated_at,
+        )
+    run_id = published.run_id or (
+        outcome.analysis_run_id if isinstance(outcome, RecommendationResultV1) else None
+    )
+    return build_attention_queue(
+        events,
+        portfolio_id=portfolio_id,
+        analysis_run_id=run_id,
+        unavailable=unavailable,
+    )
 
 
 def _thesis_for(p: Position, theses: ThesisStates) -> AgentCell:

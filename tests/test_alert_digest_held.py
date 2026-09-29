@@ -6,11 +6,15 @@ individual emails); held-portfolio stop-loss / profit-target events fire an
 immediate individual email and are persisted regardless of send success.
 """
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-from app.agents.alert.alert_agent import AlertAgent
+from markupsafe import escape
+
+from app.agents.alert.alert_agent import ATTENTION_EMAIL_NOTE, AlertAgent
 from app.agents.alert.templating import get_macro
 from app.core.alerting import classify_alert
+from app.orchestration.orchestrator import _email_attention
 from app.repositories.notifications_repo import build_notifications_repository
 from app.schemas import (
     CANSLIMScore,
@@ -21,6 +25,7 @@ from app.schemas import (
     StockRecord,
     StockScan,
 )
+from app.schemas.source_health import SourceHealth, SourceName, SourceState
 
 # A SEPA template with 6/8 checks true — enough to clear the digest's
 # LOW-CONVICTION filter (needs sepa_count >= 5) so a setup actually renders.
@@ -157,6 +162,7 @@ def test_watched_signals_appear_in_digest(mock_smtp, tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -203,6 +209,7 @@ def test_tracked_signals_reuse_current_run_analysis(mock_smtp, tmp_path) -> None
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -230,6 +237,7 @@ def test_tracked_signal_without_analysis_shows_unavailable(mock_smtp, tmp_path) 
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -263,6 +271,7 @@ def test_sell_card_canslim_present(mock_smtp, tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -287,6 +296,7 @@ def test_sell_card_canslim_absent(mock_smtp, tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -318,6 +328,7 @@ def test_buy_alerts_split_into_breaking_out_and_approaching(mock_smtp, tmp_path)
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -356,6 +367,7 @@ def test_non_held_watched_stop_is_suppressed(mock_smtp, tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         return True
 
@@ -393,6 +405,7 @@ def test_narrative_snapshot_columns_stack_on_mobile(mock_smtp, tmp_path) -> None
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -422,6 +435,7 @@ def test_cta_sits_between_narrative_snapshot_and_sell_section(
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -464,6 +478,7 @@ def test_cta_group_order_matches_sections(mock_smtp, tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -514,6 +529,7 @@ def test_entry_reached_and_breaking_out_merge_into_one_buy_section(
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -593,6 +609,7 @@ def test_stopped_out_moves_next_to_sell(mock_smtp, tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -618,6 +635,7 @@ def test_cta_folds_stopped_out_into_sell_group_no_extra_group(
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -643,6 +661,7 @@ def test_cta_no_alerts_fallback(tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -666,6 +685,7 @@ def test_narrative_and_snapshot_render_as_two_columns(mock_smtp, tmp_path) -> No
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -699,6 +719,7 @@ def test_snapshot_positive_pnl_is_blue_not_green(mock_smtp, tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         return True
 
@@ -721,6 +742,7 @@ def test_snapshot_renders_each_portfolio_with_cash_and_total(
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -770,6 +792,7 @@ def test_cta_html_collapsed_by_default_text_always_expanded(
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         captured["text"] = text
         return True
@@ -797,6 +820,7 @@ def test_cta_no_alerts_fallback_html_not_collapsible(tmp_path) -> None:
     captured: dict[str, str] = {}
 
     def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
         captured["html"] = html
         return True
 
@@ -908,3 +932,163 @@ def test_held_and_watched_same_ticker_dedups(mock_smtp, tmp_path) -> None:
     items = [i for i in build_notifications_repository().recent() if i.ticker == "NVDA"]
     assert len(items) == 1
     assert items[0].event_type == "stop_loss_hit"
+
+
+# ── Needs attention (GH-18) ────────────────────────────────────────────────
+
+
+def _email_inputs(tmp_path) -> tuple[AlertAgent, list[dict], dict]:
+    """A stop hit in portfolio 2, a failed source and one breakout."""
+    agent = _agent(tmp_path)
+    agent._buy_alerts.append((_buy_record("NEW", breakout=True), "VCP Breakout"))
+    snapshots = [
+        {"portfolio_id": 1, "name": "SIPP", "positions": [_position("OK", 100.0)]},
+        {
+            "portfolio_id": 2,
+            "name": "ISA",
+            "positions": [_position("AAA", 80.0, stop_loss=90.0)],
+        },
+    ]
+    health = {
+        SourceName.STOCKTWITS: SourceHealth(
+            source=SourceName.STOCKTWITS,
+            state=SourceState.FAILED,
+            display_message="HTTP 500",
+        )
+    }
+    return agent, snapshots, health
+
+
+def _send(agent: AlertAgent, snapshots: list[dict], attention) -> dict[str, str]:
+    captured: dict[str, str] = {}
+
+    def _capture(subject: str, html: str, text: str) -> bool:
+        captured["subject"] = subject
+        captured["html"] = html
+        captured["text"] = text
+        return True
+
+    with patch.object(AlertAgent, "send_email", side_effect=_capture):
+        agent.send_summary_email(
+            [p for s in snapshots for p in s["positions"]],
+            portfolio_snapshots=snapshots,
+            attention=attention,
+        )
+    return captured
+
+
+def test_needs_attention_section_is_risk_first_in_html_and_text(tmp_path) -> None:
+    agent, snapshots, health = _email_inputs(tmp_path)
+    queue = _email_attention(agent, snapshots, health, "run-1")
+    assert queue is not None
+
+    captured = _send(agent, snapshots, queue)
+
+    titles = (
+        "ISA: AAA at or below its stop",
+        "StockTwits source failed",
+        "NEW: VCP Breakout",
+    )
+    html, text = captured["html"], captured["text"]
+    for body in (html, text):
+        positions = [body.index(title) for title in titles]
+        assert positions == sorted(positions)
+    # The note is HTML-escaped in the HTML body and verbatim in the text.
+    assert str(escape(ATTENTION_EMAIL_NOTE)) in html
+    assert ATTENTION_EMAIL_NOTE in text
+    # After the last snapshot, before the alert sections' guidance.
+    for body, heading in ((html, ">Needs attention</h3>"), (text, "NEEDS ATTENTION")):
+        lower = body.lower()
+        assert (
+            lower.index("portfolio snapshot — isa")
+            < body.index(heading)
+            < body.index(titles[0])
+            < lower.index("how to use this email")
+        )
+
+
+def test_a_failing_builder_omits_the_section_and_still_sends(tmp_path) -> None:
+    agent, snapshots, health = _email_inputs(tmp_path)
+    with patch(
+        "app.orchestration.orchestrator.build_attention_queue",
+        side_effect=RuntimeError("boom"),
+    ):
+        queue = _email_attention(agent, snapshots, health, "run-1")
+    assert queue is None
+
+    captured = _send(agent, snapshots, queue)
+
+    assert captured["html"] and captured["text"]
+    assert "needs attention" not in captured["html"].lower()
+    assert "NEEDS ATTENTION" not in captured["text"]
+
+
+def test_an_empty_queue_says_so_with_the_recommendation_line(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    queue = _email_attention(agent, [], {}, "run-1")
+    assert queue is not None and queue.items == []
+
+    captured = _send(agent, [], queue)
+
+    assert "No urgent findings." in captured["html"]
+    assert "No urgent findings." in captured["text"]
+    assert ATTENTION_EMAIL_NOTE in captured["text"]
+
+
+def test_email_setups_skip_held_and_critical_tickers(tmp_path) -> None:
+    agent, snapshots, health = _email_inputs(tmp_path)
+    # AAA is held (and hit its stop); CRIT alerted as a held sell this run.
+    agent._buy_alerts.append((_buy_record("AAA", breakout=True), "VCP Breakout"))
+    agent._sell_alerts.append((_position("CRIT", 50.0, stop_loss=60.0), None))
+    agent._entry_triggered.append(("CRIT", 50.0, 45.0, None))
+
+    queue = _email_attention(agent, snapshots, health, "run-1")
+
+    assert queue is not None
+    setups = [i.title for i in queue.items if i.kind == "new_setup"]
+    assert setups == ["NEW: VCP Breakout"]
+
+
+def test_every_held_sell_alert_is_in_needs_attention_per_portfolio(tmp_path) -> None:
+    agent = _agent(tmp_path)
+    trailing = _position("AAA", 95.0)
+    agent._sell_alerts.append((trailing, None))
+    agent._watched_stops.append(("BBB", 40.0, 45.0, None))
+    snapshots = [
+        {"portfolio_id": 1, "name": "SIPP", "positions": [trailing]},
+        {
+            "portfolio_id": 2,
+            "name": "ISA",
+            "positions": [_position("AAA", 95.0), _position("BBB", 40.0)],
+        },
+    ]
+
+    queue = _email_attention(agent, snapshots, {}, "run-1")
+    assert queue is not None
+    captured = _send(agent, snapshots, queue)
+
+    assert "SELL" in captured["subject"]
+    assert [i.title for i in queue.items] == [
+        "SIPP: AAA hit its trailing stop",
+        "ISA: AAA hit its trailing stop",
+        "ISA: BBB broke its watched stop",
+    ]
+    for body in (captured["html"], captured["text"]):
+        assert "No urgent findings." not in body
+        assert "SIPP: AAA hit its trailing stop" in body
+
+
+def test_email_attention_does_not_depend_on_the_clock(tmp_path) -> None:
+    agent, snapshots, health = _email_inputs(tmp_path)
+    runs = []
+    for year in (2026, 2031):
+        with patch("app.orchestration.orchestrator.datetime") as clock:
+            clock.now.return_value = datetime(year, 1, 1, tzinfo=UTC)
+            queue = _email_attention(agent, snapshots, health, "run-1")
+        assert queue is not None
+        runs.append(queue.model_dump_json())
+
+    assert runs[0] == runs[1]
+    held = next(e for e in queue.events if e.kind == "stop_hit")
+    assert held.observed_at is None
+    assert "Evidence as of an unknown date." in queue.items[0].summary
