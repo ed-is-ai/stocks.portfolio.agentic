@@ -81,6 +81,7 @@ from app.services.snapshot_valuation import (
     valid_rate_or_none,
     value_positions_gbp,
 )
+from app.services.stop_suggestion import stop_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,34 @@ class OpeningLotDuplicateError(ValueError):
     """Raised when an Opening Lot entry duplicates an existing one (Story
     2.4, AC4) -- same canonicalized ticker, ``shares``, and ``date`` already
     recorded with ``source="opening_lot"`` for this portfolio."""
+
+
+class StopRefusedError(ValueError):
+    """Raised when a stop cannot be recorded; the message is user-facing."""
+
+
+def _latest_replayed_buy_id(
+    rows: list[tuple[Any, ...]], canonical: str, aliases: Any
+) -> int | None:
+    """Return the id of the last BUY of ``canonical`` that the replay reads.
+
+    ``rows`` come from ``open_rows_on_connection(..., with_ids=True)`` in
+    replay order; like ``TraderAgent._replay_trades`` a row whose date is not
+    ISO is skipped and each raw ticker is folded to its canonical identity.
+    """
+    latest: int | None = None
+    for row in rows:
+        raw_ticker, action, trade_date, trade_id = row[0], row[1], row[4], row[8]
+        try:
+            _date.fromisoformat(trade_date)
+        except ValueError:
+            continue
+        folded = canonicalize_or_fallback(
+            raw_ticker, aliases, logger=logger, context="set_latest_buy_stop"
+        )
+        if action == "BUY" and folded == canonical:
+            latest = trade_id
+    return latest
 
 
 def _to_iso_date(value: str) -> str:
@@ -564,6 +593,49 @@ class TraderAgent(Agent):
             portfolio_id=portfolio_id,
             source="correction",
         )
+
+    def set_latest_buy_stop(
+        self, portfolio_id: int, ticker: str, stop_loss: float
+    ) -> None:
+        """Record ``stop_loss`` on the holding's latest replayed BUY only.
+
+        One ``BEGIN IMMEDIATE`` transaction replays the portfolio's rows
+        exactly as ``get_portfolio`` does (same SELECT, filters and order,
+        alias folding, non-ISO dates skipped), refuses unless the holding is
+        currently held with no effective stop (``stop_refusal``), then
+        updates the last BUY the replay read by its id. No trade is created
+        or deleted and no other row, cash flow or portfolio changes; unlike
+        ``correct_trade`` it never rewrites the ticker's history. Raises
+        ``StopRefusedError`` (nothing written) when refused.
+        """
+        aliases = load_aliases()
+        canonical = canonicalize_or_fallback(
+            ticker, aliases, logger=logger, context="set_latest_buy_stop"
+        )
+        conn = self._conn()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = self._trades.open_rows_on_connection(
+                conn, portfolio_id, with_ids=True
+            )
+            state = self._replay_trades(rows).get(canonical)
+            position = (
+                self._build_position(
+                    canonical, state, None, display_ticker=state["display_ticker"]
+                )
+                if state is not None and abs(state["shares"]) > QUANTITY_EPSILON
+                else None
+            )
+            refusal = stop_refusal(position)
+            if refusal is not None:
+                raise StopRefusedError(refusal)
+            trade_id = _latest_replayed_buy_id(rows, canonical, aliases)
+            if trade_id is None:
+                raise StopRefusedError("Not currently held.")
+            self._trades.set_stop(conn, trade_id, stop_loss)
+            conn.commit()
+        finally:
+            conn.close()
 
     def delete_trade(self, trade_id: int) -> bool:
         """Delete a trade by ID. Returns True if a row was deleted."""

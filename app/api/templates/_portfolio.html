@@ -601,7 +601,33 @@
           {% if p.stop_loss %}
             <span class="neg">{{ sym }}{{ "%.2f"|format(p.stop_loss) }}</span>
           {% else %}
+            {# A suggestion from the assigned Strategy is shown, never recorded
+               until "Use" is confirmed; risk checks read recorded stops only. #}
+            {% set sug = (suggested_stops or {}).get(p.ticker) %}
+            {% if sug and sug.level is not none %}
+            {# Shown rounded by magnitude; "Use" posts the full-precision level
+               the route compares against its own recomputed suggestion. #}
+            {% set level = ("%.2f" if sug.level >= 1 else "%.4f")|format(sug.level) %}
+            <div class="stop-suggestion">
+              <span class="stop-suggestion-label">Suggested</span>
+              <span class="stop-suggestion-level">{{ sym }}{{ level }}</span>
+              <span class="stop-suggestion-note">{{ sug.rule }}{% if sug.distance_pct is not none %} · {{ "%+.1f"|format(sug.distance_pct) }}%{% endif %}</span>
+              {% if sug.at_or_below %}<span class="neg">Price at or below the suggested stop</span>{% endif %}
+              {% if sug.note %}<span class="stop-suggestion-note">{{ sug.note }}</span>{% endif %}
+              {% if portfolio_id is not none %}
+              <button class="text-button" type="button"
+                      aria-label="Use the suggested stop for {{ p.display_symbol }}"
+                      hx-post="/portfolios/{{ portfolio_id }}/positions/{{ p.ticker | urlencode }}/stop"
+                      hx-vals='{{ {"stop_loss": sug.level|string} | tojson }}'
+                      hx-confirm="Record a stop of {{ sym }}{{ level }} on your latest {{ p.display_symbol }} buy?"
+                      hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">Use</button>
+              {% endif %}
+            </div>
+            {% elif sug and sug.note %}
+            <div class="stop-suggestion"><span class="stop-suggestion-note">No suggestion — {{ sug.note }}</span></div>
+            {% else %}
             <span class="text-muted">—</span>
+            {% endif %}
           {% endif %}
         </td>
         <td>

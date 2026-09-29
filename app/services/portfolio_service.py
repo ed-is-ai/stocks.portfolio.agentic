@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, DecimalException, localcontext
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any, ClassVar, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
@@ -44,6 +44,7 @@ from app.schemas.portfolio_risk import RiskReportV1
 from app.schemas.position_thesis import ThesisSummary
 from app.schemas.record import StockRecord
 from app.schemas.source_health import SourceHealth, SourceName
+from app.schemas.strategy_assignment import AssignmentView
 from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
 from app.services.freshness_service import FreshnessState, calculate_freshness
@@ -61,6 +62,13 @@ from app.services.portfolio_import.registry_loader import get_contract_registry
 from app.services.risk_engine import evaluate
 from app.services.series_downsample import downsample_last_per_bucket
 from app.services.snapshot_valuation import amount_in_gbp
+from app.services.stop_suggestion import (
+    MAX_LOSS_PARAM,
+    STOP_RULES,
+    StopSuggestion,
+    suggest_stop,
+    valid_max_loss_pct,
+)
 from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 
@@ -1276,6 +1284,55 @@ class PortfolioService:
             snapshot.trades, current_prices, display_info
         )
 
+    def _stop_suggester(
+        self,
+        view: AssignmentView | None,
+        records: list[StockRecord],
+        unavailable: bool = False,
+    ) -> Callable[[Position, StockRecord | None], StopSuggestion]:
+        """Bind ``suggest_stop`` to the portfolio's assigned Strategy.
+
+        ``unavailable`` (the assignment lookup failed) or a Strategy missing
+        from discovery gives no suggestion ("Strategy unavailable").
+        Descriptor defaults are read (metadata-only discovery, cached) only
+        when the stored maximum-loss setting is missing or unusable; a failed
+        read leaves them None, which ``suggest_stop`` declares as a note.
+        The newest record date is the as-of a 50-day average is aged against.
+        """
+        if unavailable or (view is not None and not view.available):
+            return lambda _pos, _rec: StopSuggestion(note="Strategy unavailable")
+        if view is None:
+            return partial(suggest_stop, strategy_id=None, parameters={}, defaults=None)
+        assignment = view.assignment
+        defaults = None
+        if assignment.strategy_id in STOP_RULES and (
+            valid_max_loss_pct(assignment.parameters.get(MAX_LOSS_PARAM)) is None
+        ):
+            defaults = self._descriptor_defaults(assignment.strategy_id)
+        return partial(
+            suggest_stop,
+            strategy_id=assignment.strategy_id,
+            parameters=assignment.parameters,
+            defaults=defaults,
+            display_name=view.display_name,
+            as_of=_newest_as_of(records),
+        )
+
+    def _descriptor_defaults(self, strategy_id: str) -> Mapping[str, Any] | None:
+        """Return a Strategy descriptor's default parameters, or None."""
+        service = self._assignment_service
+        if service is None:
+            return None
+        try:
+            choices = service.list_choices()
+        except Exception:
+            logger.warning("Strategy discovery failed for stop defaults", exc_info=True)
+            return None
+        return next(
+            (d.default_parameters for d in choices if d.strategy_id == strategy_id),
+            None,
+        )
+
     def portfolio_partial_context(
         self,
         positions: list[Position],
@@ -1304,13 +1361,36 @@ class PortfolioService:
             if isinstance(cash_balance, _CashBalanceUnset)
             else cash_balance
         )
+        # Strategy assignment chip + scan-freshness banner (#440). None-safe:
+        # without an assignment service (or with no assignment) both keys are
+        # None and rendering is unchanged apart from the new control.
+        # Fail-soft: a failed lookup renders the tab without the chip and
+        # declares "Strategy unavailable" instead of stop suggestions.
+        assignment_service = self._assignment_service
+        strategy_assignment = None
+        assignment_failed = False
+        if assignment_service is not None and portfolio_id is not None:
+            try:
+                strategy_assignment = assignment_service.assignment_view(portfolio_id)
+            except Exception:
+                logger.warning("Strategy assignment lookup failed", exc_info=True)
+                assignment_failed = True
         records = snapshot.analysis_records
         analysis_map = {r.ticker: r for r in records}
+        # A held holding without a recorded stop gets the assigned Strategy's
+        # suggestion (or its declared reason for none), kept apart from the
+        # ``Position`` so risk checks only ever see recorded stops.
+        suggest = self._stop_suggester(
+            strategy_assignment, records, unavailable=assignment_failed
+        )
+        suggested_stops: dict[str, StopSuggestion] = {}
         for pos in positions:
             stock = analysis_map.get(pos.ticker)
             pos.exit_signal = self._evaluator.evaluate(pos, stock)
             if stock and stock.analysis:
                 pos.next_pivot = stock.analysis.entry_price
+            if not pos.stop_loss and pos.shares > 0:
+                suggested_stops[pos.ticker] = suggest(pos, stock)
 
         # Compute GBP-equivalent totals for summary cards. ``total_value_gbp``
         # remains the authoritative cash-inclusive portfolio total; the
@@ -1457,15 +1537,6 @@ class PortfolioService:
             if portfolio_id is not None
             else set()
         )
-        # Strategy assignment chip + scan-freshness banner (#440). None-safe:
-        # without an assignment service (or with no assignment) both keys are
-        # None and rendering is unchanged apart from the new control.
-        assignment_service = self._assignment_service
-        strategy_assignment = (
-            assignment_service.assignment_view(portfolio_id)
-            if assignment_service is not None and portfolio_id is not None
-            else None
-        )
         strategy_freshness = (
             assignment_service.freshness() if assignment_service else None
         )
@@ -1482,6 +1553,7 @@ class PortfolioService:
             "opening_lot_tickers": opening_lot_tickers,
             "strategy_assignment": strategy_assignment,
             "strategy_freshness": strategy_freshness,
+            "suggested_stops": suggested_stops,
             "reconciliation_issue_count": reconciliation_issue_count,
             "cash_balances_by_currency": cash_balances_by_currency,
             "positions_with_value": positions_with_value,
@@ -1858,3 +1930,14 @@ def _valid_records(rows: Sequence[Any]) -> list[StockRecord]:
         except Exception:
             continue
     return records
+
+
+def _newest_as_of(records: Sequence[StockRecord]) -> date | None:
+    """Return the newest parseable ``as_of`` date among ``records``."""
+    dates: list[date] = []
+    for record in records:
+        try:
+            dates.append(date.fromisoformat(record.as_of[:10]))
+        except ValueError:
+            continue
+    return max(dates, default=None)

@@ -7,6 +7,7 @@ one; the template exposes its id so the browser can persist the selection.
 """
 
 import logging
+import math
 import sqlite3
 from typing import Annotated
 
@@ -20,7 +21,9 @@ from app.api.dependencies import (
     get_strategy_assignment_service,
     get_trader_service,
 )
+from app.agents.trader.trader_agent import StopRefusedError
 from app.api.templating import templates
+from app.core.ticker_identity import AliasFileUnreadableError
 from app.core.security import require_local_or_token
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.notification import NotificationCategory, NotificationSeverity
@@ -33,6 +36,7 @@ from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
 from app.services.portfolio_service import PortfolioService
+from app.services.stop_suggestion import stop_refusal
 from app.services.strategy_assignment_service import (
     IncompatibleStrategyError,
     StrategyAssignmentService,
@@ -78,6 +82,13 @@ def _strategy_warning(
     assignment is left untouched and the tab re-renders with the message.
     """
     context = portfolio.default_portfolio_context(portfolio_id)
+    return _warning_response(request, context, message, status_code=status_code)
+
+
+def _warning_response(
+    request: Request, context: dict, message: str, *, status_code: int
+) -> HTMLResponse:
+    """Render an already-built Portfolio ``context`` with a visible warning."""
     context["warning_message"] = message
     return templates.TemplateResponse(
         request, "_portfolio.html", context=context, status_code=status_code
@@ -243,6 +254,72 @@ async def clear_strategy(
     assignment.clear(portfolio_id)
     logger.info("Cleared Strategy assignment for portfolio id=%s", portfolio_id)
     return _render(request, portfolio, portfolio_id)
+
+
+@router.post(
+    "/portfolios/{portfolio_id}/positions/{ticker:path}/stop",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def set_position_stop(
+    request: Request,
+    trader: TraderDep,
+    portfolio: PortfolioDep,
+    portfolio_id: int,
+    ticker: str,
+    stop_loss: Annotated[str | None, Form()] = None,
+) -> HTMLResponse:
+    """Record the Strategy's suggested stop on the holding's latest BUY.
+
+    Only the suggestion is accepted: the tab context is rebuilt and the
+    posted value must equal the holding's current suggestion level exactly
+    (the button posts it at full precision). The holding must be currently
+    held with no recorded stop -- an existing stop is never overwritten,
+    and the write re-checks both inside its transaction. Changes only that
+    one trade's ``stop_loss``, never the Adjust dialog's history-replacing
+    correction. Refusals re-render the tab with a warning -- 422 for an
+    invalid value, 409 otherwise -- and write nothing.
+    """
+    stop = _positive_float(stop_loss)
+    if stop is None:
+        return _strategy_warning(
+            request,
+            portfolio,
+            portfolio_id,
+            "Enter a positive stop price.",
+            status_code=422,
+        )
+    context = portfolio.default_portfolio_context(portfolio_id)
+    in_scope = context.get("portfolio_id") == portfolio_id
+    position = next(
+        (p for p in context.get("positions", []) if in_scope and p.ticker == ticker),
+        None,
+    )
+    suggestion = (context.get("suggested_stops") or {}).get(ticker)
+    refusal = stop_refusal(position)
+    if refusal is None and (suggestion is None or suggestion.level != stop):
+        refusal = "The suggestion changed; reload the Portfolio tab."
+    if refusal is None:
+        try:
+            trader.set_latest_buy_stop(portfolio_id, ticker, stop)
+        except StopRefusedError as exc:
+            refusal = str(exc)
+        except (LookupError, AliasFileUnreadableError):
+            logger.warning("Set stop failed for %s", ticker, exc_info=True)
+            refusal = "The stop could not be recorded; reload the Portfolio tab."
+    if refusal is not None:
+        return _warning_response(request, context, refusal, status_code=409)
+    logger.info("Set stop %s on %s in portfolio id=%s", stop, ticker, portfolio_id)
+    return _render(request, portfolio, portfolio_id)
+
+
+def _positive_float(raw: str | None) -> float | None:
+    """Parse ``raw`` as a positive finite float, else None."""
+    try:
+        value = float(raw or "")
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value > 0 else None
 
 
 @router.get(

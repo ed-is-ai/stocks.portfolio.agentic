@@ -314,6 +314,16 @@ class TraderService:
         """
         return self._agent.delete_opening_lot(trade_id, portfolio_id)
 
+    def set_latest_buy_stop(
+        self, portfolio_id: int, ticker: str, stop_loss: float
+    ) -> None:
+        """Record a stop on the holding's latest BUY only (never its history).
+
+        Raises ``StopRefusedError`` (nothing written) unless the holding is
+        currently held with no recorded stop.
+        """
+        self._agent.set_latest_buy_stop(portfolio_id, ticker, stop_loss)
+
     def delete_trade(self, trade_id: int) -> bool:
         """Delete a trade by ID. Returns True if a row was deleted."""
         return self._agent.delete_trade(trade_id)
