@@ -1,0 +1,49 @@
+{# AI Desk inspector for one DeskItem ``d`` (GH-21): the finding, its fact
+   table, every evidence ref and original event, and links to where the
+   user acts today. No mutating control here: the thesis button opens the
+   same editor as the Portfolio tab's Thesis button, where saving happens. #}
+<div class="desk-detail">
+  <div class="desk-signal">
+    <span class="desk-tag is-{{ d.tone }}">{{ d.chip }}</span>
+    <span class="desk-signal-time">{{ d.item.severity | capitalize }} severity{% if d.item.as_of %} · evidence as of <span class="desk-num">{{ d.item.as_of.isoformat() }}</span>{% endif %}</span>
+  </div>
+  <h3 class="desk-finding">{{ d.item.title }}</h3>
+  <p class="desk-lead">{{ d.item.summary }}</p>
+  <dl class="desk-facts">
+    {% for label, value in d.facts %}
+    <div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
+    {% endfor %}
+  </dl>
+  <section class="desk-evidence">
+    <h4>Evidence and provenance</h4>
+    <ul>
+      {% for ref in d.evidence %}
+      <li><code>{{ ref.kind }}</code> {{ ref.id }} · as of <span class="desk-num">{{ ref.as_of.isoformat() if ref.as_of else "unknown" }}</span> · {{ ref.source }}</li>
+      {% endfor %}
+    </ul>
+  </section>
+  <section class="desk-events">
+    <h4>Original events ({{ d.events | length }})</h4>
+    <ol>
+      {% for e in d.events %}
+      <li><strong>{{ e.title }}</strong> {{ e.summary }} <small>{{ e.raised_by | raised_by }} · {{ e.source_event_id }}{% if e.stale %} · stale{% endif %}</small></li>
+      {% endfor %}
+    </ol>
+  </section>
+  {% if d.actions %}
+  <div class="desk-actions">
+    {% for a in d.actions %}
+    {% if a.kind == "thesis" %}
+    <button type="button" class="desk-action"
+            hx-get="{{ a.target }}" hx-target="#thesis-editor-modal-target" hx-swap="innerHTML"
+            hx-on::response-error="thesisRequestFailed(event)"
+            hx-on::send-error="thesisRequestFailed(event)">{{ a.label }}</button>
+    {% elif a.kind == "href" %}
+    <a class="desk-action" href="{{ a.target }}">{{ a.label }}</a>
+    {% else %}
+    <a class="desk-action" href="/" data-desk-tab="{{ a.target }}">{{ a.label }}</a>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>

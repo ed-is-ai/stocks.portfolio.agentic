@@ -4,7 +4,7 @@ import csv
 import json
 import logging
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
     get_alerts_repository,
+    get_notifications_repository,
     get_portfolio_recommendation_service,
     get_portfolio_service,
     get_position_thesis_service,
@@ -35,6 +36,8 @@ from app.services.evidence_quality import (
 from app.core.config import PIPELINE_RUNS_CSV
 from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
+from app.repositories.notifications_repo import NotificationsRepository
+from app.services.desk_service import notification_loader
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
@@ -68,6 +71,12 @@ async def index(request: Request) -> HTMLResponse:
     it is server-rendered on first paint rather than waiting on (or failing
     with) the load-triggered ``/pipeline-status`` fetch.
     """
+    return render_shell(request, "stock-scanner")
+
+
+def render_shell(request: Request, active_tab: str) -> HTMLResponse:
+    """Render ``index.html`` with ``active_tab`` active and loaded first
+    (``stock-scanner`` for ``/``, ``desk`` for ``/desk``, GH-21)."""
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -78,6 +87,7 @@ async def index(request: Request) -> HTMLResponse:
             #: dialog after the click. They come from the process environment,
             #: so first paint is the only time they can change.
             "pipeline_warnings": PipelineService.missing_configuration(),
+            "active_tab": active_tab,
         },
     )
 
@@ -156,6 +166,9 @@ def partial_portfolio_agents(
         PortfolioRecommendationService, Depends(get_portfolio_recommendation_service)
     ],
     theses: Annotated[PositionThesisService, Depends(get_position_thesis_service)],
+    notifications: Annotated[
+        NotificationsRepository, Depends(get_notifications_repository)
+    ],
     portfolio_id: str | None = None,
 ) -> HTMLResponse:
     """Out-of-band swaps for the Portfolio tab's agent layer (GH-19, GH-14,
@@ -163,16 +176,18 @@ def partial_portfolio_agents(
 
     A plain ``def`` like ``partial_portfolio_risk``: the recommendation and
     risk evaluation read the ledger, scan artifact and price cache, so they
-    run in the threadpool, lazily, after the tab has painted. Never mutates
-    trades, cash flows, portfolios, Strategy assignments or theses; the risk
-    valuation may fetch and cache an FX quote exactly as the Portfolio tab
-    render does.
+    run in the threadpool, lazily, after the tab has painted. The queue gets
+    the same notification events as the AI Desk (GH-21), so both show one
+    queue. Never mutates trades, cash flows, portfolios, Strategy
+    assignments, theses or notifications; the risk valuation may fetch and
+    cache an FX quote exactly as the Portfolio tab render does.
     """
     view = portfolio.agent_view(
         optional_int(portfolio_id),
         recommendations.recommend,
         theses.statuses,
         load_source_health,
+        notification_loader(notifications, datetime.now(UTC)),
     )
     return templates.TemplateResponse(
         request, "_portfolio_agents.html", context={"view": view}

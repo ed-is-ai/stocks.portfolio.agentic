@@ -66,7 +66,10 @@ def build_attention_queue(
 
 
 def _subject(event: AttentionEventV1) -> str:
-    """The security, else the source name of a source event, else the kind."""
+    """The notification (each is its own item, GH-21), else the security,
+    else the source name of a source event, else the kind."""
+    if any(ref.kind == "notification" for ref in event.evidence):
+        return event.source_event_id
     if event.security_id is not None:
         return event.security_id
     source = next((r.id for r in event.evidence if r.kind == "source_health"), None)

@@ -8,7 +8,7 @@ clock, and ``observed_at`` is the evidence time the caller passes in.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import partial
 from typing import Literal
 
@@ -21,6 +21,11 @@ from app.schemas.attention import (
     run_key,
 )
 from app.schemas.evidence_ref import EvidenceRefV1
+from app.schemas.notification import (
+    Notification,
+    NotificationCategory,
+    NotificationSeverity,
+)
 from app.schemas.portfolio_recommendation import (
     RecommendationEvidenceDiagnosticV1,
     RecommendationResultV1,
@@ -33,6 +38,21 @@ from app.schemas.trade import Position
 from app.services.freshness_service import Freshness, FreshnessState
 
 STALE = "Stale: "
+#: How far back a notification can still raise an attention event.
+NOTIFICATION_WINDOW = timedelta(days=7)
+#: Who raised a notification event, by its category. Alert notifications
+#: about a security are already queued by the held and setup events, so only
+#: run-wide ones (a failed thesis evaluation or email dispatch) get through;
+#: source notifications of the published run are its source-health events.
+NOTIFICATION_LABELS: dict[NotificationCategory, str] = {
+    NotificationCategory.ALERT: "System",
+    NotificationCategory.SOURCE: "Data source",
+    NotificationCategory.REFRESH: "Data refresh",
+    NotificationCategory.PORTFOLIO: "Portfolio",
+    NotificationCategory.STRATEGY_INITIALIZATION: "Strategy setup",
+    NotificationCategory.BACKTEST: "Backtest",
+}
+_ATTENTION_SEVERITIES = (NotificationSeverity.WARNING, NotificationSeverity.ERROR)
 #: Risk findings about one holding; the rest are portfolio-wide.
 POSITION_KINDS = frozenset(
     {"position_concentration", "below_stop", "unpriced", "no_stop"}
@@ -418,3 +438,65 @@ def held_events(
             )
         )
     return events
+
+
+def _queued_notification(
+    n: Notification,
+    portfolio_id: int | None,
+    since: datetime,
+    published_run_id: str | None,
+) -> bool:
+    """A recent, undismissed warning or error about this portfolio (or none)
+    that no other source already queues (the published run's source health,
+    security alerts)."""
+    return (
+        n.id is not None
+        and n.dismissed_at is None
+        and n.created_at >= since
+        and n.severity in _ATTENTION_SEVERITIES
+        and n.category in NOTIFICATION_LABELS
+        and not (n.category is NotificationCategory.ALERT and n.ticker)
+        and not (
+            n.category is NotificationCategory.SOURCE and n.run_id == published_run_id
+        )
+        and n.portfolio_id in (None, portfolio_id)
+    )
+
+
+def notification_events(
+    notifications: Iterable[Notification],
+    *,
+    portfolio_id: int | None,
+    now: datetime,
+    published_run_id: str | None = None,
+) -> list[AttentionEventV1]:
+    """Recent warning and error notifications as ``evidence`` events.
+
+    Only those from the last ``NOTIFICATION_WINDOW`` that are not dismissed,
+    are run-wide or about ``portfolio_id``, and are not already covered by
+    the source-health, held or setup events: a source notification is kept
+    only when it is from a run other than ``published_run_id`` (one that
+    never published). Each is its own queue item and never counts urgent.
+    """
+    since = now - NOTIFICATION_WINDOW
+    return [
+        _event(
+            "evidence",
+            source_event_id=f"notification:{n.id}",
+            kind=n.event_type,
+            portfolio_id=n.portfolio_id,
+            security_id=n.ticker,
+            title=n.title,
+            summary=n.body or n.title,
+            evidence=EvidenceRefV1(
+                kind="notification",
+                id=str(n.id),
+                as_of=n.created_at.date(),
+                source=n.category.value,
+            ),
+            raised_by=NOTIFICATION_LABELS[n.category],
+            observed_at=n.created_at,
+        )
+        for n in notifications
+        if _queued_notification(n, portfolio_id, since, published_run_id)
+    ]

@@ -9,12 +9,14 @@ from fastapi.templating import Jinja2Templates
 
 from app.core import config
 from app.services.backtest.activity_presenter import absolute_time, relative_time
+from app.services.desk_service import raised_by_label
 from app.services.portfolio_agent_view import agent_slug
 
 templates = Jinja2Templates(directory=str(config.TEMPLATES_DIR))
 templates.env.filters["relative_time"] = relative_time
 templates.env.filters["absolute_time"] = absolute_time
 templates.env.filters["agent_slug"] = agent_slug
+templates.env.filters["raised_by"] = raised_by_label
 
 
 def is_htmx_request(request: Request) -> bool:

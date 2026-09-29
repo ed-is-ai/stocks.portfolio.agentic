@@ -130,6 +130,21 @@ class TradeReviewService:
                         self._cache.popitem(last=False)
         return dict(cached)
 
+    def cached_reviews(self) -> dict[int, TradeReviewV1] | None:
+        """Return every portfolio's reviews if the cache is warm, else None.
+
+        Never computes and never waits: while a compute holds the lock the
+        cache counts as cold (the AI Desk must not trigger or queue a scan).
+        """
+        key = self._key([p.id for p in self._trader.list_portfolios()])
+        if key is None or not self._lock.acquire(blocking=False):
+            return None
+        try:
+            cached = self._cache.get(key)
+        finally:
+            self._lock.release()
+        return None if cached is None else dict(cached)
+
     def review(self, trade_id: int) -> TradeReviewV1 | None:
         """Return one trade's review, or None if it has none.
 

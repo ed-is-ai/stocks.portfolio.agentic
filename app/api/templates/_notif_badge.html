@@ -1,13 +1,27 @@
-{#- Unread bell badge. Polls itself so the count stays current; also returned
-    out-of-band (oob=True) whenever the panel re-renders after a read/dismiss. -#}
+{#- The bell's badge: the AI Desk's urgent attention count for the active
+    portfolio (GH-21). Polls itself while the page is visible, and on a
+    ``refresh`` event (the Desk loading or changing portfolio); an explicit
+    hx-target="this" so the outerHTML swap never inherits a target from the
+    bell link. Its hidden text completes the bell link's accessible name;
+    the page script announces changes in #notif-live. A count that could
+    not be computed shows "?", never zero. -#}
+{%- if count is none -%}
+{%- set label = "attention count unavailable" -%}
+{%- elif count -%}
+{%- set label = count ~ " urgent attention item" ~ ("" if count == 1 else "s") -%}
+{%- else -%}
+{%- set label = "no urgent attention items" -%}
+{%- endif -%}
 <span id="notif-badge"
-      class="notif-badge{{ ' has-unread' if unread_count else '' }}"
-      {% if oob %}hx-swap-oob="true"{% endif %}
+      class="notif-badge{{ ' is-unknown' if count is none else (' has-count' if count else '') }}"
       hx-get="/notifications/count"
-      hx-trigger="every 20s"
+      hx-trigger="every 20s [document.visibilityState === 'visible'], refresh"
       hx-target="this"
       hx-swap="outerHTML"
-      aria-live="polite"
-      aria-label="{{ unread_count }} unread notifications">
-  {%- if unread_count -%}{{ unread_count if unread_count <= 99 else '99+' }}{%- endif -%}
+      hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'
+      data-announce="{{ label }}">
+  {%- if count is none -%}<span aria-hidden="true">?</span>
+  {%- elif count -%}<span aria-hidden="true">{{ count if count <= 99 else '99+' }}</span>
+  {%- endif -%}
+  <span class="visually-hidden">{{ label }}</span>
 </span>
