@@ -16,6 +16,7 @@ import time
 import traceback
 from datetime import date, datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, cast
 from uuid import uuid4
 
@@ -33,6 +34,12 @@ from apscheduler.triggers.cron import CronTrigger
 
 from app.agents.analyst.analyst_agent import AnalystAgent, recommendation
 from app.agents.alert.alert_agent import AlertAgent
+from app.agents.triage.queue import build_attention_queue
+from app.agents.triage.sources import (
+    held_events,
+    setup_events,
+    source_health_events,
+)
 from app.agents.extraction.extraction_agent import ExtractionAgent
 from app.agents.price_backfill import PriceBackfillAgent, PriceBackfillPayload
 from app.agents.trader.trader_agent import TraderAgent
@@ -96,6 +103,7 @@ from app.schemas.analysis_artifact import (
     CurrentAnalysisEvidenceV1,
     build_analysis_payload,
 )
+from app.schemas.attention import AttentionQueueV1
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
 from app.schemas.source_health import (
@@ -299,6 +307,48 @@ def _emit_bau_notification(
         )
     except Exception as error:  # pragma: no cover - defensive
         print(f"[notify] BAU notification error: {error}")
+
+
+def _email_attention(
+    alerter: AlertAgent,
+    portfolio_snapshots: list[dict[str, Any]],
+    source_health: Mapping[SourceName, SourceHealth],
+    run_id: str,
+) -> AttentionQueueV1 | None:
+    """The summary email's "Needs attention" queue from this run's inputs:
+    every held sell alert (per holding portfolio), non-ok sources and buy
+    alerts on unheld securities (GH-18).
+
+    No wall clock: the pipeline carries no price-evidence date here, so held
+    and setup events say their evidence date is unknown. Fail-soft: any
+    error returns ``None`` so the email goes out without the section and the
+    run is unaffected.
+    """
+    try:
+        signals = alerter.run_sell_signals()
+        events = [
+            event
+            for snapshot in portfolio_snapshots
+            for event in held_events(
+                snapshot["positions"],
+                portfolio_id=snapshot.get("portfolio_id"),
+                portfolio_name=snapshot.get("name") or "Portfolio",
+                run_id=run_id,
+                observed_at=None,
+                signals=signals,
+            )
+        ]
+        events += source_health_events(source_health, run_id=run_id)
+        held = {p.ticker for s in portfolio_snapshots for p in s["positions"]}
+        events += setup_events(
+            alerter.run_buy_signals(held), run_id=run_id, observed_at=None
+        )
+        return build_attention_queue(
+            events, portfolio_id=None, analysis_run_id=run_id, unavailable=()
+        )
+    except Exception as error:
+        print(f"[Attention warning] summary email sent without it: {error}")
+        return None
 
 
 def _cached_extraction_health(
@@ -1303,6 +1353,7 @@ def pipeline(
             )
             portfolio_snapshots.append(
                 {
+                    "portfolio_id": pf.id,
                     "name": pf.name,
                     "positions": pf_positions,
                     "gbp_totals": portfolio_service.gbp_totals(pf_positions, gbpusd),
@@ -1377,6 +1428,9 @@ def pipeline(
             gbp_totals=gbp_totals,
             market_narrative=market_narrative,
             portfolio_snapshots=portfolio_snapshots,
+            attention=_email_attention(
+                alerter, portfolio_snapshots, source_health, run_id
+            ),
         )
 
         status_repo.transition(

@@ -34,10 +34,22 @@ from app.schemas.portfolio_recommendation import (
     RecommendationResultV1,
     RecommendationV1,
 )
-from app.services.portfolio_agent_view import RecommendationOutcome
+from app.agents.triage.sources import setup_events
+from app.api.routes import views as views_module
+from app.api.templating import templates
+from app.schemas.source_health import SourceHealth, SourceName, SourceState
+from app.services import portfolio_service as portfolio_service_module
+from app.services.portfolio_agent_view import (
+    PortfolioAgentView,
+    PublishedEvidence,
+    RecommendationOutcome,
+    build_agent_view,
+)
 from app.services.portfolio_service import PortfolioService
 from app.services.position_thesis_service import PositionThesisService
 from app.services.trader_service import TraderService
+from tests.test_alert_digest_held import _buy_record
+from tests.test_portfolio_agent_view import _risk
 from tests.test_portfolio_risk_route import _dump, _record
 from tests.test_thesis_evaluator import FRESH, META, make_record
 
@@ -107,6 +119,16 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     }
     recommendations = SimpleNamespace(recommend=lambda pid: outcome["recommend"](pid))
     artifact = tmp_path / "no-artifact.json"
+    # The attention queue reads the published artifact's freshness and the
+    # run's source health; keep both isolated and fresh by default.
+    monkeypatch.setattr(portfolio_service_module, "ANALYSIS_JSON", artifact)
+    monkeypatch.setattr(views_module, "load_source_health", dict)
+    artifact.write_text(
+        json.dumps(
+            build_analysis_payload([], run_id="run-0", generated_at=datetime.now(UTC))
+        ),
+        encoding="utf-8",
+    )
     theses = PositionThesisService(
         PositionThesesRepository(db.make_connect(lambda: agent.db_path)),
         trader,
@@ -334,9 +356,11 @@ def test_current_invalidated_thesis_is_an_urgent_finding(stack) -> None:
     body = _agents(stack)
 
     assert _thesis_status(stack, body) == ("risk", "Invalidated")
-    assert _cell(stack, body, "findings").strip() == "6"
-    assert "6 urgent findings." in body
+    # It joins AAA's Sell as one exit item, both events expandable.
+    assert _cell(stack, body, "findings").strip() == "5"
+    assert "5 urgent findings." in body
     assert "AAA: thesis invalidated" in body
+    assert "2 source events" in body
 
 
 @pytest.mark.parametrize(
@@ -499,3 +523,131 @@ def test_a_superseded_agents_request_is_not_marked_failed() -> None:
     assert failed.index("abortedRequests.has(detail.xhr)) return;") < failed.index(
         '[data-agent-cell="${scope}"]'
     )
+
+
+# ── Published evidence and the strip (GH-18) ──────────────────────────────
+
+
+def _view_with(stack: SimpleNamespace, **health: object):
+    return stack.service.agent_view(
+        stack.pid, lambda _pid: _result(), stack.theses.statuses, lambda: health
+    )
+
+
+def _publish_records(stack: SimpleNamespace, *records: StockRecord) -> datetime:
+    at = datetime(2026, 9, 28, 21, tzinfo=UTC)
+    rows = [r.model_dump(mode="json") for r in records]
+    payload = build_analysis_payload(rows, run_id="run-7", generated_at=at)
+    stack.artifact.write_text(json.dumps(payload), encoding="utf-8")
+    return at
+
+
+def test_no_published_artifact_is_unavailable_not_unknown_freshness(stack) -> None:
+    stack.artifact.unlink()
+
+    view = _view_with(stack)
+
+    assert "Published analysis" in view.unavailable
+    assert not any(e.kind.startswith("analysis_") for e in view.attention.events)
+    assert "not counted: Published analysis." in _agents(stack)
+
+
+def test_a_legacy_artifact_keeps_the_unknown_freshness_item(stack) -> None:
+    stack.artifact.write_text(
+        json.dumps([_buy_record("NEW", breakout=True).model_dump(mode="json")]),
+        encoding="utf-8",
+    )
+
+    titles = [i.title for i in _view_with(stack).attention.items]
+
+    assert "Analysis freshness is unknown" in titles
+    assert "Stale: NEW: VCP Breakout" in titles
+
+
+def test_setups_skip_securities_held_in_any_portfolio(stack) -> None:
+    other = stack.agent.create_portfolio("ISA")
+    stack.agent.record_buy("OTH", 1, 10.0, "2026-01-02", portfolio_id=other.id)
+    _publish_records(
+        stack, _buy_record("NEW", breakout=True), _buy_record("OTH", breakout=True)
+    )
+
+    setups = [i.title for i in _view_with(stack).attention.items]
+
+    assert "NEW: VCP Breakout" in setups
+    assert "OTH: VCP Breakout" not in setups
+
+
+def test_published_evidence_comes_from_one_artifact_read(
+    stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    at = _publish_records(stack, _buy_record("NEW", breakout=True))
+    reads: list[Path] = []
+    real = portfolio_service_module.read_analysis_snapshot
+
+    def _spy(path: Path):
+        reads.append(path)
+        return real(path)
+
+    monkeypatch.setattr(portfolio_service_module, "read_analysis_snapshot", _spy)
+
+    view = _view_with(stack)
+
+    assert reads == [stack.artifact]
+    (setup,) = [e for e in view.attention.events if e.category == "new_setup"]
+    assert setup.source_event_id == "setup:run-7:NEW:breakout"
+    assert setup.observed_at == at
+    assert view.attention.analysis_run_id == "run-7"
+
+
+def test_no_portfolios_still_queues_published_evidence(
+    stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(stack.service._trader, "list_portfolios", lambda: [])
+    failed = SourceHealth(source=SourceName.CONGRESS, state=SourceState.FAILED)
+
+    view = stack.service.agent_view(
+        None, _raise, _raise, lambda: {SourceName.CONGRESS: failed}
+    )
+
+    assert [i.title for i in view.attention.items] == ["Congress source failed"]
+    assert view.attention.urgent_count == 0
+
+
+def test_a_failing_published_evidence_path_is_fail_soft(
+    stack, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _publish_records(stack, _buy_record("NEW", breakout=True))
+    monkeypatch.setattr(portfolio_service_module, "record_setups", _raise)
+
+    view = _view_with(stack)
+    body = _agents(stack)
+
+    assert "Published evidence" in view.unavailable
+    assert not any(
+        e.raised_by in ("scanner", "pipeline") for e in view.attention.events
+    )
+    assert "Published evidence failed" in caplog.text
+    assert "Sell" in _cell(stack, body, "strategy-AAA")
+    assert "166 / 200" in _cell(stack, body, "evidence-BBB")
+    assert "not counted: Published evidence." in body
+
+
+def _strip(view: PortfolioAgentView) -> str:
+    return templates.get_template("_portfolio_agents.html").render(view=view)
+
+
+def test_info_items_without_urgent_ones_are_introduced_not_shown_clear() -> None:
+    setup = setup_events(
+        [("NEW", "breakout", "VCP Breakout")], run_id="run-1", observed_at=None
+    )
+    published = PublishedEvidence(run_id="run-1", events=tuple(setup))
+    risk = _risk()
+
+    listed = _strip(build_agent_view(1, (), NO_ASSIGNMENT, risk, {}, published))
+    empty = _strip(build_agent_view(1, (), NO_ASSIGNMENT, risk, {}))
+
+    assert "No urgent findings." in listed
+    assert listed.index("Also noted — not urgent") < listed.index("NEW: VCP Breakout")
+    assert "is-clear" not in listed
+    assert "is-clear" in empty
+    assert "Also noted" not in empty

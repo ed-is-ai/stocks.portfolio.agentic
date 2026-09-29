@@ -15,6 +15,7 @@ from pydantic import PrivateAttr
 
 from app.agents.alert.templating import email_templates, get_macro
 from app.agents.base import Agent
+from app.agents.triage.sources import HeldSignal, held_hit
 from app.core.alerting import classify_alert, is_on_cooldown
 from app.core.alerting import BREAKOUT_COOLDOWN_HOURS as ALERT_COOLDOWN_HOURS
 from app.core import config
@@ -27,6 +28,7 @@ from app.schemas import (
     Position,
     StockRecord,
 )
+from app.schemas.attention import AttentionQueueV1
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.portfolio_recommendation import (
     EvaluationCoverageV1,
@@ -126,6 +128,25 @@ _CTA_NO_ALERTS = "No actionable tickers today — nothing below needs a decision
 # Reuses the exact wording already used app-wide, see
 # app/schemas/market_narrative.py: MarketNarrative.not_advice default.
 _CTA_NOT_ADVICE = "Informational only — not financial advice."
+
+# Fixed "Needs attention" footer (GH-18): the summary email is sent before
+# recommendations and thesis evaluation run, so those arrive separately.
+ATTENTION_EMAIL_NOTE = (
+    "Exits and thesis changes for this run arrive in each portfolio's "
+    "recommendation email."
+)
+
+
+def _attention_text(queue: AttentionQueueV1) -> str:
+    """The plain-text "Needs attention" section, in queue order."""
+    lines = ["\n\nNEEDS ATTENTION"]
+    lines += [
+        f"  {n}. [{item.severity.upper()}] {item.title}\n     {item.summary}"
+        for n, item in enumerate(queue.items, 1)
+    ] or ["  No urgent findings."]
+    lines.append(f"  {ATTENTION_EMAIL_NOTE}")
+    return "\n".join(lines)
+
 
 # Narrative shown on a Buy card for a watchlist setup that crossed its entry
 # price on a run where the screener produced no full analysis for it (#356).
@@ -303,6 +324,34 @@ class AlertAgent(Agent):
             buy_count=len(self._buy_alerts),
             tickers=[stock.ticker for stock, _ in self._buy_alerts],
         )
+
+    def run_buy_signals(self, held: Iterable[str] = ()) -> list[tuple[str, str, str]]:
+        """This run's entry-triggered and breakout buy alerts on unheld
+        securities, as ``(ticker, kind, label)`` for the attention queue
+        (GH-18). ``held`` tickers and this run's held sell alerts (which the
+        summary body already drops from the watchlist) are excluded."""
+        excluded = {*held, *(pos.ticker for pos, _ in self._sell_alerts)}
+        setups = [
+            (ticker, "entry_triggered", "Entry triggered")
+            for ticker, *_ in self._entry_triggered
+        ]
+        setups += [
+            (stock.ticker, "breakout", trigger)
+            for stock, trigger in self._buy_alerts
+            if classify_alert(stock).trigger
+        ]
+        return [setup for setup in setups if setup[0] not in excluded]
+
+    def run_sell_signals(self) -> dict[str, HeldSignal]:
+        """This run's held sell alerts by ticker (GH-18): hard stop, profit
+        target or trailing stop, then any watched-setup stop (the caller
+        keeps only held tickers)."""
+        signals: dict[str, HeldSignal] = {
+            pos.ticker: held_hit(pos) or "trailing" for pos, _ in self._sell_alerts
+        }
+        for ticker, *_ in self._watched_stops:
+            signals.setdefault(ticker, "watched_stop")
+        return signals
 
     def init_db(self) -> None:
         """Ensure the alerts schema exists (kept for backward compatibility)."""
@@ -920,18 +969,12 @@ class AlertAgent(Agent):
         """
         self._sell_alerts.clear()
         for pos in positions:
-            if pos.current_price is None:
-                continue
-            hit_stop = pos.stop_loss is not None and pos.current_price <= pos.stop_loss
-            hit_target = (
-                pos.profit_target_20 is not None
-                and pos.current_price >= pos.profit_target_20
-            )
-            if not hit_stop and not hit_target:
+            hit = held_hit(pos)
+            if hit is None:
                 continue
             stock = stock_map.get(pos.ticker)
             self._sell_alerts.append((pos, stock))
-            if hit_stop:
+            if hit == "stop":
                 self._alert_held_stop(pos, stock)
             else:
                 self._alert_held_target(pos, stock)
@@ -1079,6 +1122,7 @@ class AlertAgent(Agent):
         gbp_totals: tuple[float, float, float] | None = None,
         market_narrative: MarketNarrative | None = None,
         portfolio_snapshots: list[dict[str, Any]] | None = None,
+        attention: AttentionQueueV1 | None = None,
     ) -> None:
         """Send one consolidated daily summary email.
 
@@ -1097,6 +1141,9 @@ class AlertAgent(Agent):
         market-cycle blurb (see ``app.agents.scanner.market_narrative``); a
         later phase can pass a Claude-generated one instead without this
         method changing.
+
+        ``attention`` (GH-18), when given, renders a risk-first "Needs
+        attention" section after the portfolio snapshots.
         """
         today = date.today().isoformat()
         # A held critical event (hard stop / trailing / target) is authoritative
@@ -1191,6 +1238,9 @@ class AlertAgent(Agent):
                         f"  {p.ticker:<6} {p.shares:>8.1f} shares"
                         f"  price {sym}{p.current_price or 0:.2f}  P&L {pnl_str}"
                     )
+
+        if attention is not None:
+            text_parts.append(_attention_text(attention))
 
         def _conviction_rank(item: tuple[StockRecord, str]) -> int:
             verdict = self._breakout_narrative(item[0])["verdict"]
@@ -1361,6 +1411,8 @@ class AlertAgent(Agent):
             today=today,
             narrative=market_narrative,
             snapshots=snapshots,
+            attention=attention,
+            attention_note=ATTENTION_EMAIL_NOTE,
             cta_active=cta_active,
             cta_groups=_CTA_GROUPS,
             cta_not_advice=_CTA_NOT_ADVICE,
