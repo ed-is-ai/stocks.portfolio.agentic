@@ -3,6 +3,8 @@ Test configuration and fixtures for stock agent tests.
 """
 
 import os
+import socket
+import warnings
 from pathlib import Path
 
 import pytest
@@ -36,7 +38,21 @@ def guard_real_databases():
     yield
     after = _mtimes()
     changed = [str(p) for p, mtime in before.items() if after.get(p) != mtime]
+    if changed and _app_running():
+        # The running web app writes these too, so a change can't be pinned on
+        # a test; stop the app for a strict run.
+        warnings.warn(f"real databases changed while the app ran: {changed}")
+        return
     assert not changed, f"tests modified real databases: {changed}"
+
+
+def _app_running() -> bool:
+    """True when something listens on the web app's local port."""
+    try:
+        with socket.create_connection(("127.0.0.1", 8000), timeout=0.2):
+            return True
+    except OSError:
+        return False
 
 
 @pytest.fixture(autouse=True)

@@ -619,11 +619,13 @@
 </div>
 <div id="boot-preparation-warning" class="alert alert-warning m-3" role="alert" hidden></div>
 <script>
-  // Retire the boot splash once the page is genuinely usable. No minimum
-  // display time — if the app is ready in 80ms, the splash is gone in 80ms.
+  // Retire the boot splash once the page is genuinely usable, but show it
+  // for at least MIN_SPLASH_MS so a fast (or failed) startup doesn't flash it.
   (function () {
     var splash = document.getElementById('boot-splash');
     if (!splash) return;
+    var MIN_SPLASH_MS = 800;
+    var shownAt = Date.now();
 
     var slowTimer = window.setTimeout(function () {
       if (splash.dataset.state === 'waiting') splash.dataset.state = 'slow';
@@ -636,6 +638,9 @@
       if (done) return;
       done = true;
       window.clearTimeout(slowTimer);
+      window.setTimeout(fade, Math.max(0, MIN_SPLASH_MS - (Date.now() - shownAt)));
+    }
+    function fade() {
       splash.dataset.state = 'fading';
       // Match the CSS transition, then take it out of the a11y tree entirely.
       window.setTimeout(function () {
