@@ -5,7 +5,7 @@ completed data-refresh run, a source-health failure during a run, or a
 SIPP CSV import. The
 repository (``app.repositories.notifications_repo``) owns the table; this
 module owns the shape and the small amount of derived presentation logic
-(icon, deep-link target) the dropdown template needs.
+(icon, deep-link target) the AI Desk inspector needs.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ class NotificationSeverity(StrEnum):
 
 #: Tab (element id in ``index.html``) each category deep-links to on click.
 _DEEP_LINK_TABS: dict[NotificationCategory, str] = {
-    NotificationCategory.ALERT: "tab-watchlist",
+    NotificationCategory.ALERT: "tab-stock-scanner",
     NotificationCategory.REFRESH: "tab-runlog",
     NotificationCategory.SOURCE: "tab-runlog",
     NotificationCategory.PORTFOLIO: "tab-portfolio",

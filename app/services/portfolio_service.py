@@ -37,6 +37,7 @@ from app.schemas.analysis_artifact import (
     read_analysis_records,
     read_analysis_snapshot,
 )
+from app.schemas.attention import AttentionEventV1
 from app.schemas.portfolio_import import ProviderOption
 from app.schemas.portfolio_recommendation import NO_ASSIGNMENT, EvaluationUnavailable
 from app.schemas.portfolio_risk import RiskReportV1
@@ -48,6 +49,7 @@ from app.services.gbp_valuation_service import GbpValuationService
 from app.services.freshness_service import FreshnessState, calculate_freshness
 from app.services.portfolio_agent_view import (
     NO_PUBLISHED_ANALYSIS,
+    NOTIFICATIONS_UNAVAILABLE,
     PUBLISHED_EVIDENCE_UNAVAILABLE,
     PortfolioAgentView,
     PublishedEvidence,
@@ -63,6 +65,9 @@ from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
+
+#: Loads notification events for (portfolio id, published run id) (GH-21).
+NotificationLoader = Callable[[int | None, str | None], Sequence[AttentionEventV1]]
 
 _DEFAULT_GBPUSD = 1.35
 _GBPUSD_CACHE_TTL_SECONDS = 60.0
@@ -1712,6 +1717,7 @@ class PortfolioService:
         recommend: Callable[[int], RecommendationOutcome],
         theses: Callable[[int], Mapping[str, ThesisSummary]],
         source_health: Callable[[], Mapping[SourceName, SourceHealth]] = dict,
+        notifications: NotificationLoader = lambda _pid, _run: (),
     ) -> PortfolioAgentView:
         """Gather the Portfolio tab's agent layer (GH-19, GH-14, GH-18).
 
@@ -1721,9 +1727,11 @@ class PortfolioService:
         recommendation, risk report or thesis store becomes a declared
         unavailable state. ``source_health`` loads the published run's
         source health for the attention queue; a failure reading the
-        published evidence only drops those events. Never mutates trades, cash flows, portfolios,
-        Strategy assignments or theses; the risk valuation may fetch and
-        cache an FX quote exactly as the Portfolio tab render does.
+        published evidence only drops those events. ``notifications`` loads
+        the notification events for the portfolio and the published run id
+        (GH-21); a failure declares them unavailable. Never mutates trades, cash flows,
+        portfolios, Strategy assignments or theses; the risk valuation may
+        fetch and cache an FX quote exactly as the Portfolio tab render does.
         """
         portfolios = self._trader.list_portfolios()
         if not portfolios:
@@ -1733,7 +1741,9 @@ class PortfolioService:
                 NO_ASSIGNMENT,
                 self._safe_risk(None),
                 {},
-                self._published_evidence(None, source_health),
+                _with_notifications(
+                    self._published_evidence(None, source_health), notifications, None
+                ),
             )
         active_id = self._active_portfolio_id(portfolio_id, portfolios)
         snapshot = self.portfolio_input_snapshot(active_id, portfolios=portfolios)
@@ -1756,7 +1766,11 @@ class PortfolioService:
             outcome,
             self._safe_risk(active_id),
             summaries,
-            self._published_evidence(prices_as_of, source_health),
+            _with_notifications(
+                self._published_evidence(prices_as_of, source_health),
+                notifications,
+                active_id,
+            ),
         )
 
     def _safe_risk(self, portfolio_id: int | None) -> RiskReportV1 | None:
@@ -1816,6 +1830,23 @@ class PortfolioService:
             prices_as_of=prices_as_of,
             events=events,
         )
+
+
+def _with_notifications(
+    published: PublishedEvidence,
+    load: NotificationLoader,
+    portfolio_id: int | None,
+) -> PublishedEvidence:
+    """``published`` plus the portfolio's notification events, or with
+    notifications declared unavailable when they cannot be read."""
+    try:
+        events = load(portfolio_id, published.run_id)
+    except Exception:
+        logger.warning("Notifications failed for the queue", exc_info=True)
+        return replace(
+            published, unavailable=(*published.unavailable, NOTIFICATIONS_UNAVAILABLE)
+        )
+    return replace(published, events=(*published.events, *events))
 
 
 def _valid_records(rows: Sequence[Any]) -> list[StockRecord]:

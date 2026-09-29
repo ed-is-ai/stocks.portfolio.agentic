@@ -235,6 +235,22 @@ class NotificationsRepository:
             ).fetchall()
         return [_row_to_notification(row) for row in rows]
 
+    def recent_warnings(self, since: datetime) -> list[Notification]:
+        """Return undismissed warnings and errors created at or after
+        ``since``, newest first (the AI Desk's notification events, GH-21)."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"SELECT {', '.join(_COLUMNS)} FROM notifications"
+                " WHERE dismissed_at IS NULL AND created_at >= ?"
+                " AND severity IN (?, ?) ORDER BY id DESC",
+                (
+                    since.astimezone(timezone.utc).isoformat(),
+                    str(NotificationSeverity.WARNING),
+                    str(NotificationSeverity.ERROR),
+                ),
+            ).fetchall()
+        return [_row_to_notification(row) for row in rows]
+
     def unread_count(self) -> int:
         """Return the number of unread, non-dismissed notifications."""
         with session(self._connect) as conn:

@@ -17,14 +17,17 @@ from app.agents.thesis.evaluator import evaluate_thesis
 from app.agents.trader.trader_agent import TraderAgent
 from app.api.app import app
 from app.api.dependencies import (
+    get_notifications_repository,
     get_portfolio_recommendation_service,
     get_portfolio_service,
     get_position_thesis_service,
     get_trader_service,
 )
 from app.repositories import db
+from app.repositories.notifications_repo import NotificationsRepository
 from app.repositories.position_theses_repo import PositionThesesRepository
 from app.schemas.analysis_artifact import build_analysis_payload
+from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.position_thesis import ThesisContentV1
 from app.schemas.record import StockRecord
 from app.schemas.portfolio_recommendation import (
@@ -140,9 +143,15 @@ def stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         recommendations
     )
     app.dependency_overrides[get_position_thesis_service] = lambda: theses
+    notifications = NotificationsRepository(
+        db.make_connect(lambda: tmp_path / "notifications.db")
+    )
+    notifications.ensure_schema()
+    app.dependency_overrides[get_notifications_repository] = lambda: notifications
     try:
         yield SimpleNamespace(
             agent=agent,
+            notifications=notifications,
             pid=pf.id,
             service=service,
             outcome=outcome,
@@ -651,3 +660,20 @@ def test_info_items_without_urgent_ones_are_introduced_not_shown_clear() -> None
     assert "is-clear" not in listed
     assert "is-clear" in empty
     assert "Also noted" not in empty
+
+
+def test_the_portfolio_tab_queues_the_desks_notification_events(stack) -> None:
+    """GH-21: the Portfolio tab and the AI Desk build one queue."""
+    stack.notifications.record(
+        NotificationCategory.PORTFOLIO,
+        "import_failed",
+        "Import rejected",
+        severity=NotificationSeverity.ERROR,
+        portfolio_id=stack.pid,
+    )
+
+    body = _agents(stack)
+
+    assert "Import rejected" in body
+    # Listed for review, never counted urgent.
+    assert _cell(stack, body, "findings").strip() == "5"

@@ -1,0 +1,57 @@
+{# AI Desk queue pane (GH-21): #18's queue in its own order, a chip per
+   item, counts that partition the list by chip, the risk strip and the
+   ordering rule. Also served alone by /partials/desk/queue; the Desk
+   refreshes as a whole (see _desk.html). Each item's inspector is
+   pre-rendered into a <template> so selecting it needs no request. #}
+{% set sel = view.selected %}
+{% set queue = view.queue %}
+<section class="desk-queue" id="desk-queue" aria-labelledby="desk-queue-heading">
+  <div class="desk-pane-head">
+    <h2 id="desk-queue-heading">Attention queue</h2>
+    <div class="desk-counts" aria-label="Queue summary">
+      {% for chip, n in view.chip_counts.items() %}
+      <span class="desk-count is-{{ chip | lower }}"><strong>{{ n }}</strong> {{ chip }}</span>
+      {% endfor %}
+      <span class="desk-count desk-count-bell">Bell: <strong>{{ queue.urgent_count }}</strong> urgent</span>
+    </div>
+  </div>
+  {% if view.agent.unavailable %}
+  <p class="desk-partial" role="note">Partial — not counted: {{ view.agent.unavailable | join(", ") }}.</p>
+  {% endif %}
+
+  {% if view.items %}
+  <div class="desk-list" role="listbox" aria-labelledby="desk-queue-heading">
+    {% for d in view.items %}
+    {% set is_sel = sel is not none and d.item.id == sel.item.id %}
+    <div class="desk-item" role="option" id="desk-option-{{ loop.index }}"
+         data-item-id="{{ d.item.id }}" data-template="desk-detail-{{ loop.index }}"
+         data-title="{{ d.item.title }}"
+         aria-selected="{{ 'true' if is_sel else 'false' }}" tabindex="{{ 0 if is_sel else -1 }}">
+      <span class="desk-chip is-{{ d.tone }}">{{ d.chip }}</span>
+      <span class="desk-item-copy">
+        <span class="desk-item-title">{{ d.item.title }}</span>
+        <span class="desk-item-summary">{{ d.item.summary }}</span>
+      </span>
+      <span class="desk-item-meta">
+        <strong>{{ d.item.raised_by | raised_by }}</strong>
+        {% if d.item.as_of %}<span class="desk-num">{{ d.item.as_of.isoformat() }}</span> · {% endif %}{{ 'stale' if d.chip == 'Limited' else 'fresh' }}
+      </span>
+    </div>
+    {% endfor %}
+  </div>
+  {% for d in view.items %}
+  <template id="desk-detail-{{ loop.index }}">{% include "_desk_inspector.html" %}</template>
+  {% endfor %}
+  {% else %}
+  <p class="desk-empty">Nothing needs attention.</p>
+  {% endif %}
+
+  {% set done, total = view.evidence_complete %}
+  <dl class="desk-strip" aria-label="Portfolio risk summary">
+    <div><dt>Open risk</dt><dd class="is-{{ view.agent.open_risk.tone }}">{{ view.agent.open_risk.text }}</dd></div>
+    <div><dt>Risk findings</dt><dd>{{ view.agent.risk_findings if view.agent.risk_findings is not none else "Unavailable" }}</dd></div>
+    <div><dt>Urgent items</dt><dd class="{{ 'is-risk' if queue.urgent_count else '' }}">{{ queue.urgent_count }}</dd></div>
+    <div><dt>Evidence</dt><dd>{{ done }} / {{ total }} complete</dd></div>
+  </dl>
+  <p class="desk-note">{{ ordering_note }}</p>
+</section>

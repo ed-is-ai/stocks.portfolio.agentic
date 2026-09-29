@@ -96,12 +96,14 @@ class AttentionQueueV1(BaseModel):
     def urgent_count(self) -> int:
         """Items about this portfolio, high or medium, with fresh evidence.
 
-        Run-wide items (source health, freshness) and items whose every
-        event is stale are listed but not counted.
+        Run-wide items (source health, freshness), items whose every event
+        is stale and notification items (GH-21, reviewed on the AI Desk) are
+        listed but not counted.
         """
         return sum(
             item.portfolio_id is not None
             and item.severity != "info"
+            and not any(ref.kind == "notification" for ref in item.evidence)
             and not all(event.stale for event in self.events_for(item))
             for item in self.items
         )

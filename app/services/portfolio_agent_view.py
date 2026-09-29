@@ -60,6 +60,7 @@ REVIEW_DUE = "Review due"
 EARLIER_RUN = "last checked on an earlier run"
 NO_PUBLISHED_ANALYSIS = "Published analysis"
 PUBLISHED_EVIDENCE_UNAVAILABLE = "Published evidence"
+NOTIFICATIONS_UNAVAILABLE = "Notifications"
 
 
 @dataclass(frozen=True)
@@ -94,6 +95,14 @@ class PortfolioAgentView:
     #: Sources that could not be read, so the count is known to be partial.
     unavailable: tuple[str, ...]
     open_risk: AgentCell
+    #: The advisor's state: "N Sell", ``NO_STRATEGY`` or unavailable.
+    advisor: str = ""
+    #: The Risk Coach's finding count; ``None`` when the report failed.
+    risk_findings: int | None = None
+    #: The thesis states the rows were built from (``None`` = failed).
+    theses: ThesisStates = None
+    #: When the published analysis run behind the queue was generated.
+    generated_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -170,7 +179,21 @@ def build_agent_view(
         ),
         unavailable=unavailable,
         open_risk=_open_risk(risk),
+        advisor=_advisor(outcome),
+        risk_findings=None if risk is None else len(risk.findings),
+        theses=theses,
+        generated_at=published.generated_at,
     )
+
+
+def _advisor(outcome: RecommendationOutcome) -> str:
+    """The Sell count, else why there is no recommendation."""
+    if isinstance(outcome, NoAssignment):
+        return NO_STRATEGY
+    if isinstance(outcome, EvaluationUnavailable):
+        return STRATEGY_UNAVAILABLE
+    sells = sum(r.action == "sell" for r in outcome.recommendations)
+    return f"{sells} Sell"
 
 
 def _recommendation(

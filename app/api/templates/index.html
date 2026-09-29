@@ -740,25 +740,19 @@
     </span>
   </div>
   <div class="navbar-actions d-flex align-items-center gap-2">
-    <!-- Notification centre (#80) -->
-    <div class="nav-bell dropdown">
-      <button id="nav-bell-btn" class="btn btn-sm nav-bell-btn" type="button"
-              data-bs-toggle="dropdown" data-bs-auto-close="outside"
-              aria-expanded="false" title="Notifications"
-              hx-get="/partials/notifications" hx-target="#notif-list"
-              hx-swap="innerHTML" hx-trigger="click">
-        <i class="bi bi-bell"></i>
-        <span id="notif-badge" class="notif-badge"
-              hx-get="/notifications/count" hx-trigger="load, every 20s"
-              hx-target="this" hx-swap="outerHTML"></span>
-      </button>
-      <div class="dropdown-menu dropdown-menu-end notif-dropdown p-0">
-        <div id="notif-list" hx-get="/partials/notifications"
-             hx-trigger="load" hx-swap="innerHTML">
-          <div class="notif-empty"><span>Loading…</span></div>
-        </div>
-      </div>
-    </div>
+    <!-- Attention bell (GH-21): a link to the AI Desk carrying its urgent
+         count; the notifications dropdown is gone. Its accessible name is
+         "AI Desk" plus the badge's hidden count text; #notif-live
+         announces a changed count politely. -->
+    <a id="nav-bell-btn" class="btn btn-sm nav-bell-btn" href="/desk" title="AI Desk">
+      <i class="bi bi-bell" aria-hidden="true"></i><span class="visually-hidden">AI Desk,</span>
+      <span id="notif-badge" class="notif-badge"
+            hx-get="/notifications/count"
+            hx-trigger="load, every 20s [document.visibilityState === 'visible'], refresh"
+            hx-target="this" hx-swap="outerHTML"
+            hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'></span>
+    </a>
+    <span id="notif-live" class="visually-hidden" aria-live="polite"></span>
     <div class="dropdown refresh-dropdown">
       <button id="refresh-data-button" type="button"
               class="btn btn-sm btn-light btn-refresh dropdown-toggle refresh-data-toggle"
@@ -850,10 +844,13 @@
 
   <!-- Tab bar -->
   <div class="tab-bar">
-    <ul class="nav nav-tabs" id="mainTabs">
+    {# hx-sync (inherited by every tab link): a new tab request aborts one
+       still in flight, so a slow response never lands on another tab. #}
+    <ul class="nav nav-tabs" id="mainTabs" hx-sync="#tab-content:replace">
       <li class="nav-item">
-        <a class="nav-link active" id="tab-stock-scanner"
-           hx-get="/partials/stock-scanner" hx-target="#tab-content" hx-trigger="click, load" hx-indicator="#spinner">
+        {% set on_desk = active_tab == "desk" %}
+        <a class="nav-link{{ '' if on_desk else ' active' }}" id="tab-stock-scanner"
+           hx-get="/partials/stock-scanner" hx-target="#tab-content" hx-trigger="click{{ '' if on_desk else ', load' }}" hx-indicator="#spinner">
           <i class="bi bi-eye"></i>Stock Scanner
         </a>
       </li>
@@ -894,6 +891,15 @@
            hx-get="/partials/data-quality" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
            hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'>
           <i class="bi bi-clipboard-data"></i>Data Quality
+        </a>
+      </li>
+      <li class="nav-item">
+        {# AI Desk (GH-21): its own URL. The first load honours /desk's
+           portfolio_id and item, then the active portfolio. #}
+        <a class="nav-link{{ ' active' if on_desk else '' }}" id="tab-desk" href="/desk"
+           hx-get="/partials/desk" hx-target="#tab-content" hx-trigger="click{{ ', load' if on_desk else '' }}" hx-indicator="#spinner"
+           hx-vals='js:{portfolio_id: (typeof deskParam === "function" && deskParam("portfolio_id")) || (typeof activePortfolio === "function" ? activePortfolio() : ""), item: (typeof deskParam === "function" ? deskParam("item") : "")}'>
+          <i class="bi bi-inbox"></i>AI Desk
         </a>
       </li>
       <li class="nav-item">
@@ -1125,10 +1131,12 @@
       thesisOpener = event.target;
     }
   });
+  // An opener detached by a Desk refresh falls back to the Desk's selected
+  // option rather than dropping focus to <body>.
   document.addEventListener('hidden.bs.modal', (event) => {
-    if (event.target.id === 'thesisEditorModal' && thesisOpener && thesisOpener.isConnected) {
-      thesisOpener.focus();
-    }
+    if (event.target.id !== 'thesisEditorModal') return;
+    if (thesisOpener && thesisOpener.isConnected) thesisOpener.focus();
+    else document.querySelector('#desk [role="option"][aria-selected="true"]')?.focus();
   });
   // GH-19: once the aside stacks below the holdings, bring a row's Why?
   // answer into view.
@@ -1434,29 +1442,104 @@
     new bootstrap.Modal(document.getElementById('sellModal')).show();
   }
 
-  // Notification centre: mark-read deep-links to the relevant tab, then
-  // closes the bell dropdown (#80).
-  function notifDeepLink(tabId) {
-    const link = document.getElementById(tabId);
-    if (link) { link.click(); }
-    const bell = document.getElementById('nav-bell-btn');
-    if (bell && window.bootstrap) {
-      const dd = bootstrap.Dropdown.getInstance(bell);
-      if (dd) { dd.hide(); }
-    }
+  // AI Desk (GH-21). The URL follows the tab (replaceState, no history
+  // entry), so a reload of /desk lands back on the Desk with its portfolio
+  // and selected item; / behaves as before.
+  function deskParam(name) {
+    return new URLSearchParams(location.search).get(name) || '';
   }
-
-  // Marks one notification read as a side effect of clicking its native
-  // detail link, without blocking that link's own navigation request
-  // (#80, Story 2.8 AC6 markup fix -- the row is no longer one synthetic
-  // clickable <li>, so its detail <a> triggers this itself).
-  function markNotificationRead(notificationId) {
-    if (window.htmx) {
-      htmx.ajax('POST', `/notifications/${notificationId}/read`, {
-        target: '#notif-list', swap: 'innerHTML',
-      });
-    }
+  function deskSelectedId() {
+    return document.querySelector('#desk [role="option"][aria-selected="true"]')?.dataset.itemId || '';
   }
+  // replaceState is debounced (the last URL within 250ms wins) and guarded,
+  // so fast arrow-key navigation cannot hit the browser's rate limit.
+  let replaceUrlTimer = null;
+  function replaceUrl(path) {
+    clearTimeout(replaceUrlTimer);
+    replaceUrlTimer = setTimeout(() => {
+      try { history.replaceState(null, '', path); } catch (err) { /* rate-limited */ }
+    }, 250);
+  }
+  function deskTabActive() {
+    return document.getElementById('tab-desk')?.classList.contains('active');
+  }
+  function deskSyncUrl() {
+    const desk = document.getElementById('desk');
+    if (!desk || !deskTabActive()) return;
+    const params = new URLSearchParams();
+    if (desk.dataset.portfolioId) params.set('portfolio_id', desk.dataset.portfolioId);
+    if (deskSelectedId()) params.set('item', deskSelectedId());
+    const query = params.toString();
+    replaceUrl('/desk' + (query ? '?' + query : ''));
+  }
+  // Swap the inspector from the item's pre-rendered <template>: no request.
+  // A user selection is announced; a queue refresh re-renders silently.
+  function selectDeskItem(option, byUser) {
+    const options = document.querySelectorAll('#desk [role="option"]');
+    options.forEach((o) => {
+      o.setAttribute('aria-selected', String(o === option));
+      o.tabIndex = o === option ? 0 : -1;
+    });
+    const body = document.getElementById('desk-inspector-body');
+    const template = document.getElementById(option.dataset.template);
+    if (body && template) {
+      body.replaceChildren(template.content.cloneNode(true));
+      if (window.htmx) htmx.process(body);
+    }
+    if (byUser) {
+      document.getElementById('desk-announcer').textContent = 'Selected: ' + option.dataset.title;
+      option.focus();
+    }
+    deskSyncUrl();
+  }
+  document.addEventListener('click', (e) => {
+    const option = e.target.closest('#desk [role="option"]');
+    if (option) { selectDeskItem(option, true); return; }
+    const link = e.target.closest('[data-desk-tab]');
+    if (!link) return;
+    e.preventDefault();
+    document.getElementById(link.dataset.deskTab)?.click();
+  });
+  document.addEventListener('keydown', (e) => {
+    const option = e.target.closest?.('#desk [role="option"]');
+    if (!option) return;
+    const options = [...document.querySelectorAll('#desk [role="option"]')];
+    const index = options.indexOf(option);
+    const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: options.length - 1 }[e.key];
+    if (next === undefined || !options[next]) return;
+    e.preventDefault();
+    selectDeskItem(options[next], true);
+  });
+  // A Desk render (load, portfolio change or refresh): remember its
+  // portfolio for the other tabs, point the bell at it, keep focus on the
+  // selected option if the listbox had it, and sync the URL. The server
+  // renders the whole Desk, inspector included, so a refreshed empty queue
+  // shows "Nothing selected". A late Desk response after the user left the
+  // tab changes nothing.
+  let deskHadFocus = false;
+  document.body.addEventListener('htmx:beforeSwap', (e) => {
+    if (e.detail.target.id === 'tab-content') {
+      deskHadFocus = !!document.activeElement?.closest('#desk [role="option"]');
+    }
+  });
+  document.body.addEventListener('htmx:afterSettle', (e) => {
+    const desk = document.getElementById('desk');
+    if (!desk || e.detail.target.id !== 'tab-content' || !deskTabActive()) return;
+    setActivePortfolio(desk.dataset.portfolioId);
+    if (window.htmx && document.getElementById('notif-badge')) htmx.trigger('#notif-badge', 'refresh');
+    const selected = desk.querySelector('[role="option"][aria-selected="true"]');
+    if (selected && deskHadFocus) selected.focus();
+    deskHadFocus = false;
+    deskSyncUrl();
+  });
+  // A changed bell count is announced politely (not the first one).
+  let lastBadgeAnnouncement = null;
+  document.body.addEventListener('htmx:afterSettle', () => {
+    const text = document.getElementById('notif-badge')?.dataset.announce;
+    if (text === undefined || text === lastBadgeAnnouncement) return;
+    if (lastBadgeAnnouncement !== null) document.getElementById('notif-live').textContent = text;
+    lastBadgeAnnouncement = text;
+  });
 
   // Keep active tab in sync with navigation clicks
   document.getElementById('mainTabs').addEventListener('click', function(e) {
@@ -1464,6 +1547,8 @@
     if (!link) return;
     document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
     link.classList.add('active');
+    const path = link.id === 'tab-desk' ? '/desk' : '/';
+    if (location.pathname !== path) replaceUrl(path);
   });
 
   // After a trade form (from a modal) updates #tab-content, activate the Portfolio tab.
@@ -1474,6 +1559,7 @@
     if (e.detail.elt?.getAttribute('hx-post') === '/trades') {
       document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
       document.getElementById('tab-portfolio').classList.add('active');
+      replaceUrl('/');
     }
   });
 

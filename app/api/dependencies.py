@@ -31,6 +31,8 @@ from app.repositories.portfolio_strategies_repo import (
 from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.repositories.position_theses_repo import PositionThesesRepository
 from app.repositories.trade_annotations_repo import TradeAnnotationsRepository
+from app.api.stock_scanner_context import load_source_health
+from app.services.desk_service import ATTENTION_COUNTS, DeskService
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
@@ -338,3 +340,33 @@ def get_trade_review_service() -> TradeReviewService:
 def get_trade_review_client() -> TradeReviewClient:
     """Return a weekly-interpretation client (GH-17); not cached, like drafts."""
     return TradeReviewClient()
+
+
+def get_desk_service(
+    trader: Annotated[TraderService, Depends(get_trader_service)],
+    portfolio: Annotated[PortfolioService, Depends(get_portfolio_service)],
+    recommendations: Annotated[
+        PortfolioRecommendationService, Depends(get_portfolio_recommendation_service)
+    ],
+    theses: Annotated[PositionThesisService, Depends(get_position_thesis_service)],
+    notifications: Annotated[
+        NotificationsRepository, Depends(get_notifications_repository)
+    ],
+    trade_reviews: Annotated[TradeReviewService, Depends(get_trade_review_service)],
+) -> DeskService:
+    """Compose the read-only AI Desk (GH-21) from the shared services.
+
+    Not cached, so overriding any of the services it reads (as tests do)
+    takes effect; only the bell's short-lived count cache is shared.
+    """
+    return DeskService(
+        trader,
+        portfolio,
+        recommendations.recommend,
+        theses.statuses,
+        notifications,
+        trade_reviews,
+        config.COPILOT_AUDIT_JSONL,
+        load_source_health,
+        count_cache=ATTENTION_COUNTS,
+    )

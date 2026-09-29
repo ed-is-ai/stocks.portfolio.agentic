@@ -63,7 +63,7 @@ def test_index_renders_primary_navigation_in_user_flow_order(
     _use_artifact(monkeypatch, tmp_path, datetime.now(timezone.utc))
 
     markup = client.get("/").text
-    tab_bar = markup.split('<ul class="nav nav-tabs" id="mainTabs">', 1)[1].split(
+    tab_bar = markup.split('<ul class="nav nav-tabs" id="mainTabs"', 1)[1].split(
         "</ul>", 1
     )[0]
     tab_ids = [
@@ -73,6 +73,7 @@ def test_index_renders_primary_navigation_in_user_flow_order(
         "tab-strategy-manager",
         "tab-history",
         "tab-runlog",
+        "tab-desk",
         "tab-settings",
     ]
 

@@ -57,6 +57,7 @@ from playwright.sync_api import Browser, Dialog, Page, expect, sync_playwright
 
 from app.api.app import create_app
 from app.api.dependencies import (
+    get_desk_service,
     get_notifications_repository,
     get_portfolio_service,
     get_trader_service,
@@ -76,6 +77,14 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+def _quiet_desk() -> MagicMock:
+    """The bell's badge now counts the AI Desk's urgent items (GH-21); a
+    fake Desk keeps that poll off the real ledger and evidence stores."""
+    desk = MagicMock()
+    desk.attention_count.return_value = 0
+    return desk
 
 
 @pytest.fixture(scope="module")
@@ -149,12 +158,14 @@ def mocked_trader() -> Iterator[MagicMock]:
     app.dependency_overrides[get_trader_service] = lambda: mock_trader
     app.dependency_overrides[get_portfolio_service] = lambda: mock_portfolio_service
     app.dependency_overrides[get_notifications_repository] = lambda: mock_notifications
+    app.dependency_overrides[get_desk_service] = _quiet_desk
     try:
         yield mock_trader
     finally:
         app.dependency_overrides.pop(get_trader_service, None)
         app.dependency_overrides.pop(get_portfolio_service, None)
         app.dependency_overrides.pop(get_notifications_repository, None)
+        app.dependency_overrides.pop(get_desk_service, None)
 
 
 @pytest.fixture
@@ -205,12 +216,14 @@ def mocked_trader_mixed_results() -> Iterator[MagicMock]:
     app.dependency_overrides[get_trader_service] = lambda: mock_trader
     app.dependency_overrides[get_portfolio_service] = lambda: mock_portfolio_service
     app.dependency_overrides[get_notifications_repository] = lambda: mock_notifications
+    app.dependency_overrides[get_desk_service] = _quiet_desk
     try:
         yield mock_trader
     finally:
         app.dependency_overrides.pop(get_trader_service, None)
         app.dependency_overrides.pop(get_portfolio_service, None)
         app.dependency_overrides.pop(get_notifications_repository, None)
+        app.dependency_overrides.pop(get_desk_service, None)
 
 
 @pytest.fixture(scope="module")

@@ -657,12 +657,12 @@ def test_refresh_completion_banner_removed() -> None:
     assert "Data refreshed successfully" not in html
 
 
-def test_notif_badge_targets_itself_inside_bell_button() -> None:
-    """The badge must not inherit the bell button's hx-target="#notif-list".
+def test_notif_badge_targets_itself_inside_bell_link() -> None:
+    """The badge swaps only itself, never an inherited target.
 
-    The bell button targets #notif-list; the nested badge's outerHTML poll
-    would inherit that and clobber the whole notification list. The badge
-    carries an explicit hx-target="this" to swap only itself.
+    The bell is now a plain link to the AI Desk (GH-21), but the nested
+    badge's outerHTML poll keeps an explicit hx-target="this" so it can never
+    inherit a target from an ancestor.
     """
     markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
     badge_start = markup.index('id="notif-badge"')

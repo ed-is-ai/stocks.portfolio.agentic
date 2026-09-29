@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from app.agents.thesis.evaluator import evaluate_thesis
 from app.agents.triage.queue import build_attention_queue
@@ -10,12 +10,19 @@ from app.agents.triage.sources import (
     freshness_events,
     held_events,
     held_hit,
+    notification_events,
     record_setups,
     recommendation_events,
     risk_events,
     setup_events,
     source_health_events,
     thesis_events,
+)
+from app.schemas.evidence_ref import EvidenceRefV1
+from app.schemas.notification import (
+    Notification,
+    NotificationCategory,
+    NotificationSeverity,
 )
 from app.schemas.position_thesis import ThesisSummary
 from app.schemas.source_health import SourceHealth, SourceName, SourceState
@@ -232,3 +239,74 @@ def test_held_events_take_this_runs_trailing_and_watched_stop_signals() -> None:
     # No wall clock: an unknown evidence date is said, never invented.
     assert all(e.observed_at is None and e.as_of is None for e in events)
     assert events[0].summary.endswith("The price evidence date is unknown.")
+
+
+def _note(nid: int, **fields: object) -> Notification:
+    return Notification.model_validate(
+        {
+            "id": nid,
+            "category": NotificationCategory.PORTFOLIO,
+            "event_type": "import_failed",
+            "severity": NotificationSeverity.WARNING,
+            "title": f"Note {nid}",
+            "created_at": AT - timedelta(days=1),
+            **fields,
+        }
+    )
+
+
+def test_recent_warning_notifications_become_evidence_events() -> None:
+    (event,) = notification_events(
+        [_note(7, portfolio_id=1, body="The CSV had no rows.")],
+        portfolio_id=1,
+        now=AT,
+    )
+
+    assert (event.category, event.severity) == ("evidence", "medium")
+    assert event.source_event_id == "notification:7"
+    assert event.raised_by == "Portfolio"
+    assert event.portfolio_id == 1
+    assert event.summary == "The CSV had no rows."
+    assert event.evidence == [
+        EvidenceRefV1(
+            kind="notification",
+            id="7",
+            as_of=(AT - timedelta(days=1)).date(),
+            source="portfolio",
+        )
+    ]
+
+
+def test_only_queueable_notifications_become_events() -> None:
+    notes = [
+        _note(1),
+        _note(2, severity=NotificationSeverity.ERROR, portfolio_id=1),
+        _note(3, severity=NotificationSeverity.INFO),
+        _note(4, created_at=AT - timedelta(days=8)),
+        _note(5, dismissed_at=AT),
+        _note(6, category=NotificationCategory.SOURCE),
+        _note(7, category=NotificationCategory.ALERT, ticker="AAA"),
+        _note(8, portfolio_id=2),
+        _note(9, category=NotificationCategory.ALERT, event_type="x"),
+    ]
+
+    events = notification_events(notes, portfolio_id=1, now=AT)
+
+    assert [e.source_event_id for e in events] == [
+        "notification:1",
+        "notification:2",
+        "notification:9",
+    ]
+    assert events[-1].raised_by == "System"
+
+
+def test_a_run_wide_notification_item_is_not_urgent() -> None:
+    queue = build_attention_queue(
+        notification_events([_note(1)], portfolio_id=1, now=AT),
+        portfolio_id=1,
+        analysis_run_id="run-1",
+        unavailable=(),
+    )
+
+    assert len(queue.items) == 1
+    assert queue.urgent_count == 0

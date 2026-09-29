@@ -1,0 +1,85 @@
+{# AI Desk (GH-21): workflows rail | attention queue | evidence inspector.
+   Read-only: every figure comes from the typed DeskView, and every action
+   is a link to where the user acts today. The inspector swaps client-side
+   from the <template>s the queue renders; the index.html script owns the
+   listbox keys, the live announcement and the URL. The whole Desk (rail,
+   notice, strip, queue) re-renders on a thesis save elsewhere and every
+   60s while the page is visible, keeping the selected item; the refresh
+   drops itself while a tab request is in flight. #}
+{% set sel = view.selected %}
+{% set pid = view.portfolio_id if view.portfolio_id is not none else '' %}
+<section class="desk-screen" id="desk" aria-labelledby="desk-heading"
+         data-portfolio-id="{{ pid }}">
+  <div id="desk-refresh" hidden
+       hx-get="/partials/desk" hx-target="#tab-content" hx-swap="innerHTML"
+       hx-sync="#tab-content:drop"
+       hx-trigger="portfolio-agents-refresh from:body, every 60s [document.visibilityState === 'visible']"
+       hx-vals='js:{portfolio_id: "{{ pid }}", item: (typeof deskSelectedId === "function" ? deskSelectedId() : "")}'></div>
+  <div class="desk-heading">
+    <h1 id="desk-heading">AI Desk</h1>
+    <p>What needs attention, why it matters and the evidence behind it.</p>
+  </div>
+
+  <div class="desk-context" aria-label="Desk context">
+    <div class="desk-field">
+      <label for="desk-portfolio">Portfolio</label>
+      {% if view.portfolios %}
+      <select id="desk-portfolio" name="portfolio_id" class="form-select form-select-sm"
+              hx-get="/partials/desk" hx-target="#tab-content" hx-swap="innerHTML"
+              hx-sync="#tab-content:replace" hx-indicator="#spinner">
+        {% for pid, name in view.portfolios %}
+        <option value="{{ pid }}"{% if pid == view.portfolio_id %} selected{% endif %}>{{ name }}</option>
+        {% endfor %}
+      </select>
+      {% else %}
+      <span id="desk-portfolio">No portfolios</span>
+      {% endif %}
+    </div>
+    <div class="desk-field">
+      <span class="desk-label">Evidence</span>
+      <span class="desk-session">
+        {% if view.queue.analysis_run_id %}Published analysis <code>{{ view.queue.analysis_run_id }}</code>{% else %}No published analysis{% endif %}
+        {% if view.agent.generated_at %} · <time class="local-time" datetime="{{ view.agent.generated_at.isoformat() }}">{{ view.agent.generated_at.strftime('%Y-%m-%d %H:%M UTC') }}</time>{% endif %}
+        · <span class="desk-freshness is-{{ view.freshness.state.value }}">{{ view.freshness.state.value | capitalize }}</span>
+      </span>
+    </div>
+    <p class="desk-context-note">{{ context_note }}</p>
+  </div>
+
+  {% if view.missing_item %}<p class="desk-notice" role="status">{{ missing_item }}</p>{% endif %}
+
+  <div class="desk-grid">
+    <aside class="desk-rail" aria-labelledby="desk-rail-heading">
+      <div class="desk-pane-head">
+        <h2 id="desk-rail-heading">Workflows</h2>
+        <span>{{ view.workflows | length }} capabilities</span>
+      </div>
+      <ul class="desk-workflows">
+        {% for w in view.workflows %}
+        <li class="desk-workflow{% if w.state == 'Live' %} is-live{% endif %}">
+          <span class="desk-workflow-name">{{ w.name }}</span>
+          <span class="desk-workflow-meta">
+            <span>{{ w.detail }}{% if w.action %}{% if w.detail %} · {% endif %}<a href="/" data-desk-tab="{{ w.action.target }}">{{ w.action.label }}</a>{% endif %}</span>
+            <span class="desk-workflow-state">{{ w.state }}</span>
+          </span>
+        </li>
+        {% endfor %}
+      </ul>
+      <p class="desk-boundary"><strong>Agent boundary</strong>{{ agent_boundary }}</p>
+    </aside>
+
+    {% include "_desk_queue.html" %}
+
+    <aside class="desk-inspector" aria-labelledby="desk-inspector-heading">
+      <div class="desk-pane-head">
+        <h2 id="desk-inspector-heading">Evidence review</h2>
+        <span>Grounded in the queue's evidence</span>
+      </div>
+      <div id="desk-inspector-body">
+        {% if sel %}{% with d = sel %}{% include "_desk_inspector.html" %}{% endwith %}
+        {% else %}<p class="desk-empty">Nothing selected — the queue is empty.</p>{% endif %}
+      </div>
+      <p id="desk-announcer" class="visually-hidden" aria-live="polite"></p>
+    </aside>
+  </div>
+</section>
