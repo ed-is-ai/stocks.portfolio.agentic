@@ -496,6 +496,12 @@ def _review(trade: Trade, checks: list[TradeCheckV1]) -> TradeReviewV1:
     )
 
 
+NO_PRIOR_SIGNAL = (
+    "No close below the 50-day average or the stop before the sale; a same-day "
+    "stop-out and a discretionary exit cannot be told apart."
+)
+
+
 def _sell_lot(window: PriceWindow | None, entry: Entry) -> TradeCheckV1:
     """One closed lot: did the sell come within the grace of the first signal?"""
     if window is not None and window.bars[-1].session <= trade_day(entry.trade):
@@ -509,7 +515,10 @@ def _sell_lot(window: PriceWindow | None, entry: Entry) -> TradeCheckV1:
         return _exit_unknown("missing history", _price_refs(window))
     index, reason = signal
     if index is None:
-        return _exit_check("deviated", "discretionary exit", window, {}, "")
+        # A same-day stop-out and a discretionary exit look the same here.
+        return _exit_check(
+            "unknown", "no exit signal before the sale", window, {}, NO_PRIOR_SIGNAL
+        )
     # Sessions from the signal to the sell: the bars after it plus the sell.
     after = len(window.bars) - index
     held = after > EXIT_GRACE_SESSIONS
