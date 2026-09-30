@@ -16,6 +16,35 @@
 {{ cell("agent-" ~ scope ~ "-evidence-" ~ row.slug, row.evidence, scope) }}
 {{ cell("agent-" ~ scope ~ "-thesis-" ~ row.slug, row.thesis, scope) }}
 {% endfor %}
+{# The Stop column's suggestion for holdings without a recorded stop, from
+   the assigned Strategy's own stop rule. "Use" posts the full-precision
+   level, which the set-stop route recomputes and accepts only exactly. #}
+{% for row in view.rows if row.stop is not none and row.position is not none %}
+{% set p = row.position %}
+{% set sug = row.stop %}
+{% set sym = '$' if p.price_currency == 'USD' else 'HK$' if p.price_currency == 'HKD' else '£' %}
+<div id="agent-{{ scope }}-stop-{{ row.slug }}" class="agent-cell stop-suggestion" data-agent-cell="{{ scope }}" hx-swap-oob="true">
+  {% if sug.level is not none %}
+  {% set level = ("%.2f" if sug.level >= 1 else "%.4f")|format(sug.level) %}
+  <span class="stop-suggestion-label">Suggested</span>
+  <span class="stop-suggestion-level"{% if sug.facts %} title="{{ sug.facts | join(' · ') }}"{% endif %}>{{ sym }}{{ level }}</span>
+  <span class="stop-suggestion-note">{{ sug.rule }}{% if sug.distance_pct is not none %} · {{ "%+.1f"|format(sug.distance_pct) }}%{% endif %}</span>
+  {% if sug.breach %}<span class="neg">{{ sug.breach }}</span>{% endif %}
+  {% if sug.note %}<span class="stop-suggestion-note">{{ sug.note }}</span>{% endif %}
+  {% if sug.stale %}<span class="stop-suggestion-note">{{ sug.stale }}</span>{% endif %}
+  {% if view.portfolio_id is not none and not sug.stale %}
+  <button class="text-button" type="button"
+          aria-label="Use the suggested stop for {{ p.display_symbol }}"
+          hx-post="/portfolios/{{ view.portfolio_id }}/positions/{{ p.ticker | urlencode }}/stop"
+          hx-vals='{{ {"stop_loss": sug.level|string} | tojson }}'
+          hx-confirm="Record a stop of {{ sym }}{{ level }} on your latest {{ p.display_symbol }} buy?"
+          hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner">Use</button>
+  {% endif %}
+  {% else %}
+  <span class="stop-suggestion-note">No suggestion — {{ sug.note }}</span>
+  {% endif %}
+</div>
+{% endfor %}
 {{ cell("agent-" ~ scope ~ "-open-risk", view.open_risk, scope) }}
 {% set queue = view.attention %}
 {% set count = queue.urgent_count %}

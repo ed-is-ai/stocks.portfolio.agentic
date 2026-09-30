@@ -12,11 +12,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.strategy_assignment import ScanFreshness
+from app.services.backtest.strategy_protocol import StopBasis, StopTrigger
 
 #: The closed action vocabulary, in the screen's fixed group order.
 RecommendationAction = Literal["sell", "hold", "buy"]
@@ -79,6 +81,28 @@ class RecommendationV1(_RecommendationModel):
     #: The assigned Strategy's own structured explanation (#472), empty
     #: for host-generated hold/fail-safe rows.
     explanation: tuple[RecommendationReasonV1, ...] = ()
+
+
+class RecommendationStopLevelV1(_RecommendationModel):
+    """The assigned Strategy's own stop level for one holding (GH-57).
+
+    The plain projection of a Strategy's ``StopLevelV1``: ``level`` is in
+    ``currency``, the unit its ``basis`` implies (the scan's quote unit for
+    a market level, the position's cost currency for an average-cost one,
+    both agreeing for a mixed one), and is ``None`` when the Strategy -- or
+    the host, for missing evidence, an unknown unit or a failed rule --
+    declares why through ``summary``. ``trigger`` is the exit's own
+    comparison. A suggestion only: never evidence of a recorded stop.
+    """
+
+    level: Decimal | None = Field(default=None, gt=Decimal(0))
+    rule_code: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    facts: tuple[str, ...] = ()
+    note: str | None = None
+    currency: str | None = None
+    basis: StopBasis | None = None
+    trigger: StopTrigger | None = None
 
 
 class RecommendationEvidenceDiagnosticV1(_RecommendationModel):
@@ -204,6 +228,9 @@ class RecommendationResultV1(_RecommendationModel):
     #: by the Strategy descriptor. ``None`` for a legacy result, where
     #: :data:`UNIVERSE_PARAMETER_KEYS` still identifies the key.
     universe_parameter: str | None = None
+    #: Each held security's Strategy stop level, keyed by ``security_id``;
+    #: empty when the Strategy has no ``stop_level`` capability (GH-57).
+    stop_levels: Mapping[str, RecommendationStopLevelV1] = Field(default_factory=dict)
 
     @property
     def universe_keys(self) -> tuple[str, ...]:

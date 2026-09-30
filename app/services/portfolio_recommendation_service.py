@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, cast
 
 from app.core.config import ANALYSIS_JSON, SKILLS_DIR
+from app.core.money import quote_currency
 from app.core.ticker_identity import (
     AmbiguousTickerAliasError,
     canonical_ticker,
@@ -35,6 +36,7 @@ from app.schemas.portfolio_recommendation import (
     RecommendationEvidenceDiagnosticV1,
     RecommendationReasonV1,
     RecommendationResultV1,
+    RecommendationStopLevelV1,
     RecommendationV1,
 )
 from app.schemas.record import StockRecord
@@ -56,11 +58,14 @@ from app.services.backtest.strategy_evidence import (
     preflight_evidence,
     strategy_support_label,
 )
-from app.services.backtest.strategy_explanation import format_reason
+from app.services.backtest.strategy_explanation import format_fact, format_reason
 from app.services.backtest.strategy_protocol import (
     MarketViewV1,
+    PortfolioView,
     Signal,
     SignalSide,
+    StopLevelStrategyV1,
+    StopLevelV1,
     StrategyProtocolV1,
     validate_entry_signals,
     validate_exit_signals,
@@ -531,6 +536,15 @@ class PortfolioRecommendationService:
             coverage=_coverage(preflight, len(entry_securities | exit_securities)),
             evaluated_at=datetime.now(UTC),
             universe_parameter=descriptor.universe.parameter,
+            stop_levels=_stop_levels(
+                strategy,
+                protocol_view,
+                portfolio_view,
+                exit_parameters,
+                preflight,
+                _scan_units(records, aliases, scan_view.selected_universe),
+                {security_id: p.cost_currency for security_id, p in held.items()},
+            ),
         )
 
     def strategy_support(self) -> Mapping[str, str]:
@@ -920,6 +934,102 @@ class PortfolioRecommendationService:
             key=lambda rec: (_ACTION_RANK[rec.action], rec.security_id)
         )
         return tuple(recommendations)
+
+
+def _scan_units(
+    records: list[StockRecord], aliases: dict[str, str], universe: tuple[str, ...]
+) -> dict[str, str]:
+    """Return ``{security_id: quote unit}`` for the scan-evidenced universe.
+
+    A held security outside it reads fallback history whose unit is not
+    carried here, so it has no entry (unit unknown).
+    """
+    units: dict[str, str] = {}
+    for record in records:
+        try:
+            security_id = canonical_ticker(record.ticker, aliases)
+        except AmbiguousTickerAliasError:
+            continue
+        if security_id in universe:
+            units[security_id] = record.currency
+    return units
+
+
+def _stop_levels(
+    strategy: object,
+    view: MarketViewV1,
+    portfolio: PortfolioView,
+    parameters: Mapping[str, Any],
+    preflight: EvidencePreflightV1,
+    scan_units: Mapping[str, str],
+    cost_units: Mapping[str, str],
+) -> dict[str, RecommendationStopLevelV1]:
+    """Ask a ``StopLevelStrategyV1`` runtime for each holding's stop (GH-57).
+
+    Uses exactly the views and parameters the exit path saw, so no extra
+    runtime load. A holding whose exit evidence is incomplete is not asked,
+    and a failing or malformed answer -- including its projection -- is
+    declared for that security alone; ``None`` (no opinion) leaves the
+    holding out.
+    """
+    if not isinstance(strategy, StopLevelStrategyV1):
+        return {}
+    levels: dict[str, RecommendationStopLevelV1] = {}
+    for position in portfolio.positions:
+        security_id = position.security_id
+        if _exit_evidence_gap(preflight, security_id) is not None:
+            levels[security_id] = RecommendationStopLevelV1(
+                rule_code="exit_evidence_incomplete",
+                summary="Exit evidence is incomplete",
+            )
+            continue
+        try:
+            stop = strategy.stop_level(view, portfolio, parameters, security_id)
+            if stop is None:
+                continue
+            if not isinstance(stop, StopLevelV1):
+                raise TypeError("stop_level must return a StopLevelV1 or None")
+            levels[security_id] = _project_stop(
+                stop, scan_units.get(security_id), cost_units.get(security_id)
+            )
+        except Exception:
+            logger.exception("Strategy stop level failed for %s", security_id)
+            levels[security_id] = RecommendationStopLevelV1(
+                rule_code="stop_level_failed", summary="The Strategy's stop rule failed"
+            )
+    return levels
+
+
+def _project_stop(
+    stop: StopLevelV1, scan_unit: str | None, cost_unit: str | None
+) -> RecommendationStopLevelV1:
+    """Project ``stop`` in the unit its basis implies, or declare why not.
+
+    A market level is in the scan's quote unit, unknown for a holding the
+    scan did not publish (its fallback history carries no unit). An
+    average-cost level is in the position's cost currency. A mixed level
+    compares both, so they must agree.
+    """
+    currency = cost_unit if stop.basis == "average_cost" else scan_unit
+    reason = None
+    if stop.level is not None and currency is None:
+        reason = "Not in the latest scan — needs scan price history"
+    elif (
+        stop.level is not None
+        and stop.basis == "mixed"
+        and quote_currency(cost_unit) != quote_currency(currency)
+    ):
+        reason = "Strategy prices and average cost are in different units"
+    return RecommendationStopLevelV1(
+        level=None if reason else stop.level,
+        rule_code="stop_unit_unknown" if reason else stop.rule_code,
+        summary=reason or stop.summary,
+        facts=tuple(format_fact(fact) for fact in stop.facts),
+        note=stop.note,
+        currency=currency,
+        basis=stop.basis,
+        trigger=stop.trigger,
+    )
 
 
 def _exit_evidence_gap(

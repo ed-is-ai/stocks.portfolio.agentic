@@ -20,6 +20,7 @@ from app.services.backtest.strategy_protocol import (
     PositionSummaryV1,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyProtocolV1,
     validate_exit_signals,
 )
@@ -518,3 +519,48 @@ def test_selected_buys_explain_eligibility_and_the_absent_exit_policy() -> None:
             "Rank by 252-session return",
             "252-session return",
         }
+
+
+# --- GH-57: a default risk stop, never a sell rule -----------------------------
+
+
+def test_stop_level_is_a_default_risk_stop_from_average_cost() -> None:
+    strategy = BuyAndHoldStrategy()
+    view = _View()
+
+    default = strategy.stop_level(view, _portfolio("5"), PARAMETERS, "sec-aapl")
+    tighter = strategy.stop_level(
+        view, _portfolio("5"), PARAMETERS | {"risk_stop_pct": 5}, "sec-aapl"
+    )
+
+    # A missing ``risk_stop_pct`` (stored snapshots predate it) reads as 10.
+    assert default.level == Decimal("90")
+    assert default.rule_code == "default_risk_stop"
+    assert (default.basis, default.trigger) == ("average_cost", "close_lte")
+    assert "not part of" in default.note.lower()
+    assert tighter.level == Decimal("95")
+    # Not part of its rules: no exit below the level either.
+    below = _View(current_close="89.99")
+    assert strategy.exit_signals(below, _portfolio("5"), PARAMETERS) == []
+
+
+def test_stop_level_rejects_an_unusable_setting_and_ignores_unheld() -> None:
+    strategy = BuyAndHoldStrategy()
+    view = _View()
+
+    def stop(value: object) -> StopLevelV1:
+        result = strategy.stop_level(
+            view, _portfolio("5"), PARAMETERS | {"risk_stop_pct": value}, "sec-aapl"
+        )
+        assert result is not None
+        return result
+
+    # Exactly the SKILL.md range: minimum 0, maximum 99.
+    assert stop(0).level == Decimal("100")
+    assert stop(99).level == Decimal("1")
+    for value in (99.5, 100, -1, True, "x", None, float("nan")):
+        assert stop(value).level is None
+        assert stop(value).summary == (
+            "Strategy setting risk_stop_pct is missing or unusable."
+        )
+    assert strategy.stop_level(view, _portfolio(), PARAMETERS, "sec-aapl") is None

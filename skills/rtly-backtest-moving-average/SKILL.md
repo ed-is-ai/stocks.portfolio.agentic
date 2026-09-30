@@ -42,6 +42,13 @@ beyond the slow window to prove a crossover, ignore equality, reject
 `fast_window >= slow_window`, and fail closed on missing, malformed, short,
 or stale history.
 
+Suggest a stop (`stop_level`) for a held position at the close below which
+tomorrow's fast SMA would cross below the slow SMA:
+`(fast * Ss - slow * Sf) / (slow - fast)`, where `Sf` and `Ss` sum today's
+latest `fast - 1` and `slow - 1` closes. Declare no level, with a reason, when
+the fast SMA is already below the slow one, the price is not positive, or
+current closes are too short.
+
 The engine owns BUY allocation and whole-share sizing. A SELL closes the exact
 held quantity, including split-created fractional shares. Make decisions from bounded close-of-session
 evidence; the engine fills accepted signals at the next-session open.

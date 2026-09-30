@@ -54,6 +54,7 @@ from app.services.trader_service import TraderService
 from tests.test_alert_digest_held import _buy_record
 from tests.test_portfolio_agent_view import _risk
 from tests.test_portfolio_risk_route import _dump, _record
+from tests._stop_helpers import stop_level
 from tests.test_thesis_evaluator import FRESH, META, make_record
 
 client = TestClient(app)
@@ -438,7 +439,11 @@ def test_tab_renders_scoped_placeholders_and_one_lazy_loader(stack) -> None:
         "attention",
     ):
         assert f'id="agent-{pid}-{name}"' in html
-    assert html.count(f'data-agent-placeholder="{pid}"') == 4 * 2 + 3
+    # Four cells per row, three cards/strip, and the Stop suggestion for BBB,
+    # the one holding without a recorded stop.
+    assert f'id="agent-{pid}-stop-BBB"' in html
+    assert f'id="agent-{pid}-stop-AAA"' not in html
+    assert html.count(f'data-agent-placeholder="{pid}"') == 4 * 2 + 3 + 1
     assert "data-agent-placeholder>" not in html
     assert "Thesis monitor not available yet" not in html
     # A static Thesis button per row opens the editor outside #tab-content,
@@ -468,6 +473,30 @@ def test_partial_ids_match_the_tab_placeholders(stack) -> None:
     swapped = re.findall(r'id="([^"]+)"[^>]*hx-swap-oob="true"', _agents(stack))
 
     assert swapped and all(f'id="{i}"' in tab for i in swapped)
+    assert f"agent-{stack.pid}-stop-BBB" in swapped
+
+
+def test_stop_suggestion_swaps_into_the_stop_column(stack) -> None:
+    """BBB has no recorded stop: the Strategy's level arrives lazily, with a
+    "Use" action; AAA keeps its recorded stop and gets no cell."""
+    stack.outcome["recommend"] = lambda _pid: _result().model_copy(
+        update={"stop_levels": {"BBB": stop_level("9.5")}}
+    )
+    body = _agents(stack)
+    cell = body.split(f'id="agent-{stack.pid}-stop-BBB"', 1)[1].split("</div>")[0]
+
+    assert f'data-agent-cell="{stack.pid}" hx-swap-oob="true"' in cell
+    assert "£9.50" in cell
+    assert f'hx-post="/portfolios/{stack.pid}/positions/BBB/stop"' in cell
+    assert f'id="agent-{stack.pid}-stop-AAA"' not in body
+
+
+def test_stop_cell_declares_no_strategy(stack) -> None:
+    stack.outcome["recommend"] = lambda _pid: NO_ASSIGNMENT
+    body = _agents(stack)
+    cell = body.split(f'id="agent-{stack.pid}-stop-BBB"', 1)[1].split("</div>")[0]
+
+    assert "No suggestion — No Strategy assigned" in cell
 
 
 def test_row_why_posts_to_the_aside_without_the_offcanvas(stack) -> None:
@@ -544,7 +573,8 @@ def _view_with(stack: SimpleNamespace, **health: object):
 
 
 def _publish_records(stack: SimpleNamespace, *records: StockRecord) -> datetime:
-    at = datetime(2026, 9, 28, 21, tzinfo=UTC)
+    # Published "now": a fixed date turns stale a day later and flips setups.
+    at = datetime.now(UTC).replace(microsecond=0)
     rows = [r.model_dump(mode="json") for r in records]
     payload = build_analysis_payload(rows, run_id="run-7", generated_at=at)
     stack.artifact.write_text(json.dumps(payload), encoding="utf-8")

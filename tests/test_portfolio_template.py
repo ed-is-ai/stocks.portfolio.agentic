@@ -14,6 +14,7 @@ def _render(
     cash_balance: float | None,
     positions: list[Any] | None = None,
     position_gbp_values: dict[str, Any] | None = None,
+    portfolio_id: int | None = None,
 ) -> str:
     context = {
         "positions": [] if positions is None else positions,
@@ -22,7 +23,7 @@ def _render(
         "cash_flows": [],
         "positions_with_value": [],
         "chart_points": 0,
-        "portfolio_id": None,
+        "portfolio_id": portfolio_id,
         "portfolios": [],
         "active_portfolio": None,
         "chart_labels": "[]",
@@ -991,3 +992,43 @@ _CHART_CONTEXT = {
     "chart_buy_tips": "[null, null, null]",
     "chart_sell_tips": "[null, null, null]",
 }
+
+
+# --- suggested stop (Stop column) ---------------------------------------------
+
+
+def test_unstopped_holding_gets_a_lazy_stop_placeholder() -> None:
+    """The suggestion arrives with the agent layer, into this placeholder."""
+    row = _position_row(_render(None, [_fake_position()], portfolio_id=7), "AAPL")
+
+    assert (
+        '<span id="agent-7-stop-AAPL" class="agent-cell" '
+        'data-agent-placeholder="7">Loading…</span>'
+    ) in row
+    assert "Suggested" not in row
+    # The suggestion never feeds the Adjust dialog, whose stop stays empty.
+    assert "openAdjust('AAPL', 1, 100, '', '', '')" in row
+
+
+def test_recorded_stop_or_closed_holding_has_no_stop_placeholder() -> None:
+    stopped = _fake_position()
+    stopped.stop_loss = 85.0
+    closed = _fake_position()
+    closed.ticker = closed.display_symbol = "CLSD"
+    closed.shares = 0
+
+    html = _render(None, [stopped, closed], portfolio_id=7)
+
+    assert '<span class="neg">£85.00</span>' in _position_row(html, "AAPL")
+    assert "-stop-" not in html
+
+
+def test_recorded_zero_stop_counts_as_recorded() -> None:
+    """A recorded 0.0 is still a recorded stop: no suggestion placeholder."""
+    zero = _fake_position()
+    zero.stop_loss = 0.0
+
+    html = _render(None, [zero], portfolio_id=7)
+
+    assert '<span class="neg">£0.00</span>' in _position_row(html, "AAPL")
+    assert "-stop-" not in html

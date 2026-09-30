@@ -29,7 +29,7 @@ from app.agents.triage.sources import (
     source_health_events,
 )
 from app.core.config import ANALYSIS_JSON, PORTFOLIO_VALUE_CSV, TRADES_DB
-from app.core.money import Money
+from app.core.money import Money, quote_currency
 from app.core.ticker_identity import canonicalize_or_fallback, load_aliases
 from app.repositories import db
 from app.repositories.fx_quote_repo import FxQuoteRepository
@@ -513,7 +513,7 @@ class PortfolioService:
             currency = yf.Ticker(yf_sym).fast_info.currency
             if not currency and yf_sym.upper().endswith(".HK"):
                 currency = "HKD"
-            return self._quote_currency(currency or "GBP")
+            return quote_currency(currency or "GBP")
         except Exception:
             if yf_sym.upper().endswith(".HK"):
                 logger.warning(
@@ -576,23 +576,9 @@ class PortfolioService:
         return resolved
 
     @staticmethod
-    def _quote_currency(currency: object) -> str:
-        """Normalise a provider quote unit without losing LSE pence case."""
-        value = str(currency).strip()
-        return (
-            "GBp"
-            if value.lower() == "gbp" and value != value.upper()
-            else value.upper()
-        )
-
-    @staticmethod
     def _trading_currency(currency: object) -> str:
         """Map a quote unit to its ISO trading currency for realised P&L."""
-        return (
-            "GBP"
-            if PortfolioService._quote_currency(currency) == "GBp"
-            else PortfolioService._quote_currency(currency)
-        )
+        return "GBP" if quote_currency(currency) == "GBp" else quote_currency(currency)
 
     def _price_quote_currencies(
         self, tickers: list[str], symbols: dict[str, str]
@@ -608,7 +594,7 @@ class PortfolioService:
         """
         _prices, _fetched_at, display_info = self._trader.load_price_cache()
         resolved = {
-            ticker: self._quote_currency(display_info[ticker][1])
+            ticker: quote_currency(display_info[ticker][1])
             for ticker in tickers
             if ticker in display_info and display_info[ticker][1]
         }
@@ -617,7 +603,7 @@ class PortfolioService:
             cached = self._trader.get_cached_ticker_currencies(missing)
             resolved.update(
                 {
-                    ticker: self._quote_currency(currency)
+                    ticker: quote_currency(currency)
                     for ticker, currency in cached.items()
                 }
             )
@@ -1460,12 +1446,14 @@ class PortfolioService:
         # Strategy assignment chip + scan-freshness banner (#440). None-safe:
         # without an assignment service (or with no assignment) both keys are
         # None and rendering is unchanged apart from the new control.
+        # Fail-soft: a failed lookup renders the tab without the chip.
         assignment_service = self._assignment_service
-        strategy_assignment = (
-            assignment_service.assignment_view(portfolio_id)
-            if assignment_service is not None and portfolio_id is not None
-            else None
-        )
+        strategy_assignment = None
+        if assignment_service is not None and portfolio_id is not None:
+            try:
+                strategy_assignment = assignment_service.assignment_view(portfolio_id)
+            except Exception:
+                logger.warning("Strategy assignment lookup failed", exc_info=True)
         strategy_freshness = (
             assignment_service.freshness() if assignment_service else None
         )

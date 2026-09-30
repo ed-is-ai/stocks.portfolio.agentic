@@ -27,6 +27,7 @@ from app.services.backtest.strategy_protocol import (
     PortfolioView,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyParameters,
 )
 
@@ -293,6 +294,54 @@ class BuyAndHoldStrategy:
         parameters: StrategyParameters,
     ) -> list[Signal]:
         return []
+
+    def stop_level(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> StopLevelV1 | None:
+        """Return a default risk stop ``risk_stop_pct`` below average cost.
+
+        Buy and Hold never sells, so this is not part of its selling rules:
+        :meth:`exit_signals` stays empty whatever the price does. Unlike
+        every other stop setting, a missing ``risk_stop_pct`` reads as its
+        default of 10: stored assignments predate the setting.
+        """
+        held = next(
+            (
+                position
+                for position in portfolio.positions
+                if position.security_id == security_id and position.quantity > 0
+            ),
+            None,
+        )
+        if held is None:
+            return None
+        raw = parameters.get("risk_stop_pct", 10)
+        try:
+            pct = None if isinstance(raw, bool) else Decimal(str(raw))
+        except InvalidOperation:
+            pct = None
+        if pct is None or not pct.is_finite() or not 0 <= pct <= 99:
+            return StopLevelV1(
+                rule_code="invalid_setting",
+                summary="Strategy setting risk_stop_pct is missing or unusable.",
+            )
+        return StopLevelV1(
+            level=held.average_cost * (Decimal(1) - pct / Decimal(100)),
+            rule_code="default_risk_stop",
+            summary=f"Default risk stop {pct.normalize():f}% below average cost",
+            facts=[
+                ExplanationFactV1(
+                    label="Risk stop", observed=pct, unit=EvidenceUnit.PERCENT
+                ),
+            ],
+            note="Not part of Buy and Hold's rules — it never sells.",
+            basis="average_cost",
+            trigger="close_lte",
+        )
 
     def position_size(
         self,

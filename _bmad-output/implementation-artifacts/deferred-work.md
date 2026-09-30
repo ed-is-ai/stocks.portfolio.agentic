@@ -714,3 +714,6 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-17-trade-review.md`
   summary: Test helpers that construct `TraderAgent()` with the default path (e.g. `_make_service_with_agent` in `tests/test_realised_pnl_service.py`) run `_init_db()` against the real `app/agents/trader/trades.db` before re-pointing `db_path`, applying schema migrations to the user's database.
   evidence: the real trades.db received this branch's new tables during a test run; `TraderAgent.__init__` calls `_init_db()` on its default path.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-57-strategy-stop-suggestions.md`
+  summary: The trade replay never clears a position's stop when it is fully sold, so a later re-buy without a stop inherits the old stop.
+  evidence: `TraderAgent` replay (~trader_agent.py:985-998) keeps `stop_loss` from the latest non-null BUY across a full sell; noted by the GH-57 edge-case review.

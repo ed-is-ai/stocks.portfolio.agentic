@@ -24,6 +24,7 @@ from app.services.backtest.strategy_protocol import (
     PortfolioView,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyParameters,
 )
 
@@ -334,6 +335,65 @@ class DarvasBoxStrategy:
                     ),
                 ]
             ),
+        )
+
+    def stop_level(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> StopLevelV1 | None:
+        """Return the level :meth:`_exit_signal` breaks next session.
+
+        Next session's prior window is today's latest ``box_lookback_sessions``
+        bars, so the level is their lowest low; a close strictly below it
+        exits.
+        """
+        if _held_quantity(portfolio, security_id) == 0:
+            return None
+        lookback = _plain_int(parameters, "box_lookback_sessions")
+        if lookback is None or lookback < 1:
+            return StopLevelV1(
+                rule_code="invalid_setting",
+                summary="Strategy setting box_lookback_sessions is missing or unusable.",
+            )
+        history = _bounded_history(view, security_id, limit=lookback, columns=("low",))
+        lows = (
+            []
+            if history is None or len(history) < lookback
+            else [_decimal(value) for value in history["low"]]
+        )
+        if not lows or any(value is None for value in lows):
+            return StopLevelV1(
+                rule_code="insufficient_history",
+                summary=f"Needs {lookback} sessions of current lows.",
+            )
+        level = min(value for value in lows if value is not None)
+        facts = [
+            ExplanationFactV1(
+                label="Box bottom",
+                observed=level,
+                unit=EvidenceUnit.PRICE,
+                as_of=view.as_of_session,
+            ),
+            ExplanationFactV1(
+                label="Lookback",
+                observed=Decimal(lookback),
+                unit=EvidenceUnit.SESSIONS,
+            ),
+        ]
+        if level <= 0:
+            return StopLevelV1(
+                rule_code="no_level", summary="No positive stop level.", facts=facts
+            )
+        return StopLevelV1(
+            level=level,
+            rule_code="close_below_box_bottom",
+            summary=f"Close below the box bottom ({lookback}-day low)",
+            facts=facts,
+            basis="market",
+            trigger="close_lt",
         )
 
     def position_size(

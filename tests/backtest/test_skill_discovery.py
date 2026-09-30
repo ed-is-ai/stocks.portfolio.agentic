@@ -57,6 +57,7 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
     "rtly-backtest-buy-and-hold": {
         "entry_on_or_after": "2000-01-01",
         "top_x": 10,
+        "risk_stop_pct": 10.0,
         **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-darvas-box": {

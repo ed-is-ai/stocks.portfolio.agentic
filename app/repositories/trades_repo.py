@@ -72,11 +72,17 @@ _REPLAY_CURRENCY = """CASE
         ), 'GBP')
     END"""
 
-_REPLAY_SELECT = (
-    f"SELECT {_REPLAY_COLUMNS}, {_REPLAY_CURRENCY} AS currency"
+_REPLAY_FROM = (
     " FROM trades t LEFT JOIN ticker_currency_cache c ON c.ticker = t.ticker"
     " LEFT JOIN trade_currency_resolutions r ON r.ticker = t.ticker"
     " WHERE t.ticker NOT IN ('', 'n/a', 'N/A')"
+)
+_REPLAY_SELECT = (
+    f"SELECT {_REPLAY_COLUMNS}, {_REPLAY_CURRENCY} AS currency{_REPLAY_FROM}"
+)
+# The same rows with each trade ``id`` as a trailing 9th column.
+_REPLAY_SELECT_WITH_IDS = (
+    f"SELECT {_REPLAY_COLUMNS}, {_REPLAY_CURRENCY} AS currency, t.id{_REPLAY_FROM}"
 )
 
 # Story 2.2: deterministic same-day replay order, applied identically to
@@ -297,6 +303,16 @@ class TradesRepository:
                 )
             return cur.rowcount > 0
 
+    def set_stop(self, conn: Any, trade_id: int, stop_loss: float) -> None:
+        """Set ``stop_loss`` on one trade row on the caller's connection.
+
+        The ``trades`` update trigger bumps the portfolio's trade revision in
+        the caller's transaction.
+        """
+        conn.execute(
+            "UPDATE trades SET stop_loss = ? WHERE id = ?", (stop_loss, trade_id)
+        )
+
     def delete_by_id(self, trade_id: int) -> bool:
         """Delete a trade by id. Returns True if a row was deleted."""
         with session(self._connect) as conn:
@@ -392,7 +408,7 @@ class TradesRepository:
             return conn.execute(sql, params).fetchall()
 
     def open_rows_on_connection(
-        self, conn: Any, portfolio_id: int | None = None
+        self, conn: Any, portfolio_id: int | None = None, with_ids: bool = False
     ) -> list[tuple[Any, ...]]:
         """Return valid-ticker trade rows for replay on the caller's connection.
 
@@ -402,8 +418,10 @@ class TradesRepository:
         in-transaction snapshot calculation sees this transaction's own
         not-yet-committed trade inserts (a separate connection would only
         see the database's last *committed* state and silently miss them).
+        ``with_ids`` appends each row's trade ``id`` as a 9th column, so a
+        caller can target exactly a row the replay read.
         """
-        sql = _REPLAY_SELECT
+        sql = _REPLAY_SELECT_WITH_IDS if with_ids else _REPLAY_SELECT
         params: tuple[Any, ...] = ()
         if portfolio_id is not None:
             sql += " AND t.portfolio_id = ?"

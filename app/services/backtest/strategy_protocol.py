@@ -447,6 +447,60 @@ class InitialEntrySelectionProviderV1(Protocol):
     ) -> InitialEntrySelectionV1: ...
 
 
+#: What a stop level is built from (its unit) and the exit's own comparison.
+StopBasis = Literal["market", "average_cost", "mixed"]
+StopTrigger = Literal["close_lte", "close_lt", "low_lt"]
+
+
+class StopLevelV1(_StrategyModel):
+    """A Strategy's own stop-loss level for one held security (GH-57).
+
+    ``level`` is the price at which the Strategy's own exit would fire on
+    the next session. ``basis`` says what it is built from, and so its unit:
+    ``market`` (only market-view prices), ``average_cost`` (only the
+    position's average cost) or ``mixed`` (the higher of a cost stop and a
+    market level). ``trigger`` is the exit's own comparison: a close at or
+    below (``close_lte``), a close below (``close_lt``) or a low below
+    (``low_lt``) the level. A level requires both. ``None`` declares why
+    there is no level (e.g. too little history) through ``summary``.
+    """
+
+    level: Decimal | None = Field(default=None, gt=Decimal(0))
+    rule_code: str = Field(min_length=1)
+    summary: str = Field(min_length=1, max_length=240)
+    facts: tuple[ExplanationFactV1, ...] = ()
+    note: str | None = None
+    basis: StopBasis | None = None
+    trigger: StopTrigger | None = None
+
+    @field_validator("facts", mode="before")
+    @classmethod
+    def _detach_facts(cls, value: object) -> tuple[object, ...]:
+        return _as_detached_tuple(value)
+
+    @model_validator(mode="after")
+    def _level_has_basis_and_trigger(self) -> "StopLevelV1":
+        if self.level is not None and (self.basis is None or self.trigger is None):
+            raise ValueError("a stop level requires its basis and trigger")
+        return self
+
+
+@runtime_checkable
+class StopLevelStrategyV1(Protocol):
+    """Optional capability: suggest a stop-loss for one held security.
+
+    Returns ``None`` when the Strategy has no opinion (e.g. not held).
+    """
+
+    def stop_level(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> StopLevelV1 | None: ...
+
+
 # ---------------------------------------------------------------------------
 # Pure result validators
 # ---------------------------------------------------------------------------
@@ -971,6 +1025,10 @@ __all__ = [
     "SignalExplanationV1",
     "SignalReasonV1",
     "SignalSide",
+    "StopBasis",
+    "StopLevelStrategyV1",
+    "StopLevelV1",
+    "StopTrigger",
     "StrategyParameterV1",
     "StrategyParameters",
     "StrategyProtocolError",
