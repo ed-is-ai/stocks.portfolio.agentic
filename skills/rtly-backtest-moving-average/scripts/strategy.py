@@ -24,6 +24,7 @@ from app.services.backtest.strategy_protocol import (
     PortfolioView,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyParameters,
 )
 
@@ -284,6 +285,81 @@ class MovingAverageStrategy:
             if security_id in held
         ]
         return [signal for signal in signals if signal is not None]
+
+    def stop_level(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> StopLevelV1 | None:
+        """Return the close below which the next session's exit crossover fires.
+
+        With ``Sf``/``Ss`` the sums of today's latest ``fast - 1``/``slow - 1``
+        closes, the next session's fast SMA falls below its slow SMA exactly
+        when its close ``x < (fast * Ss - slow * Sf) / (slow - fast)``. A fast
+        SMA already below the slow one leaves no crossover to fire.
+        """
+        if not any(
+            position.security_id == security_id and position.quantity > 0
+            for position in portfolio.positions
+        ):
+            return None
+        windows = _windows(parameters)
+        if windows is None:
+            return StopLevelV1(
+                rule_code="invalid_setting",
+                summary=(
+                    "Strategy setting fast_window/slow_window is missing or unusable."
+                ),
+            )
+        fast, slow = windows
+        history = _fresh_history(view, security_id, limit=slow)
+        closes = None if history is None else _close_values(history)
+        if closes is None or len(closes) < slow:
+            return StopLevelV1(
+                rule_code="insufficient_history",
+                summary=f"Needs {slow} sessions of current closes.",
+            )
+        fast_today = sum(closes[-fast:], Decimal(0)) / Decimal(fast)
+        slow_today = sum(closes, Decimal(0)) / Decimal(slow)
+        facts = [
+            ExplanationFactV1(
+                label="Fast moving average",
+                observed=fast_today,
+                unit=EvidenceUnit.PRICE,
+                as_of=view.as_of_session,
+            ),
+            ExplanationFactV1(
+                label="Slow moving average",
+                observed=slow_today,
+                unit=EvidenceUnit.PRICE,
+                as_of=view.as_of_session,
+            ),
+        ]
+        if fast_today < slow_today:
+            return StopLevelV1(
+                rule_code="already_crossed",
+                summary="Fast average already below slow — no crossover to fire.",
+                facts=facts,
+            )
+        fast_sum = sum(closes[slow - fast + 1 :], Decimal(0))
+        slow_sum = sum(closes[1:], Decimal(0))
+        level = (fast * slow_sum - slow * fast_sum) / Decimal(slow - fast)
+        if level <= 0:
+            return StopLevelV1(
+                rule_code="no_level",
+                summary="No crossover price within reach.",
+                facts=facts,
+            )
+        return StopLevelV1(
+            level=level,
+            rule_code="bearish_ma_crossover",
+            summary=f"Close below the {fast}/{slow}-day crossover price",
+            facts=facts,
+            basis="market",
+            trigger="close_lt",
+        )
 
     def position_size(
         self,

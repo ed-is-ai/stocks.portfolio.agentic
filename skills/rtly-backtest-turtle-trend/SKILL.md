@@ -46,3 +46,8 @@ Keep all decisions bounded to `view.as_of_session`. Exclude the current bar
 from both channels, apply each channel's own warm-up, and treat equality at a
 channel boundary as no signal. Return no signal for empty, stale, short, or
 non-finite history.
+
+Suggest a stop (`stop_level`) for a held position at tomorrow's exit channel:
+the lowest low of today's latest `exit_lookback_sessions` bars. A low strictly
+below it exits. Declare no level, with a reason, when current lows are too
+short or `exit_lookback_sessions` is missing or unusable (never a default).

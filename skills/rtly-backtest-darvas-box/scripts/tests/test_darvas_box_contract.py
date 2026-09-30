@@ -434,3 +434,51 @@ def test_breakout_and_breakdown_explain_the_box() -> None:
     assert _codes(exits[0]) == ("box_bottom_break",)
     assert exits[0].explanation is not None
     assert "89.99" in exits[0].explanation.reasons[0].facts[0].observed.to_eng_string()
+
+
+# --- GH-57: the Strategy's own stop level ------------------------------------
+
+EPSILON = Decimal("0.01")
+
+
+def _next_session(history: pd.DataFrame, close: Decimal) -> _View:
+    """``history`` plus one next-session bar closing (and low) at ``close``."""
+    session = history.index[-1] + timedelta(days=1)
+    bar = pd.DataFrame({column: [close] for column in history.columns}, index=[session])
+    return _View(session, pd.concat([history, bar]))
+
+
+def test_stop_level_is_the_next_sessions_box_bottom() -> None:
+    strategy = MODULE.DarvasBoxStrategy()
+    as_of, history = _history()
+
+    stop = strategy.stop_level(
+        _View(as_of, history), _portfolio("5"), _parameters(), "sec-aapl"
+    )
+
+    # The lowest low of the latest three bars, today's included.
+    assert stop.level == Decimal("89")
+    assert stop.rule_code == "close_below_box_bottom"
+    assert (stop.basis, stop.trigger) == ("market", "close_lt")
+    below = _next_session(history, stop.level - EPSILON)
+    above = _next_session(history, stop.level + EPSILON)
+    assert strategy.exit_signals(below, _portfolio("5"), _parameters())
+    assert not strategy.exit_signals(above, _portfolio("5"), _parameters())
+
+
+def test_stop_level_declares_a_missing_setting_and_ignores_unheld() -> None:
+    strategy = MODULE.DarvasBoxStrategy()
+    as_of, history = _history()
+    view = _View(as_of, history)
+    defaults = {"selected_securities": ["sec-aapl"]}
+
+    missing = strategy.stop_level(view, _portfolio("5"), defaults, "sec-aapl")
+
+    # The exit never fires without the setting, so no default is invented.
+    assert missing.level is None
+    assert (
+        missing.summary
+        == "Strategy setting box_lookback_sessions is missing or unusable."
+    )
+    assert not strategy.exit_signals(view, _portfolio("5"), defaults)
+    assert strategy.stop_level(view, _portfolio(), _parameters(), "sec-aapl") is None

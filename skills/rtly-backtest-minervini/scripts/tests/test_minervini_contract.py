@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
@@ -20,6 +21,7 @@ from app.services.backtest.strategy_protocol import (
     PositionSummaryV1,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyProtocolV1,
     validate_entry_signals,
     validate_exit_signals,
@@ -707,3 +709,88 @@ def test_upgrade_exit_explains_the_rotation() -> None:
     )
 
     assert _codes(exits[0]) == ("portfolio_upgrade",)
+
+
+# --- GH-57: the Strategy's own stop level ------------------------------------
+
+NEXT = date(2026, 8, 21)
+EPSILON = Decimal("0.01")
+
+
+def _closes(closes: list[Decimal], end: date = AS_OF) -> pd.DataFrame:
+    sessions = pd.bdate_range(end=end, periods=len(closes))
+    volumes = [Decimal("100")] * len(closes)
+    return pd.DataFrame({"close": closes, "volume": volumes}, index=sessions)
+
+
+def _stop(
+    closes: list[Decimal], parameters: Mapping[str, object] = PARAMETERS
+) -> StopLevelV1:
+    view = _View(_closes(closes), _scan())
+    stop = MinerviniStrategy().stop_level(view, _portfolio(), parameters, "sec-aapl")
+    assert stop is not None
+    return stop
+
+
+def _exits_next_session(closes: list[Decimal], next_close: Decimal) -> bool:
+    view = _View(_closes([*closes, next_close], NEXT), _scan())
+    view.as_of_session = NEXT
+    return bool(MinerviniStrategy().exit_signals(view, _portfolio(), PARAMETERS))
+
+
+def test_stop_level_is_the_close_that_breaks_the_next_sessions_sma50() -> None:
+    closes = [Decimal(100 + index) for index in range(60)]
+    stop = _stop(closes)
+    level = stop.level
+    assert level is not None
+
+    # The mean of the latest 49 closes, not today's SMA50 (134.5).
+    assert stop.level == Decimal(135)
+    assert stop.rule_code == "close_below_sma50"
+    assert (stop.basis, stop.trigger) == ("mixed", "close_lt")
+    assert _exits_next_session(closes, level - EPSILON)
+    assert not _exits_next_session(closes, level + EPSILON)
+
+
+def test_stop_level_is_the_maximum_loss_stop_when_it_binds() -> None:
+    closes = [Decimal(90)] * 60
+    stop = _stop(closes)
+    level = stop.level
+    assert level is not None
+
+    assert stop.level == Decimal("92.00")
+    assert stop.rule_code == "maximum_loss_stop"
+    assert (stop.basis, stop.trigger) == ("mixed", "close_lte")
+    assert stop.summary == "Max loss 8% from average cost"
+    assert _exits_next_session(closes, level - EPSILON)
+    assert not _exits_next_session(closes, level + EPSILON)
+
+
+UNUSABLE_MAXIMUM_LOSS = (None, "x", float("nan"), -1, 100)
+
+
+def test_stop_level_declares_an_unusable_maximum_loss() -> None:
+    """Read as the exit reads it, with no default; checked before history."""
+    missing = {k: v for k, v in PARAMETERS.items() if k != "maximum_loss_pct"}
+    unusable = [
+        PARAMETERS | {"maximum_loss_pct": value} for value in UNUSABLE_MAXIMUM_LOSS
+    ]
+
+    for parameters in [missing, *unusable]:
+        for closes in ([Decimal(90)] * 60, [Decimal(90)] * 48):
+            stop = _stop(closes, parameters)
+            assert stop.level is None
+            assert stop.summary == (
+                "Strategy setting maximum_loss_pct is missing or unusable."
+            )
+
+
+def test_stop_level_declares_short_history_and_ignores_unheld() -> None:
+    short = _stop([Decimal(90)] * 48)
+    view = _View(_closes([Decimal(90)] * 60), _scan())
+
+    assert short.level is None and short.rule_code == "insufficient_history"
+    assert (
+        MinerviniStrategy().stop_level(view, _portfolio("0"), PARAMETERS, "sec-aapl")
+        is None
+    )

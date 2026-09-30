@@ -4,33 +4,46 @@ The write records a stop on a holding's latest replayed BUY only, and only
 when the holding is currently held with no recorded stop: every other trade
 row, cash flow and portfolio must stay byte-identical -- unlike the Adjust
 dialog's correction, which replaces the ticker's whole trade history. The
-route accepts only the Strategy's current suggestion.
+route re-evaluates the Strategy through ``recommend`` and accepts only the
+stop level it returns for that holding.
 """
 
 from __future__ import annotations
 
+import html
+import inspect
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.agents.trader import trader_agent as agent_module
-from app.agents.trader.trader_agent import StopRefusedError, TraderAgent
+from app.agents.trader.trader_agent import (
+    StopRefusedError,
+    TraderAgent,
+    stop_refusal,
+)
 from app.api.app import app
-from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.api.dependencies import (
+    get_portfolio_recommendation_service,
+    get_portfolio_service,
+    get_trader_service,
+)
 from app.core.ticker_identity import AliasFileUnreadableError
-from app.schemas.record import StockRecord
+from app.api.routes.portfolios import set_position_stop
+from app.schemas.portfolio_recommendation import NO_ASSIGNMENT, EvaluationUnavailable
+from app.schemas.trade import Position
 from app.services.gbp_valuation_service import GbpValuationService
+from app.services.portfolio_agent_view import RecommendationOutcome
 from app.services.portfolio_service import PortfolioService
-from app.services.stop_suggestion import DARVAS_BOX
-from app.services.strategy_assignment_service import StrategyAssignmentService
 from app.services.trader_service import TraderService
 from tests.test_portfolio_service import _NoFxValuation
 from tests.test_risk_engine import _kind, _run
-from tests.test_stop_suggestion import _bar, _FakeAssignments, _newest_first
+from tests._stop_helpers import result, stop_level
 
 client = TestClient(app)
 _AUTH = {"X-Auth-Token": "s3cret"}
@@ -226,45 +239,31 @@ def test_set_stop_requires_a_current_holding(
 # --- route (real PortfolioService / TraderAgent stack) -------------------------
 
 
-def _record(ticker: str, sma50: float) -> StockRecord:
-    return StockRecord(
-        ticker=ticker,
-        as_of="2026-09-28",
-        price=100.0,
-        volume=1000,
-        rel_volume=1.0,
-        high_52w=120.0,
-        low_52w=80.0,
-        pct_from_52w_high=-10.0,
-        pct_change_week=1.0,
-        sma50=sma50,
-        currency="GBP",
-    )
-
-
 @pytest.fixture
 def stack(
     monkeypatch: pytest.MonkeyPatch, agent: TraderAgent, seeded: dict[str, Any]
-) -> Iterator[PortfolioService]:
-    """Auth + the real tab stack on a temp DB, Minervini at 8% max loss.
-
-    AAA (avg 100, 50-day avg 95) is suggested 95.0.
-    """
+) -> Iterator[SimpleNamespace]:
+    """Auth + the real tab stack on a temp DB, and a recommendation service
+    whose outcome each test sets: by default the Strategy's stop for AAA is
+    95.0 (in GBP, the holding's price unit)."""
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     agent.save_price_cache({"AAA": 100.0}, {"AAA": (100.0, "GBP")})
     trader = TraderService(agent)
     service = PortfolioService(
-        trader,
-        gbp_valuation=cast(GbpValuationService, _NoFxValuation()),
-        assignment_service=cast(
-            StrategyAssignmentService, _FakeAssignments({"maximum_loss_pct": 8.0})
-        ),
+        trader, gbp_valuation=cast(GbpValuationService, _NoFxValuation())
     )
-    monkeypatch.setattr(service, "load_analysis", lambda: [_record("AAA", 95.0)])
+    monkeypatch.setattr(service, "load_analysis", list)
+    outcome: dict[str, Callable[[int], RecommendationOutcome]] = {
+        "recommend": lambda _pid: result(AAA=stop_level("95.0"))
+    }
+    recommendations = SimpleNamespace(recommend=lambda pid: outcome["recommend"](pid))
     app.dependency_overrides[get_trader_service] = lambda: trader
     app.dependency_overrides[get_portfolio_service] = lambda: service
+    app.dependency_overrides[get_portfolio_recommendation_service] = lambda: (
+        recommendations
+    )
     try:
-        yield service
+        yield SimpleNamespace(service=service, outcome=outcome)
     finally:
         app.dependency_overrides.clear()
 
@@ -281,29 +280,28 @@ def _post(pid: int, ticker: str, value: str | None, **headers: str) -> Any:
 def _warning(body: str) -> str:
     """The re-rendered tab's warning text (the alert's message span)."""
     alert = body.split('class="alert alert-warning', 1)[1]
-    return alert.split("<span>", 1)[1].split("</span>", 1)[0]
+    return html.unescape(alert.split("<span>", 1)[1].split("</span>", 1)[0])
 
 
 def test_use_records_the_suggestion_and_rerenders_the_recorded_stop(
-    stack: PortfolioService, agent: TraderAgent, seeded: dict[str, Any]
+    stack: SimpleNamespace, agent: TraderAgent, seeded: dict[str, Any]
 ) -> None:
     pid = seeded["pid"]
     tab = client.get(f"/partials/portfolio?portfolio_id={pid}").text
-    assert """hx-vals='{"stop_loss": "95.0"}'""" in tab
-    assert 'aria-label="Use the suggested stop for AAA"' in tab
+    assert f'id="agent-{pid}-stop-AAA"' in tab
 
     resp = _post(pid, "AAA", "95.0")
 
     assert resp.status_code == 200
     assert _stops(agent.db_path)[seeded["latest"]] == 95.0
     assert '<span class="neg">£95.00</span>' in resp.text
-    assert 'aria-label="Use the suggested stop for AAA"' not in resp.text
+    assert f'id="agent-{pid}-stop-AAA"' not in resp.text
     assert 'class="alert alert-warning' not in resp.text
 
 
 @pytest.mark.parametrize("value", [None, "", "abc", "0", "-5", "nan", "inf"])
 def test_route_rejects_invalid_stop_without_writing(
-    stack: PortfolioService, agent: TraderAgent, seeded: dict[str, Any], value: Any
+    stack: SimpleNamespace, agent: TraderAgent, seeded: dict[str, Any], value: Any
 ) -> None:
     before = _dump(agent.db_path)
 
@@ -324,7 +322,7 @@ def test_route_rejects_invalid_stop_without_writing(
     ],
 )
 def test_route_refusals_are_visible_409s_without_writing(
-    stack: PortfolioService,
+    stack: SimpleNamespace,
     agent: TraderAgent,
     seeded: dict[str, Any],
     ticker: str,
@@ -343,7 +341,7 @@ def test_route_refusals_are_visible_409s_without_writing(
 
 
 def test_route_refuses_a_race_the_write_transaction_catches(
-    stack: PortfolioService,
+    stack: SimpleNamespace,
     agent: TraderAgent,
     seeded: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -371,7 +369,7 @@ def test_route_refuses_a_race_the_write_transaction_catches(
 
 
 def test_route_alias_file_failure_is_a_visible_409(
-    stack: PortfolioService,
+    stack: SimpleNamespace,
     agent: TraderAgent,
     seeded: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
@@ -390,74 +388,100 @@ def test_route_alias_file_failure_is_a_visible_409(
 
 
 def test_route_accepts_a_ticker_with_a_slash(
-    stack: PortfolioService,
+    stack: SimpleNamespace,
     agent: TraderAgent,
     seeded: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pid = seeded["pid"]
     trade = agent.record_buy("BRK/B", 1, 100.0, "2026-07-01", portfolio_id=pid)
-    monkeypatch.setattr(
-        stack, "load_analysis", lambda: [_record("AAA", 95.0), _record("BRK/B", 96)]
-    )
-    tab = client.get(f"/partials/portfolio?portfolio_id={pid}").text
-    assert f'hx-post="/portfolios/{pid}/positions/BRK/B/stop"' in tab
+    stack.outcome["recommend"] = lambda _pid: result(**{"BRK/B": stop_level("96")})
 
-    resp = _post(pid, "BRK/B", "96.0")
+    resp = _post(pid, "BRK/B", "96")
 
     assert resp.status_code == 200
     assert trade.id is not None
     assert _stops(agent.db_path)[trade.id] == 96.0
 
 
-def test_use_accepts_a_price_history_suggestion(
-    stack: PortfolioService,
+def _boom(_pid: int) -> RecommendationOutcome:
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize(
+    ("recommend", "message"),
+    [
+        (lambda _pid: NO_ASSIGNMENT, "No Strategy assigned"),
+        (
+            lambda _pid: EvaluationUnavailable(reason="No published scan artifact."),
+            "No published scan artifact.",
+        ),
+        (lambda _pid: result(), "No stop level from the Strategy"),
+        (
+            lambda _pid: result(AAA=stop_level(None, summary="Needs history.")),
+            "Needs history.",
+        ),
+        (
+            lambda _pid: result(AAA=stop_level("95.0", currency="GBp")),
+            "Strategy prices are in a different unit",
+        ),
+        (
+            lambda _pid: result("stale", AAA=stop_level("95.0")),
+            "The Strategy's data is stale; run the pipeline first.",
+        ),
+        (_boom, "The Strategy could not be evaluated; reload the Portfolio tab."),
+    ],
+)
+def test_route_refuses_with_the_reason_there_is_no_usable_level(
+    stack: SimpleNamespace,
     agent: TraderAgent,
     seeded: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
+    recommend: Callable[[int], RecommendationOutcome],
+    message: str,
 ) -> None:
-    """A Darvas box bottom is recomputed server-side and accepted exactly."""
-    pid = seeded["pid"]
-    stack._assignment_service = cast(
-        StrategyAssignmentService,
-        _FakeAssignments({"box_lookback_sessions": 3}, strategy_id=DARVAS_BOX),
-    )
-    bars = [_bar(10.0), _bar(97.0), _bar(96.5), _bar(98.0)]
-    record = _record("AAA", 95.0).model_copy(
-        update={"ohlcv_history": _newest_first(bars)}
-    )
-    monkeypatch.setattr(stack, "load_analysis", lambda: [record])
-    tab = client.get(f"/partials/portfolio?portfolio_id={pid}").text
-    assert """hx-vals='{"stop_loss": "96.5"}'""" in tab
-    assert "box bottom (3-day low)" in tab
+    """The level is recomputed through ``recommend``; no usable level (no
+    Strategy, a failed or stale evaluation, none returned, another unit)
+    records nothing and says why."""
+    stack.outcome["recommend"] = recommend
+    before = _dump(agent.db_path)
 
-    assert _post(pid, "AAA", "95.0").status_code == 409
-    resp = _post(pid, "AAA", "96.5")
+    resp = _post(seeded["pid"], "AAA", "95.0")
 
-    assert resp.status_code == 200
-    assert _stops(agent.db_path)[seeded["latest"]] == 96.5
+    assert resp.status_code == 409
+    assert _warning(resp.text) == message
+    assert _dump(agent.db_path) == before
+
+
+def test_route_runs_off_the_event_loop() -> None:
+    """A plain ``def``: FastAPI runs the synchronous evaluation in its
+    threadpool rather than blocking the event loop."""
+    assert not inspect.iscoroutinefunction(set_position_stop)
+
+
+def test_a_recorded_zero_stop_is_refused() -> None:
+    position = Position(
+        ticker="AAA", shares=1.0, avg_cost=1.0, total_cost=1.0, stop_loss=0.0
+    )
+
+    assert stop_refusal(position) == (
+        "A stop is already recorded for AAA; edit it with Adjust."
+    )
 
 
 def test_route_compares_small_levels_at_full_precision(
-    stack: PortfolioService,
-    agent: TraderAgent,
-    seeded: dict[str, Any],
-    monkeypatch: pytest.MonkeyPatch,
+    stack: SimpleNamespace, agent: TraderAgent, seeded: dict[str, Any]
 ) -> None:
-    """0.0375 x 0.92 is shown 0.0345 but posted and recorded whole."""
+    """A level shown as 0.0345 is posted and recorded whole."""
     pid = seeded["pid"]
     trade = agent.record_buy("PNY", 1, 0.0375, "2026-07-01", portfolio_id=pid)
-    level = 0.0375 * (1 - 8.0 / 100)
-    tab = client.get(f"/partials/portfolio?portfolio_id={pid}").text
-    assert f"""hx-vals='{{"stop_loss": "{level!r}"}}'""" in tab
-    assert "Record a stop of £0.0345 on your latest PNY buy?" in tab
+    level = "0.0345000000000001"
+    stack.outcome["recommend"] = lambda _pid: result(PNY=stop_level(level))
 
-    assert _post(pid, "PNY", "0.03").status_code == 409
-    resp = _post(pid, "PNY", repr(level))
+    assert _post(pid, "PNY", "0.0345").status_code == 409
+    resp = _post(pid, "PNY", level)
 
     assert resp.status_code == 200
     assert trade.id is not None
-    assert _stops(agent.db_path)[trade.id] == level
+    assert _stops(agent.db_path)[trade.id] == float(level)
 
 
 def test_route_rejects_cross_site_requests_without_a_token(

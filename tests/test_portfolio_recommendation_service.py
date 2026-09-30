@@ -42,6 +42,7 @@ from app.services.backtest.strategy_protocol import (
     PortfolioView,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyParameters,
 )
 from app.services.portfolio_recommendation_service import (
@@ -750,6 +751,8 @@ def test_real_discovered_runtime_evaluates_against_adapter(
         pytest.fail(f"real runtime failed against the adapter: {outcome.reason}")
     assert isinstance(outcome, RecommendationResultV1)
     assert outcome.strategy_id == "rtly-backtest-darvas-box"
+    # The skill's own stop rule answers too (two sessions: no level).
+    assert outcome.stop_levels["AAA"].level is None
 
 
 # ---------------------------------------------------------------------------
@@ -876,3 +879,242 @@ def test_host_generated_hold_rows_carry_no_strategy_explanation(env: Any) -> Non
     assert (hold.action, hold.rule_id) == ("hold", "no_exit_signal")
     assert hold.explanation == ()
     assert hold.reason == "No exit signal from the assigned Strategy — position held."
+
+
+# ---------------------------------------------------------------------------
+# GH-57 -- the Strategy's own stop level rides on the result
+# ---------------------------------------------------------------------------
+
+
+class StopStrategy(HistoryOnlyStrategy):
+    """``HistoryOnlyStrategy`` with the optional ``stop_level`` capability."""
+
+    def __init__(self, *, minimum_sessions: int = 0) -> None:
+        super().__init__()
+        self.calls: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+        self._minimum_sessions = minimum_sessions
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        history = EvidenceRequirementV1(
+            kind=EvidenceKind.PRICE_HISTORY,
+            minimum_sessions=self._minimum_sessions,
+            columns=("close",),
+        )
+        return StrategyEvidenceRequirementsV1(entry=(history,), exit=(history,))
+
+    def stop_level(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> StopLevelV1 | None:
+        held = tuple(p.security_id for p in portfolio.positions)
+        universe = tuple(cast(list[str], parameters["selected_securities"]))
+        self.calls.append((security_id, held, universe))
+        if security_id == "BBB":
+            raise RuntimeError("boom")
+        if security_id == "CCC":
+            return None
+        close = view.price_history(security_id)["close"].iloc[-1]
+        return StopLevelV1(
+            level=Decimal(str(close)) - 1,
+            rule_code="close_below_level",
+            summary="Close below the level",
+            facts=[ExplanationFactV1(label="Level", observed=Decimal(1))],
+            basis="market",
+            trigger="close_lt",
+        )
+
+
+def test_runtime_without_stop_capability_returns_no_levels(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+
+    result = _service(env, HistoryOnlyStrategy(), [_position("AAA")]).recommend(7)
+
+    assert isinstance(result, RecommendationResultV1)
+    assert result.stop_levels == {}
+
+
+def test_stop_levels_use_the_exit_views_and_declare_failures(env: Any) -> None:
+    _write_artifact(
+        env.tmp_path / "analysis.json",
+        [
+            _record("AAA", [12.0, 10.0]),
+            _record("BBB", [10.0, 12.0]),
+            _record("CCC", [10.0, 11.0]) | {"currency": "GBp"},
+        ],
+        generated_at=datetime.now(UTC),
+    )
+    env.assignment.assign(7, "alpha")
+    strategy = StopStrategy()
+    positions = [_position("AAA"), _position("BBB"), _position("CCC")]
+
+    result = _service(env, strategy, positions).recommend(7)
+
+    assert isinstance(result, RecommendationResultV1)
+    aaa = result.stop_levels["AAA"]
+    assert aaa.level == Decimal("9.0")
+    assert (aaa.rule_code, aaa.summary) == (
+        "close_below_level",
+        "Close below the level",
+    )
+    assert aaa.facts == ("Level: 1",)
+    # The level is in the market view's unit: the scan record's currency.
+    assert aaa.currency == "USD"
+    failed = result.stop_levels["BBB"]
+    assert (failed.level, failed.rule_code) == (None, "stop_level_failed")
+    # ``None`` is no opinion: the holding is left out.
+    assert "CCC" not in result.stop_levels
+    # Every holding is asked with the exit path's portfolio and universe.
+    assert {call[0] for call in strategy.calls} == {"AAA", "BBB", "CCC"}
+    assert all(call[1] == ("AAA", "BBB", "CCC") for call in strategy.calls)
+    assert all({"AAA", "BBB", "CCC"} <= set(call[2]) for call in strategy.calls)
+
+
+def test_incomplete_exit_evidence_is_declared_without_asking(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    strategy = StopStrategy(minimum_sessions=5)
+
+    result = _service(env, strategy, [_position("AAA")]).recommend(7)
+
+    assert isinstance(result, RecommendationResultV1)
+    assert result.stop_levels["AAA"].rule_code == "exit_evidence_incomplete"
+    assert strategy.calls == []
+
+
+class FixedStopStrategy(HistoryOnlyStrategy):
+    """Declares no exit evidence (as Buy and Hold) and returns ``stops``."""
+
+    def __init__(self, stops: dict[str, StopLevelV1]) -> None:
+        super().__init__()
+        self._stops = stops
+
+    def evidence_requirements(
+        self, parameters: StrategyParameters
+    ) -> StrategyEvidenceRequirementsV1:
+        history = EvidenceRequirementV1(
+            kind=EvidenceKind.PRICE_HISTORY, columns=("close",)
+        )
+        return StrategyEvidenceRequirementsV1(entry=(history,), exit=())
+
+    def exit_signals(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+    ) -> list[Signal]:
+        return []
+
+    def stop_level(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> StopLevelV1 | None:
+        return self._stops.get(security_id)
+
+
+def _level(basis: str, trigger: str = "close_lt") -> StopLevelV1:
+    return StopLevelV1.model_validate(
+        {
+            "level": Decimal(9),
+            "rule_code": "rule",
+            "summary": "The rule",
+            "basis": basis,
+            "trigger": trigger,
+        }
+    )
+
+
+def test_stop_levels_carry_the_unit_their_basis_implies(env: Any) -> None:
+    """ZZZ is held outside the scan: a cost level keeps the cost currency,
+    a market or mixed level (fallback history, unit unknown) is declared.
+    AAA is in the scan (USD): a mixed level needs cost in USD too."""
+    env.assignment.assign(7, "alpha")
+    usd_cost = _position("AAA").model_copy(update={"cost_currency": "USD"})
+    strategy = FixedStopStrategy({"AAA": _level("mixed"), "BBB": _level("mixed")})
+
+    def zzz(basis: str) -> Any:
+        strategy._stops["ZZZ"] = _level(basis, "close_lte")
+        result = _service(
+            env, strategy, [usd_cost, _position("BBB"), _position("ZZZ")]
+        ).recommend(7)
+        assert isinstance(result, RecommendationResultV1)
+        return result
+
+    cost = zzz("average_cost")
+    assert cost.stop_levels["ZZZ"].level == Decimal(9)
+    assert cost.stop_levels["ZZZ"].currency == "GBP"
+    assert cost.stop_levels["ZZZ"].trigger == "close_lte"
+    for basis in ("market", "mixed"):
+        declared = zzz(basis).stop_levels["ZZZ"]
+        assert declared.level is None
+        assert declared.summary == ("Not in the latest scan — needs scan price history")
+    assert (cost.stop_levels["AAA"].level, cost.stop_levels["AAA"].currency) == (
+        Decimal(9),
+        "USD",
+    )
+    mismatch = cost.stop_levels["BBB"]
+    assert mismatch.level is None
+    assert mismatch.summary == (
+        "Strategy prices and average cost are in different units"
+    )
+
+
+def test_real_buy_and_hold_suggests_a_risk_stop_outside_the_scan(
+    env: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.core.config import SKILLS_DIR
+    from app.services.backtest.skill_discovery import discover_strategies
+    from app.services.backtest.worker import _load_strategy_instance
+
+    monkeypatch.setattr(assignment_module, "discover_strategies", discover_strategies)
+    assignment = StrategyAssignmentService(
+        PortfolioStrategiesRepository(db.make_connect(lambda: tmp_path / "trades.db")),
+        skills_root=SKILLS_DIR,
+        analysis_path=tmp_path / "analysis.json",
+    )
+    assignment._repo.upsert(7, "rtly-backtest-buy-and-hold", {})
+    service = PortfolioRecommendationService(
+        assignment_service=assignment,
+        trader=MagicMock(),
+        skills_root=SKILLS_DIR,
+        loader=_load_strategy_instance,
+    )
+    service._trader.get_portfolio.return_value = [_position("ZZZ")]
+    service._trader.get_cash_balance.return_value = 1000.0
+
+    outcome = service.recommend(7)
+
+    assert isinstance(outcome, RecommendationResultV1), outcome
+    stop = outcome.stop_levels["ZZZ"]
+    assert (stop.level, stop.currency, stop.basis) == (
+        Decimal("9.0"),
+        "GBP",
+        "average_cost",
+    )
+
+
+def test_a_malformed_stop_level_fails_only_its_security(env: Any) -> None:
+    env.assignment.assign(7, "alpha")
+    malformed = StopLevelV1.model_construct(
+        level=Decimal(0),
+        rule_code="rule",
+        summary="The rule",
+        facts=(),
+        note=None,
+        basis="market",
+        trigger="close_lt",
+    )
+    usd_cost = _position("BBB").model_copy(update={"cost_currency": "USD"})
+    strategy = FixedStopStrategy({"AAA": malformed, "BBB": _level("market")})
+
+    result = _service(env, strategy, [_position("AAA"), usd_cost]).recommend(7)
+
+    assert isinstance(result, RecommendationResultV1)
+    assert result.stop_levels["AAA"].rule_code == "stop_level_failed"
+    assert result.stop_levels["BBB"].level == Decimal(9)

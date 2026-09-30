@@ -25,6 +25,13 @@ parameters:
     minimum: 1
     description: Number of strongest eligible securities to buy once at the first Run session.
     required: false
+  - name: risk_stop_pct
+    type: number
+    default: 10
+    minimum: 0
+    maximum: 99
+    description: Default risk stop below average cost suggested for a holding; never a sell rule.
+    required: false
 ---
 
 # Buy and Hold Backtest
@@ -40,6 +47,11 @@ excluded with a plain-language reason in the completed Result.
 Select the top `top_x` (default 10) by return descending and canonical security
 ID ascending; record a stable excluded decision for every other member. Never
 rerank, rebalance, emit an ordinary entry candidate, or emit SELL.
+
+Suggest a default risk stop (`stop_level`) for a held position at
+`average cost x (1 - risk_stop_pct / 100)`. A missing setting reads as 10
+(stored assignments predate it); one outside 0-99 gives no level, with a reason.
+It is not part of the selling rules: the Strategy still never emits SELL.
 
 Fail closed into an auditable exclusion for malformed cutoff dates and missing,
 short, stale, non-finite, or non-positive bounded history. The engine owns BUY

@@ -429,3 +429,51 @@ def test_channel_breakout_and_breach_explain_their_own_channel() -> None:
     assert _codes(exits[0]) == ("channel_breach",)
     entry_facts = {fact.label for fact in entries[0].explanation.reasons[0].facts}
     assert entry_facts == {"High", "Entry channel lookback"}
+
+
+# --- GH-57: the Strategy's own stop level ------------------------------------
+
+EPSILON = Decimal("0.01")
+
+
+def _next_session(history: pd.DataFrame, low: Decimal) -> _View:
+    """``history`` plus one next-session bar whose prices are all ``low``."""
+    session = history.index[-1] + timedelta(days=1)
+    bar = pd.DataFrame({column: [low] for column in history.columns}, index=[session])
+    return _View(session, pd.concat([history, bar]))
+
+
+def test_stop_level_is_the_next_sessions_exit_channel_low() -> None:
+    strategy = MODULE.TurtleTrendStrategy()
+    as_of, history = _history()
+
+    stop = strategy.stop_level(
+        _View(as_of, history), _portfolio("5"), _parameters(), "sec-aapl"
+    )
+
+    # The lowest low of the latest two bars, today's included.
+    assert stop.level == Decimal("7")
+    assert stop.rule_code == "low_below_exit_channel"
+    assert (stop.basis, stop.trigger) == ("market", "low_lt")
+    below = _next_session(history, stop.level - EPSILON)
+    above = _next_session(history, stop.level + EPSILON)
+    assert strategy.exit_signals(below, _portfolio("5"), _parameters())
+    assert not strategy.exit_signals(above, _portfolio("5"), _parameters())
+
+
+def test_stop_level_declares_a_missing_setting_and_ignores_unheld() -> None:
+    strategy = MODULE.TurtleTrendStrategy()
+    as_of, history = _history()
+    view = _View(as_of, history)
+    defaults = {"selected_securities": ["sec-aapl"]}
+
+    missing = strategy.stop_level(view, _portfolio("5"), defaults, "sec-aapl")
+
+    # The exit never fires without the setting, so no default is invented.
+    assert missing.level is None
+    assert (
+        missing.summary
+        == "Strategy setting exit_lookback_sessions is missing or unusable."
+    )
+    assert not strategy.exit_signals(view, _portfolio("5"), defaults)
+    assert strategy.stop_level(view, _portfolio(), _parameters(), "sec-aapl") is None

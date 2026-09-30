@@ -13,6 +13,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Literal
 
 from app.agents.triage.queue import build_attention_queue
@@ -23,6 +24,7 @@ from app.agents.triage.sources import (
     risk_events,
     thesis_events,
 )
+from app.core.money import quote_currency
 from app.schemas.attention import AttentionEventV1, AttentionQueueV1
 from app.schemas.portfolio_recommendation import (
     EvaluationUnavailable,
@@ -73,6 +75,25 @@ class AgentCell:
 
 
 @dataclass(frozen=True)
+class StopSuggestion:
+    """The assigned Strategy's suggested stop for one holding, or why none.
+
+    ``level`` is in the holding's price unit; ``rule`` is the Strategy's own
+    summary. A suggestion is never evidence: risk checks read recorded stops.
+    """
+
+    level: Decimal | None = None
+    rule: str = ""
+    facts: tuple[str, ...] = ()
+    note: str = ""
+    distance_pct: float | None = None
+    #: Why the price already meets the rule's trigger; empty when it does not.
+    breach: str = ""
+    #: Why the level cannot be used (a stale scan); empty when current.
+    stale: str = ""
+
+
+@dataclass(frozen=True)
 class HoldingAgentRow:
     """The agent cells for one holding, addressed by its DOM-safe slug."""
 
@@ -81,6 +102,11 @@ class HoldingAgentRow:
     risk: AgentCell
     evidence: AgentCell
     thesis: AgentCell
+    #: The Stop column's suggestion; ``None`` when a stop is recorded or the
+    #: holding is closed (no cell is swapped then).
+    stop: StopSuggestion | None = None
+    #: The holding itself, for the stop cell's unit symbol and "Use" action.
+    position: Position | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +178,12 @@ def build_agent_view(
             risk=_risk_cell(p, risk),
             evidence=_evidence_cell(p, outcome),
             thesis=_thesis_for(p, theses),
+            stop=(
+                None
+                if p.stop_loss is not None or p.shares <= 0
+                else suggest_stop(p, outcome)
+            ),
+            position=p,
         )
         for p in positions
     )
@@ -242,6 +274,54 @@ def _evidence_cell(p: Position, outcome: RecommendationOutcome) -> AgentCell:
         )
         return AgentCell("Degraded", "warn", reason)
     return AgentCell("Complete", "good")
+
+
+def suggest_stop(p: Position, outcome: RecommendationOutcome) -> StopSuggestion:
+    """The Strategy's stop level for ``p`` as a suggestion, or why there is none.
+
+    Shared by the Stop cell and the set-stop route, which records only this
+    level. The level is offered only when its unit -- the scan's for a
+    market level, the cost currency for an average-cost one, both (already
+    agreed) for a mixed one -- is exactly the holding's price unit (pence
+    never equal pounds). A level from a stale scan is shown but not usable.
+    """
+    if isinstance(outcome, NoAssignment):
+        return StopSuggestion(note=NO_STRATEGY)
+    if isinstance(outcome, EvaluationUnavailable):
+        return StopSuggestion(note=STRATEGY_UNAVAILABLE)
+    stop = outcome.stop_levels.get(p.ticker)
+    if stop is None:
+        return StopSuggestion(note="No stop level from the Strategy")
+    if stop.level is None:
+        return StopSuggestion(note=stop.summary)
+    if stop.currency is None or quote_currency(stop.currency) != quote_currency(
+        p.price_currency
+    ):
+        return StopSuggestion(
+            note="Cost and price are in different units"
+            if stop.basis == "average_cost"
+            else "Strategy prices are in a different unit"
+        )
+    price = p.current_price if p.current_price and p.current_price > 0 else None
+    level = float(stop.level)
+    return StopSuggestion(
+        level=stop.level,
+        rule=stop.summary,
+        facts=stop.facts,
+        note=stop.note or "",
+        distance_pct=None if price is None else (level / price - 1) * 100,
+        breach="" if price is None else _breach(price, level, stop.trigger),
+        stale=""
+        if outcome.freshness == "fresh"
+        else f"Based on a stale scan (as of {outcome.market_session:%d %b %Y})",
+    )
+
+
+def _breach(price: float, level: float, trigger: str | None) -> str:
+    """Say when ``price`` already meets the rule's own ``trigger``."""
+    if trigger == "close_lte":
+        return "Price at or below the suggested stop" if price <= level else ""
+    return "Price below the suggested stop" if price < level else ""
 
 
 def _risk_cell(p: Position, risk: RiskReportV1 | None) -> AgentCell:

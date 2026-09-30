@@ -7,23 +7,18 @@ these are the only tests that exercise the template's real conditionals.
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
-
 from app.api.templating import templates
-from app.services.stop_suggestion import BUY_AND_HOLD_NOTE, StopSuggestion
 
 
 def _render(
     cash_balance: float | None,
     positions: list[Any] | None = None,
     position_gbp_values: dict[str, Any] | None = None,
-    suggested_stops: dict[str, Any] | None = None,
     portfolio_id: int | None = None,
 ) -> str:
     context = {
         "positions": [] if positions is None else positions,
         "position_gbp_values": position_gbp_values or {},
-        "suggested_stops": suggested_stops or {},
         "cash_balance": cash_balance,
         "cash_flows": [],
         "positions_with_value": [],
@@ -1002,130 +997,38 @@ _CHART_CONTEXT = {
 # --- suggested stop (Stop column) ---------------------------------------------
 
 
-def _suggestion(**overrides: Any) -> StopSuggestion:
-    fields: dict[str, Any] = {
-        "level": 95.0,
-        "rule": "50-day avg",
-        "distance_pct": -5.0,
-    }
-    return StopSuggestion(**(fields | overrides))
+def test_unstopped_holding_gets_a_lazy_stop_placeholder() -> None:
+    """The suggestion arrives with the agent layer, into this placeholder."""
+    row = _position_row(_render(None, [_fake_position()], portfolio_id=7), "AAPL")
 
-
-def test_unstopped_holding_shows_suggestion_with_use_action() -> None:
-    html = _render(
-        None,
-        positions=[_fake_position()],
-        suggested_stops={"AAPL": _suggestion()},
-        portfolio_id=7,
-    )
-    row = _position_row(html, "AAPL")
-
-    assert "Suggested" in row
-    assert "£95.00" in row
-    assert "50-day avg · -5.0%" in row
-    assert 'hx-post="/portfolios/7/positions/AAPL/stop"' in row
-    assert """hx-vals='{"stop_loss": "95.0"}'""" in row
-    assert 'hx-confirm="Record a stop of £95.00 on your latest AAPL buy?"' in row
-    assert 'hx-target="#tab-content"' in row
-    assert "at or below the suggested stop" not in row
+    assert (
+        '<span id="agent-7-stop-AAPL" class="agent-cell" '
+        'data-agent-placeholder="7">Loading…</span>'
+    ) in row
+    assert "Suggested" not in row
     # The suggestion never feeds the Adjust dialog, whose stop stays empty.
     assert "openAdjust('AAPL', 1, 100, '', '', '')" in row
 
 
-def test_suggestion_uses_row_symbol_and_flags_price_at_or_below() -> None:
-    usd = _fake_position()
-    usd.price_currency = "USD"
-    usd.cost_currency = "USD"
-    suggestion = _suggestion(distance_pct=5.6, at_or_below=True, note="Note X")
-    html = _render(
-        None, positions=[usd], suggested_stops={"AAPL": suggestion}, portfolio_id=7
-    )
-    row = _position_row(html, "AAPL")
-
-    assert "$95.00" in row
-    assert "+5.6%" in row
-    assert "Price at or below the suggested stop" in row
-    assert "Note X" in row
-
-
-@pytest.mark.parametrize(
-    ("rule", "note"),
-    [
-        ("150-day avg", None),
-        ("box bottom (20-day low)", None),
-        ("10-day low", None),
-        ("50/200 crossover price", None),
-        ("default risk stop 10%", BUY_AND_HOLD_NOTE),
-    ],
-)
-def test_each_strategy_rule_labels_its_suggestion(rule: str, note: str | None) -> None:
-    html = _render(
-        None,
-        positions=[_fake_position()],
-        suggested_stops={"AAPL": _suggestion(rule=rule, note=note)},
-        portfolio_id=7,
-    )
-    row = _position_row(html, "AAPL")
-
-    assert f"{rule} · -5.0%" in row
-    assert note is None or note in row
-    assert 'hx-post="/portfolios/7/positions/AAPL/stop"' in row
-
-
-def test_declared_reason_shows_without_level_or_use() -> None:
-    reason = StopSuggestion(note="No Strategy assigned")
-    html = _render(
-        None,
-        positions=[_fake_position()],
-        suggested_stops={"AAPL": reason},
-        portfolio_id=7,
-    )
-    row = _position_row(html, "AAPL")
-
-    assert "No suggestion — No Strategy assigned" in row
-    # The reason replaces the Stop cell's bare dash rather than sitting by it.
-    dash = '<span class="text-muted">—</span>'
-    bare = _render(None, positions=[_fake_position()], portfolio_id=7)
-    assert row.count(dash) == _position_row(bare, "AAPL").count(dash) - 1
-    assert "Suggested" not in row
-    assert "/stop" not in row
-
-
-def test_recorded_stop_shows_as_before_without_suggestion() -> None:
+def test_recorded_stop_or_closed_holding_has_no_stop_placeholder() -> None:
     stopped = _fake_position()
     stopped.stop_loss = 85.0
-    html = _render(
-        None,
-        positions=[stopped],
-        suggested_stops={"AAPL": _suggestion()},
-        portfolio_id=7,
-    )
-    row = _position_row(html, "AAPL")
+    closed = _fake_position()
+    closed.ticker = closed.display_symbol = "CLSD"
+    closed.shares = 0
 
-    assert '<span class="neg">£85.00</span>' in row
-    assert "Suggested" not in row
+    html = _render(None, [stopped, closed], portfolio_id=7)
+
+    assert '<span class="neg">£85.00</span>' in _position_row(html, "AAPL")
+    assert "-stop-" not in html
 
 
-def test_no_use_action_without_a_portfolio() -> None:
-    html = _render(
-        None, positions=[_fake_position()], suggested_stops={"AAPL": _suggestion()}
-    )
-    row = _position_row(html, "AAPL")
+def test_recorded_zero_stop_counts_as_recorded() -> None:
+    """A recorded 0.0 is still a recorded stop: no suggestion placeholder."""
+    zero = _fake_position()
+    zero.stop_loss = 0.0
 
-    assert "£95.00" in row
-    assert "/stop" not in row
+    html = _render(None, [zero], portfolio_id=7)
 
-
-def test_small_suggestion_shows_four_places_but_posts_full_precision() -> None:
-    for level, shown in ((0.004, "0.0040"), (0.0345 * (1 + 1e-12), "0.0345")):
-        html = _render(
-            None,
-            positions=[_fake_position()],
-            suggested_stops={"AAPL": _suggestion(level=level)},
-            portfolio_id=7,
-        )
-        row = _position_row(html, "AAPL")
-
-        assert f"£{shown}" in row
-        assert f"""hx-vals='{{"stop_loss": "{level!r}"}}'""" in row
-        assert f'hx-confirm="Record a stop of £{shown} on your latest AAPL buy?"' in row
+    assert '<span class="neg">£0.00</span>' in _position_row(html, "AAPL")
+    assert "-stop-" not in html

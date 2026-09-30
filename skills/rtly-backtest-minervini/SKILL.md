@@ -98,6 +98,13 @@ This mirrors Minervini's own "upgrading" discipline; it never overrides the
 mechanical exits above and never buys anything itself -- the freed cash is
 picked up by the ordinary entry path on a later qualifying session.
 
+Suggest a stop (`stop_level`) for a held position at the close where
+tomorrow's own exit would fire: the higher of the maximum-loss stop from
+average cost and the close that breaks the next session's 50-session SMA (the
+mean of today's latest 49 closes). Declare no level, with a reason, when
+current closes are too short or `maximum_loss_pct` is missing or unusable
+(never a default).
+
 The engine owns BUY allocation and whole-share sizing.
 
 Do not pyramid, partially exit, simulate an intraday stop, access live state,

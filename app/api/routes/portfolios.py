@@ -7,8 +7,8 @@ one; the template exposes its id so the browser can persist the selection.
 """
 
 import logging
-import math
 import sqlite3
+from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -21,7 +21,7 @@ from app.api.dependencies import (
     get_strategy_assignment_service,
     get_trader_service,
 )
-from app.agents.trader.trader_agent import StopRefusedError
+from app.agents.trader.trader_agent import StopRefusedError, stop_refusal
 from app.api.templating import templates
 from app.core.ticker_identity import AliasFileUnreadableError
 from app.core.security import require_local_or_token
@@ -32,11 +32,12 @@ from app.schemas.portfolio_recommendation import (
     NoAssignment,
     RecommendationResultV1,
 )
+from app.schemas.trade import Position
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
+from app.services.portfolio_agent_view import suggest_stop
 from app.services.portfolio_service import PortfolioService
-from app.services.stop_suggestion import stop_refusal
 from app.services.strategy_assignment_service import (
     IncompatibleStrategyError,
     StrategyAssignmentService,
@@ -261,26 +262,29 @@ async def clear_strategy(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def set_position_stop(
+def set_position_stop(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
+    recommendations: RecommendationDep,
     portfolio_id: int,
     ticker: str,
     stop_loss: Annotated[str | None, Form()] = None,
 ) -> HTMLResponse:
     """Record the Strategy's suggested stop on the holding's latest BUY.
 
-    Only the suggestion is accepted: the tab context is rebuilt and the
-    posted value must equal the holding's current suggestion level exactly
-    (the button posts it at full precision). The holding must be currently
-    held with no recorded stop -- an existing stop is never overwritten,
-    and the write re-checks both inside its transaction. Changes only that
-    one trade's ``stop_loss``, never the Adjust dialog's history-replacing
-    correction. Refusals re-render the tab with a warning -- 422 for an
-    invalid value, 409 otherwise -- and write nothing.
+    Only the suggestion is accepted: the Strategy is re-evaluated through
+    ``recommend`` (as the agent layer does) and the posted value must equal
+    the holding's suggested level exactly (the button posts it at full
+    precision). The holding must be currently held with no recorded stop --
+    an existing stop is never overwritten, and the write re-checks both
+    inside its transaction. Changes only that one trade's ``stop_loss``,
+    never the Adjust dialog's history-replacing correction. Refusals
+    re-render the tab with a warning -- 422 for an invalid value, 409
+    otherwise -- and write nothing. A plain ``def``: the synchronous
+    evaluation runs in the threadpool, off the event loop.
     """
-    stop = _positive_float(stop_loss)
+    stop = _positive_decimal(stop_loss)
     if stop is None:
         return _strategy_warning(
             request,
@@ -295,13 +299,12 @@ async def set_position_stop(
         (p for p in context.get("positions", []) if in_scope and p.ticker == ticker),
         None,
     )
-    suggestion = (context.get("suggested_stops") or {}).get(ticker)
     refusal = stop_refusal(position)
-    if refusal is None and (suggestion is None or suggestion.level != stop):
-        refusal = "The suggestion changed; reload the Portfolio tab."
+    if refusal is None and position is not None:
+        refusal = _suggestion_refusal(position, recommendations, portfolio_id, stop)
     if refusal is None:
         try:
-            trader.set_latest_buy_stop(portfolio_id, ticker, stop)
+            trader.set_latest_buy_stop(portfolio_id, ticker, float(stop))
         except StopRefusedError as exc:
             refusal = str(exc)
         except (LookupError, AliasFileUnreadableError):
@@ -313,13 +316,37 @@ async def set_position_stop(
     return _render(request, portfolio, portfolio_id)
 
 
-def _positive_float(raw: str | None) -> float | None:
-    """Parse ``raw`` as a positive finite float, else None."""
+def _suggestion_refusal(
+    position: Position,
+    recommendations: PortfolioRecommendationService,
+    portfolio_id: int,
+    stop: Decimal,
+) -> str | None:
+    """Return why ``stop`` is not the holding's usable suggestion, or None."""
     try:
-        value = float(raw or "")
-    except ValueError:
+        outcome = recommendations.recommend(portfolio_id)
+    except Exception:
+        logger.exception("Stop suggestion failed for %s", position.ticker)
+        return "The Strategy could not be evaluated; reload the Portfolio tab."
+    if isinstance(outcome, EvaluationUnavailable):
+        return outcome.reason
+    suggestion = suggest_stop(position, outcome)
+    if suggestion.level is None:
+        return suggestion.note
+    if suggestion.stale:
+        return "The Strategy's data is stale; run the pipeline first."
+    if suggestion.level != stop:
+        return "The suggestion changed; reload the Portfolio tab."
+    return None
+
+
+def _positive_decimal(raw: str | None) -> Decimal | None:
+    """Parse ``raw`` as a positive finite Decimal, else None."""
+    try:
+        value = Decimal((raw or "").strip())
+    except InvalidOperation:
         return None
-    return value if math.isfinite(value) and value > 0 else None
+    return value if value.is_finite() and value > 0 else None
 
 
 @router.get(

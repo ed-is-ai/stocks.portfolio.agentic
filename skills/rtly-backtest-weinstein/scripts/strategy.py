@@ -24,6 +24,7 @@ from app.services.backtest.strategy_protocol import (
     PortfolioView,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyParameters,
 )
 
@@ -652,6 +653,78 @@ class WeinsteinStrategy:
             session=view.as_of_session,
             rule_id=_EXIT_RULE,
             explanation=SignalExplanationV1(reasons=reasons),
+        )
+
+    def stop_level(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+        security_id: str,
+    ) -> StopLevelV1 | None:
+        """Return the close at which :meth:`_exit_signal` fires next session.
+
+        The exit sells on ``close <= stop`` or on a close below the next
+        session's 150-session SMA, which is exactly a close below the mean
+        of today's latest 149 closes; the higher of the two binds.
+        ``maximum_loss_pct`` is read as the exit reads it, with no default.
+        """
+        held = _position(portfolio, security_id)
+        if held is None or held.quantity <= 0:
+            return None
+        maximum_loss = _decimal(parameters.get("maximum_loss_pct"))
+        if maximum_loss is None or not 0 <= maximum_loss < 100:
+            return StopLevelV1(
+                rule_code="invalid_setting",
+                summary="Strategy setting maximum_loss_pct is missing or unusable.",
+            )
+        history = _current_history(view, security_id, limit=149, columns=("close",))
+        closes = (
+            None
+            if history is None or len(history) < 149
+            else _decimals(history["close"])
+        )
+        if closes is None:
+            return StopLevelV1(
+                rule_code="insufficient_history",
+                summary="Needs 149 sessions of current closes.",
+            )
+        stop = held.average_cost * (Decimal(1) - maximum_loss / Decimal(100))
+        sma_break = sum(closes, Decimal(0)) / Decimal(149)
+        facts = [
+            ExplanationFactV1(
+                label="Maximum-loss stop", observed=stop, unit=EvidenceUnit.PRICE
+            ),
+            ExplanationFactV1(
+                label="Maximum loss", observed=maximum_loss, unit=EvidenceUnit.PERCENT
+            ),
+            ExplanationFactV1(
+                label="Close that breaks the 150-session SMA",
+                observed=sma_break,
+                unit=EvidenceUnit.PRICE,
+                as_of=view.as_of_session,
+            ),
+        ]
+        if sma_break > stop:
+            return StopLevelV1(
+                level=sma_break,
+                rule_code="close_below_sma150",
+                basis="mixed",
+                trigger="close_lt",
+                summary="Close below the 150-day average",
+                facts=facts,
+            )
+        if stop <= 0:
+            return StopLevelV1(
+                rule_code="no_level", summary="No positive stop level.", facts=facts
+            )
+        return StopLevelV1(
+            level=stop,
+            rule_code="maximum_loss_stop",
+            summary=f"Max loss {maximum_loss.normalize():f}% from average cost",
+            facts=facts,
+            basis="mixed",
+            trigger="close_lte",
         )
 
     def position_size(

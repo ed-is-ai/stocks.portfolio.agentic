@@ -81,7 +81,6 @@ from app.services.snapshot_valuation import (
     valid_rate_or_none,
     value_positions_gbp,
 )
-from app.services.stop_suggestion import stop_refusal
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +106,23 @@ class OpeningLotDuplicateError(ValueError):
 
 class StopRefusedError(ValueError):
     """Raised when a stop cannot be recorded; the message is user-facing."""
+
+
+def stop_refusal(position: Position | None) -> str | None:
+    """Return why a stop cannot be recorded on ``position``, or None.
+
+    Only a currently held (positive shares) holding with no recorded stop
+    may take one: an existing stop is edited with Adjust, never overwritten.
+    Shared by the set-stop route and its write transaction.
+    """
+    if position is None or position.shares <= 0:
+        return "Not currently held."
+    if position.stop_loss is not None:
+        return (
+            f"A stop is already recorded for {position.display_symbol}; "
+            "edit it with Adjust."
+        )
+    return None
 
 
 def _latest_replayed_buy_id(

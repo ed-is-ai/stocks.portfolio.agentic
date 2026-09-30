@@ -33,6 +33,16 @@ _DIGITS_SHAPE_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)*")
 _LEADING_NON_DIGIT_RE = re.compile(r"^[^0-9]*")
 
 
+def quote_currency(currency: object) -> str:
+    """Normalise a provider quote unit without losing LSE pence case.
+
+    ``GBp``/``gbp``-style mixed case is pence (``GBp``); anything else is
+    upper-cased, so ``GBP`` (pounds) never equals pence.
+    """
+    value = str(currency).strip()
+    return "GBp" if value.lower() == "gbp" and value != value.upper() else value.upper()
+
+
 class MoneyParseError(ValueError):
     """Raised by ``parse_money`` instead of returning a guessed value.
 

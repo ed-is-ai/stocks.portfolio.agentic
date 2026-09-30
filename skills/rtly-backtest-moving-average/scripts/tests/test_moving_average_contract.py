@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import date, timedelta
 from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
@@ -19,6 +20,7 @@ from app.services.backtest.strategy_protocol import (
     PositionSummaryV1,
     Signal,
     SignalSide,
+    StopLevelV1,
     StrategyProtocolV1,
     validate_entry_signals,
     validate_exit_signals,
@@ -379,3 +381,58 @@ def test_crossovers_explain_both_moving_averages() -> None:
         "Fast window",
         "Slow window",
     }
+
+
+# --- GH-57: the Strategy's own stop level ------------------------------------
+
+EPSILON = Decimal("0.01")
+NEXT = AS_OF + timedelta(days=1)
+
+
+def _stop(
+    closes: list[Decimal], parameters: Mapping[str, object] = PARAMETERS
+) -> StopLevelV1:
+    view = _View(list(closes))
+    stop = MovingAverageStrategy().stop_level(
+        view, _portfolio("7"), parameters, "sec-aapl"
+    )
+    assert stop is not None
+    return stop
+
+
+def _exits_next_session(closes: list[Decimal], close: Decimal) -> bool:
+    view = _View([*closes, close], latest=NEXT)
+    view.as_of_session = NEXT
+    return bool(MovingAverageStrategy().exit_signals(view, _portfolio("7"), PARAMETERS))
+
+
+def test_stop_level_is_the_next_sessions_crossover_price() -> None:
+    closes = [Decimal("1"), Decimal("2"), Decimal("3"), Decimal("4")]
+    stop = _stop(closes)
+    level = stop.level
+    assert level is not None
+
+    # (2 * (3 + 4) - 3 * 4) / (3 - 2)
+    assert stop.level == Decimal("2")
+    assert stop.rule_code == "bearish_ma_crossover"
+    assert (stop.basis, stop.trigger) == ("market", "close_lt")
+    assert _exits_next_session(closes, level - EPSILON)
+    assert not _exits_next_session(closes, level + EPSILON)
+
+
+def test_stop_level_declares_why_there_is_no_level() -> None:
+    crossed = _stop([Decimal("4"), Decimal("3"), Decimal("2"), Decimal("1")])
+    unreachable = _stop([Decimal("1"), Decimal("1"), Decimal("10")])
+    defaults = _stop([Decimal("1")] * 4, {"selected_securities": ["sec-aapl"]})
+    view = _View([Decimal("1")] * 4)
+
+    assert crossed.level is None and crossed.rule_code == "already_crossed"
+    assert unreachable.level is None and unreachable.rule_code == "no_level"
+    # Missing windows read as the exit's own defaults of 50/200: too short.
+    assert defaults.summary == "Needs 200 sessions of current closes."
+    invalid = _stop([Decimal("1")] * 4, PARAMETERS | {"fast_window": 3})
+    assert invalid.level is None and invalid.rule_code == "invalid_setting"
+    assert (
+        MovingAverageStrategy().stop_level(view, _portfolio(), PARAMETERS, "sec-aapl")
+        is None
+    )
