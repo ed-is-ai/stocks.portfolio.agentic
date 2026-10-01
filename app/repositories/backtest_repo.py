@@ -1449,6 +1449,8 @@ class BacktestActivitySummaryV1:
     profile_hash: str | None = None
     universe_security_ids: tuple[str, ...] | None = None
     tuning_parameters: dict[str, object] | None = None
+    #: Why a complete job's stored Result failed verification (no Metrics).
+    result_error: str | None = None
 
 
 class ComparisonIneligibleReason(StrEnum):
@@ -3635,10 +3637,12 @@ class BacktestRepository:
         (sorted by key, independent of whether the current Skill still
         discovers that Strategy at all) and Metrics are attached only via
         :meth:`backtest_result`'s verified-complete projection. A
-        ``complete`` job whose Result is missing/malformed, or a
-        non-complete job that unexpectedly has one, raises
-        :class:`BacktestIntegrityError` rather than silently returning a
-        partial or zero-filled row.
+        ``complete`` job whose Result is missing, or a non-complete job
+        that unexpectedly has one, raises :class:`BacktestIntegrityError`
+        rather than silently returning a partial or zero-filled row. A
+        present Result that fails verification is listed with no Metrics
+        and its ``result_error``, so one damaged row is flagged rather than
+        hiding every other Backtest.
         """
         with session(self._connect) as conn:
             job_rows = conn.execute(
@@ -3686,10 +3690,15 @@ class BacktestRepository:
                 )
             metrics = None
             availability = None
+            result_error = None
             if is_complete:
-                result = self.backtest_result(job.id)
-                metrics = result.metrics
-                availability = result.metric_availability
+                try:
+                    result = self.backtest_result(job.id)
+                except BacktestIntegrityError as exc:
+                    result_error = str(exc)
+                else:
+                    metrics = result.metrics
+                    availability = result.metric_availability
             universe_ids, universe_parameter = _parse_universe_selection(run_row[7])
             summaries.append(
                 BacktestActivitySummaryV1(
@@ -3704,6 +3713,7 @@ class BacktestRepository:
                     profile_hash=str(run_row[6]),
                     universe_security_ids=universe_ids,
                     tuning_parameters=tuning_parameters(parameters, universe_parameter),
+                    result_error=result_error,
                 )
             )
         return tuple(summaries)

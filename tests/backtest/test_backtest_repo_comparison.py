@@ -742,3 +742,29 @@ def test_comparison_candidates_raises_on_tampered_candidate_result(
 
     with pytest.raises(BacktestIntegrityError):
         repo.comparison_candidates(ANCHOR_ID)
+
+
+def test_list_flags_a_tampered_result_and_keeps_the_others(tmp_path: Path) -> None:
+    """A Result failing verification is listed without Metrics, flagged."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER IF EXISTS backtest_result_evidence_immutable")
+        conn.execute(
+            "UPDATE backtest_results SET metrics_json=?, "
+            "note_version=note_version+1 WHERE run_id=?",
+            (
+                '{"total_return": 999.0, "sharpe_ratio": null, '
+                '"win_rate": null, "max_drawdown": null}',
+                OTHER_ID,
+            ),
+        )
+
+    by_id = {a.job.id: a for a in repo.list_backtest_activities()}
+
+    assert by_id[OTHER_ID].metrics is None
+    assert by_id[OTHER_ID].result_error == "stored backtest result digest is invalid"
+    assert by_id[ANCHOR_ID].metrics is not None
+    assert by_id[ANCHOR_ID].result_error is None
