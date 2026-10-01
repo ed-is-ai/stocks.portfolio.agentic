@@ -157,6 +157,7 @@ table,
 .sm-alert-success { border-left-color: var(--green); background: var(--green-bg); }
 .sm-alert-warning { border-left-color: var(--amber); background: var(--amber-bg); }
 .sm-alert-danger { border-left-color: var(--red); background: var(--red-bg); }
+.sm-result-error { color: var(--red); font-family: var(--font-ui); }
 .sm-alert-neutral { border-left-color: var(--muted); background: #f8fafc; }
 .sm-stage-list { list-style: none; margin: 0 0 1rem; padding: 0; counter-reset: sm-stage; }
 .sm-stage {

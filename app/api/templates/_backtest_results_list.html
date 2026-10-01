@@ -15,6 +15,12 @@
     <a href="/strategy-manager/configuration" hx-get="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML">Configure a Backtest</a>
   </div>
   {% else %}
+  {% set damaged = backtest_activities | selectattr("activity.result_error") | list %}
+  {% if damaged %}
+  <div class="sm-alert sm-alert-warning" role="status">
+    {{ damaged | length }} stored result{{ "s" if damaged | length != 1 }} failed {{ "their" if damaged | length != 1 else "its" }} integrity check and show{{ "" if damaged | length != 1 else "s" }} no metrics.
+  </div>
+  {% endif %}
   <div class="tbl-wrap">
     <table class="table table-hover align-middle">
       <thead><tr><th scope="col">Run</th><th scope="col">Started</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Universe</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
@@ -49,6 +55,8 @@
           <td class="mono-num">
             {%- if item.metrics and activity.job.status.value == 'complete' -%}
               <span{% if item.metrics.total_return.css_class %} class="{{ item.metrics.total_return.css_class }}"{% endif %}>{{ item.metrics.total_return.value }}</span>
+            {%- elif activity.result_error -%}
+              <span class="sm-result-error" title="{{ activity.result_error }}">Integrity check failed</span>
             {%- else -%}
               <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
             {%- endif -%}
@@ -56,6 +64,8 @@
           <td class="mono-num">
             {%- if activity.job.status.value == 'complete' and item.metrics -%}
               {{ item.metrics.win_rate.value }}
+            {%- elif activity.result_error -%}
+              <span class="sm-result-error" title="{{ activity.result_error }}">Integrity check failed</span>
             {%- else -%}
               <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
             {%- endif -%}

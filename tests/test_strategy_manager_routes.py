@@ -2356,6 +2356,35 @@ def test_backtests_list_integrity_error_alert(services):
     assert "Reload" in response.text
 
 
+def test_backtests_list_flags_a_result_that_failed_verification(services):
+    """One damaged stored Result is flagged on its row; the list still loads."""
+    repo, _ = services
+    repo.backtest_activities = (
+        _universe_activity(),
+        _universe_activity(
+            job=cast(
+                StrategyJobV1,
+                SimpleNamespace(
+                    id="job-damaged",
+                    enqueue_seq=6,
+                    status=StrategyJobStatus.COMPLETE,
+                    cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 6, 9, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            metrics=None,
+            metric_availability=None,
+            result_error="stored backtest result digest is invalid",
+        ),
+    )
+    response = client.get("/strategy-manager/backtests")
+    assert response.status_code == 200
+    assert "could not be loaded" not in response.text
+    assert "1 stored result failed its integrity check" in response.text
+    assert response.text.count("Integrity check failed") == 2  # both metric cells
+    assert 'title="stored backtest result digest is invalid"' in response.text
+
+
 # ---------------------------------------------------------------------------
 # gh-434: Universe column on the results list, universe row + composition
 # panel on the Result page.
