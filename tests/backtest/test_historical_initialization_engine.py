@@ -572,3 +572,223 @@ def test_initialization_persists_chained_sqlite_diagnostics(wrapped):
     assert repo.failed[0]["detail"] == (
         "initialization.month: sqlite3.OperationalError; code=unknown; name=unknown"
     )
+
+
+_PINNED_SESSIONS = (date(2026, 7, 31), date(2026, 8, 31), date(2026, 9, 30))
+
+
+def _pinned_member() -> CapturedRosterMemberV1:
+    return CapturedRosterMemberV1(
+        security_id="security-1",
+        mic="XNAS",
+        calendar="XNYS",
+        provider_symbol="AAPL",
+        currency="USD",
+        quote_unit="USD",
+        source_memberships=(),
+        identity_evidence=(),
+        evidence_digest="a" * 64,
+    )
+
+
+def _pinned_evidence(last_session: date) -> SimpleNamespace:
+    return SimpleNamespace(
+        security_id="security-1",
+        alias_revision="b" * 64,
+        requested_symbol="AAPL",
+        observed_symbol="AAPL",
+        currency="USD",
+        quote_unit="USD",
+        exchange_timezone="America/New_York",
+        rows=({"session": last_session.isoformat()},),
+    )
+
+
+class _PinnedPrices:
+    """Stored revisions keyed by end; records every probe and commit."""
+
+    def __init__(self, stored: dict[str, SimpleNamespace] | None = None) -> None:
+        self.stored = stored or {}
+        self.probes: list[str] = []
+        self.committed: list[object] = []
+
+    def find_request(self, *, end: str, **_kwargs):
+        self.probes.append(end)
+        return self.stored.get(end)
+
+    def find_compatible_request(self, **_kwargs):
+        return None
+
+    def commit(self, payload):
+        self.committed.append(payload)
+        return "revision"
+
+    def verify(self, _revision):
+        return self.committed[-1]
+
+
+class _PinnedProvider:
+    """Fails with each queued failure first, then returns evidence."""
+
+    def __init__(self, failures: tuple[ProviderFailure, ...] = ()) -> None:
+        self.failures = list(failures)
+        self.ends: list[date] = []
+
+    def fetch(self, request):
+        self.ends.append(request.end)
+        if self.failures:
+            raise self.failures.pop(0)
+        return _pinned_evidence(max(s for s in _PINNED_SESSIONS if s < request.end))
+
+
+def _pinned_processor(
+    prices: _PinnedPrices, provider: _PinnedProvider
+) -> CanonicalSnapshotMonthProcessor:
+    processor = object.__new__(CanonicalSnapshotMonthProcessor)
+    setattr(processor, "_price_repository", prices)
+    setattr(processor, "_evidence_adapter", provider)
+    setattr(processor, "_alias_revision", "b" * 64)
+    setattr(processor, "_evidence_cache", {})
+    setattr(processor, "_validated_evidence_cache", set())
+    setattr(processor, "_fetched_security_ids", set())
+    setattr(
+        processor,
+        "_calendar",
+        SimpleNamespace(
+            sessions_in_range=lambda _mic, _start, end: tuple(
+                s for s in _PINNED_SESSIONS if s < end
+            )
+        ),
+    )
+    return processor
+
+
+def _resolve_pinned(processor, now: datetime, target: date):
+    """Mirror the month path: pin the end, build the request, resolve it."""
+    member = _pinned_member()
+    request = processor._evidence_request(member, processor._pinned_end(now))
+    return processor._evidence_for(member, request, target)
+
+
+@pytest.fixture
+def waits(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    recorded: list[float] = []
+    monkeypatch.setattr(
+        "app.services.backtest.historical_initialization_engine.sleep",
+        recorded.append,
+    )
+    return recorded
+
+
+def _unavailable() -> ProviderFailure:
+    return ProviderFailure(
+        FailureCode.PROVIDER_UNAVAILABLE,
+        "Historical source unavailable",
+        retryable=True,
+    )
+
+
+def test_evidence_end_stays_pinned_when_clock_crosses_a_month() -> None:
+    prices, provider = _PinnedPrices(), _PinnedProvider()
+    processor = _pinned_processor(prices, provider)
+
+    _resolve_pinned(
+        processor, datetime(2026, 9, 30, 23, tzinfo=timezone.utc), date(2026, 7, 31)
+    )
+    _resolve_pinned(
+        processor, datetime(2026, 10, 1, 1, tzinfo=timezone.utc), date(2026, 8, 31)
+    )
+
+    assert processor._run_end == date(2026, 9, 1)
+    assert provider.ends == [date(2026, 9, 1)]
+    assert "2026-10-01" not in prices.probes
+
+
+def test_new_month_run_reuses_previous_month_revision_without_fetch() -> None:
+    stored = _pinned_evidence(date(2026, 8, 31))
+    prices = _PinnedPrices({"2026-09-01": stored})
+    provider = _PinnedProvider()
+    processor = _pinned_processor(prices, provider)
+    october = datetime(2026, 10, 1, tzinfo=timezone.utc)
+
+    assert _resolve_pinned(processor, october, date(2026, 7, 31)) is stored
+    assert _resolve_pinned(processor, october, date(2026, 8, 31)) is stored
+
+    assert provider.ends == []
+    assert prices.probes == ["2026-10-01", "2026-09-01"]
+    assert processor._fetched_security_ids == set()
+
+
+def test_previous_month_revision_is_not_reused_past_its_end() -> None:
+    prices = _PinnedPrices({"2026-09-01": _pinned_evidence(date(2026, 8, 31))})
+    provider = _PinnedProvider()
+    processor = _pinned_processor(prices, provider)
+
+    _resolve_pinned(
+        processor, datetime(2026, 10, 1, tzinfo=timezone.utc), date(2026, 9, 30)
+    )
+
+    assert provider.ends == [date(2026, 10, 1)]
+
+
+def test_missing_stored_revision_is_fetched_with_the_pinned_end() -> None:
+    prices, provider = _PinnedPrices(), _PinnedProvider()
+    processor = _pinned_processor(prices, provider)
+
+    _resolve_pinned(
+        processor, datetime(2026, 10, 5, tzinfo=timezone.utc), date(2026, 7, 31)
+    )
+
+    assert processor._run_end == date(2026, 10, 1)
+    assert prices.probes == ["2026-10-01", "2026-09-01"]
+    assert provider.ends == [date(2026, 10, 1)]
+    assert processor._fetched_security_ids == {"security-1"}
+
+
+def test_transient_provider_failure_is_retried_then_continues(
+    waits: list[float],
+) -> None:
+    provider = _PinnedProvider((_unavailable(),))
+    processor = _pinned_processor(_PinnedPrices(), provider)
+
+    _resolve_pinned(
+        processor, datetime(2026, 10, 5, tzinfo=timezone.utc), date(2026, 7, 31)
+    )
+
+    assert len(provider.ends) == 2
+    assert waits == [30.0]
+
+
+def test_persistent_transient_failure_still_fails_the_month(
+    waits: list[float],
+) -> None:
+    provider = _PinnedProvider((_unavailable(), _unavailable(), _unavailable()))
+    processor = _pinned_processor(_PinnedPrices(), provider)
+
+    with pytest.raises(InitializationMonthError) as error:
+        processor._resolve_member(
+            _pinned_member(),
+            "2026-07",
+            date(2026, 7, 31),
+            datetime(2026, 10, 5, tzinfo=timezone.utc),
+        )
+
+    assert error.value.code is JobFailureCode.PROVIDER_UNAVAILABLE
+    assert len(provider.ends) == 3
+    assert waits == [30.0, 120.0]
+
+
+def test_non_retryable_provider_failure_is_not_retried(waits: list[float]) -> None:
+    failure = ProviderFailure(
+        FailureCode.PROVIDER_CONTRACT_ERROR, "Historical source contract mismatch"
+    )
+    provider = _PinnedProvider((failure,))
+    processor = _pinned_processor(_PinnedPrices(), provider)
+
+    with pytest.raises(ProviderFailure):
+        _resolve_pinned(
+            processor, datetime(2026, 10, 5, tzinfo=timezone.utc), date(2026, 7, 31)
+        )
+
+    assert len(provider.ends) == 1
+    assert waits == []

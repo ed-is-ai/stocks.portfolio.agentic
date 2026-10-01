@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import os
-from time import monotonic
+from time import monotonic, sleep
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -21,10 +21,12 @@ from app.repositories.historical_price_repo import (
 from app.services.backtest.detectors import DETECTOR_REGISTRY
 from app.services.backtest.historical_data_qualification import (
     REQUEST_CONTRACT_VERSION,
+    FailureCode,
     ProviderFailure,
 )
 from app.services.backtest.historical_price_evidence import (
     CANONICAL_EXCHANGE_SESSIONS_POLICY,
+    HistoricalEvidencePayload,
     HistoricalEvidenceRequest,
     YFinanceHistoricalEvidenceAdapter,
     rebind_historical_evidence_alias,
@@ -76,6 +78,10 @@ from app.services.backtest.strategy_job import (
 
 logger = logging.getLogger(__name__)
 
+#: Extra waits (seconds) before re-asking the provider after a retryable
+#: ``provider_unavailable`` that survived the adapter's own quick retries.
+PROVIDER_RETRY_WAITS_SECONDS: tuple[float, ...] = (30.0, 120.0)
+
 
 class InitializationMonthError(RuntimeError):
     """One safe, closed failure emitted by month preparation."""
@@ -112,6 +118,10 @@ class CanonicalSnapshotMonthProcessor:
     }
 
     _DETECTOR_WORKERS = max(4, min(os.cpu_count() or 4, 8))
+
+    #: Evidence end pinned once per run (first day of the run-start month),
+    #: so a run crossing a month boundary never switches end mid-run.
+    _run_end: date | None = None
 
     def __init__(
         self,
@@ -357,11 +367,10 @@ class CanonicalSnapshotMonthProcessor:
                 # were computed from: if the price store now resolves a
                 # different revision (re-ingestion/correction), the member
                 # must resolve fresh to stay byte-identical to a Rebuild.
-                request = self._evidence_request(
-                    member, snapshot_month, target_session, now
-                )
+                request = self._evidence_request(member, self._pinned_end(now))
                 evidence = cast(
-                    StoredHistoricalEvidence, self._evidence_for(member, request)
+                    StoredHistoricalEvidence,
+                    self._evidence_for(member, request, target_session),
                 )
                 adoptable = evidence.data_revision == previous[0].provider_data_revision
             if adoptable:
@@ -463,10 +472,10 @@ class CanonicalSnapshotMonthProcessor:
         byte-for-byte what a fresh ``reconstruct`` would produce under the
         new input manifest (gh-468).
         """
-        request = self._evidence_request(member, snapshot_month, target_session, now)
+        request = self._evidence_request(member, self._pinned_end(now))
         evidence = cast(
             StoredHistoricalEvidence,
-            self._evidence_for(member, request),
+            self._evidence_for(member, request, target_session),
         )
         reconstruction_request = ReconstructionRequestV1(
             security_id=member.security_id,
@@ -492,15 +501,19 @@ class CanonicalSnapshotMonthProcessor:
             reconstruction_request,
         )
 
+    def _pinned_end(self, now: datetime) -> date:
+        """Pin the run's evidence end on first use and keep it for the run."""
+        if self._run_end is None:
+            self._run_end = date(now.year, now.month, 1)
+            logger.info(
+                "Historical initialization evidence end pinned to %s", self._run_end
+            )
+        return self._run_end
+
     def _evidence_request(
-        self,
-        member: CapturedRosterMemberV1,
-        snapshot_month: str,
-        target_session: date,
-        now: datetime,
+        self, member: CapturedRosterMemberV1, end_exclusive: date
     ) -> HistoricalEvidenceRequest:
         """Build the canonical full-history evidence request for one member."""
-        end_exclusive = date(now.year, now.month, 1)
         expected_sessions = self._calendar.sessions_in_range(
             member.mic, FULL_HISTORY_START, end_exclusive
         )
@@ -576,9 +589,9 @@ class CanonicalSnapshotMonthProcessor:
         target_session: date,
         now: datetime,
     ) -> ResolvedSnapshotMember | ReconstructionRequestV1:
-        request = self._evidence_request(member, snapshot_month, target_session, now)
+        request = self._evidence_request(member, self._pinned_end(now))
         try:
-            evidence = self._evidence_for(member, request)
+            evidence = self._evidence_for(member, request, target_session)
         except ProviderFailure as exc:
             raise InitializationMonthError(
                 JobFailureCode(exc.code.value),
@@ -659,21 +672,62 @@ class CanonicalSnapshotMonthProcessor:
         )
 
     def _evidence_for(
-        self, member: CapturedRosterMemberV1, request: HistoricalEvidenceRequest
+        self,
+        member: CapturedRosterMemberV1,
+        request: HistoricalEvidenceRequest,
+        target_session: date | None = None,
     ) -> StoredHistoricalEvidence:
-        cache_key: EvidenceCacheKey = (
+        """Resolve one member's evidence: cache, stored revision, then provider.
+
+        A stored revision ending at the previous month start is reused when
+        none ends at ``request.end`` and it still covers ``target_session``;
+        otherwise the provider is asked with ``request.end``.
+        """
+        candidates = [request]
+        previous_end = (request.end - timedelta(days=1)).replace(day=1)
+        if target_session is not None and target_session < previous_end:
+            candidates.append(self._evidence_request(member, previous_end))
+        for candidate in candidates:
+            cache_key = self._cache_key(member, candidate)
+            cached = self._evidence_cache.get(cache_key)
+            if cached is not None:
+                if cache_key not in self._validated_evidence_cache:
+                    self._validate_cached_evidence(cached, candidate)
+                    self._validated_evidence_cache.add(cache_key)
+                return cached
+        evidence: StoredHistoricalEvidence | None = None
+        for candidate in candidates:
+            evidence = self._stored_evidence(member, candidate)
+            if evidence is not None:
+                request = candidate
+                break
+        if evidence is None:
+            payload = self._fetch_with_retry(request)
+            self._fetched_security_ids.add(member.security_id)
+            revision = self._price_repository.commit(payload)
+            evidence = self._price_repository.verify(revision)
+        cache_key = self._cache_key(member, request)
+        self._validate_cached_evidence(evidence, request)
+        self._evidence_cache[cache_key] = evidence
+        self._validated_evidence_cache.add(cache_key)
+        return evidence
+
+    @staticmethod
+    def _cache_key(
+        member: CapturedRosterMemberV1, request: HistoricalEvidenceRequest
+    ) -> EvidenceCacheKey:
+        return (
             member.security_id,
             member.provider_symbol,
             request.alias_revision,
             request.start.isoformat(),
             request.end.isoformat(),
         )
-        cached = self._evidence_cache.get(cache_key)
-        if cached is not None:
-            if cache_key not in self._validated_evidence_cache:
-                self._validate_cached_evidence(cached, request)
-                self._validated_evidence_cache.add(cache_key)
-            return cached
+
+    def _stored_evidence(
+        self, member: CapturedRosterMemberV1, request: HistoricalEvidenceRequest
+    ) -> StoredHistoricalEvidence | None:
+        """Return a stored revision for exactly ``request.end``, if any."""
         evidence = self._price_repository.find_request(
             security_id=member.security_id,
             requested_symbol=member.provider_symbol,
@@ -683,38 +737,52 @@ class CanonicalSnapshotMonthProcessor:
             request_contract_version=REQUEST_CONTRACT_VERSION,
             observation_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
         )
-        if evidence is None:
-            compatible = self._price_repository.find_compatible_request(
-                security_id=member.security_id,
-                requested_symbol=member.provider_symbol,
-                start=FULL_HISTORY_START.isoformat(),
-                end=request.end.isoformat(),
-                request_contract_version=REQUEST_CONTRACT_VERSION,
-                observation_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
+        if evidence is not None:
+            return evidence
+        compatible = self._price_repository.find_compatible_request(
+            security_id=member.security_id,
+            requested_symbol=member.provider_symbol,
+            start=FULL_HISTORY_START.isoformat(),
+            end=request.end.isoformat(),
+            request_contract_version=REQUEST_CONTRACT_VERSION,
+            observation_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
+        )
+        if compatible is None:
+            return None
+        acquired = self._price_repository.acquisition_times(compatible.data_revision)
+        if not acquired:
+            raise InitializationMonthError(
+                JobFailureCode.INTEGRITY_ERROR,
+                "Historical evidence acquisition audit is missing",
             )
-            if compatible is None:
-                payload = self._evidence_adapter.fetch(request)
-                self._fetched_security_ids.add(member.security_id)
-            else:
-                acquired = self._price_repository.acquisition_times(
-                    compatible.data_revision
+        payload = rebind_historical_evidence_alias(
+            compatible,
+            alias_revision=self._alias_revision,
+            acquired_at=acquired[0],
+        )
+        revision = self._price_repository.commit(payload)
+        return self._price_repository.verify(revision)
+
+    def _fetch_with_retry(
+        self, request: HistoricalEvidenceRequest
+    ) -> HistoricalEvidencePayload:
+        """Fetch, re-trying a retryable ``provider_unavailable`` after waits."""
+        for wait in (*PROVIDER_RETRY_WAITS_SECONDS, None):
+            try:
+                return self._evidence_adapter.fetch(request)
+            except ProviderFailure as exc:
+                transient = exc.retryable and (
+                    exc.code is FailureCode.PROVIDER_UNAVAILABLE
                 )
-                if not acquired:
-                    raise InitializationMonthError(
-                        JobFailureCode.INTEGRITY_ERROR,
-                        "Historical evidence acquisition audit is missing",
-                    )
-                payload = rebind_historical_evidence_alias(
-                    compatible,
-                    alias_revision=self._alias_revision,
-                    acquired_at=acquired[0],
+                if not transient or wait is None:
+                    raise
+                logger.warning(
+                    "Provider unavailable for %s; retrying in %ss",
+                    request.symbol,
+                    wait,
                 )
-            revision = self._price_repository.commit(payload)
-            evidence = self._price_repository.verify(revision)
-        self._validate_cached_evidence(evidence, request)
-        self._evidence_cache[cache_key] = evidence
-        self._validated_evidence_cache.add(cache_key)
-        return evidence
+                sleep(wait)
+        raise AssertionError("unreachable")
 
     @staticmethod
     def _validate_cached_evidence(evidence, request: HistoricalEvidenceRequest) -> None:
