@@ -359,7 +359,7 @@ def _exit_closes(drop_at: int | None) -> list[float]:
     [
         (108, ("deviated", "held through signal")),
         (117, ("followed", "")),
-        (None, ("deviated", "discretionary exit")),
+        (None, ("unknown", "no exit signal before the sale")),
     ],
     ids=["12-sessions-before", "3-sessions-before", "no-signal"],
 )
@@ -626,7 +626,10 @@ def test_stop_against_a_price_line_in_another_currency_is_not_used() -> None:
 
     assert same is not None and same.note == "held through signal"
     assert exit_check is not None
-    assert (exit_check.status, exit_check.note) == ("deviated", "discretionary exit")
+    assert (exit_check.status, exit_check.note) == (
+        "unknown",
+        "no exit signal before the sale",
+    )
     assert stop is not None
     assert (stop.status, stop.note) == (
         "unknown",
@@ -654,7 +657,10 @@ def test_stop_needs_the_exact_entry_session_to_be_restated() -> None:
 
     assert statuses(missing)["exit_signal"] == ("unknown", "missing history")
     assert statuses(zeroed)["exit_signal"] == ("unknown", "missing history")
-    assert statuses(no_stop)["exit_signal"] == ("deviated", "discretionary exit")
+    assert statuses(no_stop)["exit_signal"] == (
+        "unknown",
+        "no exit signal before the sale",
+    )
 
 
 # --- review fixes: exits ----------------------------------------------------------
