@@ -2,6 +2,7 @@
 title: 'Persist Skill ranking evidence and explain generic slot outcomes'
 type: feature
 baseline_revision: a375a5586e3993279acc790b00df05d6b456e01d
+final_revision: b7df5a65c9b443dc1c00da263492c8108c6a3385
 created: '2026-10-06'
 status: done
 review_loop_iteration: 0
