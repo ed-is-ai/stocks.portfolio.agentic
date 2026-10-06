@@ -82,12 +82,18 @@ Enter only a Stage 2, trend-template-passing security whose monthly scan
 state shows an intact base (`Pre-breakout`, `Breakout` or
 `Early-post-breakout`) and whose trend score, VCP score floor, daily volume,
 pivot, and pivot-extension gates all qualify. A validated multi-contraction
-VCP is not required: flat bases and other non-VCP setups qualify too. Each
-entry carries its VCP score as `Signal.priority`, so when the position cap
-leaves fewer free slots than candidates, higher VCP scores fill first and
-ties fall back to the engine's security order. The breakout itself is detected on the
-daily session, not from the scan's `Breakout` state, which only describes the
-snapshot session. Exit the
+VCP is not required: flat bases and other non-VCP setups qualify too. Rank the
+complete qualifying batch by VCP score descending, then 21-session price
+momentum descending within equal VCP scores, then security ID ascending. The
+breakout itself is detected on the daily session, not from the scan's
+`Breakout` state, which only describes the snapshot session. Momentum uses
+`close[-22] / close[-253] - 1` from 253 bounded Run-currency closes. Encode the
+order as descending positive ordinal `Signal.priority` values and explain raw
+VCP and momentum evidence, endpoint dates, currency, rank and any missing-data
+reason. Momentum is ranking-only: absent capability, short history or
+unavailable endpoints keep an otherwise qualifying BUY and place missing
+momentum after valid momentum at the same VCP score. The VCP score remains the
+separate raw value used by the position-upgrade rule. Exit the
 full position on the configured loss threshold, a close below the current
 50-session SMA, a non-Stage-2 scan, or `Invalid`/`Damaged` VCP state.
 

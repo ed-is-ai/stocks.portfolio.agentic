@@ -47,6 +47,14 @@ from both channels, apply each channel's own warm-up, and treat equality at a
 channel boundary as no signal. Return no signal for empty, stale, short, or
 non-finite history.
 
+Rank the complete qualifying BUY batch by 21-session price momentum descending,
+then security ID ascending. Momentum uses `close[-22] / close[-253] - 1` from
+253 bounded Run-currency closes. Encode the order as descending positive
+ordinal `Signal.priority` values and explain momentum, endpoint dates, currency,
+rank and any missing-data reason. Momentum is ranking-only: absent capability,
+short history or unavailable endpoints keep an otherwise qualifying BUY;
+valid negative momentum ranks ahead of missing momentum.
+
 Suggest a stop (`stop_level`) for a held position at tomorrow's exit channel:
 the lowest low of today's latest `exit_lookback_sessions` bars. A low strictly
 below it exits. Declare no level, with a reason, when current lows are too

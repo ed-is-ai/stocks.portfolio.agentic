@@ -55,6 +55,16 @@ from every box and volume reference window; treat equality at a price boundary
 as no signal and equality at depth or volume thresholds as qualifying. Return
 no signal for empty, stale, short, or non-finite history.
 
+Rank the complete qualifying BUY batch by 21-session price momentum descending,
+then current volume divided by the prior box-window mean descending, then
+security ID ascending. Momentum uses `close[-22] / close[-253] - 1` from 253
+bounded Run-currency closes. The momentum endpoints and volume reference both
+exclude today's bar. Encode the order as descending positive ordinal
+`Signal.priority` values and explain raw momentum, relative volume, endpoint
+dates, currency, rank and any missing-data reason. Momentum is ranking-only:
+absent capability, short history or unavailable endpoints keep an otherwise
+qualifying BUY; valid negative momentum still ranks ahead of missing momentum.
+
 Suggest a stop (`stop_level`) for a held position at tomorrow's box bottom:
 the lowest low of today's latest `box_lookback_sessions` bars. A close strictly
 below it exits. Declare no level, with a reason, when current lows are too

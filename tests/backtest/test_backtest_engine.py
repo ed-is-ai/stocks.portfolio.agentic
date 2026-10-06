@@ -2355,7 +2355,10 @@ def test_weinstein_skill_momentum_priority_wins_the_engine_slot() -> None:
     )
     momentum_sessions = pd.bdate_range(end=d0, periods=253)
     momentum_histories: dict[str, pd.DataFrame] = {}
-    for security_id, numerator in (("sec-a", Decimal("110")), ("sec-z", Decimal("150"))):
+    for security_id, numerator in (
+        ("sec-a", Decimal("110")),
+        ("sec-z", Decimal("150")),
+    ):
         closes: list[Decimal | None] = [Decimal("100")] * 253
         closes[-22] = numerator
         momentum_histories[security_id] = pd.DataFrame(
@@ -2463,3 +2466,98 @@ def test_priority_is_inert_when_every_candidate_fits() -> None:
 
     assert _entry_fills(ranked) == _entry_fills(plain)
     assert ranked.final_cash_base == plain.final_cash_base
+
+
+def test_darvas_skill_ranking_controls_cap_and_held_leader_falls_through() -> None:
+    runtime = (
+        Path(__file__).resolve().parents[2]
+        / "skills/rtly-backtest-darvas-box/scripts/strategy.py"
+    )
+    spec = spec_from_file_location("darvas_engine_integration", runtime)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    strategy = module.DarvasBoxStrategy()
+    ids = ("sec-a", "sec-z")
+    parameters = {
+        "selected_securities": list(ids),
+        "box_lookback_sessions": 20,
+        "maximum_box_depth_pct": 15,
+        "volume_multiplier": 1.5,
+    }
+
+    class _RankedView:
+        base_currency = "USD"
+
+        def __init__(self, as_of: date) -> None:
+            self.as_of_session = as_of
+            sessions = pd.bdate_range(end=as_of, periods=21)
+            self.stock_histories = {
+                security_id: pd.DataFrame(
+                    {
+                        "high": [Decimal("100")] * 20 + [Decimal("101")],
+                        "low": [Decimal("95")] * 21,
+                        "close": [Decimal("100")] * 20 + [Decimal("101")],
+                        "volume": [Decimal("100")] * 20 + [Decimal("150")],
+                    },
+                    index=sessions,
+                )
+                for security_id in ids
+            }
+            momentum_sessions = pd.bdate_range(end=as_of, periods=253)
+            self.momentum_histories = {}
+            for security_id, numerator in (
+                ("sec-a", Decimal("110")),
+                ("sec-z", Decimal("150")),
+            ):
+                closes = [Decimal("100")] * 253
+                closes[-22] = numerator
+                self.momentum_histories[security_id] = pd.DataFrame(
+                    {"close": closes, "reason": [None] * 253},
+                    index=momentum_sessions,
+                )
+
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: tuple[str, ...] | None = None,
+        ) -> pd.DataFrame:
+            history = self.stock_histories[security_id]
+            if limit is not None:
+                history = history.tail(limit)
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+
+        def base_currency_close_history(
+            self, security_id: str, *, limit: int
+        ) -> pd.DataFrame:
+            return self.momentum_histories[security_id].tail(limit)
+
+    d0, d2 = _MARCH_2024[0], _MARCH_2024[2]
+    signals = strategy.entry_signals(_RankedView(d0), parameters)
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-a": Decimal("1"),
+        "sec-z": Decimal("2"),
+    }
+
+    capped = _run_capped(
+        security_ids=ids,
+        entries={d0: signals},
+        starting_capital=Decimal("2000"),
+        max_positions=1,
+    )
+    assert [fill[0] for fill in _entry_fills(capped)] == ["sec-z"]
+
+    held_leader = _run_capped(
+        security_ids=ids,
+        entries={
+            d0: [_buy("sec-z", d0)],
+            d2: strategy.entry_signals(_RankedView(d2), parameters),
+        },
+        starting_capital=Decimal("3000"),
+        max_positions=2,
+    )
+    assert [fill[0] for fill in _entry_fills(held_leader)] == ["sec-z", "sec-a"]
