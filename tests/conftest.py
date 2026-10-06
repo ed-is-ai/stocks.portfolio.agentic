@@ -20,7 +20,12 @@ os.environ.setdefault("STRATEGY_MANAGER_WORKER_ENABLED", "false")
 os.environ.setdefault("PIPELINE_SCHEDULE_CRON", "")
 
 
-_REAL_DBS = (config.TRADES_DB, config.BACKTEST_DB, config.HISTORICAL_PRICE_CACHE)
+_REAL_DBS = (
+    config.TRADES_DB,
+    config.BACKTEST_DB,
+    config.HISTORICAL_PRICE_CACHE,
+    config.INDEX_MEMBERSHIP_DB,
+)
 
 
 def _mtimes() -> dict[Path, int]:

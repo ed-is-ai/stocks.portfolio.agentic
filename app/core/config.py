@@ -22,6 +22,8 @@ RESULTS_DB = ROOT_DIR / "app" / "agents" / "analyst" / "results.db"
 CONGRESS_CACHE_DB = ROOT_DIR / "app" / "agents" / "scanner" / "congress_cache.db"
 BACKTEST_DB = ROOT_DIR / "data" / "backtest.db"
 HISTORICAL_PRICE_CACHE = ROOT_DIR / "data" / "historical_price_cache.db"
+# Point-in-time index membership intervals (#68), e.g. S&P 500 since 1996.
+INDEX_MEMBERSHIP_DB = ROOT_DIR / "data" / "index_membership.db"
 BAU_RUN_ENVELOPES_DIR = ROOT_DIR / "data" / "bau_run_envelopes"
 
 # --- Pipeline artifacts ----------------------------------------------------
