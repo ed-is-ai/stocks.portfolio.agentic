@@ -39,6 +39,8 @@ class WikiChange(BaseModel):
     date: str
     added: str | None
     removed: str | None
+    #: The removed company's name; the only name source for old tickers.
+    removed_name: str | None
     reason: str
 
 
@@ -86,7 +88,7 @@ def wikipedia_diff(
     Raises ``ValueError`` if either table is missing.
     """
     wikipedia = {row[0] for row in table_rows(constituents_html, "constituents")}
-    parsed = [_change(row) for row in table_rows(changes_html, "changes")]
+    parsed = [parse_change(row) for row in table_rows(changes_html, "changes")]
     changes = [c for c in parsed if c is not None]
     current = {i.ticker for i in intervals if i.end_date is None}
     starts = {(i.ticker, i.start_date) for i in intervals}
@@ -136,7 +138,7 @@ def table_rows(html: str, table_id: str) -> list[list[str]]:
     return [row for row in parser.rows if row]
 
 
-def _change(row: list[str]) -> WikiChange | None:
+def parse_change(row: list[str]) -> WikiChange | None:
     """Map ``date, added, name, removed, name, reason[, refs]`` cells; ``None``
     for a row in another shape (e.g. one sharing a date cell via rowspan)."""
     if len(row) < 6:
@@ -146,7 +148,11 @@ def _change(row: list[str]) -> WikiChange | None:
     except ValueError:
         return None
     return WikiChange(
-        date=as_of, added=row[1] or None, removed=row[3] or None, reason=row[5]
+        date=as_of,
+        added=row[1] or None,
+        removed=row[3] or None,
+        removed_name=row[4] or None,
+        reason=row[5],
     )
 
 

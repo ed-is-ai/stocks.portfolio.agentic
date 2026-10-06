@@ -21,6 +21,10 @@ from pydantic import BaseModel, ConfigDict
 from app.repositories.db import Connect, session
 
 Confidence = Literal["low", "normal"]
+EventType = Literal[
+    "acquisition", "bankruptcy", "delisting", "still_trading", "rename", "unknown"
+]
+Evidence = Literal["wikipedia+edgar", "wikipedia", "edgar", "none"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS membership_imports (
@@ -47,9 +51,38 @@ CREATE TABLE IF NOT EXISTS membership_intervals (
 );
 CREATE INDEX IF NOT EXISTS idx_membership_intervals_ticker
     ON membership_intervals (import_id, ticker);
+CREATE TABLE IF NOT EXISTS terminal_events (
+    import_id      INTEGER NOT NULL REFERENCES membership_imports(id),
+    security_key   TEXT NOT NULL,
+    ticker         TEXT NOT NULL,
+    exit_date      TEXT NOT NULL,
+    event_type     TEXT NOT NULL CHECK(event_type IN ('acquisition', 'bankruptcy',
+                       'delisting', 'still_trading', 'rename', 'unknown')),
+    cik            INTEGER,
+    terminal_price REAL,
+    terms          TEXT,
+    source_filing  TEXT,
+    evidence       TEXT NOT NULL CHECK(evidence IN ('wikipedia+edgar', 'wikipedia',
+                       'edgar', 'none')),
+    note           TEXT NOT NULL,
+    PRIMARY KEY (import_id, security_key)
+);
 """
 
 _INTERVAL_COLUMNS = "ticker, start_date, end_date, security_key"
+_EVENT_FIELDS = (
+    "security_key",
+    "ticker",
+    "exit_date",
+    "event_type",
+    "cik",
+    "terminal_price",
+    "terms",
+    "source_filing",
+    "evidence",
+    "note",
+)
+_EVENT_COLUMNS = ", ".join(_EVENT_FIELDS)
 
 
 class MembershipInterval(BaseModel):
@@ -92,6 +125,28 @@ class Roster(BaseModel):
     #: ``as_of`` is after the source's last date, so members may be out of date.
     stale: bool
     members: list[MembershipInterval]
+
+
+class TerminalEvent(BaseModel):
+    """Why one membership interval ended (#73): an exit or not, and its terms.
+
+    ``event_type`` is ``acquisition``, ``bankruptcy``, ``delisting`` (exits),
+    ``still_trading``, ``rename`` (not exits) or ``unknown``; ``evidence`` is
+    ``wikipedia+edgar``, ``wikipedia``, ``edgar`` or ``none``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    security_key: str
+    ticker: str
+    exit_date: str
+    event_type: EventType
+    cik: int | None = None
+    terminal_price: float | None = None
+    terms: str | None = None
+    source_filing: str | None = None
+    evidence: Evidence
+    note: str = ""
 
 
 class IndexMembershipRepository:
@@ -206,6 +261,41 @@ class IndexMembershipRepository:
         if latest is None:
             return []
         return self._intervals(latest.id, "ticker = ?", (ticker,))
+
+    def intervals_ended_since(
+        self, import_id: int, since: str
+    ) -> list[MembershipInterval]:
+        """Return the intervals of import ``import_id`` ending on/after ``since``."""
+        return self._intervals(import_id, "end_date >= ?", (since,))
+
+    def replace_terminal_events(
+        self, import_id: int, events: list[TerminalEvent]
+    ) -> None:
+        """Replace every terminal event of ``import_id`` in one transaction."""
+        rows = [(import_id, *(getattr(e, f) for f in _EVENT_FIELDS)) for e in events]
+        with session(self._connect) as conn:
+            conn.execute(
+                "DELETE FROM terminal_events WHERE import_id = ?", (import_id,)
+            )
+            conn.executemany(
+                f"INSERT INTO terminal_events (import_id, {_EVENT_COLUMNS})"
+                f" VALUES ({', '.join('?' * (len(_EVENT_FIELDS) + 1))})",
+                rows,
+            )
+
+    def terminal_events(self, index_id: str) -> list[TerminalEvent]:
+        """Return the terminal events of the newest import, by exit date."""
+        latest = self.latest_import(index_id)
+        if latest is None:
+            return []
+        with session(self._connect) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT {_EVENT_COLUMNS} FROM terminal_events WHERE import_id = ?"
+                " ORDER BY exit_date, security_key",
+                (latest.id,),
+            ).fetchall()
+        return [TerminalEvent(**dict(r)) for r in rows]
 
     def _intervals(
         self, import_id: int, where: str, params: tuple[str, ...]
