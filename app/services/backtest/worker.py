@@ -48,6 +48,11 @@ from app.services.backtest.historical_initialization_engine import (
 )
 from app.services.backtest.market_view import MarketView
 from app.services.backtest.market_planes import HistoricalMarketPlanes
+from app.services.backtest.currency import (
+    CurrencyPolicyError,
+    PreparedFxCloses,
+    prepare_fx_closes,
+)
 from app.services.backtest.reconstruction_roster import CapturedRosterV1
 from app.services.backtest.run_input_manifest import (
     ENGINE_VERSION,
@@ -1096,6 +1101,7 @@ class BacktestExecutionEngine:
         )
         prepared_planes: dict[str, HistoricalMarketPlanes] = {}
         prepared_planes_view = MappingProxyType(prepared_planes)
+        prepared_fx: PreparedFxCloses | None = None
         scan_cache: dict[tuple[str, str], HistoricalScanRecordV1 | None] = {}
         scan_cache_month: dict[str, str] = {}
 
@@ -1112,6 +1118,9 @@ class BacktestExecutionEngine:
                 ),
                 backtest_repo=self._repository,
                 historical_price_repo=self._prices,
+                base_currency=manifest.base_currency,
+                fx_evidence=fx_evidence,
+                prepared_fx=prepared_fx,
                 regime_benchmark=manifest.regime_benchmark
                 if isinstance(manifest, RunInputManifestV3)
                 else None,
@@ -1131,12 +1140,22 @@ class BacktestExecutionEngine:
             )
 
         try:
+            if fx_evidence is not None:
+                try:
+                    prepared_fx = prepare_fx_closes(fx_evidence)
+                except CurrencyPolicyError as exc:
+                    raise SimulationError(
+                        code=exc.code,
+                        session=date.fromisoformat(f"{manifest.start_month}-01"),
+                        message=exc.detail,
+                    ) from exc
             run_simulation(
                 manifest=manifest,
                 strategy=strategy,
                 market_view_factory=market_view_factory,
                 security_market_data=security_market_data,
                 fx_evidence=fx_evidence,
+                prepared_fx=prepared_fx,
                 sink=sink,
                 month_boundary_observer=observer,
                 prepared_planes=prepared_planes,

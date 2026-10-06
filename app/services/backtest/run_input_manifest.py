@@ -87,7 +87,7 @@ RUN_INPUT_MANIFEST_V3_VERSION = "run_input_manifest.v3"
 #: placeholder semantics is no longer comparable. Bump again the moment
 #: engine/protocol behavior changes.
 ENGINE_VERSION = "backtest_engine.v9"
-PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v5"
+PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v6"
 
 #: Story 2.4 landed ``backtest_engine.py`` as real, hashable source, so
 #: :func:`_ledger_action_metrics_digest` now hashes it via
@@ -110,6 +110,7 @@ _LEDGER_ACTION_METRICS_ALLOWLIST = ("app/services/backtest/backtest_engine.py",)
 _MARKET_VIEW_ALLOWLIST = (
     "app/services/backtest/market_view.py",
     "app/services/backtest/market_planes.py",
+    "app/services/backtest/currency.py",
     "app/services/backtest/strategy_protocol.py",
     "app/services/backtest/historical_scan_record.py",
     "app/repositories/historical_price_repo.py",

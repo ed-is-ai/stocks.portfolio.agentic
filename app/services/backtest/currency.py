@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, DecimalException, InvalidOperation
@@ -69,6 +70,7 @@ class PreparedFxCloses:
 
     evidence_revision: str
     closes: tuple[tuple[date, Decimal], ...]
+    sessions: tuple[date, ...]
 
     def __init__(
         self,
@@ -81,6 +83,12 @@ class PreparedFxCloses:
             raise TypeError("PreparedFxCloses must be created by prepare_fx_closes")
         object.__setattr__(self, "evidence_revision", evidence_revision)
         object.__setattr__(self, "closes", closes)
+        object.__setattr__(self, "sessions", tuple(session for session, _ in closes))
+
+    def latest_on_or_before(self, session: date) -> tuple[date, Decimal] | None:
+        """Return the latest pinned FX close at or before ``session`` in O(log n)."""
+        index = bisect_right(self.sessions, session) - 1
+        return None if index < 0 else self.closes[index]
 
 
 def _input_decimal(value: object) -> Decimal:
@@ -239,10 +247,11 @@ def convert_to_base(
             raise CurrencyPolicyError(
                 "fx_ambiguous", "Prepared FX closes do not match FX evidence."
             )
-        closes = prepared_fx.closes
+        selected = prepared_fx.latest_on_or_before(completed_fx_through)
+        eligible = () if selected is None else (selected,)
     else:
         closes = _fx_closes(fx_evidence)
-    eligible = tuple(row for row in closes if row[0] <= completed_fx_through)
+        eligible = tuple(row for row in closes if row[0] <= completed_fx_through)
     if not eligible:
         raise CurrencyPolicyError("fx_missing", "Required GBP/USD FX close is missing.")
     fx_session, rate = eligible[-1]

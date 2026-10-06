@@ -232,6 +232,35 @@ evaluation. Missing, thin, stale, conflicting, or failed detector evidence is
 reported through generic evidence preflight and must be treated as degraded;
 Strategies must never fetch data or rerun detectors to fill that gap.
 
+### Optional base-currency close history
+
+Historical views may additionally implement the separate,
+runtime-checkable `BaseCurrencyCloseHistoryViewV1` capability. It is optional:
+do not add it to `MarketViewV1`, and check for it before use so current-scan
+views and older test doubles continue to work.
+
+```python
+from app.services.backtest.strategy_protocol import (
+    BaseCurrencyCloseHistoryViewV1,
+)
+
+if isinstance(view, BaseCurrencyCloseHistoryViewV1):
+    closes = view.base_currency_close_history("sec-aapl", limit=253)
+    base_currency = view.base_currency
+```
+
+The bounded DataFrame keeps the same oldest-first security-session index and
+has `close`, `reason`, `source_currency`, `source_quote_unit`, `fx_rate`,
+`fx_session`, `fx_revision`, and `policy_version` columns. A missing or stale
+ranking-only FX observation yields a null `close` and a row-level `reason`;
+the host does not drop or shift that row. `close` is converted with the pinned
+price/FX revisions, existing quote-unit scaling and five-calendar-day carry,
+using no FX observation after that price session. The capability performs
+currency conversion only. A Strategy owns all lookbacks, endpoint selection,
+score validation, ranking and preference explanations. Missing ranking data
+must not remove an otherwise eligible signal, and a Strategy must never fetch
+replacement data itself.
+
 ### `PortfolioView`
 
 An immutable, read-only snapshot of simulated portfolio state bounded to one

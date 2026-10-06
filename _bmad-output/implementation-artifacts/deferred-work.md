@@ -720,3 +720,6 @@ Genuine follow-ups, each needing product direction:
 - source_spec: GitHub issue #68 (code review of PR #76, 2026-10-06)
   summary: `security_key` is `ticker@start_date`, a per-interval key rather than a security identity; renames are not linked, one company that leaves and rejoins becomes two keys, and an upstream start-date correction changes the key on re-import.
   evidence: `derive_intervals` in `app/services/index_membership/sp500_import.py`; identity mapping is deferred to #70/#71, so #68's "security identity" scope stays open until then.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-63-weinstein-momentum-with-bounded-currency.md`
+  summary: The three-repeat representative replay timing comparison has not been measured for GH #63.
+  evidence: The isolated `data/backtest.db` has zero strategy jobs/runs/results and the repository has no applicable short-replay benchmark harness. GH #66 owns the controlled performance evaluation; no replay overhead claim is made for #63.

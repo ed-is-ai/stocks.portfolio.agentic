@@ -114,6 +114,30 @@ def test_prepared_fx_closes_skip_repeated_evidence_decoding(monkeypatch) -> None
     assert result.base_amount == Decimal("12.50000000")
 
 
+def test_prepared_fx_closes_select_latest_close_at_or_before_bound() -> None:
+    evidence = _fx_evidence(
+        (
+            ("2024-01-05", 1.20),
+            ("2024-01-08", 1.25),
+            ("2024-01-09", 1.30),
+        )
+    )
+
+    result = convert_to_base(
+        value="10",
+        quote_currency="GBP",
+        quote_unit="GBP",
+        base_currency="USD",
+        valuation_session=date(2024, 1, 8),
+        completed_fx_through=date(2024, 1, 7),
+        fx_evidence=evidence,
+        prepared_fx=prepare_fx_closes(evidence),
+    )
+
+    assert result.base_amount == Decimal("12.00000000")
+    assert result.fx_session == date(2024, 1, 5)
+
+
 def test_prepared_fx_closes_cannot_be_reused_for_other_evidence() -> None:
     prepared = prepare_fx_closes(_fx_evidence())
     other = _fx_evidence(data_revision="fx-revision-2")

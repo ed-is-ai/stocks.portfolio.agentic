@@ -11,7 +11,9 @@ import hashlib
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, Mapping
 
 import pandas as pd
@@ -2327,6 +2329,91 @@ def test_cap_fills_slots_by_priority_then_engine_order() -> None:
     # unranked candidate goes last. Kept fills and skips stay in signal order.
     assert [fill[0] for fill in _entry_fills(output)] == ["sec-b", "sec-c"]
     assert _cap_skips(output) == ["sec-a", "sec-d"]
+
+
+def test_weinstein_skill_momentum_priority_wins_the_engine_slot() -> None:
+    runtime = (
+        Path(__file__).resolve().parents[2]
+        / "skills/rtly-backtest-weinstein/scripts/strategy.py"
+    )
+    spec = spec_from_file_location("weinstein_engine_integration", runtime)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    strategy = module.WeinsteinStrategy()
+    d0 = _MARCH_2024[0]
+    ids = ("sec-a", "sec-z")
+    stock_sessions = pd.bdate_range(end=d0, periods=225)
+    stock_closes = [Decimal(100 + index) for index in range(225)]
+    stock_frame = pd.DataFrame(
+        {
+            "high": stock_closes,
+            "close": stock_closes,
+            "volume": [Decimal("100")] * 224 + [Decimal("150")],
+        },
+        index=stock_sessions,
+    )
+    momentum_sessions = pd.bdate_range(end=d0, periods=253)
+    momentum_histories: dict[str, pd.DataFrame] = {}
+    for security_id, numerator in (("sec-a", Decimal("110")), ("sec-z", Decimal("150"))):
+        closes: list[Decimal | None] = [Decimal("100")] * 253
+        closes[-22] = numerator
+        momentum_histories[security_id] = pd.DataFrame(
+            {"close": closes, "reason": [None] * 253},
+            index=momentum_sessions,
+        )
+
+    class _RankedView:
+        as_of_session = d0
+        base_currency = "USD"
+
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: tuple[str, ...] | None = None,
+        ) -> pd.DataFrame:
+            del security_id, columns
+            history = stock_frame
+            if limit is not None:
+                history = history.tail(limit)
+            return history
+
+        def scan_result(self, security_id: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                security_id=security_id,
+                as_of_session_date=d0,
+                stage=SimpleNamespace(value="Stage 2"),
+            )
+
+        def base_currency_close_history(
+            self, security_id: str, *, limit: int
+        ) -> pd.DataFrame:
+            return pd.DataFrame(momentum_histories[security_id]).tail(limit)
+
+    signals = strategy.entry_signals(
+        _RankedView(),
+        {
+            "selected_securities": list(ids),
+            "breakout_lookback_sessions": 50,
+            "minimum_relative_volume": 1.5,
+        },
+    )
+
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-a": Decimal("1"),
+        "sec-z": Decimal("2"),
+    }
+    output = _run_capped(
+        security_ids=ids,
+        entries={d0: signals},
+        starting_capital=Decimal("2000"),
+        max_positions=1,
+    )
+
+    assert [fill[0] for fill in _entry_fills(output)] == ["sec-z"]
+    assert _cap_skips(output) == ["sec-a"]
 
 
 def test_preflight_rejection_does_not_consume_a_position_slot() -> None:

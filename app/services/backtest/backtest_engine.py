@@ -645,6 +645,7 @@ class _Engine:
         market_view_factory: MarketViewFactory,
         security_market_data: tuple[SecurityMarketDataV1, ...],
         fx_evidence: Any,
+        prepared_fx: PreparedFxCloses | None,
         sink: SessionBatchSink,
         month_observer: MonthBoundaryObserver,
         prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
@@ -733,9 +734,16 @@ class _Engine:
 
         self.planes = prepared_planes if prepared_planes is not None else {}
         self.market_data: dict[str, _EngineSecurityContext] = {}
-        self.prepared_fx: PreparedFxCloses | None = None
+        self.prepared_fx = prepared_fx
         self.mic_by_security: dict[str, str] = {}
         try:
+            if prepared_fx is not None and (
+                fx_evidence is None
+                or prepared_fx.evidence_revision != fx_evidence.data_revision
+            ):
+                raise CurrencyPolicyError(
+                    "fx_ambiguous", "Prepared FX closes do not match FX evidence."
+                )
             unexpected_planes = set(self.planes).difference(supplied)
             if unexpected_planes:
                 raise _fatal(
@@ -815,7 +823,7 @@ class _Engine:
             if fx_evidence is not None and any(
                 context.currency != self.manifest.base_currency
                 for context in self.market_data.values()
-            ):
+            ) and self.prepared_fx is None:
                 self.prepared_fx = prepare_fx_closes(fx_evidence)
         except MarketDataPolicyError as exc:
             raise _fatal(exc.code, self.start_date, exc.detail) from exc
@@ -1824,6 +1832,7 @@ def run_simulation(
     market_view_factory: MarketViewFactory,
     security_market_data: tuple[SecurityMarketDataV1, ...],
     fx_evidence: Any = None,
+    prepared_fx: PreparedFxCloses | None = None,
     sink: SessionBatchSink | None = None,
     month_boundary_observer: MonthBoundaryObserver | None = None,
     prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
@@ -1854,6 +1863,7 @@ def run_simulation(
         market_view_factory=market_view_factory,
         security_market_data=security_market_data,
         fx_evidence=fx_evidence,
+        prepared_fx=prepared_fx,
         sink=sink if sink is not None else InMemorySessionBatchSink(),
         month_observer=(
             month_boundary_observer
