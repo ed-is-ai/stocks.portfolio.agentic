@@ -8,7 +8,8 @@ Downloads fja05680/sp500 pinned to the branch head's commit, derives dated
 membership intervals, cross-checks them against the dataset's start/end file
 and prints a summary. Re-running against an unchanged source records nothing.
 ``--dry-run`` writes nothing; ``--wikipedia`` also reports differences from
-Wikipedia's current constituents and changes after the dataset's last date.
+Wikipedia's current constituents, its changes the dataset lacks, and changes
+after the dataset's last date.
 """
 
 from __future__ import annotations
@@ -40,7 +41,9 @@ def main(argv: list[str] | None = None, fetch: Fetch = http_fetch) -> None:
         repo = IndexMembershipRepository(db.make_connect(lambda: INDEX_MEMBERSHIP_DB))
         repo.ensure_schema()
     summary = import_sp500(fetch, repo)
-    for field, value in summary.model_dump(exclude={"latest_members"}).items():
+    for field, value in summary.model_dump(
+        exclude={"latest_members", "intervals"}
+    ).items():
         if isinstance(value, list):
             print(f"{field}: {len(value)}")
             for item in value:
@@ -48,9 +51,15 @@ def main(argv: list[str] | None = None, fetch: Fetch = http_fetch) -> None:
         else:
             print(f"{field}: {value}")
     if args.wikipedia:
-        diff = fetch_wikipedia_diff(fetch, summary.latest_members, summary.last_date)
+        diff = fetch_wikipedia_diff(
+            fetch, summary.intervals, summary.first_date, summary.last_date
+        )
         print(f"wikipedia only_in_dataset: {diff.only_in_dataset}")
         print(f"wikipedia only_in_wikipedia: {diff.only_in_wikipedia}")
+        print(f"wikipedia skipped_change_rows: {diff.skipped_change_rows}")
+        print(f"wikipedia unmatched_changes: {len(diff.unmatched_changes)}")
+        for unmatched in diff.unmatched_changes:
+            print(f"  {unmatched}")
         for change in diff.changes_after:
             print(f"  change after dataset: {change.model_dump()}")
 

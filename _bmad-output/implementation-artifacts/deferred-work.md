@@ -717,3 +717,6 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-57-strategy-stop-suggestions.md`
   summary: The trade replay never clears a position's stop when it is fully sold, so a later re-buy without a stop inherits the old stop.
   evidence: `TraderAgent` replay (~trader_agent.py:985-998) keeps `stop_loss` from the latest non-null BUY across a full sell; noted by the GH-57 edge-case review.
+- source_spec: GitHub issue #68 (code review of PR #76, 2026-10-06)
+  summary: `security_key` is `ticker@start_date`, a per-interval key rather than a security identity; renames are not linked, one company that leaves and rejoins becomes two keys, and an upstream start-date correction changes the key on re-import.
+  evidence: `derive_intervals` in `app/services/index_membership/sp500_import.py`; identity mapping is deferred to #70/#71, so #68's "security identity" scope stays open until then.

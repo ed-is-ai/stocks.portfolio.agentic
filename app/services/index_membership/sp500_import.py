@@ -13,7 +13,11 @@ vs 2015+). Each contiguous interval is therefore its own security, keyed
 Mapping keys to provider securities is left to #70/#71.
 
 Confidence: before 2001-01-16 the dataset has fewer than ~494 members
-(dataset README), so dates, and intervals starting, before then are ``low``.
+(dataset README), so rosters dated before then are ``low``. The cutoff is
+recorded on each import and applied per roster date by the repository.
+
+Only imports pinned to a commit are recorded: when the commit cannot be
+resolved the two files could come from different heads of ``master``.
 """
 
 import csv
@@ -21,6 +25,7 @@ import hashlib
 import io
 import json
 import logging
+from collections import Counter
 from collections.abc import Callable
 from datetime import date
 from urllib.parse import quote
@@ -29,7 +34,6 @@ import requests
 from pydantic import BaseModel, ConfigDict
 
 from app.repositories.index_membership_repo import (
-    Confidence,
     IndexMembershipRepository,
     MembershipInterval,
 )
@@ -66,9 +70,10 @@ class ImportSummary(BaseModel):
     snapshot_count: int
     interval_count: int
     ticker_count: int
-    low_confidence_intervals: int
+    low_confidence_before: str
     latest_member_count: int
     latest_members: frozenset[str]
+    intervals: list[MembershipInterval]
     only_in_components: list[Span]
     only_in_start_end: list[Span]
     import_id: int | None
@@ -86,11 +91,19 @@ def http_fetch(url: str) -> bytes:
 
 def import_sp500(fetch: Fetch, repo: IndexMembershipRepository | None) -> ImportSummary:
     """Fetch, parse and cross-check the dataset; store it unless ``repo`` is
-    ``None`` (dry run). Re-importing an unchanged file records nothing."""
+    ``None`` (dry run). Re-importing an unchanged file records nothing.
+
+    Raises ``RuntimeError`` when storing and the commit cannot be resolved.
+    """
     ref = resolve_commit(fetch)
+    if repo is not None and ref == BRANCH:
+        raise RuntimeError(
+            f"could not pin {SOURCE} to a commit; not recording an unpinned"
+            " import (retry later, or use --dry-run)"
+        )
     components = fetch(raw_url(ref, COMPONENTS_FILE))
-    start_end = parse_start_end(fetch(raw_url(ref, START_END_FILE)).decode())
-    snapshots = parse_components(components.decode())
+    start_end = parse_start_end(fetch(raw_url(ref, START_END_FILE)).decode("utf-8-sig"))
+    snapshots = parse_components(components.decode("utf-8-sig"))
     intervals = derive_intervals(snapshots)
     only_in_components, only_in_start_end = cross_check(intervals, start_end)
     digest = hashlib.sha256(components).hexdigest()
@@ -105,6 +118,7 @@ def import_sp500(fetch: Fetch, repo: IndexMembershipRepository | None) -> Import
             first_date=snapshots[0][0],
             last_date=snapshots[-1][0],
             snapshot_count=len(snapshots),
+            low_confidence_before=LOW_CONFIDENCE_BEFORE,
             intervals=intervals,
         )
     return ImportSummary(
@@ -115,9 +129,10 @@ def import_sp500(fetch: Fetch, repo: IndexMembershipRepository | None) -> Import
         snapshot_count=len(snapshots),
         interval_count=len(intervals),
         ticker_count=len({i.ticker for i in intervals}),
-        low_confidence_intervals=sum(i.confidence == "low" for i in intervals),
+        low_confidence_before=LOW_CONFIDENCE_BEFORE,
         latest_member_count=len(snapshots[-1][1]),
         latest_members=snapshots[-1][1],
+        intervals=intervals,
         only_in_components=only_in_components,
         only_in_start_end=only_in_start_end,
         import_id=import_id,
@@ -130,7 +145,7 @@ def resolve_commit(fetch: Fetch) -> str:
     API is unavailable (the import is then recorded as unpinned)."""
     try:
         return str(json.loads(fetch(COMMIT_API_URL))["sha"])
-    except Exception as exc:  # noqa: BLE001 -- any failure means "unpinned"
+    except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
         logger.warning("could not pin %s to a commit: %s", SOURCE, exc)
         return BRANCH
 
@@ -141,7 +156,10 @@ def raw_url(ref: str, file_name: str) -> str:
 
 
 def parse_components(text: str) -> Snapshots:
-    """Parse the point-in-time file (``date,tickers``) oldest first."""
+    """Parse the point-in-time file (``date,tickers``) oldest first.
+
+    Raises ``ValueError`` if it is empty or repeats a date.
+    """
     rows = csv.DictReader(io.StringIO(text))
     snapshots = [
         (
@@ -152,6 +170,10 @@ def parse_components(text: str) -> Snapshots:
     ]
     if not snapshots:
         raise ValueError("point-in-time membership file has no rows")
+    counts = Counter(d for d, _ in snapshots)
+    repeated = sorted(d for d, n in counts.items() if n > 1)
+    if repeated:
+        raise ValueError(f"point-in-time membership file repeats {repeated}")
     return sorted(snapshots)
 
 
@@ -183,20 +205,9 @@ def derive_intervals(snapshots: Snapshots) -> list[MembershipInterval]:
             start_date=start,
             end_date=end,
             security_key=f"{ticker}@{start}",
-            confidence=confidence_on(start),
         )
         for ticker, start, end in sorted(spans)
     ]
-
-
-def confidence_on(as_of: str) -> Confidence:
-    """Return the dataset's confidence in membership on ``as_of``."""
-    return "low" if as_of < LOW_CONFIDENCE_BEFORE else "normal"
-
-
-def member_counts(snapshots: Snapshots) -> dict[str, int]:
-    """Return the number of members on each change date."""
-    return {as_of: len(members) for as_of, members in snapshots}
 
 
 def cross_check(
