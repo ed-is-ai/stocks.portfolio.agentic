@@ -11,6 +11,7 @@ from decimal import Decimal
 from pathlib import Path
 import json
 import sqlite3
+import tracemalloc
 import zlib
 
 import pytest
@@ -18,6 +19,9 @@ import pytest
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
 from app.services.backtest.backtest_engine import (
+    CandidateAuditDisposition,
+    CandidateAuditOrderV1,
+    CandidateAuditV1,
     EntryFillEventV1,
     EquityCurvePointV1,
     ExitFillEventV1,
@@ -37,6 +41,10 @@ from app.services.backtest.strategy_job import (
     RunUniverseSelectionV1,
     StrategyJobConflict,
     StrategyJobNotFound,
+)
+from app.services.backtest.strategy_explanation import (
+    SignalExplanationV1,
+    SignalReasonV1,
 )
 from app.services.backtest.strategy_protocol import (
     EntrySelectionDecisionV1,
@@ -218,6 +226,43 @@ def _curve_point(seq: int, session: date, equity: str) -> EquityCurvePointV1:
         positions_value_base=Decimal("0"),
         total_equity_base=Decimal(equity),
         sequence=seq,
+    )
+
+
+def _candidate_audit(
+    sequence: int = 1,
+    *,
+    session: date = date(2026, 1, 2),
+    event_sequence: int | None = None,
+    security_id: str = "AAA",
+    rule_id: str = "rule-1",
+    priority: Decimal | None = Decimal("2"),
+    explanation: SignalExplanationV1 | None = None,
+    pending_sell_releases: tuple[CandidateAuditOrderV1, ...] = (),
+    position_cap: int | None = 10,
+) -> CandidateAuditV1:
+    return CandidateAuditV1(
+        candidate_sequence=sequence,
+        signal_session=session,
+        security_id=security_id,
+        side=SignalSide.BUY,
+        rule_id=rule_id,
+        priority=priority,
+        explanation=explanation,
+        intended_fill_session=session,
+        host_cohort_position=sequence,
+        allocator_position=sequence if position_cap is not None else None,
+        position_cap=position_cap,
+        pending_sell_releases=pending_sell_releases,
+        occupied_slots=0,
+        available_slots_before_cohort=10 if position_cap is not None else None,
+        available_slots_before_candidate=(
+            max(0, 11 - sequence) if position_cap is not None else None
+        ),
+        allocation_target_base=Decimal("1000"),
+        outcome_session=session,
+        disposition=CandidateAuditDisposition.FILLED,
+        event_sequence=sequence if event_sequence is None else event_sequence,
     )
 
 
@@ -699,6 +744,7 @@ def _append_batch(
     events: tuple[TradeLogEvent, ...] | None = None,
     final_cash: str = "10000",
     initial_entry_selection: InitialEntrySelectionV1 | None = None,
+    candidate_audits: tuple[CandidateAuditV1, ...] | None = None,
     lease: object | None = None,
 ) -> None:
     repo.append_backtest_staging_batch(
@@ -714,6 +760,7 @@ def _append_batch(
         ),
         equity_point=_curve_point(batch_sequence, session, final_cash),
         final_cash_base=Decimal(final_cash),
+        candidate_audits=candidate_audits,
         initial_entry_selection=initial_entry_selection,
         lease=lease,  # type: ignore[arg-type]
     )
@@ -801,6 +848,388 @@ def test_session_batch_append_stores_one_bounded_payload_and_latest_checkpoint(
         assert size == len(raw)
         assert digest == __import__("hashlib").sha256(raw).hexdigest()
         assert payload["equity_curve"][0]["sequence"] == sequence
+
+
+def test_session_batch_audit_is_fenced_idempotent_and_part_of_same_batch(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    session = date(2026, 1, 2)
+    explanation = SignalExplanationV1(
+        reasons=(SignalReasonV1(code="trend_strength", summary="Trend qualified."),)
+    )
+    sell_release = CandidateAuditOrderV1(
+        security_id="SELL-1",
+        signal_session=date(2025, 12, 30),
+        fill_session=session,
+        side=SignalSide.SELL,
+    )
+    audit = _candidate_audit(
+        session=session,
+        explanation=explanation,
+        pending_sell_releases=(sell_release,),
+    )
+
+    _append_batch(repo, session=session, candidate_audits=(audit,))
+    _append_batch(repo, session=session, candidate_audits=(audit,))
+
+    assert repo.read_backtest_staging_candidate_audits(RUN_ID) == (audit,)
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT candidate_count FROM backtest_staging_audit_batches "
+            "WHERE run_id=? AND batch_sequence=1",
+            (RUN_ID,),
+        ).fetchone() == (1,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM backtest_staging_candidate_audits WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone() == (1,)
+
+    changed = _candidate_audit(session=session, priority=Decimal("3"))
+    with pytest.raises(BacktestIntegrityError, match="different payload"):
+        _append_batch(repo, session=session, candidate_audits=(changed,))
+
+
+def test_result_audit_promotion_preserves_economic_digest_and_summarizes_coverage(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    session = date(2026, 1, 2)
+    explanation = SignalExplanationV1(
+        reasons=(SignalReasonV1(code="trend_strength", summary="Trend qualified."),)
+    )
+    audit = _candidate_audit(session=session, explanation=explanation)
+    _append_batch(repo, session=session, candidate_audits=(audit,))
+
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    result = repo.backtest_result(RUN_ID)
+    summary = result.candidate_audit_summary
+    assert summary is not None
+    assert summary.recorded is True
+    assert summary.candidate_count == 1
+    assert summary.priority_recorded == 1
+    assert summary.priority_missing == 0
+    assert summary.explanation_recorded == 1
+    assert summary.explanation_missing == 0
+    page = repo.backtest_result_candidate_audit_page(RUN_ID, page_size=1)
+    assert page.records == (audit,)
+    assert page.records[0].side is SignalSide.BUY
+    with sqlite3.connect(path) as conn:
+        assert conn.execute(
+            "SELECT audit_contract_version FROM backtest_results WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone() == ("candidate_allocation_audit.v1",)
+        assert conn.execute(
+            "SELECT candidate_count FROM backtest_result_audit_manifests "
+            "WHERE run_id=?",
+            (RUN_ID,),
+        ).fetchone() == (1,)
+
+
+def test_result_audit_distinguishes_recorded_zero_candidates_from_legacy(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(
+        repo,
+        events=(),
+        candidate_audits=(),
+    )
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    empty_summary = repo.backtest_result(RUN_ID).candidate_audit_summary
+    empty_page = repo.backtest_result_candidate_audit_page(RUN_ID)
+    assert empty_summary is not None and empty_summary.recorded is True
+    assert empty_summary.candidate_count == 0
+    assert empty_page.records == ()
+
+    legacy_path = tmp_path / "legacy.db"
+    legacy_repo = _repo(legacy_path)
+    _seed_backtest_run(legacy_path)
+    _write_staging(legacy_repo)
+    legacy_repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+    legacy_summary = legacy_repo.backtest_result(RUN_ID).candidate_audit_summary
+    legacy_page = legacy_repo.backtest_result_candidate_audit_page(RUN_ID)
+    assert legacy_summary is not None and legacy_summary.recorded is False
+    assert legacy_summary.contract_version == "not_recorded"
+    assert legacy_page.records == ()
+
+
+def test_result_audit_summary_detects_missing_rows_and_tampered_payload(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    session = date(2026, 1, 2)
+    _append_batch(
+        repo,
+        session=session,
+        candidate_audits=(_candidate_audit(session=session),),
+    )
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER backtest_result_candidate_audit_immutable_delete")
+        conn.execute(
+            "DELETE FROM backtest_result_candidate_audits WHERE run_id=?", (RUN_ID,)
+        )
+    with pytest.raises(BacktestIntegrityError, match="row count"):
+        repo.backtest_result(RUN_ID)
+
+    # Recreate the completed fixture to exercise payload verification too.
+    path = tmp_path / "tampered.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(
+        repo,
+        session=session,
+        candidate_audits=(_candidate_audit(session=session),),
+    )
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER backtest_result_candidate_audit_immutable_update")
+        conn.execute(
+            "UPDATE backtest_result_candidate_audits SET payload_json='{}' "
+            "WHERE run_id=?",
+            (RUN_ID,),
+        )
+    with pytest.raises(BacktestIntegrityError, match="row digest"):
+        repo.backtest_result_candidate_audit_page(RUN_ID)
+
+
+def test_audit_sequence_is_independent_of_outcome_session_order(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    signalled = date(2026, 1, 2)
+    early_outcome = date(2026, 1, 3)
+    delayed_outcome = date(2026, 1, 5)
+
+    _append_batch(
+        repo,
+        batch_sequence=1,
+        session=signalled,
+        events=(),
+        candidate_audits=(),
+    )
+    early_event = _skip(1, early_outcome)
+    early_record = _candidate_audit(
+        2,
+        session=early_outcome,
+        event_sequence=1,
+        security_id="BBB",
+        rule_id="rule-2",
+    ).model_copy(
+        update={
+            "intended_fill_session": None,
+            "host_cohort_position": None,
+            "allocator_position": None,
+            "disposition": CandidateAuditDisposition.PREFLIGHT_REJECTED,
+            "reason_code": SkipReasonCode.INSUFFICIENT_CASH.value,
+        }
+    )
+    _append_batch(
+        repo,
+        batch_sequence=2,
+        session=early_outcome,
+        events=(early_event,),
+        candidate_audits=(early_record,),
+    )
+
+    delayed_event = _entry(2, delayed_outcome).model_copy(
+        update={"signal_session": signalled}
+    )
+    delayed_record = _candidate_audit(
+        1,
+        session=signalled,
+        event_sequence=2,
+    ).model_copy(
+        update={
+            "intended_fill_session": delayed_outcome,
+            "outcome_session": delayed_outcome,
+        }
+    )
+    _append_batch(
+        repo,
+        batch_sequence=3,
+        session=delayed_outcome,
+        events=(delayed_event,),
+        candidate_audits=(delayed_record,),
+    )
+
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+    result = repo.backtest_result(RUN_ID)
+    assert result.candidate_audit_summary is not None
+    assert result.candidate_audit_summary.candidate_count == 2
+
+
+def test_legacy_staging_resume_keeps_audit_contract_not_recorded(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(
+        repo,
+        batch_sequence=1,
+        session=date(2026, 1, 2),
+        candidate_audits=None,
+    )
+    # Model a checkpoint created before the audit contract table existed.
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM backtest_staging_audit_contracts WHERE run_id=?",
+            (RUN_ID,),
+        )
+    _append_batch(
+        repo,
+        batch_sequence=2,
+        session=date(2026, 1, 5),
+        candidate_audits=(
+            _candidate_audit(2, session=date(2026, 1, 5), event_sequence=2),
+        ),
+    )
+
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+    result = repo.backtest_result(RUN_ID)
+    assert result.candidate_audit_summary is not None
+    assert result.candidate_audit_summary.recorded is False
+
+
+def test_missing_staged_audit_headers_for_recorded_contract_fail_completion(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    _append_batch(repo, candidate_audits=(_candidate_audit(),))
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "DELETE FROM backtest_staging_audit_batches WHERE run_id=?",
+            (RUN_ID,),
+        )
+
+    with pytest.raises(BacktestIntegrityError, match="coverage is incomplete"):
+        repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+
+def test_large_result_candidate_audit_storage_and_page_memory_are_bounded(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _seed_backtest_run(path)
+    session = date(2026, 1, 2)
+    events = tuple(
+        _entry(sequence, session).model_copy(
+            update={
+                "security_id": f"SEC-{sequence:03d}",
+                "rule_id": f"rule-{sequence}",
+            }
+        )
+        for sequence in range(1, 1001)
+    )
+    records = tuple(
+        _candidate_audit(
+            sequence,
+            session=session,
+            security_id=f"SEC-{sequence:03d}",
+            rule_id=f"rule-{sequence}",
+            position_cap=None,
+        )
+        for sequence in range(1, 1001)
+    )
+    _append_batch(repo, session=session, events=events, candidate_audits=records)
+    repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+
+    def allocated_database_bytes(database_path: Path) -> int:
+        with sqlite3.connect(database_path) as conn:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            page_count = int(conn.execute("PRAGMA page_count").fetchone()[0])
+            page_size = int(conn.execute("PRAGMA page_size").fetchone()[0])
+        return page_count * page_size
+
+    audit_database_bytes = allocated_database_bytes(path)
+    control_path = tmp_path / "without-audit.db"
+    control_repo = _repo(control_path)
+    _seed_backtest_run(control_path)
+    _append_batch(
+        control_repo,
+        session=session,
+        events=events,
+        candidate_audits=None,
+    )
+    control_repo.complete_claimed_backtest_job(RUN_ID, CLAIM_TOKEN, expected_version=1)
+    control_database_bytes = allocated_database_bytes(control_path)
+    assert audit_database_bytes > control_database_bytes
+
+    with sqlite3.connect(path) as conn:
+        stored_bytes = conn.execute(
+            """SELECT SUM(length(payload_json) + length(payload_digest))
+               FROM backtest_result_candidate_audits WHERE run_id=?""",
+            (RUN_ID,),
+        ).fetchone()[0]
+    expected_bytes = sum(
+        len(
+            json.dumps(
+                record.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
+        )
+        + 64
+        for record in records
+    )
+    assert stored_bytes == expected_bytes
+
+    traced_queries: list[str] = []
+    original_connect = repo._connect
+
+    def traced_connect():
+        connection = original_connect()
+        connection.set_trace_callback(traced_queries.append)
+        return connection
+
+    repo._connect = traced_connect
+    tracemalloc.start()
+    first = repo.backtest_result_candidate_audit_page(RUN_ID, page=1, page_size=10)
+    last = repo.backtest_result_candidate_audit_page(RUN_ID, page=100, page_size=10)
+    _, peak_bytes = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    assert len(first.records) == 10
+    assert [record.candidate_sequence for record in first.records] == list(range(1, 11))
+    assert len(last.records) == 10
+    assert [record.candidate_sequence for record in last.records] == list(
+        range(991, 1001)
+    )
+    assert first.total_pages == 100
+    assert peak_bytes < 512_000
+    page_row_queries = [
+        query.upper()
+        for query in traced_queries
+        if "SELECT CANDIDATE_SEQUENCE, PAYLOAD_JSON, PAYLOAD_DIGEST" in query.upper()
+        and "FROM BACKTEST_RESULT_CANDIDATE_AUDITS" in query.upper()
+    ]
+    assert len(page_row_queries) == 2
+    assert all("LIMIT 10 OFFSET" in query for query in page_row_queries)
+    event_link_queries = [
+        query.upper()
+        for query in traced_queries
+        if "FROM TRADE_LOG" in query.upper() and "SEQUENCE IN" in query.upper()
+    ]
+    assert len(event_link_queries) == 2
+    with pytest.raises(ValueError, match="page size"):
+        repo.backtest_result_candidate_audit_page(RUN_ID, page_size=101)
 
 
 def test_session_batch_append_rejects_a_session_outside_the_pinned_run(

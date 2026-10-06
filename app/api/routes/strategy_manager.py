@@ -51,6 +51,7 @@ from app.services.backtest.result_presenter import (
     UniverseViewV1,
     backtest_metrics_view,
     build_universe_view,
+    candidate_audit_view,
     comparison_equity_payload,
     equity_curve_payload,
     initial_basket_view,
@@ -1927,7 +1928,7 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
     alone -- every Metrics/Equity-Curve/Trade-Log/provenance value is
     formatted, never recomputed, by ``result_presenter.py``."""
     try:
-        result = repo.backtest_result(run_id)
+        result = repo.backtest_result(run_id, include_candidate_audit_summary=False)
     except StrategyJobNotFound as exc:
         # The caller already confirmed job.status is COMPLETE, so a
         # missing Result row here is a genuine integrity defect (Story
@@ -1957,6 +1958,12 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         identities,
         runnable_ids=runnable_ids,
     )
+    candidate_audit_page = None
+    candidate_audit_integrity_error = None
+    try:
+        candidate_audit_page = repo.backtest_result_candidate_audit_page(run_id, page=1)
+    except BacktestIntegrityError as exc:
+        candidate_audit_integrity_error = str(exc)
     return {
         "run_id": run_id,
         "integrity_error": None,
@@ -1969,6 +1976,14 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         "financials": result_financials_view(result),
         "equity_curve_payload": equity_curve_payload(result),
         "initial_basket": initial_basket_view(result, identities),
+        "candidate_audit": (
+            None
+            if candidate_audit_page is None
+            else candidate_audit_view(
+                candidate_audit_page, identities, result.base_currency
+            )
+        ),
+        "candidate_audit_integrity_error": candidate_audit_integrity_error,
         "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
         "regime_benchmark": _regime_benchmark_context(result),
@@ -2056,6 +2071,49 @@ async def backtest_result_view(
             {"run_id": run_id, "integrity_error": str(exc)},
         )
     return template_response(request, "_backtest_result.html", context)
+
+
+@router.get(
+    "/strategy-manager/results/{run_id}/candidate-audit",
+    response_class=HTMLResponse,
+)
+async def backtest_candidate_audit_page_view(
+    request: Request, run_id: str, backtest: BacktestDep, page: int = 1
+) -> Response:
+    """Return one bounded candidate-audit page from persisted evidence."""
+    try:
+        job = backtest.strategy_job(run_id)
+    except StrategyJobNotFound:
+        return HTMLResponse("Backtest result not found.", status_code=404)
+    if (
+        job.job_type is not StrategyJobType.BACKTEST
+        or job.status is not StrategyJobStatus.COMPLETE
+    ):
+        return RedirectResponse(
+            f"/strategy-manager/activities/{run_id}", status_code=303
+        )
+    try:
+        run = backtest.strategy_run(run_id)
+        identities = _roster_identity_map(backtest, run.profile_hash)
+        page_data = backtest.backtest_result_candidate_audit_page(run_id, page=page)
+        context = {
+            "run_id": run_id,
+            "candidate_audit": candidate_audit_view(
+                page_data, identities, run.base_currency
+            ),
+            "integrity_error": None,
+        }
+    except BacktestIntegrityError as exc:
+        context = {
+            "run_id": run_id,
+            "candidate_audit": None,
+            "integrity_error": str(exc),
+        }
+    except StrategyJobNotFound:
+        return HTMLResponse("Backtest result not found.", status_code=404)
+    except ValueError as exc:
+        return HTMLResponse(str(exc), status_code=422)
+    return template_response(request, "_backtest_candidate_audit.html", context)
 
 
 @router.post(

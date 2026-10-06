@@ -16,8 +16,13 @@ from decimal import Decimal, DecimalException, localcontext
 import html
 import math
 
-from app.repositories.backtest_repo import BacktestIntegrityError, BacktestResultV1
+from app.repositories.backtest_repo import (
+    BacktestCandidateAuditPageV1,
+    BacktestIntegrityError,
+    BacktestResultV1,
+)
 from app.services.backtest.backtest_engine import (
+    CandidateAuditDisposition,
     DividendAppliedEventV1,
     EntryFillEventV1,
     ExitFillEventV1,
@@ -31,6 +36,7 @@ from app.services.backtest.backtest_engine import (
 from app.services.backtest.metrics import MetricUnavailableReason
 from app.services.backtest.snapshot_profile import CoverageIntervalV1, CoverageSummaryV1
 from app.services.backtest.strategy_protocol import EntrySelectionState
+from app.services.backtest.strategy_explanation import format_decimal, format_reason
 from app.services.backtest.trading_calendar import TradingCalendar
 
 #: AC 2: the two null-Metric display strings, sourced only from
@@ -267,6 +273,49 @@ class TradeLogViewV1:
     rows: tuple[TradeLogRowV1, ...]
     has_events: bool
     has_executed_fills: bool
+
+
+@dataclass(frozen=True)
+class CandidateAuditRowViewV1:
+    candidate_sequence: int
+    security_id: str
+    security_label: str
+    side: str
+    signal_session: str
+    intended_fill_session: str
+    outcome_session: str
+    disposition: str
+    priority: str
+    host_cohort_position: str
+    allocator_position: str
+    slot_summary: str
+    available_slots_before_cohort: str
+    held_positions: tuple[str, ...]
+    pending_buy_reservations: tuple[str, ...]
+    prior_cohort_admissions: tuple[str, ...]
+    sell_releases: tuple[str, ...]
+    reservation_summary: str
+    reason_code: str
+    explanation: tuple[str, ...]
+    event_sequence: int
+
+
+@dataclass(frozen=True)
+class CandidateAuditViewV1:
+    recorded: bool
+    candidate_count: int
+    priority_recorded: int
+    priority_missing: int
+    explanation_recorded: int
+    explanation_missing: int
+    preflight_rejected: int
+    full_book_rejected: int
+    competition_rejected: int
+    filled: int
+    fill_rejected: int
+    page: int
+    total_pages: int
+    rows: tuple[CandidateAuditRowViewV1, ...]
 
 
 @dataclass(frozen=True)
@@ -862,6 +911,142 @@ def trade_log_view(
     has_executed_fills = any(row.kind in _EXECUTED_FILL_KINDS for row in rows)
     return TradeLogViewV1(
         rows=rows, has_events=bool(rows), has_executed_fills=has_executed_fills
+    )
+
+
+_CANDIDATE_AUDIT_DISPOSITION_TEXT: dict[CandidateAuditDisposition, str] = {
+    CandidateAuditDisposition.PREFLIGHT_REJECTED: "Rejected before slot consideration",
+    CandidateAuditDisposition.FULL_BOOK_REJECTED: "No usable slot",
+    CandidateAuditDisposition.COMPETITION_REJECTED: "Lost an available slot to the cohort",
+    CandidateAuditDisposition.FILLED: "Filled",
+    CandidateAuditDisposition.FILL_REJECTED: "Admitted, then rejected at fill",
+}
+
+
+def candidate_audit_view(
+    page: BacktestCandidateAuditPageV1,
+    identities: Mapping[str, tuple[str, str]],
+    base_currency: str,
+) -> CandidateAuditViewV1:
+    """Format one persisted candidate page without running Skills or prices."""
+    summary = page.summary
+    rows: list[CandidateAuditRowViewV1] = []
+    for record in page.records:
+        held_positions = tuple(
+            f"{resolve_security_label(security_id, identities)} [{security_id}]"
+            for security_id in record.held_security_ids
+        )
+        pending_buy_reservations = tuple(
+            f"{resolve_security_label(order.security_id, identities)} "
+            f"[{order.security_id}], signalled {order.signal_session.isoformat()}, "
+            f"fills {order.fill_session.isoformat()}, reserves "
+            f"{format_decimal(order.reserved_base or Decimal(0))} {base_currency}"
+            for order in record.pending_buy_orders
+        )
+        prior_cohort_admissions = tuple(
+            f"{resolve_security_label(security_id, identities)} [{security_id}]"
+            for security_id in record.prior_cohort_admitted_security_ids
+        )
+        sell_releases = tuple(
+            f"{resolve_security_label(order.security_id, identities)} "
+            f"[{order.security_id}], signalled {order.signal_session.isoformat()}, "
+            f"releases {order.fill_session.isoformat()} "
+            f"({'by candidate fill' if record.intended_fill_session is not None and order.fill_session <= record.intended_fill_session else 'after candidate fill'})"
+            for order in record.pending_sell_releases
+        )
+        qualifying_sell_releases = sum(
+            record.intended_fill_session is not None
+            and order.fill_session <= record.intended_fill_session
+            for order in record.pending_sell_releases
+        )
+        if record.position_cap is None:
+            slot_summary = "No position cap was configured."
+        elif record.host_cohort_position is None:
+            slot_summary = (
+                "Preflight rejected this candidate before slot consideration."
+            )
+        else:
+            slot_summary = (
+                f"{record.available_slots_before_candidate or 0} slot(s) available "
+                f"when considered; {record.occupied_slots} held or pending BUY; "
+                f"{qualifying_sell_releases} of {len(record.pending_sell_releases)} "
+                "scheduled SELL(s) release by fill date."
+            )
+        pending_base = format_decimal(record.pending_buy_reservation_base)
+        allocation = (
+            "not allocated"
+            if record.allocation_target_base is None
+            else format_decimal(record.allocation_target_base)
+        )
+        explanation: list[str] = []
+        if record.explanation is not None:
+            for reason in record.explanation.reasons:
+                summary_text, facts = format_reason(reason)
+                explanation.append(f"{reason.code}: {summary_text}")
+                explanation.extend(facts)
+        rows.append(
+            CandidateAuditRowViewV1(
+                candidate_sequence=record.candidate_sequence,
+                security_id=record.security_id,
+                security_label=resolve_security_label(record.security_id, identities),
+                side=record.side.value,
+                signal_session=record.signal_session.isoformat(),
+                intended_fill_session=(
+                    "—"
+                    if record.intended_fill_session is None
+                    else record.intended_fill_session.isoformat()
+                ),
+                outcome_session=record.outcome_session.isoformat(),
+                disposition=_CANDIDATE_AUDIT_DISPOSITION_TEXT[record.disposition],
+                priority=(
+                    "Not supplied"
+                    if record.priority is None
+                    else format_decimal(record.priority)
+                ),
+                host_cohort_position=(
+                    "—"
+                    if record.host_cohort_position is None
+                    else str(record.host_cohort_position)
+                ),
+                allocator_position=(
+                    "—"
+                    if record.allocator_position is None
+                    else str(record.allocator_position)
+                ),
+                slot_summary=slot_summary,
+                available_slots_before_cohort=(
+                    "—"
+                    if record.available_slots_before_cohort is None
+                    else str(record.available_slots_before_cohort)
+                ),
+                held_positions=held_positions,
+                pending_buy_reservations=pending_buy_reservations,
+                prior_cohort_admissions=prior_cohort_admissions,
+                sell_releases=sell_releases,
+                reservation_summary=(
+                    f"Earlier pending BUY reservations: {pending_base} {base_currency}; "
+                    f"this candidate: {allocation} {base_currency}."
+                ),
+                reason_code=record.reason_code or "—",
+                explanation=tuple(explanation),
+                event_sequence=record.event_sequence,
+            )
+        )
+    return CandidateAuditViewV1(
+        recorded=summary.recorded,
+        candidate_count=summary.candidate_count,
+        priority_recorded=summary.priority_recorded,
+        priority_missing=summary.priority_missing,
+        explanation_recorded=summary.explanation_recorded,
+        explanation_missing=summary.explanation_missing,
+        preflight_rejected=summary.preflight_rejected,
+        full_book_rejected=summary.full_book_rejected,
+        competition_rejected=summary.competition_rejected,
+        filled=summary.filled,
+        fill_rejected=summary.fill_rejected,
+        page=page.page,
+        total_pages=page.total_pages,
+        rows=tuple(rows),
     )
 
 

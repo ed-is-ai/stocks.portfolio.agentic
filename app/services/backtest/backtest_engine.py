@@ -47,7 +47,7 @@ rather than inventing a new manifest field for it.
 from __future__ import annotations
 
 from bisect import bisect_right
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, DecimalException, ROUND_DOWN
@@ -76,6 +76,7 @@ from app.services.backtest.market_planes import (
     quantize_eight,
 )
 from app.services.backtest.run_input_manifest import RunInputManifestV1
+from app.services.backtest.strategy_explanation import SignalExplanationV1
 from app.services.backtest.strategy_protocol import (
     InitialEntrySelectionProviderV1,
     InitialEntrySelectionV1,
@@ -165,6 +166,14 @@ class SkipReasonCode(StrEnum):
     SECURITY_EXITED = "security_exited"
 
 
+class CandidateAuditDisposition(StrEnum):
+    PREFLIGHT_REJECTED = "preflight_rejected"
+    FULL_BOOK_REJECTED = "full_book_rejected"
+    COMPETITION_REJECTED = "competition_rejected"
+    FILLED = "filled"
+    FILL_REJECTED = "fill_rejected"
+
+
 # ---------------------------------------------------------------------------
 # Trade Log event / Equity Curve / output models
 # ---------------------------------------------------------------------------
@@ -177,6 +186,60 @@ class _EngineModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid", frozen=True, strict=True, allow_inf_nan=False
     )
+
+
+class CandidateAuditOrderV1(_EngineModel):
+    """One pending order included in a candidate's allocation snapshot.
+
+    For a pending SELL, ``fill_session`` shows when the slot can be reused;
+    the audit retains orders after the candidate's intended fill as well so
+    cross-calendar deferrals remain explainable.
+    """
+
+    security_id: str
+    signal_session: date
+    fill_session: date
+    side: SignalSide
+    reserved_base: Decimal | None = None
+
+
+class CandidateAuditEvidenceV1(_EngineModel):
+    """Opaque Skill input and exact host inputs for one BUY candidate.
+
+    ``host_cohort_position`` is the canonical engine-order position after
+    preflight. ``allocator_position`` is the priority-sorted position the
+    slot allocator considered; neither replaces the Skill's priority.
+    """
+
+    candidate_sequence: int = Field(ge=1)
+    signal_session: date
+    security_id: str = Field(min_length=1)
+    side: SignalSide = SignalSide.BUY
+    rule_id: str = Field(min_length=1)
+    priority: Decimal | None = None
+    explanation: SignalExplanationV1 | None = None
+    intended_fill_session: date | None = None
+    host_cohort_position: int | None = Field(default=None, ge=1)
+    allocator_position: int | None = Field(default=None, ge=1)
+    position_cap: int | None = Field(default=None, ge=1)
+    held_security_ids: tuple[str, ...] = ()
+    pending_buy_orders: tuple[CandidateAuditOrderV1, ...] = ()
+    prior_cohort_admitted_security_ids: tuple[str, ...] = ()
+    pending_sell_releases: tuple[CandidateAuditOrderV1, ...] = ()
+    occupied_slots: int = Field(ge=0)
+    available_slots_before_cohort: int | None = Field(default=None, ge=0)
+    available_slots_before_candidate: int | None = Field(default=None, ge=0)
+    pending_buy_reservation_base: Decimal = Decimal(0)
+    allocation_target_base: Decimal | None = None
+
+
+class CandidateAuditV1(CandidateAuditEvidenceV1):
+    """One completed candidate decision linked to its economic event."""
+
+    outcome_session: date
+    disposition: CandidateAuditDisposition
+    reason_code: str | None = None
+    event_sequence: int = Field(ge=1)
 
 
 def _serialize_share_quantity(value: Decimal) -> int | str:
@@ -419,6 +482,7 @@ class PendingOrderV1:
     #: Engine-owned base-currency target reserved for a shared BUY cohort.
     #: ``None`` remains the legacy/full-exit path.
     allocation_target_base: Decimal | None = None
+    audit_evidence: CandidateAuditEvidenceV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -498,6 +562,7 @@ class SessionBatchSink(Protocol):
         session: date,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        candidate_audits: tuple[CandidateAuditV1, ...] = (),
         initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None: ...
 
@@ -509,6 +574,7 @@ class InMemorySessionBatchSink:
 
     events: list[TradeLogEvent] = field(default_factory=list)
     equity_curve: list[EquityCurvePointV1] = field(default_factory=list)
+    candidate_audits: list[CandidateAuditV1] = field(default_factory=list)
 
     def publish_session(
         self,
@@ -516,12 +582,14 @@ class InMemorySessionBatchSink:
         session: date,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        candidate_audits: tuple[CandidateAuditV1, ...] = (),
         initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None:
         del session  # already carried by equity_point.session
         del initial_entry_selection
         self.events.extend(events)
         self.equity_curve.append(equity_point)
+        self.candidate_audits.extend(candidate_audits)
 
 
 class MonthBoundaryObserver(Protocol):
@@ -820,10 +888,14 @@ class _Engine:
                 self.mic_by_security[security_id] = _mic_for_exchange_timezone(
                     context.exchange_timezone, session=self.start_date
                 )
-            if fx_evidence is not None and any(
-                context.currency != self.manifest.base_currency
-                for context in self.market_data.values()
-            ) and self.prepared_fx is None:
+            if (
+                fx_evidence is not None
+                and any(
+                    context.currency != self.manifest.base_currency
+                    for context in self.market_data.values()
+                )
+                and self.prepared_fx is None
+            ):
                 self.prepared_fx = prepare_fx_closes(fx_evidence)
         except MarketDataPolicyError as exc:
             raise _fatal(exc.code, self.start_date, exc.detail) from exc
@@ -864,6 +936,7 @@ class _Engine:
         self.cash = quantize_eight(manifest.starting_capital)
         self.positions: dict[str, PositionState] = {}
         self.pending: dict[str, PendingOrderV1] = {}
+        self._candidate_audit_sequence = 0
         self.applied_action_keys: set[str] = set()
         self._sequence = 0
         self.output_events: list[TradeLogEvent] = []
@@ -1104,7 +1177,10 @@ class _Engine:
     # -- fills --------------------------------------------------------------
 
     def _execute_fills(
-        self, session: date, session_events: list[TradeLogEvent]
+        self,
+        session: date,
+        session_events: list[TradeLogEvent],
+        candidate_audits: list[CandidateAuditV1],
     ) -> None:
         due = [
             order for order in self.pending.values() if order.fill_session == session
@@ -1112,7 +1188,29 @@ class _Engine:
         due.sort(key=_fill_sort_key)
         for order in due:
             del self.pending[order.security_id]
-            session_events.append(self._execute_fill(order, session))
+            event = self._execute_fill(order, session)
+            session_events.append(event)
+            if order.audit_evidence is not None:
+                disposition = (
+                    CandidateAuditDisposition.FILLED
+                    if isinstance(event, EntryFillEventV1)
+                    else CandidateAuditDisposition.FILL_REJECTED
+                )
+                if not isinstance(event, (EntryFillEventV1, SkippedSignalEventV1)):
+                    raise RuntimeError("audited BUY fill produced an unsupported event")
+                candidate_audits.append(
+                    self._finalize_candidate_audit(
+                        order.audit_evidence,
+                        outcome_session=session,
+                        disposition=disposition,
+                        reason_code=(
+                            None
+                            if isinstance(event, EntryFillEventV1)
+                            else event.reason.value
+                        ),
+                        event_sequence=event.sequence,
+                    )
+                )
 
     def _execute_fill(self, order: PendingOrderV1, session: date) -> TradeLogEvent:
         if self._exited(order.security_id, session):
@@ -1375,6 +1473,7 @@ class _Engine:
         session: date,
         session_events: list[TradeLogEvent],
         equity_base: Decimal,
+        candidate_audits: list[CandidateAuditV1],
     ) -> InitialEntrySelectionV1 | None:
         view = self.market_view_factory(session)
         if view.as_of_session != session:
@@ -1419,12 +1518,19 @@ class _Engine:
             combined = sorted(exits + entries, key=_engine_signal_sort_key)
             pending_before = dict(self.pending)
             sequence_before = self._sequence
+            candidate_sequence_before = self._candidate_audit_sequence
             events_before = len(session_events)
+            audits_before = len(candidate_audits)
             seen: set[tuple[date, str, SignalSide, str]] = set()
             try:
                 buy_candidates: list[tuple[Signal, date]] = []
+                candidate_sequences: dict[int, int] = {}
                 pending_buy_security_ids: set[str] = set()
                 for signal in combined:
+                    candidate_sequence: int | None = None
+                    if signal.side is SignalSide.BUY:
+                        self._candidate_audit_sequence += 1
+                        candidate_sequence = self._candidate_audit_sequence
                     identity = (
                         signal.session,
                         signal.security_id,
@@ -1432,41 +1538,79 @@ class _Engine:
                         signal.rule_id,
                     )
                     if identity in seen:
-                        session_events.append(
-                            self._skip_signal(
-                                signal,
-                                session,
-                                SkipReasonCode.DUPLICATE_SIGNAL,
-                                "duplicate signal instruction",
-                            )
+                        skip = self._skip_signal(
+                            signal,
+                            session,
+                            SkipReasonCode.DUPLICATE_SIGNAL,
+                            "duplicate signal instruction",
                         )
+                        session_events.append(skip)
+                        if candidate_sequence is not None:
+                            candidate_audits.append(
+                                self._finalize_candidate_audit(
+                                    self._candidate_audit_evidence(
+                                        signal, candidate_sequence
+                                    ),
+                                    outcome_session=session,
+                                    disposition=CandidateAuditDisposition.PREFLIGHT_REJECTED,
+                                    reason_code=skip.reason.value,
+                                    event_sequence=skip.sequence,
+                                )
+                            )
                         continue
                     seen.add(identity)
                     if signal.side is SignalSide.BUY:
+                        assert candidate_sequence is not None
                         if signal.security_id in pending_buy_security_ids:
-                            session_events.append(
-                                self._skip_signal(
-                                    signal,
-                                    session,
-                                    SkipReasonCode.POSITION_CONFLICT,
-                                    "another BUY for this security is already eligible in this cohort",
+                            skip = self._skip_signal(
+                                signal,
+                                session,
+                                SkipReasonCode.POSITION_CONFLICT,
+                                "another BUY for this security is already eligible in this cohort",
+                            )
+                            session_events.append(skip)
+                            candidate_audits.append(
+                                self._finalize_candidate_audit(
+                                    self._candidate_audit_evidence(
+                                        signal, candidate_sequence
+                                    ),
+                                    outcome_session=session,
+                                    disposition=CandidateAuditDisposition.PREFLIGHT_REJECTED,
+                                    reason_code=skip.reason.value,
+                                    event_sequence=skip.sequence,
                                 )
                             )
                             continue
                         fill_session, skip = self._preflight_buy(signal, session)
                         if skip is not None:
                             session_events.append(skip)
+                            candidate_audits.append(
+                                self._finalize_candidate_audit(
+                                    self._candidate_audit_evidence(
+                                        signal, candidate_sequence
+                                    ),
+                                    outcome_session=session,
+                                    disposition=CandidateAuditDisposition.PREFLIGHT_REJECTED,
+                                    reason_code=skip.reason.value,
+                                    event_sequence=skip.sequence,
+                                )
+                            )
                             continue
                         assert fill_session is not None
                         pending_buy_security_ids.add(signal.security_id)
                         buy_candidates.append((signal, fill_session))
+                        candidate_sequences[id(signal)] = candidate_sequence
                         continue
                     skip = self._schedule_signal(signal, session, view, portfolio)
                     if skip is not None:
                         session_events.append(skip)
 
-                buy_candidates = self._apply_position_slots(
-                    buy_candidates, session, session_events
+                buy_candidates, audit_evidence = self._apply_position_slots(
+                    buy_candidates,
+                    session,
+                    session_events,
+                    candidate_sequences,
+                    candidate_audits,
                 )
 
                 # Reserve every eligible candidate's equal target before any
@@ -1500,6 +1644,10 @@ class _Engine:
                     # could reserve more than the available cash in aggregate.
                     target = target.quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
                     for signal, fill_session in buy_candidates:
+                        candidate_sequence = candidate_sequences[id(signal)]
+                        evidence = audit_evidence[candidate_sequence].model_copy(
+                            update={"allocation_target_base": target}
+                        )
                         self.pending[signal.security_id] = PendingOrderV1(
                             security_id=signal.security_id,
                             side=SignalSide.BUY,
@@ -1508,22 +1656,94 @@ class _Engine:
                             rule_id=signal.rule_id,
                             requested_shares=None,
                             allocation_target_base=target,
+                            audit_evidence=evidence,
                         )
             except Exception:
                 self.pending = pending_before
                 self._sequence = sequence_before
+                self._candidate_audit_sequence = candidate_sequence_before
                 del session_events[events_before:]
+                del candidate_audits[audits_before:]
                 raise
             return selection
         except StrategyProtocolError as exc:
             raise _fatal(exc.code, session, str(exc)) from exc
+
+    def _candidate_audit_evidence(
+        self,
+        signal: Signal,
+        candidate_sequence: int,
+        *,
+        intended_fill_session: date | None = None,
+        host_cohort_position: int | None = None,
+        allocator_position: int | None = None,
+        available_slots_before_cohort: int | None = None,
+        available_slots_before_candidate: int | None = None,
+        prior_cohort_admitted_security_ids: tuple[str, ...] = (),
+        pending_sell_releases: tuple[CandidateAuditOrderV1, ...] = (),
+    ) -> CandidateAuditEvidenceV1:
+        pending_buys = tuple(
+            CandidateAuditOrderV1(
+                security_id=order.security_id,
+                signal_session=order.signal_session,
+                fill_session=order.fill_session,
+                side=order.side,
+                reserved_base=order.allocation_target_base,
+            )
+            for order in sorted(self.pending.values(), key=_fill_sort_key)
+            if order.side is SignalSide.BUY
+        )
+        reserved_base = sum(
+            (order.reserved_base or Decimal(0) for order in pending_buys),
+            Decimal(0),
+        )
+        return CandidateAuditEvidenceV1(
+            candidate_sequence=candidate_sequence,
+            signal_session=signal.session,
+            security_id=signal.security_id,
+            side=signal.side,
+            rule_id=signal.rule_id,
+            priority=signal.priority,
+            explanation=signal.explanation,
+            intended_fill_session=intended_fill_session,
+            host_cohort_position=host_cohort_position,
+            allocator_position=allocator_position,
+            position_cap=self.max_concurrent_positions,
+            held_security_ids=tuple(sorted(self.positions)),
+            pending_buy_orders=pending_buys,
+            prior_cohort_admitted_security_ids=prior_cohort_admitted_security_ids,
+            pending_sell_releases=pending_sell_releases,
+            occupied_slots=len(self.positions) + len(pending_buys),
+            available_slots_before_cohort=available_slots_before_cohort,
+            available_slots_before_candidate=available_slots_before_candidate,
+            pending_buy_reservation_base=reserved_base,
+        )
+
+    @staticmethod
+    def _finalize_candidate_audit(
+        evidence: CandidateAuditEvidenceV1,
+        *,
+        outcome_session: date,
+        disposition: CandidateAuditDisposition,
+        reason_code: str | None,
+        event_sequence: int,
+    ) -> CandidateAuditV1:
+        return CandidateAuditV1(
+            **evidence.model_dump(mode="python"),
+            outcome_session=outcome_session,
+            disposition=disposition,
+            reason_code=reason_code,
+            event_sequence=event_sequence,
+        )
 
     def _apply_position_slots(
         self,
         buy_candidates: list[tuple[Signal, date]],
         session: date,
         session_events: list[TradeLogEvent],
-    ) -> list[tuple[Signal, date]]:
+        candidate_sequences: Mapping[int, int],
+        candidate_audits: list[CandidateAuditV1],
+    ) -> tuple[list[tuple[Signal, date]], dict[int, CandidateAuditEvidenceV1]]:
         """Keep only the BUY candidates that fit the free position slots.
 
         Held positions and pending BUYs occupy slots. SELLs scheduled this
@@ -1535,13 +1755,30 @@ class _Engine:
         candidates are both returned or recorded in that signal order.
         """
         cap = self.max_concurrent_positions
+        audit_evidence: dict[int, CandidateAuditEvidenceV1] = {}
         if cap is None:
-            return buy_candidates
-        sell_fill_sessions = [
-            order.fill_session
+            for cohort_position, (signal, fill_session) in enumerate(
+                buy_candidates, start=1
+            ):
+                candidate_sequence = candidate_sequences[id(signal)]
+                audit_evidence[candidate_sequence] = self._candidate_audit_evidence(
+                    signal,
+                    candidate_sequence,
+                    intended_fill_session=fill_session,
+                    host_cohort_position=cohort_position,
+                    allocator_position=None,
+                )
+            return buy_candidates, audit_evidence
+        pending_sells = tuple(
+            CandidateAuditOrderV1(
+                security_id=order.security_id,
+                signal_session=order.signal_session,
+                fill_session=order.fill_session,
+                side=order.side,
+            )
             for order in self.pending.values()
             if order.side is SignalSide.SELL
-        ]
+        )
         occupied = len(self.positions) + sum(
             1 for order in self.pending.values() if order.side is SignalSide.BUY
         )
@@ -1550,24 +1787,65 @@ class _Engine:
             key=lambda index: _slot_rank(buy_candidates[index][0]),
         )
         kept: set[int] = set()
-        for index in by_priority:
+        for allocator_position, index in enumerate(by_priority, start=1):
             fill_session = buy_candidates[index][1]
-            freed = sum(1 for sold in sell_fill_sessions if sold <= fill_session)
+            signal = buy_candidates[index][0]
+            candidate_sequence = candidate_sequences[id(signal)]
+            qualifying_releases = tuple(
+                order for order in pending_sells if order.fill_session <= fill_session
+            )
+            freed = len(qualifying_releases)
+            available_before_cohort = max(0, cap - occupied + freed)
+            available_before_candidate = max(0, cap - occupied + freed - len(kept))
+            evidence = self._candidate_audit_evidence(
+                signal,
+                candidate_sequence,
+                intended_fill_session=fill_session,
+                host_cohort_position=index + 1,
+                allocator_position=allocator_position,
+                available_slots_before_cohort=available_before_cohort,
+                available_slots_before_candidate=available_before_candidate,
+                prior_cohort_admitted_security_ids=tuple(
+                    buy_candidates[prior_index][0].security_id
+                    for prior_index in by_priority[: allocator_position - 1]
+                    if prior_index in kept
+                ),
+                pending_sell_releases=pending_sells,
+            )
+            audit_evidence[candidate_sequence] = evidence
             if occupied - freed + len(kept) < cap:
                 kept.add(index)
         for index, (signal, _) in enumerate(buy_candidates):
             if index not in kept:
-                session_events.append(
-                    self._skip_signal(
-                        signal,
-                        session,
-                        SkipReasonCode.MAX_CONCURRENT_POSITIONS,
-                        "concurrent position limit reached",
+                skip = self._skip_signal(
+                    signal,
+                    session,
+                    SkipReasonCode.MAX_CONCURRENT_POSITIONS,
+                    "concurrent position limit reached",
+                )
+                session_events.append(skip)
+                evidence = audit_evidence[candidate_sequences[id(signal)]]
+                candidate_audits.append(
+                    self._finalize_candidate_audit(
+                        evidence,
+                        outcome_session=session,
+                        disposition=(
+                            CandidateAuditDisposition.FULL_BOOK_REJECTED
+                            if evidence.available_slots_before_cohort == 0
+                            else CandidateAuditDisposition.COMPETITION_REJECTED
+                        ),
+                        reason_code=skip.reason.value,
+                        event_sequence=skip.sequence,
                     )
                 )
-        return [
-            candidate for index, candidate in enumerate(buy_candidates) if index in kept
-        ]
+        return (
+            [
+                candidate
+                for index, candidate in enumerate(buy_candidates)
+                if index in kept
+            ],
+            audit_evidence,
+        )
 
     def _schedule_signal(
         self,
@@ -1773,20 +2051,22 @@ class _Engine:
         tuple[TradeLogEvent, ...],
         EquityCurvePointV1,
         InitialEntrySelectionV1 | None,
+        tuple[CandidateAuditV1, ...],
     ]:
         session_events: list[TradeLogEvent] = []
+        candidate_audits: list[CandidateAuditV1] = []
         self._apply_actions(session, session_events)
         self._settle_terminal_exits(session, session_events)
-        self._execute_fills(session, session_events)
+        self._execute_fills(session, session_events, candidate_audits)
         equity_point = self._value_state(session)
         selection = self._process_signals(
-            session, session_events, equity_point.total_equity_base
+            session, session_events, equity_point.total_equity_base, candidate_audits
         )
         if is_final:
             final_marks = self._mark_final_positions(session)
             session_events.extend(final_marks)
             self.final_open_positions = final_marks
-        return tuple(session_events), equity_point, selection
+        return tuple(session_events), equity_point, selection, tuple(candidate_audits)
 
     def run(self) -> SimulationOutputV1:
         current_month: str | None = None
@@ -1796,13 +2076,14 @@ class _Engine:
             if month != current_month:
                 current_month = month
                 self.month_observer.on_month_boundary(month=month)
-            session_events, equity_point, selection = self._process_session(
-                session, is_final=(index == last_index)
+            session_events, equity_point, selection, candidate_audits = (
+                self._process_session(session, is_final=(index == last_index))
             )
             self.sink.publish_session(
                 session=session,
                 events=session_events,
                 equity_point=equity_point,
+                candidate_audits=candidate_audits,
                 initial_entry_selection=selection,
             )
             if selection is not None:
@@ -1877,6 +2158,10 @@ def run_simulation(
 
 
 __all__ = [
+    "CandidateAuditDisposition",
+    "CandidateAuditEvidenceV1",
+    "CandidateAuditOrderV1",
+    "CandidateAuditV1",
     "DividendAppliedEventV1",
     "EntryFillEventV1",
     "EquityCurvePointV1",

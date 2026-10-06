@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Mapping, Protocol, cast
 from types import MappingProxyType
 
 from app.core import config
-from app.integrations.fx_history import BankOfEnglandFxSeriesFetcher, ChainedFxQuoteFetcher
+from app.integrations.fx_history import (
+    BankOfEnglandFxSeriesFetcher,
+    ChainedFxQuoteFetcher,
+)
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.historical_price_repo import (
@@ -27,6 +30,7 @@ from app.repositories.historical_price_repo import (
 from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.backtest_engine import (
+    CandidateAuditV1,
     EquityCurvePointV1,
     EntryFillEventV1,
     MarketDataAccessV1,
@@ -793,6 +797,7 @@ class _StagingSink:
         session: date,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        candidate_audits: tuple[CandidateAuditV1, ...] = (),
         initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None:
         published_selection = initial_entry_selection
@@ -827,6 +832,7 @@ class _StagingSink:
                 portfolio_state=portfolio_state,
                 events=events,
                 equity_point=equity_point,
+                candidate_audits=candidate_audits,
                 final_cash_base=equity_point.cash_base,
                 initial_entry_selection=published_selection,
                 lease=self.lease,
@@ -1368,9 +1374,7 @@ class BacktestExecutionEngine:
                 == TradingCalendar().session_table_digest()
                 and pin.price_plane_policy_version == "HistoricalMarketPlanesV1"
             )
-            rows = access.bounded(
-                through=pin.request_end - timedelta(days=1)
-            ).rows
+            rows = access.bounded(through=pin.request_end - timedelta(days=1)).rows
             sessions = tuple(date.fromisoformat(str(row["session"])) for row in rows)
             expected_sessions = TradingCalendar().sessions_in_range(
                 pin.calendar_mic, pin.request_start, pin.request_end
