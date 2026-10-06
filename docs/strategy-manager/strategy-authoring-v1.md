@@ -295,6 +295,18 @@ function of `(session, security_id, side, rule_id)` alone, with SELL ranked
 before BUY for the same session/security. Return signals in whatever order
 is convenient; the validators below always produce one canonical order.
 
+Each Skill owns the ordering of its qualifying BUY candidates. When scarce
+position slots make that ordering matter, it may encode its within-batch rank
+as a descending ordinal `Decimal(N - rank + 1)` in `Signal.priority`, where N
+is the endpoint of that Skill's rank space (Buy & Hold uses configured
+`top_x`); rank 1 gets the highest value. The engine consumes this optional
+scalar generically, considering higher priorities first and missing priorities
+last, with its deterministic signal order resolving ties. A backtest runs one
+Strategy Skill, so priority values apply only within that Skill's candidate
+batch and are not comparable across sessions or Skills. Keep the Skill's raw
+score components and rank in its explanation. Priority does not change the
+canonical `sort_key` or outcomes when every candidate fits.
+
 ### `parameters`
 
 `parameters: StrategyParameters` is a read-only, JSON-compatible mapping

@@ -2329,6 +2329,31 @@ def test_cap_fills_slots_by_priority_then_engine_order() -> None:
     assert _cap_skips(output) == ["sec-a", "sec-d"]
 
 
+def test_preflight_rejection_does_not_consume_a_position_slot() -> None:
+    d0 = _MARCH_2024[0]
+    output = _run_capped(
+        security_ids=("sec-b", "sec-c"),
+        entries={
+            d0: [
+                _ranked_buy("sec-z-unpinned", d0, Decimal("3")),
+                _ranked_buy("sec-c", d0, Decimal("2")),
+                _ranked_buy("sec-b", d0, Decimal("1")),
+            ]
+        },
+        starting_capital=Decimal("2000"),
+        max_positions=2,
+    )
+
+    skips = {
+        event.security_id: event.reason
+        for event in output.events
+        if isinstance(event, SkippedSignalEventV1)
+    }
+    assert [fill[0] for fill in _entry_fills(output)] == ["sec-b", "sec-c"]
+    assert skips["sec-z-unpinned"] is SkipReasonCode.INELIGIBLE_SECURITY
+    assert _cap_skips(output) == []
+
+
 def test_priority_is_inert_when_every_candidate_fits() -> None:
     d0 = _MARCH_2024[0]
     security_ids = ("sec-a", "sec-b")

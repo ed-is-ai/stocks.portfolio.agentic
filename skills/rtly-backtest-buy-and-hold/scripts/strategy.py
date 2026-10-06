@@ -268,6 +268,7 @@ class BuyAndHoldStrategy:
                 side=SignalSide.BUY,
                 session=view.as_of_session,
                 rule_id=RULE_ID,
+                priority=Decimal(top_x - decision.rank + 1),
                 explanation=_selection_explanation(
                     score=decision.score,
                     rank=decision.rank,

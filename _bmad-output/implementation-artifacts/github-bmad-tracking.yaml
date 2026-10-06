@@ -1,5 +1,5 @@
 generated: 2026-08-20
-updated: 2026-09-14
+updated: 2026-10-06
 repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
@@ -259,6 +259,18 @@ standalone_issues:
     issue: 420
     status: review
     spec: spec-gh-420-backtest-metric-formatting.md
+  skill-owned-entry-ranking:
+    issue: 61
+    repository: ed-is-ai/stocks.portfolio.agentic
+    status: in-progress
+    feature_plan: feature-gh-61-skill-owned-entry-ranking.md
+    sub_issues: [62, 63, 64, 65, 66]
+    completed_sub_issues: [62]
+    stories:
+      gh-61-1-skill-priority-contract-and-buy-hold:
+        issue: 62
+        status: done
+        spec: spec-gh-62-skill-priority-contract-and-buy-hold.md
   buy-and-hold-top-x-strength:
     issue: 366
     status: done
