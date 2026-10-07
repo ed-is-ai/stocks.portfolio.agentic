@@ -24,6 +24,7 @@ from app.services.backtest.backtest_engine import (
     SkipReasonCode,
     SkippedSignalEventV1,
     SplitAppliedEventV1,
+    TerminalSettlementEventV1,
     TradeLogEvent,
 )
 from app.services.backtest.metrics import MetricUnavailableReason
@@ -43,6 +44,7 @@ _KIND_LABELS: dict[str, str] = {
     "skipped_signal": "Skipped",
     "split_applied": "Split",
     "dividend_applied": "Dividend",
+    "terminal_settlement": "Exit settled",
     "open_position_mark": "Open mark",
 }
 
@@ -55,6 +57,7 @@ _SKIP_REASON_TEXT: dict[SkipReasonCode, str] = {
     SkipReasonCode.POSITION_SIZE_ZERO: "Position size zero",
     SkipReasonCode.FILL_BEYOND_END: "Fill beyond run end",
     SkipReasonCode.MAX_CONCURRENT_POSITIONS: "Position limit reached",
+    SkipReasonCode.SECURITY_EXITED: "Security exited",
 }
 
 _EXECUTED_FILL_KINDS = frozenset({"entry_fill", "exit_fill"})
@@ -618,6 +621,25 @@ def _trade_log_row(
             detail=(
                 f"{event.shares_carried} shares credited "
                 f"{_money(event.cash_credit_base, base_currency)}"
+            ),
+        )
+    if isinstance(event, TerminalSettlementEventV1):
+        price = _money(event.settlement_price_native, event.currency)
+        basis = event.price_basis.replace("_", " ")
+        return TradeLogRowV1(
+            sequence=event.sequence,
+            kind=event.kind,
+            kind_label=kind_label,
+            security_id=event.security_id,
+            security_label=resolve_security_label(event.security_id, identities),
+            date=event.session.isoformat(),
+            shares=str(event.shares),
+            price=price,
+            pnl=_money(event.realized_pnl_base, base_currency),
+            rule_id="—",
+            detail=(
+                f"Exit settled at {price} ({basis}) — {event.exit_type} "
+                f"on {event.exit_session.isoformat()}"
             ),
         )
     # OpenPositionMarkEventV1: an open final mark, never a fabricated exit

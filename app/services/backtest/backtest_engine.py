@@ -162,6 +162,7 @@ class SkipReasonCode(StrEnum):
     ALLOCATION_UNAFFORDABLE = "allocation_unaffordable"
     FILL_BEYOND_END = "fill_beyond_end"
     MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"
+    SECURITY_EXITED = "security_exited"
 
 
 # ---------------------------------------------------------------------------
@@ -310,6 +311,53 @@ class OpenPositionMarkEventV1(_EngineModel):
         return _serialize_share_quantity(value)
 
 
+#: Exit types that settle a held position (#82); ``still_trading``,
+#: ``rename`` and ``unknown`` are not company exits.
+#: Exit types that cash out a held position; others are not exits.
+SettlingExitType = Literal["acquisition", "bankruptcy", "delisting"]
+
+
+class TerminalExitV1(_EngineModel):
+    """One pinned company exit (#82): a held position is cashed out on the
+    first engine session on or after ``exit_session``."""
+
+    security_id: str = Field(min_length=1)
+    exit_session: date
+    exit_type: SettlingExitType
+    #: Native quote-unit price; ``None`` settles at the last close on or
+    #: before ``exit_session``.
+    terminal_price_native: Decimal | None = Field(default=None, ge=Decimal(0))
+    source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class TerminalSettlementEventV1(_EngineModel):
+    """One held position cashed out because its company left the market --
+    no commission, applied after corporate actions and before fills."""
+
+    kind: Literal["terminal_settlement"] = "terminal_settlement"
+    security_id: str = Field(min_length=1)
+    session: date
+    exit_session: date
+    exit_type: SettlingExitType
+    shares: Decimal = Field(gt=Decimal(0))
+    settlement_price_native: Decimal = Field(ge=Decimal(0))
+    price_basis: Literal["terminal_price", "last_close"]
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    quote_unit: str = Field(min_length=1)
+    proceeds_base: Decimal
+    cost_basis_base: Decimal
+    realized_pnl_base: Decimal
+    fx_rate: Decimal | None = None
+    fx_session: date | None = None
+    fx_revision: str | None = None
+    source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sequence: int = Field(ge=1)
+
+    @field_serializer("shares", when_used="json")
+    def _serialize_shares(self, value: Decimal) -> int | str:
+        return _serialize_share_quantity(value)
+
+
 #: The full closed set of Trade Log work events.
 TradeLogEvent = (
     EntryFillEventV1
@@ -317,6 +365,7 @@ TradeLogEvent = (
     | SkippedSignalEventV1
     | SplitAppliedEventV1
     | DividendAppliedEventV1
+    | TerminalSettlementEventV1
     | OpenPositionMarkEventV1
 )
 
@@ -599,6 +648,7 @@ class _Engine:
         sink: SessionBatchSink,
         month_observer: MonthBoundaryObserver,
         prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
+        terminal_exits: tuple[TerminalExitV1, ...] = (),
     ) -> None:
         self.manifest = manifest
         self.strategy = strategy
@@ -625,6 +675,7 @@ class _Engine:
                 "max_concurrent_positions must be a positive integer",
             )
         self.max_concurrent_positions: int | None = cap
+
 
         if not isinstance(strategy, StrategyProtocolV1):
             raise _fatal(
@@ -771,6 +822,21 @@ class _Engine:
         except CurrencyPolicyError as exc:
             raise _fatal(exc.code, self.start_date, exc.detail) from exc
 
+        self.terminal_exits: dict[str, TerminalExitV1] = {}
+        for item in terminal_exits:
+            if item.security_id in self.terminal_exits:
+                problem = "has more than one exit"
+            elif item.security_id not in self.market_data:
+                problem = "is not pinned in this run"
+            else:
+                self.terminal_exits[item.security_id] = item
+                continue
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                self.start_date,
+                f"terminal exit {item.security_id!r} {problem}",
+            )
+
         mics = sorted(set(self.mic_by_security.values()))
         union: set[date] = set()
         for mic in mics:
@@ -894,7 +960,10 @@ class _Engine:
     ) -> None:
         for security_id in sorted(self.positions):
             actions = self._actions_on(security_id, session)
+            exit_item = self.terminal_exits.get(security_id)
             for action in actions:
+                if exit_item is not None and action.session > exit_item.exit_session:
+                    continue  # the company had already left the market
                 action_key = (
                     f"{security_id}:{action.evidence_revision}:"
                     f"{action.session.isoformat()}:{action.action_type}"
@@ -963,6 +1032,67 @@ class _Engine:
         except MarketDataPolicyError as exc:
             raise _fatal(exc.code, session, exc.detail) from exc
 
+    # -- terminal exits -------------------------------------------------
+
+    def _exited(self, security_id: str, session: date) -> bool:
+        item = self.terminal_exits.get(security_id)
+        return item is not None and item.exit_session <= session
+
+    def _settle_terminal_exits(
+        self, session: date, session_events: list[TradeLogEvent]
+    ) -> None:
+        for security_id in sorted(self.positions):
+            if self._exited(security_id, session):
+                session_events.append(self._settle_one(security_id, session))
+
+    def _settle_one(self, security_id: str, session: date) -> TradeLogEvent:
+        item = self.terminal_exits[security_id]
+        price_native = item.terminal_price_native
+        price_basis: Literal["terminal_price", "last_close"] = "terminal_price"
+        if price_native is None:
+            row = self._latest_row_on_or_before(security_id, item.exit_session)
+            if row is None:
+                raise _fatal(
+                    SimulationErrorCode.MISSING_REQUIRED_CLOSE,
+                    session,
+                    f"no as-traded close is available to settle {security_id!r}",
+                )
+            price_native, price_basis = row.close, "last_close"
+        plane = self.market_data[security_id]
+        position = self.positions.pop(security_id)
+        try:
+            with deterministic_decimal_context():
+                native_proceeds = price_native * position.shares
+                cost_basis_base = quantize_eight(
+                    position.per_share_basis * position.shares
+                )
+        except DecimalException as exc:
+            raise _fatal(
+                "integrity_error", session, "settlement arithmetic failed"
+            ) from exc
+        conversion = self._convert(native_proceeds, plane, valuation_session=session)
+        proceeds_base = conversion.base_amount
+        self.cash = quantize_eight(self.cash + proceeds_base)
+        return TerminalSettlementEventV1(
+            security_id=security_id,
+            session=session,
+            exit_session=item.exit_session,
+            exit_type=item.exit_type,
+            shares=position.shares,
+            settlement_price_native=price_native,
+            price_basis=price_basis,
+            currency=plane.currency,
+            quote_unit=plane.quote_unit,
+            proceeds_base=proceeds_base,
+            cost_basis_base=cost_basis_base,
+            realized_pnl_base=quantize_eight(proceeds_base - cost_basis_base),
+            fx_rate=conversion.fx_rate,
+            fx_session=conversion.fx_session,
+            fx_revision=conversion.fx_revision,
+            source_digest=item.source_digest,
+            sequence=self._next_seq(),
+        )
+
     # -- fills --------------------------------------------------------------
 
     def _execute_fills(
@@ -977,6 +1107,13 @@ class _Engine:
             session_events.append(self._execute_fill(order, session))
 
     def _execute_fill(self, order: PendingOrderV1, session: date) -> TradeLogEvent:
+        if self._exited(order.security_id, session):
+            return self._skip_order(
+                order,
+                session,
+                SkipReasonCode.SECURITY_EXITED,
+                "security has left the market",
+            )
         row = self._row_on(order.security_id, session)
         price_native = row.open if row is not None else None
         if price_native is None:
@@ -1445,6 +1582,13 @@ class _Engine:
                 SkipReasonCode.INELIGIBLE_SECURITY,
                 "security is not pinned for this Run",
             )
+        if self._exited(signal.security_id, session):
+            return self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.SECURITY_EXITED,
+                "security has left the market",
+            )
         if signal.security_id in self.pending:
             return self._skip_signal(
                 signal,
@@ -1526,6 +1670,13 @@ class _Engine:
                 session,
                 SkipReasonCode.INELIGIBLE_SECURITY,
                 "security is not pinned for this Run",
+            )
+        if self._exited(signal.security_id, session):
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.SECURITY_EXITED,
+                "security has left the market",
             )
         if signal.security_id in self.pending:
             return None, self._skip_signal(
@@ -1617,6 +1768,7 @@ class _Engine:
     ]:
         session_events: list[TradeLogEvent] = []
         self._apply_actions(session, session_events)
+        self._settle_terminal_exits(session, session_events)
         self._execute_fills(session, session_events)
         equity_point = self._value_state(session)
         selection = self._process_signals(
@@ -1675,6 +1827,7 @@ def run_simulation(
     sink: SessionBatchSink | None = None,
     month_boundary_observer: MonthBoundaryObserver | None = None,
     prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
+    terminal_exits: tuple[TerminalExitV1, ...] = (),
 ) -> SimulationOutputV1:
     """Deterministically replay ``manifest`` and return its complete
     :class:`SimulationOutputV1` (AC 1-7).
@@ -1690,6 +1843,10 @@ def run_simulation(
     corporate action, ambiguous/missing/stale FX, missing/tampered pinned
     evidence, arithmetic failure, or an impossible portfolio invariant);
     no :class:`SimulationOutputV1` is ever returned for a Run that raised.
+
+    ``terminal_exits`` pins company exits (#82); a held position settles in
+    cash on the first session on or after its exit. Raises ``ValueError``
+    for a non-settling exit type or a repeated security.
     """
     engine = _Engine(
         manifest=manifest,
@@ -1704,6 +1861,7 @@ def run_simulation(
             else NoOpMonthBoundaryObserver()
         ),
         prepared_planes=prepared_planes,
+        terminal_exits=terminal_exits,
     )
     return engine.run()
 
@@ -1728,6 +1886,8 @@ __all__ = [
     "SkipReasonCode",
     "SkippedSignalEventV1",
     "SplitAppliedEventV1",
+    "TerminalExitV1",
+    "TerminalSettlementEventV1",
     "TradeLogEvent",
     "run_simulation",
 ]

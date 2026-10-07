@@ -315,7 +315,7 @@ def test_starting_capital_is_rendered_as_its_exact_decimal_string() -> None:
 
 
 def test_engine_and_protocol_schema_versions_bumped_for_real_engine_semantics() -> None:
-    assert ENGINE_VERSION == "backtest_engine.v8"
+    assert ENGINE_VERSION == "backtest_engine.v9"
     assert PROTOCOL_SCHEMA_VERSION == "strategy_protocol.v5"
 
 
@@ -389,7 +389,7 @@ def test_build_run_input_manifest_pins_the_real_ledger_action_metrics_digest(
 
     import app.services.backtest.run_input_manifest as run_input_manifest_module
 
-    assert manifest.engine_version == "backtest_engine.v8"
+    assert manifest.engine_version == "backtest_engine.v9"
     assert manifest.protocol_schema_version == "strategy_protocol.v5"
     assert manifest.ledger_action_metrics_digest == (
         run_input_manifest_module._ledger_action_metrics_digest(PROJECT_ROOT)

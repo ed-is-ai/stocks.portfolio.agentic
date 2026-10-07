@@ -36,6 +36,7 @@ from app.services.backtest.backtest_engine import (
     SimulationError,
     SimulationErrorCode,
     SplitAppliedEventV1,
+    TerminalSettlementEventV1,
     TradeLogEvent,
     run_simulation,
 )
@@ -790,7 +791,7 @@ class _StagingSink:
         for event in events:
             if isinstance(event, EntryFillEventV1):
                 self.open_positions[event.security_id] = Decimal(event.shares)
-            elif isinstance(event, ExitFillEventV1):
+            elif isinstance(event, (ExitFillEventV1, TerminalSettlementEventV1)):
                 self.open_positions.pop(event.security_id, None)
             elif isinstance(event, SplitAppliedEventV1):
                 self.open_positions[event.security_id] = event.shares_after
@@ -1132,6 +1133,8 @@ class BacktestExecutionEngine:
                 sink=sink,
                 month_boundary_observer=observer,
                 prepared_planes=prepared_planes,
+                # #82 C maps index-membership exits to securities.
+                terminal_exits=(),
             )
         except _BacktestCancelled:
             return self._cancel(job_id, claim_token)

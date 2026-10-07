@@ -1164,7 +1164,7 @@ CREATE TABLE IF NOT EXISTS trade_log (
     sequence INTEGER NOT NULL CHECK(sequence > 0),
     kind TEXT NOT NULL CHECK(kind IN (
         'entry_fill', 'exit_fill', 'skipped_signal', 'split_applied',
-        'dividend_applied', 'open_position_mark'
+        'dividend_applied', 'open_position_mark', 'terminal_settlement'
     )),
     security_id TEXT NOT NULL,
     event_json TEXT NOT NULL,
@@ -1909,6 +1909,75 @@ def _migrate_snapshot_exclusion_constraints(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_trade_log_kind_constraint(conn: sqlite3.Connection) -> None:
+    """Admit ``terminal_settlement`` trade log rows (#82) without data loss."""
+    table, replacement = "trade_log", "trade_log__kind_migration"
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    stale = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (replacement,)
+    ).fetchone()
+    legacy = row is not None and "'terminal_settlement'" not in str(row[0])
+    if not legacy and stale is None:
+        return
+
+    before = len(conn.execute(f'PRAGMA foreign_key_check("{table}")').fetchall())
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if stale is not None:
+            conn.execute(f'DROP TABLE "{replacement}"')
+        if legacy and row is not None:
+            dependents = conn.execute(
+                """SELECT type, name, sql FROM sqlite_master
+                   WHERE type IN ('trigger', 'index') AND sql IS NOT NULL
+                     AND (tbl_name=? OR instr(sql, ?) > 0)""",
+                (table, table),
+            ).fetchall()
+            columns = ", ".join(
+                f'"{item[1]}"'
+                for item in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            )
+            create_sql = (
+                str(row[0])
+                .replace(f'CREATE TABLE "{table}"', f'CREATE TABLE "{replacement}"', 1)
+                .replace(f"CREATE TABLE {table}", f"CREATE TABLE {replacement}", 1)
+                .replace(
+                    "'open_position_mark'",
+                    "'open_position_mark', 'terminal_settlement'",
+                    1,
+                )
+            )
+            rewritten = replacement in create_sql
+            if not rewritten or "'terminal_settlement'" not in create_sql:
+                raise sqlite3.DatabaseError("unrecognised trade_log schema")
+            conn.execute(create_sql)
+            conn.execute(
+                f'INSERT INTO "{replacement}" ({columns}) '
+                f'SELECT {columns} FROM "{table}"'
+            )
+            for kind, name, _sql in dependents:
+                conn.execute(f'DROP {str(kind).upper()} "{name}"')
+            conn.execute(f'DROP TABLE "{table}"')
+            conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
+            for _kind, _name, sql in dependents:
+                conn.execute(str(sql))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    # Only violations the rebuild introduced fail it (rowids are renumbered,
+    # so compare counts); older orphans stay as they were.
+    after = len(conn.execute(f'PRAGMA foreign_key_check("{table}")').fetchall())
+    if after > before:
+        raise sqlite3.IntegrityError("trade log kind migration violated foreign keys")
+
+
 def _ensure_trigger(conn: sqlite3.Connection, definition: str) -> None:
     """Replace a migrated trigger only when its stored definition differs."""
     definition = definition.strip().rstrip(";")
@@ -2001,6 +2070,7 @@ class BacktestRepository:
             conn.commit()
             _migrate_bats_mic_constraints(conn)
             _migrate_snapshot_exclusion_constraints(conn)
+            _migrate_trade_log_kind_constraint(conn)
             conn.execute("BEGIN IMMEDIATE")
             columns = {
                 str(row[1])
@@ -5443,8 +5513,11 @@ class BacktestRepository:
         normal write always inserts the Result and transitions the job
         together.
         """
-        from app.services.backtest.backtest_engine import ExitFillEventV1
-        from app.services.backtest.metrics import MetricsError, calculate_metrics
+        from app.services.backtest.metrics import (
+            ClosedTrade,
+            MetricsError,
+            calculate_metrics,
+        )
 
         now = self._job_now()
         with session(self._connect) as conn:
@@ -5508,7 +5581,7 @@ class BacktestRepository:
                 )
 
             closed_trades = tuple(
-                event for event in staging.events if isinstance(event, ExitFillEventV1)
+                event for event in staging.events if isinstance(event, ClosedTrade)
             )
             try:
                 metrics = calculate_metrics(
@@ -5610,9 +5683,9 @@ class BacktestRepository:
         (tamper detection, mirroring ``activate_snapshot_profile``'s
         rebuild-and-compare convention).
         """
-        from app.services.backtest.backtest_engine import ExitFillEventV1
         from app.services.backtest.metrics import (
             BacktestMetricsV1,
+            ClosedTrade,
             MetricsError,
             metric_availability,
         )
@@ -5700,7 +5773,7 @@ class BacktestRepository:
             raise BacktestIntegrityError("stored backtest result digest is invalid")
 
         closed_trades = tuple(
-            event for event in events if isinstance(event, ExitFillEventV1)
+            event for event in events if isinstance(event, ClosedTrade)
         )
         try:
             availability = metric_availability(
@@ -6244,6 +6317,7 @@ class BacktestRepository:
             OpenPositionMarkEventV1,
             SkippedSignalEventV1,
             SplitAppliedEventV1,
+            TerminalSettlementEventV1,
         )
 
         if not isinstance(payload, dict):
@@ -6255,6 +6329,7 @@ class BacktestRepository:
             "split_applied": SplitAppliedEventV1,
             "dividend_applied": DividendAppliedEventV1,
             "open_position_mark": OpenPositionMarkEventV1,
+            "terminal_settlement": TerminalSettlementEventV1,
         }
         kind = payload.get("kind")
         model = models.get(str(kind))
