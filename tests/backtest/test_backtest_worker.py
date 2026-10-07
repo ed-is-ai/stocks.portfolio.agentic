@@ -771,9 +771,7 @@ def test_worker_wires_run_currency_and_prepared_pinned_fx_into_market_view(
     def fail_redecode(_evidence):
         raise AssertionError("worker-prepared FX closes must be reused by engine")
 
-    monkeypatch.setattr(
-        backtest_engine_module, "prepare_fx_closes", fail_redecode
-    )
+    monkeypatch.setattr(backtest_engine_module, "prepare_fx_closes", fail_redecode)
     engine = worker_module.build_backtest_engine(claim.job.id, claim.claim_token, repo)
     engine._prices = prices  # type: ignore[attr-defined]
 

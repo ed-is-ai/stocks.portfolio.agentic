@@ -626,7 +626,9 @@ def test_base_currency_history_marks_excessive_fx_carry_unavailable(tmp_path) ->
     assert row["fx_revision"] == fx.data_revision
 
 
-def test_base_currency_history_keeps_market_view_selection_and_bound_errors(tmp_path) -> None:
+def test_base_currency_history_keeps_market_view_selection_and_bound_errors(
+    tmp_path,
+) -> None:
     view = _universe_view(tmp_path, (SECURITY_ID,))
     with pytest.raises(UnselectedSecurityError):
         view.base_currency_close_history("sec-outside", limit=2)

@@ -2737,7 +2737,10 @@ class BacktestRepository:
                 identity.security_id,
                 identity.evidence_digest,
             )
-            if existing is not None and tuple(str(value) for value in existing) != expected_identity:
+            if (
+                existing is not None
+                and tuple(str(value) for value in existing) != expected_identity
+            ):
                 raise sqlite3.IntegrityError(
                     "reference identity conflicts with existing security"
                 )
@@ -2759,7 +2762,12 @@ class BacktestRepository:
                 """INSERT INTO reference_identity_registry_revisions
                    (revision_digest, canonical_manifest_json, evidence_digest, created_at)
                    VALUES (?, ?, ?, ?)""",
-                (registry.revision, registry_json, registry.evidence_digest, captured_at),
+                (
+                    registry.revision,
+                    registry_json,
+                    registry.evidence_digest,
+                    captured_at,
+                ),
             )
             if existing is None and by_id is None:
                 conn.execute(
@@ -2782,7 +2790,9 @@ class BacktestRepository:
                 (aliases.revision,),
             ).fetchone()
             if alias_existing is not None and str(alias_existing[0]) != aliases_json:
-                raise sqlite3.IntegrityError("reference alias manifest digest collision")
+                raise sqlite3.IntegrityError(
+                    "reference alias manifest digest collision"
+                )
             self._insert_or_verify(
                 conn,
                 "reference_alias_manifests",
@@ -2812,8 +2822,13 @@ class BacktestRepository:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (aliases.revision, *alias_values),
                 )
-            elif tuple(str(value) if value is not None else None for value in alias_row) != alias_values:
-                raise sqlite3.IntegrityError("reference alias conflicts with existing entry")
+            elif (
+                tuple(str(value) if value is not None else None for value in alias_row)
+                != alias_values
+            ):
+                raise sqlite3.IntegrityError(
+                    "reference alias conflicts with existing entry"
+                )
         return ReferenceIdentityRegistrationV1(
             identity=identity,
             alias=alias,
@@ -2855,12 +2870,12 @@ class BacktestRepository:
             effective_to=None if row[5] is None else date.fromisoformat(str(row[5])),
             evidence_source=str(row[6]),
             evidence_digest=str(row[7]),
-            provenance=cast(Literal["provider_evidence", "manual_override"], str(row[8])),
+            provenance=cast(
+                Literal["provider_evidence", "manual_override"], str(row[8])
+            ),
         )
 
-    def reference_identity_details(
-        self, security_id: str
-    ) -> tuple[str, str, str, str]:
+    def reference_identity_details(self, security_id: str) -> tuple[str, str, str, str]:
         """Resolve one immutable reference identity and its registry revision."""
         with session(self._connect) as conn:
             row = conn.execute(
@@ -3602,7 +3617,8 @@ class BacktestRepository:
         )
 
         if (
-            submission.manifest_version not in {"run_input_manifest.v2", "run_input_manifest.v3"}
+            submission.manifest_version
+            not in {"run_input_manifest.v2", "run_input_manifest.v3"}
             or submission.source_preparation_job_id != prep_id
         ):
             raise StrategyJobConflict("invalid preparation seal")
@@ -3659,9 +3675,13 @@ class BacktestRepository:
                     or tuple(str(value) for value in alias_row)
                     != (pin.security_id, "yfinance", "ARCX", "SPY")
                 ):
-                    raise StrategyJobConflict("regime benchmark identity is unavailable")
+                    raise StrategyJobConflict(
+                        "regime benchmark identity is unavailable"
+                    )
                 try:
-                    price_evidence = historical_price_repository.verify(pin.price_revision)
+                    price_evidence = historical_price_repository.verify(
+                        pin.price_revision
+                    )
                     action_evidence = (
                         price_evidence
                         if pin.action_revision == pin.price_revision
@@ -3710,8 +3730,7 @@ class BacktestRepository:
                 == manifest.starting_capital
                 and submission.universe_selection == s == manifest.universe_selection
                 and submission.regime_benchmark == prep.regime_benchmark
-                and getattr(manifest, "regime_benchmark", None)
-                == prep.regime_benchmark
+                and getattr(manifest, "regime_benchmark", None) == prep.regime_benchmark
                 and manifest.source_preparation_job_id == prep_id
                 and manifest.digest() == submission.run_input_manifest_digest
                 and submission.execution_contract_digest
@@ -3792,7 +3811,10 @@ class BacktestRepository:
                 ),
             )
             if isinstance(manifest, RunInputManifestV3):
-                for revision in {manifest.regime_benchmark.price_revision, manifest.regime_benchmark.action_revision}:
+                for revision in {
+                    manifest.regime_benchmark.price_revision,
+                    manifest.regime_benchmark.action_revision,
+                }:
                     historical_price_repository.pin("backtest", cid, revision)
             fence = _lease_fence_params(lease)
             cursor = conn.execute(
@@ -4129,7 +4151,8 @@ class BacktestRepository:
         left_selection = left_result.universe_selection
         right_selection = right_result.universe_selection
         if (
-            left_result.manifest_version in {"run_input_manifest.v2", "run_input_manifest.v3"}
+            left_result.manifest_version
+            in {"run_input_manifest.v2", "run_input_manifest.v3"}
             and left_selection is not None
             and right_selection is not None
             and left_selection.run_universe_digest
@@ -9076,10 +9099,18 @@ class BacktestRepository:
         if not selected:
             return ()
         preferred = dict(self.snapshot_member_revisions(profile_hash, snapshot_month))
-        resolved = {security_id: preferred[security_id] for security_id in selected if security_id in preferred}
-        missing = tuple(security_id for security_id in selected if security_id not in resolved)
+        resolved = {
+            security_id: preferred[security_id]
+            for security_id in selected
+            if security_id in preferred
+        }
+        missing = tuple(
+            security_id for security_id in selected if security_id not in resolved
+        )
         if not missing:
-            return tuple((security_id, resolved[security_id]) for security_id in selected)
+            return tuple(
+                (security_id, resolved[security_id]) for security_id in selected
+            )
 
         placeholders = ",".join("?" for _ in missing)
         with session(self._connect) as conn:

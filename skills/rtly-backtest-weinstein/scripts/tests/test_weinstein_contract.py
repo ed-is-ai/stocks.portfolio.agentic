@@ -149,12 +149,18 @@ def test_entry_requires_strict_breakout_and_complete_current_history() -> None:
     equal_breakout.loc[equal_breakout.index[-1], "close"] = history["high"].iloc[-2]
 
     assert strategy.entry_signals(_View(equal_breakout, _scan()), PARAMETERS) == []
-    assert strategy.entry_signals(
-        _View(cast(pd.DataFrame, history.iloc[:-1, :]), _scan()), PARAMETERS
-    ) == []
-    assert strategy.entry_signals(
-        _View(cast(pd.DataFrame, history.iloc[-203:, :]), _scan()), PARAMETERS
-    ) == []
+    assert (
+        strategy.entry_signals(
+            _View(cast(pd.DataFrame, history.iloc[:-1, :]), _scan()), PARAMETERS
+        )
+        == []
+    )
+    assert (
+        strategy.entry_signals(
+            _View(cast(pd.DataFrame, history.iloc[-203:, :]), _scan()), PARAMETERS
+        )
+        == []
+    )
 
 
 def test_entry_fails_closed_for_missing_future_or_invalid_volume_evidence() -> None:
@@ -358,9 +364,7 @@ class _RankedView(_KeyedView):
         self, security_id: str, *, limit: int
     ) -> pd.DataFrame:
         assert limit == 253
-        return cast(
-            pd.DataFrame, self._momentum[security_id].iloc[-limit:, :].copy()
-        )
+        return cast(pd.DataFrame, self._momentum[security_id].iloc[-limit:, :].copy())
 
 
 def _ranking_reason(signal: Signal) -> SignalReasonV1:
@@ -376,7 +380,9 @@ def _fact(reason: SignalReasonV1, label: str) -> ExplanationFactV1:
     return next(fact for fact in reason.facts if fact.label == label)
 
 
-def test_entry_ranking_prefers_momentum_over_identifier_and_explains_endpoints() -> None:
+def test_entry_ranking_prefers_momentum_over_identifier_and_explains_endpoints() -> (
+    None
+):
     low_id, high_id = "sec-a", "sec-z"
     view = _RankedView(
         {low_id: _history(), high_id: _history()},
@@ -407,7 +413,9 @@ def test_entry_ranking_prefers_momentum_over_identifier_and_explains_endpoints()
     assert _fact(ranking, "Score currency").observed == "GBP"
 
 
-def test_relative_volume_breaks_momentum_ties_then_identifier_breaks_exact_ties() -> None:
+def test_relative_volume_breaks_momentum_ties_then_identifier_breaks_exact_ties() -> (
+    None
+):
     ids = ("sec-a", "sec-b", "sec-c")
     view = _RankedView(
         {
@@ -428,9 +436,8 @@ def test_relative_volume_breaks_momentum_ties_then_identifier_breaks_exact_ties(
         "sec-a": Decimal("2"),
         "sec-b": Decimal("1"),
     }
-    assert (
-        _fact(_ranking_reason(signals[0]), "Relative volume").observed
-        == Decimal("3")
+    assert _fact(_ranking_reason(signals[0]), "Relative volume").observed == Decimal(
+        "3"
     )
 
 
@@ -453,12 +460,13 @@ def test_valid_negative_momentum_ranks_ahead_of_fx_missing() -> None:
 
     assert by_id[missing_id].priority == Decimal("1")
     assert by_id[valid_id].priority == Decimal("2")
-    assert (
-        _fact(_ranking_reason(by_id[valid_id]), "Momentum").observed
-        == Decimal("-0.1")
+    assert _fact(_ranking_reason(by_id[valid_id]), "Momentum").observed == Decimal(
+        "-0.1"
     )
     assert (
-        _fact(_ranking_reason(by_id[missing_id]), "Momentum unavailable reason").observed
+        _fact(
+            _ranking_reason(by_id[missing_id]), "Momentum unavailable reason"
+        ).observed
         == "fx_outside_coverage"
     )
 
@@ -509,9 +517,9 @@ def test_momentum_uses_253_canonical_rows_and_excludes_t_through_t_minus_20() ->
 
 
 def test_missing_optional_currency_history_preserves_entry_with_reason() -> None:
-    signal = WeinsteinStrategy().entry_signals(
-        _View(_history(), _scan()), PARAMETERS
-    )[0]
+    signal = WeinsteinStrategy().entry_signals(_View(_history(), _scan()), PARAMETERS)[
+        0
+    ]
 
     assert signal.priority == Decimal("1")
     assert _fact(_ranking_reason(signal), "Ranking policy").observed == (
@@ -531,8 +539,8 @@ def test_short_history_and_invalid_momentum_endpoints_keep_qualifying_entry() ->
     full = _momentum_history()
     short = cast(pd.DataFrame, full.iloc[1:, :].copy())
     invalid_numerator = full.copy()
-    invalid_numerator.iloc[-22, invalid_numerator.columns.get_loc("close")] = (
-        Decimal("NaN")
+    invalid_numerator.iloc[-22, invalid_numerator.columns.get_loc("close")] = Decimal(
+        "NaN"
     )
     invalid_denominator = full.copy()
     invalid_denominator.iloc[-253, invalid_denominator.columns.get_loc("close")] = (
@@ -545,9 +553,7 @@ def test_short_history_and_invalid_momentum_endpoints_keep_qualifying_entry() ->
         (invalid_denominator, "invalid_momentum_endpoint"),
     )
     for history, expected_reason in cases:
-        view = _RankedView(
-            {security_id: _history()}, {security_id: history}
-        )
+        view = _RankedView({security_id: _history()}, {security_id: history})
         signals = WeinsteinStrategy().entry_signals(
             view, {**PARAMETERS, "selected_securities": [security_id]}
         )
@@ -555,9 +561,7 @@ def test_short_history_and_invalid_momentum_endpoints_keep_qualifying_entry() ->
         assert len(signals) == 1
         assert signals[0].priority == Decimal("1")
         assert (
-            _fact(
-                _ranking_reason(signals[0]), "Momentum unavailable reason"
-            ).observed
+            _fact(_ranking_reason(signals[0]), "Momentum unavailable reason").observed
             == expected_reason
         )
 

@@ -1,5 +1,5 @@
 # generated: 2026-08-10
-# last_updated: 2026-10-07 (GH-66 controlled ranking evaluation complete; current-main integration in progress)
+# last_updated: 2026-10-08 (GH-61 stories 62-66 complete; integrated with current main)
 # project: Agents.stocks
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-10-07 (GH-66 controlled ranking evaluation complete; current-main integration in progress)"
+last_updated: "2026-10-08 (GH-61 stories 62-66 complete; integrated with current main)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -50,7 +50,7 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 development_status:
   feature-strategy-manager-multi-run-performance: done
   strategy-manager-multi-run-performance: done
-  feature-gh-61-skill-owned-entry-ranking: in-progress
+  feature-gh-61-skill-owned-entry-ranking: done
   gh-61-1-skill-priority-contract-and-buy-hold: done
   gh-61-2-weinstein-momentum-with-bounded-currency: done
   gh-61-3-rank-remaining-strategy-skills: done

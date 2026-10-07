@@ -262,7 +262,7 @@ standalone_issues:
   skill-owned-entry-ranking:
     issue: 61
     repository: ed-is-ai/stocks.portfolio.agentic
-    status: in-progress
+    status: done
     feature_plan: feature-gh-61-skill-owned-entry-ranking.md
     sub_issues: [62, 63, 64, 65, 66]
     completed_sub_issues: [62, 63, 64, 65, 66]

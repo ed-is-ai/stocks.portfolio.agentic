@@ -328,8 +328,7 @@ def _boe_fx_evidence(
         "request_contract_version": BOE_FX_SERIES_REQUEST_CONTRACT_VERSION,
         "request_contract": {
             "provider_endpoint": (
-                "https://www.bankofengland.co.uk/boeapps/database/"
-                "fromshowcolumns.asp"
+                "https://www.bankofengland.co.uk/boeapps/database/fromshowcolumns.asp"
             ),
             "series_code": "XUDLUSS",
             "start": "2000-01-01",

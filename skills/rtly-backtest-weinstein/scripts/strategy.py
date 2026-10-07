@@ -196,7 +196,12 @@ def _ranking_evidence(
     """Read bounded base-currency endpoints without affecting eligibility."""
     if not isinstance(view, BaseCurrencyCloseHistoryViewV1):
         return _EntryRankEvidence(
-            None, None, None, None, _relative_volume(qualification), "base_currency_history_unavailable"
+            None,
+            None,
+            None,
+            None,
+            _relative_volume(qualification),
+            "base_currency_history_unavailable",
         )
     history = view.base_currency_close_history(security_id, limit=253)
     currency = view.base_currency
@@ -388,9 +393,7 @@ def _entry_explanation(
                         label="Candidate count", observed=Decimal(candidate_count)
                     ),
                     ExplanationFactV1(label="Ordinal rank", observed=Decimal(rank)),
-                    ExplanationFactV1(
-                        label="Encoded priority", observed=priority
-                    ),
+                    ExplanationFactV1(label="Encoded priority", observed=priority),
                     ExplanationFactV1(
                         label="Momentum unavailable reason",
                         observed=ranking.missing_reason,

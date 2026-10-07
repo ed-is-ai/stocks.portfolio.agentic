@@ -405,9 +405,7 @@ class MarketView:
         evidence still raises through the ordinary market/currency policy.
         """
         self.require_selected(security_id)
-        history = self.price_history(
-            security_id, limit=limit, columns=("close",)
-        )
+        history = self.price_history(security_id, limit=limit, columns=("close",))
         if history.empty:
             return pd.DataFrame(
                 columns=BASE_CURRENCY_CLOSE_COLUMNS,
@@ -481,7 +479,8 @@ class MarketView:
             fx_session = None
             fx_revision = (
                 self.fx_evidence.data_revision
-                if source_currency != self.base_currency and self.fx_evidence is not None
+                if source_currency != self.base_currency
+                and self.fx_evidence is not None
                 else None
             )
             try:
@@ -556,7 +555,10 @@ class MarketView:
             access = self.historical_price_repo.open_read(pin.price_revision)
             owns_access = True
         try:
-            if access.data_revision != pin.price_revision or access.security_id != security_id:
+            if (
+                access.data_revision != pin.price_revision
+                or access.security_id != security_id
+            ):
                 raise MarketDataPolicyError(
                     "integrity_error",
                     "regime benchmark access does not match its pinned reference",

@@ -745,7 +745,6 @@ class _Engine:
             )
         self.max_concurrent_positions: int | None = cap
 
-
         if not isinstance(strategy, StrategyProtocolV1):
             raise _fatal(
                 SimulationErrorCode.INVALID_STRATEGY_IMPLEMENTATION,
