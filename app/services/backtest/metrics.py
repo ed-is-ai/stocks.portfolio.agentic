@@ -22,12 +22,20 @@ import statistics
 
 from pydantic import BaseModel, ConfigDict
 
-from app.services.backtest.backtest_engine import EquityCurvePointV1, ExitFillEventV1
+from app.services.backtest.backtest_engine import (
+    EquityCurvePointV1,
+    ExitFillEventV1,
+    TerminalSettlementEventV1,
+)
 from app.services.backtest.market_planes import deterministic_decimal_context
 
 #: Trading sessions per year used to annualize Sharpe at a 0% risk-free
 #: rate (AD-8).
 _TRADING_SESSIONS_PER_YEAR = 252
+
+
+#: A position closed by a sell or by an exit settlement.
+ClosedTrade = ExitFillEventV1 | TerminalSettlementEventV1
 
 
 class MetricsError(ValueError):
@@ -110,7 +118,7 @@ def _validate_equity_curve(equity_curve: tuple[EquityCurvePointV1, ...]) -> None
         previous_session = point.session
 
 
-def _validate_closed_trades(closed_trades: tuple[ExitFillEventV1, ...]) -> None:
+def _validate_closed_trades(closed_trades: tuple[ClosedTrade, ...]) -> None:
     for trade in closed_trades:
         if not trade.realized_pnl_base.is_finite():
             raise MetricsError(
@@ -190,7 +198,7 @@ def _sharpe_ratio(daily_returns: list[Decimal]) -> float | None:
         raise MetricsError("integrity_error", "sharpe ratio arithmetic failed") from exc
 
 
-def _win_rate(closed_trades: tuple[ExitFillEventV1, ...]) -> float | None:
+def _win_rate(closed_trades: tuple[ClosedTrade, ...]) -> float | None:
     if not closed_trades:
         return None
     wins = sum(1 for trade in closed_trades if trade.realized_pnl_base > 0)
@@ -201,14 +209,15 @@ def calculate_metrics(
     *,
     starting_capital: Decimal,
     equity_curve: tuple[EquityCurvePointV1, ...],
-    closed_trades: tuple[ExitFillEventV1, ...],
+    closed_trades: tuple[ClosedTrade, ...],
 ) -> BacktestMetricsV1:
     """Compute AD-8's four Metrics from a completed simulation's exact
     Equity Curve and closed trades.
 
     Pure: never recomputes fills/P&L/actions/FX (Story 2.4's authority),
     never touches a repository or the filesystem. ``closed_trades`` must
-    contain only :class:`ExitFillEventV1` events -- skips, corporate
+    contain only :class:`ExitFillEventV1` and
+    :class:`TerminalSettlementEventV1` events -- skips, corporate
     actions, and :class:`OpenPositionMarkEventV1` final marks are never
     closed trades and must be filtered out by the caller before this call.
     Raises :class:`MetricsError` for structurally invalid input; never for
@@ -229,7 +238,7 @@ def calculate_metrics(
 def metric_availability(
     *,
     equity_curve: tuple[EquityCurvePointV1, ...],
-    closed_trades: tuple[ExitFillEventV1, ...],
+    closed_trades: tuple[ClosedTrade, ...],
 ) -> MetricAvailabilityV1:
     """Return typed reasons Win Rate/Sharpe are ``null`` for retrieval
     (AC 5), computed with the exact same rules :func:`calculate_metrics`
