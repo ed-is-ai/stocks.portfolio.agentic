@@ -957,8 +957,7 @@ class _Engine:
         next_day = signal_session + timedelta(days=1)
         if next_day >= self.end_exclusive:
             return None
-        candidates = self.calendar.sessions_in_range(mic, next_day, self.end_exclusive)
-        return candidates[0] if candidates else None
+        return self.calendar.first_session_in_range(mic, next_day, self.end_exclusive)
 
     def _latest_row_on_or_before(
         self, security_id: str, as_of: date

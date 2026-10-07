@@ -265,7 +265,7 @@ standalone_issues:
     status: in-progress
     feature_plan: feature-gh-61-skill-owned-entry-ranking.md
     sub_issues: [62, 63, 64, 65, 66]
-    completed_sub_issues: [62, 63, 64, 65]
+    completed_sub_issues: [62, 63, 64, 65, 66]
     stories:
       gh-61-1-skill-priority-contract-and-buy-hold:
         issue: 62
@@ -283,6 +283,10 @@ standalone_issues:
         issue: 65
         status: done
         spec: spec-gh-65-persist-and-explain-ranking-decisions.md
+      gh-61-5-validate-ranking-performance:
+        issue: 66
+        status: done
+        spec: gh-61-5-validate-ranking-performance.md
   buy-and-hold-top-x-strength:
     issue: 366
     status: done

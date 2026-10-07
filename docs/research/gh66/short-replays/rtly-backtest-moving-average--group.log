@@ -1,0 +1,72 @@
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-11-23 count=60
+ARM legacy-repeat-1.json: completed seconds=342.44 planes=755
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-11-23 count=60
+ARM proposed-repeat-1.json: completed seconds=38.92 planes=755
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-11-23 count=60
+ARM random-11-repeat-1.json: completed seconds=39.03 planes=755
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-11-23 count=60
+ARM legacy-repeat-2.json: completed seconds=37.98 planes=755
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-11-23 count=60
+ARM proposed-repeat-2.json: completed seconds=38.37 planes=755
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-11-23 count=60
+ARM random-11-repeat-2.json: completed seconds=38.17 planes=755
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/legacy/None: session=2016-11-23 count=60
+ARM legacy-repeat-3.json: completed seconds=37.97 planes=755
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/proposed/None: session=2016-11-23 count=60
+ARM proposed-repeat-3.json: completed seconds=38.21 planes=755
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-01 count=1
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-14 count=10
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-09-28 count=20
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-10-12 count=30
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-10-26 count=40
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-11-09 count=50
+PROGRESS rtly-backtest-moving-average/random/11: session=2016-11-23 count=60
+ARM random-11-repeat-3.json: completed seconds=38.00 planes=755

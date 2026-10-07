@@ -1,5 +1,5 @@
 # generated: 2026-08-10
-# last_updated: 2026-10-07 (GH-61 ranking stories 62-66 being integrated)
+# last_updated: 2026-10-07 (GH-66 controlled ranking evaluation complete; current-main integration in progress)
 # project: Agents.stocks
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-10-07 (GH-61 ranking stories 62-66 being integrated)"
+last_updated: "2026-10-07 (GH-66 controlled ranking evaluation complete; current-main integration in progress)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -55,6 +55,7 @@ development_status:
   gh-61-2-weinstein-momentum-with-bounded-currency: done
   gh-61-3-rank-remaining-strategy-skills: done
   gh-61-4-persist-and-explain-ranking-decisions: done
+  gh-61-5-validate-ranking-performance: done
   feature-gh-665-spy-regime-benchmark: in-progress
   gh-665-1-register-spy-reference-evidence: done
   gh-665-2-pin-reference-in-run-manifest: done

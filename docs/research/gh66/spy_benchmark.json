@@ -1,0 +1,15 @@
+{
+  "end_month": "2026-08",
+  "experiment_id": "f72d586e3a85ada75bb06e5ff0734918729b91696bb49b259de9b76ac16cd056",
+  "failure_excerpt": "Traceback (most recent call last):\n  File \"<frozen runpy>\", line 203, in _run_module_as_main\n  File \"<frozen runpy>\", line 88, in _run_code\n  File \"/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py\", line 2523, in <module>\n    main()\n    ~~~~^^\n  File \"/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py\", line 2477, in main\n    result = run_one(\n        manifest_path=args.manifest,\n    ...<7 lines>...\n        end_month=args.end_month,\n    )\n  File \"/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py\", line 1268, in run_one\n    ) = _current_manifest_and_resolver(\n        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        backtest_db,\n        ^^^^^^^^^^^^\n    ...<5 lines>...\n        skills_root=legacy_skill_root,\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py\", line 966, in _current_manifest_and_resolver\n    current_manifest = RunInputManifestV2.model_validate(raw_manifest)\n  File \"/Users/edyau/Git/stocks.portfolio.agentic/.venv/lib/python3.14/site-packages/pydantic/main.py\", line 732, in model_validate\n    return cls.__pydantic_validator__.validate_python(\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        obj,\n        ^^^^\n    ...<5 lines>...\n        by_name=by_name,\n        ^^^^^^^^^^^^^^^^\n    )\n    ^\npydantic_core._pydantic_core.ValidationError: 1 validation error for RunInputManifestV2\nsecurities\n  Input should be a valid tuple [type=tuple_type, input_value=[{'security_id': '556ba16...29f9273d9ae521a2f5af2'}], input_type=list]\n    For further information visit https://errors.pydantic.dev/2.13/v/tuple_type",
+  "failure_exit_code": 1,
+  "failure_log": "spy_benchmark.log",
+  "original_manifest_digest": "235069a49a0744566cd3e34df879973ed02ba35da35505e25c056aaa8bdf4118",
+  "original_run_id": "59926a2b-4ee6-4b1e-9ac0-519399f2ae3f",
+  "schema": "gh66_research_result.v1",
+  "seed": null,
+  "start_month": "2016-09",
+  "status": "failed",
+  "strategy_id": "SPY",
+  "variant": "benchmark"
+}

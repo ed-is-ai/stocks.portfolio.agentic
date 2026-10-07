@@ -1,0 +1,91 @@
+{
+  "completed_replays": 9,
+  "experiment_id": "f72d586e3a85ada75bb06e5ff0734918729b91696bb49b259de9b76ac16cd056",
+  "overhead_investigation": "not triggered",
+  "period": [
+    "2016-09",
+    "2016-11"
+  ],
+  "planned_replays": 9,
+  "proposed_repeat_digests": [
+    "bd25a233d1cfd680afe4da810bcefbee4ac5dad74bbf242d4d77f6f0b51a82d3",
+    "bd25a233d1cfd680afe4da810bcefbee4ac5dad74bbf242d4d77f6f0b51a82d3",
+    "bd25a233d1cfd680afe4da810bcefbee4ac5dad74bbf242d4d77f6f0b51a82d3"
+  ],
+  "proposed_repeats_deterministic": true,
+  "proposed_vs_legacy_median_runtime_overhead_pct": 0.5893354941791662,
+  "repeat_schedule": [
+    "legacy",
+    "proposed",
+    "random-11",
+    "legacy",
+    "proposed",
+    "random-11",
+    "legacy",
+    "proposed",
+    "random-11"
+  ],
+  "repeats_per_variant": 3,
+  "runtime_comparison_method": "median total seconds; each arm computes its own Skill output on shared warmed market data",
+  "signal_cache_shared": false,
+  "strategy_id": "rtly-backtest-moving-average",
+  "variants": {
+    "legacy": {
+      "audit_payload_bytes": [
+        228734,
+        228734,
+        228734
+      ],
+      "audit_rows": [
+        122,
+        122,
+        122
+      ],
+      "median_seconds": 41.291788707952946,
+      "peak_rss_bytes_max": 5420023808,
+      "statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ]
+    },
+    "proposed": {
+      "audit_payload_bytes": [
+        396652,
+        396652,
+        396652
+      ],
+      "audit_rows": [
+        122,
+        122,
+        122
+      ],
+      "median_seconds": 41.535135874990374,
+      "peak_rss_bytes_max": 5420023808,
+      "statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ]
+    },
+    "random-11": {
+      "audit_payload_bytes": [
+        305637,
+        305637,
+        305637
+      ],
+      "audit_rows": [
+        122,
+        122,
+        122
+      ],
+      "median_seconds": 41.34259654197376,
+      "peak_rss_bytes_max": 5420023808,
+      "statuses": [
+        "completed",
+        "completed",
+        "completed"
+      ]
+    }
+  }
+}

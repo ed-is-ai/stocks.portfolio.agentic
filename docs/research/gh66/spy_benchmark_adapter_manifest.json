@@ -1,0 +1,13 @@
+{
+  "schema": "gh66_spy_benchmark_adapter.v1",
+  "created_at": "2026-10-07T19:57:58.893014+00:00",
+  "parent_experiment_id": "f72d586e3a85ada75bb06e5ff0734918729b91696bb49b259de9b76ac16cd056",
+  "adapter_path": "docs/research/gh66/spy_benchmark_adapter.py",
+  "adapter_sha256": "b284f3eab74f5c74e4b4c25931dbbbed699abb515a87f4e48193ead9c492b85a",
+  "manifest_normalization": "Convert only securities from list to tuple at RunInputManifestV2.model_validate boundary; preserve elements and ordering.",
+  "entry_policy": "Buy the sole pinned SPY security on the first Run session via InitialEntrySelectionV1; hold through the final session with no exits.",
+  "benchmark_assumptions": "Same frozen dates, GBP 10000 capital, pinned SPY price/action/FX evidence, gross engine costs, and non-reinvested cash dividends.",
+  "supersedes_invalid_diagnostic": "docs/research/gh66/spy_benchmark_no_trade_diagnostic.json; excluded because the Buy & Hold Skill required 253 prior closes and the SPY pin did not include enough pre-horizon history.",
+  "result_path": "docs/research/gh66/supplemental-spy-benchmark.json",
+  "adapter_id": "51fd062bcac9f71feac9cbb3fd8afc5a9a9c50cf1266edd1cf7ee43f16f7b5d0"
+}

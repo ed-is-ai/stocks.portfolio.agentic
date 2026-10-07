@@ -1,0 +1,315 @@
+{
+  "created_at": "2026-10-07T21:06:19.936395+00:00",
+  "experiment_id": "f72d586e3a85ada75bb06e5ff0734918729b91696bb49b259de9b76ac16cd056",
+  "external_inputs": [
+    {
+      "path": "/private/tmp/gh66-single-ma/single-instrument-evidence.sqlite",
+      "role": "single_instrument_historical_cache",
+      "sha256": "4dc2309d0e0875b685928075cbd7b85d4e329a794c219e41b86e0343a574336c"
+    }
+  ],
+  "files": [
+    {
+      "path": "docs/research/gh66/execution-source/gh66_experiment.py",
+      "sha256": "a81e74e3a511928a5286af1d622af8557991521998e7e2dae4376543d38a88a3"
+    },
+    {
+      "path": "docs/research/gh66/execution-source/gh66_variants.py",
+      "sha256": "d9a18d2e76f7390a827563eb210cb6a809d5a370c0fab854a1da7d951b77e4ad"
+    },
+    {
+      "path": "docs/research/gh66/experiment_manifest.json",
+      "sha256": "e4a29c426976408e8fede1c2b2599f4be7755d9286369683206fab9e652b7ea0"
+    },
+    {
+      "path": "docs/research/gh66/full-repeat-control.json",
+      "sha256": "76b7719eb59a85943f1699ee8a79d0368ad84a74502b764bf687dc9f6e03fc81"
+    },
+    {
+      "path": "docs/research/gh66/matrix-progress.json",
+      "sha256": "4702d0ab44638079456925ccb1da77f3befd87b3c8a6b3ebcc147bdcd57b22a0"
+    },
+    {
+      "path": "docs/research/gh66/original-results-before.json",
+      "sha256": "4d173c73cef5de55adf116cae25b03f05432432d0901508fb9adb8982227ff8a"
+    },
+    {
+      "path": "docs/research/gh66/original-results-preservation.json",
+      "sha256": "126bf5c1c2e7a00976264341cd99e027e3b75ec009c18b7280119ca9560517c3"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-buy-and-hold--legacy.json",
+      "sha256": "24f2f84ec1cee40b599b761ef469fe0324e200af4c5301d3a019d4677f65f1e2"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-buy-and-hold--proposed.json",
+      "sha256": "73c1954c62e90e9176b10992270111cf15575f6461c498f62624e8a58a879146"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-buy-and-hold--random-11.json",
+      "sha256": "5c7e52b86739d3afa5d5073bfcb7ef28d63b4fbd255c875a1cd2abea42657de1"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-buy-and-hold--random-23.json",
+      "sha256": "80c85dc3189565ebfa63e1a22fb30008c6b6144ced5640ad7d605019f94c199a"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-buy-and-hold--random-37.json",
+      "sha256": "c1aee3309aab41837d1a934aed9eb96746aa37cb4d767104f971d17c7c40952c"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-buy-and-hold--random-53.json",
+      "sha256": "70c077c68a6f007f454b67868185c2aff6b66084e5495f27b70a2fd8529d3f5d"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-buy-and-hold--random-71.json",
+      "sha256": "cac09fa7ccd2bb42aa76f9d6cbd7dc0c2486ce41b9691b2ef8c14776e7f9a2c2"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-darvas-box--legacy.json",
+      "sha256": "baafeaddab558f9fb7d55ceab1dfdde69a5a8dfcda718823c2e6b0f927a1195c"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-darvas-box--proposed.json",
+      "sha256": "442640593d29709dd14c40f2a252e28d49587ea0c6a290e22dadac57b26e5fb7"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-darvas-box--random-11.json",
+      "sha256": "f0c0d4a6f50526a175be94d81ac601ff56f2f045e5a225ea09f06b8809529201"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-darvas-box--random-23.json",
+      "sha256": "6bcddd9ebc65578a00d484101b6e73675d54278093f11a3835b241408cf602ef"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-darvas-box--random-37.json",
+      "sha256": "167ac3b5bf00e097710dedd362f43ba0af609823ae5ca54f1db421dfc2de36de"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-darvas-box--random-53.json",
+      "sha256": "4225fee5c223a4b6ee4852aadb43ca03a9a3d9a098adebcb4a036d3c43cb1d60"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-darvas-box--random-71.json",
+      "sha256": "bcc4d9d5a7a171187025e21cb48bd1f1533b559fad4427eb1630fda9ce879592"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-minervini--legacy.json",
+      "sha256": "3c59ce5e886194cdc17fff0a2045b81f13217c9308a88e42b56a0a6e7dd40e13"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-minervini--proposed.json",
+      "sha256": "01f591c9efa32002b2a161f5dfdecd862350e04415a9849857c839970adc4eed"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-minervini--random-11.json",
+      "sha256": "a8c883f4e2d89803a3b19c0ce5d7d539233b948fb9cc9d1b2c46951e2453aabf"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-minervini--random-23.json",
+      "sha256": "9eca5c82e4eb15dd9b8a1fd778b29b4e88a1fff03b22c5792928d1336d5027f1"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-minervini--random-37.json",
+      "sha256": "7c29e79d7343e3086c8247f2dbb53dcb722724c3038ea866f1276f7df1c45b2e"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-minervini--random-53.json",
+      "sha256": "f404abdffd2dd74e195b104ae79d8aaa956686b11f0e0798c096773fe5e041f9"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-minervini--random-71.json",
+      "sha256": "e3b5445729270ab5b329a16734ef32d051fd88d39eb1bc24832836f52e211f10"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-moving-average--legacy.json",
+      "sha256": "f551270b8ffee32027d3ef5ec41e1635646d0f5e53a141b3f2601beb242b069e"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-moving-average--proposed.json",
+      "sha256": "4ff57e671ef59c466c5d93ff9f31382cbdbf52f64cb32523391f637efca736df"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-moving-average--random-11.json",
+      "sha256": "ac25496d26c273235296dd95b0217bc3033ecdae517db7c3754b1b30eff31bf7"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-moving-average--random-23.json",
+      "sha256": "24302cef99b4a888ef29b0ad2ba83c6283119bc8a147b312ae34ae78282c38dd"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-moving-average--random-37.json",
+      "sha256": "259f9c41a5f59f4a46da427c53a7372947ca47542721ddd7594462bbef39e402"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-moving-average--random-53.json",
+      "sha256": "110a74267f4679b569de9cf310b1db950bf0a006f79ef8fd07d21a5fda046c80"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-moving-average--random-71.json",
+      "sha256": "f53c487e42df094d7c42f827a9857bffdc57af6a64380a4abd43a20bde7c6c94"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-turtle-trend--legacy.json",
+      "sha256": "5fbbbf369b31ed58eeeabcd8be0bed0f675ee916e53655521b3e0e46b7a56b4b"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-turtle-trend--proposed.json",
+      "sha256": "463b7f611582ffb5433b6bad4da6835ea60a256a64d7e8f11296be627065690f"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-turtle-trend--random-11.json",
+      "sha256": "2e69c0c0e1d5dcc8fbeb73d0d3e06cb47833692f3c17bf0cb5dd8f6841ee605e"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-turtle-trend--random-23.json",
+      "sha256": "77fc8b52452aa6073a1a13ae72cd72a2a5ceaeac861d894c366ae62a7df7e360"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-turtle-trend--random-37.json",
+      "sha256": "301ab89d9bad3d45162155931b97992c42daef76fd66daf2a8ee36f248d7e6ec"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-turtle-trend--random-53.json",
+      "sha256": "7758aeedf2c2a54c08a97c48246bdb68f7cae30a0ef769bc0658301ce9e2ca95"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-turtle-trend--random-71.json",
+      "sha256": "39548e1d4b5505cf95404e8926df5f709a4f63caf9142ccffc536acb53a02a24"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-weinstein--legacy.json",
+      "sha256": "d3dac59a9a560f47aaa59ae3cc9f1f86fedecbcd165c65a0b77978e63955cd00"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-weinstein--proposed.json",
+      "sha256": "48ea56a6fad78ddad3aab23c30e3fd602dc2f1d527543a3a4ae7443449eb6c43"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-weinstein--random-11.json",
+      "sha256": "0721f8b73e593f9e80de8e9b52f6aa2cc2e2f5b49ce13519251b2261956f1093"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-weinstein--random-23.json",
+      "sha256": "934843892be6829c594c277e2d2ba4aae3affcc9f9d2c3919d2ab2b97dd3d31f"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-weinstein--random-37.json",
+      "sha256": "d6961b71e16f4ef2e10c261db1c631e8995ecbf31fb43b6baa46180d53d3706b"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-weinstein--random-53.json",
+      "sha256": "34c8e6e3cd5548b5874d0e2be013ea4be5e44a3ede1984f39c9a2ee558384edc"
+    },
+    {
+      "path": "docs/research/gh66/runs/rtly-backtest-weinstein--random-71.json",
+      "sha256": "2b735a1288135160924e92d770f75cc169a10a3b5c98826289f12face2c97955"
+    },
+    {
+      "path": "docs/research/gh66/short-benchmark.json",
+      "sha256": "c7d042b35e15f674e7a2e2a2b915fd891da139d144318dd3143cf9d54c3351a4"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/legacy-repeat-1.json",
+      "sha256": "dba91090dc1b6c008938f31a5be480a12078d8a043e36679558c591ee31b8aac"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/legacy-repeat-2.json",
+      "sha256": "2d664273c76097ab6dfedfaeafc748cae71ae5a41701532e2bfbd5b7774b5db1"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/legacy-repeat-3.json",
+      "sha256": "f6362669ca243a9d7a028113181fa996b7a33df382dfb84575732f9d2c5dfc96"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/proposed-repeat-1.json",
+      "sha256": "cc12acd61964ff089eb9f836a628506493cfc0042eb2cc016141efa8ff6945c4"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/proposed-repeat-2.json",
+      "sha256": "89ebc034e9a08f9624f34799866369ac02aa04c80f183ebb728780f6f70c6243"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/proposed-repeat-3.json",
+      "sha256": "3a0477a0001b81f7403bfc7c6fd98849c9942935daa48868bb337e1d0a28a791"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/random-11-repeat-1.json",
+      "sha256": "1cdd9b035e273c4fbe476ae37a76626d865e71a00e0cfb9e197edb479fe19502"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/random-11-repeat-2.json",
+      "sha256": "d3070423c709dcc8d266c4d0b62967686ee67a0a7072804cf7fd0109cd018f3a"
+    },
+    {
+      "path": "docs/research/gh66/short-replays/random-11-repeat-3.json",
+      "sha256": "a59c8dc62b89df782022cee86464afefc60fc6909806e87ab03817bf3041cc6e"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/evidence-setup.json",
+      "sha256": "bd8d9712d8678d6c576561da6e24e9bf1738b152acb13f2d97125d44b8e388b3"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/qqq-cap1-manifest.json",
+      "sha256": "458f626d843213ff37ac1ab64f158798769080b135b0e778d9e5b5b98a9ca641"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/qqq-cap1-result.json",
+      "sha256": "4112dc4d48c4ee6db70f537bc576d55fab2643e0bc4528aae50a9cec481a230e"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/qqq-cap10-manifest.json",
+      "sha256": "15e65e5b8ba162ed3a4e1dd179afa84ec6eee52eda2575d0f239723e1991b099"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/qqq-cap10-result.json",
+      "sha256": "a5a84d2e900b5a814a35ea60663a5e9523f91bd36fee58212c6bcc243217aa44"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/spy-cap1-manifest.json",
+      "sha256": "15c2249232ba0d74c25dcf88735f8da69250d3bfa3f3d9f82bf099c8f5bf2c31"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/spy-cap1-result.json",
+      "sha256": "230d7f3c95bfeed3aa4ecc54138dcc17dadd2cb5998d549326fab349e6b40be3"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/spy-cap10-manifest.json",
+      "sha256": "cd0540d360c87747374cd67bf1bd9b3bba6fcc3b820ae08f261de6d81e19b976"
+    },
+    {
+      "path": "docs/research/gh66/single-instrument/spy-cap10-result.json",
+      "sha256": "6d50dee26e2b6ac6193d289b373abe3fe0f09c248328bc863fc43f9f36296427"
+    },
+    {
+      "path": "docs/research/gh66/single_instrument_ma_runner.py",
+      "sha256": "375bb06b60f7c10f25cfc18e500969d8714bd23322ef4a7399ff2c1ccbf01a05"
+    },
+    {
+      "path": "docs/research/gh66/spy_benchmark.json",
+      "sha256": "63da887f75a3c8138b2427f464809ff8a504a6a68c4f2634f07a9aeaae9600e8"
+    },
+    {
+      "path": "docs/research/gh66/spy_benchmark_adapter.py",
+      "sha256": "b284f3eab74f5c74e4b4c25931dbbbed699abb515a87f4e48193ead9c492b85a"
+    },
+    {
+      "path": "docs/research/gh66/spy_benchmark_adapter_manifest.json",
+      "sha256": "78b541b153bf0673bd9f83f9e0f824f926307d87b8c0689254bafd19e3947e40"
+    },
+    {
+      "path": "docs/research/gh66/supplemental-spy-benchmark.json",
+      "sha256": "031359a4ce121cb5aeba5a783d0b43b69978a1d610508dd18956b2fb5e11b527"
+    },
+    {
+      "path": "scripts/research/gh66_experiment.py",
+      "sha256": "96e1debc39ce724f3a933fa809305430ec2b8aa9cfcbd189c9700e09bc5c024f"
+    },
+    {
+      "path": "scripts/research/gh66_variants.py",
+      "sha256": "d9a18d2e76f7390a827563eb210cb6a809d5a370c0fab854a1da7d951b77e4ad"
+    }
+  ],
+  "report_source_sha256": "59a3d925335f9fa0321c4e65203aab73b02b433211ae7505acbe5dc3ee906867",
+  "schema": "gh66_results_seal.v1"
+}

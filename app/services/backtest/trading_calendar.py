@@ -139,6 +139,22 @@ class TradingCalendar:
         sessions = calendar.sessions_in_range(bounded_start, bounded_end)
         return tuple(timestamp.date() for timestamp in sessions)
 
+    def first_session_in_range(
+        self, mic: str, start: date, end_exclusive: date
+    ) -> date | None:
+        """Return the first canonical session without materializing the range."""
+        if start >= end_exclusive:
+            raise CalendarContractError("calendar interval must be non-empty")
+        calendar = self._calendar(mic)
+        bounded_start = max(pd.Timestamp(start), calendar.first_session)
+        bounded_end = min(
+            pd.Timestamp(end_exclusive - timedelta(days=1)), calendar.last_session
+        )
+        if bounded_start > bounded_end:
+            return None
+        session = calendar.date_to_session(bounded_start, direction="next")
+        return session.date() if session <= bounded_end else None
+
     @staticmethod
     def closed_month(month: str, *, as_of: date) -> str:
         """Validate one fully closed historical calendar month."""
