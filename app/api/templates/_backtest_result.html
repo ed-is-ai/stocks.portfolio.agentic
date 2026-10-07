@@ -242,6 +242,15 @@
     </div>
   </details>
 
+  <!-- Per-candidate allocation evidence is a bounded, separately loaded
+       companion to the immutable economic Result. -->
+  <section id="candidate-audit-section" aria-labelledby="candidate-audit-heading" class="mb-4">
+    <h2 id="candidate-audit-heading" class="h5">Candidate allocation audit</h2>
+    <div id="candidate-audit-content">
+      {% include "_backtest_candidate_audit.html" %}
+    </div>
+  </section>
+
   <!-- Trade Log -->
   <h2 class="h5">Trade Log</h2>
   {% if not trade_log.has_events %}
@@ -264,7 +273,7 @@
         </thead>
         <tbody>
           {% for row in trade_log.rows %}
-          <tr>
+          <tr id="trade-log-event-{{ row.sequence }}">
             <td>{{ row.sequence }}</td>
             <td>{{ row.kind_label }}</td>
             <td>

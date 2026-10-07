@@ -69,6 +69,15 @@ current volume meets the prior 50-session mean multiple. Exit the full
 position at the configured loss threshold, on a non-Stage-2 scan, or when the
 close falls below its current 150-session SMA.
 
+When more qualifying entries compete for slots, rank them by 252-session
+price momentum in Run currency (`close[-22] / close[-253] - 1`), then current
+volume divided by the prior 50-session mean, then security ID ascending.
+Request no more than 253 bounded base-currency close rows. Missing momentum
+evidence stays eligible, ranks after valid momentum, and is explained with its
+availability reason. Valid negative momentum still ranks ahead of missing
+momentum. The historical view supplies converted closes only; this Skill owns
+the endpoints and ranking policy.
+
 When `enable_position_upgrade` is true, also sell the weakest held position
 (lowest percent above its own 150-session SMA) when the strongest unheld
 candidate's percent-above-SMA reading exceeds the weakest holding's by at

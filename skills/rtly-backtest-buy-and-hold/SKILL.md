@@ -47,6 +47,11 @@ excluded with a plain-language reason in the completed Result.
 Select the top `top_x` (default 10) by return descending and canonical security
 ID ascending; record a stable excluded decision for every other member. Never
 rerank, rebalance, emit an ordinary entry candidate, or emit SELL.
+Give each selected BUY a descending ordinal priority of `top_x - rank + 1`
+(as a Decimal), so rank 1 receives the first available slot when selected
+candidates exceed the position cap. This preserves the existing return and ID
+order; retain the raw return and rank in the signal explanation, and emit the
+full selected basket without truncating it to the cap.
 
 Suggest a default risk stop (`stop_level`) for a held position at
 `average cost x (1 - risk_stop_pct / 100)`. A missing setting reads as 10

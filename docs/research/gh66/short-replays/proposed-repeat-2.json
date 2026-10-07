@@ -1,0 +1,526 @@
+{
+  "active_skill_source_digest": "b891872fd83e2632bfe86b19b28acea7175b0fa81bb0866b9794a870bb371c55",
+  "audit_storage": {
+    "isolated_sqlite_page_bytes": 524288,
+    "payload_bytes": 396652,
+    "rows": 122
+  },
+  "candidate_audit_sha256": "2c0f6e6f5f889c8418a820f76e12135d6dae98c32a489f94cb13f7e677d32e9a",
+  "end_month": "2016-11",
+  "equity_curve": [
+    {
+      "cash_base": "10000.00000000",
+      "positions_value_base": "0",
+      "sequence": 1,
+      "session": "2016-09-01",
+      "total_equity_base": "10000.00000000"
+    },
+    {
+      "cash_base": "8133.06505422",
+      "positions_value_base": "1916.96988827",
+      "sequence": 4,
+      "session": "2016-09-02",
+      "total_equity_base": "10050.03494249"
+    },
+    {
+      "cash_base": "8133.06505422",
+      "positions_value_base": "1913.32015406",
+      "sequence": 5,
+      "session": "2016-09-05",
+      "total_equity_base": "10046.38520828"
+    },
+    {
+      "cash_base": "3173.78265644",
+      "positions_value_base": "6852.53718094",
+      "sequence": 11,
+      "session": "2016-09-06",
+      "total_equity_base": "10026.31983738"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "9894.29390797",
+      "sequence": 16,
+      "session": "2016-09-07",
+      "total_equity_base": "10177.88324247"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "9955.10336825",
+      "sequence": 26,
+      "session": "2016-09-08",
+      "total_equity_base": "10238.69270275"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "9899.78410280",
+      "sequence": 35,
+      "session": "2016-09-09",
+      "total_equity_base": "10183.37343730"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "9949.13938166",
+      "sequence": 40,
+      "session": "2016-09-12",
+      "total_equity_base": "10232.72871616"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "10041.74267068",
+      "sequence": 50,
+      "session": "2016-09-13",
+      "total_equity_base": "10325.33200518"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "10090.58830029",
+      "sequence": 51,
+      "session": "2016-09-14",
+      "total_equity_base": "10374.17763479"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "10194.99373559",
+      "sequence": 54,
+      "session": "2016-09-15",
+      "total_equity_base": "10478.58307009"
+    },
+    {
+      "cash_base": "283.58933450",
+      "positions_value_base": "10243.75179350",
+      "sequence": 57,
+      "session": "2016-09-16",
+      "total_equity_base": "10527.34112800"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10231.07645655",
+      "sequence": 59,
+      "session": "2016-09-19",
+      "total_equity_base": "10533.47752063"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10311.98336382",
+      "sequence": 67,
+      "session": "2016-09-20",
+      "total_equity_base": "10614.38442790"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10365.74465540",
+      "sequence": 71,
+      "session": "2016-09-21",
+      "total_equity_base": "10668.14571948"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10295.13124611",
+      "sequence": 74,
+      "session": "2016-09-22",
+      "total_equity_base": "10597.53231019"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10363.19762215",
+      "sequence": 76,
+      "session": "2016-09-23",
+      "total_equity_base": "10665.59868623"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10267.94223525",
+      "sequence": 79,
+      "session": "2016-09-26",
+      "total_equity_base": "10570.34329933"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10374.97650362",
+      "sequence": 83,
+      "session": "2016-09-27",
+      "total_equity_base": "10677.37756770"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10347.87215620",
+      "sequence": 86,
+      "session": "2016-09-28",
+      "total_equity_base": "10650.27322028"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10231.47743971",
+      "sequence": 88,
+      "session": "2016-09-29",
+      "total_equity_base": "10533.87850379"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10359.32234170",
+      "sequence": 91,
+      "session": "2016-09-30",
+      "total_equity_base": "10661.72340578"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10514.02047526",
+      "sequence": 93,
+      "session": "2016-10-03",
+      "total_equity_base": "10816.42153934"
+    },
+    {
+      "cash_base": "302.40106408",
+      "positions_value_base": "10589.19055659",
+      "sequence": 95,
+      "session": "2016-10-04",
+      "total_equity_base": "10891.59162067"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10692.01252944",
+      "sequence": 98,
+      "session": "2016-10-05",
+      "total_equity_base": "10999.90723659"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10734.74304593",
+      "sequence": 101,
+      "session": "2016-10-06",
+      "total_equity_base": "11042.63775308"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10803.57251995",
+      "sequence": 104,
+      "session": "2016-10-07",
+      "total_equity_base": "11111.46722710"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10864.70579276",
+      "sequence": 107,
+      "session": "2016-10-10",
+      "total_equity_base": "11172.60049991"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10546.70110583",
+      "sequence": 112,
+      "session": "2016-10-11",
+      "total_equity_base": "10854.59581298"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10584.63434556",
+      "sequence": 117,
+      "session": "2016-10-12",
+      "total_equity_base": "10892.52905271"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10529.48230023",
+      "sequence": 118,
+      "session": "2016-10-13",
+      "total_equity_base": "10837.37700738"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10605.80712391",
+      "sequence": 119,
+      "session": "2016-10-14",
+      "total_equity_base": "10913.70183106"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10631.34515374",
+      "sequence": 122,
+      "session": "2016-10-17",
+      "total_equity_base": "10939.23986089"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10606.38652367",
+      "sequence": 124,
+      "session": "2016-10-18",
+      "total_equity_base": "10914.28123082"
+    },
+    {
+      "cash_base": "307.89470715",
+      "positions_value_base": "10635.43112810",
+      "sequence": 127,
+      "session": "2016-10-19",
+      "total_equity_base": "10943.32583525"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10539.37058464",
+      "sequence": 129,
+      "session": "2016-10-20",
+      "total_equity_base": "10862.28929179"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10503.39977517",
+      "sequence": 131,
+      "session": "2016-10-21",
+      "total_equity_base": "10826.31848232"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10572.16434345",
+      "sequence": 133,
+      "session": "2016-10-24",
+      "total_equity_base": "10895.08305060"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10539.27432146",
+      "sequence": 134,
+      "session": "2016-10-25",
+      "total_equity_base": "10862.19302861"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10487.43253565",
+      "sequence": 136,
+      "session": "2016-10-26",
+      "total_equity_base": "10810.35124280"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10515.01254398",
+      "sequence": 138,
+      "session": "2016-10-27",
+      "total_equity_base": "10837.93125113"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10540.38532705",
+      "sequence": 139,
+      "session": "2016-10-28",
+      "total_equity_base": "10863.30403420"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10501.83313925",
+      "sequence": 141,
+      "session": "2016-10-31",
+      "total_equity_base": "10824.75184640"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10426.39519978",
+      "sequence": 143,
+      "session": "2016-11-01",
+      "total_equity_base": "10749.31390693"
+    },
+    {
+      "cash_base": "322.91870715",
+      "positions_value_base": "10331.69001544",
+      "sequence": 144,
+      "session": "2016-11-02",
+      "total_equity_base": "10654.60872259"
+    },
+    {
+      "cash_base": "324.29164974",
+      "positions_value_base": "10378.63605424",
+      "sequence": 146,
+      "session": "2016-11-03",
+      "total_equity_base": "10702.92770398"
+    },
+    {
+      "cash_base": "324.29164974",
+      "positions_value_base": "10291.30526308",
+      "sequence": 147,
+      "session": "2016-11-04",
+      "total_equity_base": "10615.59691282"
+    },
+    {
+      "cash_base": "324.29164974",
+      "positions_value_base": "10577.70688055",
+      "sequence": 148,
+      "session": "2016-11-07",
+      "total_equity_base": "10901.99853029"
+    },
+    {
+      "cash_base": "331.07008127",
+      "positions_value_base": "10551.53008284",
+      "sequence": 150,
+      "session": "2016-11-08",
+      "total_equity_base": "10882.60016411"
+    },
+    {
+      "cash_base": "331.07008127",
+      "positions_value_base": "10749.43243186",
+      "sequence": 151,
+      "session": "2016-11-09",
+      "total_equity_base": "11080.50251313"
+    },
+    {
+      "cash_base": "331.07008127",
+      "positions_value_base": "10935.08161537",
+      "sequence": 153,
+      "session": "2016-11-10",
+      "total_equity_base": "11266.15169664"
+    },
+    {
+      "cash_base": "331.07008127",
+      "positions_value_base": "10969.80065295",
+      "sequence": 155,
+      "session": "2016-11-11",
+      "total_equity_base": "11300.87073422"
+    },
+    {
+      "cash_base": "331.07008127",
+      "positions_value_base": "11156.33182528",
+      "sequence": 156,
+      "session": "2016-11-14",
+      "total_equity_base": "11487.40190655"
+    },
+    {
+      "cash_base": "331.07008127",
+      "positions_value_base": "11213.08525856",
+      "sequence": 159,
+      "session": "2016-11-15",
+      "total_equity_base": "11544.15533983"
+    },
+    {
+      "cash_base": "331.07008127",
+      "positions_value_base": "11098.94364690",
+      "sequence": 161,
+      "session": "2016-11-16",
+      "total_equity_base": "11430.01372817"
+    },
+    {
+      "cash_base": "334.64508155",
+      "positions_value_base": "11186.08534083",
+      "sequence": 164,
+      "session": "2016-11-17",
+      "total_equity_base": "11520.73042238"
+    },
+    {
+      "cash_base": "344.31044867",
+      "positions_value_base": "11268.44268428",
+      "sequence": 168,
+      "session": "2016-11-18",
+      "total_equity_base": "11612.75313295"
+    },
+    {
+      "cash_base": "344.31044867",
+      "positions_value_base": "11236.82729181",
+      "sequence": 172,
+      "session": "2016-11-21",
+      "total_equity_base": "11581.13774048"
+    },
+    {
+      "cash_base": "344.31044867",
+      "positions_value_base": "11260.28839769",
+      "sequence": 174,
+      "session": "2016-11-22",
+      "total_equity_base": "11604.59884636"
+    },
+    {
+      "cash_base": "344.31044867",
+      "positions_value_base": "11268.03409990",
+      "sequence": 177,
+      "session": "2016-11-23",
+      "total_equity_base": "11612.34454857"
+    },
+    {
+      "cash_base": "344.31044867",
+      "positions_value_base": "11263.27230782",
+      "sequence": 180,
+      "session": "2016-11-24",
+      "total_equity_base": "11607.58275649"
+    },
+    {
+      "cash_base": "758.05010794",
+      "positions_value_base": "10881.50050289",
+      "sequence": 184,
+      "session": "2016-11-25",
+      "total_equity_base": "11639.55061083"
+    },
+    {
+      "cash_base": "764.09264742",
+      "positions_value_base": "10834.15254866",
+      "sequence": 189,
+      "session": "2016-11-28",
+      "total_equity_base": "11598.24519608"
+    },
+    {
+      "cash_base": "764.09264742",
+      "positions_value_base": "10790.97332805",
+      "sequence": 192,
+      "session": "2016-11-29",
+      "total_equity_base": "11555.06597547"
+    },
+    {
+      "cash_base": "764.09264742",
+      "positions_value_base": "10860.09754207",
+      "sequence": 194,
+      "session": "2016-11-30",
+      "total_equity_base": "11624.19018949"
+    }
+  ],
+  "event_count": 141,
+  "event_sha256": "32580459593fb625c142842c877274fd7c4ba86d3ccb46324cf672b400217b64",
+  "execution_contract_digest": "506b38400b60eabb3d8c9ed7c4ce3ce767b39d9b01d5f8edc846aaf9c787a16f",
+  "experiment_id": "f72d586e3a85ada75bb06e5ff0734918729b91696bb49b259de9b76ac16cd056",
+  "manifest_digest": "0e601a55cfe3548da24438817c20142275fcf5c961f42d2785ee2d1348282da3",
+  "metrics": {
+    "cagr": 0.8418667416592294,
+    "candidate_audit_rows": 122,
+    "candidate_dispositions": {
+      "competition_rejected": 3,
+      "filled": 11,
+      "full_book_rejected": 106,
+      "preflight_rejected": 2
+    },
+    "contested_selections": 3,
+    "end_value": "11624.19018949",
+    "exit_count": 1,
+    "explanation_coverage_pct": 100.0,
+    "full_book_rejections": 106,
+    "max_drawdown": -0.04985442620046129,
+    "mean_invested_exposure_pct": 92.5545708619059,
+    "momentum_evidence_coverage_pct": 22.950819672131146,
+    "priority_coverage_pct": 100.0,
+    "sharpe_ratio": 4.477664748023667,
+    "start_value": "10000.00000000",
+    "time_invested_pct": 98.46153846153847,
+    "total_return": 0.162419018949,
+    "turnover_on_initial_capital": 1.081127133733,
+    "win_rate": 0.0
+  },
+  "original_manifest_digest": "dca820e7043a6ffe056c50dfbd66674593d1658c666491a0f9af75e9fac28dc1",
+  "original_run_id": "71fc5af6-3624-4220-bb57-879f66b07e5a",
+  "performance": {
+    "elapsed_seconds": 38.36665045795962,
+    "peak_rss_bytes": 5420023808,
+    "peak_rss_delta_bytes": 0,
+    "prepared_market_plane_count": 755,
+    "setup_seconds": 3.1684854170307517,
+    "total_seconds": 41.535135874990374
+  },
+  "proposed_skill_source_digest": "b891872fd83e2632bfe86b19b28acea7175b0fa81bb0866b9794a870bb371c55",
+  "research_code_sha256": {
+    "scripts/research/gh66_experiment.py": "a81e74e3a511928a5286af1d622af8557991521998e7e2dae4376543d38a88a3",
+    "scripts/research/gh66_variants.py": "d9a18d2e76f7390a827563eb210cb6a809d5a370c0fab854a1da7d951b77e4ad"
+  },
+  "research_signal_cache": {
+    "entry_batches_computed": 65,
+    "entry_batches_reused": 0,
+    "initial_selections_computed": 0,
+    "initial_selections_reused": 0
+  },
+  "run_id": "2b58564df9ad852f62cc18f8f72e82ec87e2d0802c83140e247166dda2598019",
+  "schema": "gh66_research_result.v1",
+  "seed": null,
+  "simulation_result_sha256": "bd25a233d1cfd680afe4da810bcefbee4ac5dad74bbf242d4d77f6f0b51a82d3",
+  "start_month": "2016-09",
+  "status": "completed",
+  "strategy_id": "rtly-backtest-moving-average",
+  "variant": "proposed"
+}

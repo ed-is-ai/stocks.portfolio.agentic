@@ -23,6 +23,8 @@ from app.api.dependencies import (
 )
 from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
+    BacktestCandidateAuditPageV1,
+    BacktestCandidateAuditSummaryV1,
     BacktestIntegrityError,
     BacktestRepository,
     BacktestResultV1,
@@ -31,6 +33,9 @@ from app.repositories.backtest_repo import (
     ComparisonIneligibleReason,
 )
 from app.services.backtest.backtest_engine import (
+    CandidateAuditDisposition,
+    CandidateAuditOrderV1,
+    CandidateAuditV1,
     DividendAppliedEventV1,
     EntryFillEventV1,
     EquityCurvePointV1,
@@ -93,6 +98,10 @@ from app.services.backtest.strategy_protocol import (
     SignalSide,
     StrategyParameterV1,
 )
+from app.services.backtest.strategy_explanation import (
+    SignalExplanationV1,
+    SignalReasonV1,
+)
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
@@ -144,6 +153,8 @@ class FakeRepo:
         self.latest_result: BacktestResultV1 | None = None
         self.result_error: Exception | None = None
         self.result_coverage: CoverageSummaryV1 | None = None
+        self.candidate_audit_page: BacktestCandidateAuditPageV1 | None = None
+        self.candidate_audit_error: Exception | None = None
         # Story 3.3: a second, independently-settable Result/error so
         # Comparison tests can express "side A loads fine, side B is
         # corrupt/vanished" (and vice versa) -- `self.result`/
@@ -247,7 +258,7 @@ class FakeRepo:
             ),
         )
 
-    def backtest_result(self, run_id):
+    def backtest_result(self, run_id, *, include_candidate_audit_summary=True):
         from app.services.backtest.strategy_job import StrategyJobNotFound
 
         if run_id in self.results_by_id:
@@ -271,6 +282,23 @@ class FakeRepo:
         if self.result is None or self.result.run_id != run_id:
             raise StrategyJobNotFound(f"missing result: {run_id}")
         return self.result
+
+    def backtest_result_candidate_audit_page(self, run_id, *, page=1, page_size=25):
+        if self.candidate_audit_error is not None:
+            raise self.candidate_audit_error
+        if type(page) is not int or page < 1:
+            raise ValueError("candidate audit page must be a positive integer")
+        if self.candidate_audit_page is not None:
+            return replace(self.candidate_audit_page, page=page)
+        return BacktestCandidateAuditPageV1(
+            summary=BacktestCandidateAuditSummaryV1(
+                recorded=False, contract_version="not_recorded"
+            ),
+            page=page,
+            page_size=page_size,
+            total_pages=1,
+            records=(),
+        )
 
     def latest_completed_backtest_result(self):
         return self.latest_result
@@ -347,6 +375,14 @@ class FakeRepo:
             strategy_id="momentum_v1",
             start_month=self.strategy_run_start,
             end_month=self.strategy_run_end,
+            profile_hash=(
+                self.result.profile_hash
+                if self.result is not None
+                else self.profile.profile_hash
+            ),
+            base_currency=(
+                self.result.base_currency if self.result is not None else "USD"
+            ),
         )
 
     def list_backtest_activities(self):
@@ -2550,6 +2586,139 @@ def test_result_page_universe_row_and_composition_panel(services):
     assert "security_ids" not in text
     assert "sid_001" not in text
     assert "lookback=20" in text
+
+
+def test_candidate_audit_result_page_and_fragment_handle_legacy_and_integrity(
+    services,
+):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+
+    result_response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert result_response.status_code == 200
+    assert 'aria-labelledby="candidate-audit-heading"' in result_response.text
+    assert "Candidate audit evidence was not recorded" in result_response.text
+
+    fragment = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}/candidate-audit")
+    assert fragment.status_code == 200
+    assert "Candidate audit evidence was not recorded" in fragment.text
+
+    repo.candidate_audit_error = BacktestIntegrityError(
+        "candidate audit manifest is missing"
+    )
+    corrupt = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}/candidate-audit")
+    assert corrupt.status_code == 200
+    assert 'role="alert"' in corrupt.text
+    assert "candidate audit manifest is missing" in corrupt.text
+    corrupt_result = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert corrupt_result.status_code == 200
+    assert "Backtest result" in corrupt_result.text
+    assert 'role="alert"' in corrupt_result.text
+    assert "candidate audit manifest is missing" in corrupt_result.text
+
+    repo.candidate_audit_error = None
+    invalid_page = client.get(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/candidate-audit?page=0"
+    )
+    assert invalid_page.status_code == 422
+
+
+def test_candidate_audit_renders_generic_skill_evidence_and_event_link(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    repo.result = _result()
+    record = CandidateAuditV1(
+        candidate_sequence=1,
+        signal_session=date(2024, 1, 2),
+        security_id="sid_001",
+        rule_id="unregistered_skill_entry",
+        priority=Decimal("87.5"),
+        explanation=SignalExplanationV1(
+            reasons=(
+                SignalReasonV1(
+                    code="custom_rank_reason",
+                    summary="Supplied by an unregistered Skill.",
+                ),
+            )
+        ),
+        intended_fill_session=date(2024, 1, 3),
+        host_cohort_position=2,
+        allocator_position=1,
+        position_cap=10,
+        held_security_ids=("sid_002",),
+        pending_buy_orders=(
+            CandidateAuditOrderV1(
+                security_id="sid_002",
+                signal_session=date(2024, 1, 2),
+                fill_session=date(2024, 1, 3),
+                side=SignalSide.BUY,
+                reserved_base=Decimal("250"),
+            ),
+        ),
+        prior_cohort_admitted_security_ids=("sid_003",),
+        occupied_slots=9,
+        available_slots_before_cohort=2,
+        available_slots_before_candidate=1,
+        allocation_target_base=Decimal("1000"),
+        outcome_session=date(2024, 1, 3),
+        disposition=CandidateAuditDisposition.FILLED,
+        event_sequence=7,
+    )
+    repo.candidate_audit_page = BacktestCandidateAuditPageV1(
+        summary=BacktestCandidateAuditSummaryV1(
+            recorded=True,
+            contract_version="candidate_allocation_audit.v1",
+            candidate_count=1,
+            priority_recorded=1,
+            explanation_recorded=1,
+            filled=1,
+        ),
+        page=1,
+        page_size=25,
+        total_pages=2,
+        records=(record,),
+    )
+
+    result_page = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}")
+    assert result_page.status_code == 200
+    assert "87.5" in result_page.text
+    assert "AAPL (XNYS)" in result_page.text
+    assert "Supplied by an unregistered Skill" in result_page.text
+    assert "Trade Log event" in result_page.text
+    assert (
+        f"/strategy-manager/results/{RESULT_RUN_ID}#trade-log-event-7"
+        in result_page.text
+    )
+    assert "1 slot(s) available when considered" in result_page.text
+    assert "Available at cohort start: 2" in result_page.text
+    assert "Pending BUY reservations:" in result_page.text
+    assert "Earlier cohort admissions:" in result_page.text
+    assert "sid_003" in result_page.text
+
+    second_page = client.get(
+        f"/strategy-manager/results/{RESULT_RUN_ID}/candidate-audit?page=2"
+    )
+    assert second_page.status_code == 200
+    assert "Page 2 of 2" in second_page.text
+
+
+def test_candidate_audit_fragment_returns_not_found_when_strategy_run_is_missing(
+    services,
+):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity()
+    original_strategy_run = repo.strategy_run
+
+    def missing_strategy_run(_run_id):
+        raise StrategyJobNotFound("strategy run is missing")
+
+    repo.strategy_run = missing_strategy_run
+    response = client.get(f"/strategy-manager/results/{RESULT_RUN_ID}/candidate-audit")
+    repo.strategy_run = original_strategy_run
+
+    assert response.status_code == 404
+    assert response.text == "Backtest result not found."
 
 
 def test_result_page_missing_snapshot_degrades_without_500(services):

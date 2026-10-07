@@ -1,0 +1,101 @@
+{% if candidate_audit_integrity_error|default(integrity_error, true) %}
+<div class="sm-alert sm-alert-danger" role="alert">
+  Candidate audit evidence needs attention: {{ candidate_audit_integrity_error|default(integrity_error, true) }}
+</div>
+{% elif not candidate_audit.recorded %}
+<p class="text-muted">Candidate audit evidence was not recorded for this historical run.</p>
+{% else %}
+<dl class="row mono-num">
+  <dt class="col-sm-3">Candidate outcomes</dt>
+  <dd class="col-sm-9">{{ candidate_audit.candidate_count }}{% if candidate_audit.candidate_count == 0 %} — zero candidate outcomes were recorded{% endif %}</dd>
+  <dt class="col-sm-3">Skill priority supplied</dt>
+  <dd class="col-sm-9">{{ candidate_audit.priority_recorded }}; missing: {{ candidate_audit.priority_missing }}</dd>
+  <dt class="col-sm-3">Skill explanation supplied</dt>
+  <dd class="col-sm-9">{{ candidate_audit.explanation_recorded }}; missing: {{ candidate_audit.explanation_missing }}</dd>
+  <dt class="col-sm-3">Preflight rejected</dt>
+  <dd class="col-sm-9">{{ candidate_audit.preflight_rejected }}</dd>
+  <dt class="col-sm-3">Position limit rejected</dt>
+  <dd class="col-sm-9">{{ candidate_audit.full_book_rejected }}</dd>
+  <dt class="col-sm-3">Cohort competition rejected</dt>
+  <dd class="col-sm-9">{{ candidate_audit.competition_rejected }}</dd>
+  <dt class="col-sm-3">Filled</dt>
+  <dd class="col-sm-9">{{ candidate_audit.filled }}</dd>
+  <dt class="col-sm-3">Rejected at fill</dt>
+  <dd class="col-sm-9">{{ candidate_audit.fill_rejected }}</dd>
+</dl>
+
+{% if candidate_audit.rows %}
+<div class="tbl-wrap" style="overflow-x:auto" tabindex="0" role="region" aria-label="Candidate allocation audit page {{ candidate_audit.page }}">
+  <table class="table table-hover align-middle mono-num">
+    <caption class="visually-hidden">Persisted candidate allocation decisions, page {{ candidate_audit.page }} of {{ candidate_audit.total_pages }}</caption>
+    <thead><tr>
+      <th scope="col">Candidate</th><th scope="col">Security</th><th scope="col">Side</th>
+      <th scope="col">Signal session</th><th scope="col">Fill date</th><th scope="col">Outcome</th>
+      <th scope="col">Trade Log event</th>
+      <th scope="col">Skill priority</th><th scope="col">Host cohort position</th>
+      <th scope="col">Allocator position</th><th scope="col">Capacity snapshot</th>
+      <th scope="col">Reservations</th><th scope="col">Disposition</th><th scope="col">Skill explanation</th>
+    </tr></thead>
+    <tbody>
+      {% for row in candidate_audit.rows %}
+      <tr>
+        <td>{{ row.candidate_sequence }}</td>
+        <td title="{{ row.security_id }}">{{ row.security_label }}</td>
+        <td>{{ row.side }}</td>
+        <td>{{ row.signal_session }}</td>
+        <td>{{ row.intended_fill_session }}</td>
+        <td>{{ row.outcome_session }}</td>
+        <td><a href="/strategy-manager/results/{{ run_id }}#trade-log-event-{{ row.event_sequence }}">#{{ row.event_sequence }}</a></td>
+        <td>{{ row.priority }}</td>
+        <td>{{ row.host_cohort_position }}</td>
+        <td>{{ row.allocator_position }}</td>
+        <td>
+          {{ row.slot_summary }}
+          {% if row.available_slots_before_cohort != '—' %}
+          <div>Available at cohort start: {{ row.available_slots_before_cohort }}</div>
+          {% endif %}
+          {% if row.held_positions %}
+          <div>Held positions:</div>
+          <ul class="mb-0 ps-3">{% for held in row.held_positions %}<li>{{ held }}</li>{% endfor %}</ul>
+          {% endif %}
+          {% if row.pending_buy_reservations %}
+          <div>Pending BUY reservations:</div>
+          <ul class="mb-0 ps-3">{% for pending in row.pending_buy_reservations %}<li>{{ pending }}</li>{% endfor %}</ul>
+          {% endif %}
+          {% if row.prior_cohort_admissions %}
+          <div>Earlier cohort admissions:</div>
+          <ul class="mb-0 ps-3">{% for admitted in row.prior_cohort_admissions %}<li>{{ admitted }}</li>{% endfor %}</ul>
+          {% endif %}
+          {% if row.sell_releases %}
+          <ul class="mb-0 ps-3">
+            {% for release in row.sell_releases %}<li>Pending SELL: {{ release }}</li>{% endfor %}
+          </ul>
+          {% endif %}
+        </td>
+        <td>{{ row.reservation_summary }}</td>
+        <td>{{ row.disposition }}{% if row.reason_code != '—' %} ({{ row.reason_code }}){% endif %}</td>
+        <td>
+          {% if row.explanation %}
+          <ul class="mb-0 ps-3">{% for line in row.explanation %}<li>{{ line }}</li>{% endfor %}</ul>
+          {% else %}Not supplied{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if candidate_audit.total_pages > 1 %}
+<nav aria-label="Candidate audit pages" class="d-flex align-items-center gap-2">
+  {% if candidate_audit.page > 1 %}
+  <a class="sm-btn sm-btn-secondary" href="/strategy-manager/results/{{ run_id }}/candidate-audit?page={{ candidate_audit.page - 1 }}"
+     hx-get="/strategy-manager/results/{{ run_id }}/candidate-audit?page={{ candidate_audit.page - 1 }}" hx-target="#candidate-audit-content" hx-swap="innerHTML">Previous</a>
+  {% endif %}
+  <span>Page {{ candidate_audit.page }} of {{ candidate_audit.total_pages }}</span>
+  {% if candidate_audit.page < candidate_audit.total_pages %}
+  <a class="sm-btn sm-btn-secondary" href="/strategy-manager/results/{{ run_id }}/candidate-audit?page={{ candidate_audit.page + 1 }}"
+     hx-get="/strategy-manager/results/{{ run_id }}/candidate-audit?page={{ candidate_audit.page + 1 }}" hx-target="#candidate-audit-content" hx-swap="innerHTML">Next</a>
+  {% endif %}
+</nav>
+{% endif %}
+{% endif %}
+{% endif %}

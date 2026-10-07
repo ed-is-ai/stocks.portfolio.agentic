@@ -720,3 +720,13 @@ Genuine follow-ups, each needing product direction:
 - source_spec: GitHub issue #68 (code review of PR #76, 2026-10-06)
   summary: `security_key` is `ticker@start_date`, a per-interval key rather than a security identity; renames are not linked, one company that leaves and rejoins becomes two keys, and an upstream start-date correction changes the key on re-import.
   evidence: `derive_intervals` in `app/services/index_membership/sp500_import.py`; identity mapping is deferred to #70/#71, so #68's "security identity" scope stays open until then.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-63-weinstein-momentum-with-bounded-currency.md`
+  summary: The three-repeat representative replay timing comparison has not been measured for GH #63.
+  evidence: The isolated `data/backtest.db` has zero strategy jobs/runs/results and the repository has no applicable short-replay benchmark harness. GH #66 owns the controlled performance evaluation; no replay overhead claim is made for #63.
+
+
+## Deferred from: GH #66 controlled ranking evaluation (2026-10-07)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-66-evaluate-entry-rankings.md`
+  summary: The cached QQQ historical evidence used by the single-instrument Moving Average comparison is in local temporary storage, so a fresh checkout cannot replay the run from the checked-in artifacts alone.
+  evidence: `docs/research/gh66/results-seal.json` and the report record `/private/tmp/gh66-single-ma/single-instrument-evidence.sqlite` with SHA-256 `4dc2309d0e0875b685928075cbd7b85d4e329a794c219e41b86e0343a574336c`; raw provider history was not copied into the repository. Current result manifests, provider revision, response digest, and output hashes remain recorded. Reacquire or archive a redistributable, durable QQQ evidence snapshot before claiming portable replay.

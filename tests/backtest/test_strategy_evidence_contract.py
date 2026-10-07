@@ -17,7 +17,8 @@ import pytest
 
 from app.core.config import SKILLS_DIR
 from app.services.backtest.market_view import PRICE_HISTORY_COLUMNS
-from app.services.backtest.scan_view import CurrentScanMarketView
+from app.services.backtest.scan_view import CurrentScanMarketView, CurrentScanRecordView
+from app.services.backtest.historical_scan_record import StageV1, VcpV1
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
     discover_strategies,
@@ -33,6 +34,10 @@ from app.services.backtest.strategy_evidence import (
     strategy_support_label,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.strategy_protocol import (
+    BaseCurrencyCloseHistoryViewV1,
+    MarketViewV1,
+)
 from app.services.backtest.worker import _load_strategy_instance
 
 SESSION = date(2026, 8, 28)
@@ -151,6 +156,192 @@ def test_scan_dependent_strategies_are_degraded_without_current_fragments(
     assert set(missing) <= set(preflight.degraded_entry[SECURITY])
     assert set(missing) <= set(preflight.degraded_exit[SECURITY])
     assert strategy_support_label(preflight) == "degraded"
+
+
+def test_weinstein_current_scan_view_without_optional_currency_history_stays_safe() -> (
+    None
+):
+    descriptor = next(
+        item for item in DESCRIPTORS if item.strategy_id == "rtly-backtest-weinstein"
+    )
+    sessions = pd.bdate_range(end=SESSION, periods=500)
+    closes = [Decimal(100 + offset) for offset in range(len(sessions))]
+    volumes = [Decimal("100")] * len(sessions)
+    volumes[-1] = Decimal("300")
+    history = pd.DataFrame(
+        {
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": volumes,
+        },
+        index=sessions,
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=(SECURITY,),
+        _histories={SECURITY: history},
+        _scan_results={
+            SECURITY: CurrentScanRecordView(
+                security_id=SECURITY,
+                as_of_session_date=SESSION,
+                stage=StageV1(value="Stage 2"),
+            )
+        },
+    )
+    strategy = _load_strategy_instance(SKILLS_DIR / descriptor.runtime_path)
+    parameters = dict(descriptor.default_parameters) | dict(
+        descriptor.bind_universe((SECURITY,))
+    )
+
+    assert not isinstance(view, BaseCurrencyCloseHistoryViewV1)
+    signals = strategy.entry_signals(cast(MarketViewV1, view), parameters)
+
+    assert len(signals) == 1
+    assert signals[0].explanation is not None
+    ranking = next(
+        reason
+        for reason in signals[0].explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert signals[0].priority == Decimal("1")
+    assert any(
+        fact.label == "Momentum unavailable reason"
+        and fact.observed == "base_currency_history_unavailable"
+        for fact in ranking.facts
+    )
+
+
+@pytest.mark.parametrize(
+    "strategy_id",
+    (
+        "rtly-backtest-darvas-box",
+        "rtly-backtest-moving-average",
+        "rtly-backtest-turtle-trend",
+    ),
+)
+def test_gh64_current_scan_skills_rank_without_optional_currency_history(
+    strategy_id: str,
+) -> None:
+    descriptor = next(item for item in DESCRIPTORS if item.strategy_id == strategy_id)
+    sessions = pd.bdate_range(end=SESSION, periods=400)
+    closes = [Decimal("100")] * len(sessions)
+    closes[-1] = Decimal("101")
+    if strategy_id == "rtly-backtest-moving-average":
+        closes[-2:] = [Decimal("99"), Decimal("102")]
+    volumes = [Decimal("100")] * len(sessions)
+    volumes[-1] = Decimal("200")
+    highs = [Decimal("100")] * len(sessions)
+    highs[-1] = Decimal("102")
+    history = pd.DataFrame(
+        {
+            "open": closes,
+            "high": highs,
+            "low": [Decimal("100")] * len(sessions),
+            "close": closes,
+            "volume": volumes,
+        },
+        index=sessions,
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=(SECURITY,),
+        _histories={SECURITY: history},
+    )
+    strategy = _load_strategy_instance(SKILLS_DIR / descriptor.runtime_path)
+    parameters = dict(descriptor.default_parameters) | dict(
+        descriptor.bind_universe((SECURITY,))
+    )
+
+    assert not isinstance(view, BaseCurrencyCloseHistoryViewV1)
+    signals = strategy.entry_signals(cast(MarketViewV1, view), parameters)
+
+    assert len(signals) == 1
+    assert signals[0].side.value == "BUY"
+    assert signals[0].priority == Decimal("1")
+    assert signals[0].explanation is not None
+    ranking = next(
+        reason
+        for reason in signals[0].explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert any(
+        fact.label == "Momentum unavailable reason"
+        and fact.observed == "base_currency_history_unavailable"
+        for fact in ranking.facts
+    )
+
+
+def test_minervini_current_scan_entry_degrades_when_currency_history_is_absent() -> (
+    None
+):
+    descriptor = next(
+        item for item in DESCRIPTORS if item.strategy_id == "rtly-backtest-minervini"
+    )
+    sessions = pd.bdate_range(end=SESSION, periods=51)
+    closes = [Decimal("100")] * 50 + [Decimal("101")]
+    volumes = [Decimal("100")] * 50 + [Decimal("150")]
+    history = pd.DataFrame(
+        {
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "close": closes,
+            "volume": volumes,
+        },
+        index=sessions,
+    )
+    scan = CurrentScanRecordView(
+        security_id=SECURITY,
+        as_of_session_date=SESSION,
+        stage=StageV1(value="Stage 2"),
+        vcp=VcpV1(
+            valid_vcp=False,
+            score=70,
+            trend_template_score=Decimal("85"),
+            trend_template_passed=True,
+            wide_and_loose=False,
+            breakout_volume_detected=True,
+            num_contractions=0,
+            contractions=(),
+            pivot_price=Decimal("100"),
+            last_contraction_low=None,
+            atr_compression_ratio=None,
+            right_side_range_ratio=None,
+            dry_up_ratio=None,
+            distance_from_pivot_pct=None,
+            execution_state="Breakout",
+        ),
+    )
+    view = CurrentScanMarketView(
+        as_of_session=SESSION,
+        selected_universe=(SECURITY,),
+        _histories={SECURITY: history},
+        _scan_results={SECURITY: scan},
+    )
+    strategy = _load_strategy_instance(SKILLS_DIR / descriptor.runtime_path)
+    parameters = dict(descriptor.default_parameters) | dict(
+        descriptor.bind_universe((SECURITY,))
+    )
+
+    assert not isinstance(view, BaseCurrencyCloseHistoryViewV1)
+    signals = strategy.entry_signals(cast(MarketViewV1, view), parameters)
+
+    assert len(signals) == 1
+    assert signals[0].side.value == "BUY"
+    assert signals[0].priority == Decimal("1")
+    assert signals[0].explanation is not None
+    ranking = next(
+        reason
+        for reason in signals[0].explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert any(
+        fact.label == "Momentum unavailable reason"
+        and fact.observed == "base_currency_history_unavailable"
+        for fact in ranking.facts
+    )
 
 
 def test_thin_history_degrades_rather_than_disqualifies() -> None:

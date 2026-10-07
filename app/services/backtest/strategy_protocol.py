@@ -375,6 +375,26 @@ class MarketViewV1(Protocol):
 
 
 @runtime_checkable
+class BaseCurrencyCloseHistoryViewV1(Protocol):
+    """Optional, generic read of bounded historical closes in Run currency.
+
+    This is deliberately separate from ``MarketViewV1`` so existing and
+    current-scan views remain compatible. The returned DataFrame has one row
+    per canonical price session and includes ``close`` (Decimal or None),
+    ``reason``, source currency/unit, FX rate/session/revision, and currency
+    policy version. It converts data only; Strategy methodology stays in the
+    Skill runtime.
+    """
+
+    @property
+    def base_currency(self) -> str: ...
+
+    def base_currency_close_history(
+        self, security_id: str, *, limit: int
+    ) -> pd.DataFrame: ...
+
+
+@runtime_checkable
 class RegimeBenchmarkViewV1(Protocol):
     """Narrow read seam for a pinned, non-tradable regime reference."""
 
@@ -1014,6 +1034,7 @@ __all__ = [
     "EvidenceUnit",
     "ExplanationFactV1",
     "MarketViewV1",
+    "BaseCurrencyCloseHistoryViewV1",
     "RegimeBenchmarkViewV1",
     "PARAMETER_TYPES",
     "ParameterFieldErrorV1",

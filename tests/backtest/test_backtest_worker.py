@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
-from typing import cast
+from typing import Any, Literal, cast
 
 import pandas as pd
 import pytest
@@ -39,6 +40,8 @@ from app.services.backtest.backtest_engine import (
     OpenPositionMarkEventV1,
     SplitAppliedEventV1,
 )
+from app.services.backtest.market_view import MarketView
+import app.services.backtest.backtest_engine as backtest_engine_module
 from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
@@ -472,6 +475,53 @@ def _commit_evidence(
     return payload.data_revision
 
 
+def _commit_fx_evidence(
+    prices: HistoricalPriceRepository, *, sessions: tuple[date, ...]
+) -> str:
+    frame = pd.DataFrame(
+        {
+            "Open": [1.25 for _ in sessions],
+            "High": [1.25 for _ in sessions],
+            "Low": [1.25 for _ in sessions],
+            "Close": [1.25 for _ in sessions],
+            "Adj Close": [1.25 for _ in sessions],
+            "Volume": [0.0 for _ in sessions],
+            "Dividends": [0.0 for _ in sessions],
+            "Stock Splits": [0.0 for _ in sessions],
+        },
+        index=pd.DatetimeIndex(
+            [session.isoformat() for session in sessions], tz="Europe/London"
+        ),
+    )
+
+    class _FxTicker(_FakeTicker):
+        def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
+            return {
+                "symbol": self._symbol,
+                "currency": "USD",
+                "exchangeTimezoneName": "Europe/London",
+            }
+
+    payload = YFinanceHistoricalEvidenceAdapter(
+        lambda _: _FxTicker(frame, "GBPUSD=X"), clock=lambda: NOW
+    ).fetch(
+        HistoricalEvidenceRequest(
+            security_id="fx:GBPUSD=X",
+            alias_revision="4" * 64,
+            symbol="GBPUSD=X",
+            start=sessions[0],
+            end=sessions[-1] + timedelta(days=1),
+            expected_currency="USD",
+            expected_quote_unit="USD",
+            expected_timezone="Europe/London",
+            expected_sessions=sessions,
+            allowed_observed_symbols=("GBPUSD=X",),
+        )
+    )
+    prices.commit(payload)
+    return payload.data_revision
+
+
 def _detector_digests() -> tuple[DetectorSourceDigestV1, ...]:
     return tuple(
         DetectorSourceDigestV1(detector_id=detector.detector_id, source_digest="a" * 64)
@@ -486,6 +536,8 @@ def _manifest(
     end_month: str,
     parameters: dict[str, object] | None = None,
     starting_capital: Decimal = Decimal("10000"),
+    base_currency: Literal["GBP", "USD"] = "USD",
+    fx_revision: str | None = None,
 ) -> RunInputManifestV1:
     contract_payload = current_execution_contract_payload(
         Path(__file__).resolve().parents[2]
@@ -512,14 +564,14 @@ def _manifest(
                 security_id=SECURITY_ID,
                 price_revision=revision,
                 action_revision=revision,
-                fx_revision=None,
+                fx_revision=fx_revision,
             ),
         ),
         profile_hash=PROFILE_HASH,
         start_month=start_month,
         end_month=end_month,
         ordered_month_digest=ORDERED_MONTH_DIGEST,
-        base_currency="USD",
+        base_currency=base_currency,
         starting_capital=starting_capital,
     )
 
@@ -668,6 +720,71 @@ def test_worker_active_v2_resolves_access_without_complete_price_get(
     assert result.status is StrategyJobStatus.COMPLETE
     assert repo.backtest_result(enqueued.job.id).events
     assert prices.read_counters.complete_revision_materializations == 0
+
+
+def test_worker_wires_run_currency_and_prepared_pinned_fx_into_market_view(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_strategy_resolution(monkeypatch)
+    repo = _repo(tmp_path / "backtest.db")
+    prices = _price_repo(tmp_path)
+    sessions = TradingCalendar().sessions_in_range(
+        "XNYS", date(2026, 6, 1), date(2026, 7, 1)
+    )
+    fx_sessions = TradingCalendar().sessions_in_range(
+        "XLON", date(2026, 6, 1), date(2026, 7, 1)
+    )
+    price_revision = _commit_evidence(
+        prices, security_id=SECURITY_ID, sessions=sessions
+    )
+    fx_revision = _commit_fx_evidence(prices, sessions=fx_sessions)
+    manifest = _manifest(
+        revision=price_revision,
+        start_month="2026-06",
+        end_month="2026-06",
+        parameters={"watch_security_id": SECURITY_ID, "fixed_shares": 1},
+        base_currency="GBP",
+        fx_revision=fx_revision,
+    )
+    _enqueue(repo, manifest)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    captured: dict[str, object] = {}
+
+    real_run_simulation = worker_module.run_simulation
+
+    def capture_view(**kwargs: Any):
+        factory = cast(Callable[[date], MarketView], kwargs["market_view_factory"])
+        view = factory(sessions[0])
+        prepared_fx = view.prepared_fx
+        assert prepared_fx is not None
+        captured["base_currency"] = view.base_currency
+        captured["fx_revision"] = prepared_fx.evidence_revision
+        captured["prepared_fx_shared"] = kwargs["prepared_fx"] is prepared_fx
+        converted = view.base_currency_close_history(SECURITY_ID, limit=1)
+        captured["close"] = converted.iloc[0]["close"]
+        captured["fx_session"] = converted.iloc[0]["fx_session"]
+        return real_run_simulation(**kwargs)
+
+    monkeypatch.setattr(worker_module, "run_simulation", capture_view)
+
+    def fail_redecode(_evidence):
+        raise AssertionError("worker-prepared FX closes must be reused by engine")
+
+    monkeypatch.setattr(backtest_engine_module, "prepare_fx_closes", fail_redecode)
+    engine = worker_module.build_backtest_engine(claim.job.id, claim.claim_token, repo)
+    engine._prices = prices  # type: ignore[attr-defined]
+
+    result = engine.run(claim.job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.COMPLETE
+    assert captured == {
+        "base_currency": "GBP",
+        "fx_revision": fx_revision,
+        "prepared_fx_shared": True,
+        "close": Decimal("80.40000000"),
+        "fx_session": sessions[0],
+    }
 
 
 def test_staging_sink_tracks_split_fraction_and_exact_exit_quantity() -> None:

@@ -1,0 +1,38 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 203, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py", line 2523, in <module>
+    main()
+    ~~~~^^
+  File "/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py", line 2477, in main
+    result = run_one(
+        manifest_path=args.manifest,
+    ...<7 lines>...
+        end_month=args.end_month,
+    )
+  File "/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py", line 1268, in run_one
+    ) = _current_manifest_and_resolver(
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        backtest_db,
+        ^^^^^^^^^^^^
+    ...<5 lines>...
+        skills_root=legacy_skill_root,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/private/tmp/stocks-gh66-1/scripts/research/gh66_experiment.py", line 966, in _current_manifest_and_resolver
+    current_manifest = RunInputManifestV2.model_validate(raw_manifest)
+  File "/Users/edyau/Git/stocks.portfolio.agentic/.venv/lib/python3.14/site-packages/pydantic/main.py", line 732, in model_validate
+    return cls.__pydantic_validator__.validate_python(
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        obj,
+        ^^^^
+    ...<5 lines>...
+        by_name=by_name,
+        ^^^^^^^^^^^^^^^^
+    )
+    ^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for RunInputManifestV2
+securities
+  Input should be a valid tuple [type=tuple_type, input_value=[{'security_id': '556ba16...29f9273d9ae521a2f5af2'}], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/tuple_type

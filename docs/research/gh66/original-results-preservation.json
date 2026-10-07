@@ -1,0 +1,98 @@
+{
+  "all_original_result_rows_still_present": true,
+  "detail": null,
+  "main_file_signatures_unchanged": {
+    "backtest": false,
+    "historical_prices": false
+  },
+  "original_result_payloads_unchanged": true,
+  "original_result_snapshot_sha256_after": "b52cd440ddae985e6e7727f31b2657b5d6f02988781012d2a77a032a44647545",
+  "original_result_snapshot_sha256_before": "b52cd440ddae985e6e7727f31b2657b5d6f02988781012d2a77a032a44647545",
+  "preserved": true,
+  "saved_run_input_identities_unchanged": true,
+  "source_database_signature_after": {
+    "backtest": {
+      "device": 16777232,
+      "inode": 10177001,
+      "mtime_ns": 1791406368520920370,
+      "path": "/Users/edyau/Git/stocks.portfolio.agentic/data/backtest.db",
+      "sidecars": {
+        "shm": {
+          "inode": 98816231,
+          "mtime_ns": 1791406368723917725,
+          "size_bytes": 32768
+        },
+        "wal": {
+          "inode": 98816230,
+          "mtime_ns": 1791406368723728015,
+          "size_bytes": 0
+        }
+      },
+      "size_bytes": 21037924352
+    },
+    "historical_prices": {
+      "device": 16777232,
+      "inode": 10042712,
+      "mtime_ns": 1791406307767207244,
+      "path": "/Users/edyau/Git/stocks.portfolio.agentic/data/historical_price_cache.db",
+      "sidecars": {
+        "shm": {
+          "inode": 98796628,
+          "mtime_ns": 1791406320046757080,
+          "size_bytes": 32768
+        },
+        "wal": {
+          "inode": 98796627,
+          "mtime_ns": 1791406307770100522,
+          "size_bytes": 0
+        }
+      },
+      "size_bytes": 47418859520
+    }
+  },
+  "source_database_signature_before": {
+    "backtest": {
+      "device": 16777232,
+      "inode": 10177001,
+      "mtime_ns": 1791329013158019573,
+      "path": "/Users/edyau/Git/stocks.portfolio.agentic/data/backtest.db",
+      "sidecars": {
+        "shm": {
+          "inode": 97261859,
+          "mtime_ns": 1791329013180221216,
+          "size_bytes": 32768
+        },
+        "wal": {
+          "inode": 97261858,
+          "mtime_ns": 1791329013180108716,
+          "size_bytes": 0
+        }
+      },
+      "size_bytes": 20205584384
+    },
+    "historical_prices": {
+      "device": 16777232,
+      "inode": 10042712,
+      "mtime_ns": 1791321403774559542,
+      "path": "/Users/edyau/Git/stocks.portfolio.agentic/data/historical_price_cache.db",
+      "sidecars": {
+        "shm": {
+          "inode": 96987456,
+          "mtime_ns": 1791328505002245051,
+          "size_bytes": 32768
+        },
+        "wal": {
+          "inode": 96987455,
+          "mtime_ns": 1791321403777036214,
+          "size_bytes": 0
+        }
+      },
+      "size_bytes": 47418859520
+    }
+  },
+  "sqlite_sidecar_signatures_unchanged": {
+    "backtest": false,
+    "historical_prices": false
+  },
+  "write_path": "all experiment connections use SQLite mode=ro plus PRAGMA query_only; replay output is in memory"
+}

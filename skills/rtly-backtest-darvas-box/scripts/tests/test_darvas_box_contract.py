@@ -9,6 +9,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pandas as pd
+import pytest
 
 from app.services.backtest.strategy_evidence import (
     EVIDENCE_CONTRACT_VERSION,
@@ -69,6 +70,46 @@ class _View:
         return None
 
 
+class _RankedView(_View):
+    base_currency = "GBP"
+
+    def __init__(
+        self,
+        as_of_session: date,
+        histories: dict[str, pd.DataFrame],
+        ranking_histories: dict[str, pd.DataFrame],
+    ) -> None:
+        super().__init__(as_of_session, histories[next(iter(histories))])
+        self._histories = histories
+        self._ranking_histories = ranking_histories
+
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame:
+        history = self._histories[security_id].copy()
+        history = history.loc[
+            [
+                (index.date() if hasattr(index, "date") else index)
+                <= self.as_of_session
+                for index in history.index
+            ]
+        ]
+        if limit is not None:
+            history = history.iloc[-limit:]
+        if columns is not None:
+            history = history.loc[:, list(columns)]
+        return history
+
+    def base_currency_close_history(
+        self, security_id: str, *, limit: int
+    ) -> pd.DataFrame:
+        return self._ranking_histories[security_id].iloc[-limit:]
+
+
 def _history(
     *, current_close: str = "101", current_volume: str = "150", stale: bool = False
 ) -> tuple[date, pd.DataFrame]:
@@ -95,6 +136,18 @@ def _history(
         },
         index=sessions,
     )
+
+
+def _momentum_history(
+    as_of: date, numerator: str | None, *, rows: int = 253
+) -> pd.DataFrame:
+    sessions = pd.bdate_range(end=as_of, periods=rows)
+    closes: list[Decimal | None] = [Decimal("100")] * rows
+    reasons: list[str | None] = [None] * rows
+    if rows >= 22:
+        closes[-22] = None if numerator is None else Decimal(numerator)
+        reasons[-22] = "fx_stale" if numerator is None else None
+    return pd.DataFrame({"close": closes, "reason": reasons}, index=sessions)
 
 
 def _parameters() -> dict[str, object]:
@@ -429,11 +482,149 @@ def test_breakout_and_breakdown_explain_the_box() -> None:
     assert _codes(entries[0]) == (
         "box_breakout",
         "box_depth_within_limit",
+        "entry_ranking",
         "volume_expansion",
     )
     assert _codes(exits[0]) == ("box_bottom_break",)
     assert exits[0].explanation is not None
     assert "89.99" in exits[0].explanation.reasons[0].facts[0].observed.to_eng_string()
+
+
+def test_entry_ranks_momentum_then_prior_box_relative_volume_and_id() -> None:
+    as_of, _ = _history()
+    ids = ("sec-a", "sec-b", "sec-m", "sec-z")
+    histories = {
+        "sec-a": _history(current_volume="150")[1],
+        "sec-b": _history(current_volume="200")[1],
+        "sec-m": _history(current_volume="200")[1],
+        "sec-z": _history(current_volume="150")[1],
+    }
+    view = _RankedView(
+        as_of,
+        histories,
+        {
+            "sec-a": _momentum_history(as_of, "110"),
+            "sec-b": _momentum_history(as_of, "100"),
+            "sec-m": _momentum_history(as_of, "100"),
+            "sec-z": _momentum_history(as_of, "100"),
+        },
+    )
+
+    signals = MODULE.DarvasBoxStrategy().entry_signals(
+        view, {**_parameters(), "selected_securities": list(reversed(ids))}
+    )
+
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-a": Decimal("4"),
+        "sec-b": Decimal("3"),
+        "sec-m": Decimal("2"),
+        "sec-z": Decimal("1"),
+    }
+    b_signal = next(signal for signal in signals if signal.security_id == "sec-b")
+    assert b_signal.explanation is not None
+    ranking = next(
+        reason
+        for reason in b_signal.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    facts = {fact.label: fact.observed for fact in ranking.facts}
+    assert facts["Current volume"] == Decimal("200")
+    assert facts["Prior box-window mean volume"] == Decimal("100")
+    assert facts["Current volume / prior mean"] == Decimal("2")
+
+
+def test_missing_momentum_keeps_qualifying_darvas_entry() -> None:
+    as_of, history = _history()
+    signal = MODULE.DarvasBoxStrategy().entry_signals(
+        _View(as_of, history), _parameters()
+    )[0]
+
+    assert signal.priority == Decimal("1")
+    assert signal.explanation is not None
+    ranking = next(
+        reason
+        for reason in signal.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert (
+        next(
+            fact.observed
+            for fact in ranking.facts
+            if fact.label == "Momentum unavailable reason"
+        )
+        == "base_currency_history_unavailable"
+    )
+
+
+def test_corrupt_momentum_view_errors_are_not_downgraded() -> None:
+    as_of, history = _history()
+
+    class _CorruptView(_View):
+        base_currency = "GBP"
+
+        def base_currency_close_history(
+            self, security_id: str, *, limit: int
+        ) -> pd.DataFrame:
+            raise RuntimeError("pinned evidence integrity error")
+
+    with pytest.raises(RuntimeError, match="integrity"):
+        MODULE.DarvasBoxStrategy().entry_signals(
+            _CorruptView(as_of, history), _parameters()
+        )
+
+
+@pytest.mark.parametrize(
+    ("ranking_history", "expected_reason"),
+    [
+        (
+            _momentum_history(date(2026, 1, 8), "100", rows=22),
+            "insufficient_price_history",
+        ),
+        (_momentum_history(date(2026, 1, 8), "100"), "invalid_momentum_endpoint"),
+    ],
+)
+def test_invalid_ranking_endpoints_keep_the_qualifying_entry(
+    ranking_history: pd.DataFrame, expected_reason: str
+) -> None:
+    as_of, market_history = _history()
+    if expected_reason == "invalid_momentum_endpoint":
+        ranking_history.iloc[0, ranking_history.columns.get_loc("close")] = Decimal(0)
+    view = _RankedView(
+        as_of,
+        {"sec-aapl": market_history},
+        {"sec-aapl": ranking_history},
+    )
+
+    signals = MODULE.DarvasBoxStrategy().entry_signals(view, _parameters())
+
+    assert len(signals) == 1
+    assert signals[0].priority == Decimal("1")
+    assert signals[0].explanation is not None
+    ranking = next(
+        reason
+        for reason in signals[0].explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert (
+        next(
+            fact.observed
+            for fact in ranking.facts
+            if fact.label == "Momentum unavailable reason"
+        )
+        == expected_reason
+    )
+
+
+def test_invalid_session_index_is_treated_as_integrity_error() -> None:
+    as_of, market_history = _history()
+    ordered = _momentum_history(as_of, "110")
+    malformed_index = list(ordered.index)
+    malformed_index[-1], malformed_index[-2] = malformed_index[-2], malformed_index[-1]
+    ordered.index = malformed_index
+    view = _RankedView(as_of, {"sec-aapl": market_history}, {"sec-aapl": ordered})
+
+    with pytest.raises(ValueError, match="unordered or duplicated"):
+        MODULE.DarvasBoxStrategy().entry_signals(view, _parameters())
 
 
 # --- GH-57: the Strategy's own stop level ------------------------------------

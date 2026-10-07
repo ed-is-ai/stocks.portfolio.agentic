@@ -42,6 +42,14 @@ beyond the slow window to prove a crossover, ignore equality, reject
 `fast_window >= slow_window`, and fail closed on missing, malformed, short,
 or stale history.
 
+Rank the complete qualifying BUY batch by 21-session price momentum descending,
+then security ID ascending. Momentum uses `close[-22] / close[-253] - 1` from
+253 bounded Run-currency closes. Encode the order as descending positive
+ordinal `Signal.priority` values and explain momentum, endpoint dates, currency,
+rank and any missing-data reason. Momentum is ranking-only: absent capability,
+short history or unavailable endpoints keep an otherwise qualifying BUY;
+valid negative momentum ranks ahead of missing momentum.
+
 Suggest a stop (`stop_level`) for a held position at the close below which
 tomorrow's fast SMA would cross below the slow SMA:
 `(fast * Ss - slow * Sf) / (slow - fast)`, where `Sf` and `Ss` sum today's

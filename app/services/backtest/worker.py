@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING, Mapping, Protocol, cast
 from types import MappingProxyType
 
 from app.core import config
-from app.integrations.fx_history import BankOfEnglandFxSeriesFetcher, ChainedFxQuoteFetcher
+from app.integrations.fx_history import (
+    BankOfEnglandFxSeriesFetcher,
+    ChainedFxQuoteFetcher,
+)
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.historical_price_repo import (
@@ -27,6 +30,7 @@ from app.repositories.historical_price_repo import (
 from app.repositories.fx_quote_repo import FxQuoteRepository
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
 from app.services.backtest.backtest_engine import (
+    CandidateAuditV1,
     EquityCurvePointV1,
     EntryFillEventV1,
     MarketDataAccessV1,
@@ -48,6 +52,11 @@ from app.services.backtest.historical_initialization_engine import (
 )
 from app.services.backtest.market_view import MarketView
 from app.services.backtest.market_planes import HistoricalMarketPlanes
+from app.services.backtest.currency import (
+    CurrencyPolicyError,
+    PreparedFxCloses,
+    prepare_fx_closes,
+)
 from app.services.backtest.reconstruction_roster import CapturedRosterV1
 from app.services.backtest.run_input_manifest import (
     ENGINE_VERSION,
@@ -788,6 +797,7 @@ class _StagingSink:
         session: date,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        candidate_audits: tuple[CandidateAuditV1, ...] = (),
         initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None:
         published_selection = initial_entry_selection
@@ -822,6 +832,7 @@ class _StagingSink:
                 portfolio_state=portfolio_state,
                 events=events,
                 equity_point=equity_point,
+                candidate_audits=candidate_audits,
                 final_cash_base=equity_point.cash_base,
                 initial_entry_selection=published_selection,
                 lease=self.lease,
@@ -1096,6 +1107,7 @@ class BacktestExecutionEngine:
         )
         prepared_planes: dict[str, HistoricalMarketPlanes] = {}
         prepared_planes_view = MappingProxyType(prepared_planes)
+        prepared_fx: PreparedFxCloses | None = None
         scan_cache: dict[tuple[str, str], HistoricalScanRecordV1 | None] = {}
         scan_cache_month: dict[str, str] = {}
 
@@ -1112,6 +1124,9 @@ class BacktestExecutionEngine:
                 ),
                 backtest_repo=self._repository,
                 historical_price_repo=self._prices,
+                base_currency=manifest.base_currency,
+                fx_evidence=fx_evidence,
+                prepared_fx=prepared_fx,
                 regime_benchmark=manifest.regime_benchmark
                 if isinstance(manifest, RunInputManifestV3)
                 else None,
@@ -1131,12 +1146,22 @@ class BacktestExecutionEngine:
             )
 
         try:
+            if fx_evidence is not None:
+                try:
+                    prepared_fx = prepare_fx_closes(fx_evidence)
+                except CurrencyPolicyError as exc:
+                    raise SimulationError(
+                        code=exc.code,
+                        session=date.fromisoformat(f"{manifest.start_month}-01"),
+                        message=exc.detail,
+                    ) from exc
             run_simulation(
                 manifest=manifest,
                 strategy=strategy,
                 market_view_factory=market_view_factory,
                 security_market_data=security_market_data,
                 fx_evidence=fx_evidence,
+                prepared_fx=prepared_fx,
                 sink=sink,
                 month_boundary_observer=observer,
                 prepared_planes=prepared_planes,
@@ -1349,9 +1374,7 @@ class BacktestExecutionEngine:
                 == TradingCalendar().session_table_digest()
                 and pin.price_plane_policy_version == "HistoricalMarketPlanesV1"
             )
-            rows = access.bounded(
-                through=pin.request_end - timedelta(days=1)
-            ).rows
+            rows = access.bounded(through=pin.request_end - timedelta(days=1)).rows
             sessions = tuple(date.fromisoformat(str(row["session"])) for row in rows)
             expected_sessions = TradingCalendar().sessions_in_range(
                 pin.calendar_mic, pin.request_start, pin.request_end

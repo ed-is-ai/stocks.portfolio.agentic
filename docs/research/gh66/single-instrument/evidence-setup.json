@@ -1,0 +1,74 @@
+{
+  "backtest_database_signature_at_setup": {
+    "device": 16777232,
+    "inode": 10177001,
+    "mtime_ns": 1791404676679013197,
+    "path": "/Users/edyau/Git/stocks.portfolio.agentic/data/backtest.db",
+    "sidecars": {
+      "shm": {
+        "inode": 98603819,
+        "mtime_ns": 1791404676909943651,
+        "size_bytes": 32768
+      },
+      "wal": {
+        "inode": 98603818,
+        "mtime_ns": 1791404676909828901,
+        "size_bytes": 0
+      }
+    },
+    "size_bytes": 20205584384
+  },
+  "base_currency": "GBP",
+  "fx": {
+    "price_revision": "4997f2386b2152be3dcaae45319333fee6c908969a029f9273d9ae521a2f5af2"
+  },
+  "historical_cache": "/private/tmp/gh66-single-ma/single-instrument-evidence.sqlite",
+  "historical_cache_sha256": "4dc2309d0e0875b685928075cbd7b85d4e329a794c219e41b86e0343a574336c",
+  "historical_cache_signature": {
+    "device": 16777232,
+    "inode": 98603651,
+    "mtime_ns": 1791404668662172985,
+    "path": "/private/tmp/gh66-single-ma/single-instrument-evidence.sqlite",
+    "sidecars": {
+      "shm": {
+        "inode": 98603821,
+        "mtime_ns": 1791404676925963140,
+        "size_bytes": 32768
+      },
+      "wal": {
+        "inode": 98603820,
+        "mtime_ns": 1791404676925870514,
+        "size_bytes": 0
+      }
+    },
+    "size_bytes": 4874240
+  },
+  "horizon": {
+    "end_month": "2026-08",
+    "start_month": "2016-09"
+  },
+  "original_moving_average_manifest_digest": "dca820e7043a6ffe056c50dfbd66674593d1658c666491a0f9af75e9fac28dc1",
+  "original_moving_average_run_id": "71fc5af6-3624-4220-bb57-879f66b07e5a",
+  "parent_experiment_id": "f72d586e3a85ada75bb06e5ff0734918729b91696bb49b259de9b76ac16cd056",
+  "position_cap": 10,
+  "qqq": {
+    "actions": 43,
+    "data_revision": "95a9e13dacb3061d4fd9d43dd7c2adcef0e582d929b890097786db34ebc5db6e",
+    "end": "2026-09-01",
+    "observed_symbol": "QQQ",
+    "provider": "yfinance",
+    "provider_version": "1.4.1",
+    "requested_symbol": "QQQ",
+    "response_metadata_digest": "6d39fc090ded8a4b35740f52bdf7194fe3ca7358f6e40a5d4c14742ca2ef7ebd",
+    "rows": 2712,
+    "security_id": "7cf2f37a-4251-5403-ae80-b7fc4fa6a70e",
+    "start": "2015-11-16"
+  },
+  "spy": {
+    "action_revision": "ae8fb84c2045757f55126dc017f97a804edb5ebaeced7c1e2f93607c344952a1",
+    "price_revision": "ae8fb84c2045757f55126dc017f97a804edb5ebaeced7c1e2f93607c344952a1",
+    "security_id": "556ba161-a9af-5292-88f7-8a0e8353c221"
+  },
+  "starting_capital": "10000",
+  "strategy_id": "rtly-backtest-moving-average"
+}

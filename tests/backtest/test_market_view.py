@@ -14,10 +14,16 @@ import pytest
 
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository, RosterCaptureCommit
-from app.repositories.historical_price_repo import HistoricalPriceRepository
+from app.repositories.historical_price_repo import (
+    HistoricalPriceRepository,
+    StoredHistoricalEvidence,
+)
 from app.services.backtest.historical_price_evidence import (
     HistoricalEvidenceRequest,
     YFinanceHistoricalEvidenceAdapter,
+)
+from app.services.backtest.historical_data_qualification import (
+    REQUEST_CONTRACT_VERSION,
 )
 from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.market_view import (
@@ -30,6 +36,7 @@ from app.services.backtest.market_planes import (
     HistoricalMarketPlanes,
     MarketDataPolicyError,
 )
+from app.services.backtest.currency import prepare_fx_closes
 from app.services.backtest.strategy_evidence import (
     EvidenceCapableViewV1,
     EvidenceKind,
@@ -64,9 +71,18 @@ SECURITY_ID = "sec-001"
 
 
 class _FakeTicker:
-    def __init__(self, frame: pd.DataFrame, symbol: str) -> None:
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        symbol: str,
+        *,
+        currency: str = "USD",
+        exchange_timezone: str = "America/New_York",
+    ) -> None:
         self._frame = frame
         self._symbol = symbol
+        self._currency = currency
+        self._exchange_timezone = exchange_timezone
 
     def history(self, **_kwargs: object) -> pd.DataFrame:
         return self._frame.copy()
@@ -74,8 +90,8 @@ class _FakeTicker:
     def get_history_metadata(self, repair: bool = False) -> dict[str, str]:
         return {
             "symbol": self._symbol,
-            "currency": "USD",
-            "exchangeTimezoneName": "America/New_York",
+            "currency": self._currency,
+            "exchangeTimezoneName": self._exchange_timezone,
         }
 
 
@@ -88,6 +104,9 @@ def _commit_price_evidence(
     end: date,
     sessions: tuple[date, ...],
     closes: tuple[float, ...],
+    currency: str = "USD",
+    quote_unit: str = "USD",
+    exchange_timezone: str = "America/New_York",
 ) -> str:
     frame = pd.DataFrame(
         {
@@ -101,7 +120,7 @@ def _commit_price_evidence(
             "Stock Splits": [0.0 for _ in closes],
         },
         index=pd.DatetimeIndex(
-            [session.isoformat() for session in sessions], tz="America/New_York"
+            [session.isoformat() for session in sessions], tz=exchange_timezone
         ),
     )
     request = HistoricalEvidenceRequest(
@@ -110,14 +129,20 @@ def _commit_price_evidence(
         symbol=symbol,
         start=start,
         end=end,
-        expected_currency="USD",
-        expected_quote_unit="USD",
-        expected_timezone="America/New_York",
+        expected_currency="GBP" if quote_unit == "GBp" else currency,
+        expected_quote_unit=quote_unit,
+        expected_timezone=exchange_timezone,
         expected_sessions=sessions,
         allowed_observed_symbols=(symbol,),
     )
     payload = YFinanceHistoricalEvidenceAdapter(
-        lambda _: _FakeTicker(frame, symbol), clock=lambda: NOW
+        lambda _: _FakeTicker(
+            frame,
+            symbol,
+            currency=quote_unit,
+            exchange_timezone=exchange_timezone,
+        ),
+        clock=lambda: NOW,
     ).fetch(request)
     repo.commit(payload)
     return payload.data_revision
@@ -127,6 +152,62 @@ def _price_repo(tmp_path: Path) -> HistoricalPriceRepository:
     repo = HistoricalPriceRepository(db.make_connect(lambda: tmp_path / "prices.db"))
     repo.ensure_schema()
     return repo
+
+
+def _fx_evidence(
+    closes: tuple[tuple[date, float], ...],
+    *,
+    start: date = date(2026, 6, 1),
+    end: date = date(2026, 6, 10),
+) -> StoredHistoricalEvidence:
+    request_contract = {
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "interval": "1d",
+        "prepost": False,
+        "auto_adjust": False,
+        "back_adjust": False,
+        "actions": True,
+        "repair": False,
+        "keepna": True,
+        "rounding": False,
+        "timeout": 15,
+        "raise_errors": True,
+    }
+    return StoredHistoricalEvidence(
+        data_revision=DIGEST_C,
+        security_id="fx:GBPUSD=X",
+        provider="yfinance",
+        provider_version="1.4.1",
+        request_contract_version=REQUEST_CONTRACT_VERSION,
+        requested_symbol="GBPUSD=X",
+        observed_symbol="GBPUSD=X",
+        alias_revision=DIGEST_B,
+        currency="USD",
+        quote_unit="USD",
+        quote_unit_scale="1",
+        exchange_timezone="Europe/London",
+        start=start.isoformat(),
+        end=end.isoformat(),
+        request_contract=request_contract,
+        response_metadata_digest=DIGEST_A,
+        canonical_manifest_json="{}",
+        rows=tuple(
+            {
+                "session": session.isoformat(),
+                "open": close.hex(),
+                "high": close.hex(),
+                "low": close.hex(),
+                "close": close.hex(),
+                "adj_close": close.hex(),
+                "volume": float(0).hex(),
+                "dividends": float(0).hex(),
+                "stock_splits": float(0).hex(),
+            }
+            for session, close in closes
+        ),
+        actions=(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +472,187 @@ def test_price_history_returns_only_rows_on_or_before_the_bound(tmp_path) -> Non
 
     assert list(frame.index) == [date(2026, 6, 1), date(2026, 6, 2), date(2026, 6, 3)]
     assert tuple(frame.columns) == PRICE_HISTORY_COLUMNS
+
+
+@pytest.mark.parametrize(
+    (
+        "source_currency",
+        "quote_unit",
+        "base_currency",
+        "native_close",
+        "expected_close",
+    ),
+    [
+        ("GBP", "GBP", "USD", 10.0, Decimal("12.50000000")),
+        ("USD", "USD", "GBP", 12.5, Decimal("10.00000000")),
+        ("GBP", "GBp", "USD", 1000.0, Decimal("12.50000000")),
+    ],
+)
+def test_base_currency_history_uses_quote_units_and_bounded_fx(
+    tmp_path,
+    source_currency: str,
+    quote_unit: str,
+    base_currency: str,
+    native_close: float,
+    expected_close: Decimal,
+) -> None:
+    price_repo = _price_repo(tmp_path)
+    session = date(2026, 6, 3)
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="TEST.L" if source_currency == "GBP" else "TEST",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=(session,),
+        closes=(native_close,),
+        currency=source_currency,
+        quote_unit=quote_unit,
+        exchange_timezone=(
+            "Europe/London" if source_currency == "GBP" else "America/New_York"
+        ),
+    )
+    fx = _fx_evidence(((session, 1.25),))
+    view = MarketView(
+        as_of_session=session,
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+        base_currency=base_currency,
+        fx_evidence=fx,
+        prepared_fx=prepare_fx_closes(fx),
+    )
+
+    rows = view.base_currency_close_history(SECURITY_ID, limit=1)
+
+    assert rows.index.tolist() == [session]
+    assert rows.iloc[0]["close"] == expected_close
+    assert rows.iloc[0]["reason"] is None
+    assert rows.iloc[0]["source_currency"] == source_currency
+    assert rows.iloc[0]["source_quote_unit"] == quote_unit
+    assert rows.iloc[0]["fx_rate"] == Decimal("1.25")
+    assert rows.iloc[0]["fx_session"] == session
+    assert rows.iloc[0]["fx_revision"] == fx.data_revision
+    assert rows.iloc[0]["policy_version"] == "CurrencyConversionPolicyV1"
+
+
+def test_base_currency_history_preserves_rows_outside_fx_revision_and_uses_no_future_fx(
+    tmp_path,
+) -> None:
+    price_repo = _price_repo(tmp_path)
+    sessions = tuple(date(2026, 6, day) for day in (1, 2, 3, 4))
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="TEST.L",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=sessions,
+        closes=(10.0, 10.0, 10.0, 10.0),
+        currency="GBP",
+        quote_unit="GBP",
+        exchange_timezone="Europe/London",
+    )
+    fx = _fx_evidence(
+        ((date(2026, 6, 3), 1.25), (date(2026, 6, 4), 1.5)),
+        start=date(2026, 6, 3),
+        end=date(2026, 6, 10),
+    )
+    view = MarketView(
+        as_of_session=date(2026, 6, 4),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+        base_currency="USD",
+        fx_evidence=fx,
+        prepared_fx=prepare_fx_closes(fx),
+    )
+
+    rows = view.base_currency_close_history(SECURITY_ID, limit=4)
+
+    assert rows.index.tolist() == list(sessions)
+    assert rows["reason"].iloc[:2].tolist() == [
+        "fx_outside_coverage",
+        "fx_outside_coverage",
+    ]
+    assert rows["reason"].iloc[2:].isna().all()
+    assert rows["close"].iloc[:2].isna().all()
+    assert rows["close"].iloc[2] == Decimal("12.50000000")
+    assert rows["fx_session"].iloc[2] == sessions[2]
+    assert rows["close"].iloc[3] == Decimal("15.00000000")
+    assert rows["fx_session"].iloc[3] == sessions[3]
+
+
+def test_base_currency_history_marks_excessive_fx_carry_unavailable(tmp_path) -> None:
+    price_repo = _price_repo(tmp_path)
+    session = date(2026, 6, 8)
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="TEST.L",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=(session,),
+        closes=(10.0,),
+        currency="GBP",
+        quote_unit="GBP",
+        exchange_timezone="Europe/London",
+    )
+    fx = _fx_evidence(
+        ((date(2026, 6, 1), 1.25),),
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+    )
+    view = MarketView(
+        as_of_session=session,
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+        base_currency="USD",
+        fx_evidence=fx,
+        prepared_fx=prepare_fx_closes(fx),
+    )
+
+    row = view.base_currency_close_history(SECURITY_ID, limit=1).iloc[0]
+
+    assert pd.isna(row["close"])
+    assert row["reason"] == "fx_stale"
+    assert row["fx_revision"] == fx.data_revision
+
+
+def test_base_currency_history_keeps_market_view_selection_and_bound_errors(
+    tmp_path,
+) -> None:
+    view = _universe_view(tmp_path, (SECURITY_ID,))
+    with pytest.raises(UnselectedSecurityError):
+        view.base_currency_close_history("sec-outside", limit=2)
+
+    price_repo = _price_repo(tmp_path)
+    revision = _commit_price_evidence(
+        price_repo,
+        security_id=SECURITY_ID,
+        symbol="AAPL",
+        start=date(2026, 6, 1),
+        end=date(2026, 6, 10),
+        sessions=(date(2026, 6, 1), date(2026, 6, 2)),
+        closes=(100.0, 101.0),
+    )
+    bound_view = MarketView(
+        as_of_session=date(2026, 7, 1),
+        profile_hash=PROFILE_HASH,
+        security_price_revisions={SECURITY_ID: revision},
+        selected_universe=(SECURITY_ID,),
+        backtest_repo=_backtest_repo(tmp_path),
+        historical_price_repo=price_repo,
+    )
+    with pytest.raises(MarketViewBoundError):
+        bound_view.base_currency_close_history(SECURITY_ID, limit=2)
 
 
 def test_reference_history_is_bounded_without_widening_trade_reads(tmp_path) -> None:

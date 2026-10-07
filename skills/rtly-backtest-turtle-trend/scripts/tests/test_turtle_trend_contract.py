@@ -9,6 +9,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pandas as pd
+import pytest
 
 from app.services.backtest.strategy_evidence import (
     EVIDENCE_CONTRACT_VERSION,
@@ -67,6 +68,36 @@ class _View:
 
     def scan_result(self, security_id: str):  # noqa: ANN201
         return None
+
+
+class _RankedView(_View):
+    base_currency = "GBP"
+
+    def __init__(
+        self,
+        as_of_session: date,
+        history: pd.DataFrame,
+        rankings: dict[str, pd.DataFrame],
+    ) -> None:
+        super().__init__(as_of_session, history)
+        self._rankings = rankings
+
+    def base_currency_close_history(
+        self, security_id: str, *, limit: int
+    ) -> pd.DataFrame:
+        return self._rankings[security_id].iloc[-limit:]
+
+
+def _momentum_history(
+    as_of: date, numerator: str | None, *, rows: int = 253
+) -> pd.DataFrame:
+    sessions = pd.bdate_range(end=as_of, periods=rows)
+    closes: list[Decimal | None] = [Decimal("100")] * rows
+    reasons: list[str | None] = [None] * rows
+    if rows >= 22:
+        closes[-22] = None if numerator is None else Decimal(numerator)
+        reasons[-22] = "fx_missing" if numerator is None else None
+    return pd.DataFrame({"close": closes, "reason": reasons}, index=sessions)
 
 
 def _history(
@@ -425,10 +456,67 @@ def test_channel_breakout_and_breach_explain_their_own_channel() -> None:
         strategy.exit_signals(_View(as_of, breach), _portfolio("7"), _parameters())
     )
 
-    assert _codes(entries[0]) == ("channel_breakout",)
+    assert _codes(entries[0]) == ("channel_breakout", "entry_ranking")
     assert _codes(exits[0]) == ("channel_breach",)
     entry_facts = {fact.label for fact in entries[0].explanation.reasons[0].facts}
     assert entry_facts == {"High", "Entry channel lookback"}
+
+
+def test_entry_ranks_by_momentum_and_keeps_missing_candidates() -> None:
+    strategy = MODULE.TurtleTrendStrategy()
+    as_of, history = _history()
+    view = _RankedView(
+        as_of,
+        history,
+        {
+            "sec-a": _momentum_history(as_of, "80"),
+            "sec-m": _momentum_history(as_of, None),
+            "sec-z": _momentum_history(as_of, "90"),
+        },
+    )
+
+    signals = strategy.entry_signals(
+        view,
+        {**_parameters(), "selected_securities": ["sec-a", "sec-m", "sec-z"]},
+    )
+
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-z": Decimal("3"),
+        "sec-a": Decimal("2"),
+        "sec-m": Decimal("1"),
+    }
+    missing = next(signal for signal in signals if signal.security_id == "sec-m")
+    assert missing.explanation is not None
+    ranking = next(
+        reason
+        for reason in missing.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert (
+        next(
+            fact.observed
+            for fact in ranking.facts
+            if fact.label == "Momentum unavailable reason"
+        )
+        == "fx_missing"
+    )
+
+
+def test_turtle_momentum_integrity_errors_propagate() -> None:
+    as_of, history = _history()
+
+    class _CorruptView(_View):
+        base_currency = "GBP"
+
+        def base_currency_close_history(
+            self, security_id: str, *, limit: int
+        ) -> pd.DataFrame:
+            raise RuntimeError("pinned evidence integrity error")
+
+    with pytest.raises(RuntimeError, match="integrity"):
+        MODULE.TurtleTrendStrategy().entry_signals(
+            _CorruptView(as_of, history), _parameters()
+        )
 
 
 # --- GH-57: the Strategy's own stop level ------------------------------------

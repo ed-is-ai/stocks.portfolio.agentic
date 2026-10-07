@@ -232,6 +232,35 @@ evaluation. Missing, thin, stale, conflicting, or failed detector evidence is
 reported through generic evidence preflight and must be treated as degraded;
 Strategies must never fetch data or rerun detectors to fill that gap.
 
+### Optional base-currency close history
+
+Historical views may additionally implement the separate,
+runtime-checkable `BaseCurrencyCloseHistoryViewV1` capability. It is optional:
+do not add it to `MarketViewV1`, and check for it before use so current-scan
+views and older test doubles continue to work.
+
+```python
+from app.services.backtest.strategy_protocol import (
+    BaseCurrencyCloseHistoryViewV1,
+)
+
+if isinstance(view, BaseCurrencyCloseHistoryViewV1):
+    closes = view.base_currency_close_history("sec-aapl", limit=253)
+    base_currency = view.base_currency
+```
+
+The bounded DataFrame keeps the same oldest-first security-session index and
+has `close`, `reason`, `source_currency`, `source_quote_unit`, `fx_rate`,
+`fx_session`, `fx_revision`, and `policy_version` columns. A missing or stale
+ranking-only FX observation yields a null `close` and a row-level `reason`;
+the host does not drop or shift that row. `close` is converted with the pinned
+price/FX revisions, existing quote-unit scaling and five-calendar-day carry,
+using no FX observation after that price session. The capability performs
+currency conversion only. A Strategy owns all lookbacks, endpoint selection,
+score validation, ranking and preference explanations. Missing ranking data
+must not remove an otherwise eligible signal, and a Strategy must never fetch
+replacement data itself.
+
 ### `PortfolioView`
 
 An immutable, read-only snapshot of simulated portfolio state bounded to one
@@ -294,6 +323,18 @@ Every `Signal` is frozen and carries a `sort_key` property -- a pure
 function of `(session, security_id, side, rule_id)` alone, with SELL ranked
 before BUY for the same session/security. Return signals in whatever order
 is convenient; the validators below always produce one canonical order.
+
+Each Skill owns the ordering of its qualifying BUY candidates. When scarce
+position slots make that ordering matter, it may encode its within-batch rank
+as a descending ordinal `Decimal(N - rank + 1)` in `Signal.priority`, where N
+is the endpoint of that Skill's rank space (Buy & Hold uses configured
+`top_x`); rank 1 gets the highest value. The engine consumes this optional
+scalar generically, considering higher priorities first and missing priorities
+last, with its deterministic signal order resolving ties. A backtest runs one
+Strategy Skill, so priority values apply only within that Skill's candidate
+batch and are not comparable across sessions or Skills. Keep the Skill's raw
+score components and rank in its explanation. Priority does not change the
+canonical `sort_key` or outcomes when every candidate fits.
 
 ### `parameters`
 

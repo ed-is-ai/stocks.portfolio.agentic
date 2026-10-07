@@ -37,11 +37,19 @@ from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.historical_price_repo import (
     HistoricalEvidenceReadHandle,
     HistoricalPriceRepository,
+    StoredHistoricalEvidence,
 )
 from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.market_planes import (
     HistoricalMarketPlanes,
     MarketDataPolicyError,
+)
+from app.services.backtest.currency import (
+    CURRENCY_CONVERSION_POLICY_VERSION,
+    CurrencyPolicyError,
+    PreparedFxCloses,
+    convert_to_base,
+    prepare_fx_closes,
 )
 from app.services.backtest.run_universe import canonical_run_universe
 from app.services.backtest.strategy_evidence import (
@@ -55,6 +63,16 @@ from app.services.backtest.trading_calendar import TradingCalendar
 #: populated or empty -- a Strategy can rely on this shape regardless of
 #: whether ``security_id`` has any evidence.
 PRICE_HISTORY_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
+BASE_CURRENCY_CLOSE_COLUMNS: tuple[str, ...] = (
+    "close",
+    "reason",
+    "source_currency",
+    "source_quote_unit",
+    "fx_rate",
+    "fx_session",
+    "fx_revision",
+    "policy_version",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +178,9 @@ class MarketView:
     selected_universe: tuple[str, ...]
     backtest_repo: BacktestRepository
     historical_price_repo: HistoricalPriceRepository
+    base_currency: str = "GBP"
+    fx_evidence: StoredHistoricalEvidence | None = None
+    prepared_fx: PreparedFxCloses | None = None
     regime_benchmark: RegimeBenchmarkPinV1 | None = None
     regime_benchmark_access: HistoricalEvidenceReadHandle | None = None
     prepared_planes: InitVar[Mapping[str, HistoricalMarketPlanes] | None] = None
@@ -373,6 +394,143 @@ class MarketView:
         )
         return frame
 
+    def base_currency_close_history(
+        self, security_id: str, *, limit: int
+    ) -> pd.DataFrame:
+        """Return bounded split-continuous closes in the Run's base currency.
+
+        Each source price session is retained in order, including rows whose
+        required FX observation is unavailable. Those rows have a null
+        ``close`` and a stable ``reason``; corrupt or mismatched pinned
+        evidence still raises through the ordinary market/currency policy.
+        """
+        self.require_selected(security_id)
+        history = self.price_history(security_id, limit=limit, columns=("close",))
+        if history.empty:
+            return pd.DataFrame(
+                columns=BASE_CURRENCY_CLOSE_COLUMNS,
+                index=pd.Index([], dtype=object, name="session"),
+            )
+
+        revision = self.security_price_revisions[security_id]
+        plane = (
+            self._prepared_planes.get(security_id)
+            if self._prepared_planes is not None
+            else None
+        )
+        if plane is None and self._prepared_plane_cache is not None:
+            plane = self._prepared_plane_cache.get(security_id)
+        access = (
+            None
+            if self._price_accesses is None
+            else self._price_accesses.get(security_id)
+        )
+        if plane is not None:
+            if plane.data_revision != revision:
+                raise MarketDataPolicyError(
+                    "integrity_error",
+                    f"Prepared plane for {security_id!r} does not match its pinned revision.",
+                )
+            source_currency, source_quote_unit = plane.currency, plane.quote_unit
+        elif access is not None:
+            if access.data_revision != revision:
+                raise MarketDataPolicyError(
+                    "integrity_error",
+                    f"Price access for {security_id!r} does not match its pinned revision.",
+                )
+            source_currency = access.metadata.currency
+            source_quote_unit = access.metadata.quote_unit
+        else:
+            evidence = self.historical_price_repo.get(revision)
+            plane = HistoricalMarketPlanes.from_evidence(evidence)
+            source_currency, source_quote_unit = plane.currency, plane.quote_unit
+
+        prepared_fx = self.prepared_fx
+        if source_currency != self.base_currency and self.fx_evidence is not None:
+            if prepared_fx is None:
+                prepared_fx = prepare_fx_closes(self.fx_evidence)
+            elif prepared_fx.evidence_revision != self.fx_evidence.data_revision:
+                raise CurrencyPolicyError(
+                    "fx_ambiguous", "Prepared FX closes do not match FX evidence."
+                )
+
+        fx_start: date | None = None
+        fx_end: date | None = None
+        if source_currency != self.base_currency and self.fx_evidence is not None:
+            try:
+                fx_start = date.fromisoformat(self.fx_evidence.start)
+                fx_end = date.fromisoformat(self.fx_evidence.end)
+            except (TypeError, ValueError) as exc:
+                raise CurrencyPolicyError(
+                    "integrity_error", "FX evidence interval is malformed."
+                ) from exc
+            if fx_start >= fx_end:
+                raise CurrencyPolicyError(
+                    "integrity_error", "FX evidence interval is invalid."
+                )
+
+        rows: list[dict[str, object]] = []
+        for session, value in history["close"].items():
+            if type(session) is not date:
+                raise MarketDataPolicyError(
+                    "integrity_error", "Price history session is not a canonical date."
+                )
+            fx_rate = None
+            fx_session = None
+            fx_revision = (
+                self.fx_evidence.data_revision
+                if source_currency != self.base_currency
+                and self.fx_evidence is not None
+                else None
+            )
+            try:
+                if (
+                    source_currency != self.base_currency
+                    and fx_start is not None
+                    and fx_end is not None
+                    and not fx_start <= session < fx_end
+                ):
+                    reason = "fx_outside_coverage"
+                    converted_close = None
+                else:
+                    converted = convert_to_base(
+                        value=value,
+                        quote_currency=source_currency,
+                        quote_unit=source_quote_unit,
+                        base_currency=self.base_currency,
+                        valuation_session=session,
+                        completed_fx_through=session,
+                        fx_evidence=self.fx_evidence,
+                        prepared_fx=prepared_fx,
+                    )
+                    converted_close = converted.base_amount
+                    reason = None
+                    fx_rate = converted.fx_rate
+                    fx_session = converted.fx_session
+                    fx_revision = converted.fx_revision
+            except CurrencyPolicyError as exc:
+                if exc.code not in {"fx_missing", "fx_stale"}:
+                    raise
+                converted_close = None
+                reason = exc.code
+            rows.append(
+                {
+                    "close": converted_close,
+                    "reason": reason,
+                    "source_currency": source_currency,
+                    "source_quote_unit": source_quote_unit,
+                    "fx_rate": fx_rate,
+                    "fx_session": fx_session,
+                    "fx_revision": fx_revision,
+                    "policy_version": CURRENCY_CONVERSION_POLICY_VERSION,
+                }
+            )
+        return pd.DataFrame(
+            rows,
+            index=pd.Index(history.index, dtype=object, name="session"),
+            columns=BASE_CURRENCY_CLOSE_COLUMNS,
+        )
+
     def regime_benchmark_history(
         self,
         security_id: str,
@@ -397,7 +555,10 @@ class MarketView:
             access = self.historical_price_repo.open_read(pin.price_revision)
             owns_access = True
         try:
-            if access.data_revision != pin.price_revision or access.security_id != security_id:
+            if (
+                access.data_revision != pin.price_revision
+                or access.security_id != security_id
+            ):
                 raise MarketDataPolicyError(
                     "integrity_error",
                     "regime benchmark access does not match its pinned reference",

@@ -1,0 +1,229 @@
+{
+  "results": {
+    "rtly-backtest-buy-and-hold": {
+      "backtest_result_audit_manifests": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_candidate_audits": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_entry_selection": {
+        "rows": 1,
+        "sha256": "dfb2587552bf49aa87915ef182eaba09143ebd1392e14b8cb33c7cabaaa5053d",
+        "status": "present"
+      },
+      "backtest_result_entry_selection_decisions": {
+        "rows": 755,
+        "sha256": "772677e7daf34a1e2b476d65b1a42a43948535142476ed21e30f7857072a7679",
+        "status": "present"
+      },
+      "backtest_results": {
+        "rows": 1,
+        "sha256": "574b5618168ff634fa18bcc1b0df11c3f29727ac2d94dc33f0adc42e072447ee",
+        "status": "present"
+      },
+      "equity_curve": {
+        "rows": 2571,
+        "sha256": "13b34bc9c755d285cce3f78833a32fd1e6a79e2a77acf256f40bdc00878b6352",
+        "status": "present"
+      },
+      "trade_log": {
+        "rows": 197,
+        "sha256": "7e0ad370bb60e810da5db28173866e62af838833e67ef4175000f46462d61d3f",
+        "status": "present"
+      }
+    },
+    "rtly-backtest-darvas-box": {
+      "backtest_result_audit_manifests": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_candidate_audits": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_entry_selection": {
+        "rows": 0,
+        "sha256": "992fcb301c420106d78667a583a2010b7b285fe024f93f8a09774e2efbd11af4",
+        "status": "present"
+      },
+      "backtest_result_entry_selection_decisions": {
+        "rows": 0,
+        "sha256": "10efc1e6c220343d8b33c960959b0454610252f0029fce610f44772faa30ff4b",
+        "status": "present"
+      },
+      "backtest_results": {
+        "rows": 1,
+        "sha256": "aa60bafa8e777f081daee0303d97377a99ca9e794d946e91abb36ea573ab291c",
+        "status": "present"
+      },
+      "equity_curve": {
+        "rows": 2571,
+        "sha256": "990f89ceea38232a2f805561afda2fe31d9ac530ceff567d3b5905af4b91ecce",
+        "status": "present"
+      },
+      "trade_log": {
+        "rows": 23092,
+        "sha256": "3f857f18037162141af230f6273791e06c54483bac47e772cc92c462244fa572",
+        "status": "present"
+      }
+    },
+    "rtly-backtest-minervini": {
+      "backtest_result_audit_manifests": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_candidate_audits": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_entry_selection": {
+        "rows": 0,
+        "sha256": "992fcb301c420106d78667a583a2010b7b285fe024f93f8a09774e2efbd11af4",
+        "status": "present"
+      },
+      "backtest_result_entry_selection_decisions": {
+        "rows": 0,
+        "sha256": "10efc1e6c220343d8b33c960959b0454610252f0029fce610f44772faa30ff4b",
+        "status": "present"
+      },
+      "backtest_results": {
+        "rows": 1,
+        "sha256": "8f432015e79e67a7836f85753632a378a168e22cf8a3239d37742c85a116fb9d",
+        "status": "present"
+      },
+      "equity_curve": {
+        "rows": 2571,
+        "sha256": "e31e70e2b3a19154448e68e980f36f7e9668cc53f64ec753f8886471c2f648ed",
+        "status": "present"
+      },
+      "trade_log": {
+        "rows": 7034,
+        "sha256": "d50dd690cf0e414d1b1ddc84fdb55cc58a05568d3c6f0e68d040195996d59f70",
+        "status": "present"
+      }
+    },
+    "rtly-backtest-moving-average": {
+      "backtest_result_audit_manifests": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_candidate_audits": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_entry_selection": {
+        "rows": 0,
+        "sha256": "992fcb301c420106d78667a583a2010b7b285fe024f93f8a09774e2efbd11af4",
+        "status": "present"
+      },
+      "backtest_result_entry_selection_decisions": {
+        "rows": 0,
+        "sha256": "10efc1e6c220343d8b33c960959b0454610252f0029fce610f44772faa30ff4b",
+        "status": "present"
+      },
+      "backtest_results": {
+        "rows": 1,
+        "sha256": "ab4b758b2b985b0c6218007cb1e5e4cf1cbf9ade231149acbf05af786319eb67",
+        "status": "present"
+      },
+      "equity_curve": {
+        "rows": 2571,
+        "sha256": "efc68783947a931ae53a6af69eea0d7116a7f11e525c31419581f558874404fc",
+        "status": "present"
+      },
+      "trade_log": {
+        "rows": 5457,
+        "sha256": "caa4bf649c63aba19e34198ef0c9d7f808ee71c8ae4b52f710ec2850ce7d99b4",
+        "status": "present"
+      }
+    },
+    "rtly-backtest-turtle-trend": {
+      "backtest_result_audit_manifests": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_candidate_audits": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_entry_selection": {
+        "rows": 0,
+        "sha256": "992fcb301c420106d78667a583a2010b7b285fe024f93f8a09774e2efbd11af4",
+        "status": "present"
+      },
+      "backtest_result_entry_selection_decisions": {
+        "rows": 0,
+        "sha256": "10efc1e6c220343d8b33c960959b0454610252f0029fce610f44772faa30ff4b",
+        "status": "present"
+      },
+      "backtest_results": {
+        "rows": 1,
+        "sha256": "2f63c1fd5ddf66e66f9686c8dd2c658c5de8100bdb976d4a74d74873e2c2977d",
+        "status": "present"
+      },
+      "equity_curve": {
+        "rows": 2571,
+        "sha256": "9c7608ddb16e6b8399c847e17c2a229394bb2e778b2390c7ab77abcf6a4a78ea",
+        "status": "present"
+      },
+      "trade_log": {
+        "rows": 243941,
+        "sha256": "f11ccd6195be690fd4f47fe2e3f7a3480d71f0e44ecae96d91693fe68fd9b9ea",
+        "status": "present"
+      }
+    },
+    "rtly-backtest-weinstein": {
+      "backtest_result_audit_manifests": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_candidate_audits": {
+        "rows": 0,
+        "sha256": null,
+        "status": "table_missing"
+      },
+      "backtest_result_entry_selection": {
+        "rows": 0,
+        "sha256": "992fcb301c420106d78667a583a2010b7b285fe024f93f8a09774e2efbd11af4",
+        "status": "present"
+      },
+      "backtest_result_entry_selection_decisions": {
+        "rows": 0,
+        "sha256": "10efc1e6c220343d8b33c960959b0454610252f0029fce610f44772faa30ff4b",
+        "status": "present"
+      },
+      "backtest_results": {
+        "rows": 1,
+        "sha256": "ab8ed192abaf32853d2862554b867b17e7f9bc268eb55e7c3e87b61fba80f0cd",
+        "status": "present"
+      },
+      "equity_curve": {
+        "rows": 2571,
+        "sha256": "3daf5bc2d383dc31e8b345244f1635a28271da1e87c3b0b18cf4d5a1c2dc57f9",
+        "status": "present"
+      },
+      "trade_log": {
+        "rows": 11761,
+        "sha256": "c5775ec8f1a7b34aae55ffe161e98cd5e690442120656f5ba00231867021faa3",
+        "status": "present"
+      }
+    }
+  },
+  "snapshot_sha256": "b52cd440ddae985e6e7727f31b2657b5d6f02988781012d2a77a032a44647545",
+  "snapshot_started_at": "2026-10-06T21:23:52.401973+00:00",
+  "source_database": "/Users/edyau/Git/stocks.portfolio.agentic/data/backtest.db"
+}

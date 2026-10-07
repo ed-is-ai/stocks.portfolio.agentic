@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pandas as pd
 
@@ -15,6 +16,10 @@ from app.services.backtest.strategy_evidence import (
     EVIDENCE_CONTRACT_VERSION,
     EvidenceKind,
     StrategyEvidenceRequirementsV1,
+)
+from app.services.backtest.strategy_explanation import (
+    ExplanationFactV1,
+    SignalReasonV1,
 )
 from app.services.backtest.strategy_protocol import (
     PortfolioView,
@@ -84,21 +89,24 @@ class _View:
         security_id: str,
         *,
         limit: int | None = None,
-        columns: object | None = None,
+        columns: Sequence[str] | None = None,
     ) -> pd.DataFrame:
         history = self._history.copy()
-        history = history.loc[
-            [
-                (index.date() if hasattr(index, "date") else index)
-                <= self.as_of_session
-                for index in history.index
-            ]
-        ]
+        history = cast(
+            pd.DataFrame,
+            history.loc[
+                [
+                    (index.date() if hasattr(index, "date") else index)
+                    <= self.as_of_session
+                    for index in history.index
+                ]
+            ],
+        )
         if limit is not None:
-            history = history.iloc[-limit:]
+            history = cast(pd.DataFrame, history.iloc[-limit:, :])
         if columns is not None:
-            history = history.loc[:, list(columns)]
-        return history
+            history = cast(pd.DataFrame, history.loc[:, list(columns)])
+        return cast(pd.DataFrame, history)
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         return self._scan
@@ -141,8 +149,18 @@ def test_entry_requires_strict_breakout_and_complete_current_history() -> None:
     equal_breakout.loc[equal_breakout.index[-1], "close"] = history["high"].iloc[-2]
 
     assert strategy.entry_signals(_View(equal_breakout, _scan()), PARAMETERS) == []
-    assert strategy.entry_signals(_View(history.iloc[:-1], _scan()), PARAMETERS) == []
-    assert strategy.entry_signals(_View(history.iloc[-203:], _scan()), PARAMETERS) == []
+    assert (
+        strategy.entry_signals(
+            _View(cast(pd.DataFrame, history.iloc[:-1, :]), _scan()), PARAMETERS
+        )
+        == []
+    )
+    assert (
+        strategy.entry_signals(
+            _View(cast(pd.DataFrame, history.iloc[-203:, :]), _scan()), PARAMETERS
+        )
+        == []
+    )
 
 
 def test_entry_fails_closed_for_missing_future_or_invalid_volume_evidence() -> None:
@@ -285,20 +303,267 @@ class _KeyedView:
         security_id: str,
         *,
         limit: int | None = None,
-        columns: object | None = None,
+        columns: Sequence[str] | None = None,
     ) -> pd.DataFrame:
         history = self._histories.get(security_id, pd.DataFrame()).copy()
         if limit is not None:
-            history = history.iloc[-limit:]
+            history = cast(pd.DataFrame, history.iloc[-limit:, :])
         if columns is not None:
-            history = history.loc[:, list(columns)]
-        return history
+            history = cast(pd.DataFrame, history.loc[:, list(columns)])
+        return cast(pd.DataFrame, history)
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
         scan = self._scans.get(security_id)
         if scan is None:
             return None
         return SimpleNamespace(**{**vars(scan), "security_id": security_id})
+
+
+def _momentum_history(
+    *,
+    numerator: str = "110",
+    denominator: str = "100",
+    missing_endpoint: int | None = None,
+    missing_reason: str = "fx_outside_coverage",
+) -> pd.DataFrame:
+    sessions = pd.bdate_range(end=AS_OF, periods=253)
+    closes: list[Decimal | None] = [Decimal("100")] * 253
+    reasons: list[str | None] = [None] * 253
+    closes[-22] = Decimal(numerator)
+    closes[-253] = Decimal(denominator)
+    if missing_endpoint is not None:
+        closes[missing_endpoint] = None
+        reasons[missing_endpoint] = missing_reason
+    return pd.DataFrame(
+        {
+            "close": closes,
+            "reason": reasons,
+            "source_currency": "GBP",
+            "source_quote_unit": "GBP",
+            "fx_rate": None,
+            "fx_session": None,
+            "fx_revision": None,
+            "policy_version": "CurrencyConversionPolicyV1",
+        },
+        index=sessions,
+    )
+
+
+class _RankedView(_KeyedView):
+    base_currency = "GBP"
+
+    def __init__(
+        self,
+        histories: dict[str, pd.DataFrame],
+        momentum: dict[str, pd.DataFrame],
+    ) -> None:
+        super().__init__(histories, {key: _scan() for key in histories})
+        self._momentum = momentum
+
+    def base_currency_close_history(
+        self, security_id: str, *, limit: int
+    ) -> pd.DataFrame:
+        assert limit == 253
+        return cast(pd.DataFrame, self._momentum[security_id].iloc[-limit:, :].copy())
+
+
+def _ranking_reason(signal: Signal) -> SignalReasonV1:
+    assert signal.explanation is not None
+    return next(
+        reason
+        for reason in signal.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+
+
+def _fact(reason: SignalReasonV1, label: str) -> ExplanationFactV1:
+    return next(fact for fact in reason.facts if fact.label == label)
+
+
+def test_entry_ranking_prefers_momentum_over_identifier_and_explains_endpoints() -> (
+    None
+):
+    low_id, high_id = "sec-a", "sec-z"
+    view = _RankedView(
+        {low_id: _history(), high_id: _history()},
+        {
+            low_id: _momentum_history(numerator="120"),
+            high_id: _momentum_history(numerator="150"),
+        },
+    )
+
+    signals = WeinsteinStrategy().entry_signals(
+        view, {**PARAMETERS, "selected_securities": [high_id, low_id]}
+    )
+    by_id = {signal.security_id: signal for signal in signals}
+    ranking = _ranking_reason(by_id[high_id])
+    dates = pd.bdate_range(end=AS_OF, periods=253)
+
+    assert by_id[high_id].priority == Decimal("2")
+    assert by_id[low_id].priority == Decimal("1")
+    assert _fact(ranking, "Momentum").observed == Decimal("0.5")
+    assert (
+        _fact(ranking, "Momentum numerator session").observed
+        == pd.Timestamp(dates[-22]).date().isoformat()
+    )
+    assert (
+        _fact(ranking, "Momentum denominator session").observed
+        == pd.Timestamp(dates[-253]).date().isoformat()
+    )
+    assert _fact(ranking, "Score currency").observed == "GBP"
+
+
+def test_relative_volume_breaks_momentum_ties_then_identifier_breaks_exact_ties() -> (
+    None
+):
+    ids = ("sec-a", "sec-b", "sec-c")
+    view = _RankedView(
+        {
+            "sec-a": _history(current_volume="200"),
+            "sec-b": _history(current_volume="200"),
+            "sec-c": _history(current_volume="300"),
+        },
+        {security_id: _momentum_history() for security_id in ids},
+    )
+
+    signals = WeinsteinStrategy().entry_signals(
+        view, {**PARAMETERS, "selected_securities": list(reversed(ids))}
+    )
+    priorities = {signal.security_id: signal.priority for signal in signals}
+
+    assert priorities == {
+        "sec-c": Decimal("3"),
+        "sec-a": Decimal("2"),
+        "sec-b": Decimal("1"),
+    }
+    assert _fact(_ranking_reason(signals[0]), "Relative volume").observed == Decimal(
+        "3"
+    )
+
+
+def test_valid_negative_momentum_ranks_ahead_of_fx_missing() -> None:
+    missing_id, valid_id = "sec-a-missing", "sec-z-valid"
+    view = _RankedView(
+        {valid_id: _history(), missing_id: _history()},
+        {
+            missing_id: _momentum_history(
+                missing_endpoint=-253, missing_reason="fx_outside_coverage"
+            ),
+            valid_id: _momentum_history(numerator="90"),
+        },
+    )
+
+    signals = WeinsteinStrategy().entry_signals(
+        view, {**PARAMETERS, "selected_securities": [missing_id, valid_id]}
+    )
+    by_id = {signal.security_id: signal for signal in signals}
+
+    assert by_id[missing_id].priority == Decimal("1")
+    assert by_id[valid_id].priority == Decimal("2")
+    assert _fact(_ranking_reason(by_id[valid_id]), "Momentum").observed == Decimal(
+        "-0.1"
+    )
+    assert (
+        _fact(
+            _ranking_reason(by_id[missing_id]), "Momentum unavailable reason"
+        ).observed
+        == "fx_outside_coverage"
+    )
+
+
+def test_relative_volume_breaks_ties_between_two_missing_momentum_values() -> None:
+    ids = ("sec-a", "sec-z")
+    view = _RankedView(
+        {
+            "sec-a": _history(current_volume="200"),
+            "sec-z": _history(current_volume="300"),
+        },
+        {
+            security_id: _momentum_history(
+                missing_endpoint=-253, missing_reason="fx_outside_coverage"
+            )
+            for security_id in ids
+        },
+    )
+
+    signals = WeinsteinStrategy().entry_signals(
+        view, {**PARAMETERS, "selected_securities": list(ids)}
+    )
+    priorities = {signal.security_id: signal.priority for signal in signals}
+
+    assert priorities == {"sec-z": Decimal("2"), "sec-a": Decimal("1")}
+
+
+def test_momentum_uses_253_canonical_rows_and_excludes_t_through_t_minus_20() -> None:
+    security_id = "sec-aapl"
+    baseline = _momentum_history(numerator="120", denominator="100")
+    changed_recent = baseline.copy()
+    changed_recent.iloc[-21:, changed_recent.columns.get_loc("close")] = Decimal("900")
+    view = _RankedView(
+        {security_id: _history()},
+        {security_id: baseline},
+    )
+    changed_view = _RankedView(
+        {security_id: _history()},
+        {security_id: changed_recent},
+    )
+    parameters = {**PARAMETERS, "selected_securities": [security_id]}
+
+    original = WeinsteinStrategy().entry_signals(view, parameters)[0]
+    changed = WeinsteinStrategy().entry_signals(changed_view, parameters)[0]
+
+    assert _fact(_ranking_reason(original), "Momentum").observed == Decimal("0.2")
+    assert _fact(_ranking_reason(changed), "Momentum").observed == Decimal("0.2")
+
+
+def test_missing_optional_currency_history_preserves_entry_with_reason() -> None:
+    signal = WeinsteinStrategy().entry_signals(_View(_history(), _scan()), PARAMETERS)[
+        0
+    ]
+
+    assert signal.priority == Decimal("1")
+    assert _fact(_ranking_reason(signal), "Ranking policy").observed == (
+        "weinstein_momentum_relative_volume_v1"
+    )
+    assert _fact(_ranking_reason(signal), "Candidate count").observed == Decimal("1")
+    assert _fact(_ranking_reason(signal), "Ordinal rank").observed == Decimal("1")
+    assert _fact(_ranking_reason(signal), "Encoded priority").observed == Decimal("1")
+    assert (
+        _fact(_ranking_reason(signal), "Momentum unavailable reason").observed
+        == "base_currency_history_unavailable"
+    )
+
+
+def test_short_history_and_invalid_momentum_endpoints_keep_qualifying_entry() -> None:
+    security_id = "sec-aapl"
+    full = _momentum_history()
+    short = cast(pd.DataFrame, full.iloc[1:, :].copy())
+    invalid_numerator = full.copy()
+    invalid_numerator.iloc[-22, invalid_numerator.columns.get_loc("close")] = Decimal(
+        "NaN"
+    )
+    invalid_denominator = full.copy()
+    invalid_denominator.iloc[-253, invalid_denominator.columns.get_loc("close")] = (
+        Decimal("0")
+    )
+
+    cases = (
+        (short, "insufficient_price_history"),
+        (invalid_numerator, "invalid_momentum_endpoint"),
+        (invalid_denominator, "invalid_momentum_endpoint"),
+    )
+    for history, expected_reason in cases:
+        view = _RankedView({security_id: _history()}, {security_id: history})
+        signals = WeinsteinStrategy().entry_signals(
+            view, {**PARAMETERS, "selected_securities": [security_id]}
+        )
+
+        assert len(signals) == 1
+        assert signals[0].priority == Decimal("1")
+        assert (
+            _fact(_ranking_reason(signals[0]), "Momentum unavailable reason").observed
+            == expected_reason
+        )
 
 
 def _upgrade_parameters(**overrides: object) -> dict[str, object]:
@@ -443,7 +708,7 @@ _BENCHMARK_ID = "sec-spy"
 class _RegimeView:
     """Wrap a contract ``_View`` and serve a crafted benchmark frame."""
 
-    def __init__(self, inner: object, benchmark_closes: list[str]) -> None:
+    def __init__(self, inner: _View, benchmark_closes: list[str]) -> None:
         self._inner = inner
         self.as_of_session = inner.as_of_session
         closes = [Decimal(value) for value in benchmark_closes]
@@ -462,15 +727,15 @@ class _RegimeView:
         security_id: str,
         *,
         limit: int | None = None,
-        columns: object | None = None,
+        columns: Sequence[str] | None = None,
     ) -> pd.DataFrame:
         if security_id == _BENCHMARK_ID:
             history = self._benchmark.copy()
             if limit is not None:
-                history = history.iloc[-limit:]
+                history = cast(pd.DataFrame, history.iloc[-limit:, :])
             if columns is not None:
-                history = history.loc[:, list(columns)]
-            return history
+                history = cast(pd.DataFrame, history.loc[:, list(columns)])
+            return cast(pd.DataFrame, history)
         return self._inner.price_history(security_id, limit=limit, columns=columns)
 
     def scan_result(self, security_id: str) -> SimpleNamespace | None:
@@ -587,6 +852,7 @@ def test_entry_explains_stage_breakout_and_volume() -> None:
 
     assert _codes(entries[0]) == (
         "breakout_above_prior_high",
+        "entry_ranking",
         "stage2_confirmed",
         "volume_expansion",
     )

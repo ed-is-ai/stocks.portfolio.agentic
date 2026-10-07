@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, NamedTuple
 
 from app.services.backtest.regime_filter import entry_signals_permitted
 from app.services.backtest.strategy_evidence import (
@@ -20,6 +20,7 @@ from app.services.backtest.strategy_explanation import (
     SignalReasonV1,
 )
 from app.services.backtest.strategy_protocol import (
+    BaseCurrencyCloseHistoryViewV1,
     MarketViewV1,
     PortfolioView,
     Signal,
@@ -66,6 +67,185 @@ def _session_date(value: object) -> date | None:
         converted = converter()
         return converted if isinstance(converted, date) else None
     return None
+
+
+class _MomentumReading(NamedTuple):
+    value: Decimal | None
+    missing_reason: str | None
+    numerator_session: date | None
+    denominator_session: date | None
+    currency: str
+
+
+def _momentum_reading(view: MarketViewV1, security_id: str) -> _MomentumReading:
+    """Read the fixed 21-session return from 253 bounded Run-currency rows."""
+    if not isinstance(view, BaseCurrencyCloseHistoryViewV1):
+        return _MomentumReading(
+            None, "base_currency_history_unavailable", None, None, "unavailable"
+        )
+    currency = view.base_currency
+    history = view.base_currency_close_history(security_id, limit=253)
+    if history is None or getattr(history, "empty", True):
+        return _MomentumReading(
+            None, "current_base_currency_close_unavailable", None, None, currency
+        )
+    sessions = [_session_date(value) for value in history.index]
+    if any(session is None for session in sessions):
+        raise ValueError("Base-currency close history has an invalid session index.")
+    canonical_sessions = [session for session in sessions if session is not None]
+    if canonical_sessions != sorted(set(canonical_sessions)):
+        raise ValueError(
+            "Base-currency close history sessions are unordered or duplicated."
+        )
+    if any(session > view.as_of_session for session in canonical_sessions):
+        raise ValueError("Base-currency close history contains a future session.")
+    if len(canonical_sessions) < 253:
+        numerator = canonical_sessions[-22] if len(canonical_sessions) >= 22 else None
+        return _MomentumReading(
+            None, "insufficient_price_history", numerator, None, currency
+        )
+    rows = history.iloc[-253:]
+    canonical_sessions = canonical_sessions[-253:]
+    numerator_session = canonical_sessions[-22]
+    denominator_session = canonical_sessions[-253]
+    if canonical_sessions[-1] != view.as_of_session:
+        return _MomentumReading(
+            None,
+            "current_base_currency_close_unavailable",
+            numerator_session,
+            denominator_session,
+            currency,
+        )
+    try:
+        numerator_row = rows.iloc[-22]
+        denominator_row = rows.iloc[-253]
+        numerator = _decimal(numerator_row["close"])
+        denominator = _decimal(denominator_row["close"])
+    except (KeyError, IndexError, TypeError):
+        return _MomentumReading(
+            None,
+            "close_endpoint_unavailable",
+            numerator_session,
+            denominator_session,
+            currency,
+        )
+    if numerator is None:
+        reason = numerator_row.get("reason")
+        return _MomentumReading(
+            None,
+            reason
+            if reason in {"fx_missing", "fx_stale", "fx_outside_coverage"}
+            else "invalid_momentum_endpoint",
+            numerator_session,
+            denominator_session,
+            currency,
+        )
+    if numerator <= 0 or denominator is None or denominator <= 0:
+        reason = denominator_row.get("reason") if denominator is None else None
+        return _MomentumReading(
+            None,
+            reason
+            if reason in {"fx_missing", "fx_stale", "fx_outside_coverage"}
+            else "invalid_momentum_endpoint",
+            numerator_session,
+            denominator_session,
+            currency,
+        )
+    return _MomentumReading(
+        numerator / denominator - Decimal(1),
+        None,
+        numerator_session,
+        denominator_session,
+        currency,
+    )
+
+
+def _rank_entries(
+    view: MarketViewV1, signals: list[Signal], *, policy: str
+) -> list[Signal]:
+    ranked_candidates = [
+        (signal, _momentum_reading(view, signal.security_id)) for signal in signals
+    ]
+    ordered = sorted(
+        ranked_candidates,
+        key=lambda item: (
+            item[1].value is None,
+            -(item[1].value or Decimal(0)),
+            item[0].security_id,
+        ),
+    )
+    count = len(ordered)
+    ranked: list[Signal] = []
+    for rank, (signal, reading) in enumerate(ordered, start=1):
+        priority = Decimal(count - rank + 1)
+        assert signal.explanation is not None
+        facts = [
+            ExplanationFactV1(label="Ranking policy", observed=policy),
+            ExplanationFactV1(
+                label="Momentum",
+                observed=None
+                if reading.value is None
+                else reading.value * Decimal(100),
+                unit=EvidenceUnit.PERCENT,
+            ),
+            ExplanationFactV1(label="Momentum currency", observed=reading.currency),
+            ExplanationFactV1(
+                label="Momentum numerator offset",
+                observed=Decimal(21),
+                unit=EvidenceUnit.SESSIONS,
+            ),
+            ExplanationFactV1(
+                label="Momentum denominator offset",
+                observed=Decimal(252),
+                unit=EvidenceUnit.SESSIONS,
+            ),
+            ExplanationFactV1(
+                label="Candidate count",
+                observed=Decimal(count),
+                unit=EvidenceUnit.COUNT,
+            ),
+            ExplanationFactV1(
+                label="Ordinal rank", observed=Decimal(rank), unit=EvidenceUnit.COUNT
+            ),
+            ExplanationFactV1(
+                label="Encoded priority", observed=priority, unit=EvidenceUnit.SCORE
+            ),
+            ExplanationFactV1(
+                label="Momentum numerator session",
+                observed=reading.numerator_session.isoformat()
+                if reading.numerator_session
+                else None,
+                as_of=reading.numerator_session,
+            ),
+            ExplanationFactV1(
+                label="Momentum denominator session",
+                observed=reading.denominator_session.isoformat()
+                if reading.denominator_session
+                else None,
+                as_of=reading.denominator_session,
+            ),
+        ]
+        if reading.missing_reason is not None:
+            facts.append(
+                ExplanationFactV1(
+                    label="Momentum unavailable reason", observed=reading.missing_reason
+                )
+            )
+        momentum_text = (
+            "unavailable"
+            if reading.value is None
+            else f"{(reading.value * Decimal(100)).to_eng_string()}%"
+        )
+        reason = SignalReasonV1(
+            code="entry_ranking",
+            summary=f"Ranked {rank} of {count} under {policy}; momentum {momentum_text}.",
+            facts=facts,
+        )
+        explanation = SignalExplanationV1(reasons=(*signal.explanation.reasons, reason))
+        ranked.append(
+            signal.model_copy(update={"priority": priority, "explanation": explanation})
+        )
+    return ranked
 
 
 def _bounded_history(
@@ -152,7 +332,11 @@ class TurtleTrendStrategy:
             self._entry_signal(view, parameters, security_id)
             for security_id in universe
         ]
-        return [signal for signal in signals if signal is not None]
+        return _rank_entries(
+            view,
+            [signal for signal in signals if signal is not None],
+            policy="turtle_momentum_v1",
+        )
 
     def exit_signals(
         self,

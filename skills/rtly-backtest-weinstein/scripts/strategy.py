@@ -20,6 +20,7 @@ from app.services.backtest.strategy_explanation import (
     SignalReasonV1,
 )
 from app.services.backtest.strategy_protocol import (
+    BaseCurrencyCloseHistoryViewV1,
     MarketViewV1,
     PortfolioView,
     Signal,
@@ -113,7 +114,7 @@ def _position(portfolio: PortfolioView, security_id: str) -> Any | None:
 def _integral_quantity(portfolio: PortfolioView, security_id: str) -> Decimal:
     held = _position(portfolio, security_id)
     if held is None or held.quantity <= 0:
-        return 0
+        return Decimal(0)
     return held.quantity
 
 
@@ -173,14 +174,115 @@ class _EntryQualification(NamedTuple):
     prior_high: Decimal
     lookback: int
     volume: Decimal
+    prior_volume_mean: Decimal
     required_volume: Decimal
     volume_multiplier: Decimal
     scan_stage: str
     daily_stage: str
 
 
+class _EntryRankEvidence(NamedTuple):
+    momentum: Decimal | None
+    numerator_session: date | None
+    denominator_session: date | None
+    score_currency: str | None
+    relative_volume: Decimal
+    missing_reason: str | None
+
+
+def _ranking_evidence(
+    view: MarketViewV1, security_id: str, qualification: _EntryQualification
+) -> _EntryRankEvidence:
+    """Read bounded base-currency endpoints without affecting eligibility."""
+    if not isinstance(view, BaseCurrencyCloseHistoryViewV1):
+        return _EntryRankEvidence(
+            None,
+            None,
+            None,
+            None,
+            _relative_volume(qualification),
+            "base_currency_history_unavailable",
+        )
+    history = view.base_currency_close_history(security_id, limit=253)
+    currency = view.base_currency
+    sessions = tuple(_session_date(session) for session in history.index)
+    if any(session is None for session in sessions):
+        raise ValueError("base-currency history has an invalid session index")
+    dated_sessions = tuple(session for session in sessions if session is not None)
+    if dated_sessions != tuple(sorted(set(dated_sessions))):
+        raise ValueError("base-currency history sessions are not unique and ordered")
+    if any(session > view.as_of_session for session in dated_sessions):
+        raise ValueError("base-currency history contains a future session")
+    if not dated_sessions or dated_sessions[-1] != view.as_of_session:
+        return _EntryRankEvidence(
+            None,
+            None,
+            None,
+            currency,
+            _relative_volume(qualification),
+            "current_base_currency_close_unavailable",
+        )
+    if len(history.index) < 253:
+        return _EntryRankEvidence(
+            None,
+            None,
+            None,
+            currency,
+            _relative_volume(qualification),
+            "insufficient_price_history",
+        )
+
+    numerator_session = dated_sessions[-22]
+    denominator_session = dated_sessions[-253]
+    numerator = _decimal(history["close"].iloc[-22])
+    denominator = _decimal(history["close"].iloc[-253])
+    numerator_reason = history["reason"].iloc[-22]
+    denominator_reason = history["reason"].iloc[-253]
+    missing: list[str] = []
+    if numerator is None or numerator <= 0:
+        missing.append(
+            str(numerator_reason)
+            if isinstance(numerator_reason, str) and numerator_reason
+            else "invalid_momentum_endpoint"
+        )
+    if denominator is None or denominator <= 0:
+        missing.append(
+            str(denominator_reason)
+            if isinstance(denominator_reason, str) and denominator_reason
+            else "invalid_momentum_endpoint"
+        )
+    if missing:
+        return _EntryRankEvidence(
+            None,
+            numerator_session,
+            denominator_session,
+            currency,
+            _relative_volume(qualification),
+            ",".join(dict.fromkeys(missing)),
+        )
+    assert numerator is not None and denominator is not None
+    return _EntryRankEvidence(
+        numerator / denominator - Decimal(1),
+        numerator_session,
+        denominator_session,
+        currency,
+        _relative_volume(qualification),
+        None,
+    )
+
+
+def _relative_volume(qualification: _EntryQualification) -> Decimal:
+    return qualification.volume / qualification.prior_volume_mean
+
+
 def _entry_explanation(
-    qualification: _EntryQualification, session: date
+    qualification: _EntryQualification,
+    ranking: _EntryRankEvidence,
+    *,
+    session: date,
+    rank: int,
+    candidate_count: int,
+    priority: Decimal,
 ) -> SignalExplanationV1:
     """Explain one Stage 2 breakout entry in provider-neutral terms."""
     return SignalExplanationV1(
@@ -242,6 +344,59 @@ def _entry_explanation(
                         label="Required multiple of average volume",
                         observed=qualification.volume_multiplier,
                         unit=EvidenceUnit.RATIO,
+                    ),
+                ],
+            ),
+            SignalReasonV1(
+                code="entry_ranking",
+                summary=(
+                    "Qualifying entries rank by 252-session Run-currency price "
+                    "momentum, then relative volume, then security ID."
+                ),
+                facts=[
+                    ExplanationFactV1(
+                        label="Ranking policy",
+                        observed="weinstein_momentum_relative_volume_v1",
+                    ),
+                    ExplanationFactV1(
+                        label="Momentum",
+                        observed=ranking.momentum,
+                        unit=EvidenceUnit.RATIO,
+                        as_of=ranking.numerator_session,
+                    ),
+                    ExplanationFactV1(
+                        label="Momentum numerator session",
+                        observed=(
+                            ranking.numerator_session.isoformat()
+                            if ranking.numerator_session is not None
+                            else "unavailable"
+                        ),
+                    ),
+                    ExplanationFactV1(
+                        label="Momentum denominator session",
+                        observed=(
+                            ranking.denominator_session.isoformat()
+                            if ranking.denominator_session is not None
+                            else "unavailable"
+                        ),
+                    ),
+                    ExplanationFactV1(
+                        label="Score currency",
+                        observed=ranking.score_currency or "unavailable",
+                    ),
+                    ExplanationFactV1(
+                        label="Relative volume",
+                        observed=ranking.relative_volume,
+                        unit=EvidenceUnit.RATIO,
+                    ),
+                    ExplanationFactV1(
+                        label="Candidate count", observed=Decimal(candidate_count)
+                    ),
+                    ExplanationFactV1(label="Ordinal rank", observed=Decimal(rank)),
+                    ExplanationFactV1(label="Encoded priority", observed=priority),
+                    ExplanationFactV1(
+                        label="Momentum unavailable reason",
+                        observed=ranking.missing_reason,
                     ),
                 ],
             ),
@@ -356,11 +511,42 @@ class WeinsteinStrategy:
         universe = _universe(parameters)
         if not entry_signals_permitted(view, parameters, universe):
             return []
-        signals = [
-            self._entry_signal(view, parameters, security_id)
-            for security_id in universe
+        candidates: list[tuple[str, _EntryQualification, _EntryRankEvidence]] = []
+        for security_id in universe:
+            qualification = self._cached_entry_qualification(
+                view, parameters, security_id
+            )
+            if qualification is not None:
+                candidates.append(
+                    (
+                        security_id,
+                        qualification,
+                        _ranking_evidence(view, security_id, qualification),
+                    )
+                )
+        ordered = sorted(
+            candidates,
+            key=lambda candidate: (
+                candidate[2].momentum is None,
+                -(candidate[2].momentum or Decimal(0)),
+                -candidate[2].relative_volume,
+                candidate[0],
+            ),
+        )
+        count = len(ordered)
+        return [
+            self._entry_signal(
+                view,
+                security_id,
+                qualification,
+                ranking,
+                rank=rank,
+                candidate_count=count,
+            )
+            for rank, (security_id, qualification, ranking) in enumerate(
+                ordered, start=1
+            )
         ]
-        return [signal for signal in signals if signal is not None]
 
     def exit_signals(
         self,
@@ -445,6 +631,7 @@ class WeinsteinStrategy:
             prior_high=prior_high,
             lookback=lookback,
             volume=volumes[-1],
+            prior_volume_mean=prior_volume_mean,
             required_volume=prior_volume_mean * minimum_volume,
             volume_multiplier=minimum_volume,
             scan_stage=scan_stage,
@@ -452,17 +639,30 @@ class WeinsteinStrategy:
         )
 
     def _entry_signal(
-        self, view: MarketViewV1, parameters: StrategyParameters, security_id: str
-    ) -> Signal | None:
-        qualification = self._cached_entry_qualification(view, parameters, security_id)
-        if qualification is None:
-            return None
+        self,
+        view: MarketViewV1,
+        security_id: str,
+        qualification: _EntryQualification,
+        ranking: _EntryRankEvidence,
+        *,
+        rank: int,
+        candidate_count: int,
+    ) -> Signal:
+        priority = Decimal(candidate_count - rank + 1)
         return Signal(
             security_id=security_id,
             side=SignalSide.BUY,
             session=view.as_of_session,
             rule_id=_ENTRY_RULE,
-            explanation=_entry_explanation(qualification, view.as_of_session),
+            priority=priority,
+            explanation=_entry_explanation(
+                qualification,
+                ranking,
+                session=view.as_of_session,
+                rank=rank,
+                candidate_count=candidate_count,
+                priority=priority,
+            ),
         )
 
     def _held_trend_strength(

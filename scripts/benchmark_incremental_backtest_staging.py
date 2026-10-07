@@ -27,6 +27,7 @@ from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
 from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.backtest.backtest_engine import (
+    CandidateAuditV1,
     EquityCurvePointV1,
     EntryFillEventV1,
     ExitFillEventV1,
@@ -164,9 +165,11 @@ class _LegacyStagingSink:
         session: Any,
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        candidate_audits: tuple[CandidateAuditV1, ...] = (),
         initial_entry_selection: InitialEntrySelectionV1 | None = None,
     ) -> None:
         del session
+        del candidate_audits
         if initial_entry_selection is not None:
             if self.initial_entry_selection is not None:
                 raise RuntimeError("initial selection was published twice")

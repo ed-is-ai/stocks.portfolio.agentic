@@ -9,6 +9,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from app.services.backtest.strategy_evidence import (
     EVIDENCE_CONTRACT_VERSION,
@@ -71,6 +72,29 @@ class _View:
 
     def scan_result(self, security_id: str) -> None:
         return None
+
+
+class _RankedView(_View):
+    base_currency = "GBP"
+
+    def __init__(self, rankings: dict[str, pd.DataFrame]) -> None:
+        super().__init__([Decimal("3"), Decimal("2"), Decimal("1"), Decimal("4")])
+        self._rankings = rankings
+
+    def base_currency_close_history(
+        self, security_id: str, *, limit: int
+    ) -> pd.DataFrame:
+        return self._rankings[security_id].iloc[-limit:]
+
+
+def _momentum_history(numerator: str | None, *, rows: int = 253) -> pd.DataFrame:
+    sessions = pd.bdate_range(end=AS_OF, periods=rows)
+    closes: list[Decimal | None] = [Decimal("100")] * rows
+    reasons: list[str | None] = [None] * rows
+    if rows >= 22:
+        closes[-22] = None if numerator is None else Decimal(numerator)
+        reasons[-22] = "fx_stale" if numerator is None else None
+    return pd.DataFrame({"close": closes, "reason": reasons}, index=sessions)
 
 
 def _portfolio(quantity: str | None = None) -> PortfolioView:
@@ -371,7 +395,7 @@ def test_crossovers_explain_both_moving_averages() -> None:
         )
     )
 
-    assert _codes(entries[0]) == ("bullish_ma_crossover",)
+    assert _codes(entries[0]) == ("bullish_ma_crossover", "entry_ranking")
     assert _codes(exits[0]) == ("bearish_ma_crossover",)
     labels = {fact.label for fact in entries[0].explanation.reasons[0].facts}
     assert labels == {
@@ -381,6 +405,59 @@ def test_crossovers_explain_both_moving_averages() -> None:
         "Fast window",
         "Slow window",
     }
+
+
+def test_entry_ranks_by_momentum_and_keeps_missing_candidates() -> None:
+    strategy = MovingAverageStrategy()
+    view = _RankedView(
+        {
+            "sec-a": _momentum_history("80"),
+            "sec-m": _momentum_history(None),
+            "sec-z": _momentum_history("90"),
+        }
+    )
+
+    signals = strategy.entry_signals(
+        view,
+        {**PARAMETERS, "selected_securities": ["sec-a", "sec-m", "sec-z"]},
+    )
+
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-z": Decimal("3"),
+        "sec-a": Decimal("2"),
+        "sec-m": Decimal("1"),
+    }
+    missing = next(signal for signal in signals if signal.security_id == "sec-m")
+    assert missing.explanation is not None
+    ranking = next(
+        reason
+        for reason in missing.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert (
+        next(
+            fact.observed
+            for fact in ranking.facts
+            if fact.label == "Momentum unavailable reason"
+        )
+        == "fx_stale"
+    )
+
+
+def test_moving_average_momentum_integrity_errors_propagate() -> None:
+    class _CorruptView(_View):
+        base_currency = "GBP"
+
+        def base_currency_close_history(
+            self, security_id: str, *, limit: int
+        ) -> pd.DataFrame:
+            raise RuntimeError("pinned evidence integrity error")
+
+    with pytest.raises(RuntimeError, match="integrity"):
+        MovingAverageStrategy().entry_signals(
+            _CorruptView([Decimal("3"), Decimal("2"), Decimal("1"), Decimal("4")]),
+            PARAMETERS,
+        )
 
 
 # --- GH-57: the Strategy's own stop level ------------------------------------

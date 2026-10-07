@@ -137,6 +137,37 @@ def test_session_range_clamps_contract_start_to_first_supported_session(
 
 
 @pytest.mark.parametrize(
+    ("mic", "start", "end_exclusive"),
+    [
+        ("XNYS", date(1970, 1, 1), date(1970, 1, 6)),
+        ("XNYS", date(2016, 9, 3), date(2016, 9, 8)),
+        ("XNYS", date(2016, 9, 3), date(2016, 9, 6)),
+        ("XNYS", date(2024, 11, 28), date(2024, 12, 1)),
+        ("XLON", date(2022, 9, 17), date(2022, 9, 21)),
+        ("XLON", date(2101, 1, 1), date(2101, 1, 5)),
+    ],
+)
+def test_first_session_matches_full_range_without_materializing_it(
+    calendars: TradingCalendar, mic: str, start: date, end_exclusive: date
+) -> None:
+    sessions = calendars.sessions_in_range(mic, start, end_exclusive)
+    assert calendars.first_session_in_range(mic, start, end_exclusive) == (
+        sessions[0] if sessions else None
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "end_exclusive"),
+    [(date(2024, 1, 3), date(2024, 1, 3)), (date(2024, 1, 4), date(2024, 1, 3))],
+)
+def test_first_session_rejects_empty_or_reversed_intervals(
+    calendars: TradingCalendar, start: date, end_exclusive: date
+) -> None:
+    with pytest.raises(CalendarContractError, match="non-empty"):
+        calendars.first_session_in_range("XNYS", start, end_exclusive)
+
+
+@pytest.mark.parametrize(
     "month", ["2024-1", "24-01", "2024-00", "2024-13", "٢٠٢٤-01", "x"]
 )
 def test_strict_closed_month_parser_rejects_malformed_values(

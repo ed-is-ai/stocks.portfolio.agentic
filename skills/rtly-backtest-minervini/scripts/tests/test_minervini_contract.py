@@ -55,6 +55,18 @@ def _history(
     return pd.DataFrame({"close": closes, "volume": volumes}, index=sessions)
 
 
+def _momentum_history(
+    numerator: str | None, *, rows: int = 253, reason: str | None = None
+) -> pd.DataFrame:
+    sessions = pd.bdate_range(end=AS_OF, periods=rows)
+    closes: list[Decimal | None] = [Decimal("100")] * rows
+    reasons: list[str | None] = [None] * rows
+    if rows >= 22:
+        closes[-22] = None if numerator is None else Decimal(numerator)
+        reasons[-22] = reason
+    return pd.DataFrame({"close": closes, "reason": reasons}, index=sessions)
+
+
 def _scan(
     *,
     stage: str = "Stage 2",
@@ -142,8 +154,8 @@ def test_entry_qualifies_at_inclusive_score_volume_and_extension_bounds() -> Non
     ]
 
 
-def test_unvalidated_vcp_still_enters_and_is_ranked_by_its_score() -> None:
-    """A validated VCP ranks a candidate rather than gating it (#35)."""
+def test_unvalidated_vcp_still_enters_and_priority_is_ordinal() -> None:
+    """A validated VCP is optional; raw VCP evidence remains available."""
     strategy = MinerviniStrategy()
     view = _View(_history(), _scan(valid_vcp=False, score=42))
 
@@ -152,8 +164,44 @@ def test_unvalidated_vcp_still_enters_and_is_ranked_by_its_score() -> None:
     )
 
     assert [(item.side, item.priority) for item in signals] == [
-        (SignalSide.BUY, Decimal("42"))
+        (SignalSide.BUY, Decimal("1"))
     ]
+    assert signals[0].explanation is not None
+    ranking = next(
+        reason
+        for reason in signals[0].explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert next(
+        fact.observed for fact in ranking.facts if fact.label == "Raw VCP score"
+    ) == Decimal("42")
+    assert (
+        next(
+            fact.observed
+            for fact in ranking.facts
+            if fact.label == "Momentum unavailable reason"
+        )
+        == "base_currency_history_unavailable"
+    )
+
+
+def test_zero_vcp_score_remains_an_eligible_entry() -> None:
+    signal = MinerviniStrategy().entry_signals(
+        _View(_history(), _scan(valid_vcp=False, score=0)),
+        {**PARAMETERS, "minimum_vcp_score": 0},
+    )[0]
+
+    assert signal.side is SignalSide.BUY
+    assert signal.priority == Decimal("1")
+    assert signal.explanation is not None
+    ranking = next(
+        reason
+        for reason in signal.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert next(
+        fact.observed for fact in ranking.facts if fact.label == "Raw VCP score"
+    ) == Decimal("0")
 
 
 def test_scan_without_a_vcp_score_never_enters() -> None:
@@ -371,6 +419,24 @@ class _KeyedView:
         return SimpleNamespace(**{**vars(scan), "security_id": security_id})
 
 
+class _RankedKeyedView(_KeyedView):
+    base_currency = "GBP"
+
+    def __init__(
+        self,
+        histories: dict[str, pd.DataFrame],
+        scans: dict[str, SimpleNamespace | None],
+        ranking_histories: dict[str, pd.DataFrame],
+    ) -> None:
+        super().__init__(histories, scans)
+        self._ranking_histories = ranking_histories
+
+    def base_currency_close_history(
+        self, security_id: str, *, limit: int
+    ) -> pd.DataFrame:
+        return self._ranking_histories[security_id].iloc[-limit:]
+
+
 def _upgrade_parameters(**overrides: object) -> dict[str, object]:
     return {
         **PARAMETERS,
@@ -379,6 +445,70 @@ def _upgrade_parameters(**overrides: object) -> dict[str, object]:
         "upgrade_score_margin": 15,
         **overrides,
     }
+
+
+def test_entry_ranking_is_vcp_first_then_momentum_then_security_id() -> None:
+    strategy = MinerviniStrategy()
+    ids = ("sec-a", "sec-b", "sec-c", "sec-d")
+    view = _RankedKeyedView(
+        {security_id: _history() for security_id in ids},
+        {
+            "sec-a": _scan(score=80, security_id="sec-a"),
+            "sec-b": _scan(score=80, security_id="sec-b"),
+            "sec-c": _scan(score=79, security_id="sec-c"),
+            "sec-d": _scan(score=80, security_id="sec-d"),
+        },
+        {
+            "sec-a": _momentum_history("90"),
+            "sec-b": _momentum_history(None, reason="fx_stale"),
+            "sec-c": _momentum_history("140"),
+            "sec-d": _momentum_history("90"),
+        },
+    )
+
+    signals = strategy.entry_signals(
+        view,
+        {
+            **PARAMETERS,
+            "selected_securities": list(reversed(ids)),
+            "minimum_vcp_score": 0,
+        },
+    )
+
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-a": Decimal("4"),
+        "sec-d": Decimal("3"),
+        "sec-b": Decimal("2"),
+        "sec-c": Decimal("1"),
+    }
+    assert len(signals) == 4
+    missing = next(signal for signal in signals if signal.security_id == "sec-b")
+    assert missing.explanation is not None
+    ranking = next(
+        reason
+        for reason in missing.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert (
+        next(
+            fact.observed
+            for fact in ranking.facts
+            if fact.label == "Momentum unavailable reason"
+        )
+        == "fx_stale"
+    )
+    strongest_momentum = next(
+        signal for signal in signals if signal.security_id == "sec-c"
+    )
+    assert strongest_momentum.explanation is not None
+    momentum_reason = next(
+        reason
+        for reason in strongest_momentum.explanation.reasons
+        if reason.code == "entry_ranking"
+    )
+    assert next(
+        fact.observed for fact in momentum_reason.facts if fact.label == "Momentum"
+    ) == Decimal("40.0")
 
 
 def _held_portfolio(cash: str, security_id: str = "sec-aapl") -> PortfolioView:
@@ -659,6 +789,7 @@ def test_entry_explains_stage_pivot_volume_and_scores() -> None:
     )
 
     assert _codes(entries[0]) == (
+        "entry_ranking",
         "stage2_confirmed",
         "trend_template",
         "vcp_breakout",

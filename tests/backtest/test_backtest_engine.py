@@ -11,7 +11,9 @@ import hashlib
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
+from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Literal, Mapping
 
 import pandas as pd
@@ -48,6 +50,10 @@ from app.services.backtest.strategy_protocol import (
     Signal,
     SignalSide,
     StrategyParameters,
+)
+from app.services.backtest.strategy_explanation import (
+    SignalExplanationV1,
+    SignalReasonV1,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
 
@@ -696,12 +702,14 @@ def test_buy_cohort_reserves_equal_targets_across_mic_fill_dates() -> None:
         end_month=_month_str(start),
         starting_capital=Decimal("1000"),
     )
+    sink = backtest_engine.InMemorySessionBatchSink()
 
     output = run_simulation(
         manifest=manifest,
         strategy=strategy,
         market_view_factory=_market_view_factory(),
         security_market_data=(us_market, uk_market, later_market),
+        sink=sink,
     )
 
     fills = [event for event in output.events if isinstance(event, EntryFillEventV1)]
@@ -717,6 +725,11 @@ def test_buy_cohort_reserves_equal_targets_across_mic_fill_dates() -> None:
     ]
     assert [skip.security_id for skip in skips] == ["sec-later"]
     assert output.final_cash_base == Decimal("0.00000000")
+    later_audit = next(
+        audit for audit in sink.candidate_audits if audit.security_id == "sec-later"
+    )
+    assert [order.security_id for order in later_audit.pending_buy_orders] == ["sec-uk"]
+    assert later_audit.pending_buy_reservation_base == Decimal("500.00000000")
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +765,7 @@ def _run_capped(
     price_by_security: Mapping[str, float] | None = None,
     overrides_by_security: Mapping[str, Mapping[date, tuple[float, float]]]
     | None = None,
+    sink: backtest_engine.InMemorySessionBatchSink | None = None,
 ) -> backtest_engine.SimulationOutputV1:
     """Run one XNYS March-2024 simulation over flat-priced securities."""
     start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
@@ -786,6 +800,7 @@ def _run_capped(
         strategy=_ScriptedStrategy(entries=entries, exits=exits, default_size=-1),
         market_view_factory=_market_view_factory(),
         security_market_data=tuple(market for market, _ in built),
+        sink=sink,
     )
 
 
@@ -851,7 +866,8 @@ def test_cap_skips_surplus_candidates_in_engine_order_deterministically() -> Non
 
 def test_cap_skips_buy_on_full_book_while_sells_still_schedule() -> None:
     d0, d2, d3 = _MARCH_2024[0], _MARCH_2024[2], _MARCH_2024[3]
-    held = ("sec-a", "sec-b", "sec-c")
+    held = tuple(f"sec-{index:02d}" for index in range(10))
+    sink = backtest_engine.InMemorySessionBatchSink()
 
     output = _run_capped(
         security_ids=(*held, "sec-d"),
@@ -859,18 +875,31 @@ def test_cap_skips_buy_on_full_book_while_sells_still_schedule() -> None:
             d0: [_buy(security_id, d0) for security_id in held],
             d2: [_buy("sec-d", d2)],
         },
-        exits={d3: [_sell("sec-a", d3)]},
-        starting_capital=Decimal("3000"),
-        max_positions=3,
+        exits={d3: [_sell(held[0], d3)]},
+        starting_capital=Decimal("10000"),
+        max_positions=10,
+        sink=sink,
     )
 
     assert _cap_skips(output) == ["sec-d"]
     assert [fill[0] for fill in _entry_fills(output)] == list(held)
     exits = [e.security_id for e in output.events if isinstance(e, ExitFillEventV1)]
-    assert exits == ["sec-a"]
+    assert exits == [held[0]]
+    rejected = next(
+        audit for audit in sink.candidate_audits if audit.security_id == "sec-d"
+    )
+    assert (
+        rejected.disposition
+        is backtest_engine.CandidateAuditDisposition.FULL_BOOK_REJECTED
+    )
+    assert rejected.occupied_slots == 10
+    assert rejected.available_slots_before_cohort == 0
 
 
-def _swap_run(max_positions: int = 3) -> backtest_engine.SimulationOutputV1:
+def _swap_run(
+    max_positions: int = 3,
+    sink: backtest_engine.InMemorySessionBatchSink | None = None,
+) -> backtest_engine.SimulationOutputV1:
     d0, d2 = _MARCH_2024[0], _MARCH_2024[2]
     held = ("sec-a", "sec-b", "sec-c")
     # $3,050 leaves $50 after three whole-share $1,000 fills, so the swap-in
@@ -885,6 +914,7 @@ def _swap_run(max_positions: int = 3) -> backtest_engine.SimulationOutputV1:
         starting_capital=Decimal("3050"),
         max_positions=max_positions,
         price_by_security={"sec-d": 10.0},
+        sink=sink,
     )
 
 
@@ -917,7 +947,8 @@ def test_cap_skips_entry_fill_when_freeing_sell_fails(
 
     monkeypatch.setattr(backtest_engine._Engine, "_execute_sell", _failing_sell)
 
-    output = _swap_run()
+    sink = backtest_engine.InMemorySessionBatchSink()
+    output = _swap_run(sink=sink)
 
     assert _cap_skips(output) == ["sec-d"]
     assert "sec-d" not in [fill[0] for fill in _entry_fills(output)]
@@ -926,6 +957,18 @@ def test_cap_skips_entry_fill_when_freeing_sell_fails(
         "sec-b",
         "sec-c",
     ]
+    candidate = next(
+        audit for audit in sink.candidate_audits if audit.security_id == "sec-d"
+    )
+    failed_event = next(
+        event for event in output.events if event.sequence == candidate.event_sequence
+    )
+    assert (
+        candidate.disposition is backtest_engine.CandidateAuditDisposition.FILL_REJECTED
+    )
+    assert candidate.reason_code == SkipReasonCode.MAX_CONCURRENT_POSITIONS.value
+    assert candidate.outcome_session == candidate.intended_fill_session
+    assert isinstance(failed_event, SkippedSignalEventV1)
 
 
 def test_cap_target_is_limited_by_unreserved_cash_below_slot_size() -> None:
@@ -999,6 +1042,7 @@ def test_cap_sell_filling_after_the_buy_does_not_free_its_slot() -> None:
         parameters={"max_concurrent_positions": 1},
     )
 
+    sink = backtest_engine.InMemorySessionBatchSink()
     output = run_simulation(
         manifest=manifest,
         strategy=_ScriptedStrategy(
@@ -1008,6 +1052,7 @@ def test_cap_sell_filling_after_the_buy_does_not_free_its_slot() -> None:
         ),
         market_view_factory=_market_view_factory(),
         security_market_data=(uk_market, us_market),
+        sink=sink,
     )
 
     cap_skips = [
@@ -1021,6 +1066,12 @@ def test_cap_sell_filling_after_the_buy_does_not_free_its_slot() -> None:
     assert [fill[0] for fill in _entry_fills(output)] == ["sec-uk"]
     exits = [e.fill_session for e in output.events if isinstance(e, ExitFillEventV1)]
     assert exits == [date(2024, 4, 2)]
+    audit = next(item for item in sink.candidate_audits if item.security_id == "sec-us")
+    assert audit.intended_fill_session == date(2024, 4, 1)
+    assert [order.fill_session for order in audit.pending_sell_releases] == [
+        date(2024, 4, 2)
+    ]
+    assert audit.available_slots_before_cohort == 0
 
 
 @pytest.mark.parametrize("cap", [0, -1, True, "3", 2.5])
@@ -2309,24 +2360,257 @@ def _ranked_buy(security_id: str, session: date, priority: Decimal | None) -> Si
 
 def test_cap_fills_slots_by_priority_then_engine_order() -> None:
     d0 = _MARCH_2024[0]
+    explanation = SignalExplanationV1(
+        reasons=(
+            SignalReasonV1(
+                code="unregistered_skill_rank",
+                summary="A synthetic Skill supplied this explanation.",
+            ),
+        )
+    )
     signals = [
-        _ranked_buy("sec-a", d0, None),
-        _ranked_buy("sec-b", d0, Decimal("60")),
-        _ranked_buy("sec-c", d0, Decimal("90")),
-        _ranked_buy("sec-d", d0, Decimal("60")),
+        _ranked_buy("sec-a", d0, None).model_copy(update={"explanation": explanation}),
+        _ranked_buy("sec-b", d0, Decimal("60")).model_copy(
+            update={"explanation": explanation}
+        ),
+        _ranked_buy("sec-c", d0, Decimal("90")).model_copy(
+            update={"explanation": explanation}
+        ),
+        _ranked_buy("sec-d", d0, Decimal("60")).model_copy(
+            update={"explanation": explanation}
+        ),
     ]
+    sink = backtest_engine.InMemorySessionBatchSink()
 
     output = _run_capped(
         security_ids=("sec-a", "sec-b", "sec-c", "sec-d"),
         entries={d0: signals},
         starting_capital=Decimal("2000"),
         max_positions=2,
+        sink=sink,
     )
 
     # sec-c outranks the tied sec-b/sec-d, whose tie keeps engine order; an
     # unranked candidate goes last. Kept fills and skips stay in signal order.
     assert [fill[0] for fill in _entry_fills(output)] == ["sec-b", "sec-c"]
     assert _cap_skips(output) == ["sec-a", "sec-d"]
+    audits = {audit.security_id: audit for audit in sink.candidate_audits}
+    assert set(audits) == {"sec-a", "sec-b", "sec-c", "sec-d"}
+    assert audits["sec-c"].priority == Decimal("90")
+    assert audits["sec-c"].host_cohort_position == 3
+    assert audits["sec-c"].allocator_position == 1
+    assert audits["sec-c"].explanation == explanation
+    assert (
+        audits["sec-d"].disposition
+        is backtest_engine.CandidateAuditDisposition.COMPETITION_REJECTED
+    )
+    assert audits["sec-d"].available_slots_before_cohort == 2
+    assert audits["sec-d"].available_slots_before_candidate == 0
+    assert all(
+        audit.event_sequence in {event.sequence for event in output.events}
+        for audit in audits.values()
+    )
+
+
+def test_eight_held_positions_leave_two_of_three_ranked_candidates_admitted() -> None:
+    d0, d2 = _MARCH_2024[0], _MARCH_2024[2]
+    held = tuple(f"held-{index:02d}" for index in range(8))
+    candidates = (
+        _ranked_buy("candidate-a", d2, Decimal("30")),
+        _ranked_buy("candidate-b", d2, Decimal("80")),
+        _ranked_buy("candidate-c", d2, Decimal("90")),
+    )
+    sink = backtest_engine.InMemorySessionBatchSink()
+
+    output = _run_capped(
+        security_ids=(*held, "candidate-a", "candidate-b", "candidate-c"),
+        entries={
+            d0: [_buy(security_id, d0) for security_id in held],
+            d2: list(candidates),
+        },
+        starting_capital=Decimal("10000"),
+        max_positions=10,
+        sink=sink,
+    )
+
+    cohort = {
+        audit.security_id: audit
+        for audit in sink.candidate_audits
+        if audit.signal_session == d2
+    }
+    assert {
+        sid
+        for sid, audit in cohort.items()
+        if audit.disposition is backtest_engine.CandidateAuditDisposition.FILLED
+    } == {
+        "candidate-b",
+        "candidate-c",
+    }
+    assert (
+        cohort["candidate-a"].disposition
+        is backtest_engine.CandidateAuditDisposition.COMPETITION_REJECTED
+    )
+    assert all(audit.occupied_slots == 8 for audit in cohort.values())
+    assert all(audit.available_slots_before_cohort == 2 for audit in cohort.values())
+    assert cohort["candidate-c"].priority == Decimal("90")
+    assert cohort["candidate-c"].host_cohort_position == 3
+    assert cohort["candidate-c"].allocator_position == 1
+    assert cohort["candidate-a"].available_slots_before_candidate == 0
+    assert {sid for sid, _, _ in _entry_fills(output)} == {
+        *held,
+        "candidate-b",
+        "candidate-c",
+    }
+
+
+def test_held_high_priority_candidate_is_preflight_not_a_ranking_loss() -> None:
+    d0, d2 = _MARCH_2024[0], _MARCH_2024[2]
+    sink = backtest_engine.InMemorySessionBatchSink()
+
+    _run_capped(
+        security_ids=("held", "lower-ranked"),
+        entries={
+            d0: [_buy("held", d0)],
+            d2: [
+                _ranked_buy("held", d2, Decimal("100")),
+                _ranked_buy("lower-ranked", d2, Decimal("10")),
+            ],
+        },
+        starting_capital=Decimal("2000"),
+        max_positions=2,
+        sink=sink,
+    )
+
+    audits = {
+        audit.security_id: audit
+        for audit in sink.candidate_audits
+        if audit.signal_session == d2
+    }
+    assert audits["held"].priority == Decimal("100")
+    assert (
+        audits["held"].disposition
+        is backtest_engine.CandidateAuditDisposition.PREFLIGHT_REJECTED
+    )
+    assert audits["held"].reason_code == SkipReasonCode.POSITION_CONFLICT.value
+    assert audits["held"].host_cohort_position is None
+    assert (
+        audits["lower-ranked"].disposition
+        is backtest_engine.CandidateAuditDisposition.FILLED
+    )
+    assert audits["lower-ranked"].available_slots_before_cohort == 1
+
+
+def test_weinstein_skill_momentum_priority_wins_the_engine_slot() -> None:
+    runtime = (
+        Path(__file__).resolve().parents[2]
+        / "skills/rtly-backtest-weinstein/scripts/strategy.py"
+    )
+    spec = spec_from_file_location("weinstein_engine_integration", runtime)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    strategy = module.WeinsteinStrategy()
+    d0 = _MARCH_2024[0]
+    ids = ("sec-a", "sec-z")
+    stock_sessions = pd.bdate_range(end=d0, periods=225)
+    stock_closes = [Decimal(100 + index) for index in range(225)]
+    stock_frame = pd.DataFrame(
+        {
+            "high": stock_closes,
+            "close": stock_closes,
+            "volume": [Decimal("100")] * 224 + [Decimal("150")],
+        },
+        index=stock_sessions,
+    )
+    momentum_sessions = pd.bdate_range(end=d0, periods=253)
+    momentum_histories: dict[str, pd.DataFrame] = {}
+    for security_id, numerator in (
+        ("sec-a", Decimal("110")),
+        ("sec-z", Decimal("150")),
+    ):
+        closes: list[Decimal | None] = [Decimal("100")] * 253
+        closes[-22] = numerator
+        momentum_histories[security_id] = pd.DataFrame(
+            {"close": closes, "reason": [None] * 253},
+            index=momentum_sessions,
+        )
+
+    class _RankedView:
+        as_of_session = d0
+        base_currency = "USD"
+
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: tuple[str, ...] | None = None,
+        ) -> pd.DataFrame:
+            del security_id, columns
+            history = stock_frame
+            if limit is not None:
+                history = history.tail(limit)
+            return history
+
+        def scan_result(self, security_id: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                security_id=security_id,
+                as_of_session_date=d0,
+                stage=SimpleNamespace(value="Stage 2"),
+            )
+
+        def base_currency_close_history(
+            self, security_id: str, *, limit: int
+        ) -> pd.DataFrame:
+            return pd.DataFrame(momentum_histories[security_id]).tail(limit)
+
+    signals = strategy.entry_signals(
+        _RankedView(),
+        {
+            "selected_securities": list(ids),
+            "breakout_lookback_sessions": 50,
+            "minimum_relative_volume": 1.5,
+        },
+    )
+
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-a": Decimal("1"),
+        "sec-z": Decimal("2"),
+    }
+    output = _run_capped(
+        security_ids=ids,
+        entries={d0: signals},
+        starting_capital=Decimal("2000"),
+        max_positions=1,
+    )
+
+    assert [fill[0] for fill in _entry_fills(output)] == ["sec-z"]
+    assert _cap_skips(output) == ["sec-a"]
+
+
+def test_preflight_rejection_does_not_consume_a_position_slot() -> None:
+    d0 = _MARCH_2024[0]
+    output = _run_capped(
+        security_ids=("sec-b", "sec-c"),
+        entries={
+            d0: [
+                _ranked_buy("sec-z-unpinned", d0, Decimal("3")),
+                _ranked_buy("sec-c", d0, Decimal("2")),
+                _ranked_buy("sec-b", d0, Decimal("1")),
+            ]
+        },
+        starting_capital=Decimal("2000"),
+        max_positions=2,
+    )
+
+    skips = {
+        event.security_id: event.reason
+        for event in output.events
+        if isinstance(event, SkippedSignalEventV1)
+    }
+    assert [fill[0] for fill in _entry_fills(output)] == ["sec-b", "sec-c"]
+    assert skips["sec-z-unpinned"] is SkipReasonCode.INELIGIBLE_SECURITY
+    assert _cap_skips(output) == []
 
 
 def test_priority_is_inert_when_every_candidate_fits() -> None:
@@ -2351,3 +2635,98 @@ def test_priority_is_inert_when_every_candidate_fits() -> None:
 
     assert _entry_fills(ranked) == _entry_fills(plain)
     assert ranked.final_cash_base == plain.final_cash_base
+
+
+def test_darvas_skill_ranking_controls_cap_and_held_leader_falls_through() -> None:
+    runtime = (
+        Path(__file__).resolve().parents[2]
+        / "skills/rtly-backtest-darvas-box/scripts/strategy.py"
+    )
+    spec = spec_from_file_location("darvas_engine_integration", runtime)
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    strategy = module.DarvasBoxStrategy()
+    ids = ("sec-a", "sec-z")
+    parameters = {
+        "selected_securities": list(ids),
+        "box_lookback_sessions": 20,
+        "maximum_box_depth_pct": 15,
+        "volume_multiplier": 1.5,
+    }
+
+    class _RankedView:
+        base_currency = "USD"
+
+        def __init__(self, as_of: date) -> None:
+            self.as_of_session = as_of
+            sessions = pd.bdate_range(end=as_of, periods=21)
+            self.stock_histories = {
+                security_id: pd.DataFrame(
+                    {
+                        "high": [Decimal("100")] * 20 + [Decimal("101")],
+                        "low": [Decimal("95")] * 21,
+                        "close": [Decimal("100")] * 20 + [Decimal("101")],
+                        "volume": [Decimal("100")] * 20 + [Decimal("150")],
+                    },
+                    index=sessions,
+                )
+                for security_id in ids
+            }
+            momentum_sessions = pd.bdate_range(end=as_of, periods=253)
+            self.momentum_histories = {}
+            for security_id, numerator in (
+                ("sec-a", Decimal("110")),
+                ("sec-z", Decimal("150")),
+            ):
+                closes = [Decimal("100")] * 253
+                closes[-22] = numerator
+                self.momentum_histories[security_id] = pd.DataFrame(
+                    {"close": closes, "reason": [None] * 253},
+                    index=momentum_sessions,
+                )
+
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: tuple[str, ...] | None = None,
+        ) -> pd.DataFrame:
+            history = self.stock_histories[security_id]
+            if limit is not None:
+                history = history.tail(limit)
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+
+        def base_currency_close_history(
+            self, security_id: str, *, limit: int
+        ) -> pd.DataFrame:
+            return self.momentum_histories[security_id].tail(limit)
+
+    d0, d2 = _MARCH_2024[0], _MARCH_2024[2]
+    signals = strategy.entry_signals(_RankedView(d0), parameters)
+    assert {signal.security_id: signal.priority for signal in signals} == {
+        "sec-a": Decimal("1"),
+        "sec-z": Decimal("2"),
+    }
+
+    capped = _run_capped(
+        security_ids=ids,
+        entries={d0: signals},
+        starting_capital=Decimal("2000"),
+        max_positions=1,
+    )
+    assert [fill[0] for fill in _entry_fills(capped)] == ["sec-z"]
+
+    held_leader = _run_capped(
+        security_ids=ids,
+        entries={
+            d0: [_buy("sec-z", d0)],
+            d2: strategy.entry_signals(_RankedView(d2), parameters),
+        },
+        starting_capital=Decimal("3000"),
+        max_positions=2,
+    )
+    assert [fill[0] for fill in _entry_fills(held_leader)] == ["sec-z", "sec-a"]

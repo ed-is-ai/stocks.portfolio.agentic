@@ -1,0 +1,12 @@
+{
+  "completed_sessions": 2232,
+  "deterministic": null,
+  "first_result_sha256": "4a0133e366ad43e64f0425bb3d19f4353e8b4949f61b2a438b3b42eb1096d026",
+  "last_progress_session": "2025-05-06",
+  "note": "Full repeat was interrupted after no progress record for approximately 18 minutes; no equality conclusion is available.",
+  "planned_sessions": 2480,
+  "repeat_result_sha256": null,
+  "status": "incomplete",
+  "strategy_id": "rtly-backtest-moving-average",
+  "variant": "proposed"
+}

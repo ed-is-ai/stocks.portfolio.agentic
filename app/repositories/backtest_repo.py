@@ -113,6 +113,7 @@ if TYPE_CHECKING:
     # block, guarded by ``from __future__ import annotations`` deferring
     # every annotation in this file to a string.
     from app.services.backtest.backtest_engine import (
+        CandidateAuditV1,
         EquityCurvePointV1,
         TradeLogEvent,
     )
@@ -1072,6 +1073,40 @@ CREATE TABLE IF NOT EXISTS backtest_staging_batches (
     UNIQUE(run_id, session)
 );
 
+CREATE TABLE IF NOT EXISTS backtest_staging_audit_batches (
+    run_id TEXT NOT NULL,
+    batch_sequence INTEGER NOT NULL,
+    session TEXT NOT NULL CHECK(length(session) = 10),
+    audit_contract_version TEXT NOT NULL
+        CHECK(audit_contract_version = 'candidate_allocation_audit.v1'),
+    candidate_count INTEGER NOT NULL CHECK(candidate_count >= 0),
+    audit_digest TEXT NOT NULL CHECK(length(audit_digest) = 64),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, batch_sequence),
+    FOREIGN KEY(run_id, batch_sequence)
+        REFERENCES backtest_staging_batches(run_id, batch_sequence) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS backtest_staging_audit_contracts (
+    run_id TEXT PRIMARY KEY,
+    audit_contract_version TEXT NOT NULL
+        CHECK(audit_contract_version IN ('none', 'candidate_allocation_audit.v1'))
+);
+CREATE TRIGGER IF NOT EXISTS backtest_staging_delete_audit_contract
+AFTER DELETE ON backtest_staging
+BEGIN
+    DELETE FROM backtest_staging_audit_contracts WHERE run_id=OLD.run_id;
+END;
+CREATE TABLE IF NOT EXISTS backtest_staging_candidate_audits (
+    run_id TEXT NOT NULL,
+    batch_sequence INTEGER NOT NULL,
+    candidate_sequence INTEGER NOT NULL CHECK(candidate_sequence > 0),
+    payload_json TEXT NOT NULL,
+    payload_digest TEXT NOT NULL CHECK(length(payload_digest) = 64),
+    PRIMARY KEY(run_id, candidate_sequence),
+    FOREIGN KEY(run_id, batch_sequence)
+        REFERENCES backtest_staging_audit_batches(run_id, batch_sequence) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS backtest_staging_entry_selection (
     run_id TEXT PRIMARY KEY REFERENCES backtest_staging(run_id) ON DELETE CASCADE,
     session TEXT NOT NULL,
@@ -1097,6 +1132,8 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     run_id TEXT PRIMARY KEY REFERENCES strategy_runs(id),
     result_schema_version TEXT NOT NULL DEFAULT 'backtest_result.v1'
         CHECK(result_schema_version IN ('backtest_result.v1', 'backtest_result.v2')),
+    audit_contract_version TEXT NOT NULL DEFAULT 'none'
+        CHECK(audit_contract_version IN ('none', 'candidate_allocation_audit.v1')),
     metrics_json TEXT NOT NULL,
     final_cash_base TEXT NOT NULL,
     result_digest TEXT NOT NULL CHECK(length(result_digest) = 64),
@@ -1105,6 +1142,35 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     completed_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS backtest_result_audit_manifests (
+    run_id TEXT PRIMARY KEY REFERENCES backtest_results(run_id),
+    audit_contract_version TEXT NOT NULL
+        CHECK(audit_contract_version = 'candidate_allocation_audit.v1'),
+    candidate_count INTEGER NOT NULL CHECK(candidate_count >= 0),
+    summary_json TEXT NOT NULL,
+    audit_digest TEXT NOT NULL CHECK(length(audit_digest) = 64),
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS backtest_result_candidate_audits (
+    run_id TEXT NOT NULL REFERENCES backtest_result_audit_manifests(run_id),
+    candidate_sequence INTEGER NOT NULL CHECK(candidate_sequence > 0),
+    payload_json TEXT NOT NULL,
+    payload_digest TEXT NOT NULL CHECK(length(payload_digest) = 64),
+    PRIMARY KEY(run_id, candidate_sequence)
+);
+CREATE TRIGGER IF NOT EXISTS backtest_result_audit_manifest_immutable_update
+BEFORE UPDATE ON backtest_result_audit_manifests
+BEGIN SELECT RAISE(ABORT, 'backtest result audit manifest is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backtest_result_audit_manifest_immutable_delete
+BEFORE DELETE ON backtest_result_audit_manifests
+BEGIN SELECT RAISE(ABORT, 'backtest result audit manifest is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backtest_result_candidate_audit_immutable_update
+BEFORE UPDATE ON backtest_result_candidate_audits
+BEGIN SELECT RAISE(ABORT, 'backtest result candidate audit is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS backtest_result_candidate_audit_immutable_delete
+BEFORE DELETE ON backtest_result_candidate_audits
+BEGIN SELECT RAISE(ABORT, 'backtest result candidate audit is immutable'); END;
 
 CREATE TABLE IF NOT EXISTS backtest_result_entry_selection (
     run_id TEXT PRIMARY KEY REFERENCES backtest_results(run_id),
@@ -1143,6 +1209,7 @@ CREATE TRIGGER IF NOT EXISTS backtest_result_evidence_immutable
 BEFORE UPDATE ON backtest_results
 WHEN NEW.run_id != OLD.run_id
   OR NEW.result_schema_version != OLD.result_schema_version
+  OR NEW.audit_contract_version != OLD.audit_contract_version
   OR NEW.metrics_json != OLD.metrics_json
   OR NEW.final_cash_base != OLD.final_cash_base
   OR NEW.result_digest != OLD.result_digest
@@ -1313,6 +1380,7 @@ class BacktestIntegrityError(RuntimeError):
 #: grow the text) and before persistence, never truncated silently.
 _NOTE_MAX_CODE_POINTS = 10_000
 _BACKTEST_STAGING_BATCH_ENCODING = "json+zlib.v1"
+_BACKTEST_CANDIDATE_AUDIT_CONTRACT = "candidate_allocation_audit.v1"
 
 
 @dataclass(frozen=True)
@@ -1387,6 +1455,42 @@ class BacktestStagingCheckpointV1:
 
 
 @dataclass(frozen=True)
+class BacktestCandidateAuditSummaryV1:
+    """Integrity-bound coverage and allocation counts for one Result."""
+
+    recorded: bool
+    contract_version: str
+    candidate_count: int = 0
+    priority_recorded: int = 0
+    priority_missing: int = 0
+    explanation_recorded: int = 0
+    explanation_missing: int = 0
+    preflight_rejected: int = 0
+    full_book_rejected: int = 0
+    competition_rejected: int = 0
+    filled: int = 0
+    fill_rejected: int = 0
+    audit_digest: str | None = None
+
+
+@dataclass(frozen=True)
+class BacktestCandidateAuditPromotionV1:
+    """Validated audit manifest data ready to promote with a Result."""
+
+    summary: dict[str, int]
+    audit_digest: str
+
+
+@dataclass(frozen=True)
+class BacktestCandidateAuditPageV1:
+    summary: BacktestCandidateAuditSummaryV1
+    page: int
+    page_size: int
+    total_pages: int
+    records: tuple["CandidateAuditV1", ...]
+
+
+@dataclass(frozen=True)
 class BacktestResultV1:
     """One completed Backtest Result's full typed retrieval projection
     (AC 5): Strategy ID/version, exact parameters, normalized period,
@@ -1421,6 +1525,7 @@ class BacktestResultV1:
     source_preparation_job_id: str | None = None
     regime_benchmark: "RegimeBenchmarkPinV1 | None" = None
     initial_entry_selection: InitialEntrySelectionV1 | None = None
+    candidate_audit_summary: BacktestCandidateAuditSummaryV1 | None = None
 
 
 @dataclass(frozen=True)
@@ -2198,6 +2303,11 @@ class BacktestRepository:
                     "ALTER TABLE backtest_results ADD COLUMN result_schema_version "
                     "TEXT NOT NULL DEFAULT 'backtest_result.v1'"
                 )
+            if "audit_contract_version" not in result_cols:
+                conn.execute(
+                    "ALTER TABLE backtest_results ADD COLUMN audit_contract_version "
+                    "TEXT NOT NULL DEFAULT 'none'"
+                )
             staging_cols = {
                 str(x[1]) for x in conn.execute("PRAGMA table_info(backtest_staging)")
             }
@@ -2239,6 +2349,7 @@ class BacktestRepository:
                    BEFORE UPDATE ON backtest_results
                    WHEN NEW.run_id != OLD.run_id
                      OR NEW.result_schema_version != OLD.result_schema_version
+                     OR NEW.audit_contract_version != OLD.audit_contract_version
                      OR NEW.metrics_json != OLD.metrics_json
                      OR NEW.final_cash_base != OLD.final_cash_base
                      OR NEW.result_digest != OLD.result_digest
@@ -2626,7 +2737,10 @@ class BacktestRepository:
                 identity.security_id,
                 identity.evidence_digest,
             )
-            if existing is not None and tuple(str(value) for value in existing) != expected_identity:
+            if (
+                existing is not None
+                and tuple(str(value) for value in existing) != expected_identity
+            ):
                 raise sqlite3.IntegrityError(
                     "reference identity conflicts with existing security"
                 )
@@ -2648,7 +2762,12 @@ class BacktestRepository:
                 """INSERT INTO reference_identity_registry_revisions
                    (revision_digest, canonical_manifest_json, evidence_digest, created_at)
                    VALUES (?, ?, ?, ?)""",
-                (registry.revision, registry_json, registry.evidence_digest, captured_at),
+                (
+                    registry.revision,
+                    registry_json,
+                    registry.evidence_digest,
+                    captured_at,
+                ),
             )
             if existing is None and by_id is None:
                 conn.execute(
@@ -2671,7 +2790,9 @@ class BacktestRepository:
                 (aliases.revision,),
             ).fetchone()
             if alias_existing is not None and str(alias_existing[0]) != aliases_json:
-                raise sqlite3.IntegrityError("reference alias manifest digest collision")
+                raise sqlite3.IntegrityError(
+                    "reference alias manifest digest collision"
+                )
             self._insert_or_verify(
                 conn,
                 "reference_alias_manifests",
@@ -2701,8 +2822,13 @@ class BacktestRepository:
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (aliases.revision, *alias_values),
                 )
-            elif tuple(str(value) if value is not None else None for value in alias_row) != alias_values:
-                raise sqlite3.IntegrityError("reference alias conflicts with existing entry")
+            elif (
+                tuple(str(value) if value is not None else None for value in alias_row)
+                != alias_values
+            ):
+                raise sqlite3.IntegrityError(
+                    "reference alias conflicts with existing entry"
+                )
         return ReferenceIdentityRegistrationV1(
             identity=identity,
             alias=alias,
@@ -2744,12 +2870,12 @@ class BacktestRepository:
             effective_to=None if row[5] is None else date.fromisoformat(str(row[5])),
             evidence_source=str(row[6]),
             evidence_digest=str(row[7]),
-            provenance=cast(Literal["provider_evidence", "manual_override"], str(row[8])),
+            provenance=cast(
+                Literal["provider_evidence", "manual_override"], str(row[8])
+            ),
         )
 
-    def reference_identity_details(
-        self, security_id: str
-    ) -> tuple[str, str, str, str]:
+    def reference_identity_details(self, security_id: str) -> tuple[str, str, str, str]:
         """Resolve one immutable reference identity and its registry revision."""
         with session(self._connect) as conn:
             row = conn.execute(
@@ -3491,7 +3617,8 @@ class BacktestRepository:
         )
 
         if (
-            submission.manifest_version not in {"run_input_manifest.v2", "run_input_manifest.v3"}
+            submission.manifest_version
+            not in {"run_input_manifest.v2", "run_input_manifest.v3"}
             or submission.source_preparation_job_id != prep_id
         ):
             raise StrategyJobConflict("invalid preparation seal")
@@ -3548,9 +3675,13 @@ class BacktestRepository:
                     or tuple(str(value) for value in alias_row)
                     != (pin.security_id, "yfinance", "ARCX", "SPY")
                 ):
-                    raise StrategyJobConflict("regime benchmark identity is unavailable")
+                    raise StrategyJobConflict(
+                        "regime benchmark identity is unavailable"
+                    )
                 try:
-                    price_evidence = historical_price_repository.verify(pin.price_revision)
+                    price_evidence = historical_price_repository.verify(
+                        pin.price_revision
+                    )
                     action_evidence = (
                         price_evidence
                         if pin.action_revision == pin.price_revision
@@ -3599,8 +3730,7 @@ class BacktestRepository:
                 == manifest.starting_capital
                 and submission.universe_selection == s == manifest.universe_selection
                 and submission.regime_benchmark == prep.regime_benchmark
-                and getattr(manifest, "regime_benchmark", None)
-                == prep.regime_benchmark
+                and getattr(manifest, "regime_benchmark", None) == prep.regime_benchmark
                 and manifest.source_preparation_job_id == prep_id
                 and manifest.digest() == submission.run_input_manifest_digest
                 and submission.execution_contract_digest
@@ -3681,7 +3811,10 @@ class BacktestRepository:
                 ),
             )
             if isinstance(manifest, RunInputManifestV3):
-                for revision in {manifest.regime_benchmark.price_revision, manifest.regime_benchmark.action_revision}:
+                for revision in {
+                    manifest.regime_benchmark.price_revision,
+                    manifest.regime_benchmark.action_revision,
+                }:
                     historical_price_repository.pin("backtest", cid, revision)
             fence = _lease_fence_params(lease)
             cursor = conn.execute(
@@ -4018,7 +4151,8 @@ class BacktestRepository:
         left_selection = left_result.universe_selection
         right_selection = right_result.universe_selection
         if (
-            left_result.manifest_version in {"run_input_manifest.v2", "run_input_manifest.v3"}
+            left_result.manifest_version
+            in {"run_input_manifest.v2", "run_input_manifest.v3"}
             and left_selection is not None
             and right_selection is not None
             and left_selection.run_universe_digest
@@ -4987,6 +5121,7 @@ class BacktestRepository:
         portfolio_state: Mapping[str, object],
         events: tuple[TradeLogEvent, ...],
         equity_point: EquityCurvePointV1,
+        candidate_audits: tuple[CandidateAuditV1, ...] | None = None,
         final_cash_base: Decimal | None = None,
         initial_entry_selection: InitialEntrySelectionV1 | None = None,
         lease: WorkerLeaseFenceV1 | None = None,
@@ -4994,7 +5129,7 @@ class BacktestRepository:
         """Append one session delta and its matching portfolio checkpoint.
 
         Serialization happens before the SQLite write lock. The append,
-        checkpoint update, and first entry-selection write share one
+        audit rows, checkpoint update, and first entry-selection write share one
         ``BEGIN IMMEDIATE`` transaction and the existing worker fence.
         """
         if type(batch_sequence) is not int or batch_sequence <= 0:
@@ -5026,6 +5161,15 @@ class BacktestRepository:
             payload, compressed, payload_digest = self._encode_backtest_staging_batch(
                 session, events, equity_point
             )
+            audit_payloads = None
+            audit_digest = None
+            if candidate_audits is not None:
+                audit_payloads, audit_digest = self._encode_candidate_audit_batch(
+                    session, candidate_audits
+                )
+                self._validate_candidate_audit_event_links(
+                    session, candidate_audits, events
+                )
         except (AttributeError, TypeError, ValueError, OverflowError) as exc:
             raise BacktestIntegrityError("backtest staging batch is invalid") from exc
 
@@ -5093,6 +5237,92 @@ class BacktestRepository:
                         "backtest staging checkpoint is invalid"
                     ) from exc
 
+            audit_contract = conn.execute(
+                """SELECT audit_contract_version
+                   FROM backtest_staging_audit_contracts WHERE run_id=?""",
+                (run_id,),
+            ).fetchone()
+            if audit_contract is None:
+                staged_audit_batch_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM backtest_staging_audit_batches WHERE run_id=?",
+                        (run_id,),
+                    ).fetchone()[0]
+                )
+                staged_audit_row_count = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM backtest_staging_candidate_audits WHERE run_id=?",
+                        (run_id,),
+                    ).fetchone()[0]
+                )
+                if last_batch_sequence == 0:
+                    existing_batch_count = int(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?",
+                            (run_id,),
+                        ).fetchone()[0]
+                    )
+                    if existing_batch_count:
+                        raise BacktestIntegrityError(
+                            "staging batches exist without a checkpoint"
+                        )
+                    audit_contract_version = (
+                        _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+                        if candidate_audits is not None
+                        else "none"
+                    )
+                elif staged_audit_batch_count == 0 and staged_audit_row_count == 0:
+                    # Staging batches created before the audit contract are
+                    # immutable economic input. A resumed run remains legacy,
+                    # because reconstructing its missing candidate evidence
+                    # would invent history.
+                    audit_contract_version = "none"
+                elif staged_audit_batch_count == last_batch_sequence:
+                    audit_contract_version = _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+                else:
+                    raise BacktestIntegrityError(
+                        "candidate audit batch coverage is incomplete"
+                    )
+                conn.execute(
+                    """INSERT INTO backtest_staging_audit_contracts (
+                           run_id, audit_contract_version
+                       ) VALUES (?, ?)""",
+                    (run_id, audit_contract_version),
+                )
+            else:
+                audit_contract_version = str(audit_contract[0])
+                if audit_contract_version not in {
+                    "none",
+                    _BACKTEST_CANDIDATE_AUDIT_CONTRACT,
+                }:
+                    raise BacktestIntegrityError(
+                        "candidate audit staging contract is invalid"
+                    )
+
+            if audit_contract_version == "none":
+                if (
+                    conn.execute(
+                        """SELECT 1 FROM backtest_staging_audit_batches
+                       WHERE run_id=? LIMIT 1""",
+                        (run_id,),
+                    ).fetchone()
+                    or conn.execute(
+                        """SELECT 1 FROM backtest_staging_candidate_audits
+                       WHERE run_id=? LIMIT 1""",
+                        (run_id,),
+                    ).fetchone()
+                ):
+                    raise BacktestIntegrityError(
+                        "legacy staging unexpectedly contains candidate audit evidence"
+                    )
+                candidate_audits = None
+                audit_payloads = None
+                audit_digest = None
+            elif candidate_audits is None:
+                raise BacktestIntegrityError(
+                    "audited staging batch is missing candidate audit evidence"
+                )
+
             existing = conn.execute(
                 """SELECT run_id, batch_sequence, session, payload_encoding,
                           payload_blob, uncompressed_bytes, payload_digest, created_at
@@ -5110,6 +5340,36 @@ class BacktestRepository:
                     and int(existing[5]) == len(payload)
                     and str(existing[6]) == payload_digest
                 )
+                stored_audit = conn.execute(
+                    """SELECT audit_contract_version, session, candidate_count,
+                              audit_digest
+                       FROM backtest_staging_audit_batches
+                       WHERE run_id=? AND batch_sequence=?""",
+                    (run_id, batch_sequence),
+                ).fetchone()
+                if candidate_audits is None:
+                    same_audit = stored_audit is None
+                else:
+                    stored_rows = conn.execute(
+                        """SELECT candidate_sequence, payload_json, payload_digest
+                           FROM backtest_staging_candidate_audits
+                           WHERE run_id=? AND batch_sequence=?
+                           ORDER BY candidate_sequence""",
+                        (run_id, batch_sequence),
+                    ).fetchall()
+                    same_audit = (
+                        stored_audit is not None
+                        and str(stored_audit[0]) == _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+                        and str(stored_audit[1]) == session.isoformat()
+                        and int(stored_audit[2]) == len(audit_payloads or ())
+                        and str(stored_audit[3]) == audit_digest
+                        and tuple(
+                            (int(row[0]), str(row[1]), str(row[2]))
+                            for row in stored_rows
+                        )
+                        == (audit_payloads or ())
+                    )
+                same_payload = same_payload and same_audit
                 if same_key and same_payload:
                     self._decode_backtest_staging_batch(existing)
                     stored_selection = self._load_entry_selection(
@@ -5251,6 +5511,32 @@ class BacktestRepository:
                 raise BacktestIntegrityError(
                     "backtest staging batch insert failed"
                 ) from exc
+            if candidate_audits is not None:
+                conn.execute(
+                    """INSERT INTO backtest_staging_audit_batches (
+                           run_id, batch_sequence, session, audit_contract_version,
+                           candidate_count, audit_digest, created_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        run_id,
+                        batch_sequence,
+                        last_session_text,
+                        _BACKTEST_CANDIDATE_AUDIT_CONTRACT,
+                        len(audit_payloads or ()),
+                        audit_digest,
+                        now,
+                    ),
+                )
+                conn.executemany(
+                    """INSERT INTO backtest_staging_candidate_audits (
+                           run_id, batch_sequence, candidate_sequence,
+                           payload_json, payload_digest
+                       ) VALUES (?, ?, ?, ?, ?)""",
+                    (
+                        (run_id, batch_sequence, *audit_payload)
+                        for audit_payload in (audit_payloads or ())
+                    ),
+                )
             if initial_entry_selection is not None:
                 self._insert_entry_selection(
                     conn,
@@ -5289,6 +5575,16 @@ class BacktestRepository:
         """Read and strictly validate an attempt's batches in sequence order."""
         with _db_session(self._connect) as conn:
             return self._load_backtest_staging_batches_on_connection(conn, run_id)
+
+    def read_backtest_staging_candidate_audits(
+        self, run_id: str
+    ) -> tuple[CandidateAuditV1, ...] | None:
+        """Read staged candidate audits, or ``None`` for legacy batches."""
+        with _db_session(self._connect) as conn:
+            batches = self._load_backtest_staging_batches_on_connection(conn, run_id)
+            return self._load_backtest_staging_candidate_audits_on_connection(
+                conn, run_id, batches
+            )
 
     def read_backtest_staging_checkpoint(
         self, run_id: str
@@ -5376,6 +5672,419 @@ class BacktestRepository:
         }
         raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return raw, zlib.compress(raw), sha256(raw).hexdigest()
+
+    @staticmethod
+    def _encode_candidate_audit_batch(
+        batch_session: date, records: tuple[CandidateAuditV1, ...]
+    ) -> tuple[tuple[tuple[int, str, str], ...], str]:
+        from app.services.backtest.backtest_engine import CandidateAuditV1
+
+        ordered = tuple(sorted(records, key=lambda item: item.candidate_sequence))
+        if len({item.candidate_sequence for item in ordered}) != len(ordered):
+            raise ValueError("candidate audit batch repeats a candidate sequence")
+        payloads: list[tuple[int, str, str]] = []
+        for record in ordered:
+            if not isinstance(record, CandidateAuditV1):
+                raise ValueError("candidate audit row has an unsupported type")
+            if record.outcome_session != batch_session:
+                raise ValueError("candidate audit outcome session differs from batch")
+            payload = json.dumps(
+                record.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            payloads.append(
+                (
+                    record.candidate_sequence,
+                    payload,
+                    sha256(payload.encode()).hexdigest(),
+                )
+            )
+        digest = manifest_digest(
+            {
+                "contract_version": _BACKTEST_CANDIDATE_AUDIT_CONTRACT,
+                "session": batch_session.isoformat(),
+                "rows": [item[2] for item in payloads],
+            }
+        )
+        return tuple(payloads), digest
+
+    @staticmethod
+    def _validate_candidate_audit_event_links(
+        outcome_session: date,
+        records: tuple[CandidateAuditV1, ...],
+        events: tuple[TradeLogEvent, ...],
+    ) -> None:
+        from app.services.backtest.backtest_engine import (
+            CandidateAuditDisposition,
+            CandidateAuditV1,
+            EntryFillEventV1,
+            SignalSide,
+            SkippedSignalEventV1,
+            SkipReasonCode,
+        )
+
+        event_by_sequence = {event.sequence: event for event in events}
+        linked: set[int] = set()
+        for record in records:
+            if not isinstance(record, CandidateAuditV1):
+                raise BacktestIntegrityError("candidate audit row has an invalid type")
+            event = event_by_sequence.get(record.event_sequence)
+            if event is None or record.event_sequence in linked:
+                raise BacktestIntegrityError("candidate audit event link is missing")
+            linked.add(record.event_sequence)
+            common = (
+                record.outcome_session == outcome_session
+                and record.side is SignalSide.BUY
+                and event.security_id == record.security_id
+                and getattr(event, "side", SignalSide.BUY) is SignalSide.BUY
+                and getattr(event, "signal_session", None) == record.signal_session
+                and getattr(event, "rule_id", None) == record.rule_id
+            )
+            if isinstance(event, EntryFillEventV1):
+                valid = (
+                    common
+                    and record.disposition is CandidateAuditDisposition.FILLED
+                    and record.reason_code is None
+                    and event.fill_session == record.outcome_session
+                    and event.fill_session == record.intended_fill_session
+                )
+            elif isinstance(event, SkippedSignalEventV1):
+                valid_disposition = record.disposition in {
+                    CandidateAuditDisposition.PREFLIGHT_REJECTED,
+                    CandidateAuditDisposition.FULL_BOOK_REJECTED,
+                    CandidateAuditDisposition.COMPETITION_REJECTED,
+                    CandidateAuditDisposition.FILL_REJECTED,
+                }
+                valid = (
+                    common
+                    and valid_disposition
+                    and record.reason_code == event.reason.value
+                )
+                if record.disposition in {
+                    CandidateAuditDisposition.FULL_BOOK_REJECTED,
+                    CandidateAuditDisposition.COMPETITION_REJECTED,
+                }:
+                    valid = (
+                        valid
+                        and event.reason is SkipReasonCode.MAX_CONCURRENT_POSITIONS
+                    )
+                if record.disposition is CandidateAuditDisposition.FULL_BOOK_REJECTED:
+                    valid = valid and record.available_slots_before_cohort == 0
+                elif (
+                    record.disposition is CandidateAuditDisposition.COMPETITION_REJECTED
+                ):
+                    valid = (
+                        valid
+                        and record.available_slots_before_cohort is not None
+                        and record.available_slots_before_cohort > 0
+                        and record.available_slots_before_candidate == 0
+                    )
+                elif record.disposition is CandidateAuditDisposition.PREFLIGHT_REJECTED:
+                    valid = (
+                        valid
+                        and record.host_cohort_position is None
+                        and record.intended_fill_session is None
+                    )
+                elif record.disposition is CandidateAuditDisposition.FILL_REJECTED:
+                    valid = valid and record.intended_fill_session == outcome_session
+            else:
+                valid = False
+            if not valid:
+                raise BacktestIntegrityError("candidate audit event link is invalid")
+
+    @classmethod
+    def _validate_backtest_staging_candidate_audits_on_connection(
+        cls,
+        conn: sqlite3.Connection,
+        run_id: str,
+        batches: tuple[BacktestStagingBatchV1, ...],
+    ) -> BacktestCandidateAuditPromotionV1 | None:
+        """Validate staged audit one session at a time and retain only counts."""
+        from app.services.backtest.backtest_engine import CandidateAuditV1
+
+        audit_batch_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM backtest_staging_audit_batches WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        audit_row_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM backtest_staging_candidate_audits WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        audit_contract = conn.execute(
+            """SELECT audit_contract_version
+               FROM backtest_staging_audit_contracts WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if audit_contract is None:
+            if audit_batch_count or audit_row_count:
+                raise BacktestIntegrityError(
+                    "candidate audit staging contract is missing"
+                )
+            return None
+        contract_version = str(audit_contract[0])
+        if contract_version == "none":
+            if audit_batch_count or audit_row_count:
+                raise BacktestIntegrityError(
+                    "legacy staging unexpectedly contains candidate audit evidence"
+                )
+            return None
+        if contract_version != _BACKTEST_CANDIDATE_AUDIT_CONTRACT:
+            raise BacktestIntegrityError("candidate audit staging contract is invalid")
+        if audit_batch_count != len(batches):
+            raise BacktestIntegrityError("candidate audit batch coverage is incomplete")
+
+        summary = {
+            "candidate_count": 0,
+            "priority_recorded": 0,
+            "priority_missing": 0,
+            "explanation_recorded": 0,
+            "explanation_missing": 0,
+            "preflight_rejected": 0,
+            "full_book_rejected": 0,
+            "competition_rejected": 0,
+            "filled": 0,
+            "fill_rejected": 0,
+        }
+        for batch in batches:
+            header = conn.execute(
+                """SELECT session, audit_contract_version, candidate_count,
+                          audit_digest
+                   FROM backtest_staging_audit_batches
+                   WHERE run_id=? AND batch_sequence=?""",
+                (run_id, batch.batch_sequence),
+            ).fetchone()
+            if (
+                header is None
+                or str(header[0]) != batch.session.isoformat()
+                or str(header[1]) != _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+            ):
+                raise BacktestIntegrityError("candidate audit batch header is invalid")
+            rows = conn.execute(
+                """SELECT candidate_sequence, payload_json, payload_digest
+                   FROM backtest_staging_candidate_audits
+                   WHERE run_id=? AND batch_sequence=? ORDER BY candidate_sequence""",
+                (run_id, batch.batch_sequence),
+            ).fetchall()
+            parsed: list[CandidateAuditV1] = []
+            payloads: list[tuple[int, str, str]] = []
+            for row in rows:
+                sequence, payload_json, payload_digest = (
+                    int(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                )
+                if sha256(payload_json.encode()).hexdigest() != payload_digest:
+                    raise BacktestIntegrityError(
+                        "candidate audit row digest is invalid"
+                    )
+                try:
+                    record = CandidateAuditV1.model_validate(
+                        json.loads(payload_json), strict=False
+                    )
+                    canonical = json.dumps(
+                        record.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    ValidationError,
+                ) as exc:
+                    raise BacktestIntegrityError(
+                        "candidate audit row is invalid"
+                    ) from exc
+                if record.candidate_sequence != sequence or canonical != payload_json:
+                    raise BacktestIntegrityError("candidate audit row is not canonical")
+                parsed.append(record)
+                payloads.append((sequence, payload_json, payload_digest))
+
+            if int(header[2]) != len(parsed):
+                raise BacktestIntegrityError(
+                    "candidate audit count does not match staged rows"
+                )
+            encoded, digest = cls._encode_candidate_audit_batch(
+                batch.session, tuple(parsed)
+            )
+            if str(header[3]) != digest or tuple(payloads) != encoded:
+                raise BacktestIntegrityError("candidate audit batch digest is invalid")
+            cls._validate_candidate_audit_event_links(
+                batch.session, tuple(parsed), batch.events
+            )
+            all_buy_events = {
+                event.sequence
+                for event in batch.events
+                if event.kind == "entry_fill"
+                or (event.kind == "skipped_signal" and event.side.value == "BUY")
+            }
+            if all_buy_events != {record.event_sequence for record in parsed}:
+                raise BacktestIntegrityError("candidate audit is missing a BUY outcome")
+            for key, value in cls._candidate_audit_summary_payload(
+                tuple(parsed)
+            ).items():
+                summary[key] += value
+
+        last_candidate_sequence = 0
+
+        def validated_candidate_digests() -> Iterable[str]:
+            nonlocal last_candidate_sequence
+            digest_rows = conn.execute(
+                """SELECT candidate_sequence, payload_digest
+                   FROM backtest_staging_candidate_audits
+               WHERE run_id=? ORDER BY candidate_sequence""",
+                (run_id,),
+            )
+            for row in digest_rows:
+                sequence = int(row[0])
+                if sequence != last_candidate_sequence + 1:
+                    raise BacktestIntegrityError(
+                        "candidate audit sequence coverage is invalid"
+                    )
+                last_candidate_sequence = sequence
+                yield str(row[1])
+
+        audit_digest = cls._candidate_audit_digest_from_row_digests(
+            summary, validated_candidate_digests()
+        )
+        if last_candidate_sequence != summary["candidate_count"]:
+            raise BacktestIntegrityError("candidate audit sequence coverage is invalid")
+        return BacktestCandidateAuditPromotionV1(
+            summary=summary, audit_digest=audit_digest
+        )
+
+    @classmethod
+    def _load_backtest_staging_candidate_audits_on_connection(
+        cls,
+        conn: sqlite3.Connection,
+        run_id: str,
+        batches: tuple[BacktestStagingBatchV1, ...],
+    ) -> tuple[CandidateAuditV1, ...] | None:
+        from app.services.backtest.backtest_engine import CandidateAuditV1
+
+        audit_batch_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM backtest_staging_audit_batches WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        audit_row_count = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM backtest_staging_candidate_audits WHERE run_id=?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        audit_contract = conn.execute(
+            """SELECT audit_contract_version
+               FROM backtest_staging_audit_contracts WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if audit_contract is None:
+            if audit_batch_count or audit_row_count:
+                raise BacktestIntegrityError(
+                    "candidate audit staging contract is missing"
+                )
+            return None
+        if str(audit_contract[0]) == "none":
+            if audit_batch_count or audit_row_count:
+                raise BacktestIntegrityError(
+                    "legacy staging unexpectedly contains candidate audit evidence"
+                )
+            return None
+        if str(audit_contract[0]) != _BACKTEST_CANDIDATE_AUDIT_CONTRACT:
+            raise BacktestIntegrityError("candidate audit staging contract is invalid")
+        if audit_batch_count != len(batches):
+            raise BacktestIntegrityError("candidate audit batch coverage is incomplete")
+
+        records: list[CandidateAuditV1] = []
+        for batch in batches:
+            header = conn.execute(
+                """SELECT session, audit_contract_version, candidate_count,
+                          audit_digest
+                   FROM backtest_staging_audit_batches
+                   WHERE run_id=? AND batch_sequence=?""",
+                (run_id, batch.batch_sequence),
+            ).fetchone()
+            if (
+                header is None
+                or str(header[0]) != batch.session.isoformat()
+                or str(header[1]) != _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+            ):
+                raise BacktestIntegrityError("candidate audit batch header is invalid")
+            rows = conn.execute(
+                """SELECT candidate_sequence, payload_json, payload_digest
+                   FROM backtest_staging_candidate_audits
+                   WHERE run_id=? AND batch_sequence=? ORDER BY candidate_sequence""",
+                (run_id, batch.batch_sequence),
+            ).fetchall()
+            parsed: list[CandidateAuditV1] = []
+            payloads: list[tuple[int, str, str]] = []
+            for row in rows:
+                sequence, payload_json, payload_digest = (
+                    int(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                )
+                if sha256(payload_json.encode()).hexdigest() != payload_digest:
+                    raise BacktestIntegrityError(
+                        "candidate audit row digest is invalid"
+                    )
+                try:
+                    record = CandidateAuditV1.model_validate(
+                        json.loads(payload_json), strict=False
+                    )
+                    canonical = json.dumps(
+                        record.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    ValidationError,
+                ) as exc:
+                    raise BacktestIntegrityError(
+                        "candidate audit row is invalid"
+                    ) from exc
+                if record.candidate_sequence != sequence or canonical != payload_json:
+                    raise BacktestIntegrityError("candidate audit row is not canonical")
+                parsed.append(record)
+                payloads.append((sequence, payload_json, payload_digest))
+            encoded, digest = cls._encode_candidate_audit_batch(
+                batch.session, tuple(parsed)
+            )
+            if int(header[2]) != len(parsed):
+                raise BacktestIntegrityError(
+                    "candidate audit count does not match staged rows"
+                )
+            if str(header[3]) != digest or tuple(payloads) != encoded:
+                raise BacktestIntegrityError("candidate audit batch digest is invalid")
+            cls._validate_candidate_audit_event_links(
+                batch.session, tuple(parsed), batch.events
+            )
+            all_buy_events = {
+                event.sequence
+                for event in batch.events
+                if event.kind == "entry_fill"
+                or (event.kind == "skipped_signal" and event.side.value == "BUY")
+            }
+            if all_buy_events != {record.event_sequence for record in parsed}:
+                raise BacktestIntegrityError("candidate audit is missing a BUY outcome")
+            records.extend(parsed)
+        if sorted(item.candidate_sequence for item in records) != list(
+            range(1, len(records) + 1)
+        ):
+            raise BacktestIntegrityError("candidate audit sequence coverage is invalid")
+        return tuple(sorted(records, key=lambda item: item.candidate_sequence))
 
     @classmethod
     def _decode_backtest_staging_batch(
@@ -5612,6 +6321,7 @@ class BacktestRepository:
             if staging is None or checkpoint is None:
                 raise StrategyJobConflict("no staging exists for this run")
 
+            candidate_audit_promotion: BacktestCandidateAuditPromotionV1 | None = None
             batch_count = int(
                 conn.execute(
                     "SELECT COUNT(*) FROM backtest_staging_batches WHERE run_id=?",
@@ -5645,6 +6355,11 @@ class BacktestRepository:
                     updated_at=checkpoint.updated_at,
                     initial_entry_selection=checkpoint.initial_entry_selection,
                 )
+                candidate_audit_promotion = (
+                    self._validate_backtest_staging_candidate_audits_on_connection(
+                        conn, job_id, batches
+                    )
+                )
 
             closed_trades = tuple(
                 event for event in staging.events if isinstance(event, ClosedTrade)
@@ -5672,6 +6387,35 @@ class BacktestRepository:
                     raise BacktestIntegrityError(
                         "conflicting repeat completion for run_id"
                     )
+                expected_audit_version = (
+                    "none"
+                    if candidate_audit_promotion is None
+                    else _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+                )
+                stored_result = conn.execute(
+                    "SELECT audit_contract_version FROM backtest_results WHERE run_id=?",
+                    (job_id,),
+                ).fetchone()
+                if (
+                    stored_result is None
+                    or str(stored_result[0]) != expected_audit_version
+                ):
+                    raise BacktestIntegrityError(
+                        "conflicting repeat completion audit contract"
+                    )
+                if candidate_audit_promotion is not None:
+                    stored_summary = (
+                        self._load_backtest_candidate_audit_summary_on_connection(
+                            conn, job_id, expected_audit_version
+                        )
+                    )
+                    if (
+                        stored_summary.audit_digest
+                        != candidate_audit_promotion.audit_digest
+                    ):
+                        raise BacktestIntegrityError(
+                            "conflicting repeat completion candidate audit"
+                        )
             else:
                 self._insert_backtest_result(
                     conn,
@@ -5683,6 +6427,7 @@ class BacktestRepository:
                     result_digest=proposed_digest,
                     completed_at=now,
                     initial_entry_selection=staging.initial_entry_selection,
+                    candidate_audit_promotion=candidate_audit_promotion,
                 )
 
             fence = _lease_fence_params(lease)
@@ -5734,7 +6479,9 @@ class BacktestRepository:
                 raise StrategyJobConflict("note update version is stale")
         return self.backtest_result(run_id)
 
-    def backtest_result(self, run_id: str) -> BacktestResultV1:
+    def backtest_result(
+        self, run_id: str, *, include_candidate_audit_summary: bool = True
+    ) -> BacktestResultV1:
         """Return one completed Backtest's full typed retrieval projection
         (AC 5): Strategy ID/version, exact parameters, normalized period,
         profile/ordered evidence, capital/base currency, full replay/
@@ -5748,6 +6495,10 @@ class BacktestRepository:
         stored evidence no longer reconstructs to its own recorded digest
         (tamper detection, mirroring ``activate_snapshot_profile``'s
         rebuild-and-compare convention).
+
+        ``include_candidate_audit_summary=False`` lets the Result page load
+        the independently paginated companion audit so its integrity errors
+        stay local to that section and each request reads only one audit page.
         """
         from app.services.backtest.metrics import (
             BacktestMetricsV1,
@@ -5761,7 +6512,7 @@ class BacktestRepository:
             row = conn.execute(
                 """SELECT result_schema_version, metrics_json, final_cash_base,
                           result_digest, note,
-                          note_version, completed_at
+                          note_version, completed_at, audit_contract_version
                    FROM backtest_results WHERE run_id=?""",
                 (run_id,),
             ).fetchone()
@@ -5782,6 +6533,13 @@ class BacktestRepository:
                 "backtest_result_entry_selection",
                 "backtest_result_entry_selection_decisions",
                 run_id,
+            )
+            candidate_audit_summary = (
+                self._load_backtest_candidate_audit_summary_on_connection(
+                    conn, run_id, str(row[7])
+                )
+                if include_candidate_audit_summary
+                else None
             )
 
         result_schema_version = str(row[0])
@@ -5875,6 +6633,130 @@ class BacktestRepository:
             source_preparation_job_id=strategy_run.source_preparation_job_id,
             regime_benchmark=strategy_run.regime_benchmark,
             initial_entry_selection=initial_entry_selection,
+            candidate_audit_summary=candidate_audit_summary,
+        )
+
+    def backtest_result_candidate_audit_page(
+        self, run_id: str, *, page: int = 1, page_size: int = 25
+    ) -> BacktestCandidateAuditPageV1:
+        """Read one bounded, integrity-checked page of persisted candidates."""
+        from app.services.backtest.backtest_engine import CandidateAuditV1
+
+        if type(page) is not int or page < 1:
+            raise ValueError("candidate audit page must be a positive integer")
+        if type(page_size) is not int or not 1 <= page_size <= 100:
+            raise ValueError("candidate audit page size must be between 1 and 100")
+        with session(self._connect) as conn:
+            result_row = conn.execute(
+                "SELECT audit_contract_version FROM backtest_results WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if result_row is None:
+                raise StrategyJobNotFound(f"backtest result not found: {run_id}")
+            summary = self._load_backtest_candidate_audit_summary_on_connection(
+                conn, run_id, str(result_row[0])
+            )
+            total_pages = max(1, (summary.candidate_count + page_size - 1) // page_size)
+            if page > total_pages:
+                raise ValueError("candidate audit page is outside the Result")
+            if not summary.recorded:
+                return BacktestCandidateAuditPageV1(
+                    summary=summary,
+                    page=page,
+                    page_size=page_size,
+                    total_pages=total_pages,
+                    records=(),
+                )
+            rows = conn.execute(
+                """SELECT candidate_sequence, payload_json, payload_digest
+                   FROM backtest_result_candidate_audits
+                   WHERE run_id=? ORDER BY candidate_sequence LIMIT ? OFFSET ?""",
+                (run_id, page_size, (page - 1) * page_size),
+            ).fetchall()
+            row_offset = (page - 1) * page_size
+            expected_page_count = min(
+                page_size, max(0, summary.candidate_count - row_offset)
+            )
+            if len(rows) != expected_page_count:
+                raise BacktestIntegrityError("candidate audit row count is invalid")
+            records: list[CandidateAuditV1] = []
+            for page_offset, row in enumerate(rows):
+                sequence, payload_json, payload_digest = (
+                    int(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                )
+                if sequence != row_offset + page_offset + 1:
+                    raise BacktestIntegrityError(
+                        "candidate audit sequence coverage is invalid"
+                    )
+                if sha256(payload_json.encode()).hexdigest() != payload_digest:
+                    raise BacktestIntegrityError(
+                        "candidate audit row digest is invalid"
+                    )
+                try:
+                    record = CandidateAuditV1.model_validate(
+                        json.loads(payload_json), strict=False
+                    )
+                    canonical = json.dumps(
+                        record.model_dump(mode="json"),
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    json.JSONDecodeError,
+                    ValidationError,
+                ) as exc:
+                    raise BacktestIntegrityError(
+                        "candidate audit row is invalid"
+                    ) from exc
+                if record.candidate_sequence != sequence or canonical != payload_json:
+                    raise BacktestIntegrityError("candidate audit row is not canonical")
+                records.append(record)
+            if records:
+                event_sequences = tuple(record.event_sequence for record in records)
+                placeholders = ",".join("?" for _ in event_sequences)
+                event_rows = conn.execute(
+                    """SELECT sequence, event_json FROM trade_log
+                       WHERE run_id=? AND sequence IN ("""
+                    + placeholders
+                    + ")",
+                    (run_id, *event_sequences),
+                ).fetchall()
+                events_by_sequence: dict[int, TradeLogEvent] = {}
+                for event_row in event_rows:
+                    try:
+                        event = self._parse_trade_log_event(
+                            json.loads(str(event_row[1]))
+                        )
+                    except (
+                        TypeError,
+                        ValueError,
+                        json.JSONDecodeError,
+                        ValidationError,
+                    ) as exc:
+                        raise BacktestIntegrityError(
+                            "candidate audit event is invalid"
+                        ) from exc
+                    events_by_sequence[int(event_row[0])] = event
+                for record in records:
+                    event = events_by_sequence.get(record.event_sequence)
+                    if event is None:
+                        raise BacktestIntegrityError(
+                            "candidate audit event link is missing"
+                        )
+                    self._validate_candidate_audit_event_links(
+                        record.outcome_session, (record,), (event,)
+                    )
+        return BacktestCandidateAuditPageV1(
+            summary=summary,
+            page=page,
+            page_size=page_size,
+            total_pages=total_pages,
+            records=tuple(records),
         )
 
     @staticmethod
@@ -5943,6 +6825,7 @@ class BacktestRepository:
             raise BacktestIntegrityError("manifest and run versions disagree")
         if str(manifest_row[1]) == "{}" and str(row[13]) != "run_input_manifest.v1":
             raise BacktestIntegrityError("stored run input manifest is invalid")
+        parsed = None
         if str(manifest_row[1]) != "{}":
             try:
                 from app.services.backtest.run_input_manifest import (
@@ -5954,9 +6837,10 @@ class BacktestRepository:
                     row[13]
                 ) or not parsed.accepts_stored_digest(str(row[11])):
                     raise ValueError
-                if str(row[13]) in {"run_input_manifest.v2", "run_input_manifest.v3"} and getattr(
-                    parsed, "universe_selection", None
-                ) != selection:
+                if (
+                    str(row[13]) in {"run_input_manifest.v2", "run_input_manifest.v3"}
+                    and getattr(parsed, "universe_selection", None) != selection
+                ):
                     raise ValueError
             except Exception as exc:
                 raise BacktestIntegrityError(
@@ -6179,22 +7063,28 @@ class BacktestRepository:
         result_digest: str,
         completed_at: str,
         initial_entry_selection: InitialEntrySelectionV1 | None,
+        candidate_audit_promotion: BacktestCandidateAuditPromotionV1 | None,
     ) -> None:
         metrics_json = json.dumps(
             metrics.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         )
         conn.execute(
             """INSERT INTO backtest_results (
-                   run_id, result_schema_version, metrics_json, final_cash_base,
-                   result_digest,
+                   run_id, result_schema_version, audit_contract_version,
+                   metrics_json, final_cash_base, result_digest,
                    note, note_version, completed_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, NULL, 1, ?, ?)""",
+               ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)""",
             (
                 run_id,
                 (
                     "backtest_result.v2"
                     if initial_entry_selection is not None
                     else "backtest_result.v1"
+                ),
+                (
+                    "none"
+                    if candidate_audit_promotion is None
+                    else _BACKTEST_CANDIDATE_AUDIT_CONTRACT
                 ),
                 metrics_json,
                 str(final_cash_base),
@@ -6244,6 +7134,30 @@ class BacktestRepository:
                     str(point.total_equity_base),
                 ),
             )
+        if candidate_audit_promotion is not None:
+            summary = candidate_audit_promotion.summary
+            conn.execute(
+                """INSERT INTO backtest_result_audit_manifests (
+                       run_id, audit_contract_version, candidate_count,
+                       summary_json, audit_digest, created_at
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    _BACKTEST_CANDIDATE_AUDIT_CONTRACT,
+                    summary["candidate_count"],
+                    json.dumps(summary, sort_keys=True, separators=(",", ":")),
+                    candidate_audit_promotion.audit_digest,
+                    completed_at,
+                ),
+            )
+            conn.execute(
+                """INSERT INTO backtest_result_candidate_audits (
+                       run_id, candidate_sequence, payload_json, payload_digest
+                   ) SELECT ?, candidate_sequence, payload_json, payload_digest
+                     FROM backtest_staging_candidate_audits
+                    WHERE run_id=? ORDER BY candidate_sequence""",
+                (run_id, run_id),
+            )
 
     @staticmethod
     def _canonical_result_payload(
@@ -6281,6 +7195,184 @@ class BacktestRepository:
                 mode="json"
             )
         return payload
+
+    @staticmethod
+    def _candidate_audit_summary_payload(
+        records: tuple[CandidateAuditV1, ...],
+    ) -> dict[str, int]:
+        from app.services.backtest.backtest_engine import CandidateAuditDisposition
+
+        counts = {
+            "candidate_count": len(records),
+            "priority_recorded": sum(record.priority is not None for record in records),
+            "priority_missing": sum(record.priority is None for record in records),
+            "explanation_recorded": sum(
+                record.explanation is not None for record in records
+            ),
+            "explanation_missing": sum(
+                record.explanation is None for record in records
+            ),
+            "preflight_rejected": 0,
+            "full_book_rejected": 0,
+            "competition_rejected": 0,
+            "filled": 0,
+            "fill_rejected": 0,
+        }
+        for record in records:
+            key = {
+                CandidateAuditDisposition.PREFLIGHT_REJECTED: "preflight_rejected",
+                CandidateAuditDisposition.FULL_BOOK_REJECTED: "full_book_rejected",
+                CandidateAuditDisposition.COMPETITION_REJECTED: "competition_rejected",
+                CandidateAuditDisposition.FILLED: "filled",
+                CandidateAuditDisposition.FILL_REJECTED: "fill_rejected",
+            }[record.disposition]
+            counts[key] += 1
+        return counts
+
+    @staticmethod
+    def _candidate_audit_digest_from_row_digests(
+        summary: Mapping[str, int], row_digests: Iterable[str]
+    ) -> str:
+        candidate_count = summary["candidate_count"]
+        digest = sha256()
+        digest.update(
+            (
+                f'{{"candidate_count":{candidate_count},'
+                f'"contract_version":{json.dumps(_BACKTEST_CANDIDATE_AUDIT_CONTRACT)},'
+                '"row_digests":['
+            ).encode()
+        )
+        seen = 0
+        for seen, row_digest in enumerate(row_digests, start=1):
+            if seen > 1:
+                digest.update(b",")
+            digest.update(json.dumps(row_digest).encode())
+        if seen != candidate_count:
+            raise BacktestIntegrityError("candidate audit row count is invalid")
+        digest.update(b'],"summary":')
+        digest.update(
+            json.dumps(dict(summary), sort_keys=True, separators=(",", ":")).encode()
+        )
+        digest.update(b"}")
+        return digest.hexdigest()
+
+    @classmethod
+    def _load_backtest_candidate_audit_summary_on_connection(
+        cls,
+        conn: sqlite3.Connection,
+        run_id: str,
+        contract_version: str,
+    ) -> BacktestCandidateAuditSummaryV1:
+        """Validate the persisted audit summary without scanning all rows.
+
+        Promotion validates the complete staged contract. Result reads check
+        the manifest and row count here, then validate payloads and event links
+        only for the requested page.
+        """
+        manifest = conn.execute(
+            """SELECT audit_contract_version, candidate_count, summary_json,
+                      audit_digest
+               FROM backtest_result_audit_manifests WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+        if contract_version == "none":
+            has_audit_rows = conn.execute(
+                """SELECT 1 FROM backtest_result_candidate_audits
+                   WHERE run_id=? LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+            if manifest is not None or has_audit_rows:
+                raise BacktestIntegrityError(
+                    "legacy Result unexpectedly contains candidate audit evidence"
+                )
+            return BacktestCandidateAuditSummaryV1(
+                recorded=False, contract_version="not_recorded"
+            )
+        if contract_version != _BACKTEST_CANDIDATE_AUDIT_CONTRACT:
+            raise BacktestIntegrityError("stored candidate audit contract is invalid")
+        if manifest is None:
+            raise BacktestIntegrityError("candidate audit manifest is missing")
+        if str(manifest[0]) != _BACKTEST_CANDIDATE_AUDIT_CONTRACT:
+            raise BacktestIntegrityError("candidate audit manifest version is invalid")
+        expected_count = int(manifest[1])
+        if expected_count == 0:
+            has_audit_rows = conn.execute(
+                """SELECT 1 FROM backtest_result_candidate_audits
+                   WHERE run_id=? LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+            if has_audit_rows:
+                raise BacktestIntegrityError("candidate audit row count is invalid")
+        else:
+            first_row = conn.execute(
+                """SELECT candidate_sequence FROM backtest_result_candidate_audits
+                   WHERE run_id=? ORDER BY candidate_sequence LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+            last_row = conn.execute(
+                """SELECT candidate_sequence FROM backtest_result_candidate_audits
+                   WHERE run_id=? ORDER BY candidate_sequence DESC LIMIT 1""",
+                (run_id,),
+            ).fetchone()
+            if (
+                first_row is None
+                or last_row is None
+                or int(first_row[0]) != 1
+                or int(last_row[0]) != expected_count
+            ):
+                raise BacktestIntegrityError("candidate audit row count is invalid")
+        try:
+            summary = json.loads(str(manifest[2]))
+            required = {
+                "candidate_count",
+                "priority_recorded",
+                "priority_missing",
+                "explanation_recorded",
+                "explanation_missing",
+                "preflight_rejected",
+                "full_book_rejected",
+                "competition_rejected",
+                "filled",
+                "fill_rejected",
+            }
+            if not isinstance(summary, dict) or set(summary) != required:
+                raise ValueError("candidate audit summary has an invalid shape")
+            if any(type(value) is not int or value < 0 for value in summary.values()):
+                raise ValueError("candidate audit summary contains an invalid count")
+            if summary["candidate_count"] != expected_count:
+                raise ValueError("candidate audit summary count is inconsistent")
+            if (
+                summary["priority_recorded"] + summary["priority_missing"]
+                != expected_count
+                or summary["explanation_recorded"] + summary["explanation_missing"]
+                != expected_count
+            ):
+                raise ValueError("candidate audit coverage counts are inconsistent")
+            outcome_keys = {
+                "preflight_rejected",
+                "full_book_rejected",
+                "competition_rejected",
+                "filled",
+                "fill_rejected",
+            }
+            if sum(summary[key] for key in outcome_keys) != expected_count:
+                raise ValueError("candidate audit outcome counts are inconsistent")
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise BacktestIntegrityError("candidate audit summary is invalid") from exc
+        canonical_summary = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+        if canonical_summary != str(manifest[2]):
+            raise BacktestIntegrityError("candidate audit summary is not canonical")
+        audit_digest = str(manifest[3])
+        if len(audit_digest) != 64 or any(
+            character not in "0123456789abcdef" for character in audit_digest
+        ):
+            raise BacktestIntegrityError("candidate audit manifest digest is invalid")
+        return BacktestCandidateAuditSummaryV1(
+            recorded=True,
+            contract_version=_BACKTEST_CANDIDATE_AUDIT_CONTRACT,
+            **summary,
+            audit_digest=audit_digest,
+        )
 
     @staticmethod
     def _insert_entry_selection(
@@ -8007,10 +9099,18 @@ class BacktestRepository:
         if not selected:
             return ()
         preferred = dict(self.snapshot_member_revisions(profile_hash, snapshot_month))
-        resolved = {security_id: preferred[security_id] for security_id in selected if security_id in preferred}
-        missing = tuple(security_id for security_id in selected if security_id not in resolved)
+        resolved = {
+            security_id: preferred[security_id]
+            for security_id in selected
+            if security_id in preferred
+        }
+        missing = tuple(
+            security_id for security_id in selected if security_id not in resolved
+        )
         if not missing:
-            return tuple((security_id, resolved[security_id]) for security_id in selected)
+            return tuple(
+                (security_id, resolved[security_id]) for security_id in selected
+            )
 
         placeholders = ",".join("?" for _ in missing)
         with session(self._connect) as conn:

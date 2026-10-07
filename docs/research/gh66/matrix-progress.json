@@ -1,0 +1,9 @@
+{
+  "completed": 42,
+  "experiment_id": "f72d586e3a85ada75bb06e5ff0734918729b91696bb49b259de9b76ac16cd056",
+  "failed": 0,
+  "last_strategy": "rtly-backtest-weinstein",
+  "planned": 42,
+  "strategy_completed": 7,
+  "updated_at": "2026-10-07T19:40:29.813270+00:00"
+}

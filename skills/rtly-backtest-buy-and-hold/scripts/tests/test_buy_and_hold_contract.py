@@ -304,17 +304,19 @@ def test_multi_security_universe_ranks_top_x_by_score_then_id() -> None:
     strategy = BuyAndHoldStrategy()
     view = _View()
 
-    selection = strategy.initial_entry_selection(
+    parameters = {**PARAMETERS, "top_x": 3}
+    first = strategy.initial_entry_selection(
         view,
-        {
-            **PARAMETERS,
-            "selected_securities": ["sec-msft", "sec-aapl", "sec-msft"],
-            "top_x": 1,
-        },
+        {**parameters, "selected_securities": ["sec-msft", "sec-aapl", "sec-msft"]},
+    )
+    permuted = strategy.initial_entry_selection(
+        view, {**parameters, "selected_securities": ["sec-aapl", "sec-msft"]}
     )
 
-    assert [signal.security_id for signal in selection.signals] == ["sec-aapl"]
-    assert [decision.security_id for decision in selection.decisions] == [
+    assert first == permuted
+    assert [signal.security_id for signal in first.signals] == ["sec-aapl", "sec-msft"]
+    assert [signal.priority for signal in first.signals] == [Decimal(3), Decimal(2)]
+    assert [decision.security_id for decision in first.decisions] == [
         "sec-aapl",
         "sec-msft",
     ]
@@ -353,6 +355,54 @@ def test_top_x_selects_the_highest_return_not_input_order() -> None:
         "sec-high",
         "sec-low",
     ]
+    assert [(signal.security_id, signal.priority) for signal in selection.signals] == [
+        ("sec-high", Decimal(1))
+    ]
+
+
+def test_selected_priorities_follow_strength_and_keep_score_explanation() -> None:
+    class _PerSecurityView(_View):
+        def price_history(
+            self,
+            security_id: str,
+            *,
+            limit: int | None = None,
+            columns: object | None = None,
+        ) -> pd.DataFrame:
+            close = {"sec-strong": "160", "sec-medium": "140", "sec-weak": "120"}[
+                security_id
+            ]
+            history = _View(current_close=close)._history.copy()
+            if limit is not None:
+                history = history.iloc[-limit:]
+            if columns is not None:
+                history = history.loc[:, list(columns)]
+            return history
+
+    selection = BuyAndHoldStrategy().initial_entry_selection(
+        _PerSecurityView(),
+        {
+            **PARAMETERS,
+            "selected_securities": ["sec-weak", "sec-strong", "sec-medium"],
+            "top_x": 3,
+        },
+    )
+
+    signals = {signal.security_id: signal for signal in selection.signals}
+    assert {
+        security_id: signal.priority for security_id, signal in signals.items()
+    } == {
+        "sec-strong": Decimal(3),
+        "sec-medium": Decimal(2),
+        "sec-weak": Decimal(1),
+    }
+    strong_facts = {
+        fact.label: fact
+        for reason in signals["sec-strong"].explanation.reasons
+        for fact in reason.facts
+    }
+    assert strong_facts["Rank by 252-session return"].observed == Decimal(1)
+    assert strong_facts["252-session return"].observed == Decimal(60)
 
 
 def test_empty_or_malformed_universe_emits_nothing() -> None:
