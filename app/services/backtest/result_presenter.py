@@ -10,10 +10,11 @@ display in a local variable; the typed aggregate handed in is read-only.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
+from decimal import Decimal, DecimalException, localcontext
 import html
+import math
 
 from app.repositories.backtest_repo import BacktestIntegrityError, BacktestResultV1
 from app.services.backtest.backtest_engine import (
@@ -225,6 +226,19 @@ class ResultFinancialsViewV1:
 
     starting_capital: MetricDisplayV1
     pnl: MetricDisplayV1
+
+
+@dataclass(frozen=True)
+class PerformanceSummaryViewV1:
+    """Additional display-only context derived from verified fills and
+    daily valuations. These values supplement, and never replace, the
+    four persisted Backtest Metrics."""
+
+    cagr: MetricDisplayV1
+    mean_invested_exposure: MetricDisplayV1
+    time_invested: MetricDisplayV1
+    turnover: MetricDisplayV1
+    exit_count: MetricDisplayV1
 
 
 @dataclass(frozen=True)
@@ -483,6 +497,75 @@ def result_financials_view(result: BacktestResultV1) -> ResultFinancialsViewV1:
     )
 
 
+def performance_summary_view(result: BacktestResultV1) -> PerformanceSummaryViewV1:
+    """Format useful context that is not part of the fixed persisted
+    Metrics contract. All inputs come from the verified equity curve and
+    executed fills on ``result``; this does not run or alter a backtest."""
+    curve = result.equity_curve
+    not_applicable = MetricDisplayV1(_NOT_APPLICABLE_TEXT)
+    cagr = not_applicable
+    if curve and result.starting_capital > 0 and curve[-1].total_equity_base > 0:
+        elapsed_days = max((curve[-1].session - curve[0].session).days, 1)
+        try:
+            rate = (
+                math.pow(
+                    float(curve[-1].total_equity_base / result.starting_capital),
+                    365.2425 / elapsed_days,
+                )
+                - 1
+            )
+        except (OverflowError, ValueError):
+            rate = math.nan
+        if math.isfinite(rate):
+            cagr = _metric_percent(rate, signed=True)
+
+    invested_fractions = [
+        point.positions_value_base / point.total_equity_base
+        for point in curve
+        if point.total_equity_base > 0
+    ]
+    if invested_fractions:
+        mean_exposure = MetricDisplayV1(
+            f"{float(sum(invested_fractions, Decimal(0)) / len(invested_fractions)) * 100:.2f}%"
+        )
+        time_invested = MetricDisplayV1(
+            f"{sum(value > 0 for value in invested_fractions) * 100 / len(invested_fractions):.2f}%"
+        )
+    else:
+        mean_exposure = not_applicable
+        time_invested = not_applicable
+
+    buys = sum(
+        (
+            event.cost_base
+            for event in result.events
+            if isinstance(event, EntryFillEventV1)
+        ),
+        Decimal(0),
+    )
+    sells = sum(
+        (
+            event.proceeds_base
+            for event in result.events
+            if isinstance(event, ExitFillEventV1)
+        ),
+        Decimal(0),
+    )
+    turnover = (
+        MetricDisplayV1(f"{(buys + sells) / result.starting_capital:.2f}×")
+        if result.starting_capital > 0
+        else not_applicable
+    )
+    exits = sum(isinstance(event, ExitFillEventV1) for event in result.events)
+    return PerformanceSummaryViewV1(
+        cagr=cagr,
+        mean_invested_exposure=mean_exposure,
+        time_invested=time_invested,
+        turnover=turnover,
+        exit_count=MetricDisplayV1(f"{exits:,}"),
+    )
+
+
 def equity_curve_payload(result: BacktestResultV1) -> tuple[dict[str, object], ...]:
     """Return one ordered ``{date, equity, equity_display}`` series (AC 3)
     -- the single server-produced payload the chart and its data-table
@@ -540,6 +623,107 @@ def comparison_equity_payload(
             }
         )
     return tuple(payload)
+
+
+def multi_comparison_equity_payload(
+    results: Sequence[BacktestResultV1],
+) -> dict[str, object]:
+    """Build indexed equity and drawdown paths for a small compatible
+    result group. Every curve must share the exact ordered session axis;
+    no missing date is interpolated or silently reindexed. Equity is
+    indexed to 100 on each run's first session so different starting
+    capital does not distort the comparison."""
+    if len(results) < 2:
+        raise ValueError("a multi-result comparison needs at least two Results")
+    sessions = tuple(point.session for point in results[0].equity_curve)
+    if not sessions:
+        raise BacktestIntegrityError("comparison equity curve is empty")
+
+    series: list[dict[str, object]] = []
+    display_columns: list[tuple[str, ...]] = []
+    equity_columns: list[tuple[str, ...]] = []
+    drawdown_columns: list[tuple[str, ...]] = []
+    for result in results:
+        result_sessions = tuple(point.session for point in result.equity_curve)
+        if result_sessions != sessions:
+            raise BacktestIntegrityError(
+                "comparison equity curves diverge: session dates do not match "
+                "between the selected Results"
+            )
+        initial_equity = result.equity_curve[0].total_equity_base
+        if initial_equity <= 0:
+            raise BacktestIntegrityError(
+                "comparison equity curve has a non-positive starting value"
+            )
+
+        values: list[float] = []
+        equity_values: list[float] = []
+        drawdowns: list[float] = []
+        value_displays: list[str] = []
+        equity_displays: list[str] = []
+        drawdown_displays: list[str] = []
+        peak = initial_equity
+        for point in result.equity_curve:
+            try:
+                indexed = (point.total_equity_base / initial_equity * 100).quantize(
+                    Decimal("0.01")
+                )
+                peak = max(peak, point.total_equity_base)
+                drawdown = ((point.total_equity_base / peak - 1) * 100).quantize(
+                    Decimal("0.01")
+                )
+                equity = point.total_equity_base.quantize(Decimal("0.01"))
+                indexed_value, equity_value, drawdown_value = map(
+                    float, (indexed, equity, drawdown)
+                )
+            except (DecimalException, OverflowError) as exc:
+                raise BacktestIntegrityError(
+                    "comparison equity values cannot be represented for display"
+                ) from exc
+            if not all(
+                math.isfinite(value)
+                for value in (indexed_value, equity_value, drawdown_value)
+            ):
+                raise BacktestIntegrityError(
+                    "comparison equity values exceed the display range"
+                )
+            values.append(indexed_value)
+            equity_values.append(equity_value)
+            drawdowns.append(drawdown_value)
+            value_displays.append(f"{indexed:,.2f}")
+            equity_displays.append(f"{equity:,.2f}")
+            drawdown_displays.append(f"{drawdown:,.2f}%")
+
+        series.append(
+            {
+                "run_id": result.run_id,
+                "label": (
+                    f"{result.strategy_id} v{result.strategy_api_version} "
+                    f"({result.run_id[:8]})"
+                ),
+                "values": tuple(values),
+                "equity_values": tuple(equity_values),
+                "drawdowns": tuple(drawdowns),
+            }
+        )
+        display_columns.append(tuple(value_displays))
+        drawdown_columns.append(tuple(drawdown_displays))
+        equity_columns.append(tuple(equity_displays))
+
+    table_rows = tuple(
+        {
+            "date": session.isoformat(),
+            "values": tuple(column[index] for column in display_columns),
+            "equities": tuple(column[index] for column in equity_columns),
+            "drawdowns": tuple(column[index] for column in drawdown_columns),
+        }
+        for index, session in enumerate(sessions)
+    )
+    return {
+        "dates": tuple(session.isoformat() for session in sessions),
+        "series": tuple(series),
+        "table_rows": table_rows,
+    }
 
 
 def _money(value: Decimal, currency: str) -> str:
@@ -752,6 +936,7 @@ __all__ = [
     "UNRESOLVED_SECURITY_LABEL",
     "resolve_security_label",
     "MetricsViewV1",
+    "PerformanceSummaryViewV1",
     "TradeLogRowV1",
     "TradeLogViewV1",
     "ProvenanceEntryViewV1",
@@ -762,6 +947,8 @@ __all__ = [
     "metrics_view",
     "equity_curve_payload",
     "comparison_equity_payload",
+    "multi_comparison_equity_payload",
+    "performance_summary_view",
     "trade_log_view",
     "provenance_view",
     "note_view",

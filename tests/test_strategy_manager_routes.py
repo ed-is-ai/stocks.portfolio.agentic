@@ -52,7 +52,9 @@ from app.services.backtest.metrics import (
     MetricAvailabilityV1,
     MetricUnavailableReason,
 )
-from app.services.backtest.result_presenter import comparison_equity_payload
+from app.services.backtest.result_presenter import (
+    comparison_equity_payload,
+)
 from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
@@ -138,6 +140,7 @@ class FakeRepo:
         self.backtest_activities_error: BacktestIntegrityError | None = None
         # Story 2.9: Result page + note CAS fakes.
         self.result: BacktestResultV1 | None = None
+        self.results_by_id: dict[str, BacktestResultV1] = {}
         self.latest_result: BacktestResultV1 | None = None
         self.result_error: Exception | None = None
         self.result_coverage: CoverageSummaryV1 | None = None
@@ -157,6 +160,7 @@ class FakeRepo:
         self.eligibility: ComparisonEligibilityV1 | None = None
         self.eligibility_error: Exception | None = None
         self.last_is_comparable_call: tuple[str, str] | None = None
+        self.is_comparable_calls: list[tuple[str, str]] = []
         self.strategy_job_error: Exception | None = None
         self.bootstrap = SimpleNamespace(job_id="job-1")
         self.bootstrap_run_calls = 0
@@ -245,6 +249,9 @@ class FakeRepo:
 
     def backtest_result(self, run_id):
         from app.services.backtest.strategy_job import StrategyJobNotFound
+
+        if run_id in self.results_by_id:
+            return self.results_by_id[run_id]
 
         if (
             self.result_b is not None
@@ -354,6 +361,7 @@ class FakeRepo:
 
     def is_comparable(self, left, right, *, left_result=None, right_result=None):
         self.last_is_comparable_call = (left, right)
+        self.is_comparable_calls.append((left, right))
         if self.eligibility_error is not None:
             raise self.eligibility_error
         if self.eligibility is not None:
@@ -3043,6 +3051,10 @@ def test_result_chart_and_table_share_the_same_ordered_payload(services):
     assert '"equity": 10250.5' in text
     assert "10,000.00" in text
     assert "10,250.50" in text
+    assert "Annualized return (CAGR)" in text
+    assert "Mean invested exposure" in text
+    assert "Turnover / starting capital" in text
+    assert "Executed exits" in text
 
 
 def test_result_canvas_has_role_img_accessible_name_and_destroy_guard(services):
@@ -3382,7 +3394,7 @@ def test_compare_picker_lists_eligible_candidates_none_preselected(services):
     repo, _ = services
     repo.activity = _complete_backtest_activity()
     repo.result = _result()
-    repo.candidates = (_candidate(),)
+    repo.candidates = (_candidate(), _candidate(run_id="run-3"))
     response = client.get(f"/strategy-manager/compare?run_id={RESULT_RUN_ID}")
     assert response.status_code == 200
     text = response.text
@@ -3393,9 +3405,11 @@ def test_compare_picker_lists_eligible_candidates_none_preselected(services):
     assert "2024-01 to 2024-01" in text
     assert "GBP" in text
     assert "run-2" in text
-    # No candidate option carries `selected` -- only the disabled placeholder does.
-    assert '<option value="run-2">' in text
-    assert '<option value="" selected disabled>' in text
+    assert 'type="checkbox" name="candidate_run_ids" value="run-2"' in text
+    assert 'type="checkbox" name="candidate_run_ids" value="run-2" checked' not in text
+    assert "Select one to seven peers" in text
+    assert 'name="candidate_run_ids" value="run-2" required' not in text
+    assert 'name="candidate_run_ids" value="run-3" required' not in text
 
 
 def test_compare_picker_empty_state_has_no_submit_control(services):
@@ -3452,7 +3466,7 @@ def test_compare_picker_corrupt_job_row_renders_integrity_error(services):
     )
     assert response.status_code == 200
     assert "stored strategy job is invalid" in response.text
-    assert "Compare against" not in response.text
+    assert "Choose compatible Results" not in response.text
 
 
 def test_compare_picker_integrity_error_renders_no_partial_data(services):
@@ -3464,35 +3478,45 @@ def test_compare_picker_integrity_error_renders_no_partial_data(services):
     response = client.get(f"/strategy-manager/compare?run_id={RESULT_RUN_ID}")
     assert response.status_code == 200
     assert "stored backtest result digest is invalid" in response.text
-    assert "Compare against" not in response.text
+    assert "Choose compatible Results" not in response.text
 
 
 def test_compare_submit_success_redirects_and_mutates_nothing(services):
     repo, _ = services
     repo.activity = _complete_backtest_activity()
-    repo.result = _result()
+    repo.result = _result(run_id="run-1")
+    repo.result_b = _result(run_id="run-2")
     repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
     response = client.post(
         "/strategy-manager/compare",
-        data={"run_id": RESULT_RUN_ID, "candidate_run_id": "run-2"},
+        data={"run_id": "run-1", "candidate_run_ids": ["run-2"]},
         headers={"X-Auth-Token": "s3cret"},
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert (
-        response.headers["location"]
-        == f"/strategy-manager/comparisons/{RESULT_RUN_ID}/run-2"
+    assert response.headers["location"] == (
+        "/strategy-manager/comparisons?run_id=run-1&candidate_run_ids=run-2"
     )
-    assert repo.last_is_comparable_call == (RESULT_RUN_ID, "run-2")
+    assert repo.last_is_comparable_call == ("run-1", "run-2")
     assert repo.last_note_call is None
     assert repo.result is not None
     assert repo.result.note_version == 1  # unchanged -- no mutation occurred
+
+    overview = client.get(
+        "/strategy-manager/comparisons",
+        params={"run_id": "run-1", "candidate_run_ids": "run-2"},
+    )
+    assert overview.status_code == 200
+    assert "multi-equity-chart" in overview.text
+    assert "multi-drawdown-chart" in overview.text
+    assert "Annualized return (CAGR)" in overview.text
 
 
 def test_compare_submit_stale_ineligible_returns_422_with_reason(services):
     repo, _ = services
     repo.activity = _complete_backtest_activity()
     repo.result = _result()
+    repo.result_b = _result(run_id="run-2")
     repo.candidates = (_candidate(),)
     repo.eligibility = ComparisonEligibilityV1(
         eligible=False,
@@ -3510,12 +3534,18 @@ def test_compare_submit_stale_ineligible_returns_422_with_reason(services):
     assert 'role="alert"' in text
     assert 'tabindex="-1"' in text
     assert "start_month differs" in text
-    # A fresh candidate list is re-fetched, and nothing is preselected.
+    # A fresh candidate list is re-fetched, and the rejected choice is
+    # preserved so the user can adjust it.
     assert "mean_reversion_v1 v2" in text
-    assert '<option value="" selected disabled>' in text
+    assert 'name="candidate_run_ids" value="run-2"' in text
+    assert "checked" in re.search(
+        r'<label class="form-check d-flex align-items-start gap-2">.*?</label>',
+        text,
+        re.DOTALL,
+    ).group(0)
 
 
-def test_compare_submit_missing_candidate_id_treated_as_ineligible(services):
+def test_compare_submit_without_peers_explains_allowed_count(services):
     repo, _ = services
     repo.activity = _complete_backtest_activity()
     repo.result = _result()
@@ -3526,13 +3556,28 @@ def test_compare_submit_missing_candidate_id_treated_as_ineligible(services):
         headers={"X-Auth-Token": "s3cret"},
     )
     assert response.status_code == 422
-    assert repo.last_is_comparable_call == (RESULT_RUN_ID, "")
+    assert "Choose between one and seven compatible Results." in response.text
+    assert repo.last_is_comparable_call is None
+
+
+def test_multi_compare_without_peers_returns_picker_with_allowed_count(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity(run_id="run-1")
+    repo.result = _result(run_id="run-1")
+    repo.candidates = (_candidate(),)
+
+    response = client.get("/strategy-manager/comparisons", params={"run_id": "run-1"})
+
+    assert response.status_code == 422
+    assert "Choose between one and seven distinct peer Results." in response.text
+    assert 'id="compare-picker-errors"' in response.text
 
 
 def test_compare_submit_anchor_integrity_error_branch_no_redirect(services):
     repo, _ = services
     repo.activity = _complete_backtest_activity()
     repo.result = _result()
+    repo.result_b = _result(run_id="run-2")
     repo.eligibility_error = BacktestIntegrityError(
         "stored backtest result digest is invalid"
     )
@@ -3655,10 +3700,81 @@ def test_comparison_happy_path_renders_both_sides(services):
     assert "Provenance" in text
     assert "comparison-equity-chart" in text
     assert "View equity data table" in text
+    assert "Annualized return (CAGR)" in text
+    assert "Mean invested exposure" in text
     assert 'href="/strategy-manager"' in text
     assert 'hx-get="/strategy-manager"' in text
     # Notes are a standalone-Result concern -- never rendered here.
     assert "Decision note" not in text
+
+
+def test_multi_compare_submit_redirects_to_indexed_growth_and_metrics(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity(run_id="run-1")
+    repo.result = _result(run_id="run-1")
+    repo.result_b = replace(_result(run_id="run-2"), strategy_id="moving_average")
+    repo.results_by_id["run-3"] = replace(
+        _result(run_id="run-3"), strategy_id="weinstein"
+    )
+    repo.eligibility = ComparisonEligibilityV1(eligible=True, reason=None, detail="")
+
+    submitted = client.post(
+        "/strategy-manager/compare",
+        data={"run_id": "run-1", "candidate_run_ids": ["run-2", "run-3"]},
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+
+    assert submitted.status_code == 303
+    assert submitted.headers["location"] == (
+        "/strategy-manager/comparisons?run_id=run-1"
+        "&candidate_run_ids=run-2&candidate_run_ids=run-3"
+    )
+    assert {call[1] for call in repo.is_comparable_calls} == {"run-2", "run-3"}
+
+    response = client.get(
+        "/strategy-manager/comparisons",
+        params={"run_id": "run-1", "candidate_run_ids": ["run-2", "run-3"]},
+    )
+
+    assert response.status_code == 200
+    text = response.text
+    assert "moving_average v1" in text
+    assert "weinstein v1" in text
+    assert "multi-equity-chart" in text
+    assert "multi-drawdown-chart" in text
+    assert "Value index (first session = 100)" in text
+    assert "Annualized return (CAGR)" in text
+    assert "Mean invested exposure" in text
+    assert "Turnover / starting capital" in text
+    assert "Executed exits" in text
+    assert "View indexed portfolio values and drawdowns" in text
+    assert "100.00" in text
+
+
+def test_multi_compare_rejects_a_peer_that_became_ineligible(services):
+    repo, _ = services
+    repo.activity = _complete_backtest_activity(run_id="run-1")
+    repo.result = _result(run_id="run-1")
+    repo.result_b = _result(run_id="run-2")
+    repo.results_by_id["run-3"] = _result(run_id="run-3")
+    repo.candidates = (_candidate(), _candidate(run_id="run-3"))
+    repo.eligibility = ComparisonEligibilityV1(
+        eligible=False,
+        reason=ComparisonIneligibleReason.PERIOD_MISMATCH,
+        detail="The selected Results no longer share a comparison period.",
+    )
+
+    response = client.post(
+        "/strategy-manager/compare",
+        data={"run_id": "run-1", "candidate_run_ids": ["run-2", "run-3"]},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 422
+    assert "The selected Results no longer share a comparison period." in response.text
+    assert 'id="compare-picker-errors"' in response.text
+    assert "multi-equity-chart" not in response.text
 
 
 def test_comparison_provenance_uses_plain_language_labels(services):

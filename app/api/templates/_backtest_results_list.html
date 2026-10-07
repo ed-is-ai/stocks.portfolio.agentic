@@ -23,7 +23,7 @@
   {% endif %}
   <div class="tbl-wrap">
     <table class="table table-hover align-middle">
-      <thead><tr><th scope="col">Run</th><th scope="col">Started</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Universe</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th></tr></thead>
+      <thead><tr><th scope="col">Run</th><th scope="col">Started</th><th scope="col">Status</th><th scope="col">Strategy</th><th scope="col">Universe</th><th scope="col">Parameters</th><th scope="col">Period</th><th scope="col">Total Return</th><th scope="col">Win Rate</th><th scope="col">Actions</th></tr></thead>
       <tbody>
         {% for item in backtest_activities %}
         {% set activity = item.activity %}
@@ -70,6 +70,12 @@
               <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
             {%- endif -%}
           </td>
+          <td>{% if activity.job.status.value == 'complete' and not activity.result_error %}
+            <a href="/strategy-manager/compare?run_id={{ activity.job.id|urlencode }}"
+               hx-get="/strategy-manager/compare?run_id={{ activity.job.id|urlencode }}"
+               hx-target="#tab-content" hx-swap="innerHTML"
+               aria-label="Compare compatible results with run {{ activity.job.enqueue_seq }}">Compare</a>
+            {% else %}<span aria-hidden="true">—</span><span class="visually-hidden">Comparison unavailable</span>{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>

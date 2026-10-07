@@ -155,6 +155,14 @@
       <div class="sval{% if metric_display.max_drawdown.css_class %} {{ metric_display.max_drawdown.css_class }}{% endif %}">{{ metrics.max_drawdown }}</div>
     </div>
   </div>
+  <h3 class="h6">Annualized return and trading activity</h3>
+  <dl class="row mono-num mb-4">
+    <dt class="col-sm-3">Annualized return (CAGR)</dt><dd class="col-sm-9">{{ performance.cagr.value }}</dd>
+    <dt class="col-sm-3">Mean invested exposure</dt><dd class="col-sm-9">{{ performance.mean_invested_exposure.value }}</dd>
+    <dt class="col-sm-3">Time invested</dt><dd class="col-sm-9">{{ performance.time_invested.value }}</dd>
+    <dt class="col-sm-3">Turnover / starting capital</dt><dd class="col-sm-9">{{ performance.turnover.value }}</dd>
+    <dt class="col-sm-3">Executed exits</dt><dd class="col-sm-9">{{ performance.exit_count.value }}</dd>
+  </dl>
 
   <!-- Equity Curve -->
   <h2 class="h5">Equity Curve</h2>
