@@ -4,8 +4,9 @@ For each month the roster on ``AS_OF_RULE`` (the month's last calendar day) is
 split into members whose yfinance history spans the month (``priced``), those
 whose ticker was reused (``suspect``: the prices may be another company's),
 uncovered members still in the index today (``not_cached``: yfinance can
-supply them, the app just has not fetched them) and the rest (``missing``:
-left the index, the survivorship gap other providers must fill).
+supply them, the app just has not fetched them), leavers only the WIKI
+archive covers (``wiki``, #70) and the rest (``missing``: left the index,
+the survivorship gap other providers must fill).
 
 The price cache is opened strictly read-only. The cache keeps short-window
 revisions too, so the first session comes from each symbol's earliest-starting
@@ -35,6 +36,8 @@ AS_OF_RULE = "last calendar day"
 
 #: yfinance symbol -> (first, last) session with a non-null close.
 Spans = dict[str, tuple[str, str]]
+#: ``(sp_ticker, as_of)`` -> whether another source prices it in that month.
+Covers = Callable[[str, str], bool]
 
 #: Only columns stored before the large JSON ones, so the scan stays cheap.
 _REVISIONS = """
@@ -63,12 +66,14 @@ class MonthCoverage(BaseModel):
     members: int
     priced: int
     suspect: int
+    wiki: int
     not_cached: int
     missing: int
     confidence: Confidence
     stale: bool
     missing_tickers: list[str]
     suspect_tickers: list[str]
+    wiki_tickers: list[str]
     not_cached_tickers: list[str]
 
 
@@ -171,47 +176,71 @@ def _first_session(
 
 
 def month_coverage(
-    roster: Roster, spans: Spans, reused: set[str], current: set[str]
+    roster: Roster,
+    spans: Spans,
+    reused: set[str],
+    current: set[str],
+    wiki: Covers | None = None,
 ) -> MonthCoverage:
-    """Split ``roster``'s members into priced, suspect, not cached and missing.
+    """Split ``roster``'s members into priced, suspect, not cached, wiki and
+    missing.
 
     A member is covered when its yfinance history (ticker with ``.`` -> ``-``)
     starts on/before the month's end and ends on/after its start; a covered
     ticker in ``reused`` is suspect instead of priced. An uncovered ticker in
-    ``current`` (still a member today, and not reused) is not cached.
+    ``current`` (still a member today, and not reused) is not cached: yfinance
+    can supply it, so WIKI does not hide it. Any other uncovered member that
+    ``wiki`` covers is wiki (suspect if reused).
     """
     # ponytail: gaps inside a history are not checked; scan every chunk if needed.
     month_start = f"{roster.as_of[:7]}-01"
     missing: list[str] = []
     suspect: list[str] = []
     not_cached: list[str] = []
+    in_wiki: list[str] = []
     for member in roster.members:
         span = spans.get(member.ticker.replace(".", "-"))
         if span is None or span[0] > roster.as_of or span[1] < month_start:
-            fetchable = member.ticker in current and member.ticker not in reused
-            (not_cached if fetchable else missing).append(member.ticker)
+            reused_ticker = member.ticker in reused
+            if member.ticker in current and not reused_ticker:
+                not_cached.append(member.ticker)
+            elif wiki is not None and wiki(member.ticker, roster.as_of):
+                (suspect if reused_ticker else in_wiki).append(member.ticker)
+            else:
+                missing.append(member.ticker)
         elif member.ticker in reused:
             suspect.append(member.ticker)
     return MonthCoverage(
         month=roster.as_of[:7],
         as_of=roster.as_of,
         members=len(roster.members),
-        priced=len(roster.members) - len(missing) - len(suspect) - len(not_cached),
+        priced=len(roster.members)
+        - len(missing)
+        - len(suspect)
+        - len(in_wiki)
+        - len(not_cached),
         suspect=len(suspect),
+        wiki=len(in_wiki),
         not_cached=len(not_cached),
         missing=len(missing),
         confidence=roster.confidence,
         stale=roster.stale,
         missing_tickers=missing,
         suspect_tickers=suspect,
+        wiki_tickers=in_wiki,
         not_cached_tickers=not_cached,
     )
 
 
 def coverage_report(
-    repo: IndexMembershipRepository, spans: Spans, start_month: str, end_month: str
+    repo: IndexMembershipRepository,
+    spans: Spans,
+    start_month: str,
+    end_month: str,
+    wiki: Covers | None = None,
 ) -> list[MonthCoverage]:
-    """Return the S&P 500 coverage of every month in the range.
+    """Return the S&P 500 coverage of every month in the range (``wiki``
+    prices members yfinance does not, see ``month_coverage``).
 
     Raises ``ValueError`` if the S&P 500 membership was never imported.
     """
@@ -225,4 +254,4 @@ def coverage_report(
     intervals = {t: repo.intervals_for(INDEX_ID, t) for t in tickers}
     reused = {t for t, spells in intervals.items() if len(spells) > 1}
     current = {t for t, spells in intervals.items() if spells[-1].end_date is None}
-    return [month_coverage(r, spans, reused, current) for r in rosters]
+    return [month_coverage(r, spans, reused, current, wiki) for r in rosters]

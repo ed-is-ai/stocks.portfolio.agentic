@@ -25,6 +25,7 @@ _REAL_DBS = (
     config.BACKTEST_DB,
     config.HISTORICAL_PRICE_CACHE,
     config.INDEX_MEMBERSHIP_DB,
+    config.WIKI_PRICES_DB,
 )
 
 
