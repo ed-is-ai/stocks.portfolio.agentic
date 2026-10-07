@@ -17,7 +17,7 @@ from typing import Annotated, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.datastructures import FormData
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
@@ -55,7 +55,9 @@ from app.services.backtest.result_presenter import (
     equity_curve_payload,
     initial_basket_view,
     metrics_view,
+    multi_comparison_equity_payload,
     note_view,
+    performance_summary_view,
     provenance_view,
     result_financials_view,
     trade_log_view,
@@ -102,6 +104,7 @@ from app.services.backtest.trading_calendar import TradingCalendar
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_MAX_COMPARISON_PEERS = 7
 BacktestDep = Annotated[BacktestRepository, Depends(get_backtest_repository)]
 JobsDep = Annotated[StrategyJobService, Depends(get_strategy_job_service)]
 LaunchDep = Annotated[BacktestLaunchService, Depends(get_backtest_launch_service)]
@@ -1959,6 +1962,7 @@ def _result_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
         "integrity_error": None,
         "result": result,
         "metrics": metrics_view(result),
+        "performance": performance_summary_view(result),
         "metric_display": backtest_metrics_view(
             result.metrics, result.metric_availability
         ),
@@ -2162,7 +2166,13 @@ def _compare_integrity_response(
     )
 
 
-def _compare_context(repo: BacktestRepository, run_id: str) -> dict[str, object]:
+def _compare_context(
+    repo: BacktestRepository,
+    run_id: str,
+    *,
+    picker_error: str | None = None,
+    selected_run_ids: Sequence[str] = (),
+) -> dict[str, object]:
     """Build the Compare picker's context: the anchor Result's own
     display fields plus Story 3.1's ``comparison_candidates(run_id)`` --
     a pure read, never a mutation, and the sole candidate-listing call
@@ -2176,19 +2186,92 @@ def _compare_context(repo: BacktestRepository, run_id: str) -> dict[str, object]
         "integrity_error": None,
         "anchor": anchor,
         "candidates": repo.comparison_candidates(run_id, anchor_result=anchor),
-        "picker_error": None,
+        "picker_error": picker_error,
+        "selected_run_ids": frozenset(selected_run_ids),
+    }
+
+
+class _ComparisonSelectionError(ValueError):
+    """A user-selected comparison peer failed fresh eligibility checks."""
+
+
+def _multi_comparison_results(
+    repo: BacktestRepository, run_id: str, candidate_run_ids: Sequence[str]
+) -> tuple[BacktestResultV1, ...]:
+    """Load and revalidate the selected compatible Results for this request.
+
+    The picker candidate list is not trusted as authorization: this request
+    reloads each Result and runs the canonical comparison predicate again.
+    """
+    try:
+        anchor = repo.backtest_result(run_id)
+    except StrategyJobNotFound as exc:
+        raise _reraise_vanished_evidence(exc) from exc
+
+    results = [anchor]
+    for candidate_id in candidate_run_ids:
+        try:
+            candidate = repo.backtest_result(candidate_id)
+        except StrategyJobNotFound as exc:
+            raise _reraise_vanished_evidence(exc) from exc
+        eligibility = _revalidate_eligibility(
+            repo,
+            run_id,
+            candidate_id,
+            left_result=anchor,
+            right_result=candidate,
+        )
+        if not eligibility.eligible:
+            raise _ComparisonSelectionError(eligibility.detail)
+        results.append(candidate)
+    return tuple(results)
+
+
+def _multi_comparison_context(
+    repo: BacktestRepository, run_id: str, candidate_run_ids: Sequence[str]
+) -> dict[str, object]:
+    """Build the chart and metric view-models for verified Results."""
+    results = _multi_comparison_results(repo, run_id, candidate_run_ids)
+    equity = multi_comparison_equity_payload(results)
+    run_views = tuple(
+        {
+            "result": result,
+            "metrics": metrics_view(result),
+            "performance": performance_summary_view(result),
+            "financials": result_financials_view(result),
+            "result_url": f"/strategy-manager/results/{quote(result.run_id)}",
+        }
+        for result in results
+    )
+    return {
+        "run_id": run_id,
+        "candidate_run_ids": tuple(candidate_run_ids),
+        "base_currency": results[0].base_currency,
+        "runs": run_views,
+        "equity_payload": equity,
+        "integrity_error": None,
     }
 
 
 def _revalidate_eligibility(
-    repo: BacktestRepository, run_id: str, candidate_run_id: str
+    repo: BacktestRepository,
+    run_id: str,
+    candidate_run_id: str,
+    *,
+    left_result: BacktestResultV1 | None = None,
+    right_result: BacktestResultV1 | None = None,
 ) -> ComparisonEligibilityV1:
     """Revalidate eligibility at submit time (AC 4, 5) -- the sole call
     site for ``is_comparable``; a rendered candidate must never be
     trusted as still-eligible. Mirrors ``_compare_context``'s wrapping
     of a vanished/corrupt Result into an explicit integrity error."""
     try:
-        return repo.is_comparable(run_id, candidate_run_id)
+        return repo.is_comparable(
+            run_id,
+            candidate_run_id,
+            left_result=left_result,
+            right_result=right_result,
+        )
     except StrategyJobNotFound as exc:
         raise _reraise_vanished_evidence(exc) from exc
 
@@ -2247,42 +2330,157 @@ async def submit_compare(
     request: Request,
     backtest: BacktestDep,
     run_id: Annotated[str, Form()],
-    candidate_run_id: Annotated[str, Form()] = "",
 ) -> Response:
     """Guarded Compare submit (AC 4, 5) -- revalidates eligibility via
     ``is_comparable`` on every submit (never trusting a rendered
     candidate), redirecting to Story 3.3's Comparison URL only when
     ``eligible=True``. A missing/malformed/stale/ineligible
-    ``candidate_run_id`` re-renders the picker with a linked error and a
+    ``candidate_run_ids`` re-renders the picker with a linked error and a
     freshly re-fetched candidate list at 422; a broken anchor surfaces
     the same explicit integrity-error branch the GET route uses. Neither
     the Result, its note, nor its evidence manifest is ever mutated
     here.
     """
-    try:
-        eligibility = _revalidate_eligibility(backtest, run_id, candidate_run_id)
-    except BacktestIntegrityError as exc:
-        return _compare_integrity_response(request, run_id, exc)
-    if eligibility.eligible:
-        return RedirectResponse(
-            f"/strategy-manager/comparisons/{run_id}/{candidate_run_id}",
-            status_code=303,
+    form = await request.form()
+    candidate_run_ids = [str(value) for value in form.getlist("candidate_run_ids")]
+    if not candidate_run_ids:
+        legacy_candidate = form.get("candidate_run_id")
+        if legacy_candidate:
+            candidate_run_ids = [str(legacy_candidate)]
+
+    duplicate_selection = len(set(candidate_run_ids)) != len(candidate_run_ids)
+    if (
+        not candidate_run_ids
+        or len(candidate_run_ids) > _MAX_COMPARISON_PEERS
+        or duplicate_selection
+    ):
+        if not candidate_run_ids:
+            message = "Choose between one and seven compatible Results."
+        elif len(candidate_run_ids) > _MAX_COMPARISON_PEERS:
+            message = "Choose no more than seven distinct compatible Results."
+        else:
+            message = "Each selected Result must be different."
+        try:
+            context = _compare_context(
+                backtest,
+                run_id,
+                picker_error=message,
+                selected_run_ids=candidate_run_ids,
+            )
+        except BacktestIntegrityError as exc:
+            return _compare_integrity_response(request, run_id, exc)
+        return template_response(
+            request, "_compare_picker.html", context, status_code=422
         )
+
     try:
-        context = _compare_context(backtest, run_id)
+        _multi_comparison_results(backtest, run_id, candidate_run_ids)
     except BacktestIntegrityError as exc:
         return _compare_integrity_response(request, run_id, exc)
-    return template_response(
-        request,
-        "_compare_picker.html",
-        {**context, "picker_error": eligibility.detail},
-        status_code=422,
+    except _ComparisonSelectionError as exc:
+        try:
+            context = _compare_context(
+                backtest,
+                run_id,
+                picker_error=str(exc),
+                selected_run_ids=candidate_run_ids,
+            )
+        except BacktestIntegrityError as integrity_exc:
+            return _compare_integrity_response(request, run_id, integrity_exc)
+        return template_response(
+            request, "_compare_picker.html", context, status_code=422
+        )
+    query = "&".join(
+        f"candidate_run_ids={quote(candidate_id, safe='')}"
+        for candidate_id in candidate_run_ids
+    )
+    return RedirectResponse(
+        f"/strategy-manager/comparisons?run_id={quote(run_id, safe='')}&{query}",
+        status_code=303,
     )
 
 
 # ---------------------------------------------------------------------------
 # Story 3.3: Comparison -- review two eligible Results side by side
 # ---------------------------------------------------------------------------
+
+
+def _multi_comparison_integrity_response(
+    request: Request,
+    run_id: str,
+    candidate_run_ids: Sequence[str],
+    exc: BacktestIntegrityError,
+) -> HTMLResponse:
+    return template_response(
+        request,
+        "_multi_comparison.html",
+        {
+            "run_id": run_id,
+            "candidate_run_ids": tuple(candidate_run_ids),
+            "integrity_error": str(exc),
+        },
+    )
+
+
+@router.get("/strategy-manager/comparisons", response_class=HTMLResponse)
+async def multi_comparison_view(
+    request: Request,
+    backtest: BacktestDep,
+    run_id: str,
+    candidate_run_ids: Annotated[list[str] | None, Query()] = None,
+) -> Response:
+    """Render an indexed growth and drawdown comparison for two to eight
+    freshly verified, compatible Results."""
+    candidate_run_ids = candidate_run_ids or []
+    if (
+        not 1 <= len(candidate_run_ids) <= _MAX_COMPARISON_PEERS
+        or any(not candidate_id.strip() for candidate_id in candidate_run_ids)
+        or len(set(candidate_run_ids)) != len(candidate_run_ids)
+        or run_id in candidate_run_ids
+    ):
+        try:
+            context = _compare_context(
+                backtest,
+                run_id,
+                picker_error="Choose between one and seven distinct peer Results.",
+                selected_run_ids=candidate_run_ids,
+            )
+        except BacktestIntegrityError as exc:
+            return _compare_integrity_response(request, run_id, exc)
+        return template_response(
+            request, "_compare_picker.html", context, status_code=422
+        )
+
+    try:
+        job = backtest.strategy_job(run_id)
+        anchor_ready = (
+            job.job_type is StrategyJobType.BACKTEST
+            and job.status is StrategyJobStatus.COMPLETE
+        )
+    except StrategyJobNotFound:
+        anchor_ready = False
+    except BacktestIntegrityError as exc:
+        return _multi_comparison_integrity_response(
+            request, run_id, candidate_run_ids, exc
+        )
+    if not anchor_ready:
+        return RedirectResponse(
+            f"/strategy-manager/activities/{run_id}", status_code=303
+        )
+
+    try:
+        context = _multi_comparison_context(backtest, run_id, candidate_run_ids)
+    except _ComparisonSelectionError as exc:
+        return RedirectResponse(
+            f"/strategy-manager/compare?run_id={quote(run_id, safe='')}"
+            f"&reason={quote(str(exc), safe='')}",
+            status_code=303,
+        )
+    except BacktestIntegrityError as exc:
+        return _multi_comparison_integrity_response(
+            request, run_id, candidate_run_ids, exc
+        )
+    return template_response(request, "_multi_comparison.html", context)
 
 
 def _comparison_integrity_response(
@@ -2320,6 +2518,8 @@ def _comparison_side_context(
         "run_id": run_id,
         "result": result,
         "metrics": metrics_view(result),
+        "performance": performance_summary_view(result),
+        "financials": result_financials_view(result),
         "trade_log": trade_log_view(result, identities),
         "provenance": provenance_view(result, coverage),
         "regime_benchmark": _regime_benchmark_context(result),

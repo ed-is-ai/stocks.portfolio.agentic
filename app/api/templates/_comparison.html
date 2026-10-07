@@ -100,6 +100,14 @@
           <div class="sval">{{ a.metrics.max_drawdown }}</div>
         </div>
       </div>
+      <dl class="row mt-3 mb-0 mono-num">
+        <dt class="col-sm-7">Profit / loss</dt><dd class="col-sm-5">{{ a.financials.pnl.value }}</dd>
+        <dt class="col-sm-7">Annualized return (CAGR)</dt><dd class="col-sm-5">{{ a.performance.cagr.value }}</dd>
+        <dt class="col-sm-7">Mean invested exposure</dt><dd class="col-sm-5">{{ a.performance.mean_invested_exposure.value }}</dd>
+        <dt class="col-sm-7">Time invested</dt><dd class="col-sm-5">{{ a.performance.time_invested.value }}</dd>
+        <dt class="col-sm-7">Turnover / starting capital</dt><dd class="col-sm-5">{{ a.performance.turnover.value }}</dd>
+        <dt class="col-sm-7">Executed exits</dt><dd class="col-sm-5">{{ a.performance.exit_count.value }}</dd>
+      </dl>
     </div>
     <div class="col-md-6">
       <p class="mono-num mb-2"><strong>Result B</strong></p>
@@ -121,6 +129,14 @@
           <div class="sval">{{ b.metrics.max_drawdown }}</div>
         </div>
       </div>
+      <dl class="row mt-3 mb-0 mono-num">
+        <dt class="col-sm-7">Profit / loss</dt><dd class="col-sm-5">{{ b.financials.pnl.value }}</dd>
+        <dt class="col-sm-7">Annualized return (CAGR)</dt><dd class="col-sm-5">{{ b.performance.cagr.value }}</dd>
+        <dt class="col-sm-7">Mean invested exposure</dt><dd class="col-sm-5">{{ b.performance.mean_invested_exposure.value }}</dd>
+        <dt class="col-sm-7">Time invested</dt><dd class="col-sm-5">{{ b.performance.time_invested.value }}</dd>
+        <dt class="col-sm-7">Turnover / starting capital</dt><dd class="col-sm-5">{{ b.performance.turnover.value }}</dd>
+        <dt class="col-sm-7">Executed exits</dt><dd class="col-sm-5">{{ b.performance.exit_count.value }}</dd>
+      </dl>
     </div>
   </div>
 

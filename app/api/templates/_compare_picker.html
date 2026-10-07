@@ -1,7 +1,5 @@
-{#- Story 3.2: Compare picker -- lists Story 3.1's comparison_candidates(run_id)
-    for the current standalone Result, or explains why none are eligible.
-    No candidate is ever preselected/defaulted; Compare only opens on an
-    explicit submit, revalidated server-side via is_comparable. -#}
+{#- Compare picker -- every chosen peer is revalidated server-side against
+    the current Result before a pair or multi-run comparison is rendered. -#}
 <section id="compare-picker-{{ run_id }}" aria-labelledby="compare-picker-heading">
   <h1 id="compare-picker-heading" tabindex="-1" class="h3 mb-3">Compare Backtest result</h1>
 
@@ -29,16 +27,19 @@
   {% else %}
   <form method="post" action="/strategy-manager/compare" hx-post="/strategy-manager/compare" hx-target="#tab-content" hx-swap="innerHTML" id="compare-picker-form">
     <input type="hidden" name="run_id" value="{{ run_id }}">
-    <div class="mb-3">
-      <label for="candidate_run_id" class="form-label">Compare against</label>
-      <select class="form-select" id="candidate_run_id" name="candidate_run_id" required {% if picker_error %}aria-describedby="compare-picker-errors" aria-invalid="true"{% endif %}>
-        <option value="" selected disabled>Choose a Result…</option>
+    <fieldset class="mb-3" {% if picker_error %}aria-describedby="compare-picker-errors" aria-invalid="true"{% endif %}>
+      <legend class="form-label">Choose compatible Results</legend>
+      <p class="text-muted small">Select one to seven peers for portfolio value, indexed growth, drawdown, and metrics. No runs are preselected.</p>
+      <div class="d-flex flex-column gap-2">
         {% for candidate in candidates %}
-        <option value="{{ candidate.run_id }}">{{ candidate.strategy_id }} v{{ candidate.strategy_api_version }} — {{ candidate.parameter_summary }} — {{ candidate.start_month }} to {{ candidate.end_month }} — {{ candidate.base_currency }} — data version {{ candidate.profile_hash }} — run {{ candidate.run_id }}</option>
+        <label class="form-check d-flex align-items-start gap-2">
+          <input class="form-check-input mt-1" type="checkbox" name="candidate_run_ids" value="{{ candidate.run_id }}"{% if candidate.run_id in selected_run_ids %} checked{% endif %}>
+          <span class="form-check-label">{{ candidate.strategy_id }} v{{ candidate.strategy_api_version }} — {{ candidate.parameter_summary }} — {{ candidate.start_month }} to {{ candidate.end_month }} — {{ candidate.base_currency }} — run {{ candidate.run_id }}</span>
+        </label>
         {% endfor %}
-      </select>
-    </div>
-    <button class="btn btn-primary" type="submit">Compare</button>
+      </div>
+    </fieldset>
+    <button class="btn btn-primary" type="submit">Compare selected Results</button>
   </form>
   {% endif %}
 
