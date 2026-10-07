@@ -185,7 +185,8 @@ def test_month_as_of_is_last_calendar_day() -> None:
 def test_io_matrix(membership_db: Path, price_db: Path) -> None:
     rows = {r.month: r for r in _report(membership_db, price_db, "2000-01", "2026-10")}
     for row in rows.values():
-        assert row.priced + row.suspect + row.not_cached + row.missing == row.members
+        total = row.priced + row.suspect + row.wiki + row.not_cached + row.missing
+        assert total == row.members and row.wiki == 0
     jan = rows["2000-01"]
     assert jan.as_of == "2000-01-31"
     assert jan.suspect_tickers == ["AAL"]  # reused ticker with spanning history
@@ -206,8 +207,8 @@ def test_cli_table_and_yearly_totals(
     cli.main(_args(membership_db, price_db, "--from", "2000-01", "--to", "2001-12"))
     out = capsys.readouterr().out
     assert "2000-01 as_of=2000-01-31 members=6 priced=3 (50.0%)" in out
-    assert "suspect=1 not_cached=1 missing=1 low" in out
-    assert "2000 members=72 priced=36 (50.0%) suspect=12 not_cached=12" in out
+    assert "suspect=1 wiki=0 not_cached=1 missing=1 low" in out
+    assert "2000 members=72 priced=36 (50.0%) suspect=12 wiki=0 not_cached=12" in out
     assert "2001 members=72" in out
     assert cli.LIMIT_NOTE in out
 
@@ -268,6 +269,8 @@ def _args(membership_db: Path, price_db: Path, *extra: object) -> list[str]:
         str(membership_db),
         "--price-db",
         str(price_db),
+        "--wiki-db",
+        str(price_db.parent / "no_wiki.db"),
         *map(str, extra),
     ]
 
@@ -301,7 +304,8 @@ def test_edge_revision_without_closes_falls_back(tmp_path: Path) -> None:
     _add_revision(conn, "X", "x-good", _span("1999-01-04", "2026-07-31"))
     # a mapped chunk whose payload row is gone is skipped, not fatal
     conn.execute(
-        "INSERT INTO historical_price_v2_revision_chunks VALUES (2, 'rows', 1990, 'gone')"
+        "INSERT INTO historical_price_v2_revision_chunks"
+        " VALUES (2, 'rows', 1990, 'gone')"
     )
     conn.commit()
     conn.close()
