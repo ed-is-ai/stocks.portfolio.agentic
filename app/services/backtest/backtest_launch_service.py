@@ -643,7 +643,7 @@ class BacktestLaunchService:
                         if (
                             expected is not None
                             and evidence.security_id == security_id
-                            and evidence.provider == "yfinance"
+                            and evidence.provider in {"yfinance", "wiki"}
                             and evidence.requested_symbol == expected[0]
                             and evidence.observed_symbol == expected[0]
                             and evidence.currency == expected[1]

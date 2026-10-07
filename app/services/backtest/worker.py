@@ -86,6 +86,10 @@ from app.services.backtest.strategy_protocol import (
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.wiki_historical_evidence import (
+    WIKI_PROVIDER,
+    WikiHistoricalEvidenceAdapter,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -138,6 +142,9 @@ def build_initialization_engine(
         roster=roster,
         backtest_repository=backtest,
         price_repository=prices,
+        evidence_adapters={
+            WIKI_PROVIDER: WikiHistoricalEvidenceAdapter(config.WIKI_PRICES_DB)
+        },
         lease=lease,
         mode=initialization.mode,
     )
