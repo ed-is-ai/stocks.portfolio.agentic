@@ -26,6 +26,11 @@ from app.services.backtest.historical_data_qualification import (
 from app.services.backtest.historical_price_evidence import (
     CANONICAL_EXCHANGE_SESSIONS_POLICY,
 )
+from app.services.backtest.wiki_historical_evidence import (
+    WIKI_PROVIDER,
+    WIKI_REQUEST_CONTRACT_VERSION,
+    wiki_request_contract,
+)
 
 EIGHT_PLACES = Decimal("0.00000001")
 DECIMAL_PRECISION = 50
@@ -114,6 +119,20 @@ def validate_provider_native_request_contract(
     if (
         evidence.request_contract_version != REQUEST_CONTRACT_VERSION
         or actual != expected
+        or observation_policy not in {None, CANONICAL_EXCHANGE_SESSIONS_POLICY}
+    ):
+        raise MarketDataPolicyError(
+            "integrity_error", "Evidence request contract is incompatible."
+        )
+
+
+def validate_wiki_request_contract(evidence: StoredHistoricalEvidence) -> None:
+    """Reject WIKI evidence whose request contract is not ``WikiArchiveDailyV1``."""
+    actual = dict(evidence.request_contract)
+    observation_policy = actual.pop("observation_policy", None)
+    if (
+        evidence.request_contract_version != WIKI_REQUEST_CONTRACT_VERSION
+        or actual != wiki_request_contract(evidence.start, evidence.end)
         or observation_policy not in {None, CANONICAL_EXCHANGE_SESSIONS_POLICY}
     ):
         raise MarketDataPolicyError(
@@ -213,11 +232,14 @@ class HistoricalMarketPlanes:
             raise MarketDataPolicyError(
                 "integrity_error", "Evidence interval is invalid."
             ) from exc
-        if start >= end or evidence.provider != "yfinance":
+        if start >= end or evidence.provider not in {"yfinance", WIKI_PROVIDER}:
             raise MarketDataPolicyError(
                 "integrity_error", "Evidence contract is invalid."
             )
-        validate_provider_native_request_contract(evidence)
+        if evidence.provider == WIKI_PROVIDER:
+            validate_wiki_request_contract(evidence)
+        else:
+            validate_provider_native_request_contract(evidence)
         try:
             quote_scale = Decimal(evidence.quote_unit_scale)
         except (InvalidOperation, TypeError, ValueError) as exc:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -65,6 +65,10 @@ from app.services.backtest.source_manifest import (
 )
 from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.trading_calendar import CalendarContractError
+from app.services.backtest.wiki_historical_evidence import (
+    WIKI_PROVIDER,
+    WIKI_REQUEST_CONTRACT_VERSION,
+)
 
 from app.services.backtest.strategy_job import (
     InitializationRunV1,
@@ -81,6 +85,29 @@ logger = logging.getLogger(__name__)
 #: Extra waits (seconds) before re-asking the provider after a retryable
 #: ``provider_unavailable`` that survived the adapter's own quick retries.
 PROVIDER_RETRY_WAITS_SECONDS: tuple[float, ...] = (30.0, 120.0)
+
+#: Price provider of a roster member that names none. Every member is
+#: yfinance today; #82 C assigns ``wiki`` to members only WIKI prices.
+DEFAULT_PROVIDER = "yfinance"
+
+#: Request contract each provider's evidence is stored under.
+_REQUEST_CONTRACT_VERSIONS = {
+    DEFAULT_PROVIDER: REQUEST_CONTRACT_VERSION,
+    WIKI_PROVIDER: WIKI_REQUEST_CONTRACT_VERSION,
+}
+
+
+class EvidenceAdapter(Protocol):
+    """Fetch one provider-native evidence interval."""
+
+    def fetch(
+        self, definition: HistoricalEvidenceRequest
+    ) -> HistoricalEvidencePayload: ...
+
+
+def member_provider(member: CapturedRosterMemberV1) -> str:
+    """Return the price provider a roster member names, else yfinance."""
+    return getattr(member, "provider", None) or DEFAULT_PROVIDER
 
 
 class InitializationMonthError(RuntimeError):
@@ -133,6 +160,7 @@ class CanonicalSnapshotMonthProcessor:
         backtest_repository: BacktestRepository,
         price_repository: HistoricalPriceRepository,
         evidence_adapter: YFinanceHistoricalEvidenceAdapter | None = None,
+        evidence_adapters: Mapping[str, EvidenceAdapter] | None = None,
         reconstructor: HistoricalScanReconstructor | None = None,
         calendar: TradingCalendar | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
@@ -151,6 +179,8 @@ class CanonicalSnapshotMonthProcessor:
         self._backtest_repository = backtest_repository
         self._price_repository = price_repository
         self._evidence_adapter = evidence_adapter or YFinanceHistoricalEvidenceAdapter()
+        # Adapters for non-default providers (e.g. ``wiki``), by provider.
+        self._evidence_adapters = dict(evidence_adapters or {})
         self._reconstructor = reconstructor or HistoricalScanReconstructor(
             backtest_repository
         )
@@ -702,7 +732,7 @@ class CanonicalSnapshotMonthProcessor:
                 request = candidate
                 break
         if evidence is None:
-            payload = self._fetch_with_retry(request)
+            payload = self._fetch_with_retry(request, member_provider(member))
             self._fetched_security_ids.add(member.security_id)
             revision = self._price_repository.commit(payload)
             evidence = self._price_repository.verify(revision)
@@ -728,13 +758,16 @@ class CanonicalSnapshotMonthProcessor:
         self, member: CapturedRosterMemberV1, request: HistoricalEvidenceRequest
     ) -> StoredHistoricalEvidence | None:
         """Return a stored revision for exactly ``request.end``, if any."""
+        contract_version = _REQUEST_CONTRACT_VERSIONS.get(member_provider(member))
+        if contract_version is None:
+            return None
         evidence = self._price_repository.find_request(
             security_id=member.security_id,
             requested_symbol=member.provider_symbol,
             alias_revision=self._alias_revision,
             start=FULL_HISTORY_START.isoformat(),
             end=request.end.isoformat(),
-            request_contract_version=REQUEST_CONTRACT_VERSION,
+            request_contract_version=contract_version,
             observation_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
         )
         if evidence is not None:
@@ -744,7 +777,7 @@ class CanonicalSnapshotMonthProcessor:
             requested_symbol=member.provider_symbol,
             start=FULL_HISTORY_START.isoformat(),
             end=request.end.isoformat(),
-            request_contract_version=REQUEST_CONTRACT_VERSION,
+            request_contract_version=contract_version,
             observation_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
         )
         if compatible is None:
@@ -763,13 +796,26 @@ class CanonicalSnapshotMonthProcessor:
         revision = self._price_repository.commit(payload)
         return self._price_repository.verify(revision)
 
+    def _adapter_for(self, provider: str) -> EvidenceAdapter:
+        """Return the evidence adapter for ``provider``."""
+        if provider == DEFAULT_PROVIDER:
+            return self._evidence_adapter
+        adapter = self._evidence_adapters.get(provider)
+        if adapter is None:
+            raise ProviderFailure(
+                FailureCode.PROVIDER_CONTRACT_ERROR,
+                f"No historical evidence adapter for provider {provider!r}",
+            )
+        return adapter
+
     def _fetch_with_retry(
-        self, request: HistoricalEvidenceRequest
+        self, request: HistoricalEvidenceRequest, provider: str = DEFAULT_PROVIDER
     ) -> HistoricalEvidencePayload:
         """Fetch, re-trying a retryable ``provider_unavailable`` after waits."""
+        adapter = self._adapter_for(provider)
         for wait in (*PROVIDER_RETRY_WAITS_SECONDS, None):
             try:
-                return self._evidence_adapter.fetch(request)
+                return adapter.fetch(request)
             except ProviderFailure as exc:
                 transient = exc.retryable and (
                     exc.code is FailureCode.PROVIDER_UNAVAILABLE
