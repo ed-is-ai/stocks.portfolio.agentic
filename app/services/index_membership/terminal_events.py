@@ -14,13 +14,25 @@ delisting filing is consistent with an acquisition or bankruptcy, not a
 conflict. On EDGAR alone, merger filings count as an acquisition only with a
 delisting filing too, since an acquirer files merger forms as well.
 
+A removal matches Wikipedia when the removed ticker is the interval's, its
+class-share root (``TMC.A`` -> ``TMC``), or, for a bankruptcy-suffixed ticker,
+its prefix (``LEHMQ`` -> ``LEH``); never by date alone, since the table is
+"selected" changes and many removals are missing from it.
+
+Still unknown afterwards, a ticker that was not reused is classified from its
+price history (yfinance cache and the WIKI archive): trading continuing more
+than ``STILL_TRADING_AFTER`` past the removal means ``still_trading``; prices
+ending within ``DELISTED_WITHIN`` of it mean ``delisting`` at the last close.
+
 Limits: 8-K item numbers exist only from August 2004, so earlier bankruptcies
 rest on Wikipedia's text. Nothing reads these events yet.
 """
 
 import logging
 import re
+from collections.abc import Callable
 from datetime import date, timedelta
+from pathlib import Path
 
 import requests
 
@@ -31,7 +43,9 @@ from app.repositories.index_membership_repo import (
     MembershipInterval,
     TerminalEvent,
 )
+from app.repositories.wiki_price_repo import WikiPriceRepository
 from app.services.index_membership import edgar
+from app.services.index_membership.coverage import price_spans, read_only
 from app.services.index_membership.edgar import Filing
 from app.services.index_membership.sp500_import import INDEX_ID, Fetch
 from app.services.index_membership.wikipedia_check import (
@@ -53,6 +67,12 @@ MAX_DOC_BYTES = 5_000_000
 #: More CIKs than this under one name is treated as ambiguous without lookups.
 MAX_CIKS = 5
 #: Matched with any ``/A`` amendment suffix removed.
+#: Trading this long after the removal means the stock kept trading.
+STILL_TRADING_AFTER = timedelta(days=30)
+#: Prices ending this close to the removal mean the stock was delisted.
+DELISTED_WITHIN = timedelta(days=10)
+#: ``ticker -> (last trading date, last close or None)``, or ``None``.
+LastTrade = Callable[[str], tuple[str, float | None] | None]
 ACQUISITION_FORMS = frozenset(
     {"DEFM14A", "PREM14A", "DEFM14C", "PREM14C", "SC TO-T", "SC 14D9", "425"}
 )
@@ -79,13 +99,18 @@ _SEC_ERRORS = (requests.RequestException, KeyError, ValueError)
 
 
 def build_events(
-    repo: IndexMembershipRepository, fetch: Fetch, sec: Fetch, limit: int | None = None
+    repo: IndexMembershipRepository,
+    fetch: Fetch,
+    sec: Fetch,
+    limit: int | None = None,
+    last_trade: LastTrade | None = None,
 ) -> tuple[int, list[TerminalEvent]]:
     """Return the newest ``sp500`` import's id and one event per interval
     ending on/after ``SINCE`` (the first ``limit`` only, if given).
 
-    ``fetch`` reads Wikipedia, ``sec`` reads EDGAR. Raises ``ValueError`` when
-    no membership has been imported.
+    ``fetch`` reads Wikipedia, ``sec`` reads EDGAR and ``last_trade`` (when
+    given) supplies price evidence for events still unknown. Raises
+    ``ValueError`` when no membership has been imported.
     """
     latest = repo.latest_import(INDEX_ID)
     if latest is None:
@@ -94,7 +119,12 @@ def build_events(
     rows = table_rows(fetch(CHANGES_URL).decode(), "changes")
     changes = [c for c in map(parse_change, rows) if c is not None and c.removed]
     lookup = edgar.parse_cik_lookup(sec(edgar.CIK_LOOKUP_URL).decode("latin-1"))
-    return latest.id, [_event(i, changes, lookup, sec) for i in intervals]
+    events = [_event(i, changes, lookup, sec) for i in intervals]
+    if last_trade is None:
+        return latest.id, events
+    tickers = {i.ticker for i in intervals}
+    reused = {t for t in tickers if len(repo.intervals_for(INDEX_ID, t)) > 1}
+    return latest.id, [with_price_evidence(e, last_trade, reused) for e in events]
 
 
 def _event(
@@ -120,16 +150,72 @@ def match_change(
     interval: MembershipInterval, changes: list[WikiChange]
 ) -> WikiChange | None:
     """Return the removal of the interval's ticker nearest its end, if within
-    ``MATCH_WINDOW``."""
+    ``MATCH_WINDOW`` (an exact ticker beats a root or prefix match)."""
     assert interval.end_date is not None
     end = date.fromisoformat(interval.end_date)
     near = [
-        (abs(date.fromisoformat(c.date) - end), c)
+        (abs(date.fromisoformat(c.date) - end), c.removed != interval.ticker, c)
         for c in changes
-        if c.removed == interval.ticker
+        if c.removed and same_security(interval.ticker, c.removed)
     ]
-    near = [(gap, c) for gap, c in near if gap <= MATCH_WINDOW]
-    return min(near, key=lambda pair: pair[0])[1] if near else None
+    near = [n for n in near if n[0] <= MATCH_WINDOW]
+    return min(near, key=lambda n: (n[1], n[0]))[2] if near else None
+
+
+def same_security(ticker: str, removed: str) -> bool:
+    """True when Wikipedia's ``removed`` ticker names the interval's ticker:
+    equal, its class-share root, or the prefix of a bankruptcy ``Q`` ticker."""
+    if removed in (ticker, ticker.split(".")[0]):
+        return True
+    return ticker.endswith("Q") and len(removed) >= 2 and ticker.startswith(removed)
+
+
+def with_price_evidence(
+    event: TerminalEvent, last_trade: LastTrade, reused: set[str]
+) -> TerminalEvent:
+    """Classify a still ``unknown``, non-reused event from its last trade."""
+    if event.event_type != "unknown" or event.ticker in reused:
+        return event
+    found = last_trade(event.ticker)
+    if found is None:
+        return event
+    last, close = found
+    gap = date.fromisoformat(last) - date.fromisoformat(event.exit_date)
+    if gap > STILL_TRADING_AFTER:
+        kind: EventType = "still_trading"
+        update = {"note": join_notes(event.note, f"prices continue to {last}")}
+    elif gap >= -DELISTED_WITHIN:
+        kind = "delisting"
+        update = {
+            "note": join_notes(event.note, f"prices end {last}"),
+            "terminal_price": close,
+        }
+    else:
+        return event
+    return event.model_copy(update={**update, "event_type": kind, "evidence": "prices"})
+
+
+def price_last_trade(price_db: Path, wiki_db: Path) -> LastTrade | None:
+    """Return a ``LastTrade`` over the yfinance cache and the WIKI archive
+    (each opened read-only, skipped if missing), or ``None`` without either.
+    The last close is known only from WIKI."""
+    yf = price_spans(price_db) if price_db.exists() else {}
+    wiki = WikiPriceRepository(lambda: read_only(wiki_db)) if wiki_db.exists() else None
+    wiki_spans = wiki.ticker_spans() if wiki is not None else {}
+    if not yf and not wiki_spans:
+        return None
+
+    def last_trade(ticker: str) -> tuple[str, float | None] | None:
+        found: list[tuple[str, float | None]] = []
+        if (span := yf.get(ticker.replace(".", "-"))) is not None:
+            found.append((span[1], None))
+        wiki_ticker = ticker.replace(".", "_")
+        if wiki is not None and (span := wiki_spans.get(wiki_ticker)) is not None:
+            closes = wiki.closes(wiki_ticker, int(span[1][:4]))
+            found.append((span[1], closes[span[1]][0] if span[1] in closes else None))
+        return max(found, key=lambda f: (f[0], f[1] is not None), default=None)
+
+    return last_trade
 
 
 def _company_filings(
