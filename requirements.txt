@@ -160,7 +160,7 @@ tzdata==2026.2 ; sys_platform == 'emscripten' or sys_platform == 'win32'
     #   tzlocal
 tzlocal==5.4.3
     # via apscheduler
-urllib3==2.7.0
+urllib3==2.8.0
     # via requests
 uvicorn==0.49.0
     # via agents-stocks
