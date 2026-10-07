@@ -44,6 +44,9 @@ from app.services.backtest.historical_scan_record import (
 )
 from app.services.backtest.market_planes import HistoricalMarketPlanes
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
+from app.services.backtest.point_in_time_membership import (
+    POINT_IN_TIME_POLICY_VERSION,
+)
 from app.services.backtest.reconstruction_roster import (
     CapturedRosterMemberV1,
     CapturedRosterV1,
@@ -58,6 +61,8 @@ from app.services.backtest.trading_calendar import TradingCalendar
 
 
 CALENDAR_DATASET_VERSION = "exchange-calendars-v1"
+#: ``(roster captured_at, point-in-time roster?)`` of a validated request.
+type RosterFacts = tuple[datetime, bool]
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _TRADING_CALENDAR = TradingCalendar()
 
@@ -189,11 +194,11 @@ class HistoricalScanReconstructor:
     ) -> tuple[ReconstructionResultV1, ...]:
         """Reconstruct requests in caller order with one cache read and write batch."""
         prepared: list[
-            tuple[ReconstructionRequestV1, datetime, HistoricalMarketPlanes, tuple]
+            tuple[ReconstructionRequestV1, RosterFacts, HistoricalMarketPlanes, tuple]
         ] = []
         keys: list[DetectorCacheKey] = []
         for request in requests:
-            captured_at = self._validate_request(request)
+            roster_facts = self._validate_request(request)
             planes = self._planes_for(request)
             bounded = planes.split_continuous_as_of(request.as_of_session_date)
             required = required_history_sessions()
@@ -219,7 +224,7 @@ class HistoricalScanReconstructor:
                 raise self._error(
                     request, "integrity_error", "detector view exceeds its as-of bound"
                 )
-            prepared.append((request, captured_at, planes, rows))
+            prepared.append((request, roster_facts, planes, rows))
             keys.extend(self._detector_keys(request))
         cached = {} if self._cache is None else self._cache.detector_fragments(keys)
         parallel: dict[int, tuple[DetectorFragmentEnvelopeV1, ...]] = {}
@@ -263,12 +268,12 @@ class HistoricalScanReconstructor:
         assembled: list[
             tuple[
                 ReconstructionRequestV1,
-                datetime,
+                RosterFacts,
                 HistoricalMarketPlanes,
                 list[tuple[DetectorCacheKey, DetectorFragmentEnvelopeV1]],
             ]
         ] = []
-        for index, (request, captured_at, planes, rows) in enumerate(prepared):
+        for index, (request, roster_facts, planes, rows) in enumerate(prepared):
             fragments: list[tuple[DetectorCacheKey, DetectorFragmentEnvelopeV1]] = []
             technicals: TechnicalsV1 | None = None
             stage_result: StageResultV1 | None = None
@@ -331,7 +336,7 @@ class HistoricalScanReconstructor:
                 raise self._error(
                     request, "integrity_error", "detector registry is incomplete"
                 )
-            assembled.append((request, captured_at, planes, fragments))
+            assembled.append((request, roster_facts, planes, fragments))
         winners = (
             {}
             if self._cache is None
@@ -341,7 +346,7 @@ class HistoricalScanReconstructor:
             )
         )
         results: list[ReconstructionResultV1] = []
-        for request, captured_at, planes, fragments in assembled:
+        for request, roster_facts, planes, fragments in assembled:
             final = tuple(winners.get(key, fragment) for key, fragment in fragments)
             technicals = next(
                 fragment.result.technicals
@@ -361,7 +366,7 @@ class HistoricalScanReconstructor:
             results.append(
                 ReconstructionResultV1(
                     self._compose_record(
-                        request, captured_at, planes, technicals, stage, vcp
+                        request, roster_facts, planes, technicals, stage, vcp
                     ),
                     final,
                 )
@@ -401,10 +406,10 @@ class HistoricalScanReconstructor:
         functions of the member's own pinned evidence, the result is
         byte-identical to a from-scratch reconstruction of the same inputs.
         """
-        roster_captured_at = self._validate_request(request)
+        roster_facts = self._validate_request(request)
         planes = self._planes_for(request)
         return self._compose_record(
-            request, roster_captured_at, planes, technicals, stage, vcp
+            request, roster_facts, planes, technicals, stage, vcp
         )
 
     def _planes_for(self, request: ReconstructionRequestV1) -> HistoricalMarketPlanes:
@@ -418,21 +423,26 @@ class HistoricalScanReconstructor:
     def _compose_record(
         self,
         request: ReconstructionRequestV1,
-        roster_captured_at: datetime,
+        roster_facts: RosterFacts,
         planes: HistoricalMarketPlanes,
         technicals: TechnicalsV1,
         stage: StageV1,
         vcp: VcpV1,
     ) -> HistoricalScanRecordV1:
         input_revision = request.input_manifest.digest()
+        roster_captured_at, point_in_time = roster_facts
         try:
             provenance = ProvenanceV1.model_validate(
                 {
-                    "price_provider": "yfinance",
-                    "universe_basis": "captured_configured_roster",
+                    "price_provider": request.evidence.provider,
+                    "universe_basis": (
+                        "point_in_time_index_membership"
+                        if point_in_time
+                        else "captured_configured_roster"
+                    ),
                     "roster_captured_at": roster_captured_at,
-                    "point_in_time_universe": False,
-                    "survivorship_bias": "known",
+                    "point_in_time_universe": point_in_time,
+                    "survivorship_bias": "reduced" if point_in_time else "known",
                     "renamed_or_delisted_may_be_absent": True,
                     "historical_tradingview_screen_available": False,
                     "roster_digest": request.input_manifest.roster_digest,
@@ -484,7 +494,7 @@ class HistoricalScanReconstructor:
             ) from exc
         return record
 
-    def _validate_request(self, request: ReconstructionRequestV1) -> datetime:
+    def _validate_request(self, request: ReconstructionRequestV1) -> RosterFacts:
         if len(request.identity_candidates) == 0:
             raise self._error(
                 request, "required_data_missing", "identity evidence is missing"
@@ -542,6 +552,7 @@ class HistoricalScanReconstructor:
             or roster_member.provider_symbol != evidence.requested_symbol
             or roster_member.currency != evidence.currency
             or roster_member.quote_unit != evidence.quote_unit
+            or (roster_member.provider or "yfinance") != evidence.provider
         ):
             raise self._error(
                 request, "integrity_error", "evidence identity does not match request"
@@ -625,7 +636,10 @@ class HistoricalScanReconstructor:
                     "input manifest detector identity does not match registry",
                     detector=detector.detector_id,
                 )
-        return captured_at
+        return (
+            captured_at,
+            roster_payload.get("policy_version") == POINT_IN_TIME_POLICY_VERSION,
+        )
 
     @staticmethod
     def _error(

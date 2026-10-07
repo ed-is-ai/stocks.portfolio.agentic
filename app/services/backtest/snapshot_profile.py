@@ -19,6 +19,9 @@ from app.services.backtest.historical_scan_record import (
     CanonicalModel,
     HistoricalScanRecordV1,
 )
+from app.services.backtest.point_in_time_membership import (
+    POINT_IN_TIME_POLICY_VERSION,
+)
 from app.services.backtest.trading_calendar import TradingCalendar
 
 Digest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -26,6 +29,8 @@ NonEmpty = Annotated[str, Field(min_length=1)]
 SnapshotMonth = Annotated[str, Field(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")]
 ProvenanceQuality = Literal["best_effort_reconstructed", "observed_bau"]
 MemberResolution = Literal["valid_scan", "legitimate_exclusion"]
+ProofProvider = Literal["yfinance", "wiki"]
+ProofContract = Literal["YFinanceDailyProviderNativeV1", "WikiArchiveDailyV1"]
 DetectorId = Literal["technical_indicators_v1", "weinstein_stage_v1", "vcp_v1"]
 DETECTOR_ORDER = (
     "technical_indicators_v1",
@@ -114,7 +119,9 @@ class SnapshotProfileV1(CanonicalModel):
     display_version: NonEmpty
     record_schema_version: Literal["historical_scan_record.v1"]
     detectors: tuple[ProfileDetectorV1, ...]
-    roster_policy_version: Literal["ReconstructionRosterPolicyV1"]
+    roster_policy_version: Literal[
+        "ReconstructionRosterPolicyV1", "PointInTimeRosterPolicyV2"
+    ]
     roster_digest: Digest
     identity_registry_version: Literal["SecurityIdentityRegistryV1"]
     alias_policy_version: Literal["SecurityAliasManifestV1"]
@@ -236,6 +243,28 @@ def adoption_gate_failures(
     return tuple(failures)
 
 
+def provider_request_contract_version(
+    profile: SnapshotProfileV1, provider: str
+) -> str | None:
+    """Return the request contract ``profile`` admits for ``provider``.
+
+    yfinance uses the profile's pinned contract; WIKI evidence (#82) is
+    admitted only under a point-in-time roster profile. ``None`` means the
+    provider is not admitted.
+    """
+    if provider == "yfinance":
+        return profile.yfinance_request_contract_version
+    if profile.roster_policy_version != POINT_IN_TIME_POLICY_VERSION:
+        return None
+    # Lazy import keeps the profile model off the evidence/repository graph.
+    from app.services.backtest.wiki_historical_evidence import (
+        WIKI_PROVIDER,
+        WIKI_REQUEST_CONTRACT_VERSION,
+    )
+
+    return WIKI_REQUEST_CONTRACT_VERSION if provider == WIKI_PROVIDER else None
+
+
 class LegitimateExclusionProofV1(CanonicalModel):
     schema_version: Literal[
         "before_first_provider_observation.v1",
@@ -258,9 +287,9 @@ class LegitimateExclusionProofV1(CanonicalModel):
     target_session: date
     calendar_dataset_version: Literal["exchange-calendars-v1"]
     calendar_dataset_digest: Digest
-    provider: Literal["yfinance"]
+    provider: ProofProvider
     provider_version: NonEmpty
-    request_contract_version: Literal["YFinanceDailyProviderNativeV1"]
+    request_contract_version: ProofContract
     full_history_start: date
     full_history_end_exclusive: date
     evidence_revision: Digest
@@ -701,7 +730,7 @@ class MonthlySnapshotCommitV1(CanonicalModel):
                     proof.calendar_dataset_version != profile.calendar_dataset_version
                     or proof.calendar_dataset_digest != profile.calendar_dataset_digest
                     or proof.request_contract_version
-                    != profile.yfinance_request_contract_version
+                    != provider_request_contract_version(profile, proof.provider)
                 ):
                     raise SnapshotContractError(
                         "exclusion proof does not match snapshot profile"
@@ -729,9 +758,13 @@ class MonthlySnapshotCommitV1(CanonicalModel):
                 != profile.calendar_dataset_digest
                 or record.provenance.detector_versions != profile.detector_versions
                 or record.provenance.provider_request_contract_version
-                != profile.yfinance_request_contract_version
+                != provider_request_contract_version(
+                    profile, record.provenance.price_provider
+                )
                 or record.provenance.yfinance_ingestion_version
                 != profile.yfinance_ingestion_version
+                or record.provenance.point_in_time_universe
+                != (profile.roster_policy_version == POINT_IN_TIME_POLICY_VERSION)
             ):
                 raise SnapshotContractError(
                     "record identity does not match profile/member"
@@ -982,6 +1015,25 @@ def _validated_observation_sessions(
     return tuple(sessions)
 
 
+#: The request contract each exclusion-proof provider's evidence must carry.
+_PROOF_CONTRACTS: dict[str, tuple[ProofProvider, ProofContract]] = {
+    "yfinance": ("yfinance", "YFinanceDailyProviderNativeV1"),
+    "wiki": ("wiki", "WikiArchiveDailyV1"),
+}
+
+
+def _proof_provider(
+    evidence: HistoricalEvidenceV1,
+) -> tuple[ProofProvider, ProofContract]:
+    """Return the evidence's provider and contract, if a proof admits them."""
+    pair = _PROOF_CONTRACTS.get(evidence.provider)
+    if pair is None or pair[1] != evidence.request_contract_version:
+        raise SnapshotContractError(
+            "exclusion evidence provider or request contract is unsupported"
+        )
+    return pair
+
+
 def build_before_first_provider_observation(
     *,
     evidence: HistoricalEvidenceV1,
@@ -997,6 +1049,7 @@ def build_before_first_provider_observation(
 ) -> LegitimateExclusionProofV1:
     """Build the sole legal exclusion from verified immutable full-history evidence."""
     verified_evidence_manifest(evidence)
+    provider, contract = _proof_provider(evidence)
     calendar = TradingCalendar()
     if calendar_dataset_version != "exchange-calendars-v1" or (
         calendar_dataset_digest != calendar.session_table_digest()
@@ -1059,9 +1112,9 @@ def build_before_first_provider_observation(
             target_session=target_session,
             calendar_dataset_version="exchange-calendars-v1",
             calendar_dataset_digest=calendar_dataset_digest,
-            provider="yfinance",
+            provider=provider,
             provider_version=evidence.provider_version,
-            request_contract_version="YFinanceDailyProviderNativeV1",
+            request_contract_version=contract,
             full_history_start=start,
             full_history_end_exclusive=end,
             evidence_revision=evidence.data_revision,
@@ -1092,6 +1145,7 @@ def build_insufficient_detector_history(
 ) -> LegitimateExclusionProofV1:
     """Prove that a listed member has not accumulated 252 usable sessions yet."""
     verified_evidence_manifest(evidence)
+    provider, contract = _proof_provider(evidence)
     calendar = TradingCalendar()
     if calendar_dataset_version != "exchange-calendars-v1" or (
         calendar_dataset_digest != calendar.session_table_digest()
@@ -1155,9 +1209,9 @@ def build_insufficient_detector_history(
             target_session=target_session,
             calendar_dataset_version="exchange-calendars-v1",
             calendar_dataset_digest=calendar_dataset_digest,
-            provider="yfinance",
+            provider=provider,
             provider_version=evidence.provider_version,
-            request_contract_version="YFinanceDailyProviderNativeV1",
+            request_contract_version=contract,
             full_history_start=start,
             full_history_end_exclusive=end,
             evidence_revision=evidence.data_revision,
@@ -1192,6 +1246,7 @@ def build_incomplete_detector_history(
 ) -> LegitimateExclusionProofV1:
     """Prove a source gap inside the detector's required 252-session window."""
     verified_evidence_manifest(evidence)
+    provider, contract = _proof_provider(evidence)
     calendar = TradingCalendar()
     if calendar_dataset_version != "exchange-calendars-v1" or (
         calendar_dataset_digest != calendar.session_table_digest()
@@ -1259,9 +1314,9 @@ def build_incomplete_detector_history(
             target_session=target_session,
             calendar_dataset_version="exchange-calendars-v1",
             calendar_dataset_digest=calendar_dataset_digest,
-            provider="yfinance",
+            provider=provider,
             provider_version=evidence.provider_version,
-            request_contract_version="YFinanceDailyProviderNativeV1",
+            request_contract_version=contract,
             full_history_start=start,
             full_history_end_exclusive=end,
             evidence_revision=evidence.data_revision,
@@ -1299,5 +1354,6 @@ __all__ = [
     "build_before_first_provider_observation",
     "build_insufficient_detector_history",
     "build_incomplete_detector_history",
+    "provider_request_contract_version",
     "verified_evidence_manifest",
 ]

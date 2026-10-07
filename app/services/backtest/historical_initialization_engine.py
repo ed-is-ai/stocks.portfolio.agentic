@@ -40,7 +40,12 @@ from app.services.backtest.historical_scan_reconstruction import (
 )
 from app.services.backtest.historical_scan_record import HistoricalScanRecordV1
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
+from app.services.backtest.point_in_time_membership import (
+    POINT_IN_TIME_POLICY_VERSION,
+    month_members,
+)
 from app.services.backtest.reconstruction_roster import (
+    ROSTER_POLICY_VERSION,
     CapturedRosterMemberV1,
     CapturedRosterV1,
 )
@@ -150,6 +155,10 @@ class CanonicalSnapshotMonthProcessor:
     #: so a run crossing a month boundary never switches end mid-run.
     _run_end: date | None = None
 
+    #: Whether the roster is point-in-time (#82): months hold only the
+    #: members whose index intervals contain the month's as-of session.
+    _point_in_time: bool = False
+
     def __init__(
         self,
         *,
@@ -202,8 +211,13 @@ class CanonicalSnapshotMonthProcessor:
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
+            # A manifest naming no policy predates V2 and is V1.
+            policy = roster_payload.get("policy_version", ROSTER_POLICY_VERSION)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ValueError("reconstruction roster alias evidence is invalid") from exc
+        if policy != profile.roster_policy_version:
+            raise ValueError("snapshot profile and reconstruction roster policy differ")
+        self._point_in_time = policy == POINT_IN_TIME_POLICY_VERSION
 
     def __call__(self, snapshot_month: str) -> InitializationMonthOutcome:
         self._fetched_security_ids = set()
@@ -218,12 +232,15 @@ class CanonicalSnapshotMonthProcessor:
                 snapshot_month,
                 as_of=now.date(),
             )
+            roster_members = month_members(
+                self._roster.members, sessions, point_in_time=self._point_in_time
+            )
             adopted_from: str | None = None
             resolved: tuple[ResolvedSnapshotMember, ...] | None = None
             if self._mode == "update":
                 try:
                     adopted_from, resolved = self._adopt_month(
-                        snapshot_month, sessions, now
+                        snapshot_month, roster_members, sessions, now
                     )
                 except InitializationMonthError:
                     raise
@@ -240,7 +257,7 @@ class CanonicalSnapshotMonthProcessor:
                     adopted_from, resolved = None, None
             if resolved is None:
                 resolved = self._resolve_fresh_members(
-                    sorted(self._roster.members, key=lambda item: item.security_id),
+                    roster_members,
                     snapshot_month,
                     sessions,
                     now,
@@ -270,9 +287,7 @@ class CanonicalSnapshotMonthProcessor:
                 adopted_from_profile_hash=adopted_from,
             )
             fetched = len(self._fetched_security_ids)
-            return InitializationMonthOutcome(
-                len(self._roster.members) - fetched, fetched
-            )
+            return InitializationMonthOutcome(len(roster_members) - fetched, fetched)
         except InitializationMonthError:
             raise
         except ProviderFailure as exc:
@@ -349,6 +364,7 @@ class CanonicalSnapshotMonthProcessor:
     def _adopt_month(
         self,
         snapshot_month: str,
+        roster_members: list[CapturedRosterMemberV1],
         sessions: dict[str, date],
         now: datetime,
     ) -> tuple[str | None, tuple[ResolvedSnapshotMember, ...] | None]:
@@ -382,7 +398,7 @@ class CanonicalSnapshotMonthProcessor:
         resolved: dict[str, ResolvedSnapshotMember] = {}
         adopted: list[tuple[ResolvedSnapshotMember, ReconstructionRequestV1]] = []
         fresh_requests: list[ReconstructionRequestV1] = []
-        for member in sorted(self._roster.members, key=lambda item: item.security_id):
+        for member in roster_members:
             target_session = sessions[member.mic]
             previous = carried.get(member.security_id)
             adoptable = previous is not None and self._carried_identity_matches(
@@ -436,16 +452,10 @@ class CanonicalSnapshotMonthProcessor:
             # Nothing was carried: stamping predecessor provenance on a
             # 100%-fresh month would mislead adoption audits (gh-468).
             return None, tuple(
-                resolved[member.security_id]
-                for member in sorted(
-                    self._roster.members, key=lambda item: item.security_id
-                )
+                resolved[member.security_id] for member in roster_members
             )
         return predecessor.profile_hash, tuple(
-            resolved[member.security_id]
-            for member in sorted(
-                self._roster.members, key=lambda item: item.security_id
-            )
+            resolved[member.security_id] for member in roster_members
         )
 
     @staticmethod
@@ -650,6 +660,7 @@ class CanonicalSnapshotMonthProcessor:
                 mic=member.mic,
                 observed_symbol=evidence.observed_symbol,
                 session_date=target_session,
+                provider=member_provider(member),
             )
             acquired = self._price_repository.acquisition_times(evidence.data_revision)
             if not acquired:

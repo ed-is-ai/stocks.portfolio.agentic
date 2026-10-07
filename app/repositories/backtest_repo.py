@@ -18,6 +18,7 @@ from typing import (
     Callable,
     Literal,
     Mapping,
+    NamedTuple,
     Protocol,
     TYPE_CHECKING,
     cast,
@@ -60,7 +61,13 @@ from app.services.backtest.snapshot_profile import (
     build_before_first_provider_observation,
     build_incomplete_detector_history,
     build_insufficient_detector_history,
+    provider_request_contract_version,
     verified_evidence_manifest,
+)
+from app.services.backtest.point_in_time_membership import (
+    POINT_IN_TIME_POLICY_VERSION,
+    MembershipIntervals,
+    month_members,
 )
 from app.services.backtest.trading_calendar import TradingCalendar
 from app.services.backtest.strategy_job import (
@@ -501,7 +508,8 @@ CREATE TRIGGER IF NOT EXISTS snapshot_member_immutable_update BEFORE UPDATE ON s
 CREATE TRIGGER IF NOT EXISTS snapshot_member_immutable_delete BEFORE DELETE ON snapshot_members BEGIN SELECT RAISE(ABORT, 'snapshot member is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS monthly_scan_result_immutable_update BEFORE UPDATE ON monthly_scan_results BEGIN SELECT RAISE(ABORT, 'monthly scan result is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS monthly_scan_result_immutable_delete BEFORE DELETE ON monthly_scan_results BEGIN SELECT RAISE(ABORT, 'monthly scan result is immutable'); END;
-CREATE TRIGGER IF NOT EXISTS snapshot_member_requires_roster_identity
+DROP TRIGGER IF EXISTS snapshot_member_requires_roster_identity;
+CREATE TRIGGER snapshot_member_requires_roster_identity
 BEFORE INSERT ON snapshot_members
 WHEN NOT EXISTS (
     SELECT 1
@@ -513,7 +521,7 @@ WHEN NOT EXISTS (
     JOIN security_alias_entries alias
       ON alias.alias_revision = roster_manifest.alias_revision
      AND alias.security_id = roster.security_id
-     AND alias.provider = 'yfinance'
+     AND alias.provider IN ('yfinance', 'wiki')
      AND alias.mic = roster.mic
      AND alias.observed_symbol = NEW.observed_symbol
      AND (alias.effective_from IS NULL OR alias.effective_from <= NEW.as_of_session_date)
@@ -1850,6 +1858,53 @@ def _row_to_initialization_progress(
     )
 
 
+class _PointInTimeRosterMember(NamedTuple):
+    security_id: str
+    mic: str
+    provider: str
+    membership_intervals: MembershipIntervals
+
+
+# ponytail: unbounded, but rosters are immutable and few per process.
+_POINT_IN_TIME_ROSTERS: dict[str, tuple[_PointInTimeRosterMember, ...]] = {}
+
+
+def _point_in_time_roster_members(
+    conn: sqlite3.Connection, roster_digest: str
+) -> tuple[_PointInTimeRosterMember, ...]:
+    """Return a point-in-time roster's members, parsed once per digest (#82)."""
+    cached = _POINT_IN_TIME_ROSTERS.get(roster_digest)
+    if cached is not None:
+        return cached
+    row = conn.execute(
+        """SELECT canonical_manifest_json FROM reconstruction_rosters
+           WHERE roster_digest=?""",
+        (roster_digest,),
+    ).fetchone()
+    try:
+        manifest = json.loads(str(row[0]))
+        if manifest["policy_version"] != POINT_IN_TIME_POLICY_VERSION:
+            raise ValueError("roster manifest policy differs from its row")
+        members = tuple(
+            _PointInTimeRosterMember(
+                security_id=str(item["security_id"]),
+                mic=str(item["mic"]),
+                provider=str(item.get("provider") or ""),
+                membership_intervals=tuple(
+                    (str(start), None if end is None else str(end))
+                    for start, end in item.get("membership_intervals") or ()
+                ),
+            )
+            for item in manifest["members"]
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise BacktestIntegrityError(
+            "point-in-time reconstruction roster is invalid"
+        ) from exc
+    _POINT_IN_TIME_ROSTERS[roster_digest] = members
+    return members
+
+
 def _migrate_bats_mic_constraints(conn: sqlite3.Connection) -> None:
     """Expand legacy closed-MIC CHECK constraints without losing evidence."""
     legacy_constraint = "('XNAS', 'XNYS', 'XLON')"
@@ -2995,19 +3050,21 @@ class BacktestRepository:
         mic: str,
         observed_symbol: str,
         session_date: date,
+        provider: str = "yfinance",
     ) -> tuple[date | None, date | None]:
-        """Return the one effective immutable yfinance alias interval."""
+        """Return the one effective immutable alias interval for ``provider``."""
         with session(self._connect) as conn:
             rows = conn.execute(
                 """SELECT effective_from, effective_to
                    FROM security_alias_entries
-                   WHERE alias_revision=? AND security_id=? AND provider='yfinance'
+                   WHERE alias_revision=? AND security_id=? AND provider=?
                      AND mic=? AND observed_symbol=?
                      AND (effective_from IS NULL OR effective_from<=?)
                      AND (effective_to IS NULL OR ?<effective_to)""",
                 (
                     alias_revision,
                     security_id,
+                    provider,
                     mic,
                     observed_symbol,
                     session_date.isoformat(),
@@ -8872,7 +8929,7 @@ class BacktestRepository:
                 or evidence.security_id != member.security_id
                 or evidence.observed_symbol != member.observed_symbol
                 or evidence.request_contract_version
-                != commit.profile.yfinance_request_contract_version
+                != provider_request_contract_version(commit.profile, evidence.provider)
             ):
                 raise BacktestIntegrityError(
                     "snapshot provider evidence does not match member"
@@ -8881,6 +8938,7 @@ class BacktestRepository:
                 record = records[member.security_id]
                 if (
                     evidence.alias_revision != record.provenance.alias_revision
+                    or evidence.provider != record.provenance.price_provider
                     or evidence.currency != record.currency
                     or evidence.quote_unit != record.quote_unit
                 ):
@@ -8929,15 +8987,24 @@ class BacktestRepository:
         conn: sqlite3.Connection, commit: MonthlySnapshotCommitV1
     ) -> None:
         BacktestRepository._validate_snapshot_members_against_roster(
-            conn, commit.profile, commit.members
+            conn, commit.profile, commit.manifest.snapshot_month, commit.members
         )
 
     @staticmethod
     def _validate_snapshot_members_against_roster(
         conn: sqlite3.Connection,
         profile: SnapshotProfileV1,
+        snapshot_month: str,
         members: tuple[SnapshotMemberV1, ...],
     ) -> None:
+        roster = conn.execute(
+            "SELECT policy_version FROM reconstruction_rosters WHERE roster_digest=?",
+            (profile.roster_digest,),
+        ).fetchone()
+        if roster is not None and str(roster[0]) != profile.roster_policy_version:
+            raise BacktestIntegrityError(
+                "snapshot profile and reconstruction roster policy differ"
+            )
         rows = conn.execute(
             """SELECT member.security_id, member.mic, roster.alias_revision
                FROM reconstruction_roster_members member
@@ -8950,20 +9017,47 @@ class BacktestRepository:
         actual = tuple(
             (item.security_id, item.mic, item.alias_revision) for item in members
         )
-        if not expected or actual != expected:
+        providers: dict[str, str] = {}
+        if profile.roster_policy_version == POINT_IN_TIME_POLICY_VERSION:
+            # #82: a point-in-time month holds exactly that month's members.
+            roster_members = _point_in_time_roster_members(conn, profile.roster_digest)
+            calendar = TradingCalendar()
+            sessions = {
+                mic: calendar.last_session_of_month(mic, snapshot_month)
+                for mic in {member.mic for member in roster_members}
+            }
+            in_month = {
+                member.security_id
+                for member in month_members(
+                    roster_members, sessions, point_in_time=True
+                )
+            }
+            providers = {
+                member.security_id: member.provider or "yfinance"
+                for member in roster_members
+            }
+            matches = (
+                set(actual) <= set(expected)
+                and actual == tuple(sorted(actual))
+                and {item[0] for item in actual} == in_month
+            )
+        else:
+            matches = actual == expected
+        if not expected or not matches:
             raise BacktestIntegrityError(
                 "snapshot members do not match the immutable reconstruction roster"
             )
         for member in members:
             alias = conn.execute(
                 """SELECT 1 FROM security_alias_entries
-                   WHERE alias_revision=? AND security_id=? AND provider='yfinance'
+                   WHERE alias_revision=? AND security_id=? AND provider=?
                      AND mic=? AND observed_symbol=?
                      AND (effective_from IS NULL OR effective_from<=?)
                      AND (effective_to IS NULL OR ?<effective_to)""",
                 (
                     member.alias_revision,
                     member.security_id,
+                    providers.get(member.security_id, "yfinance"),
                     member.mic,
                     member.observed_symbol,
                     member.as_of_session_date.isoformat(),
@@ -9314,7 +9408,9 @@ class BacktestRepository:
                 records.append(record)
             member_tuple = tuple(members)
             record_tuple = tuple(records)
-            self._validate_snapshot_members_against_roster(conn, profile, member_tuple)
+            self._validate_snapshot_members_against_roster(
+                conn, profile, snapshot_month, member_tuple
+            )
             MonthlySnapshotCommitV1._validate_members_and_records(
                 profile,
                 snapshot_month,
@@ -10022,21 +10118,75 @@ class BacktestRepository:
                 """,
                 (profile_hash, security_id, as_of_session.isoformat()),
             ).fetchone()
-        if row is None:
-            return None
-        try:
-            record = HistoricalScanRecordV1.from_canonical_json(str(row[1]))
-        except Exception as exc:
-            raise BacktestIntegrityError(
-                "stored monthly scan result is invalid"
-            ) from exc
-        if (
-            record.security_id != security_id
-            or record.snapshot_month != str(row[0])
-            or record.digest() != str(row[2])
-        ):
-            raise BacktestIntegrityError("stored monthly scan result is invalid")
+            if row is None:
+                return None
+            try:
+                record = HistoricalScanRecordV1.from_canonical_json(str(row[1]))
+            except Exception as exc:
+                raise BacktestIntegrityError(
+                    "stored monthly scan result is invalid"
+                ) from exc
+            if (
+                record.security_id != security_id
+                or record.snapshot_month != str(row[0])
+                or record.digest() != str(row[2])
+            ):
+                raise BacktestIntegrityError("stored monthly scan result is invalid")
+            if not self._member_of_latest_month(
+                conn, profile_hash, record, as_of_session
+            ):
+                return None
         return record
+
+    @staticmethod
+    def _member_of_latest_month(
+        conn: sqlite3.Connection,
+        profile_hash: str,
+        record: HistoricalScanRecordV1,
+        as_of_session: date,
+    ) -> bool:
+        """Whether ``record``'s security is in the latest month in effect (#82).
+
+        The latest fully committed month in effect at ``as_of_session`` must
+        hold a member row for the security, so a point-in-time leaver's scans
+        stop being visible. Every month before the session's month is in
+        effect; the session's own month only from its stored as-of session on
+        the record's calendar. Every V1 month holds every roster member, so
+        V1 visibility is unchanged.
+        """
+        session_month = as_of_session.strftime("%Y-%m")
+        months = conn.execute(
+            """SELECT snapshot_month FROM snapshot_months
+               WHERE profile_hash=? AND snapshot_month>? AND snapshot_month<=?
+                 AND processing_complete = 1 AND market_complete = 'unknown'
+               ORDER BY snapshot_month DESC LIMIT 2""",
+            (profile_hash, record.snapshot_month, session_month),
+        ).fetchall()
+        calendar = TradingCalendar.calendar_name(record.mic)
+        mics = tuple(
+            mic
+            for mic in ("BATS", "XNAS", "XNYS", "XLON")
+            if TradingCalendar.calendar_name(mic) == calendar
+        )
+        for (month,) in months:
+            if month == session_month:
+                (month_as_of,) = conn.execute(
+                    f"""SELECT MAX(as_of_session_date) FROM snapshot_members
+                        WHERE profile_hash=? AND snapshot_month=?
+                          AND mic IN ({", ".join("?" for _ in mics)})""",
+                    (profile_hash, month, *mics),
+                ).fetchone()
+                if month_as_of is None or str(month_as_of) > as_of_session.isoformat():
+                    continue
+            return (
+                conn.execute(
+                    """SELECT 1 FROM snapshot_members
+                       WHERE profile_hash=? AND snapshot_month=? AND security_id=?""",
+                    (profile_hash, month, record.security_id),
+                ).fetchone()
+                is not None
+            )
+        return True
 
     @staticmethod
     def _verify_fragment_key(

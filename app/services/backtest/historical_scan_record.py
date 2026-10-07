@@ -312,11 +312,13 @@ class EnrichmentV1(CanonicalModel):
 
 
 class ProvenanceV1(CanonicalModel):
-    price_provider: Literal["yfinance"]
-    universe_basis: Literal["captured_configured_roster"]
+    price_provider: Literal["yfinance", "wiki"]
+    universe_basis: Literal[
+        "captured_configured_roster", "point_in_time_index_membership"
+    ]
     roster_captured_at: datetime
     point_in_time_universe: bool
-    survivorship_bias: Literal["known", "not_applicable"]
+    survivorship_bias: Literal["known", "not_applicable", "reduced"]
     renamed_or_delisted_may_be_absent: bool
     historical_tradingview_screen_available: bool
     roster_digest: Digest
@@ -358,11 +360,14 @@ class ReconstructabilityPolicyV1(CanonicalModel):
         if any(value is not None for value in record.enrichment.model_dump().values()):
             raise ValueError("reconstructed enrichment fields must all be null")
         provenance = record.provenance
+        # #82: a point-in-time roster reduces, but cannot remove, the bias.
+        point_in_time = provenance.universe_basis == "point_in_time_index_membership"
         if (
-            provenance.point_in_time_universe
-            or provenance.survivorship_bias != "known"
+            provenance.point_in_time_universe != point_in_time
+            or provenance.survivorship_bias != ("reduced" if point_in_time else "known")
             or not provenance.renamed_or_delisted_may_be_absent
             or provenance.historical_tradingview_screen_available
+            or (not point_in_time and provenance.price_provider != "yfinance")
         ):
             raise ValueError("reconstructed provenance facts violate policy")
 

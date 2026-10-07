@@ -21,6 +21,10 @@ from app.integrations.tv_screener import (
 )
 from app.services.backtest.canonical_manifest import canonical_json, manifest_digest
 from app.services.backtest.historical_price_evidence import canonical_provider_metadata
+from app.services.backtest.point_in_time_membership import (
+    POINT_IN_TIME_POLICY_VERSION,
+    MembershipIntervals,
+)
 from app.services.backtest.security_identity import (
     AliasEntryV1,
     SecurityAliasManifestV1,
@@ -33,7 +37,6 @@ from app.services.backtest.strategy_job import WorkerLeaseFenceV1
 from app.services.backtest.trading_calendar import TradingCalendar
 
 ROSTER_POLICY_VERSION = "ReconstructionRosterPolicyV1"
-POINT_IN_TIME_POLICY_VERSION = "PointInTimeRosterPolicyV2"
 ROSTER_MANIFEST_VERSION = "ReconstructionRosterManifestV1"
 DATAHUB_SP500_SOURCE_URL = (
     "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/"
@@ -139,9 +142,6 @@ class TerminalExitV1:
     event_type: str
     terminal_price: float | None
     event_digest: str
-
-
-MembershipIntervals = tuple[tuple[str, str | None], ...]
 
 
 @dataclass(frozen=True)
@@ -1039,7 +1039,10 @@ class ReconstructionRosterCaptureService:
             identity = exact.get((member.mic, member.provider_symbol))
             if identity is None:
                 alias_id = aliases.resolve(
-                    "yfinance", member.mic, member.provider_symbol, captured_at.date()
+                    member.provider or "yfinance",
+                    member.mic,
+                    member.provider_symbol,
+                    captured_at.date(),
                 )
                 if alias_id is not None:
                     identity = by_id.get(alias_id)
@@ -1084,8 +1087,17 @@ class ReconstructionRosterCaptureService:
             for entry in alias_manifest.entries
         }
         augmented_entries = list(alias_manifest.entries)
+        # #82: a point-in-time member's alias names its own price provider.
+        providers: dict[str, str] = {}
+        for member in captured_members:
+            if member.provider and (
+                providers.setdefault(member.security_id, member.provider)
+                != member.provider
+            ):
+                raise RosterCaptureError("provider conflict", code="identity_ambiguous")
         for identity in identities:
-            key = ("yfinance", identity.mic, identity.provider_symbol)
+            provider = providers.get(identity.security_id, "yfinance")
+            key = (provider, identity.mic, identity.provider_symbol)
             existing_alias = direct_aliases.get(key)
             if existing_alias is not None:
                 if existing_alias.security_id != identity.security_id:
@@ -1097,7 +1109,7 @@ class ReconstructionRosterCaptureService:
             augmented_entries.append(
                 AliasEntryV1(
                     security_id=identity.security_id,
-                    provider="yfinance",
+                    provider=provider,
                     mic=identity.mic,
                     observed_symbol=identity.provider_symbol,
                     effective_from=None,
