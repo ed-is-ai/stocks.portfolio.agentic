@@ -4,6 +4,7 @@ Usage::
 
     SEC_USER_AGENT="Name contact@example.com" \\
         uv run python -m app.cli.import_terminal_events sp500 [--dry-run] [--limit N]
+        [--price-db PATH] [--wiki-db PATH]
 
 For each interval of the newest ``sp500`` membership import ending since
 2000, stores one terminal event (replacing that import's previous events) and
@@ -11,21 +12,30 @@ prints counts by type and the ``unknown`` events. ``--dry-run`` writes
 nothing; ``--limit N`` classifies only the first N intervals and, since that
 is not a full set, also writes nothing. SEC requires a descriptive
 ``User-Agent``, read from ``SEC_USER_AGENT``; the run refuses to start
-without it.
+without it. Events still unknown get price evidence from the yfinance cache
+and the WIKI archive when those databases exist (opened read-only).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 from collections import Counter
 
-from app.core.config import INDEX_MEMBERSHIP_DB
+from app.core.config import (
+    HISTORICAL_PRICE_CACHE,
+    INDEX_MEMBERSHIP_DB,
+    WIKI_PRICES_DB,
+)
 from app.repositories import db
 from app.repositories.index_membership_repo import IndexMembershipRepository
 from app.services.index_membership.edgar import sec_fetch
 from app.services.index_membership.sp500_import import Fetch, http_fetch
-from app.services.index_membership.terminal_events import build_events
+from app.services.index_membership.terminal_events import (
+    build_events,
+    price_last_trade,
+)
 
 
 def _positive(value: str) -> int:
@@ -50,6 +60,12 @@ def main(
     parser.add_argument(
         "--limit", type=_positive, help="Only the first N; writes nothing."
     )
+    parser.add_argument(
+        "--price-db", type=Path, default=HISTORICAL_PRICE_CACHE, help="yfinance cache."
+    )
+    parser.add_argument(
+        "--wiki-db", type=Path, default=WIKI_PRICES_DB, help="WIKI price archive."
+    )
     args = parser.parse_args(argv)
     if sec is None:
         user_agent = os.environ.get("SEC_USER_AGENT", "").strip()
@@ -59,7 +75,8 @@ def main(
     repo = IndexMembershipRepository(db.make_connect(lambda: INDEX_MEMBERSHIP_DB))
     repo.ensure_schema()
     try:
-        import_id, events = build_events(repo, fetch, sec, args.limit)
+        last_trade = price_last_trade(args.price_db, args.wiki_db)
+        import_id, events = build_events(repo, fetch, sec, args.limit, last_trade)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     written = not args.dry_run and args.limit is None

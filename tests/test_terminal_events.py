@@ -15,6 +15,7 @@ from app.repositories.index_membership_repo import (
     MembershipInterval,
     TerminalEvent,
 )
+from app.repositories.wiki_price_repo import WikiPriceRepository
 from app.services.index_membership import edgar
 from app.services.index_membership import terminal_events as te
 from app.services.index_membership import wikipedia_check as wiki
@@ -431,7 +432,8 @@ def test_older_history_pages_are_read_for_the_window() -> None:
         {"name": "p1.json", "filingFrom": "2008-01-01", "filingTo": "2012-12-31"},
         {"name": "p0.json", "filingFrom": "1999-01-01", "filingTo": "2007-12-31"},
     ]
-    page = json.loads(_submissions(1, ("DEFM14A", "2009-12-01", None)))  # type: ignore[arg-type]
+    no_items: Any = None  # older pages can have null items
+    page = json.loads(_submissions(1, ("DEFM14A", "2009-12-01", no_items)))
     page = page["filings"]["recent"]
     sec = _fetcher(
         {
@@ -474,3 +476,122 @@ def test_cli_rejects_bad_limit_and_missing_import(
         cli.main(["sp500", "--limit", "0"], fetch=sec, sec=sec)
     with pytest.raises(SystemExit, match="no sp500 membership import"):
         cli.main(["sp500"], fetch=sec, sec=sec)
+
+
+@pytest.fixture(autouse=True)
+def no_real_price_dbs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep CLI runs off the developer's price databases."""
+    monkeypatch.setattr(cli, "HISTORICAL_PRICE_CACHE", tmp_path / "no-prices.db")
+    monkeypatch.setattr(cli, "WIKI_PRICES_DB", tmp_path / "no-wiki.db")
+
+
+@pytest.mark.parametrize(
+    ("ticker", "removed", "same"),
+    [
+        ("LEHMQ", "LEH", True),
+        ("TMC.A", "TMC", True),
+        ("AAPL", "AAPL", True),
+        ("LEHMQ", "L", False),  # prefix too short
+        ("ABCD", "ABC", False),  # prefix only for bankruptcy "Q" tickers
+    ],
+)
+def test_same_security(ticker: str, removed: str, same: bool) -> None:
+    assert te.same_security(ticker, removed) is same
+
+
+def test_match_change_prefers_exact_ticker() -> None:
+    interval = _interval("LEHMQ", "2008-09-17")
+    prefix = wiki.WikiChange(
+        date="2008-09-16", added=None, removed="LEH", removed_name="L", reason="x"
+    )
+    exact = prefix.model_copy(update={"removed": "LEHMQ", "date": "2008-09-20"})
+    assert te.match_change(interval, [prefix]) == prefix
+    assert te.match_change(interval, [prefix, exact]) == exact
+
+
+def _unknown(ticker: str, exit_date: str) -> TerminalEvent:
+    return TerminalEvent(
+        security_key=f"{ticker}@1996-01-02",
+        ticker=ticker,
+        exit_date=exit_date,
+        event_type="unknown",
+        evidence="none",
+        note="not in Wikipedia changes",
+    )
+
+
+@pytest.mark.parametrize(
+    ("last", "expected"),
+    [
+        (
+            ("2012-01-03", None),
+            ("still_trading", None, "prices continue to 2012-01-03"),
+        ),
+        (("2010-01-27", 9.5), ("delisting", 9.5, "prices end 2010-01-27")),
+        (("2009-12-01", 9.5), ("unknown", None, "")),  # ended long before removal
+        (None, ("unknown", None, "")),
+    ],
+)
+def test_price_evidence(
+    last: tuple[str, float | None] | None,
+    expected: tuple[str, float | None, str],
+) -> None:
+    event = te.with_price_evidence(
+        _unknown("JAVA", "2010-01-27"), lambda t: last, set()
+    )
+    kind, price, note = expected
+    assert (event.event_type, event.terminal_price) == (kind, price)
+    assert note in event.note
+    if kind != "unknown":
+        assert event.evidence == "prices"
+
+
+def test_price_evidence_skips_reused_and_classified() -> None:
+    def trading(ticker: str) -> tuple[str, float | None]:
+        return ("2020-01-02", None)
+
+    reused = te.with_price_evidence(_unknown("RE", "2010-01-27"), trading, {"RE"})
+    assert reused.event_type == "unknown"
+    known = _unknown("ACQ", "2010-01-27").model_copy(
+        update={"event_type": "acquisition", "evidence": "wikipedia"}
+    )
+    assert te.with_price_evidence(known, trading, set()) == known
+
+
+def test_old_terminal_events_table_is_rebuilt(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE terminal_events (evidence TEXT CHECK(evidence IN ('none')))"
+    )
+    conn.commit()
+    conn.close()
+    repo = IndexMembershipRepository(db.make_connect(lambda: path))
+    repo.ensure_schema()
+    repo.ensure_schema()  # idempotent once current
+    conn = sqlite3.connect(path)
+    (sql,) = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'terminal_events'"
+    ).fetchone()
+    conn.close()
+    assert "'prices'" in sql
+
+
+def test_price_last_trade_reads_wiki_and_yfinance(tmp_path: Path) -> None:
+    wiki_csv = tmp_path / "w.csv"
+    wiki_csv.write_text(
+        "ticker,date,open,high,low,close,volume,ex-dividend,split_ratio,"
+        "adj_open,adj_high,adj_low,adj_close,adj_volume\n"
+        "JAVA,2010-01-26,9,9,9,9.25,1,0,1,1,1,1,1,1\n"
+        "BRK_B,2017-01-03,1,1,1,1,1,0,1,1,1,1,1,1\n"
+    )
+    wiki_db = tmp_path / "wiki.db"
+    wiki_repo = WikiPriceRepository(db.make_connect(lambda: wiki_db))
+    wiki_repo.ensure_schema()
+    wiki_repo.import_csv(wiki_csv)
+    assert te.price_last_trade(tmp_path / "none.db", tmp_path / "none2.db") is None
+    last_trade = te.price_last_trade(tmp_path / "none.db", wiki_db)
+    assert last_trade is not None
+    assert last_trade("JAVA") == ("2010-01-26", 9.25)
+    assert last_trade("BRK.B") == ("2017-01-03", 1.0)
+    assert last_trade("NOPE") is None

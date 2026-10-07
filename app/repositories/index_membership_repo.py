@@ -24,7 +24,7 @@ Confidence = Literal["low", "normal"]
 EventType = Literal[
     "acquisition", "bankruptcy", "delisting", "still_trading", "rename", "unknown"
 ]
-Evidence = Literal["wikipedia+edgar", "wikipedia", "edgar", "none"]
+Evidence = Literal["wikipedia+edgar", "wikipedia", "edgar", "prices", "none"]
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS membership_imports (
@@ -63,7 +63,7 @@ CREATE TABLE IF NOT EXISTS terminal_events (
     terms          TEXT,
     source_filing  TEXT,
     evidence       TEXT NOT NULL CHECK(evidence IN ('wikipedia+edgar', 'wikipedia',
-                       'edgar', 'none')),
+                       'edgar', 'prices', 'none')),
     note           TEXT NOT NULL,
     PRIMARY KEY (import_id, security_key)
 );
@@ -132,7 +132,7 @@ class TerminalEvent(BaseModel):
 
     ``event_type`` is ``acquisition``, ``bankruptcy``, ``delisting`` (exits),
     ``still_trading``, ``rename`` (not exits) or ``unknown``; ``evidence`` is
-    ``wikipedia+edgar``, ``wikipedia``, ``edgar`` or ``none``.
+    ``wikipedia+edgar``, ``wikipedia``, ``edgar``, ``prices`` or ``none``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -156,8 +156,18 @@ class IndexMembershipRepository:
         self._connect = connect
 
     def ensure_schema(self) -> None:
-        """Create the tables if missing (idempotent)."""
+        """Create the tables if missing (idempotent).
+
+        A ``terminal_events`` table from before the ``prices`` evidence value
+        is dropped and recreated: its rows are derived and the next
+        ``import_terminal_events`` run rebuilds them.
+        """
         with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'terminal_events'"
+            ).fetchone()
+            if row is not None and "'prices'" not in row[0]:
+                conn.execute("DROP TABLE terminal_events")
             conn.executescript(_SCHEMA)
 
     def record_import(
