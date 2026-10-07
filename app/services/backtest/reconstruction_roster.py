@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timezone
 from enum import StrEnum
 from importlib.metadata import version
 import json
@@ -33,6 +33,7 @@ from app.services.backtest.strategy_job import WorkerLeaseFenceV1
 from app.services.backtest.trading_calendar import TradingCalendar
 
 ROSTER_POLICY_VERSION = "ReconstructionRosterPolicyV1"
+POINT_IN_TIME_POLICY_VERSION = "PointInTimeRosterPolicyV2"
 ROSTER_MANIFEST_VERSION = "ReconstructionRosterManifestV1"
 DATAHUB_SP500_SOURCE_URL = (
     "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/"
@@ -55,6 +56,7 @@ class RosterSource(StrEnum):
     DATAHUB_SP500 = "datahub_sp500"
     TRADINGVIEW_US = "tradingview_us"
     TRADINGVIEW_UK = "tradingview_uk"
+    SP500_POINT_IN_TIME = "sp500_point_in_time"
 
 
 REQUIRED_SOURCE_ORDER = (
@@ -62,6 +64,10 @@ REQUIRED_SOURCE_ORDER = (
     RosterSource.TRADINGVIEW_US,
     RosterSource.TRADINGVIEW_UK,
 )
+POINT_IN_TIME_SOURCE_ORDER = (*REQUIRED_SOURCE_ORDER, RosterSource.SP500_POINT_IN_TIME)
+_US_MICS = frozenset({"BATS", "XNAS", "XNYS"})
+#: Identity evidence source of a point-in-time member whose MIC is assumed.
+MIC_ASSUMED_EVIDENCE = f"{RosterSource.SP500_POINT_IN_TIME.value}:mic_assumed"
 
 
 @dataclass(frozen=True)
@@ -126,6 +132,19 @@ class RosterSourcePayloadV1:
 
 
 @dataclass(frozen=True)
+class TerminalExitV1:
+    """A pinned #73 exit of a point-in-time member (price ``None`` if unknown)."""
+
+    exit_date: str
+    event_type: str
+    terminal_price: float | None
+    event_digest: str
+
+
+MembershipIntervals = tuple[tuple[str, str | None], ...]
+
+
+@dataclass(frozen=True)
 class NormalizedRosterMemberV1:
     mic: str
     calendar: str
@@ -136,6 +155,9 @@ class NormalizedRosterMemberV1:
     source_evidence_digests: tuple[str, ...]
     identity_evidence: tuple[MarketIdentityEvidence, ...]
     evidence_digest: str
+    provider: str = ""
+    membership_intervals: MembershipIntervals = ()
+    terminal_exit: TerminalExitV1 | None = None
 
 
 IdentityResolver = Callable[[str, dict[str, object]], MarketIdentityEvidence]
@@ -145,6 +167,7 @@ class ReconstructionRosterPolicyV1:
     """Normalize the exact configured current scanner-roster union."""
 
     version = ROSTER_POLICY_VERSION
+    source_order: tuple[RosterSource, ...] = REQUIRED_SOURCE_ORDER
 
     def __init__(
         self,
@@ -252,6 +275,14 @@ class ReconstructionRosterPolicyV1:
             )
         return tuple(members)
 
+    def normalize_with_skips(
+        self,
+        payloads: Sequence[RosterSourcePayloadV1],
+        datahub_identity_resolver: IdentityResolver,
+    ) -> tuple[tuple[NormalizedRosterMemberV1, ...], tuple[dict[str, object], ...]]:
+        """Normalize and return the source rows skipped on the way (none in V1)."""
+        return self.normalize(payloads, datahub_identity_resolver), ()
+
     def _tradingview_identity(
         self,
         source: RosterSource,
@@ -318,6 +349,216 @@ class ReconstructionRosterPolicyV1:
             )
         if not identity.evidence_source or not identity.evidence_digest:
             raise RosterCaptureError("market identity evidence is missing")
+
+
+class PointInTimeRosterPolicyV2(ReconstructionRosterPolicyV1):
+    """V1's current union plus the point-in-time S&P 500 history (#82).
+
+    A point-in-time row joins the current US member with its provider symbol;
+    otherwise it becomes a new member on an assumed ``XNYS`` (every US MIC
+    shares the XNYS calendar). Rows are skipped, and recorded, rather than
+    merged when:
+
+    * a member with a pinned exit shares its symbol with a current member
+      that is not in the current S&P 500 -- a different company now trades
+      under the ticker. A former member without an exit (e.g. one that left
+      the index for market cap) is the same company and still joins;
+    * an earlier row (in canonical JSON order, so deterministic) already
+      took the provider symbol.
+    """
+
+    version = POINT_IN_TIME_POLICY_VERSION
+    source_order = POINT_IN_TIME_SOURCE_ORDER
+
+    def normalize_with_skips(
+        self,
+        payloads: Sequence[RosterSourcePayloadV1],
+        datahub_identity_resolver: IdentityResolver,
+    ) -> tuple[tuple[NormalizedRosterMemberV1, ...], tuple[dict[str, object], ...]]:
+        if tuple(payload.source for payload in payloads) != self.source_order:
+            raise RosterCaptureError("roster payloads are not in fixed source order")
+        point_in_time = payloads[-1]
+        if not point_in_time.rows:
+            raise RosterCaptureError(
+                f"required roster source is empty: {point_in_time.source}"
+            )
+        current = super().normalize(payloads[:-1], datahub_identity_resolver)
+        members = {
+            (m.mic, m.provider_symbol): replace(m, provider="yfinance") for m in current
+        }
+        us_keys: dict[str, tuple[str, str]] = {}
+        for mic, symbol in members:
+            if mic in _US_MICS:
+                if symbol in us_keys:
+                    raise RosterCaptureError(
+                        f"ambiguous US identity for {symbol}",
+                        code="identity_ambiguous",
+                    )
+                us_keys[symbol] = (mic, symbol)
+        skipped: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for raw_row in sorted(point_in_time.rows, key=canonical_json):
+            row = dict(raw_row)
+            symbol = normalize_symbol(str(row["provider_symbol"]))
+            fields = _point_in_time_fields(row)
+            key = us_keys.get(symbol)
+            reason = None
+            if symbol in seen:
+                reason = "duplicate_provider_symbol"
+            elif (
+                key is not None
+                and fields["terminal_exit"] is not None
+                and RosterSource.DATAHUB_SP500.value
+                not in members[key].source_memberships
+            ):
+                reason = "symbol_held_by_non_sp500_current_member"
+            if reason is not None:
+                skipped.append(
+                    {
+                        "symbol": row.get("symbol"),
+                        "provider_symbol": symbol,
+                        "reason": reason,
+                    }
+                )
+                continue
+            seen.add(symbol)
+            evidence_digest = manifest_digest(
+                {
+                    "source": point_in_time.source,
+                    "source_payload_digest": point_in_time.payload_digest,
+                    "provider_symbol": symbol,
+                    "row": row,
+                }
+            )
+            if key is not None:
+                existing = members[key]
+                evidence = (*existing.source_evidence_digests, evidence_digest)
+                members[key] = replace(
+                    existing,
+                    source_memberships=(
+                        *existing.source_memberships,
+                        point_in_time.source.value,
+                    ),
+                    source_evidence_digests=evidence,
+                    evidence_digest=manifest_digest(evidence),
+                    **fields,
+                )
+                continue
+            identity = MarketIdentityEvidence(
+                mic="XNYS",
+                currency="USD",
+                quote_unit="USD",
+                evidence_source=MIC_ASSUMED_EVIDENCE,
+                evidence_digest=manifest_digest(
+                    {"mic": "XNYS", "mic_assumed": True, "row": row}
+                ),
+            )
+            members[("XNYS", symbol)] = NormalizedRosterMemberV1(
+                mic="XNYS",
+                calendar=self._calendar.calendar_name("XNYS"),
+                provider_symbol=symbol,
+                currency="USD",
+                quote_unit="USD",
+                source_memberships=(point_in_time.source.value,),
+                source_evidence_digests=(evidence_digest,),
+                identity_evidence=(identity,),
+                evidence_digest=manifest_digest((evidence_digest,)),
+                **fields,
+            )
+        return tuple(members[key] for key in sorted(members)), tuple(skipped)
+
+    def normalize(
+        self,
+        payloads: Sequence[RosterSourcePayloadV1],
+        datahub_identity_resolver: IdentityResolver,
+    ) -> tuple[NormalizedRosterMemberV1, ...]:
+        return self.normalize_with_skips(payloads, datahub_identity_resolver)[0]
+
+
+def _point_in_time_fields(row: Mapping[str, object]) -> dict[str, Any]:
+    """Return a point-in-time row's provider, intervals and pinned exit."""
+    provider = row.get("provider")
+    if provider not in {"yfinance", "wiki"}:
+        raise RosterCaptureError(
+            f"unsupported point-in-time provider: {provider}", code="integrity_error"
+        )
+    intervals = _intervals(row.get("membership_intervals"))
+    if not intervals:
+        raise RosterCaptureError(
+            "point-in-time row has no membership intervals", code="integrity_error"
+        )
+    raw_exit = row.get("terminal_exit")
+    return {
+        "provider": provider,
+        "membership_intervals": intervals,
+        "terminal_exit": None if raw_exit is None else _terminal_exit(raw_exit),
+    }
+
+
+def _integrity(message: str) -> RosterCaptureError:
+    return RosterCaptureError(message, code="integrity_error")
+
+
+def _iso(value: object) -> str:
+    """Return ``value`` when it is an ISO ``YYYY-MM-DD`` string."""
+    try:
+        if isinstance(value, str) and date.fromisoformat(value).isoformat() == value:
+            return value
+    except ValueError:
+        pass
+    raise _integrity(f"not an ISO date: {value!r}")
+
+
+def _intervals(value: object) -> MembershipIntervals:
+    """Parse ``[[start, end|null], ...]``: ordered, non-empty, open only last."""
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise _integrity("membership intervals are malformed")
+    parsed: list[tuple[str, str | None]] = []
+    for item in value:
+        if isinstance(item, (str, bytes)) or not isinstance(item, Sequence):
+            raise _integrity("membership interval is not a pair")
+        if len(item) != 2:
+            raise _integrity("membership interval is not a pair")
+        start, end = _iso(item[0]), None if item[1] is None else _iso(item[1])
+        if end is not None and start >= end:
+            raise _integrity(f"membership interval ends before it starts: {start}")
+        if parsed and parsed[-1][1] is None:
+            raise _integrity("open membership interval is not the last")
+        parsed.append((start, end))
+    return tuple(parsed)
+
+
+def _terminal_exit(value: object) -> TerminalExitV1:
+    """Parse a pinned exit; canonical JSON stores the price as a float hex."""
+    if not isinstance(value, Mapping):
+        raise _integrity("terminal exit is not a mapping")
+    missing = {"exit_date", "event_type", "terminal_price", "event_digest"} - set(value)
+    if missing:
+        raise _integrity(f"terminal exit lacks {sorted(missing)}")
+    price, event_type, digest = (
+        value["terminal_price"],
+        value["event_type"],
+        value["event_digest"],
+    )
+    if event_type not in {"acquisition", "bankruptcy", "delisting"}:
+        raise _integrity(f"unsupported terminal exit type: {event_type!r}")
+    if not isinstance(digest, str) or not digest:
+        raise _integrity("terminal exit digest is missing")
+    try:
+        if isinstance(price, str):
+            price = float.fromhex(price)
+    except ValueError as exc:
+        raise _integrity("terminal exit price is malformed") from exc
+    if price is not None and (
+        isinstance(price, bool) or not isinstance(price, (int, float))
+    ):
+        raise _integrity("terminal exit price is malformed")
+    return TerminalExitV1(
+        exit_date=_iso(value["exit_date"]),
+        event_type=event_type,
+        terminal_price=None if price is None else float(price),
+        event_digest=digest,
+    )
 
 
 @dataclass(frozen=True)
@@ -586,6 +827,24 @@ class CapturedRosterMemberV1:
     source_memberships: tuple[str, ...]
     identity_evidence: tuple[MarketIdentityEvidence, ...]
     evidence_digest: str
+    provider: str = ""
+    membership_intervals: MembershipIntervals = ()
+    terminal_exit: TerminalExitV1 | None = None
+
+
+#: Member fields of a V1 manifest; V2 manifests add ``_POINT_IN_TIME_FIELDS``.
+_V1_MEMBER_FIELDS = (
+    "security_id",
+    "mic",
+    "calendar",
+    "provider_symbol",
+    "currency",
+    "quote_unit",
+    "source_memberships",
+    "identity_evidence",
+    "evidence_digest",
+)
+_POINT_IN_TIME_FIELDS = ("provider", "membership_intervals", "terminal_exit")
 
 
 @dataclass(frozen=True)
@@ -611,6 +870,11 @@ class CapturedRosterV1:
                     for evidence in item["identity_evidence"]
                 ),
                 evidence_digest=item["evidence_digest"],
+                provider=item.get("provider", ""),
+                membership_intervals=_intervals(item.get("membership_intervals", ())),
+                terminal_exit=None
+                if item.get("terminal_exit") is None
+                else _terminal_exit(item["terminal_exit"]),
             )
             for item in payload["members"]
         )
@@ -618,6 +882,16 @@ class CapturedRosterV1:
 
 
 SourceFetcher = Callable[[], RosterSourcePayloadV1]
+
+
+def _manifest_member(
+    member: CapturedRosterMemberV1, source_order: Sequence[RosterSource]
+) -> dict[str, object]:
+    """Render a member; V1 manifests keep exactly their original fields."""
+    fields = _V1_MEMBER_FIELDS
+    if RosterSource.SP500_POINT_IN_TIME in source_order:
+        fields += _POINT_IN_TIME_FIELDS
+    return {field: getattr(member, field) for field in fields}
 
 
 def _capture_content_digest(manifest: Mapping[str, object]) -> str:
@@ -655,21 +929,10 @@ def _capture_content_digest(manifest: Mapping[str, object]) -> str:
                 "identity_evidence": getattr(member, "identity_evidence", None),
                 "evidence_digest": getattr(member, "evidence_digest", None),
             }
-        members.append(
-            {
-                field: values.get(field)
-                for field in (
-                    "mic",
-                    "calendar",
-                    "provider_symbol",
-                    "currency",
-                    "quote_unit",
-                    "source_memberships",
-                    "identity_evidence",
-                    "evidence_digest",
-                )
-            }
+        fields = _V1_MEMBER_FIELDS[1:] + tuple(
+            field for field in _POINT_IN_TIME_FIELDS if field in values
         )
+        members.append({field: values.get(field) for field in fields})
     return manifest_digest(
         {
             "policy_version": manifest.get("policy_version"),
@@ -686,19 +949,38 @@ class ReconstructionRosterCaptureService:
     def __init__(
         self,
         repository: BacktestRepository,
-        source_fetchers: tuple[SourceFetcher, SourceFetcher, SourceFetcher],
+        source_fetchers: Sequence[SourceFetcher],
         datahub_identity_resolver: IdentityResolver,
         *,
         id_generator: Callable[[], str] = lambda: str(uuid4()),
         clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         policy: ReconstructionRosterPolicyV1 | None = None,
     ) -> None:
+        """Bind the repository, one fetcher per policy source and the policy."""
         self._repository = repository
         self._source_fetchers = source_fetchers
         self._identity_resolver = datahub_identity_resolver
         self._id_generator = id_generator
         self._clock = clock
         self._policy = policy or ReconstructionRosterPolicyV1()
+        if len(source_fetchers) != len(self._policy.source_order):
+            raise ValueError("one source fetcher is required per policy source")
+
+    @staticmethod
+    def _assumed_mic_identity(
+        member: NormalizedRosterMemberV1,
+        existing: Sequence[SecurityIdentityV1],
+    ) -> SecurityIdentityV1 | None:
+        """Reuse the one stored US identity of an assumed-MIC member's symbol."""
+        if member.identity_evidence[0].evidence_source != MIC_ASSUMED_EVIDENCE:
+            return None
+        found = [
+            identity
+            for identity in existing
+            if identity.provider_symbol == member.provider_symbol
+            and identity.mic in _US_MICS
+        ]
+        return found[0] if len(found) == 1 else None
 
     def capture(
         self,
@@ -717,11 +999,16 @@ class ReconstructionRosterCaptureService:
                 raise RosterCaptureError(
                     "lineage roster evidence is missing", code="integrity_error"
                 )
+            if json.loads(existing_json).get("policy_version") != self._policy.version:
+                raise RosterCaptureError(
+                    "lineage roster was captured under another policy",
+                    code="integrity_error",
+                )
             return CapturedRosterV1.from_json(existing_digest, existing_json)
 
         payloads: list[RosterSourcePayloadV1] = []
         for expected, fetch in zip(
-            REQUIRED_SOURCE_ORDER, self._source_fetchers, strict=True
+            self._policy.source_order, self._source_fetchers, strict=True
         ):
             payload = fetch()
             if payload.source is not expected:
@@ -729,7 +1016,9 @@ class ReconstructionRosterCaptureService:
                     f"expected {expected.value}, received {payload.source.value}"
                 )
             payloads.append(payload)
-        normalized = self._policy.normalize(payloads, self._identity_resolver)
+        normalized, skipped = self._policy.normalize_with_skips(
+            payloads, self._identity_resolver
+        )
         captured_at = self._clock()
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
             raise ValueError("capture clock must return a timezone-aware instant")
@@ -760,6 +1049,10 @@ class ReconstructionRosterCaptureService:
                             code="integrity_error",
                         )
                 else:
+                    identity = self._assumed_mic_identity(member, existing_identities)
+                    if identity is not None:
+                        member = replace(member, mic=identity.mic)
+                if identity is None:
                     identity = SecurityIdentityV1(
                         security_id=self._id_generator(),
                         mic=member.mic,
@@ -780,6 +1073,9 @@ class ReconstructionRosterCaptureService:
                     source_memberships=member.source_memberships,
                     identity_evidence=member.identity_evidence,
                     evidence_digest=member.evidence_digest,
+                    provider=member.provider,
+                    membership_intervals=member.membership_intervals,
+                    terminal_exit=member.terminal_exit,
                 )
             )
 
@@ -821,7 +1117,7 @@ class ReconstructionRosterCaptureService:
         provenance = RosterProvenanceV1(captured_at)
         manifest_body = {
             "schema_version": ROSTER_MANIFEST_VERSION,
-            "policy_version": ROSTER_POLICY_VERSION,
+            "policy_version": self._policy.version,
             "captured_at": captured_at,
             "identity_registry_revision": registry.revision,
             "alias_revision": committed_alias_manifest.revision,
@@ -839,16 +1135,21 @@ class ReconstructionRosterCaptureService:
                 }
                 for payload in payloads
             ],
-            "members": captured_members,
+            "members": [
+                _manifest_member(member, self._policy.source_order)
+                for member in captured_members
+            ],
             "provenance": provenance,
         }
+        if RosterSource.SP500_POINT_IN_TIME in self._policy.source_order:
+            manifest_body["skipped_point_in_time_rows"] = list(skipped)
         roster_digest = manifest_digest(manifest_body)
         manifest_json = canonical_json(manifest_body)
         commit = RosterCaptureCommit(
             lineage_id=lineage_id,
             roster_digest=roster_digest,
             roster_manifest_json=manifest_json,
-            policy_version=ROSTER_POLICY_VERSION,
+            policy_version=self._policy.version,
             identity_registry_revision=registry.revision,
             identity_registry_json=canonical_json(
                 {
