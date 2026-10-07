@@ -13,6 +13,7 @@ from app.services.backtest.reconstruction_roster import (
     DataHubRosterSourceAdapter,
     ReconstructionRosterCaptureService,
     MarketIdentityEvidence,
+    REQUIRED_SOURCE_ORDER,
     ReconstructionRosterPolicyV1,
     RosterCaptureError,
     RosterSource,
@@ -297,7 +298,7 @@ def test_capture_commits_manifest_once_per_lineage_and_refresh_reuses_identities
     refreshed = service.capture("lineage-2", empty_aliases)
 
     assert first.roster_digest == again.roster_digest
-    assert calls == [source.value for source in RosterSource] * 2
+    assert calls == [source.value for source in REQUIRED_SOURCE_ORDER] * 2
     assert [member.security_id for member in first.members] == [
         member.security_id for member in refreshed.members
     ]

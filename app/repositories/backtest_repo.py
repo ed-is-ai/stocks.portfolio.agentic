@@ -300,7 +300,7 @@ CREATE TABLE IF NOT EXISTS reconstruction_rosters (
 );
 CREATE TABLE IF NOT EXISTS reconstruction_roster_sources (
     roster_digest TEXT NOT NULL REFERENCES reconstruction_rosters(roster_digest),
-    source_name TEXT NOT NULL CHECK(source_name IN ('datahub_sp500', 'tradingview_us', 'tradingview_uk')),
+    source_name TEXT NOT NULL CHECK(source_name IN ('datahub_sp500', 'tradingview_us', 'tradingview_uk', 'sp500_point_in_time')),
     payload_digest TEXT NOT NULL,
     original_payload_json TEXT NOT NULL,
     retrieved_at TEXT NOT NULL,
@@ -1978,6 +1978,71 @@ def _migrate_trade_log_kind_constraint(conn: sqlite3.Connection) -> None:
         raise sqlite3.IntegrityError("trade log kind migration violated foreign keys")
 
 
+def _migrate_roster_source_constraint(conn: sqlite3.Connection) -> None:
+    """Admit the ``sp500_point_in_time`` roster source (#82) without data loss."""
+    table = "reconstruction_roster_sources"
+    replacement = f"{table}__pit_migration"
+    legacy = "'tradingview_uk')"
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    stale = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (replacement,)
+    ).fetchone()
+    sql = "" if row is None else str(row[0])
+    pending = legacy in sql
+    if sql and not pending and "'sp500_point_in_time'" not in sql:
+        raise sqlite3.DatabaseError("unrecognised roster source schema")
+    if not pending and stale is None:
+        return
+
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if stale is not None:
+            conn.execute(f'DROP TABLE "{replacement}"')
+        if pending and row is not None:
+            triggers = conn.execute(
+                """SELECT name, sql FROM sqlite_master
+                   WHERE type='trigger' AND sql IS NOT NULL
+                     AND (tbl_name=? OR instr(sql, ?) > 0)""",
+                (table, table),
+            ).fetchall()
+            columns = ", ".join(
+                f'"{item[1]}"'
+                for item in conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+            )
+            create_sql = (
+                str(row[0])
+                .replace(f'CREATE TABLE "{table}"', f'CREATE TABLE "{replacement}"', 1)
+                .replace(f"CREATE TABLE {table}", f"CREATE TABLE {replacement}", 1)
+                .replace(legacy, "'tradingview_uk', 'sp500_point_in_time')", 1)
+            )
+            if replacement not in create_sql:
+                raise sqlite3.DatabaseError("unrecognised roster source schema")
+            conn.execute(create_sql)
+            conn.execute(
+                f'INSERT INTO "{replacement}" ({columns}) '
+                f'SELECT {columns} FROM "{table}"'
+            )
+            for name, _sql in triggers:
+                conn.execute(f'DROP TRIGGER "{name}"')
+            conn.execute(f'DROP TABLE "{table}"')
+            conn.execute(f'ALTER TABLE "{replacement}" RENAME TO "{table}"')
+            for _name, sql in triggers:
+                conn.execute(str(sql))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+    if conn.execute(f'PRAGMA foreign_key_check("{table}")').fetchall():
+        raise sqlite3.IntegrityError("roster source migration violated foreign keys")
+
+
 def _ensure_trigger(conn: sqlite3.Connection, definition: str) -> None:
     """Replace a migrated trigger only when its stored definition differs."""
     definition = definition.strip().rstrip(";")
@@ -2071,6 +2136,7 @@ class BacktestRepository:
             _migrate_bats_mic_constraints(conn)
             _migrate_snapshot_exclusion_constraints(conn)
             _migrate_trade_log_kind_constraint(conn)
+            _migrate_roster_source_constraint(conn)
             conn.execute("BEGIN IMMEDIATE")
             columns = {
                 str(row[1])
