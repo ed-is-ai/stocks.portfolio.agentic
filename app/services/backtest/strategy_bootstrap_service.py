@@ -384,7 +384,8 @@ class StrategyProviderBundleV1:
                 ),
             ),
             TradingViewBatchMarketIdentityResolver(
-                provider_symbol_aliases=provider_symbol_aliases
+                provider_symbol_aliases=provider_symbol_aliases,
+                assume_us_listing=True,
             ),
             policy=PointInTimeRosterPolicyV2(
                 calendar=calendar,
