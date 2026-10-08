@@ -540,6 +540,7 @@ def _observed_members(
             alias_revision=alias,
             observed_symbol=m.provider_symbol,
             as_of_session_date=calendar.last_session_of_month(m.mic, month),
+            exclusion_evidence=None,
         )
         for m in sorted(roster.members, key=lambda item: item.security_id)
         if m.provider_symbol in symbols
