@@ -1044,3 +1044,100 @@ def test_setup_not_required_for_a_profile_captured_under_the_retired_runtime(
 
     assert service.reset_pending() is False
     assert service.is_setup_required() is False
+
+
+# ---------------------------------------------------------------------------
+# #82 C3b: production captures point-in-time (V2) rosters.
+# ---------------------------------------------------------------------------
+
+
+def _point_in_time_production(
+    monkeypatch: pytest.MonkeyPatch, root: Path, paths: tuple[Path, Path, Path]
+) -> StrategyProviderBundleV1:
+    """Production bundle over tmp databases with the live screens faked."""
+    from app.core import config
+    from app.repositories.historical_price_repo import HistoricalPriceRepository
+    from app.services.backtest import strategy_bootstrap_service as module
+
+    membership_db, wiki_db, overrides = paths
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "wiki_ticker_overrides.csv").write_text(overrides.read_text())
+    price_db = root / "historical_price_cache.db"
+    HistoricalPriceRepository(db.make_connect(lambda: price_db)).ensure_schema()
+    for name, value in (
+        ("ROOT_DIR", root),
+        ("INDEX_MEMBERSHIP_DB", membership_db),
+        ("WIKI_PRICES_DB", wiki_db),
+        ("HISTORICAL_PRICE_CACHE", price_db),
+    ):
+        monkeypatch.setattr(config, name, value)
+    datahub = _payload(RosterSource.DATAHUB_SP500, [{"symbol": "AAPL", "name": "A"}])
+    tradingview = {
+        "US": _payload(
+            RosterSource.TRADINGVIEW_US,
+            [{"symbol": "NASDAQ:AAPL", "exchange": "NASDAQ", "currency": "USD"}],
+        ),
+        "UK": _payload(
+            RosterSource.TRADINGVIEW_UK,
+            [{"symbol": "LSE:ULVR", "exchange": "LSE", "currency": "GBp"}],
+        ),
+    }
+    monkeypatch.setattr(
+        module, "DataHubRosterSourceAdapter", lambda _fetch: lambda: datahub
+    )
+    monkeypatch.setattr(
+        module,
+        "TradingViewRosterSourceAdapter",
+        lambda market: lambda: tradingview[market],
+    )
+    monkeypatch.setattr(
+        module,
+        "TradingViewBatchMarketIdentityResolver",
+        lambda **_kwargs: (
+            lambda _symbol, _row: MarketIdentityEvidence(
+                "XNAS", "USD", "USD", "test", "i" * 64
+            )
+        ),
+    )
+    return StrategyProviderBundleV1.production(_empty_repo(root / "backtest.db"))
+
+
+def test_production_bootstrap_captures_a_point_in_time_roster(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sources
+) -> None:
+    bundle = _point_in_time_production(monkeypatch, tmp_path / "root", sources)
+    aliases = SecurityAliasManifestV1.build((), created_at=NOW)
+
+    roster = bundle.roster_capture.capture("lineage", aliases)
+
+    manifest = json.loads(roster.canonical_manifest_json)
+    assert manifest["policy_version"] == "PointInTimeRosterPolicyV2"
+    assert "LEHMQ" in {m.provider_symbol for m in roster.members}
+    profile = bundle.snapshot_profile(roster.roster_digest)
+    assert profile.roster_policy_version == "PointInTimeRosterPolicyV2"
+
+
+def test_production_bootstrap_without_membership_db_is_provider_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sources
+) -> None:
+    missing = tmp_path / "absent" / "index_membership.db"
+    bundle = _point_in_time_production(
+        monkeypatch, tmp_path / "root", (missing, *sources[1:])
+    )
+    aliases = SecurityAliasManifestV1.build((), created_at=NOW)
+
+    with pytest.raises(RosterCaptureError) as caught:
+        bundle.roster_capture.capture("lineage", aliases)
+    failure = _bootstrap_failure(
+        caught.value, JobFailureCode.REQUIRED_DATA_MISSING, stage="Roster capture"
+    )
+
+    assert failure.code is JobFailureCode.PROVIDER_UNAVAILABLE
+    assert str(missing) in failure.detail
+    assert not missing.exists()
+
+
+def test_fixture_bootstrap_keeps_the_v1_roster_policy(tmp_path: Path) -> None:
+    bundle = StrategyProviderBundleV1.fixture(_empty_repo(tmp_path / "backtest.db"))
+    profile = bundle.snapshot_profile(ROSTER_DIGEST)
+    assert profile.roster_policy_version == "ReconstructionRosterPolicyV1"

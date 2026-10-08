@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
+from typing import Literal
 from uuid import uuid4
 
 import pandas as pd
@@ -18,7 +19,12 @@ from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.pipeline_status import PipelineState
 from app.schemas.source_health import SourceName, SourceResult
 from app.orchestration.orchestrator import _recover_bau_run_authority
-from app.services.backtest.bau_capture_coordinator import _first_eligible_capture_date
+from app.services.backtest.bau_capture_coordinator import (
+    BauCaptureCoordinator,
+    BauCaptureSession,
+    BauCaptureUnavailable,
+    _first_eligible_capture_date,
+)
 from app.services.backtest.bau_run_envelope import (
     BauCaptureMemberV1,
     BauRawEvidenceV1,
@@ -35,6 +41,10 @@ from app.services.backtest.observed_bau_record_builder import (
     ObservedBauRecordBuilder,
 )
 from app.services.backtest.bau_snapshot_promotion import BauSnapshotPromotionService
+from app.services.backtest.reconstruction_roster import (
+    CapturedRosterMemberV1,
+    CapturedRosterV1,
+)
 from app.services.backtest.snapshot_profile import ProfileDetectorV1, SnapshotProfileV1
 from app.services.backtest.source_manifest import (
     DetectorInputIdentityV1,
@@ -47,6 +57,7 @@ from app.schemas.analysis_artifact import build_analysis_payload
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RosterPolicy = Literal["ReconstructionRosterPolicyV1", "PointInTimeRosterPolicyV2"]
 
 
 def _payload() -> SimpleNamespace:
@@ -158,7 +169,9 @@ def _envelope(run_id: str) -> BauRunEnvelopeV1:
 
 
 def _capture(
-    run_id: str, payload: SimpleNamespace | None = None
+    run_id: str,
+    payload: SimpleNamespace | None = None,
+    policy: RosterPolicy = "ReconstructionRosterPolicyV1",
 ) -> BauSnapshotCaptureV1:
     raw = BauRawEvidenceV1.from_historical_payload(payload or _payload())
     detector_manifests = detector_source_manifests(PROJECT_ROOT)
@@ -175,7 +188,7 @@ def _capture(
         display_version="Scanner data v1",
         record_schema_version="historical_scan_record.v1",
         detectors=detectors,
-        roster_policy_version="ReconstructionRosterPolicyV1",
+        roster_policy_version=policy,
         roster_digest="c" * 64,
         identity_registry_version="SecurityIdentityRegistryV1",
         alias_policy_version="SecurityAliasManifestV1",
@@ -696,3 +709,165 @@ def test_replay_failure_does_not_block_later_envelopes(tmp_path, monkeypatch) ->
     with pytest.raises(Exception, match="stale profile"):
         service.replay_completed_envelopes()
     assert attempted == [first, second]
+
+
+# ---------------------------------------------------------------------------
+# #82 C3b: BAU under point-in-time (V2) rosters.
+# ---------------------------------------------------------------------------
+
+V2: RosterPolicy = "PointInTimeRosterPolicyV2"
+
+
+def _roster_member(symbol: str, *sources: str) -> CapturedRosterMemberV1:
+    return CapturedRosterMemberV1(
+        security_id=f"sec-{symbol}",
+        mic="XNYS",
+        calendar="XNYS",
+        provider_symbol=symbol,
+        currency="USD",
+        quote_unit="USD",
+        source_memberships=sources,
+        identity_evidence=(),
+        evidence_digest="e" * 64,
+    )
+
+
+PIT = "sp500_point_in_time"
+#: Three current-source members and two point-in-time-only delisted ones.
+MIXED = (
+    _roster_member("AAPL", "datahub_sp500", "tradingview_us", PIT),
+    _roster_member("MSFT", "tradingview_us"),
+    _roster_member("ULVR.L", "tradingview_uk"),
+    _roster_member("LEHMQ", PIT),
+    _roster_member("ENRNQ", PIT),
+)
+
+
+def _preloaded(
+    policy: RosterPolicy, members: tuple[CapturedRosterMemberV1, ...] = MIXED
+) -> tuple[str, ...]:
+    """Preload a roster of ``members`` and return the fetched symbols."""
+    roster = CapturedRosterV1("c" * 64, "{}", members)
+    session = BauCaptureSession(
+        run_id=str(uuid4()),
+        snapshot_month="2026-07",
+        profile=_capture(str(uuid4()), policy=policy).profile,
+        roster=roster,
+        roster_captured_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        alias_revision="a" * 64,
+        sessions={},
+        adapter=object(),  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 3, 12, tzinfo=timezone.utc),
+        project_root=PROJECT_ROOT,
+        backtest_repository=object(),  # type: ignore[arg-type]
+    )
+    session._capture_member = lambda member: (  # type: ignore[method-assign]
+        member,
+        member.provider_symbol,
+        pd.DataFrame(),
+    )
+    session.preload()
+    return session.roster_tickers()
+
+
+def test_v2_bau_preload_fetches_only_current_source_members() -> None:
+    assert _preloaded(V2) == ("AAPL", "MSFT", "ULVR.L")
+
+
+def test_v2_bau_without_current_source_members_is_unavailable() -> None:
+    with pytest.raises(BauCaptureUnavailable, match="no current-source"):
+        _preloaded(V2, MIXED[3:])
+
+
+def test_v1_bau_preload_still_fetches_the_whole_roster() -> None:
+    assert _preloaded("ReconstructionRosterPolicyV1") == (
+        "AAPL",
+        "ENRNQ",
+        "LEHMQ",
+        "MSFT",
+        "ULVR.L",
+    )
+
+
+def test_v2_promotion_keeps_captured_roster_provenance(tmp_path) -> None:
+    run_id = str(uuid4())
+    capture = _capture(run_id, _full_payload(), policy=V2)
+    store = BauRunEnvelopeStore(tmp_path)
+    store.publish(
+        BauRunEnvelopeV1(
+            run_id=run_id,
+            outcome="successful",
+            analysis_payload_digest="c" * 64,
+            prepared_at=datetime(2026, 8, 3, 12, 2, tzinfo=timezone.utc),
+            completion_state="completed",
+            completed_at=datetime(2026, 8, 3, 12, 3, tzinfo=timezone.utc),
+            capture=capture,
+            capture_digest=capture.capture_digest,
+        )
+    )
+    commits = []
+
+    class Backtest:
+        def is_promotable_bau(self, profile, envelope, *, envelope_store):
+            return SimpleNamespace(eligible=True, reason=None)
+
+        def commit_snapshot_month(self, commit, prices, **kwargs):
+            commits.append(commit)
+
+        def snapshot_member_revisions(self, profile_hash, snapshot_month):
+            return ()
+
+    class Prices:
+        def commit(self, payload):
+            return None
+
+    service = BauSnapshotPromotionService(
+        backtest_repository=Backtest(),  # type: ignore[arg-type]
+        price_repository=Prices(),  # type: ignore[arg-type]
+        envelope_directory=tmp_path,
+        clock=lambda: datetime(2026, 8, 3, 12, 4, tzinfo=timezone.utc),
+    )
+
+    assert service.promote_run(run_id)
+    (commit,) = commits
+    assert [m.security_id for m in commit.members] == ["sec-001"]
+    provenance = commit.records[0].provenance
+    # The roster is frozen at capture, so later months are not bias-free.
+    assert provenance.universe_basis == "captured_configured_roster"
+    assert provenance.point_in_time_universe is False
+    assert provenance.survivorship_bias == "known"
+    assert provenance.renamed_or_delisted_may_be_absent is True
+    assert provenance.price_provider == "yfinance"
+
+
+def test_v2_bau_skips_months_before_the_roster_capture() -> None:
+    profile = _capture(str(uuid4()), policy=V2).profile
+    manifest = {"members": [], "captured_at": "2026-08-01T00:00:00+00:00"}
+
+    class Backtest:
+        def active_snapshot_profile(self):
+            return SimpleNamespace(profile_hash=profile.profile_hash)
+
+        def snapshot_profile(self, profile_hash):
+            return profile
+
+        def validate_bau_profile_authority(self, profile):
+            return None
+
+        def snapshot_month(self, profile_hash, month):
+            return None
+
+        def roster_manifest_json(self, digest):
+            return json.dumps(manifest)
+
+        def claim_bau_capture_attempt(self, **kwargs):
+            raise AssertionError("a pre-capture month must not be claimed")
+
+    coordinator = BauCaptureCoordinator(
+        backtest_repository=Backtest(),  # type: ignore[arg-type]
+        envelope_directory=Path("unused"),
+        adapter=object(),  # type: ignore[arg-type]
+        clock=lambda: datetime(2026, 8, 3, 23, tzinfo=timezone.utc),
+    )
+
+    assert coordinator.prepare_for_run(str(uuid4())) is None

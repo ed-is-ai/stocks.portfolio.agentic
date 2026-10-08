@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Callable, Literal
 
 import requests
 
+from app.core import config
 from app.core.ticker_identity import load_provider_symbol_aliases
 from app.repositories.backtest_repo import BacktestIntegrityError
 from app.services.backtest.strategy_job import (
@@ -44,14 +45,15 @@ from app.services.backtest.reconstruction_roster import (
     DATAHUB_SP500_SOURCE_URL,
     DataHubRosterSourceAdapter,
     MarketIdentityEvidence,
+    PointInTimeRosterPolicyV2,
     ReconstructionRosterCaptureService,
-    ReconstructionRosterPolicyV1,
     RosterCaptureError,
     RosterSource,
     RosterSourcePayloadV1,
     TradingViewRosterSourceAdapter,
     TradingViewBatchMarketIdentityResolver,
 )
+from app.services.backtest.point_in_time_roster import PointInTimeRosterSourceAdapter
 from app.services.backtest.security_identity import SecurityAliasManifestV1
 from app.services.backtest.snapshot_profile import ProfileDetectorV1, SnapshotProfileV1
 from app.services.backtest.source_manifest import (
@@ -372,49 +374,25 @@ class StrategyProviderBundleV1:
                 DataHubRosterSourceAdapter(_fetch_datahub_sp500),
                 TradingViewRosterSourceAdapter("US"),
                 TradingViewRosterSourceAdapter("UK"),
+                # #82 C3b: local, read-only; a missing database fails the
+                # capture as provider_unavailable (no V1 fallback).
+                PointInTimeRosterSourceAdapter(
+                    config.INDEX_MEMBERSHIP_DB,
+                    config.WIKI_PRICES_DB,
+                    config.ROOT_DIR / "config" / "wiki_ticker_overrides.csv",
+                    price_db=config.HISTORICAL_PRICE_CACHE,
+                ),
             ),
             TradingViewBatchMarketIdentityResolver(
                 provider_symbol_aliases=provider_symbol_aliases
             ),
-            policy=ReconstructionRosterPolicyV1(
+            policy=PointInTimeRosterPolicyV2(
                 calendar=calendar,
                 provider_symbol_aliases=provider_symbol_aliases,
             ),
         )
         aliases = SecurityAliasManifestV1.build((), created_at=now)
-
-        def profile(roster_digest: str) -> SnapshotProfileV1:
-            manifests = detector_source_manifests(Path(__file__).resolve().parents[3])
-            return SnapshotProfileV1(
-                schema_version="snapshot_profile.v1",
-                display_version="Scanner data v1",
-                record_schema_version="historical_scan_record.v1",
-                detectors=tuple(
-                    ProfileDetectorV1(
-                        detector_id=item.detector_id,
-                        detector_api_version=item.detector_api_version,
-                        detector_version=manifests[item.detector_id].digest,
-                    )
-                    for item in DETECTOR_REGISTRY
-                ),
-                roster_policy_version="ReconstructionRosterPolicyV1",
-                roster_digest=roster_digest,
-                identity_registry_version="SecurityIdentityRegistryV1",
-                alias_policy_version="SecurityAliasManifestV1",
-                source_policy_version="FreeHistoricalSourcePolicyV1",
-                calendar_policy_version="PerExchangeMonthEndV1",
-                calendar_dataset_version="exchange-calendars-v1",
-                calendar_dataset_digest=calendar.session_table_digest(),
-                yfinance_request_contract_version="YFinanceDailyProviderNativeV1",
-                yfinance_ingestion_version=yfinance_ingestion_source_manifest(
-                    Path(__file__).resolve().parents[3]
-                ).digest,
-                market_plane_policy_version=PRICE_VOLUME_PLANE_VERSION,
-                reconstructability_policy_version="reconstructability.v1",
-                provenance_vocabulary=("best_effort_reconstructed", "observed_bau"),
-                cadence="per-exchange month_end",
-            )
-
+        profile = _profile_factory("PointInTimeRosterPolicyV2")
         return cls(runner, roster, aliases, profile, "production")
 
     @classmethod
@@ -466,14 +444,56 @@ class StrategyProviderBundleV1:
             id_generator=lambda: next(identifiers),
             clock=lambda: fixed,
         )
-        production = cls.production(repository)
         return cls(
             runner,
             roster,
             SecurityAliasManifestV1.build((), created_at=fixed),
-            production.snapshot_profile,
+            _profile_factory("ReconstructionRosterPolicyV1"),
             "fixture",
         )
+
+
+def _profile_factory(
+    roster_policy_version: Literal[
+        "ReconstructionRosterPolicyV1", "PointInTimeRosterPolicyV2"
+    ],
+) -> Callable[[str], SnapshotProfileV1]:
+    """Return the runtime snapshot profile builder for one roster policy."""
+    calendar = TradingCalendar()
+
+    def profile(roster_digest: str) -> SnapshotProfileV1:
+        manifests = detector_source_manifests(Path(__file__).resolve().parents[3])
+        return SnapshotProfileV1(
+            schema_version="snapshot_profile.v1",
+            display_version="Scanner data v1",
+            record_schema_version="historical_scan_record.v1",
+            detectors=tuple(
+                ProfileDetectorV1(
+                    detector_id=item.detector_id,
+                    detector_api_version=item.detector_api_version,
+                    detector_version=manifests[item.detector_id].digest,
+                )
+                for item in DETECTOR_REGISTRY
+            ),
+            roster_policy_version=roster_policy_version,
+            roster_digest=roster_digest,
+            identity_registry_version="SecurityIdentityRegistryV1",
+            alias_policy_version="SecurityAliasManifestV1",
+            source_policy_version="FreeHistoricalSourcePolicyV1",
+            calendar_policy_version="PerExchangeMonthEndV1",
+            calendar_dataset_version="exchange-calendars-v1",
+            calendar_dataset_digest=calendar.session_table_digest(),
+            yfinance_request_contract_version="YFinanceDailyProviderNativeV1",
+            yfinance_ingestion_version=yfinance_ingestion_source_manifest(
+                Path(__file__).resolve().parents[3]
+            ).digest,
+            market_plane_policy_version=PRICE_VOLUME_PLANE_VERSION,
+            reconstructability_policy_version="reconstructability.v1",
+            provenance_vocabulary=("best_effort_reconstructed", "observed_bau"),
+            cadence="per-exchange month_end",
+        )
+
+    return profile
 
 
 def _production_probes() -> dict[str, ProbeDefinition]:
