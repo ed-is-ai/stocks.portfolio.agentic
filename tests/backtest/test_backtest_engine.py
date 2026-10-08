@@ -2290,10 +2290,10 @@ def test_missing_open_on_fill_session_carries_forward_prior_close() -> None:
     assert fills[0].fill_price_native == Decimal("101")
 
 
-def test_missing_open_without_prior_close_remains_fatal() -> None:
+def test_fill_before_the_first_observation_is_skipped() -> None:
+    """#82: a joiner's fill before its evidence starts is skipped, not fatal."""
     start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
     full_sessions = _sessions("XNYS", start, end_exclusive)
-    gap_day = full_sessions[1]
     market_data, pinned = _build_security(
         "sec-a", "XNYS", full_sessions[2:], revision=DIGEST_A
     )
@@ -2306,16 +2306,16 @@ def test_missing_open_without_prior_close_remains_fatal() -> None:
         end_month=_month_str(start),
     )
 
-    with pytest.raises(SimulationError) as exc_info:
-        run_simulation(
-            manifest=manifest,
-            strategy=_ScriptedStrategy(entries={full_sessions[0]: [signal]}),
-            market_view_factory=_market_view_factory(),
-            security_market_data=(market_data,),
-        )
+    output = run_simulation(
+        manifest=manifest,
+        strategy=_ScriptedStrategy(entries={full_sessions[0]: [signal]}),
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+    )
 
-    assert exc_info.value.code == "missing_required_open"
-    assert exc_info.value.session == gap_day
+    (skip,) = [e for e in output.events if isinstance(e, SkippedSignalEventV1)]
+    assert skip.reason is SkipReasonCode.NO_PRICE_BEFORE_EVIDENCE_START
+    assert output.final_open_positions == ()
 
 
 def test_fx_evidence_revision_mismatch_against_pinned_fx_revision_aborts_fatal() -> (

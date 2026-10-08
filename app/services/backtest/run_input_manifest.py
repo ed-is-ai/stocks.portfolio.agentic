@@ -32,6 +32,7 @@ resolves fails with ``historical_price_repo.EvidenceMissingError``
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version
@@ -86,7 +87,7 @@ RUN_INPUT_MANIFEST_V3_VERSION = "run_input_manifest.v3"
 #: ``execution_contract_digest`` computed against the pre-Story-2.4
 #: placeholder semantics is no longer comparable. Bump again the moment
 #: engine/protocol behavior changes.
-ENGINE_VERSION = "backtest_engine.v9"
+ENGINE_VERSION = "backtest_engine.v10"
 PROTOCOL_SCHEMA_VERSION = "strategy_protocol.v6"
 
 #: Story 2.4 landed ``backtest_engine.py`` as real, hashable source, so
@@ -186,6 +187,24 @@ class PinnedSecurityEvidenceV1(_RunInputModel):
     fx_revision: Digest | None = None
 
 
+#: Exit types that settle a held position (#82); ``still_trading``,
+#: ``rename`` and ``unknown`` are not company exits.
+SettlingExitType = Literal["acquisition", "bankruptcy", "delisting"]
+
+
+class TerminalExitV1(_RunInputModel):
+    """One pinned company exit (#82): a held position is cashed out on the
+    first engine session on or after ``exit_session``."""
+
+    security_id: NonEmpty
+    exit_session: date
+    exit_type: SettlingExitType
+    #: Native quote-unit price; ``None`` settles at the last close on or
+    #: before ``exit_session``.
+    terminal_price_native: Decimal | None = Field(default=None, ge=Decimal(0))
+    source_digest: Digest
+
+
 class RunInputManifestV1(_RunInputModel):
     """One Backtest Run's complete, canonically pinned replay identity.
 
@@ -232,6 +251,10 @@ class RunInputManifestV1(_RunInputModel):
     base_currency: Literal["GBP", "USD"]
     starting_capital: Decimal = Field(gt=Decimal(0))
 
+    #: Pinned company exits of point-in-time runs (#82); omitted from the
+    #: canonical payload when empty so earlier digests are unchanged.
+    terminal_exits: tuple[TerminalExitV1, ...] = ()
+
     @field_validator("detector_source_digests")
     @classmethod
     def _exact_detector_set(
@@ -267,6 +290,15 @@ class RunInputManifestV1(_RunInputModel):
             raise ValueError("start_month must not be after end_month")
         return self
 
+    @model_validator(mode="after")
+    def _exits_of_pinned_securities(self) -> "RunInputManifestV1":
+        exit_ids = [item.security_id for item in self.terminal_exits]
+        if len(set(exit_ids)) != len(exit_ids):
+            raise ValueError("terminal_exits must not repeat a security_id")
+        if not set(exit_ids) <= {item.security_id for item in self.securities}:
+            raise ValueError("terminal_exits must name pinned securities")
+        return self
+
     def canonical_payload(self) -> dict[str, object]:
         """Return the flat, sorted mapping every digest is computed over.
 
@@ -279,7 +311,12 @@ class RunInputManifestV1(_RunInputModel):
         """
         payload = self.model_dump(
             mode="python",
-            exclude={"detector_source_digests", "securities", "starting_capital"},
+            exclude={
+                "detector_source_digests",
+                "securities",
+                "starting_capital",
+                "terminal_exits",
+            },
         )
         payload["detector_source_digests"] = [
             detector.model_dump(mode="python")
@@ -292,6 +329,11 @@ class RunInputManifestV1(_RunInputModel):
             for security in sorted(self.securities, key=lambda item: item.security_id)
         ]
         payload["starting_capital"] = str(self.starting_capital)
+        if self.terminal_exits:
+            payload["terminal_exits"] = [
+                item.model_dump(mode="json")
+                for item in sorted(self.terminal_exits, key=lambda x: x.security_id)
+            ]
         return payload
 
     def canonical_json(self) -> str:
@@ -660,6 +702,7 @@ def build_run_input_manifest(
     base_currency: Literal["GBP", "USD"],
     starting_capital: Decimal,
     securities: tuple[PinnedSecurityEvidenceV1, ...],
+    terminal_exits: tuple[TerminalExitV1, ...] = (),
 ) -> RunInputManifestV1:
     """Resolve, verify, and canonically bind one Run's complete input identity.
 
@@ -770,6 +813,7 @@ def build_run_input_manifest(
         ordered_month_digest=ordered_month_digest,
         base_currency=base_currency,
         starting_capital=starting_capital,
+        terminal_exits=terminal_exits,
     )
 
 
@@ -784,6 +828,7 @@ __all__ = [
     "RunInputManifestError",
     "RunInputManifestV1",
     "RunInputManifestV2",
+    "TerminalExitV1",
     "current_execution_contract_payload",
     "current_execution_contract_digest",
     "read_run_input_manifest",

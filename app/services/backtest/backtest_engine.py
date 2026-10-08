@@ -75,7 +75,11 @@ from app.services.backtest.market_planes import (
     deterministic_decimal_context,
     quantize_eight,
 )
-from app.services.backtest.run_input_manifest import RunInputManifestV1
+from app.services.backtest.run_input_manifest import (
+    RunInputManifestV1,
+    SettlingExitType,
+    TerminalExitV1,
+)
 from app.services.backtest.strategy_explanation import SignalExplanationV1
 from app.services.backtest.strategy_protocol import (
     InitialEntrySelectionProviderV1,
@@ -164,6 +168,10 @@ class SkipReasonCode(StrEnum):
     FILL_BEYOND_END = "fill_beyond_end"
     MAX_CONCURRENT_POSITIONS = "max_concurrent_positions"
     SECURITY_EXITED = "security_exited"
+    #: A fill session after the last observation, or evidence without rows.
+    NO_PRICE_AFTER_EVIDENCE_END = "no_price_after_evidence_end"
+    #: A fill session before the first observation (a point-in-time joiner).
+    NO_PRICE_BEFORE_EVIDENCE_START = "no_price_before_evidence_start"
 
 
 class CandidateAuditDisposition(StrEnum):
@@ -372,25 +380,6 @@ class OpenPositionMarkEventV1(_EngineModel):
     @field_serializer("shares", when_used="json")
     def _serialize_shares(self, value: Decimal) -> int | str:
         return _serialize_share_quantity(value)
-
-
-#: Exit types that settle a held position (#82); ``still_trading``,
-#: ``rename`` and ``unknown`` are not company exits.
-#: Exit types that cash out a held position; others are not exits.
-SettlingExitType = Literal["acquisition", "bankruptcy", "delisting"]
-
-
-class TerminalExitV1(_EngineModel):
-    """One pinned company exit (#82): a held position is cashed out on the
-    first engine session on or after ``exit_session``."""
-
-    security_id: str = Field(min_length=1)
-    exit_session: date
-    exit_type: SettlingExitType
-    #: Native quote-unit price; ``None`` settles at the last close on or
-    #: before ``exit_session``.
-    terminal_price_native: Decimal | None = Field(default=None, ge=Decimal(0))
-    source_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class TerminalSettlementEventV1(_EngineModel):
@@ -942,6 +931,7 @@ class _Engine:
         self.equity_curve: list[EquityCurvePointV1] = []
         self.final_open_positions: tuple[OpenPositionMarkEventV1, ...] = ()
         self.initial_entry_selection: InitialEntrySelectionV1 | None = None
+        self._last_observations: dict[str, date] = {}
 
     # -- sequencing -----------------------------------------------------
 
@@ -968,6 +958,20 @@ class _Engine:
         rows = context.plane.as_traded()
         index = bisect_right(tuple(row.session for row in rows), as_of) - 1
         return None if index < 0 else rows[index]
+
+    def _past_evidence_end(self, security_id: str, session: date) -> bool:
+        """Whether ``session`` follows the security's last observation (#82).
+
+        Point-in-time leavers' evidence ends before the run does; nothing
+        past that end is looked up. Evidence without rows covers no session.
+        """
+        last = self._last_observations.get(security_id)
+        if last is None:
+            bound = self.market_data[security_id].end - timedelta(days=1)
+            row = self._latest_row_on_or_before(security_id, bound)
+            last = date.min if row is None else row.session
+            self._last_observations[security_id] = last
+        return session > last
 
     def _row_on(self, security_id: str, session: date) -> AsTradedRow | None:
         context = self.market_data[security_id]
@@ -1038,6 +1042,8 @@ class _Engine:
         self, session: date, session_events: list[TradeLogEvent]
     ) -> None:
         for security_id in sorted(self.positions):
+            if self._past_evidence_end(security_id, session):
+                continue
             actions = self._actions_on(security_id, session)
             exit_item = self.terminal_exits.get(security_id)
             for action in actions:
@@ -1218,13 +1224,27 @@ class _Engine:
                 SkipReasonCode.SECURITY_EXITED,
                 "security has left the market",
             )
+        if self._past_evidence_end(order.security_id, session):
+            return self._skip_order(
+                order,
+                session,
+                SkipReasonCode.NO_PRICE_AFTER_EVIDENCE_END,
+                "price evidence ends before this session",
+            )
         row = self._row_on(order.security_id, session)
         price_native = row.open if row is not None else None
         if price_native is None:
             # Match valuation/FX weekend behavior: an exchange session with
             # no observation carries the prior as-traded close forward.
             previous = self._latest_row_on_or_before(order.security_id, session)
-            price_native = None if previous is None else previous.close
+            if previous is None:
+                return self._skip_order(
+                    order,
+                    session,
+                    SkipReasonCode.NO_PRICE_BEFORE_EVIDENCE_START,
+                    "price evidence starts after this session",
+                )
+            price_native = previous.close
         if price_native is None:
             raise _fatal(
                 SimulationErrorCode.MISSING_REQUIRED_OPEN,
@@ -2173,6 +2193,7 @@ __all__ = [
     "PendingOrderV1",
     "SecurityMarketDataV1",
     "SessionBatchSink",
+    "SettlingExitType",
     "SimulationError",
     "SimulationErrorCode",
     "SimulationOutputV1",

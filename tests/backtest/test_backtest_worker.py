@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 import pandas as pd
@@ -30,6 +31,7 @@ from app.services.backtest.run_input_manifest import (
     DetectorSourceDigestV1,
     PinnedSecurityEvidenceV1,
     RunInputManifestV1,
+    TerminalExitV1,
     build_run_input_manifest_v2,
     current_execution_contract_payload,
 )
@@ -38,7 +40,10 @@ from app.services.backtest.backtest_engine import (
     EquityCurvePointV1,
     ExitFillEventV1,
     OpenPositionMarkEventV1,
+    SkipReasonCode,
+    SkippedSignalEventV1,
     SplitAppliedEventV1,
+    TerminalSettlementEventV1,
 )
 from app.services.backtest.market_view import MarketView
 import app.services.backtest.backtest_engine as backtest_engine_module
@@ -1159,8 +1164,11 @@ def test_worker_carries_forward_prior_close_for_missing_fill_open(
     full_sessions = TradingCalendar().sessions_in_range(
         "XNYS", date(2026, 6, 1), date(2026, 7, 1)
     )
+    # An interior gap: evidence ending early skips the fill instead (#82).
     revision = _commit_evidence(
-        prices, security_id=SECURITY_ID, sessions=full_sessions[:2]
+        prices,
+        security_id=SECURITY_ID,
+        sessions=full_sessions[:2] + full_sessions[3:],
     )
     manifest = _manifest(
         revision=revision,
@@ -1186,6 +1194,127 @@ def test_worker_carries_forward_prior_close_for_missing_fill_open(
     assert exit_fills
     assert exit_fills[0].fill_session == full_sessions[2]
     assert exit_fills[0].fill_price_native == Decimal("100.5")
+
+
+def test_worker_runs_pinned_exits_past_an_early_evidence_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#82: exits ride the manifest; nothing is read past the evidence end."""
+    _patch_strategy_resolution(monkeypatch)
+    repo = _repo(tmp_path / "backtest.db")
+    prices = _price_repo(tmp_path)
+    full_sessions = TradingCalendar().sessions_in_range(
+        "XNYS", date(2026, 6, 1), date(2026, 7, 1)
+    )
+    revision = _commit_evidence(
+        prices, security_id=SECURITY_ID, sessions=full_sessions[:2]
+    )
+    exit_item = TerminalExitV1(
+        security_id=SECURITY_ID,
+        exit_session=full_sessions[5],
+        exit_type="acquisition",
+        terminal_price_native=Decimal("45.5"),
+        source_digest="e" * 64,
+    )
+    manifest = _manifest(
+        revision=revision,
+        start_month="2026-06",
+        end_month="2026-06",
+        parameters={"watch_security_id": SECURITY_ID, "fixed_shares": 1},
+    ).model_copy(update={"terminal_exits": (exit_item,)})
+    _enqueue(repo, manifest)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+    priced: dict[date, set[str]] = {}
+    real_view = worker_module.MarketView
+
+    def recording_view(**kwargs):
+        priced[kwargs["as_of_session"]] = set(kwargs["security_price_revisions"])
+        return real_view(**kwargs)
+
+    monkeypatch.setattr(worker_module, "MarketView", recording_view)
+    engine = worker_module.build_backtest_engine(claim.job.id, claim.claim_token, repo)
+    engine._prices = prices  # type: ignore[attr-defined]
+
+    result = engine.run(claim.job.id, claim.claim_token)
+
+    assert result.status is StrategyJobStatus.COMPLETE
+    events = repo.backtest_result(claim.job.id).events
+    skipped = [e for e in events if isinstance(e, SkippedSignalEventV1)]
+    assert SkipReasonCode.NO_PRICE_AFTER_EVIDENCE_END in {e.reason for e in skipped}
+    (settlement,) = [e for e in events if isinstance(e, TerminalSettlementEventV1)]
+    assert settlement.session == full_sessions[5]
+    assert settlement.settlement_price_native == Decimal("45.5")
+    assert priced[full_sessions[1]] == {SECURITY_ID}
+    assert priced[full_sessions[2]] == set()
+
+
+def _joiner_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, roster: object
+) -> tuple[Any, dict[date, bool], tuple[date, ...]]:
+    """Run June 2026 with ``point_in_time_roster`` stubbed to ``roster``."""
+    _patch_strategy_resolution(monkeypatch)
+    repo = _repo(tmp_path / "backtest.db")
+    prices = _price_repo(tmp_path)
+    sessions = TradingCalendar().sessions_in_range(
+        "XNYS", date(2026, 6, 1), date(2026, 7, 1)
+    )
+    revision = _commit_evidence(prices, security_id=SECURITY_ID, sessions=sessions)
+    manifest = _manifest(
+        revision=revision,
+        start_month="2026-06",
+        end_month="2026-06",
+        parameters={"watch_security_id": SECURITY_ID, "fixed_shares": 1},
+    )
+    _enqueue(repo, manifest)
+    claim = repo.claim_next_strategy_job()
+    assert claim is not None
+
+    def stub_roster(_repo: object, _profile_hash: str) -> object:
+        if isinstance(roster, Exception):
+            raise roster
+        return roster
+
+    priced: dict[date, bool] = {}
+    real_view = worker_module.MarketView
+
+    def recording_view(**kwargs):
+        view = real_view(**kwargs)
+        priced[view.as_of_session] = not view.price_history(SECURITY_ID).empty
+        return view
+
+    monkeypatch.setattr(worker_module, "point_in_time_roster", stub_roster)
+    monkeypatch.setattr(worker_module, "MarketView", recording_view)
+    engine = worker_module.build_backtest_engine(claim.job.id, claim.claim_token, repo)
+    engine._prices = prices  # type: ignore[attr-defined]
+    return engine.run(claim.job.id, claim.claim_token), priced, sessions
+
+
+def test_worker_hides_a_joiners_prices_before_it_joins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    joined = date(2026, 6, 10)
+    member = SimpleNamespace(
+        security_id=SECURITY_ID, membership_intervals=((joined.isoformat(), None),)
+    )
+
+    result, priced, sessions = _joiner_run(
+        tmp_path, monkeypatch, SimpleNamespace(members=(member,))
+    )
+
+    assert result.status is StrategyJobStatus.COMPLETE
+    assert priced == {session: session >= joined for session in sessions}
+
+
+def test_worker_maps_a_roster_read_failure_to_required_data_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result, _priced, _sessions = _joiner_run(
+        tmp_path, monkeypatch, ValueError("roster is unreadable")
+    )
+
+    assert result.status is StrategyJobStatus.FAILED
+    assert result.failure_code is JobFailureCode.REQUIRED_DATA_MISSING
 
 
 def test_worker_maps_strategy_identity_mismatch_to_integrity_error(
