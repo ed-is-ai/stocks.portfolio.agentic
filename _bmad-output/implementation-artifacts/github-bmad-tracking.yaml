@@ -287,6 +287,16 @@ standalone_issues:
         issue: 66
         status: done
         spec: gh-61-5-validate-ranking-performance.md
+  minervini-weinstein-position-upgrade-full-book:
+    issue: 90
+    repository: ed-is-ai/stocks.portfolio.agentic
+    status: review
+    feature_plan: feature-gh-90-position-upgrade-full-book.md
+    stories:
+      gh-90-position-upgrade-full-book:
+        issue: 90
+        status: review
+        spec: gh-90-position-upgrade-full-book.md
   buy-and-hold-top-x-strength:
     issue: 366
     status: done

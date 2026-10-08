@@ -78,10 +78,11 @@ availability reason. Valid negative momentum still ranks ahead of missing
 momentum. The historical view supplies converted closes only; this Skill owns
 the endpoints and ranking policy.
 
-When `enable_position_upgrade` is true, also sell the weakest held position
-(lowest percent above its own 150-session SMA) when the strongest unheld
-candidate's percent-above-SMA reading exceeds the weakest holding's by at
-least `upgrade_score_margin_pct` points. This mirrors Weinstein's own
+When `enable_position_upgrade` is true and all configured position slots are
+occupied after mechanical exits, also sell the weakest held position (lowest
+percent above its own 150-session SMA) when the strongest unheld candidate's
+percent-above-SMA reading exceeds the weakest holding's by at least
+`upgrade_score_margin_pct` points. This mirrors Weinstein's own
 practice of rotating capital toward leadership during a Stage 2 advance; it
 never overrides the mechanical exits above and never buys anything itself --
 the freed cash is picked up by the ordinary entry path on a later qualifying

@@ -393,19 +393,19 @@ def _entry_explanation(
 def _upgrade_explanation(
     *,
     candidate_id: str,
-    candidate_score: int,
-    held_score: int,
+    candidate_score: Decimal,
+    held_score: Decimal,
     margin: int,
     session: date,
 ) -> SignalExplanationV1:
-    """Explain rotating out of the weakest holding into a stronger base."""
+    """Explain rotation from the weakest holding into stronger momentum."""
     return SignalExplanationV1(
         reasons=[
             SignalReasonV1(
                 code="portfolio_upgrade",
                 summary=(
-                    "A stronger VCP candidate outscores this holding by more "
-                    "than the required margin, so capital rotates to it."
+                    "A qualifying candidate's 12-to-1 momentum exceeds this "
+                    "holding's by the required percentage-point margin."
                 ),
                 facts=[
                     # The candidate's identity is a fact *value*, never part
@@ -413,23 +413,23 @@ def _upgrade_explanation(
                     # overflow the label bound and cost the Sell signal.
                     ExplanationFactV1(label="Upgrade candidate", observed=candidate_id),
                     ExplanationFactV1(
-                        label="Candidate VCP score",
-                        observed=Decimal(candidate_score),
+                        label="Candidate 12-to-1 momentum",
+                        observed=candidate_score * Decimal(100),
                         operator=ComparisonOperator.GTE,
-                        threshold=Decimal(held_score + margin),
-                        unit=EvidenceUnit.SCORE,
+                        threshold=held_score * Decimal(100) + Decimal(margin),
+                        unit=EvidenceUnit.PERCENT,
                         as_of=session,
                     ),
                     ExplanationFactV1(
-                        label="Held VCP score",
-                        observed=Decimal(held_score),
-                        unit=EvidenceUnit.SCORE,
+                        label="Held 12-to-1 momentum",
+                        observed=held_score * Decimal(100),
+                        unit=EvidenceUnit.PERCENT,
                         as_of=session,
                     ),
                     ExplanationFactV1(
-                        label="Required upgrade margin",
+                        label="Required momentum lead",
                         observed=Decimal(margin),
-                        unit=EvidenceUnit.SCORE,
+                        unit=EvidenceUnit.PERCENT,
                     ),
                 ],
             ),
@@ -679,16 +679,6 @@ class MinerviniStrategy:
             explanation=_entry_explanation(qualification, view.as_of_session),
         )
 
-    def _held_vcp_score(self, view: MarketViewV1, security_id: str) -> int | None:
-        """Return a held position's current VCP score for upgrade ranking,
-        or ``None`` if no visible scan evidence exists today -- a position
-        with no computable score is never treated as the weakest holding."""
-        scan = _visible_scan(view, security_id)
-        if scan is None:
-            return None
-        score = getattr(getattr(scan, "vcp", None), "score", None)
-        return score if isinstance(score, int) and not isinstance(score, bool) else None
-
     def _upgrade_exit_signal(
         self,
         view: MarketViewV1,
@@ -698,10 +688,10 @@ class MinerviniStrategy:
     ) -> Signal | None:
         """Story: portfolio upgrading (Minervini's "upgrade" discipline).
 
-        When a stronger unheld candidate's VCP score clears the weakest held
-        position's own current score by at least ``upgrade_score_margin``,
-        sell the weakest holding to free cash for the stronger setup --
-        exactly mirroring the mechanical
+        When the configured position cap is full and a stronger unheld
+        candidate's current 12-to-1 momentum clears the weakest held
+        position's momentum by ``upgrade_score_margin`` percentage points,
+        sell the weakest holding -- exactly mirroring the mechanical
         stop/SMA/pattern-invalidation exits above, never overriding them.
         The freed cash is picked up by the ordinary ``entry_signals`` path
         on a later qualifying session; this method never buys anything
@@ -712,11 +702,6 @@ class MinerviniStrategy:
         margin = _plain_int(parameters["upgrade_score_margin"])
         if margin is None:
             return None
-        # The shared allocator owns BUY affordability.  Do not liquidate a
-        # holding while a cash slot remains for its next cohort.
-        if portfolio.cash > 0:
-            return None
-
         held_ids = {
             position.security_id
             for position in portfolio.positions
@@ -724,8 +709,11 @@ class MinerviniStrategy:
         }
         if not held_ids:
             return None
+        position_cap = _plain_int(parameters.get("max_concurrent_positions"))
+        if position_cap is None or position_cap < 1 or len(held_ids) < position_cap:
+            return None
 
-        candidates: list[tuple[int, str]] = []
+        candidates: list[tuple[Decimal, str]] = []
         for security_id in _universe(parameters):
             if security_id in held_ids:
                 continue
@@ -733,21 +721,23 @@ class MinerviniStrategy:
                 view, parameters, security_id
             )
             if qualification is not None:
-                candidates.append((qualification.score, security_id))
+                momentum = _momentum_reading(view, security_id).value
+                if momentum is not None:
+                    candidates.append((momentum, security_id))
         if not candidates:
             return None
         best_score, best_security_id = max(candidates, key=lambda item: item)
 
         held_scored = [
-            (score, security_id)
+            (momentum, security_id)
             for security_id in held_ids
-            if (score := self._held_vcp_score(view, security_id)) is not None
+            if (momentum := _momentum_reading(view, security_id).value) is not None
         ]
         if not held_scored:
             return None
         weakest_score, weakest_security_id = min(held_scored, key=lambda item: item)
 
-        if best_score - weakest_score < margin:
+        if best_score - weakest_score < Decimal(margin) / Decimal(100):
             return None
         return Signal(
             security_id=weakest_security_id,

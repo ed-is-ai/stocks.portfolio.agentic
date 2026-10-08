@@ -572,6 +572,7 @@ def _upgrade_parameters(**overrides: object) -> dict[str, object]:
         "selected_securities": ["sec-aapl", "sec-msft"],
         "enable_position_upgrade": True,
         "upgrade_score_margin_pct": 10.0,
+        "max_concurrent_positions": 1,
         **overrides,
     }
 
@@ -610,15 +611,18 @@ def test_upgrade_exit_disabled_by_default_even_with_a_stronger_starved_candidate
     assert exits == []
 
 
-def test_upgrade_exit_sells_weakest_position_when_margin_cleared() -> None:
+def test_upgrade_exit_sells_weakest_position_with_residual_cash_at_full_cap() -> None:
     strategy = WeinsteinStrategy()
     view = _KeyedView(
-        {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
+        {
+            "sec-aapl": _history(),
+            "sec-msft": _history(current_close="350"),
+        },
         {"sec-aapl": _scan(), "sec-msft": _scan()},
     )
 
     exits = validate_exit_signals(
-        strategy.exit_signals(view, _held_portfolio(cash="0"), _upgrade_parameters())
+        strategy.exit_signals(view, _held_portfolio(cash="1"), _upgrade_parameters())
     )
 
     assert [(s.security_id, s.rule_id) for s in exits] == [
@@ -626,7 +630,7 @@ def test_upgrade_exit_sells_weakest_position_when_margin_cleared() -> None:
     ]
 
 
-def test_upgrade_exit_keeps_a_cash_slot_for_engine_owned_buy_allocation() -> None:
+def test_upgrade_exit_does_not_fire_when_a_position_slot_is_open() -> None:
     strategy = WeinsteinStrategy()
     view = _KeyedView(
         {"sec-aapl": _history(), "sec-msft": _history(current_close="450")},
@@ -634,7 +638,9 @@ def test_upgrade_exit_keeps_a_cash_slot_for_engine_owned_buy_allocation() -> Non
     )
 
     exits = strategy.exit_signals(
-        view, _held_portfolio(cash="100000"), _upgrade_parameters()
+        view,
+        _held_portfolio(cash="100000"),
+        _upgrade_parameters(max_concurrent_positions=2),
     )
 
     assert exits == []
