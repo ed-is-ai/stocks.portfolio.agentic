@@ -11,6 +11,7 @@ import pandas as pd
 
 from app.services.backtest.reconstruction_roster import (
     DataHubRosterSourceAdapter,
+    NormalizedRosterMemberV1,
     ReconstructionRosterCaptureService,
     MarketIdentityEvidence,
     REQUIRED_SOURCE_ORDER,
@@ -24,7 +25,10 @@ from app.services.backtest.reconstruction_roster import (
 )
 from app.repositories import db
 from app.repositories.backtest_repo import BacktestRepository
-from app.services.backtest.security_identity import SecurityAliasManifestV1
+from app.services.backtest.security_identity import (
+    SecurityAliasManifestV1,
+    SecurityIdentityV1,
+)
 from app.integrations.tv_screener import TradingViewRosterEvidence
 from app.schemas.source_health import SourceName, SourceResult
 
@@ -430,6 +434,18 @@ def test_tradingview_batch_identity_resolver_is_bounded_and_supports_bats() -> N
         resolver("MISSING", {})
 
 
+def test_tradingview_resolver_can_assume_a_us_listing_for_missing_metadata() -> None:
+    resolver = TradingViewBatchMarketIdentityResolver(
+        lambda: ({"symbol": "AAPL", "exchange": "NASDAQ", "currency": "USD"},),
+        assume_us_listing=True,
+    )
+
+    assert resolver("AAPL", {}).mic == "XNAS"  # real metadata still wins
+    assumed = resolver("PSKY", {})
+    assert (assumed.mic, assumed.currency, assumed.quote_unit) == ("XNYS", "USD", "USD")
+    assert assumed.evidence_source == "datahub_sp500:mic_assumed"
+
+
 def test_concurrent_identical_capture_returns_one_lineage_winner(tmp_path) -> None:
     repo = BacktestRepository(db.make_connect(lambda: tmp_path / "backtest.db"))
     repo.ensure_schema()
@@ -529,3 +545,25 @@ def test_concurrent_capture_rejects_different_resolved_market_evidence(
     failure = next(outcome for outcome in outcomes if outcome is not None)
     assert isinstance(failure, RosterCaptureError)
     assert failure.code == "integrity_error"
+
+
+def test_datahub_member_with_assumed_mic_reuses_its_stored_us_identity() -> None:
+    assumed = TradingViewBatchMarketIdentityResolver(
+        lambda: (), assume_us_listing=True
+    )("WBD", {})
+    member = NormalizedRosterMemberV1(
+        mic="XNYS",
+        calendar="XNYS",
+        provider_symbol="WBD",
+        currency="USD",
+        quote_unit="USD",
+        source_memberships=("datahub_sp500",),
+        source_evidence_digests=("d" * 64,),
+        identity_evidence=(assumed,),
+        evidence_digest="e" * 64,
+    )
+    stored = SecurityIdentityV1(
+        "845818af-391d-4145-a0de-e5df44e2223c", "XNAS", "WBD", "f" * 64
+    )
+    service = ReconstructionRosterCaptureService
+    assert service._assumed_mic_identity(member, (stored,)) == stored

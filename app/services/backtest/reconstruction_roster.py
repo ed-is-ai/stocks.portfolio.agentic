@@ -752,23 +752,44 @@ class TradingViewBatchMarketIdentityResolver:
             _fetch_tradingview_us_identity_rows
         ),
         provider_symbol_aliases: Mapping[str, str] | None = None,
+        *,
+        assume_us_listing: bool = False,
     ) -> None:
         self._fetch = fetch
         self._provider_symbol_aliases = dict(provider_symbol_aliases or {})
+        self._assume_us_listing = assume_us_listing
         self._identities: dict[str, MarketIdentityEvidence] | None = None
 
     def __call__(
         self, symbol: str, _source_row: dict[str, object]
     ) -> MarketIdentityEvidence:
+        """Return ``symbol``'s market identity from the TradingView batch.
+
+        A DataHub S&P 500 member is always US-listed in USD, so with
+        ``assume_us_listing`` a symbol TradingView has no metadata for (e.g.
+        right after a ticker change, like PSKY) gets ``XNYS``/USD, marked as
+        assumed in its evidence; every US MIC shares the XNYS calendar.
+        Otherwise a missing symbol raises ``RosterCaptureError``.
+        """
         if self._identities is None:
             self._identities = self._load()
         identity = self._identities.get(symbol)
-        if identity is None:
-            raise RosterCaptureError(
-                f"market identity metadata unavailable for {symbol}",
-                code="identity_ambiguous",
+        if identity is not None:
+            return identity
+        if self._assume_us_listing:
+            return MarketIdentityEvidence(
+                mic="XNYS",
+                currency="USD",
+                quote_unit="USD",
+                evidence_source="datahub_sp500:mic_assumed",
+                evidence_digest=manifest_digest(
+                    {"symbol": symbol, "mic": "XNYS", "mic_assumed": True}
+                ),
             )
-        return identity
+        raise RosterCaptureError(
+            f"market identity metadata unavailable for {symbol}",
+            code="identity_ambiguous",
+        )
 
     def _load(self) -> dict[str, MarketIdentityEvidence]:
         identities: dict[str, MarketIdentityEvidence] = {}
@@ -971,8 +992,9 @@ class ReconstructionRosterCaptureService:
         member: NormalizedRosterMemberV1,
         existing: Sequence[SecurityIdentityV1],
     ) -> SecurityIdentityV1 | None:
-        """Reuse the one stored US identity of an assumed-MIC member's symbol."""
-        if member.identity_evidence[0].evidence_source != MIC_ASSUMED_EVIDENCE:
+        """Reuse the one stored US identity of an assumed-MIC member's symbol
+        (point-in-time members and DataHub members TradingView lacks)."""
+        if not member.identity_evidence[0].evidence_source.endswith(":mic_assumed"):
             return None
         found = [
             identity
