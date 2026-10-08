@@ -11,6 +11,7 @@ from pathlib import Path
 import html
 import json
 import logging
+import re
 import sqlite3
 from threading import RLock
 from typing import (
@@ -53,6 +54,7 @@ from app.services.backtest.snapshot_profile import (
     HistoricalEvidenceV1,
     IntervalReadinessV1,
     MonthlySnapshotCommitV1,
+    NoProviderDataProofV1,
     ProvenanceCoverageV1,
     SnapshotMemberV1,
     SnapshotMonthManifestV1,
@@ -460,7 +462,8 @@ CREATE TABLE IF NOT EXISTS snapshot_members (
     exclusion_reason TEXT CHECK(exclusion_reason IS NULL OR exclusion_reason IN (
         'before_first_provider_observation',
         'insufficient_detector_history',
-        'incomplete_detector_history'
+        'incomplete_detector_history',
+        'no_provider_data'
     )),
     exclusion_evidence_json TEXT,
     provenance_digest TEXT NOT NULL CHECK(length(provenance_digest) = 64),
@@ -476,7 +479,8 @@ CREATE TABLE IF NOT EXISTS snapshot_members (
          AND exclusion_reason IN (
              'before_first_provider_observation',
              'insufficient_detector_history',
-             'incomplete_detector_history'
+             'incomplete_detector_history',
+             'no_provider_data'
          )
          AND exclusion_evidence_json IS NOT NULL)
     )
@@ -2095,6 +2099,59 @@ def _migrate_snapshot_exclusion_constraints(conn: sqlite3.Connection) -> None:
         )
 
 
+#: The three-reason exclusion vocabulary that predates ``no_provider_data``.
+_PRE_NO_PROVIDER_DATA_REASONS = re.compile(
+    r"'before_first_provider_observation',(\s*)'insufficient_detector_history',"
+    r"\s*'incomplete_detector_history'"
+)
+
+
+def _migrate_snapshot_no_provider_data_check(conn: sqlite3.Connection) -> None:
+    """Admit ``no_provider_data`` in both ``snapshot_members`` CHECKs (#82 C4).
+
+    Widening a CHECK changes no stored row, so the DDL text is rewritten in
+    place through ``writable_schema`` and ``schema_version`` is bumped, as
+    ``HistoricalPriceRepository._migrate_provider_check`` does: the real
+    table is far too large to copy. Idempotent; unrecognised DDL raises.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='snapshot_members'"
+    ).fetchone()
+    if row is None or str(row[0]).count("'no_provider_data'") == 2:
+        return
+    widened, count = _PRE_NO_PROVIDER_DATA_REASONS.subn(
+        lambda match: f"{match.group(0)},{match.group(1)}'no_provider_data'",
+        str(row[0]),
+    )
+    if count != 2 or "'no_provider_data'" in str(row[0]):
+        raise BacktestIntegrityError(
+            "snapshot_members has an unrecognised exclusion CHECK"
+        )
+    conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    conn.execute("PRAGMA writable_schema = ON")
+    try:
+        # Re-read under the write lock: another process may have migrated.
+        (sql,) = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='snapshot_members'"
+        ).fetchone()
+        if sql == str(row[0]):
+            (version,) = conn.execute("PRAGMA schema_version").fetchone()
+            conn.execute(
+                "UPDATE sqlite_master SET sql = ? WHERE type = 'table' "
+                "AND name = 'snapshot_members'",
+                (widened,),
+            )
+            conn.execute(f"PRAGMA schema_version = {int(version) + 1}")
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.execute("PRAGMA writable_schema = OFF")
+
+
 def _migrate_trade_log_kind_constraint(conn: sqlite3.Connection) -> None:
     """Admit ``terminal_settlement`` trade log rows (#82) without data loss."""
     table, replacement = "trade_log", "trade_log__kind_migration"
@@ -2321,6 +2378,7 @@ class BacktestRepository:
             conn.commit()
             _migrate_bats_mic_constraints(conn)
             _migrate_snapshot_exclusion_constraints(conn)
+            _migrate_snapshot_no_provider_data_check(conn)
             _migrate_trade_log_kind_constraint(conn)
             _migrate_roster_source_constraint(conn)
             conn.execute("BEGIN IMMEDIATE")
@@ -8951,6 +9009,8 @@ class BacktestRepository:
     ) -> None:
         records = {item.security_id: item for item in commit.records}
         for member in commit.members:
+            if isinstance(member.exclusion_evidence, NoProviderDataProofV1):
+                continue  # #82 C4: the proof records a failure, not evidence
             evidence = evidence_verifier.verify(member.provider_data_revision)
             try:
                 verified_evidence_manifest(evidence)
@@ -9092,6 +9152,21 @@ class BacktestRepository:
                 and actual == tuple(sorted(actual))
                 and {item[0] for item in actual} == in_month
             )
+            current = {
+                m.security_id
+                for m in roster_members
+                if is_current_source(m.source_memberships)
+            }
+            for item in members:
+                proof = item.exclusion_evidence
+                if isinstance(proof, NoProviderDataProofV1) and (
+                    item.security_id in current
+                    or proof.provider != providers.get(item.security_id)
+                ):
+                    raise BacktestIntegrityError(
+                        "no-provider-data exclusion requires a non-current member "
+                        "of its provider"
+                    )
         else:
             matches = actual == expected
         if not expected or not matches:

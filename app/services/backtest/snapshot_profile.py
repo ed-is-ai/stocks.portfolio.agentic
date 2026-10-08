@@ -370,6 +370,54 @@ class LegitimateExclusionProofV1(CanonicalModel):
         return manifest_digest(self.content_identity())
 
 
+class NoProviderDataProofV1(CanonicalModel):
+    """Proof that no provider could price a point-in-time leaver (#82 C4).
+
+    It records the provider failure instead of an evidence revision; the
+    member's revision columns then carry this proof's content digest.
+    """
+
+    schema_version: Literal["no_provider_data.v1"]
+    exclusion_reason: Literal["no_provider_data"]
+    security_id: NonEmpty
+    requested_symbol: NonEmpty
+    alias_revision: Digest
+    snapshot_month: SnapshotMonth
+    mic: Literal["BATS", "XNAS", "XNYS", "XLON"]
+    target_session: date
+    provider: ProofProvider
+    request_contract_version: ProofContract
+    failure_code: Literal["provider_contract_error", "required_data_missing"]
+    first_attempted_at: datetime
+
+    @field_validator("first_attempted_at")
+    @classmethod
+    def _utc_attempt(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() != timezone.utc.utcoffset(value):
+            raise ValueError("first_attempted_at must be a UTC instant")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def _closed_boundary(self) -> "NoProviderDataProofV1":
+        if self.snapshot_month != self.target_session.strftime("%Y-%m"):
+            raise ValueError("target session is outside snapshot month")
+        return self
+
+    def content_identity(self) -> dict[str, object]:
+        """Return the proof identity without the audit-only attempt time."""
+        return self.model_dump(mode="python", exclude={"first_attempted_at"})
+
+    @property
+    def content_digest(self) -> str:
+        return manifest_digest(self.content_identity())
+
+
+ExclusionProof = Annotated[
+    LegitimateExclusionProofV1 | NoProviderDataProofV1,
+    Field(discriminator="exclusion_reason"),
+]
+
+
 class SnapshotMemberV1(CanonicalModel):
     schema_version: Literal["snapshot_member.v1"] = "snapshot_member.v1"
     security_id: NonEmpty
@@ -389,10 +437,11 @@ class SnapshotMemberV1(CanonicalModel):
             "before_first_provider_observation",
             "insufficient_detector_history",
             "incomplete_detector_history",
+            "no_provider_data",
         ]
         | None
     )
-    exclusion_evidence: LegitimateExclusionProofV1 | None
+    exclusion_evidence: ExclusionProof | None
     provenance_digest: Digest
 
     @model_validator(mode="after")
@@ -410,15 +459,28 @@ class SnapshotMemberV1(CanonicalModel):
                 raise ValueError("valid member source cutoff is not the target session")
         elif (
             self.record_digest is not None
-            or self.exclusion_reason
-            not in {
-                "before_first_provider_observation",
-                "insufficient_detector_history",
-                "incomplete_detector_history",
-            }
             or self.exclusion_evidence is None
+            or self.exclusion_reason != self.exclusion_evidence.exclusion_reason
         ):
             raise ValueError("excluded member evidence is malformed")
+        elif isinstance(self.exclusion_evidence, NoProviderDataProofV1):
+            proof = self.exclusion_evidence
+            if (
+                proof.security_id != self.security_id
+                or proof.requested_symbol != self.observed_symbol
+                or proof.mic != self.mic
+                or proof.target_session != self.as_of_session_date
+                or proof.alias_revision != self.alias_revision
+                or self.source_cutoff != self.as_of_session_date
+                or {
+                    self.source_payload_digest,
+                    self.input_revision,
+                    self.provider_data_revision,
+                    self.provider_evidence_manifest_digest,
+                }
+                != {proof.content_digest}
+            ):
+                raise ValueError("excluded member proof does not match member")
         elif (
             self.exclusion_evidence.security_id != self.security_id
             or self.exclusion_evidence.observed_symbol != self.observed_symbol
@@ -486,20 +548,28 @@ class SnapshotMemberV1(CanonicalModel):
 
     @classmethod
     def legitimate_exclusion(
-        cls, proof: LegitimateExclusionProofV1
+        cls, proof: LegitimateExclusionProofV1 | NoProviderDataProofV1
     ) -> "SnapshotMemberV1":
+        if isinstance(proof, NoProviderDataProofV1):
+            # No evidence exists, so the proof digest stands in for it.
+            observed = proof.requested_symbol
+            revision = manifest = proof.content_digest
+        else:
+            observed = proof.observed_symbol
+            revision = proof.evidence_revision
+            manifest = proof.evidence_manifest_digest
         values = {
             "schema_version": "snapshot_member.v1",
             "security_id": proof.security_id,
-            "observed_symbol": proof.observed_symbol,
+            "observed_symbol": observed,
             "mic": proof.mic,
             "as_of_session_date": proof.target_session,
             "resolution": "legitimate_exclusion",
             "source_cutoff": proof.target_session,
-            "source_payload_digest": proof.evidence_revision,
+            "source_payload_digest": revision,
             "input_revision": proof.content_digest,
-            "provider_data_revision": proof.evidence_revision,
-            "provider_evidence_manifest_digest": proof.evidence_manifest_digest,
+            "provider_data_revision": revision,
+            "provider_evidence_manifest_digest": manifest,
             "alias_revision": proof.alias_revision,
             "record_digest": None,
             "exclusion_reason": proof.exclusion_reason,
@@ -726,11 +796,22 @@ class MonthlySnapshotCommitV1(CanonicalModel):
                     raise SnapshotContractError(
                         "excluded member evidence is not canonical"
                     )
-                if (
+                if isinstance(proof, NoProviderDataProofV1):
+                    # #82 C4: only a point-in-time leaver may lack data.
+                    if profile.roster_policy_version != POINT_IN_TIME_POLICY_VERSION:
+                        raise SnapshotContractError(
+                            "no-provider-data exclusion requires a point-in-time "
+                            "profile"
+                        )
+                elif (
                     proof.calendar_dataset_version != profile.calendar_dataset_version
                     or proof.calendar_dataset_digest != profile.calendar_dataset_digest
-                    or proof.request_contract_version
-                    != provider_request_contract_version(profile, proof.provider)
+                ):
+                    raise SnapshotContractError(
+                        "exclusion proof does not match snapshot profile"
+                    )
+                if proof.request_contract_version != provider_request_contract_version(
+                    profile, proof.provider
                 ):
                     raise SnapshotContractError(
                         "exclusion proof does not match snapshot profile"
@@ -1350,6 +1431,7 @@ __all__ = [
     "IntervalReadinessV1",
     "LegitimateExclusionProofV1",
     "MonthlySnapshotCommitV1",
+    "NoProviderDataProofV1",
     "ProfileDetectorV1",
     "ProvenanceCoverageV1",
     "SnapshotContractError",

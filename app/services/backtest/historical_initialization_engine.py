@@ -12,7 +12,11 @@ from time import monotonic, sleep
 from pathlib import Path
 from typing import Protocol, cast
 
-from app.repositories.backtest_repo import BacktestIntegrityError, BacktestRepository
+from app.repositories.backtest_repo import (
+    BacktestIntegrityError,
+    BacktestRepository,
+    is_current_source,
+)
 from app.repositories.db import sqlite_failure_detail
 from app.repositories.historical_price_repo import (
     HistoricalPriceRepository,
@@ -53,6 +57,7 @@ from app.services.backtest.snapshot_profile import (
     FULL_HISTORY_START,
     IntervalReadinessV1,
     MonthlySnapshotCommitV1,
+    NoProviderDataProofV1,
     SnapshotContractError,
     SnapshotMemberV1,
     SnapshotProfileV1,
@@ -101,6 +106,19 @@ _REQUEST_CONTRACT_VERSIONS = {
     WIKI_PROVIDER: WIKI_REQUEST_CONTRACT_VERSION,
 }
 
+#: Non-retryable failures meaning the provider has no data for a symbol.
+_NO_DATA_CODES = frozenset(
+    {FailureCode.PROVIDER_CONTRACT_ERROR, FailureCode.REQUIRED_DATA_MISSING}
+)
+
+#: A recorded no-data verdict older than this is re-asked of the provider.
+NO_DATA_MEMO_TTL = timedelta(days=90)
+
+#: Known-good symbol a provider must serve before a contract error on a
+#: leaver is trusted as "no data" rather than an outage (#82 C4).
+PROBE_SYMBOL = "SPY"
+PROBE_WINDOW = timedelta(days=14)
+
 
 class EvidenceAdapter(Protocol):
     """Fetch one provider-native evidence interval."""
@@ -124,6 +142,63 @@ class InitializationMonthError(RuntimeError):
         super().__init__(detail)
 
 
+class NoProviderData(Exception):
+    """A point-in-time leaver no provider can price (#82 C4).
+
+    Month preparation turns it into a ``no_provider_data`` exclusion; one
+    that escapes anywhere else maps to its closed job failure instead.
+    """
+
+    def __init__(
+        self, failure_code: str, first_attempted_at: datetime, symbol: str
+    ) -> None:
+        self.failure_code = failure_code
+        self.first_attempted_at = first_attempted_at
+        super().__init__(f"No provider data for {symbol}")
+
+    def month_error(self) -> InitializationMonthError:
+        """Return the job failure this verdict means outside an exclusion."""
+        return InitializationMonthError(JobFailureCode(self.failure_code), str(self))
+
+
+def _memo_reason(failure: NoProviderData, alias_revision: str, detail: str) -> str:
+    """Encode a no-data verdict as an unavailable-attempt reason."""
+    return json.dumps(
+        {
+            "alias_revision": alias_revision,
+            "detail": detail,
+            "failure_code": failure.failure_code,
+            "first_attempted_at": failure.first_attempted_at.isoformat(),
+        },
+        sort_keys=True,
+    )
+
+
+def _memo_failure(
+    reason: str, *, symbol: str, alias_revision: str, now: datetime
+) -> NoProviderData | None:
+    """Decode a still-valid verdict from :func:`_memo_reason`, else ``None``.
+
+    A foreign or unparseable reason, another alias revision, or a verdict
+    older than :data:`NO_DATA_MEMO_TTL` means the provider is asked again.
+    """
+    try:
+        payload = json.loads(reason)
+        code = str(payload["failure_code"])
+        attempted = datetime.fromisoformat(str(payload["first_attempted_at"]))
+        alias = payload["alias_revision"]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if (
+        code not in _NO_DATA_CODES
+        or attempted.utcoffset() is None
+        or alias != alias_revision
+        or now - attempted > NO_DATA_MEMO_TTL
+    ):
+        return None
+    return NoProviderData(code, attempted.astimezone(timezone.utc), symbol)
+
+
 @dataclass(frozen=True)
 class ResolvedSnapshotMember:
     member: SnapshotMemberV1
@@ -137,6 +212,8 @@ type EvidenceCacheKey = tuple[str, str, str | None, str, str]
 class InitializationMonthOutcome:
     reused_securities: int
     fetched_securities: int
+    #: Point-in-time leavers excluded because no provider can price them.
+    no_provider_data_securities: int = 0
 
 
 class CanonicalSnapshotMonthProcessor:
@@ -208,6 +285,8 @@ class CanonicalSnapshotMonthProcessor:
         self._evidence_cache: dict[EvidenceCacheKey, StoredHistoricalEvidence] = {}
         self._validated_evidence_cache: set[EvidenceCacheKey] = set()
         self._fetched_security_ids: set[str] = set()
+        # Provider health probe results, once per run (#82 C4).
+        self._provider_health: dict[str, bool] = {}
         try:
             roster_payload = json.loads(roster.canonical_manifest_json)
             self._alias_revision = str(roster_payload["alias_revision"])
@@ -274,6 +353,8 @@ class CanonicalSnapshotMonthProcessor:
                 as_of=now.date(),
             )
             for member in members:
+                if isinstance(member.exclusion_evidence, NoProviderDataProofV1):
+                    continue  # no evidence revision exists to pin
                 self._price_repository.pin(
                     "snapshot",
                     f"{self._profile.profile_hash}:{snapshot_month}:{member.security_id}",
@@ -287,9 +368,24 @@ class CanonicalSnapshotMonthProcessor:
                 adopted_from_profile_hash=adopted_from,
             )
             fetched = len(self._fetched_security_ids)
-            return InitializationMonthOutcome(len(roster_members) - fetched, fetched)
+            no_data = sum(
+                isinstance(member.exclusion_evidence, NoProviderDataProofV1)
+                for member in members
+            )
+            if no_data:
+                logger.warning(
+                    "Historical month %s excluded %d point-in-time leaver(s) "
+                    "no provider can price",
+                    snapshot_month,
+                    no_data,
+                )
+            return InitializationMonthOutcome(
+                len(roster_members) - fetched - no_data, fetched, no_data
+            )
         except InitializationMonthError:
             raise
+        except NoProviderData as exc:
+            raise exc.month_error() from exc
         except ProviderFailure as exc:
             raise InitializationMonthError(
                 JobFailureCode(exc.code.value), str(exc)
@@ -414,11 +510,18 @@ class CanonicalSnapshotMonthProcessor:
                 # different revision (re-ingestion/correction), the member
                 # must resolve fresh to stay byte-identical to a Rebuild.
                 request = self._evidence_request(member, self._pinned_end(now))
-                evidence = cast(
-                    StoredHistoricalEvidence,
-                    self._evidence_for(member, request, target_session),
-                )
-                adoptable = evidence.data_revision == previous[0].provider_data_revision
+                try:
+                    evidence = cast(
+                        StoredHistoricalEvidence,
+                        self._evidence_for(member, request, target_session),
+                    )
+                except NoProviderData:
+                    # Resolved fresh: _prepare_member builds the exclusion.
+                    adoptable = False
+                else:
+                    adoptable = (
+                        evidence.data_revision == previous[0].provider_data_revision
+                    )
             if adoptable:
                 assert previous is not None
                 item, request = self._adopt_valid_member(
@@ -632,6 +735,27 @@ class CanonicalSnapshotMonthProcessor:
         request = self._evidence_request(member, self._pinned_end(now))
         try:
             evidence = self._evidence_for(member, request, target_session)
+        except NoProviderData as exc:
+            provider = member_provider(member)
+            proof = NoProviderDataProofV1.model_validate(
+                {
+                    "schema_version": "no_provider_data.v1",
+                    "exclusion_reason": "no_provider_data",
+                    "security_id": member.security_id,
+                    "requested_symbol": member.provider_symbol,
+                    "alias_revision": self._alias_revision,
+                    "snapshot_month": snapshot_month,
+                    "mic": member.mic,
+                    "target_session": target_session,
+                    "provider": provider,
+                    "request_contract_version": _REQUEST_CONTRACT_VERSIONS[provider],
+                    "failure_code": exc.failure_code,
+                    "first_attempted_at": exc.first_attempted_at,
+                }
+            )
+            return ResolvedSnapshotMember(
+                SnapshotMemberV1.legitimate_exclusion(proof), None
+            )
         except ProviderFailure as exc:
             raise InitializationMonthError(
                 JobFailureCode(exc.code.value),
@@ -743,7 +867,7 @@ class CanonicalSnapshotMonthProcessor:
                 request = candidate
                 break
         if evidence is None:
-            payload = self._fetch_with_retry(request, member_provider(member))
+            payload = self._fetch_member(member, request)
             self._fetched_security_ids.add(member.security_id)
             revision = self._price_repository.commit(payload)
             evidence = self._price_repository.verify(revision)
@@ -818,6 +942,98 @@ class CanonicalSnapshotMonthProcessor:
                 f"No historical evidence adapter for provider {provider!r}",
             )
         return adapter
+
+    def _is_point_in_time_leaver(self, member: CapturedRosterMemberV1) -> bool:
+        """Whether ``member`` is a V2 member that has left the index (#82 C4)."""
+        return self._point_in_time and not is_current_source(member.source_memberships)
+
+    def _fetch_member(
+        self, member: CapturedRosterMemberV1, request: HistoricalEvidenceRequest
+    ) -> HistoricalEvidencePayload:
+        """Fetch one member's evidence; a priceless V2 leaver is excluded.
+
+        For a point-in-time leaver, ``required_data_missing`` -- or a
+        ``provider_contract_error`` while the provider passes its health
+        probe -- raises :class:`NoProviderData` (#82 C4) and is recorded as
+        an unavailable attempt under the provider's request contract, so
+        later months and runs skip the provider.
+        """
+        provider = member_provider(member)
+        contract = _REQUEST_CONTRACT_VERSIONS.get(provider)
+        if contract is None or not self._is_point_in_time_leaver(member):
+            return self._fetch_with_retry(request, provider)
+        now = self._clock().astimezone(timezone.utc)
+        attempt = self._price_repository.get_unavailable_attempt(
+            member.security_id, contract_version=contract
+        )
+        if attempt is not None and attempt.requested_symbol == member.provider_symbol:
+            memo = _memo_failure(
+                attempt.reason,
+                symbol=member.provider_symbol,
+                alias_revision=self._alias_revision,
+                now=now,
+            )
+            if memo is not None:
+                raise memo
+        self._adapter_for(provider)  # a missing adapter is no provider verdict
+        try:
+            return self._fetch_with_retry(request, provider)
+        except ProviderFailure as exc:
+            if exc.retryable or exc.code not in _NO_DATA_CODES:
+                raise
+            if exc.code is FailureCode.PROVIDER_CONTRACT_ERROR and (
+                not self._provider_healthy(provider, request.end)
+            ):
+                raise
+            failure = NoProviderData(exc.code.value, now, member.provider_symbol)
+            self._price_repository.record_unavailable_attempt(
+                security_id=member.security_id,
+                requested_symbol=member.provider_symbol,
+                reason=_memo_reason(failure, self._alias_revision, str(exc)),
+                contract_version=contract,
+            )
+            raise failure from exc
+
+    def _provider_healthy(self, provider: str, end: date) -> bool:
+        """Probe ``provider`` once per run; cache whether it is serving."""
+        healthy = self._provider_health.get(provider)
+        if healthy is None:
+            healthy = self._probe(provider, end)
+            self._provider_health[provider] = healthy
+            if not healthy:
+                logger.warning(
+                    "Provider %s failed its health probe; contract errors on "
+                    "leavers stay fatal this run",
+                    provider,
+                )
+        return healthy
+
+    def _probe(self, provider: str, end: date) -> bool:
+        """Whether ``provider`` serves :data:`PROBE_SYMBOL` before ``end``."""
+        start = end - PROBE_WINDOW
+        request = HistoricalEvidenceRequest(
+            security_id=None,
+            alias_revision=None,
+            symbol=PROBE_SYMBOL,
+            start=start,
+            end=end,
+            expected_sessions=self._calendar.sessions_in_range("XNYS", start, end),
+            allowed_observed_symbols=(PROBE_SYMBOL,),
+            allow_missing_prefix=True,
+            canonical_exchange_sessions=True,
+        )
+        try:
+            self._adapter_for(provider).fetch(request)
+        except ProviderFailure as exc:
+            # The frozen WIKI archive holds no SPY: it is down only when it
+            # cannot be opened or has no import (``provider_unavailable``).
+            return provider == WIKI_PROVIDER and (
+                exc.code is not FailureCode.PROVIDER_UNAVAILABLE
+            )
+        except Exception:
+            logger.exception("Provider %s health probe failed", provider)
+            return False
+        return True
 
     def _fetch_with_retry(
         self, request: HistoricalEvidenceRequest, provider: str = DEFAULT_PROVIDER
