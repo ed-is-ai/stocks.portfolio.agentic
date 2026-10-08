@@ -125,7 +125,10 @@ class FakeBacktestRepo:
         )
 
     def snapshot_profile(self, profile_hash: str):
-        return SimpleNamespace(roster_digest=ROSTER_DIGEST)
+        return SimpleNamespace(
+            roster_digest=ROSTER_DIGEST,
+            roster_policy_version="ReconstructionRosterPolicyV1",
+        )
 
     def snapshot_member_revisions(self, profile_hash: str, snapshot_month: str):
         if self.member_revisions_error is not None:

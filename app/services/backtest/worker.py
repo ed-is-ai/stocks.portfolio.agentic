@@ -28,7 +28,11 @@ from app.repositories.historical_price_repo import (
     StoredHistoricalEvidence,
 )
 from app.repositories.fx_quote_repo import FxQuoteRepository
-from app.services.backtest.backtest_launch_service import BacktestLaunchService
+from app.services.backtest.backtest_launch_service import (
+    BacktestLaunchService,
+    pinned_terminal_exits,
+    point_in_time_roster,
+)
 from app.services.backtest.backtest_engine import (
     CandidateAuditV1,
     EquityCurvePointV1,
@@ -411,7 +415,19 @@ class PreparationStageEngine(StageWalkEngine):
                 starting_capital=prep.starting_capital,
                 securities=evidence,
             )
-            base = base.model_copy(update={"parameters": prep.parameters})
+            exits = pinned_terminal_exits(
+                point_in_time_roster(self._repository, s.profile_hash),
+                tuple(item.security_id for item in evidence),
+                str(prep.start_month),
+                str(prep.end_month),
+            )
+            base = RunInputManifestV1.model_validate(
+                {
+                    **base.model_dump(mode="python"),
+                    "parameters": prep.parameters,
+                    "terminal_exits": exits,
+                }
+            )
             if prep.regime_benchmark is None:
                 manifest = build_run_input_manifest_v2(
                     base, selection=s, source_preparation_job_id=job_id
@@ -651,6 +667,19 @@ class BootstrapStageEngine:
 
 def _owns(job: StrategyJobV1, claim_token: str) -> bool:
     return job.status is StrategyJobStatus.RUNNING and job.claim_token == claim_token
+
+
+#: Per security: the inclusive sessions its prices may be shown on, or
+#: ``None`` when its evidence has no rows (#82).
+PriceWindows = Mapping[str, tuple[date, date] | None]
+
+
+def _shows_prices(windows: PriceWindows, security_id: str, session: date) -> bool:
+    """Whether a run's market view may expose ``security_id``'s prices."""
+    if security_id not in windows:
+        return True
+    window = windows[security_id]
+    return window is not None and window[0] <= session <= window[1]
 
 
 def build_stage_walk_engine(
@@ -1040,6 +1069,7 @@ class BacktestExecutionEngine:
 
         try:
             manifest, strategy, security_market_data, fx_evidence = self._resolve()
+            price_windows = self._price_windows(manifest, security_market_data)
         except BacktestResolutionError as exc:
             current = self._repository.strategy_job(job_id)
             if not self._owns(current, claim_token):
@@ -1118,6 +1148,7 @@ class BacktestExecutionEngine:
                 security_price_revisions={
                     item.security_id: item.price_revision
                     for item in manifest.securities
+                    if _shows_prices(price_windows, item.security_id, session)
                 },
                 selected_universe=tuple(
                     item.security_id for item in manifest.securities
@@ -1165,8 +1196,7 @@ class BacktestExecutionEngine:
                 sink=sink,
                 month_boundary_observer=observer,
                 prepared_planes=prepared_planes,
-                # #82 C maps index-membership exits to securities.
-                terminal_exits=(),
+                terminal_exits=manifest.terminal_exits,
             )
         except _BacktestCancelled:
             return self._cancel(job_id, claim_token)
@@ -1249,6 +1279,41 @@ class BacktestExecutionEngine:
             if self._owns(current, claim_token) and current.cancel_requested_at:
                 return self._cancel(job_id, claim_token)
             return current
+
+    def _price_windows(
+        self,
+        manifest: RunInputManifestV1,
+        security_market_data: tuple[SecurityMarketDataV1, ...],
+    ) -> PriceWindows:
+        """Sessions each security's price history may be shown on (#82).
+
+        From its evidence start -- or, in a point-in-time run, its first
+        index join, so a joiner is not seen early -- through its last
+        observed row, the engine's evidence end. A leaver's prices stay
+        visible after it leaves the index, so a held position is managed.
+        """
+        try:
+            roster = point_in_time_roster(self._repository, manifest.profile_hash)
+        except ValueError as exc:
+            raise BacktestResolutionError(
+                JobFailureCode.REQUIRED_DATA_MISSING, str(exc)
+            ) from exc
+        joins = {
+            member.security_id: min(
+                date.fromisoformat(start) for start, _ in member.membership_intervals
+            )
+            for member in (() if roster is None else roster.members)
+            if member.membership_intervals
+        }
+        windows: dict[str, tuple[date, date] | None] = {}
+        for item in security_market_data:
+            access = item.price_access
+            if access is None:
+                continue
+            last = access.as_traded_row_on_or_before(access.end - timedelta(days=1))
+            first = max(access.start, joins.get(item.security_id, access.start))
+            windows[item.security_id] = None if last is None else (first, last.session)
+        return windows
 
     def _resolve(
         self,

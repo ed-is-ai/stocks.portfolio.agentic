@@ -28,11 +28,12 @@ FX through the historical price cache, where a single-day
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Mapping, cast
+from typing import Literal, Mapping, cast, get_args
 
 from app.core.config import ROOT_DIR, SKILLS_DIR
 from app.integrations.fx_history import (
@@ -60,9 +61,15 @@ from app.services.backtest.benchmark_evidence import (
     BenchmarkEvidenceError,
     BenchmarkEvidenceService,
 )
+from app.services.backtest.point_in_time_membership import (
+    POINT_IN_TIME_POLICY_VERSION,
+)
+from app.services.backtest.reconstruction_roster import CapturedRosterV1
 from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
     RunInputManifestError,
+    SettlingExitType,
+    TerminalExitV1,
     build_run_input_manifest,
 )
 from app.services.backtest.skill_discovery import (
@@ -162,6 +169,78 @@ class _RosterEvidenceError(ValueError):
     #: The message is composed entirely by this module (never raw
     #: exception text), so the worker may surface it verbatim.
     user_safe_message = True
+
+
+_SETTLING_EXIT_TYPES = frozenset(get_args(SettlingExitType))
+
+
+def point_in_time_roster(
+    repo: BacktestRepository, profile_hash: str
+) -> CapturedRosterV1 | None:
+    """Return the profile's captured roster when it is point-in-time (#82)."""
+    try:
+        profile = repo.snapshot_profile(profile_hash)
+        if (
+            profile is None
+            or profile.roster_policy_version != POINT_IN_TIME_POLICY_VERSION
+        ):
+            return None
+        raw = repo.roster_manifest_json(profile.roster_digest)
+        if raw is None:
+            raise _RosterEvidenceError("The active profile's roster is missing.")
+        return CapturedRosterV1.from_json(profile.roster_digest, raw)
+    except (BacktestIntegrityError, KeyError, TypeError, ValueError) as exc:
+        raise _RosterEvidenceError(str(exc)) from exc
+
+
+def pinned_terminal_exits(
+    roster: CapturedRosterV1 | None,
+    security_ids: tuple[str, ...],
+    start_month: str,
+    end_month: str,
+) -> tuple[TerminalExitV1, ...]:
+    """Pin each run security's settling roster exit inside the run window (#82).
+
+    Values are copied from the captured roster, so a run never reads
+    ``index_membership.db``. A V1 roster (``None``) pins nothing; a
+    malformed exit raises :class:`_RosterEvidenceError`.
+    """
+    if roster is None:
+        return ()
+    window_start, window_end = _month_start(start_month), _month_after(end_month)
+    pinned = set(security_ids)
+    exits: list[TerminalExitV1] = []
+    for member in roster.members:
+        item = member.terminal_exit
+        if (
+            item is None
+            or member.security_id not in pinned
+            or item.event_type not in _SETTLING_EXIT_TYPES
+        ):
+            continue
+        price = item.terminal_price
+        try:
+            if price is not None and not math.isfinite(price):
+                raise ValueError("terminal price is not finite")
+            exit_session = date.fromisoformat(item.exit_date)
+            if not window_start <= exit_session < window_end:
+                continue
+            exits.append(
+                TerminalExitV1(
+                    security_id=member.security_id,
+                    exit_session=exit_session,
+                    exit_type=cast(SettlingExitType, item.event_type),
+                    terminal_price_native=None
+                    if price is None
+                    else Decimal(repr(price)),
+                    source_digest=item.event_digest,
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise _RosterEvidenceError(
+                f"The terminal exit of {member.security_id!r} is malformed."
+            ) from exc
+    return tuple(exits)
 
 
 @dataclass(frozen=True)
@@ -467,12 +546,24 @@ class BacktestLaunchService:
                 ) from exc
 
         try:
+            roster = point_in_time_roster(self._backtest_repo, profile_hash)
             securities = self._resolve_roster_evidence(
                 profile_hash=profile_hash,
                 snapshot_month=command.start_month,
                 base_currency=command.base_currency,
                 start_month=command.start_month,
                 end_month=command.end_month,
+                selected_security_ids=None
+                if roster is None
+                else self._union_member_ids(
+                    profile_hash, command.start_month, command.end_month
+                ),
+            )
+            terminal_exits = pinned_terminal_exits(
+                roster,
+                tuple(item.security_id for item in securities),
+                command.start_month,
+                command.end_month,
             )
         except _RosterEvidenceError as exc:
             raise BacktestLaunchValidationError(
@@ -494,6 +585,7 @@ class BacktestLaunchService:
                 base_currency=command.base_currency,
                 starting_capital=command.starting_capital,
                 securities=securities,
+                terminal_exits=terminal_exits,
             )
         except (RunInputManifestError, EvidenceMissingError) as exc:
             raise BacktestLaunchValidationError(
@@ -563,6 +655,26 @@ class BacktestLaunchService:
                 ),
             )
         return ()
+
+    def _union_member_ids(
+        self, profile_hash: str, start_month: str, end_month: str
+    ) -> tuple[str, ...]:
+        """Every security with a valid scan in any month of the run (#82)."""
+        try:
+            union = {
+                security_id
+                for month in TradingCalendar.months_inclusive(start_month, end_month)
+                for security_id, _ in self._backtest_repo.snapshot_member_revisions(
+                    profile_hash, month
+                )
+            }
+        except BacktestIntegrityError as exc:
+            raise _RosterEvidenceError(str(exc)) from exc
+        if not union:
+            raise _RosterEvidenceError(
+                "The active profile's roster has no members for the chosen period."
+            )
+        return tuple(sorted(union))
 
     def _resolve_roster_evidence(
         self,
