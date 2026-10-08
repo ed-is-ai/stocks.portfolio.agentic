@@ -55,15 +55,15 @@ parameters:
     type: boolean
     default: false
     description: >-
-      Sell the weakest held position (by current VCP score) when a stronger
-      unheld candidate clears the configured score margin.
+      Sell the held position with the weakest current 12-to-1 momentum when a
+      qualifying unheld candidate clears the configured momentum lead.
     required: true
   - name: upgrade_score_margin
     type: integer
     default: 15
     description: >-
-      Minimum VCP score edge the strongest unheld candidate must hold over
-      the weakest held position before an upgrade exit fires.
+      Minimum momentum lead in percentage points required for the strongest
+      unheld candidate to replace the weakest held position.
     required: true
     minimum: 0
     maximum: 100
@@ -97,12 +97,17 @@ separate raw value used by the position-upgrade rule. Exit the
 full position on the configured loss threshold, a close below the current
 50-session SMA, a non-Stage-2 scan, or `Invalid`/`Damaged` VCP state.
 
-When `enable_position_upgrade` is true, also sell the weakest held position
-(lowest current VCP score) when the strongest unheld qualifying candidate's
-VCP score exceeds the weakest holding's by at least `upgrade_score_margin`.
-This mirrors Minervini's own "upgrading" discipline; it never overrides the
-mechanical exits above and never buys anything itself -- the freed cash is
-picked up by the ordinary entry path on a later qualifying session.
+When `enable_position_upgrade` is true and all configured position slots are
+occupied after mechanical exits, also sell the held position with the lowest
+current 12-to-1 momentum when the strongest unheld qualifying candidate's
+12-to-1 momentum leads by at least `upgrade_score_margin` percentage points.
+Use the same Run-currency reading as the entry-ranking momentum:
+`close[-22] / close[-253] - 1`. A position or candidate without valid current
+momentum evidence cannot be ranked for an upgrade. The candidate must still
+pass the normal Minervini entry qualification. This mirrors Minervini's own
+"upgrading" discipline; it never overrides the mechanical exits above and
+never buys anything itself -- the freed cash is picked up by the ordinary
+entry path on a later qualifying session.
 
 Suggest a stop (`stop_level`) for a held position at the close where
 tomorrow's own exit would fire: the higher of the maximum-loss stop from

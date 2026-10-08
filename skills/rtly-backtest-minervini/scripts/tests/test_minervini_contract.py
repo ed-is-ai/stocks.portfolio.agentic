@@ -443,8 +443,33 @@ def _upgrade_parameters(**overrides: object) -> dict[str, object]:
         "selected_securities": ["sec-aapl", "sec-msft"],
         "enable_position_upgrade": True,
         "upgrade_score_margin": 15,
+        "max_concurrent_positions": 1,
         **overrides,
     }
+
+
+def _upgrade_view(
+    *,
+    held_momentum: str | None = "100",
+    candidate_momentum: str | None = "115",
+    held_vcp: int = 95,
+    candidate_vcp: int = 70,
+    held_state: str = "Breakout",
+) -> _RankedKeyedView:
+    return _RankedKeyedView(
+        {
+            "sec-aapl": _history(),
+            "sec-msft": _history(),
+        },
+        {
+            "sec-aapl": _scan(score=held_vcp, state=held_state),
+            "sec-msft": _scan(score=candidate_vcp),
+        },
+        {
+            "sec-aapl": _momentum_history(held_momentum),
+            "sec-msft": _momentum_history(candidate_momentum),
+        },
+    )
 
 
 def test_entry_ranking_is_vcp_first_then_momentum_then_security_id() -> None:
@@ -545,15 +570,14 @@ def test_upgrade_exit_disabled_by_default_even_with_a_stronger_starved_candidate
     assert exits == []
 
 
-def test_upgrade_exit_sells_weakest_position_when_margin_cleared() -> None:
+def test_upgrade_exit_sells_weakest_position_with_residual_cash_at_full_cap() -> None:
     strategy = MinerviniStrategy()
-    view = _KeyedView(
-        {"sec-aapl": _history(), "sec-msft": _history()},
-        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=95)},
-    )
+    # The unheld candidate has a lower VCP score than the holding, but its
+    # 12-to-1 momentum leads by exactly the configured 15 percentage points.
+    view = _upgrade_view()
 
     exits = validate_exit_signals(
-        strategy.exit_signals(view, _held_portfolio(cash="0"), _upgrade_parameters())
+        strategy.exit_signals(view, _held_portfolio(cash="1"), _upgrade_parameters())
     )
 
     assert [(s.security_id, s.rule_id) for s in exits] == [
@@ -561,15 +585,14 @@ def test_upgrade_exit_sells_weakest_position_when_margin_cleared() -> None:
     ]
 
 
-def test_upgrade_exit_keeps_a_cash_slot_for_engine_owned_buy_allocation() -> None:
+def test_upgrade_exit_does_not_fire_when_a_position_slot_is_open() -> None:
     strategy = MinerviniStrategy()
-    view = _KeyedView(
-        {"sec-aapl": _history(), "sec-msft": _history()},
-        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=95)},
-    )
+    view = _upgrade_view(candidate_momentum="130")
 
     exits = strategy.exit_signals(
-        view, _held_portfolio(cash="10000"), _upgrade_parameters()
+        view,
+        _held_portfolio(cash="1"),
+        _upgrade_parameters(max_concurrent_positions=2),
     )
 
     assert exits == []
@@ -577,16 +600,24 @@ def test_upgrade_exit_keeps_a_cash_slot_for_engine_owned_buy_allocation() -> Non
 
 def test_upgrade_exit_does_not_fire_when_margin_not_cleared() -> None:
     strategy = MinerviniStrategy()
-    view = _KeyedView(
-        {"sec-aapl": _history(), "sec-msft": _history()},
-        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=80)},
-    )
+    view = _upgrade_view(candidate_momentum="114")
 
     exits = strategy.exit_signals(
         view, _held_portfolio(cash="1"), _upgrade_parameters()
     )
 
     assert exits == []
+
+
+def test_upgrade_exit_requires_current_momentum_for_both_sides() -> None:
+    strategy = MinerviniStrategy()
+    parameters = _upgrade_parameters()
+
+    for view in (
+        _upgrade_view(candidate_momentum=None),
+        _upgrade_view(held_momentum=None),
+    ):
+        assert strategy.exit_signals(view, _held_portfolio(cash="1"), parameters) == []
 
 
 def test_upgrade_exit_never_duplicates_a_position_already_exiting_on_its_own_rule() -> (
@@ -596,10 +627,7 @@ def test_upgrade_exit_never_duplicates_a_position_already_exiting_on_its_own_rul
     (Damaged VCP) -- the upgrade check must not also emit a second SELL
     for the same security."""
     strategy = MinerviniStrategy()
-    view = _KeyedView(
-        {"sec-aapl": _history(), "sec-msft": _history()},
-        {"sec-aapl": _scan(score=70, state="Damaged"), "sec-msft": _scan(score=95)},
-    )
+    view = _upgrade_view(held_state="Damaged", candidate_momentum="130")
 
     exits = strategy.exit_signals(
         view, _held_portfolio(cash="1"), _upgrade_parameters()
@@ -830,16 +858,18 @@ def test_stage_and_stop_loss_exits_carry_their_own_codes() -> None:
 
 def test_upgrade_exit_explains_the_rotation() -> None:
     strategy = MinerviniStrategy()
-    view = _KeyedView(
-        {"sec-aapl": _history(), "sec-msft": _history()},
-        {"sec-aapl": _scan(score=70), "sec-msft": _scan(score=95)},
-    )
+    view = _upgrade_view()
 
     exits = validate_exit_signals(
         strategy.exit_signals(view, _held_portfolio(cash="0"), _upgrade_parameters())
     )
 
     assert _codes(exits[0]) == ("portfolio_upgrade",)
+    reason = exits[0].explanation.reasons[0]
+    facts = {fact.label: fact.observed for fact in reason.facts}
+    assert facts["Candidate 12-to-1 momentum"] == Decimal("15.0")
+    assert facts["Held 12-to-1 momentum"] == Decimal("0")
+    assert facts["Required momentum lead"] == Decimal("15")
 
 
 # --- GH-57: the Strategy's own stop level ------------------------------------

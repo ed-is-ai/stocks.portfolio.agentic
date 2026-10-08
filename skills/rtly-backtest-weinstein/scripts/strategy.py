@@ -694,7 +694,8 @@ class WeinsteinStrategy:
         """Portfolio upgrading: rotate capital toward the strongest Stage 2
         leadership when a slot isn't otherwise free.
 
-        When a stronger unheld candidate's percent-above-150-session-SMA
+        When the configured position cap is full and a stronger unheld
+        candidate's percent-above-150-session-SMA
         clears the weakest held position's own current reading by at least
         ``upgrade_score_margin_pct`` points, sell the weakest holding to
         free cash for the stronger setup -- mirroring Weinstein's own
@@ -709,17 +710,15 @@ class WeinsteinStrategy:
         margin = _decimal(parameters["upgrade_score_margin_pct"])
         if margin is None:
             return None
-        # The shared allocator owns BUY affordability.  Do not liquidate a
-        # holding while a cash slot remains for its next cohort.
-        if portfolio.cash > 0:
-            return None
-
         held_ids = {
             position.security_id
             for position in portfolio.positions
             if position.quantity > 0 and position.security_id not in already_exiting
         }
         if not held_ids:
+            return None
+        position_cap = _plain_int(parameters.get("max_concurrent_positions"))
+        if position_cap is None or position_cap < 1 or len(held_ids) < position_cap:
             return None
 
         candidates: list[tuple[Decimal, str]] = []
