@@ -63,6 +63,9 @@ from app.services.backtest.strategy_job import (
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.wiki_historical_evidence import (
+    WikiHistoricalEvidenceAdapter,
+)
 from app.services.backtest.worker import (
     build_backtest_engine,
     build_initialization_engine,
@@ -248,6 +251,9 @@ def test_clean_checkout_journey_completes_a_real_backtest_end_to_end(
     init_engine._month_processor._evidence_adapter = (  # type: ignore[attr-defined]
         _initialization_evidence_adapter()
     )
+    # #82 C3b: the production engine path can build WIKI-priced members.
+    adapters = init_engine._month_processor._evidence_adapters  # type: ignore[attr-defined]
+    assert isinstance(adapters["wiki"], WikiHistoricalEvidenceAdapter)
     init_run_result = init_engine.run(init_claim.job.id, init_claim.claim_token)
     assert init_run_result.status is StrategyJobStatus.COMPLETE
 

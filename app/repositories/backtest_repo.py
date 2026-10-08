@@ -1858,11 +1858,36 @@ def _row_to_initialization_progress(
     )
 
 
+#: Roster sources screened live; a V2 BAU month observes only their members.
+CURRENT_ROSTER_SOURCES = frozenset(
+    {"datahub_sp500", "tradingview_us", "tradingview_uk"}
+)
+
+
+def is_current_source(source_memberships: Iterable[str]) -> bool:
+    """Whether a roster member comes from a live (current) roster source."""
+    return not CURRENT_ROSTER_SOURCES.isdisjoint(source_memberships)
+
+
 class _PointInTimeRosterMember(NamedTuple):
     security_id: str
     mic: str
     provider: str
     membership_intervals: MembershipIntervals
+    source_memberships: tuple[str, ...]
+
+
+def _source_memberships(item: Mapping[str, object]) -> tuple[str, ...]:
+    """Return a manifest member's source names; reject anything else."""
+    sources = item.get("source_memberships")
+    if not isinstance(sources, list) or not all(isinstance(x, str) for x in sources):
+        raise ValueError("roster member source memberships are malformed")
+    return tuple(sources)
+
+
+def _utc_month(instant: str) -> str:
+    """Return the ``YYYY-MM`` UTC month of an ISO-8601 instant."""
+    return datetime.fromisoformat(instant).astimezone(timezone.utc).strftime("%Y-%m")
 
 
 # ponytail: unbounded, but rosters are immutable and few per process.
@@ -1894,6 +1919,7 @@ def _point_in_time_roster_members(
                     (str(start), None if end is None else str(end))
                     for start, end in item.get("membership_intervals") or ()
                 ),
+                source_memberships=_source_memberships(item),
             )
             for item in manifest["members"]
         )
@@ -8474,8 +8500,17 @@ class BacktestRepository:
             if roster_json is None:
                 return BauPromotionDecision(False, "snapshot roster is unavailable")
             roster = CapturedRosterV1.from_json(profile.roster_digest, roster_json)
-            expected = tuple((item.security_id, item.mic) for item in roster.members)
+            point_in_time = (
+                profile.roster_policy_version == POINT_IN_TIME_POLICY_VERSION
+            )
+            expected = tuple(
+                (item.security_id, item.mic)
+                for item in roster.members
+                if not point_in_time or is_current_source(item.source_memberships)
+            )
             actual = tuple((item.security_id, item.mic) for item in capture.members)
+            if not expected:
+                return BauPromotionDecision(False, "BAU capture roster is empty")
             if actual != expected:
                 return BauPromotionDecision(False, "BAU capture roster is incomplete")
             roster_by_id = {item.security_id: item for item in roster.members}
@@ -8987,7 +9022,11 @@ class BacktestRepository:
         conn: sqlite3.Connection, commit: MonthlySnapshotCommitV1
     ) -> None:
         BacktestRepository._validate_snapshot_members_against_roster(
-            conn, commit.profile, commit.manifest.snapshot_month, commit.members
+            conn,
+            commit.profile,
+            commit.manifest.snapshot_month,
+            commit.members,
+            provenance_quality=commit.manifest.provenance_quality,
         )
 
     @staticmethod
@@ -8996,9 +9035,14 @@ class BacktestRepository:
         profile: SnapshotProfileV1,
         snapshot_month: str,
         members: tuple[SnapshotMemberV1, ...],
+        *,
+        provenance_quality: str,
     ) -> None:
+        if provenance_quality not in ("best_effort_reconstructed", "observed_bau"):
+            raise BacktestIntegrityError("snapshot provenance quality is unknown")
         roster = conn.execute(
-            "SELECT policy_version FROM reconstruction_rosters WHERE roster_digest=?",
+            """SELECT policy_version, captured_at FROM reconstruction_rosters
+               WHERE roster_digest=?""",
             (profile.roster_digest,),
         ).fetchone()
         if roster is not None and str(roster[0]) != profile.roster_policy_version:
@@ -9026,12 +9070,19 @@ class BacktestRepository:
                 mic: calendar.last_session_of_month(mic, snapshot_month)
                 for mic in {member.mic for member in roster_members}
             }
-            in_month = {
-                member.security_id
-                for member in month_members(
-                    roster_members, sessions, point_in_time=True
+            if provenance_quality == "observed_bau" and (
+                roster is None or snapshot_month < _utc_month(str(roster[1]))
+            ):
+                raise BacktestIntegrityError(
+                    "observed BAU month precedes its roster capture"
                 )
-            }
+            # C3b: a BAU month observes the live screens, not the intervals.
+            month = (
+                [m for m in roster_members if is_current_source(m.source_memberships)]
+                if provenance_quality == "observed_bau"
+                else month_members(roster_members, sessions, point_in_time=True)
+            )
+            in_month = {member.security_id for member in month}
             providers = {
                 member.security_id: member.provider or "yfinance"
                 for member in roster_members
@@ -9409,7 +9460,11 @@ class BacktestRepository:
             member_tuple = tuple(members)
             record_tuple = tuple(records)
             self._validate_snapshot_members_against_roster(
-                conn, profile, snapshot_month, member_tuple
+                conn,
+                profile,
+                snapshot_month,
+                member_tuple,
+                provenance_quality=manifest.provenance_quality,
             )
             MonthlySnapshotCommitV1._validate_members_and_records(
                 profile,

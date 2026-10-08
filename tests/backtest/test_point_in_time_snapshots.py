@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -515,7 +517,82 @@ def test_roster_and_profile_policies_must_agree(
     try:
         with pytest.raises(BacktestIntegrityError, match="policy"):
             BacktestRepository._validate_snapshot_members_against_roster(
-                conn, _profile(digest, "ReconstructionRosterPolicyV1"), "2005-06", ()
+                conn,
+                _profile(digest, "ReconstructionRosterPolicyV1"),
+                "2005-06",
+                (),
+                provenance_quality="best_effort_reconstructed",
             )
+    finally:
+        conn.close()
+
+
+def _observed_members(
+    roster: CapturedRosterV1, symbols: tuple[str, ...], month: str
+) -> tuple[SimpleNamespace, ...]:
+    """Duck-typed snapshot members of ``symbols`` at their ``month`` end."""
+    alias = json.loads(roster.canonical_manifest_json)["alias_revision"]
+    calendar = TradingCalendar()
+    return tuple(
+        SimpleNamespace(
+            security_id=m.security_id,
+            mic=m.mic,
+            alias_revision=alias,
+            observed_symbol=m.provider_symbol,
+            as_of_session_date=calendar.last_session_of_month(m.mic, month),
+        )
+        for m in sorted(roster.members, key=lambda item: item.security_id)
+        if m.provider_symbol in symbols
+    )
+
+
+@pytest.mark.parametrize(
+    ("quality", "month", "symbols", "error"),
+    [
+        # The roster fixture is captured in 2026-08.
+        ("observed_bau", "2026-08", ("AAPL", "ULVR.L"), None),
+        ("observed_bau", "2026-08", ("AAPL", "ULVR.L", "STAY"), "roster"),
+        ("observed_bau", "2026-07", ("AAPL", "ULVR.L"), "precedes"),
+        ("best_effort_reconstructed", "2005-09", ("AAPL", "ULVR.L"), "roster"),
+        ("best_effort_reconstructed", "2005-09", ("JOIN", "STAY"), None),
+        ("observed", "2026-08", ("AAPL", "ULVR.L"), "unknown"),
+    ],
+    ids=[
+        "bau-current",
+        "bau-with-delisted",
+        "bau-before-capture",
+        "reconstructed-current",
+        "intervals",
+        "unknown-quality",
+    ],
+)
+def test_v2_month_set_depends_on_provenance_quality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    quality: str,
+    month: str,
+    symbols: tuple[str, ...],
+    error: str | None,
+) -> None:
+    _processor_, _repo, roster = _processor(tmp_path, monkeypatch)
+    profile = _profile(roster.roster_digest, POLICY_V2)
+    members = _observed_members(roster, symbols, month)
+    conn = sqlite3.connect(tmp_path / "backtest.db")
+    try:
+
+        def check() -> None:
+            BacktestRepository._validate_snapshot_members_against_roster(
+                conn,
+                profile,
+                month,
+                members,  # type: ignore[arg-type]
+                provenance_quality=quality,
+            )
+
+        if error is None:
+            check()
+        else:
+            with pytest.raises(BacktestIntegrityError, match=error):
+                check()
     finally:
         conn.close()

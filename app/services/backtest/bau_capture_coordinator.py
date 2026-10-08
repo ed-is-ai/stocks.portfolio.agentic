@@ -11,7 +11,7 @@ from typing import Literal, cast
 
 import pandas as pd
 
-from app.repositories.backtest_repo import BacktestRepository
+from app.repositories.backtest_repo import BacktestRepository, is_current_source
 from app.services.backtest.bau_run_envelope import (
     BauCaptureMemberV1,
     BauRawEvidenceV1,
@@ -23,8 +23,17 @@ from app.services.backtest.historical_price_evidence import (
     YFinanceHistoricalEvidenceAdapter,
 )
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
-from app.services.backtest.reconstruction_roster import CapturedRosterV1
-from app.services.backtest.snapshot_profile import FULL_HISTORY_START
+from app.services.backtest.point_in_time_membership import (
+    POINT_IN_TIME_POLICY_VERSION,
+)
+from app.services.backtest.reconstruction_roster import (
+    CapturedRosterMemberV1,
+    CapturedRosterV1,
+)
+from app.services.backtest.snapshot_profile import (
+    FULL_HISTORY_START,
+    SnapshotProfileV1,
+)
 from app.services.backtest.source_manifest import (
     DetectorInputIdentityV1,
     ReconstructionInputManifestV1,
@@ -74,8 +83,13 @@ class BauCaptureSession:
         self._consumed_lock = Lock()
 
     def preload(self) -> None:
-        """Fetch the complete roster before the scanner converts any ticker."""
-        ordered = tuple(sorted(self._roster.members, key=lambda item: item.security_id))
+        """Fetch the complete observed roster before the scanner converts any."""
+        ordered = tuple(
+            sorted(
+                _observed_members(self._profile, self._roster),
+                key=lambda item: item.security_id,
+            )
+        )
         try:
             # This is an eligible scan's market-data boundary, not a background
             # initializer. Bound concurrency prevents a large profile roster from
@@ -221,9 +235,16 @@ class BauCaptureCoordinator:
             ).astimezone(timezone.utc)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise BauCaptureUnavailable("roster capture authority is invalid") from exc
+        if (
+            profile.roster_policy_version == POINT_IN_TIME_POLICY_VERSION
+            and month < roster_captured_at.strftime("%Y-%m")
+        ):
+            return None  # #82 C3b: a V2 roster observes no month before capture.
         calendar = TradingCalendar()
         sessions = calendar.month_sessions(
-            tuple(member.mic for member in roster.members), month, as_of=now.date()
+            tuple(member.mic for member in _observed_members(profile, roster)),
+            month,
+            as_of=now.date(),
         )
         first_eligible = _first_eligible_capture_date(calendar, sessions)
         if now.date() != first_eligible:
@@ -259,6 +280,24 @@ class BauCaptureCoordinator:
             project_root=self._project_root,
             backtest_repository=self._backtest,
         )
+
+
+def _observed_members(
+    profile: SnapshotProfileV1, roster: CapturedRosterV1
+) -> tuple[CapturedRosterMemberV1, ...]:
+    """Return the members BAU observes: the whole V1 roster, or only a V2
+    roster's current-source members (#82 C3b); delisted names are never fetched.
+    """
+    if profile.roster_policy_version != POINT_IN_TIME_POLICY_VERSION:
+        return roster.members
+    members = tuple(
+        member
+        for member in roster.members
+        if is_current_source(member.source_memberships)
+    )
+    if not members:
+        raise BauCaptureUnavailable("no current-source roster members")
+    return members
 
 
 def _input_manifest(

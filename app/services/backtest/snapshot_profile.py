@@ -763,8 +763,13 @@ class MonthlySnapshotCommitV1(CanonicalModel):
                 )
                 or record.provenance.yfinance_ingestion_version
                 != profile.yfinance_ingestion_version
+                # #82 C3b: observed BAU months observe a roster frozen at
+                # capture, so only reconstructed records are point-in-time.
                 or record.provenance.point_in_time_universe
-                != (profile.roster_policy_version == POINT_IN_TIME_POLICY_VERSION)
+                != (
+                    profile.roster_policy_version == POINT_IN_TIME_POLICY_VERSION
+                    and provenance_quality == "best_effort_reconstructed"
+                )
             ):
                 raise SnapshotContractError(
                     "record identity does not match profile/member"
