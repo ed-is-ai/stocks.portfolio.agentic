@@ -1,0 +1,63 @@
+<section aria-labelledby="strategy-experiments-heading">
+  <div class="d-flex justify-content-between align-items-start gap-3 mb-4">
+    <div>
+      <h1 id="strategy-experiments-heading" class="h3">Strategy experiments</h1>
+      <p class="text-muted mb-0">Draft one parameter change against a verified historical Backtest. Drafting never starts a run.</p>
+    </div>
+    <a class="sm-btn sm-btn-secondary" href="/strategy-manager">Strategy Manager</a>
+  </div>
+
+  {% if outcome %}
+  <div class="sm-alert sm-alert-warning" role="alert">
+    <strong>Draft {{ outcome.status.value if outcome.status.value is defined else outcome.status }}.</strong>
+    {{ outcome.reason }}
+  </div>
+  {% endif %}
+
+  <article class="card sm-card mb-4">
+    <div class="card-body">
+      <h2 class="h5">Propose a test</h2>
+      <form method="post" action="/strategy-manager/experiments/draft">
+        <label class="form-label" for="experiment-baseline">Verified baseline Backtest</label>
+        <select class="form-select mb-3" id="experiment-baseline" name="baseline_run_id" required>
+          <option value="">Choose a completed run</option>
+          {% for baseline in baselines %}
+          <option value="{{ baseline.id }}" {% if baseline.id == baseline_run_id %}selected{% endif %}>
+            {{ baseline.strategy_id }} · {{ baseline.start_month }} to {{ baseline.end_month }} · {{ baseline.id }}
+          </option>
+          {% endfor %}
+        </select>
+        <p class="form-text">Showing up to {{ baseline_limit }} recent completed runs that passed result verification.</p>
+        {% if not baselines %}<p class="text-muted">No verified completed Backtests are available as baselines.</p>{% endif %}
+        <label class="form-label" for="experiment-hypothesis">Hypothesis</label>
+        <textarea class="form-control mb-3" id="experiment-hypothesis" name="hypothesis" rows="3" maxlength="2000" required>{{ hypothesis }}</textarea>
+        <button class="sm-btn sm-btn-primary" type="submit" {% if not baselines %}disabled{% endif %}>Create draft</button>
+      </form>
+    </div>
+  </article>
+
+  <h2 class="h5">Saved experiments</h2>
+  {% if experiments %}
+  <ul class="list-group">
+    {% for experiment in experiments %}
+    <li class="list-group-item d-flex flex-wrap justify-content-between gap-2">
+      <span><strong>{{ experiment.draft.strategy_id }}</strong> · {{ experiment.draft.parameter_name }} · {{ experiment.status.value }}</span>
+      <a href="/strategy-manager/experiments/{{ experiment.id }}">Review experiment</a>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="text-muted">No Strategy experiments have been drafted.</p>
+  {% endif %}
+
+  {% if attempt_audit %}
+  <details class="mt-4">
+    <summary>Recent rejected or unavailable draft attempts</summary>
+    <ol>
+      {% for attempt in attempt_audit %}
+      <li><time>{{ attempt.occurred_at.isoformat() }}</time> · {{ attempt.event_type }}{% if attempt.baseline_run_id %} · baseline <code>{{ attempt.baseline_run_id }}</code>{% endif %}{% if attempt.details.get('reason') %} · {{ attempt.details.get('reason') }}{% endif %}{% if attempt.details.get('hypothesis') %}<p>Hypothesis: {{ attempt.details.get('hypothesis') }}</p>{% endif %}</li>
+      {% endfor %}
+    </ol>
+  </details>
+  {% endif %}
+</section>

@@ -1055,6 +1055,24 @@ class BacktestExecutionEngine:
         self._regime_benchmark_access: HistoricalEvidenceReadHandle | None = None
 
     def run(self, job_id: str, claim_token: str) -> StrategyJobV1:
+        try:
+            result = self._run_once(job_id, claim_token)
+        except Exception:
+            self._reconcile_terminal_experiment(job_id)
+            raise
+        if result.status in {
+            StrategyJobStatus.COMPLETE,
+            StrategyJobStatus.FAILED,
+            StrategyJobStatus.CANCELLED,
+        }:
+            self._reconcile_terminal_experiment(job_id)
+        return result
+
+    def _reconcile_terminal_experiment(self, job_id: str) -> None:
+        """Reconcile experiment evidence on the worker path, never on a GET."""
+        _reconcile_terminal_experiment(self._repository, job_id)
+
+    def _run_once(self, job_id: str, claim_token: str) -> StrategyJobV1:
         job = self._repository.strategy_job(job_id)
         if not self._owns(job, claim_token):
             return job
@@ -1546,6 +1564,35 @@ class BacktestExecutionEngine:
         )
 
 
+def _reconcile_terminal_experiment(
+    repository: BacktestRepository, job_id: str
+) -> None:
+    """Reconcile terminal candidate state from every worker exit path."""
+    try:
+        job = repository.strategy_job(job_id)
+        if (
+            job.job_type is not StrategyJobType.BACKTEST
+            or job.status
+            not in {
+                StrategyJobStatus.COMPLETE,
+                StrategyJobStatus.FAILED,
+                StrategyJobStatus.CANCELLED,
+            }
+        ):
+            return
+        from app.services.backtest.strategy_experiment_service import (
+            StrategyExperimentService,
+        )
+
+        StrategyExperimentService(repository).reconcile_candidate(job_id)
+    except Exception:
+        logger.warning(
+            "strategy experiment reconciliation failed for %s",
+            job_id,
+            exc_info=True,
+        )
+
+
 def build_backtest_engine(
     job_id: str,
     claim_token: str,
@@ -1657,6 +1704,7 @@ def main(
                     ),
                     lease=lease,
                 )
+        _reconcile_terminal_experiment(repository, args.job_id)
         return 1
     gc_was_enabled = gc.isenabled()
     if job.job_type is StrategyJobType.INITIALIZATION:
@@ -1694,6 +1742,7 @@ def main(
                         detail=db.sqlite_failure_detail(exc, "worker.execute", detail),
                         lease=lease,
                     )
+            _reconcile_terminal_experiment(repository, args.job_id)
             return 1
     finally:
         if job.job_type is StrategyJobType.INITIALIZATION and gc_was_enabled:

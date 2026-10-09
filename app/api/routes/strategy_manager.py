@@ -29,9 +29,11 @@ from app.api.dependencies import (
     get_bootstrap_service,
     get_readiness_service,
     get_strategy_job_service,
+    get_strategy_experiment_service,
     get_strategy_manager_agent,
 )
 from app.api.templating import is_htmx_request, template_response, templates
+from app.core import config
 from app.core.security import require_local_or_token
 from app.repositories.backtest_repo import (
     BacktestActivitySummaryV1,
@@ -95,6 +97,7 @@ from app.services.backtest.strategy_job import (
     StrategyReadinessV1,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
+from app.services.backtest.strategy_experiment_service import StrategyExperimentService
 from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1
 from app.services.backtest.strategy_protocol import validate_strategy_parameters
 from app.services.backtest.strategy_readiness_service import (
@@ -114,6 +117,9 @@ StrategyManagerDep = Annotated[
 ]
 BootstrapDep = Annotated[StrategyBootstrapService, Depends(get_bootstrap_service)]
 ReadinessDep = Annotated[StrategyReadinessService, Depends(get_readiness_service)]
+ExperimentDep = Annotated[
+    StrategyExperimentService, Depends(get_strategy_experiment_service)
+]
 
 _TERMINAL = {
     StrategyJobStatus.COMPLETE,
@@ -1463,6 +1469,173 @@ async def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLRes
     """Render the standalone Backtest results list (Story 2.8 AC 2, 7)."""
     return template_response(
         request, "_backtest_results_list.html", _backtest_activities_context(backtest)
+    )
+
+
+def _experiment_list_context(
+    backtest: BacktestRepository,
+    experiments: StrategyExperimentService,
+    *,
+    baseline_run_id: str = "",
+    hypothesis: str = "",
+    outcome: object | None = None,
+) -> dict[str, object]:
+    return {
+        "experiments": experiments.list(),
+        "baselines": backtest.strategy_experiment_baselines(),
+        "attempt_audit": experiments.attempt_audit(),
+        "baseline_run_id": baseline_run_id,
+        "hypothesis": hypothesis,
+        "outcome": outcome,
+        "baseline_limit": 25,
+    }
+
+
+@router.get("/strategy-manager/experiments", response_class=HTMLResponse)
+def strategy_experiments(
+    request: Request, backtest: BacktestDep, experiments: ExperimentDep
+) -> HTMLResponse:
+    """Read-only list and draft form; this route is separate from the landing view."""
+    return template_response(
+        request,
+        "_strategy_experiments.html",
+        _experiment_list_context(backtest, experiments),
+    )
+
+
+@router.post(
+    "/strategy-manager/experiments/draft",
+    dependencies=[Depends(require_local_or_token)],
+)
+def create_strategy_experiment_draft(
+    request: Request,
+    backtest: BacktestDep,
+    experiments: ExperimentDep,
+    baseline_run_id: Annotated[str, Form()] = "",
+    hypothesis: Annotated[str, Form()] = "",
+) -> Response:
+    outcome = experiments.draft(
+        baseline_run_id=baseline_run_id, hypothesis=hypothesis
+    )
+    if outcome.experiment is not None:
+        return RedirectResponse(
+            f"/strategy-manager/experiments/{outcome.experiment.id}", status_code=303
+        )
+    return template_response(
+        request,
+        "_strategy_experiments.html",
+        _experiment_list_context(
+            backtest,
+            experiments,
+            baseline_run_id=baseline_run_id,
+            hypothesis=hypothesis,
+            outcome=outcome,
+        ),
+        status_code=_form_error_status(request),
+    )
+
+
+def _experiment_detail_context(
+    experiments: StrategyExperimentService,
+    experiment_id: str,
+    *,
+    error: str | None = None,
+) -> dict[str, object]:
+    return {"detail": experiments.detail(experiment_id), "error": error}
+
+
+def _experiment_approval_actor(request: Request) -> Literal["local_user", "api_token"]:
+    token = config.APP_AUTH_TOKEN()
+    if token and request.headers.get("X-Auth-Token") == token:
+        return "api_token"
+    return "local_user"
+
+
+@router.get(
+    "/strategy-manager/experiments/{experiment_id}", response_class=HTMLResponse
+)
+def strategy_experiment_detail(
+    request: Request, experiments: ExperimentDep, experiment_id: str
+) -> Response:
+    try:
+        context = _experiment_detail_context(experiments, experiment_id)
+    except StrategyJobNotFound:
+        return Response(status_code=404)
+    return template_response(request, "_strategy_experiment_detail.html", context)
+
+
+@router.post(
+    "/strategy-manager/experiments/{experiment_id}/approve",
+    dependencies=[Depends(require_local_or_token)],
+)
+def approve_strategy_experiment(
+    request: Request,
+    experiments: ExperimentDep,
+    experiment_id: str,
+    draft_digest: Annotated[str, Form()] = "",
+    confirm_approval: Annotated[str | None, Form()] = None,
+) -> Response:
+    if confirm_approval != "yes":
+        try:
+            context = _experiment_detail_context(
+                experiments,
+                experiment_id,
+                error="Check the explicit approval box before enqueuing the candidate.",
+            )
+        except StrategyJobNotFound:
+            return Response(status_code=404)
+        return template_response(
+            request, "_strategy_experiment_detail.html", context, status_code=422
+        )
+    try:
+        experiments.approve(
+            experiment_id,
+            draft_digest,
+            actor=_experiment_approval_actor(request),
+        )
+    except StrategyJobNotFound:
+        return Response(status_code=404)
+    except (StrategyJobConflict, ValueError) as exc:
+        try:
+            context = _experiment_detail_context(
+                experiments, experiment_id, error=str(exc)
+            )
+        except StrategyJobNotFound:
+            return Response(status_code=404)
+        return template_response(
+            request, "_strategy_experiment_detail.html", context, status_code=409
+        )
+    return RedirectResponse(
+        f"/strategy-manager/experiments/{experiment_id}", status_code=303
+    )
+
+
+@router.post(
+    "/strategy-manager/experiments/{experiment_id}/discard",
+    dependencies=[Depends(require_local_or_token)],
+)
+def discard_strategy_experiment(
+    request: Request,
+    experiments: ExperimentDep,
+    experiment_id: str,
+    draft_digest: Annotated[str, Form()] = "",
+) -> Response:
+    try:
+        experiments.discard(experiment_id, draft_digest)
+    except StrategyJobNotFound:
+        return Response(status_code=404)
+    except StrategyJobConflict as exc:
+        try:
+            context = _experiment_detail_context(
+                experiments, experiment_id, error=str(exc)
+            )
+        except StrategyJobNotFound:
+            return Response(status_code=404)
+        return template_response(
+            request, "_strategy_experiment_detail.html", context, status_code=409
+        )
+    return RedirectResponse(
+        f"/strategy-manager/experiments/{experiment_id}", status_code=303
     )
 
 

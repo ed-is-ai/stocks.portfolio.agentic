@@ -332,6 +332,7 @@ class StrategyJobService:
                     lock_failures = 0
                     continue
                 self.dispatch_once()
+                self._reconcile_pending_experiments()
                 lock_failures = 0
             except Exception as exc:
                 if is_transient_sqlite_lock(exc):
@@ -345,6 +346,32 @@ class StrategyJobService:
                     self._stop.wait(delay)
                     continue
                 logger.exception("Strategy job dispatcher iteration failed")
+
+    def _reconcile_pending_experiments(self) -> None:
+        """Retry terminal experiment comparisons from their durable job records."""
+        pending_reader = getattr(
+            self._repository, "pending_strategy_experiment_reconciliations", None
+        )
+        if pending_reader is None:
+            return
+        pending = pending_reader()
+        if not pending:
+            return
+        from app.services.backtest.strategy_experiment_service import (
+            StrategyExperimentService,
+        )
+
+        experiments = StrategyExperimentService(self._repository)
+        for candidate_run_id in pending:
+            try:
+                experiments.reconcile_candidate(candidate_run_id)
+            except Exception as exc:
+                if is_transient_sqlite_lock(exc):
+                    raise
+                logger.exception(
+                    "Pending Strategy experiment reconciliation failed for %s",
+                    candidate_run_id,
+                )
 
     def _stop_owned_child_after_lease_loss(self) -> None:
         """Stop a child immediately after another instance owns the lease.

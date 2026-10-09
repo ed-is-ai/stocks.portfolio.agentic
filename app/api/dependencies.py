@@ -13,6 +13,7 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.agents.research.copilot import ResearchCopilotClient
+from app.agents.strategy_experiment import StrategyExperimentAgent
 from app.agents.thesis.drafter import ThesisDraftClient
 from app.agents.trade_review.weekly import TradeReviewClient
 from app.agents.strategy_manager import StrategyManagerAgent
@@ -45,7 +46,6 @@ from app.services.portfolio_recommendation_service import (
 from app.services.trade_review_service import TradeReviewService
 from app.services.trader_service import TraderService
 from app.services.backtest.backtest_launch_service import BacktestLaunchService
-from app.services.backtest.historical_price_evidence import YFinanceFxSeriesFetcher
 from app.services.snapshot_price_backfill import PriceEvidenceBackfillService
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
@@ -55,6 +55,7 @@ from app.services.backtest.notification_projector import StrategyNotificationPro
 from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
+from app.services.backtest.strategy_experiment_service import StrategyExperimentService
 
 
 @lru_cache
@@ -318,6 +319,19 @@ def get_thesis_draft_client() -> ThesisDraftClient:
     startup takes effect on the next draft.
     """
     return ThesisDraftClient()
+
+
+def get_strategy_experiment_agent() -> StrategyExperimentAgent:
+    """Return a proposal client pinned to the local Foundry service."""
+    return StrategyExperimentAgent()
+
+
+@lru_cache
+def get_strategy_experiment_service() -> StrategyExperimentService:
+    """Return the shared Strategy experiment lifecycle service (GH-15)."""
+    return StrategyExperimentService(
+        get_backtest_repository(), get_strategy_experiment_agent()
+    )
 
 
 @lru_cache

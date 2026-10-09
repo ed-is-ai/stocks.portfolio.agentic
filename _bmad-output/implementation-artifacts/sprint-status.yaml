@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-10-08 (GH-90 four-arm comparison complete; GitHub issue update pending network)"
+last_updated: "2026-10-09 (GH-15 strategy experiment agent implementation ready for review)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -58,6 +58,10 @@ development_status:
   gh-61-5-validate-ranking-performance: done
   feature-gh-90-position-upgrade-full-book: review
   gh-90-position-upgrade-full-book: review
+  feature-gh-15-strategy-experiment-agent: review
+  gh-15-1-bound-and-persist-strategy-experiment-drafts: review
+  gh-15-2-approve-and-launch-exact-strategy-experiment: review
+  gh-15-3-compare-experiments-and-audit-conclusion: review
   feature-gh-665-spy-regime-benchmark: in-progress
   gh-665-1-register-spy-reference-evidence: done
   gh-665-2-pin-reference-in-run-manifest: done

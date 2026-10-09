@@ -1,5 +1,5 @@
 generated: 2026-08-20
-updated: 2026-10-06
+updated: 2026-10-09
 repository: ed-is-ai/Agents.stocks
 contract_traceability:
   architecture_spine: embedded-relevant-text
@@ -156,6 +156,30 @@ stories:
     issue: 493
     status: review
     spec: spec-gh-444-493-storage-baseline-strategy-agent.md
+  strategy-experiment-agent:
+    issue: 15
+    repository: ed-is-ai/stocks.portfolio.agentic
+    status: review
+    branch: codex/gh-15-strategy-experiment-agent
+    feature_plan: feature-gh-15-strategy-experiment-agent.md
+    completed_prerequisite_issues: [13, 33]
+    related_issues: [20]
+    sub_issues: [97, 98, 99]
+    stories:
+      gh-15-1-bound-and-persist-strategy-experiment-drafts:
+        issue: 97
+        status: review
+        spec: spec-gh-15-strategy-experiment-agent.md
+      gh-15-2-approve-and-launch-exact-strategy-experiment:
+        issue: 98
+        status: review
+        prerequisite_issues: [97]
+        spec: spec-gh-15-strategy-experiment-agent.md
+      gh-15-3-compare-experiments-and-audit-conclusion:
+        issue: 99
+        status: review
+        prerequisite_issues: [98]
+        spec: spec-gh-15-strategy-experiment-agent.md
   1-1-qualify-the-free-historical-data-contract: { issue: 184, status: done }
   1-2-capture-stable-security-identities-and-the-reconstruction-roster: { issue: 185, status: done }
   1-3-store-immutable-provider-native-historical-evidence: { issue: 186, status: done }

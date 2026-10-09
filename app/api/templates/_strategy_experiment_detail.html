@@ -1,0 +1,102 @@
+{% set experiment = detail.experiment %}
+<section aria-labelledby="strategy-experiment-heading">
+  <p><a href="/strategy-manager/experiments">← Strategy experiments</a></p>
+  <h1 id="strategy-experiment-heading" class="h3">Experiment review</h1>
+  {% if error %}<div class="sm-alert sm-alert-danger" role="alert">{{ error }}</div>{% endif %}
+
+  <article class="card sm-card mb-4">
+    <div class="card-body">
+      <h2 class="h5">{{ experiment.draft.strategy_id }} · {{ experiment.draft.parameter_name }}</h2>
+      <dl class="row mb-0">
+        <dt class="col-sm-3">Status</dt><dd class="col-sm-9">{{ experiment.status.value }}{% if detail.candidate_status %} · candidate {{ detail.candidate_status }}{% endif %}</dd>
+        <dt class="col-sm-3">Baseline</dt><dd class="col-sm-9"><a href="/strategy-manager/results/{{ experiment.draft.baseline_run_id }}">{{ experiment.draft.baseline_run_id }}</a></dd>
+        <dt class="col-sm-3">Hypothesis</dt><dd class="col-sm-9">{{ experiment.draft.hypothesis }}</dd>
+        <dt class="col-sm-3">Proposed effect</dt><dd class="col-sm-9">{{ experiment.draft.effect_summary }}</dd>
+        <dt class="col-sm-3">Exact parameter change</dt><dd class="col-sm-9"><code>{{ experiment.draft.parameter_name }}</code>: <code>{{ experiment.draft.baseline_value | tojson }}</code> → <code>{{ experiment.draft.proposed_value | tojson }}</code></dd>
+        <dt class="col-sm-3">Approved metric</dt><dd class="col-sm-9">{{ experiment.draft.metric.value }} · expected {{ experiment.draft.expected_direction.value }}</dd>
+        <dt class="col-sm-3">Draft digest</dt><dd class="col-sm-9"><code>{{ experiment.draft_digest }}</code></dd>
+      </dl>
+    </div>
+  </article>
+
+  {% if experiment.conclusion %}
+  <article class="card sm-card mb-4" aria-labelledby="experiment-conclusion-heading">
+    <div class="card-body">
+      <h2 id="experiment-conclusion-heading" class="h5">Historical comparison: {{ experiment.conclusion.verdict.value }}</h2>
+      <p>{{ experiment.conclusion.summary }}</p>
+      <p>Baseline: {{ experiment.comparison.baseline_value if experiment.comparison.baseline_value is not none else 'unavailable' }} ({{ experiment.comparison.baseline_closed_trades if experiment.comparison.baseline_closed_trades is not none else 'unavailable' }} closed trades). Candidate: {{ experiment.comparison.candidate_value if experiment.comparison.candidate_value is not none else 'unavailable' }} ({{ experiment.comparison.candidate_closed_trades if experiment.comparison.candidate_closed_trades is not none else 'unavailable' }} closed trades).</p>
+      <ul>{% for limitation in experiment.comparison.limitations %}<li>{{ limitation }}</li>{% endfor %}</ul>
+    </div>
+  </article>
+  {% endif %}
+
+  {% if experiment.status.value == 'draft' %}
+  <div class="d-flex gap-2 mb-4">
+    <button id="experiment-review-trigger" type="button" class="sm-btn sm-btn-primary" aria-haspopup="dialog" aria-controls="experiment-approval-dialog">Review and approve candidate</button>
+    <form method="post" action="/strategy-manager/experiments/{{ experiment.id }}/discard" onsubmit="return window.confirm('Discard this experiment draft? It cannot be restored.');">
+      <input type="hidden" name="draft_digest" value="{{ experiment.draft_digest }}">
+      <button class="sm-btn sm-btn-secondary" type="submit">Discard draft</button>
+    </form>
+  </div>
+  <dialog id="experiment-approval-dialog" aria-labelledby="experiment-approval-title" aria-describedby="experiment-approval-description">
+    <div class="p-4">
+      <h2 id="experiment-approval-title" class="h4">Approve one candidate Backtest?</h2>
+      <p id="experiment-approval-description">This action adds one durable Backtest job using the stored baseline manifest and the single approved parameter value.</p>
+      <h3 class="h6">Baseline and every locked run input</h3>
+      <p>Baseline run: <code>{{ experiment.draft.baseline_run_id }}</code>. The JSON below includes Strategy source, parameters, dates, currency, capital, universe, execution contract, and every evidence pin copied from the verified baseline.</p>
+      <pre class="border rounded p-3" style="max-height: 18rem; overflow: auto"><code>{{ detail.locked_manifest_json }}</code></pre>
+      <p><strong>Exact write:</strong> enqueue candidate with <code>{{ experiment.draft.parameter_name }}={{ experiment.draft.proposed_value | tojson }}</code>; all other manifest fields stay equal to the baseline.</p>
+      <p><strong>Verification:</strong> after the job is terminal, both results are integrity-checked, their manifest pins are compared, and canonical comparison eligibility is applied. Failed, cancelled, ineligible, unavailable, equal-metric, or zero-trade outcomes are inconclusive. The result is historical and makes no future-performance claim.</p>
+      <form method="post" action="/strategy-manager/experiments/{{ experiment.id }}/approve">
+        <input type="hidden" name="draft_digest" value="{{ experiment.draft_digest }}">
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="checkbox" id="confirm-experiment-approval" name="confirm_approval" value="yes" required>
+          <label class="form-check-label" for="confirm-experiment-approval">I approve enqueueing this one candidate Backtest.</label>
+        </div>
+        <div class="d-flex gap-2">
+          <button class="sm-btn sm-btn-primary" type="submit">Approve and enqueue</button>
+          <button class="sm-btn sm-btn-secondary" type="button" data-close-experiment-dialog>Cancel</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+  <script>
+    (() => {
+      const dialog = document.getElementById('experiment-approval-dialog');
+      const opener = document.getElementById('experiment-review-trigger');
+      if (!dialog || !opener) return;
+      const closeButton = dialog.querySelector('[data-close-experiment-dialog]');
+      const focusable = () => Array.from(dialog.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )).filter((item) => item.offsetParent !== null);
+      opener.addEventListener('click', () => {
+        dialog.showModal();
+        closeButton.focus();
+      });
+      closeButton.addEventListener('click', () => dialog.close());
+      dialog.addEventListener('close', () => opener.focus());
+      dialog.addEventListener('keydown', (event) => {
+        if (event.key !== 'Tab') return;
+        const items = focusable();
+        if (!items.length) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      });
+    })();
+  </script>
+  {% elif experiment.candidate_run_id %}
+  <p><a href="/strategy-manager/activities/{{ experiment.candidate_run_id }}">Candidate activity</a> · <a href="/strategy-manager/results/{{ experiment.candidate_run_id }}">Candidate result</a></p>
+  {% endif %}
+
+  <details class="mt-4">
+    <summary>Audit history</summary>
+    <ol>{% for event in detail.audit_events %}<li><time>{{ event.occurred_at.isoformat() }}</time> · {{ event.event_type }} <code>{{ event.details | tojson }}</code></li>{% endfor %}</ol>
+  </details>
+</section>
