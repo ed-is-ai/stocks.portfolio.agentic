@@ -25,6 +25,20 @@ def _detail():
         proposed_value=21,
         metric=SimpleNamespace(value="total_return"),
         expected_direction=SimpleNamespace(value="higher"),
+        model_provider="foundry_local",
+        model_id="phi-4-mini-local",
+        model_attempts=[
+            SimpleNamespace(
+                model_provider="anthropic",
+                model_id="claude-sonnet-5",
+                outcome="no_valid_proposal",
+            ),
+            SimpleNamespace(
+                model_provider="foundry_local",
+                model_id="phi-4-mini-local",
+                outcome="selected",
+            ),
+        ],
     )
     experiment = SimpleNamespace(
         id="experiment-1",
@@ -91,6 +105,30 @@ def test_experiment_list_is_a_separate_route(experiment_services) -> None:
     assert experiment_list.status_code == 200
     assert "Strategy experiments" in experiment_list.text
     assert "Create draft" in experiment_list.text
+    assert (
+        "Only the hypothesis, Strategy ID, declared parameter definitions"
+        in experiment_list.text
+    )
+    assert (
+        "baseline ID and manifest, Strategy source, other run inputs"
+        in experiment_list.text
+    )
+    assert "cannot return a schema-valid proposal" in experiment_list.text
+    assert (
+        "if it does not propose one valid declared parameter change, no draft is created"
+        in experiment_list.text
+    )
+
+
+def test_experiment_detail_shows_proposal_model(experiment_services) -> None:
+    response = client.get("/strategy-manager/experiments/experiment-1")
+
+    assert response.status_code == 200
+    assert "Proposal model" in response.text
+    assert "Foundry Local · phi-4-mini-local" in response.text
+    assert "Provider attempts" in response.text
+    assert "Claude · claude-sonnet-5 — no valid proposal" in response.text
+    assert "Foundry Local · phi-4-mini-local — proposal selected" in response.text
 
 
 def test_approval_route_requires_explicit_checkbox_and_enqueues_on_approval(
@@ -117,9 +155,7 @@ def test_approval_route_requires_explicit_checkbox_and_enqueues_on_approval(
 
     assert accepted.status_code == 303
     assert accepted.headers["location"].endswith("/experiment-1")
-    assert experiment_services.approvals == [
-        ("experiment-1", "a" * 64, "api_token")
-    ]
+    assert experiment_services.approvals == [("experiment-1", "a" * 64, "api_token")]
 
 
 def test_discard_route_is_digest_bound(experiment_services: _ExperimentService) -> None:

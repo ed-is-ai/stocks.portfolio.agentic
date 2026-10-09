@@ -3808,7 +3808,15 @@ class BacktestRepository:
                 baseline_run_id=draft.baseline_run_id,
                 candidate_run_id=None,
                 event_type="draft_created",
-                details={"draft_digest": draft_digest, "model_id": draft.model_id},
+                details={
+                    "draft_digest": draft_digest,
+                    "model_provider": draft.model_provider,
+                    "model_id": draft.model_id,
+                    "model_attempts": [
+                        attempt.model_dump(mode="json")
+                        for attempt in draft.model_attempts
+                    ],
+                },
                 occurred_at=now,
             )
             row = conn.execute(

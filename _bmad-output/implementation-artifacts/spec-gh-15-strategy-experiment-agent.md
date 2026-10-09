@@ -2,8 +2,8 @@
 title: 'GH-15 Strategy experiment agent'
 type: 'feature'
 created: '2026-10-09'
-status: 'done'
-baseline_revision: 5243c2cd56c7d08eae6c75adbac4f8de492fa038
+status: 'in-progress'
+baseline_revision: b89b168814ce6b7c78315ed9a96af02caad9fbda
 review_loop_iteration: 0
 final_revision: 99ffbce1f9c5dc4ccddf0067ea092e0d6ea8e4a8
 followup_review_recommended: true
@@ -48,17 +48,17 @@ warnings: []
 - `app/repositories/backtest_repo.py` -- durable jobs, verified results, canonical eligibility, and SQLite schema.
 - `app/services/backtest/backtest_launch_service.py` -- normal launch rebuilds from active state; experiment launch must preserve the baseline manifest instead.
 - `app/services/backtest/worker.py` -- durable candidate execution and terminal completion hook.
-- `app/agents/analyst/analyst_agent.py` -- existing fixed-loopback Foundry Local client pattern used for privacy-safe proposal generation.
-- `app/schemas/strategy_experiment.py` -- strict typed proposal and durable lifecycle contracts; model output contains no run inputs or enqueue fields.
+- `app/agents/strategy_experiment/agent.py` -- Claude-first structured proposal client with a fixed-loopback Foundry Local fallback; only the approved hypothesis and declared Strategy parameter context are sent remotely.
+- `app/schemas/strategy_experiment.py` -- strict typed proposal and durable lifecycle contracts, including provider attempt provenance; model output contains no run inputs or enqueue fields.
 - `app/api/routes/strategy_manager.py`, `app/api/dependencies.py` -- synchronous threadpool-backed Strategy Manager experiment routes and service composition.
-- `app/api/templates/_strategy_experiments.html` and `app/api/templates/_strategy_experiment_detail.html` -- baseline selection, attempt audit, review, and approval dialog.
+- `app/api/templates/_strategy_experiments.html` and `app/api/templates/_strategy_experiment_detail.html` -- baseline selection, data-use disclosure, provider-attempt provenance, review, and approval dialog.
 - `tests/test_strategy_experiment_browser.py` -- Playwright keyboard and dialog interaction coverage.
 
 ## Tasks & Acceptance
 
 **Execution:**
 - [x] `app/schemas/strategy_experiment.py` -- define strict draft, state, metric/direction, comparison, and outcome models -- keep persisted/API contracts typed.
-- [x] `app/agents/strategy_experiment/__init__.py` and `app/agents/strategy_experiment/agent.py` -- request a strict structured proposal from the fixed local Foundry endpoint -- model output cannot choose run inputs or enqueue.
+- [x] `app/agents/strategy_experiment/__init__.py` and `app/agents/strategy_experiment/agent.py` -- request a strict structured proposal from Claude, falling back to the fixed local Foundry endpoint -- model output cannot choose run inputs or enqueue.
 - [x] `app/repositories/backtest_repo.py` -- persist experiments/audit events and atomically enqueue a child candidate from a verified manifest -- support V1/V2/V3 while preserving all baseline pins.
 - [x] `app/services/backtest/strategy_experiment_service.py` and `app/services/backtest/strategy_job_service.py` -- validate drafts, bind approval to a digest, discard drafts, and reconcile terminal runs -- enforce lifecycle invariants in one service boundary.
 - [x] `app/services/backtest/worker.py` -- trigger idempotent experiment reconciliation when the candidate reaches a terminal state -- do not depend on a GET request to finalize results.
@@ -77,6 +77,8 @@ warnings: []
 ## Spec Change Log
 
 - 2026-10-09: Proposal generation uses the fixed localhost Foundry Local endpoint, following the existing Analyst implementation. The externally hosted model call was rejected by automatic privacy review because it would transmit the hypothesis and Strategy parameter context outside the app; no remote fallback was added. Unavailable local model returns no draft.
+- 2026-10-09: The user directed Claude to be the default and explicitly approved sending the hypothesis, Strategy ID, declared parameter definitions, and current parameter values to Anthropic. The baseline ID and manifest, Strategy source, other run inputs, and historical results stay local. `claude-sonnet-5` is primary; fixed-loopback Foundry Local is tried when Claude is unconfigured, unavailable, or cannot return schema-valid output. A schema-valid proposal that fails local Strategy parameter validation is rejected without a draft. This user-approved decision supersedes the earlier local-only choice.
+- 2026-10-09: Persist the provider/model attempts and their outcomes in each successful draft so fallback drafts retain the audit trail showing whether Anthropic received the proposal context.
 
 ## Review Triage Log
 
@@ -101,6 +103,16 @@ warnings: []
   - `[medium]` `[patch]` Recreating an unchanged SQLite index changed `schema_version` and invalidated snapshot caches; preserve the index when its definition matches.
   - `[low]` `[patch]` JSON `NaN` could pass the proposal numeric contract; reject non-finite parameter values.
 
+### 2026-10-09 — Claude-first provider follow-up review
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2 (medium 1, low 1)
+- defer: 0
+- reject: 0
+- addressed_findings:
+  - `[low]` `[patch]` The UI implied that every invalid Claude proposal triggers Foundry; clarify fallback only handles missing/unavailable Claude or schema-invalid output, then state local Strategy parameter validation can reject a schema-valid proposal without creating a draft.
+  - `[medium]` `[patch]` A saved Foundry fallback draft hid the earlier Claude attempt; persist and display provider/model attempts with their outcomes so the audit shows if Anthropic received proposal context.
+
 ## Design Notes
 
 The ordinary `BacktestLaunchService.launch()` reconstructs inputs from the active profile and current evidence. It cannot safely relaunch an old baseline. Approval must verify the stored baseline result/manifest, make a typed copy changing only its parameter mapping, and enqueue through the durable job path. The manifest digest will change; its execution contract and every other manifest field must remain equal. The canonical comparison service does not compare all experiment-specific constraints (for example starting capital or Strategy source identity), so the experiment service must enforce those before recording an outcome.
@@ -117,29 +129,32 @@ The draft locks one key from `BacktestMetricsV1` plus an expected numeric direct
 - `rtk git diff --check` -- passed.
 - `rtk .venv/bin/pytest -q` -- 4,508 passed, 1 skipped, 7 failed, 11 errors. All 18 failures/errors were browser tests blocked by sandbox localhost/Chromium permissions.
 - Escalated browser-only rerun -- 18 passed, 1 existing boot-splash test failed due to a Chromium launch timeout; the new Strategy experiment browser test passed.
+- Claude-first provider follow-up: `rtk .venv/bin/pytest -q tests/backtest/test_strategy_experiment_agent.py tests/backtest/test_strategy_experiment_service.py tests/backtest/test_backtest_repo_experiments.py tests/test_strategy_experiment_routes.py tests/test_strategy_experiment_browser.py` -- 37 passed, 1 skipped (Chromium unavailable).
+- Provider follow-up: `rtk .venv/bin/ruff check app tests`, scoped Pyrefly, `compileall`, and `rtk git diff --check` -- passed.
+- No live Anthropic or Foundry proposal request was made during verification.
 
 ## Auto Run Result
 
 ### Summary
 
-Implemented the fixed-input Strategy experiment workflow: generate and validate a local-model proposal, preserve the verified baseline manifest, require digest-bound approval before a single candidate enqueue, reconcile results durably, and expose audit and comparison details.
+Implemented the fixed-input Strategy experiment workflow: generate and validate a Claude proposal with local Foundry fallback, preserve the verified baseline manifest, require digest-bound approval before a single candidate enqueue, reconcile results durably, and expose audit and comparison details. The experiment screen discloses the proposal data sent to Anthropic and records the winning provider/model plus every attempted provider/model and outcome.
 
 ### Files changed
 
-- `app/agents/strategy_experiment/` -- local Foundry proposal agent with strict output and proxy isolation.
+- `app/agents/strategy_experiment/` -- Claude-first proposal agent with strict output, call-time API key lookup, and local Foundry fallback with proxy isolation.
 - `app/api/dependencies.py` -- inject experiment service and agent dependencies.
 - `app/api/routes/strategy_manager.py` -- list, draft, detail, discard, approve, and audit routes.
-- `app/api/templates/_strategy_experiments.html` -- experiment list, bounded baseline choices, and attempt history.
-- `app/api/templates/_strategy_experiment_detail.html` -- locked manifest, comparison, audit, and approval confirmation.
+- `app/api/templates/_strategy_experiments.html` -- experiment list, bounded baseline choices, attempt history, and proposal data-use disclosure.
+- `app/api/templates/_strategy_experiment_detail.html` -- locked manifest, comparison, audit, provider/model attempt history, and approval confirmation.
 - `app/repositories/backtest_repo.py` -- experiment persistence, cloned candidate enqueue, audit queries, verified baselines, and durable reconciliation scan.
-- `app/schemas/strategy_experiment.py` -- strict typed proposal, draft, approval, comparison, and conclusion models.
+- `app/schemas/strategy_experiment.py` -- strict typed proposal, draft, provider attempt, approval, comparison, and conclusion models.
 - `app/services/backtest/strategy_experiment_service.py` -- proposal validation, lifecycle, manifest checks, and deterministic conclusion.
 - `app/services/backtest/strategy_job_service.py` and `app/services/backtest/worker.py` -- retry and terminal reconciliation integration.
 - `tests/backtest/test_backtest_repo_experiments.py` -- persistence, atomic approval, baseline filtering, and audit coverage.
-- `tests/backtest/test_strategy_experiment_agent.py` -- strict output and non-finite-value rejection.
+- `tests/backtest/test_strategy_experiment_agent.py` -- Claude-first strict output, provider attempt outcomes, invalid-response fallback, call-time key lookup, and non-finite-value rejection.
 - `tests/backtest/test_strategy_experiment_service.py` -- lifecycle, manifest, error, and verdict coverage.
 - `tests/backtest/test_strategy_experiment_worker.py` -- durable retry coverage.
-- `tests/test_strategy_experiment_routes.py` -- route behavior and audit actor coverage.
+- `tests/test_strategy_experiment_routes.py` -- route behavior, audit actor coverage, provider disclosure, and detail provenance.
 - `tests/test_strategy_experiment_browser.py` -- review-dialog keyboard and focus behavior.
 - `_bmad-output/implementation-artifacts/github-bmad-tracking.yaml` and `sprint-status.yaml` -- feature/story issue and progress tracking.
 - `_bmad-output/planning-artifacts/feature-gh-15-strategy-experiment-agent.md` and this spec -- scope and implementation record.
@@ -153,6 +168,6 @@ Implemented the fixed-input Strategy experiment workflow: generate and validate 
 
 ### Residual risks
 
-- Foundry Local was not available for a live proposal round-trip; unavailable-model behavior is covered by tests.
+- No live Anthropic or Foundry proposal round-trip was run; provider success and fallback behavior are covered with mocked clients.
 - Chromium launch is intermittent in this environment: browser suites first failed when sandbox permissions blocked local sockets/process startup; after an escalated rerun, the feature browser test passed and one unrelated splash test timed out launching Chromium.
 - No feature-related failures remain; the repository-wide non-browser tests and the full affected backtest/Strategy Manager suites passed.

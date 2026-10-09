@@ -17,6 +17,7 @@
   <article class="card sm-card mb-4">
     <div class="card-body">
       <h2 class="h5">Propose a test</h2>
+      <p class="sm-alert sm-alert-info" role="note">When an Anthropic key is configured, Claude drafts proposals by default. Only the hypothesis, Strategy ID, declared parameter definitions, and current parameter values are sent to Anthropic. The baseline ID and manifest, Strategy source, other run inputs, and historical results stay in this app. If Claude is not configured, unavailable, or cannot return a schema-valid proposal, the app tries local Foundry with the same proposal context. Each proposal is then checked against the Strategy parameter contract; if it does not propose one valid declared parameter change, no draft is created.</p>
       <form method="post" action="/strategy-manager/experiments/draft">
         <label class="form-label" for="experiment-baseline">Verified baseline Backtest</label>
         <select class="form-select mb-3" id="experiment-baseline" name="baseline_run_id" required>

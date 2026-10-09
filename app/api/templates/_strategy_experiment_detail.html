@@ -9,6 +9,8 @@
       <h2 class="h5">{{ experiment.draft.strategy_id }} · {{ experiment.draft.parameter_name }}</h2>
       <dl class="row mb-0">
         <dt class="col-sm-3">Status</dt><dd class="col-sm-9">{{ experiment.status.value }}{% if detail.candidate_status %} · candidate {{ detail.candidate_status }}{% endif %}</dd>
+        <dt class="col-sm-3">Proposal model</dt><dd class="col-sm-9">{{ 'Claude' if experiment.draft.model_provider == 'anthropic' else 'Foundry Local' }} · {{ experiment.draft.model_id }}</dd>
+        {% if experiment.draft.model_attempts %}<dt class="col-sm-3">Provider attempts</dt><dd class="col-sm-9"><ol class="mb-0">{% for attempt in experiment.draft.model_attempts %}<li>{{ 'Claude' if attempt.model_provider == 'anthropic' else 'Foundry Local' }} · {{ attempt.model_id }} — {{ 'proposal selected' if attempt.outcome == 'selected' else 'no valid proposal' }}</li>{% endfor %}</ol></dd>{% endif %}
         <dt class="col-sm-3">Baseline</dt><dd class="col-sm-9"><a href="/strategy-manager/results/{{ experiment.draft.baseline_run_id }}">{{ experiment.draft.baseline_run_id }}</a></dd>
         <dt class="col-sm-3">Hypothesis</dt><dd class="col-sm-9">{{ experiment.draft.hypothesis }}</dd>
         <dt class="col-sm-3">Proposed effect</dt><dd class="col-sm-9">{{ experiment.draft.effect_summary }}</dd>

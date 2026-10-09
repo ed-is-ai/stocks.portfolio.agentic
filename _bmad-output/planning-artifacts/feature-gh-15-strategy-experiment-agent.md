@@ -37,13 +37,13 @@ A user can submit a hypothesis against a completed baseline, review a typed sing
 3. **Exact baseline reuse.** `BacktestLaunchService.launch()` rebuilds from the active profile and current evidence, so experiment approval must use a verified copy of the stored baseline manifest. A candidate must preserve every manifest field except its one Strategy parameter and keep the baseline as its durable parent.
 4. **Approval is an explicit boundary.** The dialog states the job write and how its result will be verified. It is keyboard-operable and returns focus to its trigger. Creation, discard, and read routes cannot enqueue jobs.
 5. **No live mutation.** Experiment output remains a historical result. It cannot assign parameters to a portfolio, publish a Skill, change a Strategy, or launch another experiment automatically.
-6. **Local-only proposal generation.** Proposal input includes the user's hypothesis and Strategy parameter context. External model transmission was rejected by automatic privacy review, so GH-15 uses the application's existing fixed-loopback Foundry Local pattern at `http://localhost:5272/v1`; it has no remote fallback. If Foundry Local is unavailable, drafting returns an explicit unavailable result.
+6. **Claude-first proposal generation.** On 2026-10-09 the user directed GH-15 to use Claude by default and explicitly approved sending the hypothesis, Strategy ID, declared parameter definitions, and current parameter values to Anthropic. The baseline run ID and manifest, Strategy source, other run inputs, and historical results stay local. Claude uses model `claude-sonnet-5`; fixed-loopback Foundry Local at `http://localhost:5272/v1` is tried when Claude is unconfigured, unavailable, or cannot return schema-valid output. A schema-valid response that fails local Strategy parameter validation is rejected without a draft. Persist and display the attempted providers and outcomes alongside the provider/model that supplied the saved proposal.
 
 ## Implementation stories
 
 ### Story 1 — GH-97: Bound and persist strategy experiment drafts
 
-Accept a hypothesis and a completed baseline ID; use the current structured-output model pattern to propose one declared parameter change, a plain-language effect, and one metric/direction. Validate locally, pin the verified baseline manifest, persist the draft plus audit event, and expose list/detail reads. Refusal, missing credentials, invalid proposals, and invalid baselines create no draft or job.
+Accept a hypothesis and a completed baseline ID; ask Claude by default, with Foundry Local as fallback, to propose one declared parameter change, a plain-language effect, and one metric/direction. Validate locally, pin the verified baseline manifest, persist the draft plus audit event, and expose list/detail reads. If no schema-valid proposal is available, the selected proposal fails Strategy parameter validation, or the baseline is invalid, create no draft or job.
 
 ### Story 2 — GH-98: Approve and launch the exact strategy experiment
 

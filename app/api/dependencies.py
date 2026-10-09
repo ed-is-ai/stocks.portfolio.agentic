@@ -322,7 +322,7 @@ def get_thesis_draft_client() -> ThesisDraftClient:
 
 
 def get_strategy_experiment_agent() -> StrategyExperimentAgent:
-    """Return a proposal client pinned to the local Foundry service."""
+    """Return a Claude proposal client with fixed local Foundry fallback."""
     return StrategyExperimentAgent()
 
 

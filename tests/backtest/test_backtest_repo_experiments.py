@@ -18,6 +18,7 @@ from app.schemas.strategy_experiment import (
     ExpectedDirection,
     StrategyExperimentApprovalV1,
     StrategyExperimentDraftV1,
+    StrategyExperimentModelAttemptV1,
 )
 from app.services.backtest.run_input_manifest import (
     PinnedSecurityEvidenceV1,
@@ -193,7 +194,20 @@ def _draft(manifest: RunInputManifestV1) -> StrategyExperimentDraftV1:
         expected_direction=ExpectedDirection.HIGHER,
         baseline_manifest_digest=manifest.digest(),
         baseline_manifest_json=manifest.canonical_json(),
+        model_provider="foundry_local",
         model_id="local-test-model",
+        model_attempts=(
+            StrategyExperimentModelAttemptV1(
+                model_provider="anthropic",
+                model_id="claude-sonnet-5",
+                outcome="no_valid_proposal",
+            ),
+            StrategyExperimentModelAttemptV1(
+                model_provider="foundry_local",
+                model_id="local-test-model",
+                outcome="selected",
+            ),
+        ),
         created_at=NOW,
     )
 
@@ -208,6 +222,7 @@ def test_approval_clones_manifest_and_concurrent_retry_returns_one_candidate(
     draft = _draft(manifest)
     draft_digest = "d" * 64
     experiment = repository.create_strategy_experiment_draft(draft, draft_digest)
+    assert experiment.draft.model_attempts == draft.model_attempts
     candidate_parameters = {**dict(manifest.parameters), "lookback": 21}
     candidate_manifest = type(manifest).model_validate(
         {**manifest.model_dump(mode="python"), "parameters": candidate_parameters}
@@ -284,6 +299,10 @@ def test_approval_clones_manifest_and_concurrent_retry_returns_one_candidate(
     assert [event.event_type for event in audit] == [
         "draft_created",
         "candidate_approved_and_enqueued",
+    ]
+    assert audit[0].details["model_provider"] == "foundry_local"
+    assert audit[0].details["model_attempts"] == [
+        attempt.model_dump(mode="json") for attempt in draft.model_attempts
     ]
 
 

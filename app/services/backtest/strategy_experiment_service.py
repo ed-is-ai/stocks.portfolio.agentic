@@ -99,7 +99,7 @@ class StrategyExperimentService:
             )
 
         current_values = self._declared_values(manifest, descriptor)
-        proposal = self._agent.propose(
+        proposal_result = self._agent.propose(
             hypothesis,
             strategy_id=descriptor.strategy_id,
             parameters={
@@ -108,13 +108,14 @@ class StrategyExperimentService:
             },
             current_values=current_values,
         )
-        if proposal is None:
+        if proposal_result is None:
             return self._no_draft(
                 "unavailable",
-                "The local proposal model is unavailable or returned no valid structured proposal.",
+                "Claude and the local fallback are unavailable or returned no valid structured proposal.",
                 baseline_run_id=baseline_run_id,
                 hypothesis=hypothesis,
             )
+        proposal = proposal_result.proposal
         try:
             proposal = StrategyExperimentProposalV1.model_validate(proposal)
             candidate_parameters = self._validated_candidate_parameters(
@@ -145,7 +146,9 @@ class StrategyExperimentService:
             expected_direction=proposal.expected_direction,
             baseline_manifest_digest=manifest.digest(),
             baseline_manifest_json=manifest.canonical_json(),
-            model_id=self._agent.model_id,
+            model_provider=proposal_result.provider,
+            model_id=proposal_result.model_id,
+            model_attempts=proposal_result.attempts,
             created_at=now,
         )
         draft_digest = manifest_digest(

@@ -10,12 +10,14 @@ from typing import cast
 import pytest
 
 from app.agents.strategy_experiment import StrategyExperimentAgent
+from app.agents.strategy_experiment.agent import StrategyExperimentProposalResult
 from app.repositories.backtest_repo import BacktestRepository
 from app.schemas.strategy_experiment import (
     ExperimentMetric,
     ExperimentStatus,
     ExperimentVerdict,
     ExpectedDirection,
+    StrategyExperimentModelAttemptV1,
     StrategyExperimentApprovalV1,
     StrategyExperimentConclusionV1,
     StrategyExperimentDraftV1,
@@ -135,15 +137,26 @@ def test_candidate_manifest_preserves_every_pin_for_v1_v2_and_v3(baseline) -> No
 
 
 class _FakeAgent:
-    model_id = "local-test-model"
-
     def __init__(self, proposal: object | None) -> None:
         self.proposal = proposal
         self.calls: list[dict[str, object]] = []
 
     def propose(self, hypothesis: str, **context: object):
         self.calls.append({"hypothesis": hypothesis, **context})
-        return self.proposal
+        if self.proposal is None:
+            return None
+        return StrategyExperimentProposalResult(
+            self.proposal,
+            "foundry_local",
+            "local-test-model",
+            (
+                StrategyExperimentModelAttemptV1(
+                    model_provider="foundry_local",
+                    model_id="local-test-model",
+                    outcome="selected",
+                ),
+            ),
+        )
 
 
 class _FakeRepository:
@@ -238,6 +251,12 @@ def test_draft_is_one_declared_parameter_and_does_not_enqueue() -> None:
     assert outcome.experiment.draft.parameter_name == "fixed_shares"
     assert outcome.experiment.draft.baseline_value == 1
     assert outcome.experiment.draft.proposed_value == 3
+    assert outcome.experiment.draft.model_provider == "foundry_local"
+    assert outcome.experiment.draft.model_id == "local-test-model"
+    assert [
+        (attempt.model_provider, attempt.model_id, attempt.outcome)
+        for attempt in outcome.experiment.draft.model_attempts
+    ] == [("foundry_local", "local-test-model", "selected")]
     assert repository.attempts == []
     assert repository.create_candidate_calls == []
     assert agent.calls[0]["current_values"] == {
@@ -318,6 +337,7 @@ def _experiment_for_reconciliation(
         expected_direction=ExpectedDirection.HIGHER,
         baseline_manifest_digest=manifest.digest(),
         baseline_manifest_json=manifest.canonical_json(),
+        model_provider="foundry_local",
         model_id="local-test-model",
         created_at=NOW,
     )

@@ -53,6 +53,14 @@ class StrategyExperimentProposalV1(_ExperimentModel):
     expected_direction: ExpectedDirection
 
 
+class StrategyExperimentModelAttemptV1(_ExperimentModel):
+    """One proposal provider attempted before the saved draft was created."""
+
+    model_provider: Literal["anthropic", "foundry_local"]
+    model_id: Annotated[str, Field(min_length=1, max_length=120)]
+    outcome: Literal["selected", "no_valid_proposal"]
+
+
 class StrategyExperimentDraftV1(_ExperimentModel):
     schema_version: Literal["strategy_experiment_draft.v1"] = (
         "strategy_experiment_draft.v1"
@@ -70,7 +78,9 @@ class StrategyExperimentDraftV1(_ExperimentModel):
     expected_direction: ExpectedDirection
     baseline_manifest_digest: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
     baseline_manifest_json: Annotated[str, Field(min_length=2)]
+    model_provider: Literal["anthropic", "foundry_local"] = "foundry_local"
     model_id: Annotated[str, Field(min_length=1, max_length=120)]
+    model_attempts: tuple[StrategyExperimentModelAttemptV1, ...] = ()
     created_at: datetime
 
 
