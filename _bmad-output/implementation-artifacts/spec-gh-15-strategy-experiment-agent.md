@@ -5,7 +5,7 @@ created: '2026-10-09'
 status: 'done'
 baseline_revision: 5243c2cd56c7d08eae6c75adbac4f8de492fa038
 review_loop_iteration: 0
-final_revision: pending-commit
+final_revision: 99ffbce1f9c5dc4ccddf0067ea092e0d6ea8e4a8
 followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/planning-artifacts/feature-gh-15-strategy-experiment-agent.md'
