@@ -2,10 +2,10 @@
 title: 'GH-15 Strategy experiment agent'
 type: 'feature'
 created: '2026-10-09'
-status: 'in-progress'
+status: 'done'
 baseline_revision: b89b168814ce6b7c78315ed9a96af02caad9fbda
 review_loop_iteration: 0
-final_revision: 99ffbce1f9c5dc4ccddf0067ea092e0d6ea8e4a8
+final_revision: edc0151e2b07429c14f45d8ee5cfdd6b757c2608
 followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/planning-artifacts/feature-gh-15-strategy-experiment-agent.md'
