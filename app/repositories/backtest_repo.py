@@ -1324,6 +1324,69 @@ BEGIN SELECT RAISE(ABORT, 'bootstrap enqueue action is immutable'); END;
 """
 
 
+_STRATEGY_EXPERIMENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS strategy_experiments (
+    id TEXT PRIMARY KEY,
+    baseline_run_id TEXT NOT NULL REFERENCES strategy_jobs(id),
+    draft_digest TEXT NOT NULL UNIQUE CHECK(length(draft_digest) = 64),
+    draft_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN (
+        'draft', 'approved', 'discarded', 'complete', 'inconclusive'
+    )),
+    candidate_run_id TEXT UNIQUE REFERENCES strategy_jobs(id),
+    approval_json TEXT,
+    comparison_json TEXT,
+    conclusion_json TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK((status = 'draft' AND candidate_run_id IS NULL AND approval_json IS NULL)
+       OR (status = 'discarded' AND candidate_run_id IS NULL AND approval_json IS NULL)
+       OR (status IN ('approved', 'complete', 'inconclusive')
+           AND candidate_run_id IS NOT NULL AND approval_json IS NOT NULL)),
+    CHECK((status IN ('complete', 'inconclusive')) = (conclusion_json IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS strategy_experiment_baseline
+ON strategy_experiments(baseline_run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS strategy_experiment_status
+ON strategy_experiments(status, created_at DESC);
+CREATE TABLE IF NOT EXISTS strategy_experiment_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id TEXT REFERENCES strategy_experiments(id),
+    baseline_run_id TEXT,
+    candidate_run_id TEXT,
+    event_type TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS strategy_experiment_audit_experiment
+ON strategy_experiment_audit(experiment_id, sequence);
+CREATE TRIGGER IF NOT EXISTS strategy_experiment_draft_immutable
+BEFORE UPDATE ON strategy_experiments
+WHEN NEW.id != OLD.id
+  OR NEW.baseline_run_id != OLD.baseline_run_id
+  OR NEW.draft_digest != OLD.draft_digest
+  OR NEW.draft_json != OLD.draft_json
+  OR NEW.created_at != OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'strategy experiment draft is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS strategy_experiment_legal_transition
+BEFORE UPDATE ON strategy_experiments
+WHEN NOT (
+    (OLD.status = 'draft' AND NEW.status IN ('approved', 'discarded'))
+    OR (OLD.status = 'approved' AND NEW.status IN ('complete', 'inconclusive'))
+)
+BEGIN SELECT RAISE(ABORT, 'illegal strategy experiment transition'); END;
+CREATE TRIGGER IF NOT EXISTS strategy_experiment_immutable_delete
+BEFORE DELETE ON strategy_experiments
+BEGIN SELECT RAISE(ABORT, 'strategy experiment is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS strategy_experiment_audit_immutable_update
+BEFORE UPDATE ON strategy_experiment_audit
+BEGIN SELECT RAISE(ABORT, 'strategy experiment audit is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS strategy_experiment_audit_immutable_delete
+BEFORE DELETE ON strategy_experiment_audit
+BEGIN SELECT RAISE(ABORT, 'strategy experiment audit is append-only'); END;
+"""
+
+
 @dataclass(frozen=True)
 class QualificationResult:
     contract_digest: str
@@ -2373,7 +2436,8 @@ class BacktestRepository:
                 + _SNAPSHOT_COVERAGE_SCHEMA
                 + _BAU_RUN_AUTHORITY_SCHEMA
                 + _STRATEGY_JOB_SCHEMA
-                + _BACKTEST_RESULT_SCHEMA,
+                + _BACKTEST_RESULT_SCHEMA
+                + _STRATEGY_EXPERIMENT_SCHEMA,
             )
             conn.commit()
             _migrate_bats_mic_constraints(conn)
@@ -2431,6 +2495,7 @@ class BacktestRepository:
                 "run_universe_digest TEXT",
                 "source_preparation_job_id TEXT",
                 "selection_json TEXT",
+                "experiment_id TEXT",
             ):
                 if definition.split()[0] not in run_cols:
                     conn.execute(f"ALTER TABLE strategy_runs ADD COLUMN {definition}")
@@ -2495,12 +2560,25 @@ class BacktestRepository:
                      OR NEW.completed_at != OLD.completed_at
                    BEGIN SELECT RAISE(ABORT, 'backtest result evidence is immutable'); END""",
             )
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "idx_strategy_runs_source_preparation "
+            preparation_index_sql = (
+                "CREATE UNIQUE INDEX idx_strategy_runs_source_preparation "
                 "ON strategy_runs(source_preparation_job_id) "
-                "WHERE source_preparation_job_id IS NOT NULL"
+                "WHERE source_preparation_job_id IS NOT NULL AND experiment_id IS NULL"
             )
+            preparation_index_row = conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='index' AND name='idx_strategy_runs_source_preparation'"
+            ).fetchone()
+            existing_preparation_index_sql = (
+                " ".join(str(preparation_index_row[0]).split())
+                if preparation_index_row is not None
+                else None
+            )
+            if existing_preparation_index_sql != preparation_index_sql:
+                conn.execute(
+                    "DROP INDEX IF EXISTS idx_strategy_runs_source_preparation"
+                )
+                conn.execute(preparation_index_sql)
             _ensure_trigger(
                 conn,
                 """CREATE TRIGGER strategy_run_v2_contract_insert
@@ -2521,11 +2599,22 @@ class BacktestRepository:
                         AND EXISTS(
                             SELECT 1 FROM strategy_jobs j
                             WHERE j.id=NEW.id AND (
-                                (NEW.source_preparation_job_id IS NOT NULL
+                                (NEW.experiment_id IS NULL
+                                 AND NEW.source_preparation_job_id IS NOT NULL
                                  AND j.parent_job_id IS NULL)
-                                OR
-                                (NEW.source_preparation_job_id IS NULL
+                                OR (NEW.experiment_id IS NULL
+                                 AND NEW.source_preparation_job_id IS NULL
                                  AND j.parent_job_id IS NOT NULL)
+                                OR (NEW.experiment_id IS NOT NULL
+                                 AND NEW.source_preparation_job_id IS NOT NULL
+                                 AND j.parent_job_id IS NOT NULL
+                                 AND EXISTS(
+                                     SELECT 1 FROM strategy_experiments e
+                                     WHERE e.id=NEW.experiment_id
+                                       AND e.candidate_run_id=NEW.id
+                                       AND e.baseline_run_id=j.parent_job_id
+                                       AND e.status='approved'
+                                 ))
                             )
                         ))
                        OR
@@ -2545,11 +2634,22 @@ class BacktestRepository:
                         AND EXISTS(
                             SELECT 1 FROM strategy_jobs j
                             WHERE j.id=NEW.id AND (
-                                (NEW.source_preparation_job_id IS NOT NULL
+                                (NEW.experiment_id IS NULL
+                                 AND NEW.source_preparation_job_id IS NOT NULL
                                  AND j.parent_job_id IS NULL)
-                                OR
-                                (NEW.source_preparation_job_id IS NULL
+                                OR (NEW.experiment_id IS NULL
+                                 AND NEW.source_preparation_job_id IS NULL
                                  AND j.parent_job_id IS NOT NULL)
+                                OR (NEW.experiment_id IS NOT NULL
+                                 AND NEW.source_preparation_job_id IS NOT NULL
+                                 AND j.parent_job_id IS NOT NULL
+                                 AND EXISTS(
+                                     SELECT 1 FROM strategy_experiments e
+                                     WHERE e.id=NEW.experiment_id
+                                       AND e.candidate_run_id=NEW.id
+                                       AND e.baseline_run_id=j.parent_job_id
+                                       AND e.status='approved'
+                                 ))
                             )
                         ))
                    )
@@ -2557,6 +2657,23 @@ class BacktestRepository:
                        SELECT RAISE(
                            ABORT, 'strategy run version provenance mismatch'
                        );
+                   END""",
+            )
+            _ensure_trigger(
+                conn,
+                """CREATE TRIGGER strategy_run_experiment_candidate_insert
+                   BEFORE INSERT ON strategy_runs
+                   WHEN NEW.experiment_id IS NOT NULL
+                    AND NOT EXISTS(
+                        SELECT 1 FROM strategy_experiments e
+                        JOIN strategy_jobs j ON j.id=NEW.id
+                        WHERE e.id=NEW.experiment_id
+                          AND e.candidate_run_id=NEW.id
+                          AND e.baseline_run_id=j.parent_job_id
+                          AND e.status='approved'
+                    )
+                   BEGIN
+                       SELECT RAISE(ABORT, 'strategy run experiment provenance mismatch');
                    END""",
             )
             self._ensure_snapshot_coverage_revisions(conn)
@@ -3546,6 +3663,658 @@ class BacktestRepository:
         payload["starting_capital"] = str(submission.starting_capital)
         return manifest_digest(payload)
 
+    @staticmethod
+    def _experiment_json(value: object) -> str:
+        from pydantic import BaseModel
+
+        if not isinstance(value, BaseModel):
+            raise TypeError("experiment payload must be a Pydantic model")
+        return json.dumps(
+            value.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+
+    @staticmethod
+    def _experiment_from_row(row: tuple[object, ...]):
+        from app.schemas.strategy_experiment import StrategyExperimentV1
+
+        payload = {
+            "id": row[0],
+            "draft_digest": row[2],
+            "draft": json.loads(str(row[3])),
+            "status": row[4],
+            "candidate_run_id": row[5],
+            "approval": json.loads(str(row[6])) if row[6] is not None else None,
+            "comparison": json.loads(str(row[7])) if row[7] is not None else None,
+            "conclusion": json.loads(str(row[8])) if row[8] is not None else None,
+            "created_at": row[9],
+            "updated_at": row[10],
+        }
+        return StrategyExperimentV1.model_validate_json(json.dumps(payload))
+
+    @staticmethod
+    def _append_experiment_event(
+        conn: sqlite3.Connection,
+        *,
+        experiment_id: str | None,
+        baseline_run_id: str | None,
+        candidate_run_id: str | None,
+        event_type: str,
+        details: Mapping[str, object],
+        occurred_at: str,
+    ) -> None:
+        conn.execute(
+            """INSERT INTO strategy_experiment_audit
+               (experiment_id, baseline_run_id, candidate_run_id,
+                event_type, details_json, occurred_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                experiment_id,
+                baseline_run_id,
+                candidate_run_id,
+                event_type,
+                json.dumps(
+                    details,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
+                occurred_at,
+            ),
+        )
+
+    def append_strategy_experiment_attempt(
+        self,
+        *,
+        baseline_run_id: str | None,
+        event_type: str,
+        details: Mapping[str, object],
+    ) -> None:
+        """Record a rejected or unavailable draft attempt without a draft row."""
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._append_experiment_event(
+                conn,
+                experiment_id=None,
+                baseline_run_id=baseline_run_id,
+                candidate_run_id=None,
+                event_type=event_type,
+                details=details,
+                occurred_at=self._job_now(),
+            )
+
+    def create_strategy_experiment_draft(self, draft: object, draft_digest: str):
+        """Persist a draft only when its baseline is still verified and live."""
+        from app.schemas.strategy_experiment import StrategyExperimentDraftV1
+        from app.services.backtest.run_input_manifest import read_run_input_manifest
+
+        if not isinstance(draft, StrategyExperimentDraftV1):
+            raise TypeError("draft must be a StrategyExperimentDraftV1")
+        try:
+            baseline_job = self.strategy_job(draft.baseline_run_id)
+            baseline_result = self.backtest_result(draft.baseline_run_id)
+            stored_manifest = self.run_input_manifest_json(
+                baseline_result.run_input_manifest_digest
+            )
+            if (
+                baseline_job.job_type is not StrategyJobType.BACKTEST
+                or baseline_job.status is not StrategyJobStatus.COMPLETE
+                or baseline_job.deleted_at is not None
+                or stored_manifest is None
+                or stored_manifest != draft.baseline_manifest_json
+            ):
+                raise StrategyJobConflict("baseline is not a verified live backtest")
+            manifest = read_run_input_manifest(stored_manifest)
+            if (
+                not manifest.accepts_stored_digest(
+                    baseline_result.run_input_manifest_digest
+                )
+                or manifest.digest() != draft.baseline_manifest_digest
+                or baseline_result.strategy_id != draft.strategy_id
+                or baseline_result.strategy_api_version != draft.strategy_api_version
+                or baseline_result.strategy_source_digest != draft.strategy_source_digest
+            ):
+                raise StrategyJobConflict("baseline manifest identity is inconsistent")
+        except (BacktestIntegrityError, StrategyJobNotFound) as exc:
+            raise StrategyJobConflict("baseline result is unavailable or corrupt") from exc
+
+        now = self._job_now()
+        experiment_id = self._id_generator()
+        draft_json = self._experiment_json(draft)
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            baseline = self._load_strategy_job(conn, draft.baseline_run_id)
+            if (
+                baseline.status is not StrategyJobStatus.COMPLETE
+                or baseline.deleted_at is not None
+                or baseline.job_type is not StrategyJobType.BACKTEST
+            ):
+                raise StrategyJobConflict("baseline is no longer eligible")
+            conn.execute(
+                """INSERT INTO strategy_experiments
+                   (id, baseline_run_id, draft_digest, draft_json, status,
+                    candidate_run_id, approval_json, comparison_json,
+                    conclusion_json, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, 'draft', NULL, NULL, NULL, NULL, ?, ?)""",
+                (experiment_id, draft.baseline_run_id, draft_digest, draft_json, now, now),
+            )
+            self._append_experiment_event(
+                conn,
+                experiment_id=experiment_id,
+                baseline_run_id=draft.baseline_run_id,
+                candidate_run_id=None,
+                event_type="draft_created",
+                details={
+                    "draft_digest": draft_digest,
+                    "model_provider": draft.model_provider,
+                    "model_id": draft.model_id,
+                    "model_attempts": [
+                        attempt.model_dump(mode="json")
+                        for attempt in draft.model_attempts
+                    ],
+                },
+                occurred_at=now,
+            )
+            row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+        if row is None:
+            raise BacktestIntegrityError("stored strategy experiment disappeared")
+        return self._experiment_from_row(row)
+
+    def strategy_experiment(self, experiment_id: str):
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+        if row is None:
+            raise StrategyJobNotFound(f"strategy experiment not found: {experiment_id}")
+        return self._experiment_from_row(row)
+
+    def strategy_experiment_for_candidate(self, candidate_run_id: str):
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE candidate_run_id=?""",
+                (candidate_run_id,),
+            ).fetchone()
+        return None if row is None else self._experiment_from_row(row)
+
+    def pending_strategy_experiment_reconciliations(
+        self, *, limit: int = 20
+    ) -> tuple[str, ...]:
+        """Return terminal candidate jobs whose durable experiment is unsettled."""
+        if not 1 <= limit <= 100:
+            raise ValueError("experiment reconciliation limit must be between 1 and 100")
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT e.candidate_run_id
+                   FROM strategy_experiments e
+                   JOIN strategy_jobs j ON j.id=e.candidate_run_id
+                   WHERE e.status='approved'
+                     AND j.status IN ('complete', 'failed', 'cancelled')
+                   ORDER BY e.updated_at, j.updated_at, e.id
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def list_strategy_experiments(self):
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments ORDER BY created_at DESC, id DESC"""
+            ).fetchall()
+        return tuple(self._experiment_from_row(row) for row in rows)
+
+    def strategy_experiment_audit(self, experiment_id: str):
+        from app.schemas.strategy_experiment import StrategyExperimentAuditEventV1
+
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT sequence, experiment_id, baseline_run_id,
+                          candidate_run_id, event_type, occurred_at, details_json
+                   FROM strategy_experiment_audit
+                   WHERE experiment_id=? ORDER BY sequence""",
+                (experiment_id,),
+            ).fetchall()
+        return tuple(
+            StrategyExperimentAuditEventV1.model_validate_json(
+                json.dumps(
+                    {
+                        "sequence": row[0],
+                        "experiment_id": row[1],
+                        "baseline_run_id": row[2],
+                        "candidate_run_id": row[3],
+                        "event_type": row[4],
+                        "occurred_at": row[5],
+                        "details": json.loads(str(row[6])),
+                    }
+                )
+            )
+            for row in rows
+        )
+
+    def strategy_experiment_attempt_audit(self, *, limit: int = 20):
+        """Return recent rejected/unavailable draft attempts with no experiment row."""
+        from app.schemas.strategy_experiment import StrategyExperimentAuditEventV1
+
+        if not 1 <= limit <= 100:
+            raise ValueError("experiment audit limit must be between 1 and 100")
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT sequence, experiment_id, baseline_run_id,
+                          candidate_run_id, event_type, occurred_at, details_json
+                   FROM strategy_experiment_audit
+                   WHERE experiment_id IS NULL
+                   ORDER BY sequence DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return tuple(
+            StrategyExperimentAuditEventV1.model_validate_json(
+                json.dumps(
+                    {
+                        "sequence": row[0],
+                        "experiment_id": row[1],
+                        "baseline_run_id": row[2],
+                        "candidate_run_id": row[3],
+                        "event_type": row[4],
+                        "occurred_at": row[5],
+                        "details": json.loads(str(row[6])),
+                    }
+                )
+            )
+            for row in rows
+        )
+
+    def strategy_experiment_baselines(self, *, limit: int = 25):
+        """Return recent verified completed Backtests, skipping damaged rows."""
+        from app.schemas.strategy_experiment import StrategyExperimentBaselineOptionV1
+
+        if not 1 <= limit <= 100:
+            raise ValueError("experiment baseline limit must be between 1 and 100")
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT j.id, r.strategy_id, r.start_month, r.end_month
+                   FROM strategy_jobs j
+                   JOIN strategy_runs r ON r.id=j.id
+                   WHERE j.job_type='backtest' AND j.status='complete'
+                     AND j.deleted_at IS NULL
+                   ORDER BY j.enqueue_seq DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        options = []
+        for row in rows:
+            run_id = str(row[0])
+            try:
+                result = self.backtest_result(run_id)
+            except (BacktestIntegrityError, StrategyJobNotFound, ValueError):
+                continue
+            if result.strategy_id != str(row[1]):
+                continue
+            options.append(
+                StrategyExperimentBaselineOptionV1(
+                    id=run_id,
+                    strategy_id=str(row[1]),
+                    start_month=str(row[2]),
+                    end_month=str(row[3]),
+                )
+            )
+            if len(options) >= limit:
+                break
+        return tuple(options)
+
+    def discard_strategy_experiment(self, experiment_id: str, draft_digest: str):
+        from app.schemas.strategy_experiment import ExperimentStatus
+
+        now = self._job_now()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                raise StrategyJobNotFound(f"strategy experiment not found: {experiment_id}")
+            experiment = self._experiment_from_row(row)
+            if experiment.draft_digest != draft_digest:
+                raise StrategyJobConflict("strategy experiment draft digest is stale")
+            if experiment.status is ExperimentStatus.DISCARDED:
+                return experiment
+            if experiment.status is not ExperimentStatus.DRAFT:
+                raise StrategyJobConflict("only an unapproved draft can be discarded")
+            conn.execute(
+                "UPDATE strategy_experiments SET status='discarded', updated_at=? WHERE id=?",
+                (now, experiment_id),
+            )
+            self._append_experiment_event(
+                conn,
+                experiment_id=experiment_id,
+                baseline_run_id=experiment.draft.baseline_run_id,
+                candidate_run_id=None,
+                event_type="draft_discarded",
+                details={"draft_digest": draft_digest},
+                occurred_at=now,
+            )
+            updated = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+        if updated is None:
+            raise BacktestIntegrityError("stored strategy experiment disappeared")
+        return self._experiment_from_row(updated)
+
+    def approve_strategy_experiment_candidate(
+        self,
+        experiment_id: str,
+        draft_digest: str,
+        candidate_manifest_json: str,
+        approval: object,
+    ):
+        """Atomically bind approval and enqueue one exact-manifest candidate."""
+        from app.schemas.strategy_experiment import (
+            ExperimentStatus,
+            StrategyExperimentApprovalV1,
+        )
+        from app.services.backtest.run_input_manifest import read_run_input_manifest
+
+        if not isinstance(approval, StrategyExperimentApprovalV1):
+            raise TypeError("approval must be a StrategyExperimentApprovalV1")
+        if approval.draft_digest != draft_digest:
+            raise StrategyJobConflict("approval is not bound to the stored draft")
+        experiment = self.strategy_experiment(experiment_id)
+        if experiment.draft_digest != draft_digest:
+            raise StrategyJobConflict("strategy experiment draft digest is stale")
+        if experiment.candidate_run_id is not None:
+            return experiment, self.strategy_job(experiment.candidate_run_id)
+
+        try:
+            baseline_job = self.strategy_job(experiment.draft.baseline_run_id)
+            baseline_result = self.backtest_result(experiment.draft.baseline_run_id)
+            baseline_raw = self.run_input_manifest_json(
+                baseline_result.run_input_manifest_digest
+            )
+            if (
+                baseline_job.job_type is not StrategyJobType.BACKTEST
+                or baseline_job.status is not StrategyJobStatus.COMPLETE
+                or baseline_job.deleted_at is not None
+                or baseline_raw is None
+                or baseline_raw != experiment.draft.baseline_manifest_json
+            ):
+                raise StrategyJobConflict("baseline is no longer eligible")
+            baseline_manifest = read_run_input_manifest(baseline_raw)
+            candidate_manifest = read_run_input_manifest(candidate_manifest_json)
+        except (BacktestIntegrityError, StrategyJobNotFound) as exc:
+            raise StrategyJobConflict("verified baseline is unavailable") from exc
+
+        if (
+            not baseline_manifest.accepts_stored_digest(
+                baseline_result.run_input_manifest_digest
+            )
+            or baseline_manifest.digest() != experiment.draft.baseline_manifest_digest
+            or candidate_manifest.canonical_json() != candidate_manifest_json
+            or candidate_manifest.schema_version != baseline_manifest.schema_version
+            or candidate_manifest.execution_contract_digest()
+            != baseline_manifest.execution_contract_digest()
+        ):
+            raise StrategyJobConflict("candidate manifest is invalid or incompatible")
+        baseline_payload = baseline_manifest.canonical_payload()
+        candidate_payload = candidate_manifest.canonical_payload()
+        baseline_parameters = dict(baseline_manifest.parameters)
+        candidate_parameters = dict(candidate_manifest.parameters)
+        before = baseline_parameters.get(experiment.draft.parameter_name, object())
+        after = candidate_parameters.get(experiment.draft.parameter_name, object())
+        changed = {
+            key
+            for key in baseline_parameters.keys() | candidate_parameters.keys()
+            if json.dumps(
+                baseline_parameters.get(key), sort_keys=True, separators=(",", ":")
+            )
+            != json.dumps(
+                candidate_parameters.get(key), sort_keys=True, separators=(",", ":")
+            )
+        }
+        baseline_payload.pop("parameters", None)
+        candidate_payload.pop("parameters", None)
+        if (
+            baseline_payload != candidate_payload
+            or changed != {experiment.draft.parameter_name}
+            or before != experiment.draft.baseline_value
+            or after != experiment.draft.proposed_value
+        ):
+            raise StrategyJobConflict("candidate changes more than the approved parameter")
+
+        now = self._job_now()
+        candidate_digest = candidate_manifest.digest()
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                raise StrategyJobNotFound(f"strategy experiment not found: {experiment_id}")
+            current = self._experiment_from_row(row)
+            if current.draft_digest != draft_digest:
+                raise StrategyJobConflict("strategy experiment draft digest is stale")
+            if current.candidate_run_id is not None:
+                return current, self._load_strategy_job(conn, current.candidate_run_id)
+            if current.status is not ExperimentStatus.DRAFT:
+                raise StrategyJobConflict("only an unapproved draft can be approved")
+            baseline = self._load_strategy_job(conn, current.draft.baseline_run_id)
+            if (
+                baseline.job_type is not StrategyJobType.BACKTEST
+                or baseline.status is not StrategyJobStatus.COMPLETE
+                or baseline.deleted_at is not None
+            ):
+                raise StrategyJobConflict("baseline is no longer eligible")
+            baseline_run = conn.execute(
+                """SELECT id, strategy_id, strategy_api_version,
+                          strategy_source_digest, parameters_json, profile_hash,
+                          start_month, end_month, ordered_month_digest,
+                          base_currency, starting_capital,
+                          run_input_manifest_digest, execution_contract_digest,
+                          manifest_version, run_universe_digest,
+                          source_preparation_job_id, selection_json, created_at
+                   FROM strategy_runs WHERE id=?""",
+                (current.draft.baseline_run_id,),
+            ).fetchone()
+            if baseline_run is None:
+                raise StrategyJobConflict("baseline run identity is unavailable")
+            if str(baseline_run[11]) != baseline_result.run_input_manifest_digest:
+                raise StrategyJobConflict("baseline run identity is inconsistent")
+            sequence_row = conn.execute(
+                "SELECT COALESCE(MAX(enqueue_seq), 0) + 1 FROM strategy_jobs"
+            ).fetchone()
+            enqueue_seq = int(sequence_row[0]) if sequence_row else 1
+            candidate_id = self._id_generator()
+            candidate_parent_id = current.draft.baseline_run_id
+            conn.execute(
+                """INSERT INTO strategy_jobs (
+                       id, job_type, status, parent_job_id, enqueue_seq,
+                       claim_token, current_month, status_version,
+                       cancel_requested_at, failure_code, failed_month,
+                       failure_detail, deleted_at, audit_summary,
+                       created_at, updated_at
+                   ) VALUES (?, 'backtest', 'queued', ?, ?, NULL, NULL, 1,
+                             NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                (candidate_id, candidate_parent_id, enqueue_seq, now, now),
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO run_input_manifests
+                   (digest, execution_contract_digest, canonical_manifest_json,
+                    created_at, manifest_version)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (
+                    candidate_digest,
+                    candidate_manifest.execution_contract_digest(),
+                    candidate_manifest_json,
+                    now,
+                    candidate_manifest.schema_version,
+                ),
+            )
+            conn.execute(
+                """UPDATE strategy_experiments
+                   SET status='approved', candidate_run_id=?, approval_json=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    candidate_id,
+                    self._experiment_json(approval),
+                    now,
+                    experiment_id,
+                ),
+            )
+            run_values = list(baseline_run)
+            run_values[0] = candidate_id
+            run_values[4] = json.dumps(
+                candidate_parameters, sort_keys=True, separators=(",", ":")
+            )
+            run_values[11] = candidate_digest
+            run_values[17] = now
+            run_values.append(experiment_id)
+            conn.execute(
+                """INSERT INTO strategy_runs (
+                       id, strategy_id, strategy_api_version,
+                       strategy_source_digest, parameters_json, profile_hash,
+                       start_month, end_month, ordered_month_digest,
+                       base_currency, starting_capital,
+                       run_input_manifest_digest, execution_contract_digest,
+                       manifest_version, run_universe_digest,
+                       source_preparation_job_id, selection_json, created_at,
+                       experiment_id
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                run_values,
+            )
+            self._append_experiment_event(
+                conn,
+                experiment_id=experiment_id,
+                baseline_run_id=current.draft.baseline_run_id,
+                candidate_run_id=candidate_id,
+                event_type="candidate_approved_and_enqueued",
+                details={
+                    "draft_digest": draft_digest,
+                    "candidate_manifest_digest": candidate_digest,
+                    "approval": json.loads(self._experiment_json(approval)),
+                },
+                occurred_at=now,
+            )
+            job = self._load_strategy_job(conn, candidate_id)
+            self._upsert_notification_outbox_on_connection(conn, job)
+            updated_row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+        if updated_row is None:
+            raise BacktestIntegrityError("stored strategy experiment disappeared")
+        return self._experiment_from_row(updated_row), job
+
+    def finalize_strategy_experiment(
+        self,
+        experiment_id: str,
+        candidate_run_id: str,
+        comparison: object,
+        conclusion: object,
+    ):
+        from app.schemas.strategy_experiment import (
+            ExperimentStatus,
+            ExperimentVerdict,
+            StrategyExperimentComparisonV1,
+            StrategyExperimentConclusionV1,
+        )
+
+        if not isinstance(comparison, StrategyExperimentComparisonV1) or not isinstance(
+            conclusion, StrategyExperimentConclusionV1
+        ):
+            raise TypeError("comparison and conclusion must use experiment models")
+        now = self._job_now()
+        status = (
+            ExperimentStatus.INCONCLUSIVE
+            if conclusion.verdict is ExperimentVerdict.INCONCLUSIVE
+            else ExperimentStatus.COMPLETE
+        )
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+            if row is None:
+                raise StrategyJobNotFound(f"strategy experiment not found: {experiment_id}")
+            current = self._experiment_from_row(row)
+            if current.candidate_run_id != candidate_run_id:
+                raise StrategyJobConflict("candidate run does not match experiment")
+            if current.status in {ExperimentStatus.COMPLETE, ExperimentStatus.INCONCLUSIVE}:
+                return current
+            if current.status is not ExperimentStatus.APPROVED:
+                raise StrategyJobConflict("only an approved experiment can conclude")
+            conn.execute(
+                """UPDATE strategy_experiments
+                   SET status=?, comparison_json=?, conclusion_json=?, updated_at=?
+                   WHERE id=?""",
+                (
+                    status.value,
+                    self._experiment_json(comparison),
+                    self._experiment_json(conclusion),
+                    now,
+                    experiment_id,
+                ),
+            )
+            self._append_experiment_event(
+                conn,
+                experiment_id=experiment_id,
+                baseline_run_id=current.draft.baseline_run_id,
+                candidate_run_id=candidate_run_id,
+                event_type="experiment_concluded",
+                details={
+                    "verdict": conclusion.verdict.value,
+                    "comparison": json.loads(self._experiment_json(comparison)),
+                    "limitations": list(comparison.limitations),
+                },
+                occurred_at=now,
+            )
+            updated_row = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments WHERE id=?""",
+                (experiment_id,),
+            ).fetchone()
+        if updated_row is None:
+            raise BacktestIntegrityError("stored strategy experiment disappeared")
+        return self._experiment_from_row(updated_row)
+
     def create_backtest_job(
         self, submission: BacktestSubmissionV1
     ) -> BacktestEnqueueResultV1:
@@ -3952,6 +4721,7 @@ class BacktestRepository:
                 ),
             )
             if isinstance(manifest, RunInputManifestV3):
+                assert historical_price_repository is not None
                 for revision in {
                     manifest.regime_benchmark.price_revision,
                     manifest.regime_benchmark.action_revision,
