@@ -1,5 +1,5 @@
 # generated: 2026-08-10
-# last_updated: 2026-10-08 (GH-61 stories 62-66 complete; integrated with current main)
+# last_updated: 2026-10-10 (GH-20 #101-103 implemented and verified; #104 backlog)
 # project: Agents.stocks
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-10-09 (GH-15 strategy experiment agent implementation ready for review)"
+last_updated: "2026-10-10 (GH-20 #101-103 implemented and verified)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -151,3 +151,8 @@ development_status:
   gh-440-assign-one-active-strategy-to-each-portfolio: backlog
   gh-441-show-portfolio-specific-recommendations: backlog
   gh-442-send-daily-portfolio-recommendation-emails: backlog
+  feature-gh-20-strategy-manager-contextual-agent-surfaces: in-progress
+  gh-20-1-summarize-comparable-backtests: done
+  gh-20-2-generate-cited-claude-insights: done
+  gh-20-3-strategy-scoped-evidence-copilot: done
+  gh-20-4-hand-off-insights-to-bounded-experiments: backlog

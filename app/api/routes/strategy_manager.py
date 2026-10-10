@@ -6,10 +6,12 @@ GET routes only render repository state.  All lifecycle changes stay behind
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import logging
+import math
 import re
 from time import perf_counter
 from collections.abc import Mapping, Sequence
@@ -17,7 +19,7 @@ from typing import Annotated, Literal, cast
 from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.datastructures import FormData
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
@@ -31,6 +33,7 @@ from app.api.dependencies import (
     get_strategy_job_service,
     get_strategy_experiment_service,
     get_strategy_manager_agent,
+    get_strategy_manager_insights_service,
 )
 from app.api.templating import is_htmx_request, template_response, templates
 from app.core import config
@@ -98,6 +101,16 @@ from app.services.backtest.strategy_job import (
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_experiment_service import StrategyExperimentService
+from app.services.backtest.strategy_outcomes import StrategyOutcomeService
+from app.services.backtest.strategy_insights import (
+    StrategyManagerInsightsService,
+    is_shareable_strategy_parameter,
+)
+from app.schemas.strategy_outcomes import OutcomeRunV1
+from app.schemas.strategy_insights import (
+    StrategyInsightParameterV1,
+    StrategyQuestionContextV1,
+)
 from app.services.backtest.strategy_protocol import JsonValue, StrategyParameterV1
 from app.services.backtest.strategy_protocol import validate_strategy_parameters
 from app.services.backtest.strategy_readiness_service import (
@@ -119,6 +132,9 @@ BootstrapDep = Annotated[StrategyBootstrapService, Depends(get_bootstrap_service
 ReadinessDep = Annotated[StrategyReadinessService, Depends(get_readiness_service)]
 ExperimentDep = Annotated[
     StrategyExperimentService, Depends(get_strategy_experiment_service)
+]
+AgentInsightsDep = Annotated[
+    StrategyManagerInsightsService, Depends(get_strategy_manager_insights_service)
 ]
 
 _TERMINAL = {
@@ -430,6 +446,7 @@ def _initialization_context(
 def _strategy_manager_context(
     repo: BacktestRepository,
     *,
+    experiments: StrategyExperimentService,
     setup_required: bool,
     ready_count: int,
     coverage_ready: bool,
@@ -452,10 +469,27 @@ def _strategy_manager_context(
         }
     else:
         profile_context = _profile_context(repo, active=active)
+    try:
+        outcome_summary = StrategyOutcomeService(repo).build_summary()
+    except Exception:  # noqa: BLE001
+        logger.warning("Strategy outcome summary unavailable", exc_info=True)
+        outcome_summary = None
+    try:
+        pending_experiments = experiments.pending_details(limit=1)
+    except Exception:  # noqa: BLE001
+        logger.warning("Pending Strategy experiment unavailable", exc_info=True)
+        pending_experiments = ()
     return {
         **_coverage_context(repo),
         **profile_context,
         **_backtest_activities_context(repo),
+        "outcome_summary": outcome_summary,
+        "agent_outcome": None,
+        "selected_evidence_handle": "",
+        "selected_result_id": "",
+        "pending_experiment_detail": (
+            pending_experiments[0] if pending_experiments else None
+        ),
         "setup_required": setup_required,
         "ready_count": ready_count,
         "primary_cta": _primary_cta(
@@ -532,6 +566,7 @@ def _form_error_status(request: Request) -> int:
 async def strategy_manager(
     request: Request,
     backtest: BacktestDep,
+    experiments: ExperimentDep,
     readiness: ReadinessDep,
     bootstrap: BootstrapDep,
     setup: str | None = None,
@@ -565,6 +600,7 @@ async def strategy_manager(
             activated_at = None
     context = _strategy_manager_context(
         backtest,
+        experiments=experiments,
         setup_required=setup_required,
         ready_count=ready_count,
         coverage_ready=coverage_ready,
@@ -577,6 +613,166 @@ async def strategy_manager(
         (perf_counter() - started) * 1_000,
     )
     return response
+
+
+@router.post(
+    "/strategy-manager/insights",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def strategy_manager_insights(
+    request: Request,
+    backtest: BacktestDep,
+    service: AgentInsightsDep,
+    refresh: bool = Form(False),
+) -> HTMLResponse:
+    """Generate cited insights only after an explicit user submission."""
+    summary = await asyncio.to_thread(StrategyOutcomeService(backtest).build_summary)
+    outcome = await asyncio.to_thread(
+        service.generate_insights, summary, refresh=refresh
+    )
+    return template_response(
+        request,
+        "_strategy_insights_panel.html",
+        {"outcome_summary": summary, "agent_outcome": outcome},
+    )
+
+
+def _strategy_question_context(
+    row: OutcomeRunV1, strategy: StrategyDescriptorV1
+) -> StrategyQuestionContextV1 | None:
+    """Bind Q&A to the latest verified parameters accepted by current code."""
+    if (
+        row.strategy_id != strategy.strategy_id
+        or row.strategy_api_version != strategy.api_version
+        or not strategy.accepts_source_digest(row.strategy_source_digest)
+    ):
+        return None
+    raw_parameters = row.parameters
+    declared: list[StrategyInsightParameterV1] = []
+    values: dict[str, JsonValue] = {}
+    for parameter in strategy.parameters:
+        if (
+            parameter.name == strategy.universe.parameter
+            or not is_shareable_strategy_parameter(parameter.name)
+        ):
+            continue
+        value = raw_parameters.get(parameter.name)
+        if (
+            type(value) not in (str, int, float, bool)
+            or (isinstance(value, str) and len(value) > 256)
+            or (isinstance(value, float) and not math.isfinite(value))
+        ):
+            continue
+        declared.append(StrategyInsightParameterV1(name=parameter.name, value=value))
+        values[parameter.name] = cast(JsonValue, value)
+    validated = validate_strategy_parameters(
+        strategy.parameters, values, apply_defaults=False
+    )
+    if isinstance(validated, tuple):
+        return None
+    return StrategyQuestionContextV1(
+        strategy_id=strategy.strategy_id,
+        strategy_api_version=strategy.api_version,
+        declared_parameters=tuple(declared[:64]),
+    )
+
+
+@router.post(
+    "/strategy-manager/copilot/ask",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+async def strategy_manager_copilot_ask(
+    request: Request,
+    backtest: BacktestDep,
+    launch: LaunchDep,
+    service: AgentInsightsDep,
+    question: str = Form(..., max_length=500),
+    result_id: str = Form(..., min_length=1, max_length=200),
+) -> HTMLResponse:
+    """Answer one bounded question about one locally selected verified Strategy."""
+    clean_question = question
+    if not question.strip():
+        raise HTTPException(status_code=422, detail="question is required")
+    summary = await asyncio.to_thread(StrategyOutcomeService(backtest).build_summary)
+    row = next((item for item in summary.runs if item.run_id == result_id), None)
+    if row is None:
+        await asyncio.to_thread(
+            service.record_unavailable_question,
+            summary,
+            question=clean_question,
+            reason="evidence_unavailable",
+        )
+        raise HTTPException(
+            status_code=409, detail="selected Strategy evidence is no longer available"
+        )
+    try:
+        discovery = await asyncio.to_thread(launch.discover)
+    except Exception:  # noqa: BLE001 - catalog failure must never trigger a model call
+        logger.warning("Strategy catalog unavailable for evidence Q&A", exc_info=True)
+        await asyncio.to_thread(
+            service.record_unavailable_question,
+            summary,
+            question=clean_question,
+            reason="strategy_discovery_unavailable",
+        )
+        return template_response(
+            request,
+            "_strategy_copilot_panel.html",
+            {
+                "outcome_summary": summary,
+                "agent_outcome": None,
+                "selected_evidence_handle": row.evidence_handle,
+                "selected_result_id": row.run_id,
+                "submitted_question": clean_question,
+                "copilot_unavailable": "The current Strategy catalog is unavailable, so no model request was sent.",
+            },
+        )
+    strategy = next(
+        (item for item in discovery.strategies if item.strategy_id == row.strategy_id),
+        None,
+    )
+    strategy_context = (
+        None if strategy is None else _strategy_question_context(row, strategy)
+    )
+    if strategy_context is None:
+        await asyncio.to_thread(
+            service.record_unavailable_question,
+            summary,
+            question=clean_question,
+            reason="strategy_source_mismatch",
+        )
+        return template_response(
+            request,
+            "_strategy_copilot_panel.html",
+            {
+                "outcome_summary": summary,
+                "agent_outcome": None,
+                "selected_evidence_handle": row.evidence_handle,
+                "selected_result_id": row.run_id,
+                "submitted_question": clean_question,
+                "copilot_unavailable": "The current Strategy definition does not match this verified result, so no model request was sent.",
+            },
+        )
+    outcome = await asyncio.to_thread(
+        service.ask,
+        summary,
+        question=clean_question,
+        strategy=strategy_context,
+    )
+    return template_response(
+        request,
+        "_strategy_copilot_panel.html",
+        {
+            "outcome_summary": summary,
+            "agent_outcome": outcome,
+            "selected_evidence_handle": row.evidence_handle,
+            "selected_result_id": row.run_id,
+            "submitted_question": clean_question,
+            "copilot_unavailable": None,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1514,9 +1710,7 @@ def create_strategy_experiment_draft(
     baseline_run_id: Annotated[str, Form()] = "",
     hypothesis: Annotated[str, Form()] = "",
 ) -> Response:
-    outcome = experiments.draft(
-        baseline_run_id=baseline_run_id, hypothesis=hypothesis
-    )
+    outcome = experiments.draft(baseline_run_id=baseline_run_id, hypothesis=hypothesis)
     if outcome.experiment is not None:
         return RedirectResponse(
             f"/strategy-manager/experiments/{outcome.experiment.id}", status_code=303

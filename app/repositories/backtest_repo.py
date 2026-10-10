@@ -1387,6 +1387,34 @@ BEGIN SELECT RAISE(ABORT, 'strategy experiment audit is append-only'); END;
 """
 
 
+_STRATEGY_MANAGER_AGENT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS strategy_manager_agent_audit (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    task TEXT NOT NULL CHECK(task IN ('insights', 'question')),
+    request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+    summary_digest TEXT NOT NULL CHECK(length(summary_digest) = 64),
+    prompt_version TEXT NOT NULL CHECK(length(prompt_version) BETWEEN 1 AND 80),
+    schema_version TEXT NOT NULL CHECK(length(schema_version) BETWEEN 1 AND 80),
+    user_question TEXT CHECK(user_question IS NULL OR length(user_question) <= 500),
+    attempts_json TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('accepted', 'unavailable')),
+    accepted_citations_json TEXT NOT NULL,
+    output_json TEXT,
+    occurred_at TEXT NOT NULL,
+    CHECK((task = 'question') = (user_question IS NOT NULL)),
+    CHECK((outcome = 'accepted') = (output_json IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS strategy_manager_agent_cache
+ON strategy_manager_agent_audit(task, request_digest, outcome, sequence DESC);
+CREATE TRIGGER IF NOT EXISTS strategy_manager_agent_audit_immutable_update
+BEFORE UPDATE ON strategy_manager_agent_audit
+BEGIN SELECT RAISE(ABORT, 'strategy manager agent audit is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS strategy_manager_agent_audit_immutable_delete
+BEFORE DELETE ON strategy_manager_agent_audit
+BEGIN SELECT RAISE(ABORT, 'strategy manager agent audit is append-only'); END;
+"""
+
+
 @dataclass(frozen=True)
 class QualificationResult:
     contract_digest: str
@@ -1601,6 +1629,17 @@ class BacktestResultV1:
     regime_benchmark: "RegimeBenchmarkPinV1 | None" = None
     initial_entry_selection: InitialEntrySelectionV1 | None = None
     candidate_audit_summary: BacktestCandidateAuditSummaryV1 | None = None
+
+
+@dataclass(frozen=True)
+class RecentBacktestResultsV1:
+    """A bounded set of verified Result candidates and exclusion counts."""
+
+    results: tuple[BacktestResultV1, ...]
+    inspected_count: int
+    integrity_excluded_count: int
+    missing_result_count: int
+    job_exclusion_counts: tuple[tuple[str, int], ...]
 
 
 @dataclass(frozen=True)
@@ -2437,7 +2476,8 @@ class BacktestRepository:
                 + _BAU_RUN_AUTHORITY_SCHEMA
                 + _STRATEGY_JOB_SCHEMA
                 + _BACKTEST_RESULT_SCHEMA
-                + _STRATEGY_EXPERIMENT_SCHEMA,
+                + _STRATEGY_EXPERIMENT_SCHEMA
+                + _STRATEGY_MANAGER_AGENT_SCHEMA,
             )
             conn.commit()
             _migrate_bats_mic_constraints(conn)
@@ -3776,11 +3816,14 @@ class BacktestRepository:
                 or manifest.digest() != draft.baseline_manifest_digest
                 or baseline_result.strategy_id != draft.strategy_id
                 or baseline_result.strategy_api_version != draft.strategy_api_version
-                or baseline_result.strategy_source_digest != draft.strategy_source_digest
+                or baseline_result.strategy_source_digest
+                != draft.strategy_source_digest
             ):
                 raise StrategyJobConflict("baseline manifest identity is inconsistent")
         except (BacktestIntegrityError, StrategyJobNotFound) as exc:
-            raise StrategyJobConflict("baseline result is unavailable or corrupt") from exc
+            raise StrategyJobConflict(
+                "baseline result is unavailable or corrupt"
+            ) from exc
 
         now = self._job_now()
         experiment_id = self._id_generator()
@@ -3800,7 +3843,14 @@ class BacktestRepository:
                     candidate_run_id, approval_json, comparison_json,
                     conclusion_json, created_at, updated_at)
                    VALUES (?, ?, ?, ?, 'draft', NULL, NULL, NULL, NULL, ?, ?)""",
-                (experiment_id, draft.baseline_run_id, draft_digest, draft_json, now, now),
+                (
+                    experiment_id,
+                    draft.baseline_run_id,
+                    draft_digest,
+                    draft_json,
+                    now,
+                    now,
+                ),
             )
             self._append_experiment_event(
                 conn,
@@ -3859,7 +3909,9 @@ class BacktestRepository:
     ) -> tuple[str, ...]:
         """Return terminal candidate jobs whose durable experiment is unsettled."""
         if not 1 <= limit <= 100:
-            raise ValueError("experiment reconciliation limit must be between 1 and 100")
+            raise ValueError(
+                "experiment reconciliation limit must be between 1 and 100"
+            )
         with session(self._connect) as conn:
             rows = conn.execute(
                 """SELECT e.candidate_run_id
@@ -3880,6 +3932,22 @@ class BacktestRepository:
                           candidate_run_id, approval_json, comparison_json,
                           conclusion_json, created_at, updated_at
                    FROM strategy_experiments ORDER BY created_at DESC, id DESC"""
+            ).fetchall()
+        return tuple(self._experiment_from_row(row) for row in rows)
+
+    def pending_strategy_experiments(self, *, limit: int = 5):
+        """Return a bounded newest-first view of actionable GH-15 drafts."""
+        if type(limit) is not int or not 1 <= limit <= 25:
+            raise ValueError("pending experiment limit must be between 1 and 25")
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT id, baseline_run_id, draft_digest, draft_json, status,
+                          candidate_run_id, approval_json, comparison_json,
+                          conclusion_json, created_at, updated_at
+                   FROM strategy_experiments
+                   WHERE status='draft'
+                   ORDER BY created_at DESC, id DESC LIMIT ?""",
+                (limit,),
             ).fetchall()
         return tuple(self._experiment_from_row(row) for row in rows)
 
@@ -3943,6 +4011,106 @@ class BacktestRepository:
             for row in rows
         )
 
+    def strategy_manager_agent_cache(
+        self, task: Literal["insights", "question"], request_digest: str
+    ) -> str | None:
+        """Return the newest locally accepted output for an exact request digest."""
+        if task not in {"insights", "question"} or not re.fullmatch(
+            r"[0-9a-f]{64}", request_digest
+        ):
+            raise ValueError("invalid Strategy Manager agent cache key")
+        with session(self._connect) as conn:
+            row = conn.execute(
+                """SELECT output_json FROM strategy_manager_agent_audit
+                   WHERE task=? AND request_digest=? AND outcome='accepted'
+                   ORDER BY sequence DESC LIMIT 1""",
+                (task, request_digest),
+            ).fetchone()
+        return None if row is None else str(row[0])
+
+    def record_strategy_manager_agent_call(
+        self,
+        *,
+        task: Literal["insights", "question"],
+        request_digest: str,
+        summary_digest: str,
+        prompt_version: str,
+        schema_version: str,
+        attempts: tuple[Mapping[str, object], ...],
+        outcome: Literal["accepted", "unavailable"],
+        accepted_citations: tuple[str, ...],
+        output: Mapping[str, object] | None,
+        user_question: str | None = None,
+    ) -> int:
+        """Append provider attempts and any validated response without raw evidence."""
+        if task not in {"insights", "question"}:
+            raise ValueError("invalid Strategy Manager agent task")
+        for digest in (request_digest, summary_digest):
+            if not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("invalid Strategy Manager agent digest")
+        if (
+            not prompt_version
+            or len(prompt_version) > 80
+            or not schema_version
+            or len(schema_version) > 80
+        ):
+            raise ValueError("invalid Strategy Manager agent prompt/schema version")
+        if (task == "question") != (user_question is not None):
+            raise ValueError("question audit text does not match task")
+        if user_question is not None and (
+            not user_question or len(user_question) > 500
+        ):
+            raise ValueError("question audit text is outside its bound")
+        if (outcome == "accepted") != (output is not None):
+            raise ValueError("accepted outcome must match validated output")
+        encoded_attempts = json.dumps(
+            [dict(item) for item in attempts],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        encoded_citations = json.dumps(
+            list(accepted_citations), separators=(",", ":"), ensure_ascii=False
+        )
+        encoded_output = (
+            None
+            if output is None
+            else json.dumps(
+                dict(output),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        )
+        with session(self._connect) as conn:
+            cursor = conn.execute(
+                """INSERT INTO strategy_manager_agent_audit
+                   (task, request_digest, summary_digest, prompt_version, schema_version,
+                    user_question, attempts_json, outcome, accepted_citations_json,
+                    output_json, occurred_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    task,
+                    request_digest,
+                    summary_digest,
+                    prompt_version,
+                    schema_version,
+                    user_question,
+                    encoded_attempts,
+                    outcome,
+                    encoded_citations,
+                    encoded_output,
+                    self._job_now(),
+                ),
+            )
+            if cursor.lastrowid is None:
+                raise BacktestIntegrityError(
+                    "Strategy Manager agent audit sequence was not assigned"
+                )
+            return cursor.lastrowid
+
     def strategy_experiment_baselines(self, *, limit: int = 25):
         """Return recent verified completed Backtests, skipping damaged rows."""
         from app.schemas.strategy_experiment import StrategyExperimentBaselineOptionV1
@@ -3995,7 +4163,9 @@ class BacktestRepository:
                 (experiment_id,),
             ).fetchone()
             if row is None:
-                raise StrategyJobNotFound(f"strategy experiment not found: {experiment_id}")
+                raise StrategyJobNotFound(
+                    f"strategy experiment not found: {experiment_id}"
+                )
             experiment = self._experiment_from_row(row)
             if experiment.draft_digest != draft_digest:
                 raise StrategyJobConflict("strategy experiment draft digest is stale")
@@ -4105,7 +4275,9 @@ class BacktestRepository:
             or before != experiment.draft.baseline_value
             or after != experiment.draft.proposed_value
         ):
-            raise StrategyJobConflict("candidate changes more than the approved parameter")
+            raise StrategyJobConflict(
+                "candidate changes more than the approved parameter"
+            )
 
         now = self._job_now()
         candidate_digest = candidate_manifest.digest()
@@ -4119,7 +4291,9 @@ class BacktestRepository:
                 (experiment_id,),
             ).fetchone()
             if row is None:
-                raise StrategyJobNotFound(f"strategy experiment not found: {experiment_id}")
+                raise StrategyJobNotFound(
+                    f"strategy experiment not found: {experiment_id}"
+                )
             current = self._experiment_from_row(row)
             if current.draft_digest != draft_digest:
                 raise StrategyJobConflict("strategy experiment draft digest is stale")
@@ -4271,11 +4445,16 @@ class BacktestRepository:
                 (experiment_id,),
             ).fetchone()
             if row is None:
-                raise StrategyJobNotFound(f"strategy experiment not found: {experiment_id}")
+                raise StrategyJobNotFound(
+                    f"strategy experiment not found: {experiment_id}"
+                )
             current = self._experiment_from_row(row)
             if current.candidate_run_id != candidate_run_id:
                 raise StrategyJobConflict("candidate run does not match experiment")
-            if current.status in {ExperimentStatus.COMPLETE, ExperimentStatus.INCONCLUSIVE}:
+            if current.status in {
+                ExperimentStatus.COMPLETE,
+                ExperimentStatus.INCONCLUSIVE,
+            }:
                 return current
             if current.status is not ExperimentStatus.APPROVED:
                 raise StrategyJobConflict("only an approved experiment can conclude")
@@ -4926,6 +5105,64 @@ class BacktestRepository:
                 # prior valid immutable Result may still be usable.
                 continue
         return None
+
+    def recent_verified_backtest_results(
+        self, *, limit: int = 25
+    ) -> RecentBacktestResultsV1:
+        """Read at most ``limit`` recent complete, live Result candidates.
+
+        Candidate rows are ordered by their persisted completion time and
+        stable run ID. Each candidate is returned only after the ordinary
+        Result digest and metric reconstruction checks pass. Failed,
+        cancelled, queued, running, and tombstoned jobs are counted through
+        a metadata-only aggregate and never cause Result/event/curve reads.
+        The candidate cap applies before Result verification, so a damaged
+        row cannot make the landing scan arbitrarily far back through history.
+        """
+        if type(limit) is not int or not 1 <= limit <= 25:
+            raise ValueError("recent Backtest Result limit must be between 1 and 25")
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT job.id, result.run_id
+                   FROM strategy_jobs AS job
+                   LEFT JOIN backtest_results AS result ON result.run_id=job.id
+                   WHERE job.job_type='backtest' AND job.status='complete'
+                     AND job.deleted_at IS NULL
+                   ORDER BY result.completed_at DESC, job.id ASC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+            exclusion_rows = conn.execute(
+                """SELECT CASE WHEN deleted_at IS NOT NULL THEN 'deleted'
+                               ELSE status END, COUNT(*)
+                   FROM strategy_jobs
+                   WHERE job_type='backtest'
+                     AND (status != 'complete' OR deleted_at IS NOT NULL)
+                   GROUP BY CASE WHEN deleted_at IS NOT NULL THEN 'deleted'
+                                 ELSE status END"""
+            ).fetchall()
+
+        results: list[BacktestResultV1] = []
+        corrupt_count = 0
+        missing_count = 0
+        for row in rows:
+            run_id = str(row[0])
+            if row[1] is None:
+                missing_count += 1
+                continue
+            try:
+                results.append(self.backtest_result(run_id))
+            except (BacktestIntegrityError, StrategyJobNotFound, ValueError):
+                corrupt_count += 1
+        return RecentBacktestResultsV1(
+            results=tuple(results),
+            inspected_count=len(rows),
+            integrity_excluded_count=corrupt_count,
+            missing_result_count=missing_count,
+            job_exclusion_counts=tuple(
+                sorted((str(row[0]), int(row[1])) for row in exclusion_rows)
+            ),
+        )
 
     def is_comparable(
         self,

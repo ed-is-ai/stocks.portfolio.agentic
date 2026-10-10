@@ -13,12 +13,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.app import app
+import app.api.routes.strategy_manager as strategy_manager_routes
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.api.dependencies import (
     get_backtest_launch_service,
+    get_strategy_manager_insights_service,
     get_backtest_repository,
     get_bootstrap_service,
     get_readiness_service,
+    get_strategy_experiment_service,
     get_strategy_job_service,
 )
 from app.repositories.backtest_repo import (
@@ -28,6 +31,7 @@ from app.repositories.backtest_repo import (
     BacktestIntegrityError,
     BacktestRepository,
     BacktestResultV1,
+    RecentBacktestResultsV1,
     ComparisonCandidateV1,
     ComparisonEligibilityV1,
     ComparisonIneligibleReason,
@@ -85,11 +89,13 @@ from app.services.backtest.strategy_job import (
 from app.api.routes.strategy_manager import (
     _backtest_progress,
     _stage_progress,
+    _strategy_question_context,
 )
 from app.services.backtest.strategy_bootstrap_service import (
     StrategyBootstrapService,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
+from app.services.backtest.strategy_experiment_service import StrategyExperimentService
 from app.services.backtest.strategy_protocol import (
     EntrySelectionDecisionV1,
     EntrySelectionState,
@@ -390,6 +396,14 @@ class FakeRepo:
             raise self.backtest_activities_error
         return self.backtest_activities
 
+    def recent_verified_backtest_results(self, *, limit=25):
+        assert limit == 25
+        return RecentBacktestResultsV1((), 0, 0, 0, ())
+
+    def pending_strategy_experiments(self, *, limit=1):
+        assert limit == 1
+        return ()
+
     def comparison_candidates(self, run_id, *, anchor_result=None):
         if self.candidates_error is not None:
             raise self.candidates_error
@@ -451,6 +465,9 @@ def services(monkeypatch):
     # handing fakes to typed constructors.
     fake_repo = cast(BacktestRepository, repo)
     fake_jobs = cast(StrategyJobService, jobs)
+    app.dependency_overrides[get_strategy_experiment_service] = lambda: (
+        StrategyExperimentService(fake_repo)
+    )
     app.dependency_overrides[get_readiness_service] = lambda: StrategyReadinessService(
         fake_repo
     )
@@ -470,6 +487,277 @@ def services(monkeypatch):
         app.dependency_overrides.clear()
 
 
+def test_landing_get_never_resolves_the_model_service(services):
+    def unexpected_provider_dependency():
+        pytest.fail("landing GET must not initialize or call the model service")
+
+    app.dependency_overrides[get_strategy_manager_insights_service] = (
+        unexpected_provider_dependency
+    )
+
+    response = client.get("/strategy-manager")
+
+    assert response.status_code == 200
+    assert "Explain these backtests" in response.text
+    assert "Ask about a Strategy" in response.text
+
+
+def test_insights_post_is_the_only_route_that_invokes_generation(services, monkeypatch):
+    _repo, _jobs = services
+    row = SimpleNamespace(
+        evidence_handle="R01",
+        strategy_id="alpha",
+        start_month="2025-01",
+        end_month="2025-12",
+        result_url="/strategy-manager/results/local-run",
+    )
+    summary = SimpleNamespace(runs=(row,))
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "StrategyOutcomeService",
+        lambda _repo: SimpleNamespace(build_summary=lambda: summary),
+    )
+    calls = []
+    service = SimpleNamespace(
+        generate_insights=lambda actual, *, refresh: (
+            calls.append((actual, refresh))
+            or SimpleNamespace(
+                state="unavailable",
+                message="No validated report.",
+                report=None,
+                attempts=(),
+                cached=False,
+            )
+        )
+    )
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: service
+
+    response = client.post(
+        "/strategy-manager/insights",
+        data={"refresh": "false"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [(summary, False)]
+    assert "No validated report." in response.text
+
+
+def test_strategy_question_context_rejects_a_stale_strategy_source() -> None:
+    row = SimpleNamespace(
+        strategy_id="alpha",
+        strategy_api_version=1,
+        strategy_source_digest="b" * 64,
+        parameters={"lookback": 20},
+    )
+
+    assert _strategy_question_context(row, STRATEGY_ALPHA) is None
+
+
+def test_strategy_copilot_sends_one_bounded_question_with_tested_scalar_config(
+    services, monkeypatch
+):
+    _repo, _jobs = services
+    row = SimpleNamespace(
+        run_id="local-run",
+        evidence_handle="R01",
+        strategy_id="alpha",
+        strategy_api_version=1,
+        strategy_source_digest=STRATEGY_ALPHA.source_digest,
+        parameters={
+            "lookback": 20,
+            "threshold": 1.5,
+            "enabled": True,
+            "label": "x",
+            "mode": "a",
+            "selected_securities": ["sid-secret"],
+        },
+        start_month="2025-01",
+        end_month="2025-12",
+        result_url="/strategy-manager/results/local-run",
+    )
+    summary = SimpleNamespace(runs=(row,))
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "StrategyOutcomeService",
+        lambda _repo: SimpleNamespace(build_summary=lambda: summary),
+    )
+    launch = SimpleNamespace(
+        discover=lambda: SimpleNamespace(strategies=(STRATEGY_ALPHA,))
+    )
+    app.dependency_overrides[get_backtest_launch_service] = lambda: launch
+    calls = []
+    answer = SimpleNamespace(
+        answer="The tested lookback was 20.",
+        citations=("R01",),
+        unknowns=("The evidence does not predict future returns.",),
+    )
+    audit = []
+    service = SimpleNamespace(
+        ask=lambda actual, *, question, strategy: (
+            calls.append((actual, question, strategy))
+            or SimpleNamespace(
+                state="completed",
+                message=None,
+                answer=answer,
+                attempts=(),
+                cached=False,
+            )
+        ),
+        record_unavailable_question=lambda actual, *, question, reason: audit.append(
+            (actual, question, reason)
+        ),
+    )
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: service
+
+    response = client.post(
+        "/strategy-manager/copilot/ask",
+        data={"result_id": "local-run", "question": " Why did this result differ? "},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert "The tested lookback was 20." in response.text
+    assert 'name="result_id"' in response.text
+    assert 'value="local-run"' in response.text
+    assert len(calls) == 1
+    actual, question, strategy_context = calls[0]
+    assert actual is summary
+    assert question == " Why did this result differ? "
+    assert strategy_context.strategy_id == "alpha"
+    assert strategy_context.strategy_api_version == 1
+    assert {item.name: item.value for item in strategy_context.declared_parameters} == {
+        "enabled": True,
+        "label": "x",
+        "lookback": 20,
+        "mode": "a",
+        "threshold": 1.5,
+    }
+    assert "sid-secret" not in response.text
+    assert audit == []
+
+
+def test_strategy_copilot_audits_question_when_selected_result_is_stale(
+    services, monkeypatch
+):
+    _repo, _jobs = services
+    summary = SimpleNamespace(runs=())
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "StrategyOutcomeService",
+        lambda _repo: SimpleNamespace(build_summary=lambda: summary),
+    )
+    audit = []
+    service = SimpleNamespace(
+        record_unavailable_question=lambda actual, *, question, reason: audit.append(
+            (actual, question, reason)
+        )
+    )
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: service
+
+    response = client.post(
+        "/strategy-manager/copilot/ask",
+        data={"result_id": "stale-run", "question": "Why did this change?"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 409
+    assert audit == [(summary, "Why did this change?", "evidence_unavailable")]
+
+
+def test_strategy_copilot_audits_question_when_strategy_source_is_stale(
+    services, monkeypatch
+):
+    _repo, _jobs = services
+    row = SimpleNamespace(
+        run_id="stale-run",
+        evidence_handle="R01",
+        strategy_id="alpha",
+        strategy_api_version=1,
+        strategy_source_digest="b" * 64,
+        parameters={"lookback": 20},
+        start_month="2025-01",
+        end_month="2025-12",
+        result_url="/strategy-manager/results/stale-run",
+    )
+    summary = SimpleNamespace(runs=(row,))
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "StrategyOutcomeService",
+        lambda _repo: SimpleNamespace(build_summary=lambda: summary),
+    )
+    app.dependency_overrides[get_backtest_launch_service] = lambda: SimpleNamespace(
+        discover=lambda: SimpleNamespace(strategies=(STRATEGY_ALPHA,))
+    )
+    audit = []
+    calls = []
+    service = SimpleNamespace(
+        ask=lambda *args, **kwargs: calls.append((args, kwargs)),
+        record_unavailable_question=lambda actual, *, question, reason: audit.append(
+            (actual, question, reason)
+        ),
+    )
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: service
+
+    response = client.post(
+        "/strategy-manager/copilot/ask",
+        data={"result_id": "stale-run", "question": "Why did this change?"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert "no model request was sent" in response.text
+    assert audit == [(summary, "Why did this change?", "strategy_source_mismatch")]
+    assert calls == []
+
+
+def test_strategy_copilot_audits_catalog_failure_without_calling_provider(
+    services, monkeypatch
+):
+    _repo, _jobs = services
+    row = SimpleNamespace(
+        run_id="local-run",
+        evidence_handle="R01",
+        strategy_id="alpha",
+        start_month="2025-01",
+        end_month="2025-12",
+        result_url="/strategy-manager/results/local-run",
+    )
+    summary = SimpleNamespace(runs=(row,))
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "StrategyOutcomeService",
+        lambda _repo: SimpleNamespace(build_summary=lambda: summary),
+    )
+
+    def fail_discovery():
+        raise RuntimeError("catalog unavailable")
+
+    app.dependency_overrides[get_backtest_launch_service] = lambda: SimpleNamespace(
+        discover=fail_discovery
+    )
+    audit = []
+    provider_calls = []
+    service = SimpleNamespace(
+        ask=lambda *args, **kwargs: provider_calls.append((args, kwargs)),
+        record_unavailable_question=lambda actual, *, question, reason: audit.append(
+            (actual, question, reason)
+        ),
+    )
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: service
+
+    response = client.post(
+        "/strategy-manager/copilot/ask",
+        data={"result_id": "local-run", "question": "Why?"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert "no model request was sent" in response.text
+    assert audit == [(summary, "Why?", "strategy_discovery_unavailable")]
+    assert provider_calls == []
+
+
 def test_main_renders_coverage_and_canonical_reconstruction_warning(services):
     response = client.get("/partials/strategy-manager")
     assert response.status_code == 200
@@ -481,6 +769,59 @@ def test_main_renders_coverage_and_canonical_reconstruction_warning(services):
         in response.text
     )
     assert "source-gap" not in response.text
+
+
+def test_landing_shows_empty_backtest_summary_and_no_sample_draft(services):
+    response = client.get("/strategy-manager")
+
+    assert response.status_code == 200
+    assert "No verified completed Backtest Results are available" in response.text
+    assert "No pending Strategy experiment draft." in response.text
+    assert 'hx-get="/strategy-manager/configuration"' in response.text
+
+
+def test_landing_shows_actual_pending_experiment_and_existing_actions(
+    services, monkeypatch
+):
+    from app.api.dependencies import get_strategy_experiment_service
+
+    run = SimpleNamespace(
+        id="draft-run-1",
+        status=SimpleNamespace(value="draft"),
+        draft=SimpleNamespace(
+            strategy_id="weinstein",
+            strategy_api_version=2,
+            strategy_source_digest="a" * 64,
+            hypothesis="A tighter exit may reduce drawdown.",
+            baseline_run_id="baseline-run",
+            parameter_name="exit_sma",
+            baseline_value=150,
+            proposed_value=100,
+            metric=SimpleNamespace(value="max_drawdown"),
+            expected_direction=SimpleNamespace(value="improve"),
+            effect_summary="Compare maximum drawdown.",
+        ),
+        draft_digest="b" * 64,
+    )
+    detail = SimpleNamespace(
+        experiment=run,
+        locked_manifest_json='{"period": "2016-01 to 2025-01"}',
+    )
+    service = SimpleNamespace(pending_details=lambda *, limit: (detail,))
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_strategy_experiment_service,
+        lambda: service,
+    )
+
+    response = client.get("/strategy-manager")
+
+    assert response.status_code == 200
+    assert "A tighter exit may reduce drawdown." in response.text
+    assert "2016-01 to 2025-01" in response.text
+    assert 'href="/strategy-manager/experiments/draft-run-1"' in response.text
+    assert 'action="/strategy-manager/experiments/draft-run-1/discard"' in response.text
+    assert f'name="draft_digest" value="{"b" * 64}"' in response.text
 
 
 def test_landing_provenance_uses_shared_labels_with_readable_fallback(services):

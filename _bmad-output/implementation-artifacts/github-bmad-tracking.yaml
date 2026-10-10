@@ -396,3 +396,29 @@ standalone_issues:
     prerequisite_issues: [625]
     related_issues: [383, 624, 625, 629, 630]
     story_artifact: 625-3-repair-or-tolerate-portfolio-history-gaps.md
+  strategy-manager-contextual-agent-surfaces:
+    issue: 20
+    repository: ed-is-ai/stocks.portfolio.agentic
+    status: in-progress
+    branch: codex/gh-20-101-103
+    feature_plan: feature-gh-20-strategy-manager-contextual-agent-surfaces.md
+    spec: spec-gh-101-103-strategy-manager-intelligence.md
+    completed_prerequisite_issues: [13, 15]
+    sub_issues: [101, 102, 103, 104]
+    stories:
+      gh-20-1-summarize-comparable-backtests:
+        issue: 101
+        status: done
+        prerequisite_issues: [13, 15]
+      gh-20-2-generate-cited-claude-insights:
+        issue: 102
+        status: done
+        prerequisite_issues: [101]
+      gh-20-3-strategy-scoped-evidence-copilot:
+        issue: 103
+        status: done
+        prerequisite_issues: [101]
+      gh-20-4-hand-off-insights-to-bounded-experiments:
+        issue: 104
+        status: backlog
+        prerequisite_issues: [101, 102, 15]
