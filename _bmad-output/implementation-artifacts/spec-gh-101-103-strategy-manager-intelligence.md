@@ -3,6 +3,7 @@ title: 'Strategy Manager backtest intelligence (#101–#103)'
 type: feature
 created: '2026-10-09'
 baseline_revision: 2cbe385f53a117d732b6bb86b4325f97a8d8912e
+final_revision: 129845b3bc7d5a3183bc90fe6138fc5da77c1387
 status: done
 review_loop_iteration: 1
 followup_review_recommended: true
