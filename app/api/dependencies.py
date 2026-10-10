@@ -13,13 +13,17 @@ from typing import Annotated
 from fastapi import Depends
 
 from app.agents.research.copilot import ResearchCopilotClient
+from app.agents.strategy_insights import StrategyManagerInsightsAgent
 from app.agents.strategy_experiment import StrategyExperimentAgent
 from app.agents.thesis.drafter import ThesisDraftClient
 from app.agents.trade_review.weekly import TradeReviewClient
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.core import config
 from app.core.config import ALERTS_DB, TRADES_DB
-from app.integrations.fx_history import BankOfEnglandFxSeriesFetcher, ChainedFxQuoteFetcher
+from app.integrations.fx_history import (
+    BankOfEnglandFxSeriesFetcher,
+    ChainedFxQuoteFetcher,
+)
 from app.repositories import db
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.notifications_repo import NotificationsRepository
@@ -56,6 +60,7 @@ from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
 )
 from app.services.backtest.strategy_experiment_service import StrategyExperimentService
+from app.services.backtest.strategy_insights import StrategyManagerInsightsService
 
 
 @lru_cache
@@ -331,6 +336,14 @@ def get_strategy_experiment_service() -> StrategyExperimentService:
     """Return the shared Strategy experiment lifecycle service (GH-15)."""
     return StrategyExperimentService(
         get_backtest_repository(), get_strategy_experiment_agent()
+    )
+
+
+@lru_cache
+def get_strategy_manager_insights_service() -> StrategyManagerInsightsService:
+    """Return the shared Claude-first Strategy Manager insight/Q&A service."""
+    return StrategyManagerInsightsService(
+        get_backtest_repository(), StrategyManagerInsightsAgent()
     )
 
 

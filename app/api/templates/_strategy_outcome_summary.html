@@ -1,0 +1,161 @@
+<section id="strategy-outcome-summary" aria-labelledby="strategy-outcome-heading" class="mt-4">
+  <h2 id="strategy-outcome-heading" tabindex="-1" class="h4">Backtest outcomes</h2>
+  {% if outcome_summary %}
+  {% if outcome_summary.state == 'cohort' %}
+  <p class="text-muted">The latest comparable cohort contains {{ outcome_summary.cohort_candidate_count }} verified Results across {{ outcome_summary.cohort_strategy_count }} Strategies. Shared period: {{ outcome_summary.cohort.period_start }} to {{ outcome_summary.cohort.period_end }} · currency: {{ outcome_summary.cohort.base_currency }}. Selection uses the Strategy Manager’s canonical comparison rule.</p>
+  {% elif outcome_summary.state == 'individual' %}
+  <div class="sm-alert sm-alert-info" role="status">No comparable multi-Strategy cohort was found. The latest result for each Strategy is shown individually; outcomes are not ranked across rows.</div>
+  {% elif outcome_summary.state == 'empty' %}
+  <div class="sm-alert sm-alert-info" role="status">No verified completed Backtest Results are available for a summary yet. The existing Configure a Backtest action remains available above.</div>
+  {% else %}
+  <div class="sm-alert sm-alert-warning" role="status">The bounded Backtest outcome summary is unavailable. Individual result pages remain available below.</div>
+  {% endif %}
+
+  <p class="small text-muted">Checked {{ outcome_summary.inspected_count }} of at most {{ outcome_summary.candidate_limit }} latest completed Result candidates; {{ outcome_summary.verified_count }} passed integrity validation.</p>
+  {% if outcome_summary.cohort.limitations %}<ul class="small text-muted">{% for limitation in outcome_summary.cohort.limitations %}<li>{{ limitation }}</li>{% endfor %}</ul>{% endif %}
+
+  {% if outcome_summary.integrity_excluded_count or outcome_summary.missing_result_count or outcome_summary.job_exclusions or outcome_summary.comparison_exclusions %}
+  <details class="mb-3">
+    <summary>Coverage and exclusions</summary>
+    <ul class="mb-0 mt-2">
+      {% if outcome_summary.integrity_excluded_count %}<li>{{ outcome_summary.integrity_excluded_count }} candidate{{ 's' if outcome_summary.integrity_excluded_count != 1 }} failed Result integrity validation.</li>{% endif %}
+      {% if outcome_summary.missing_result_count %}<li>{{ outcome_summary.missing_result_count }} completed job{{ 's' if outcome_summary.missing_result_count != 1 }} had no stored Result.</li>{% endif %}
+      {% for exclusion in outcome_summary.job_exclusions %}<li>{{ exclusion.count }} {{ exclusion.reason|replace('_', ' ') }} job{{ 's' if exclusion.count != 1 }} excluded.</li>{% endfor %}
+      {% for exclusion in outcome_summary.comparison_exclusions %}<li>{{ exclusion.count }} Result candidate{{ 's' if exclusion.count != 1 }} excluded from the selected cohort: {{ exclusion.reason|replace('_', ' ') }}.</li>{% endfor %}
+    </ul>
+  </details>
+  {% endif %}
+
+  {% if outcome_summary.runs %}
+  <div class="tbl-wrap mb-3" tabindex="0" role="region" aria-label="Recent verified Backtest outcome metrics and tested setups">
+    <table class="table table-hover align-middle mono-num">
+        <caption class="visually-hidden">Verified results selected for the Strategy Manager outcome summary</caption>
+      <thead><tr><th scope="col">Strategy / result</th><th scope="col">Period</th><th scope="col">Return</th><th scope="col">Sharpe</th><th scope="col">Win rate</th><th scope="col">Max drawdown</th><th scope="col">Sample</th><th scope="col">Tested setup and data</th></tr></thead>
+      <tbody>
+        {% for run in outcome_summary.runs %}
+        <tr>
+          <th scope="row">
+            <a href="{{ run.result_url }}" hx-get="{{ run.result_url }}" hx-target="#tab-content" hx-swap="innerHTML">{{ run.strategy_id }} · v{{ run.strategy_api_version }}</a>
+            <span class="d-block small fw-normal">{{ run.evidence_handle }}{% if run.is_spy_reference %} · pinned SPY reference{% endif %}</span>
+          </th>
+          <td>{{ run.start_month }} to {{ run.end_month }} · {{ run.base_currency }}</td>
+          {% for metric_key in ('total_return', 'sharpe_ratio', 'win_rate', 'max_drawdown') %}
+          <td>
+            {{ run.metric_display[metric_key] }}
+            {% if run.metric_availability.get(metric_key) %}<span class="d-block small text-muted">{{ run.metric_availability[metric_key]|replace('_', ' ')|title }}</span>{% endif %}
+          </td>
+          {% endfor %}
+          <td>{{ run.closed_trade_count }} closed trades{% if run.candidate_count is not none %}<span class="d-block small">{{ run.candidate_count }} candidates</span>{% else %}<span class="d-block small text-muted">candidate count unavailable</span>{% endif %}</td>
+          <td class="text-wrap" style="min-width:16rem;max-width:28rem">
+            <details>
+              <summary>Parameters, universe, provenance</summary>
+              <dl class="mb-0 mt-2">
+                <dt>Starting capital</dt><dd>{{ run.starting_capital }} {{ run.base_currency }}</dd>
+                <dt>Parameters</dt><dd><code>{{ run.parameters|tojson }}</code></dd>
+                <dt>Universe</dt><dd>{% if run.universe %}{{ run.universe|join(', ') }}{% else %}Not recorded{% endif %}</dd>
+                <dt>Stored equity points</dt><dd>{{ run.equity_point_count }}</dd>
+                <dt>Data provenance</dt><dd>{% for source in run.provenance %}{{ source.quality|replace('_', ' ')|title }} · {{ source.snapshot_count }} snapshots{% if not loop.last %}; {% endif %}{% else %}Unavailable{% endfor %}</dd>
+              </dl>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if outcome_summary.curve_error %}<div class="sm-alert sm-alert-warning" role="status">The stored equity curves could not be aligned: {{ outcome_summary.curve_error }}</div>{% endif %}
+  {% if outcome_summary.equity_payload %}
+  <h3 class="h5">Portfolio value over time</h3>
+  <p class="small text-muted">The curve uses stored daily portfolio values from the shared period. {% if outcome_summary.equity_mode == 'indexed' %}Values are indexed to 100 on each run’s first stored session because starting capital differs; this changes display only.{% else %}Values are shown in {{ outcome_summary.cohort.base_currency }}.{% endif %}</p>
+  <div class="card sm-card mb-3"><div class="card-body">
+    <label for="strategy-outcome-equity-mode" class="form-label small mb-1">Chart values</label>
+    <select id="strategy-outcome-equity-mode" class="form-select form-select-sm mb-3" style="max-width:22rem" hidden>
+      <option value="equity" {% if outcome_summary.equity_mode == 'currency' %}selected{% endif %}>Portfolio value ({{ outcome_summary.cohort.base_currency }})</option>
+      <option value="indexed" {% if outcome_summary.equity_mode == 'indexed' %}selected{% endif %}>Indexed growth (first session = 100)</option>
+    </select>
+    <canvas id="strategy-outcome-equity-chart" role="img" aria-label="Stored portfolio value paths for the selected comparable Strategies" style="max-height:320px">Chart unavailable. Expand the monthly values table for accessible portfolio values.</canvas>
+    <p id="strategy-outcome-equity-status" class="text-muted small mt-2 mb-0" hidden>Chart unavailable. Expand the monthly values table for accessible portfolio values.</p>
+  </div></div>
+  <details id="strategy-outcome-equity-table" class="mb-4">
+    <summary>View monthly stored portfolio values and indexed growth</summary>
+    <div class="tbl-wrap mt-2" style="overflow-x:auto" tabindex="0" role="region" aria-label="Monthly stored portfolio valuations and indexed growth for each Strategy">
+      <table class="table table-hover align-middle mono-num">
+        <caption class="visually-hidden">Monthly last-session stored portfolio valuations and display-only indexed growth for verified comparable Backtest Results</caption>
+        <thead><tr><th scope="col">Month</th>{% for series in outcome_summary.equity_payload.series %}<th scope="col">{{ series.label }} · {{ outcome_summary.cohort.base_currency }}</th><th scope="col">Indexed growth</th>{% endfor %}</tr></thead>
+        <tbody>
+          {% for point in outcome_summary.equity_payload.table_rows %}
+          <tr><th scope="row">{{ point.date[:7] }}</th>{% for series in outcome_summary.equity_payload.series %}<td>{{ point.equities[loop.index0] }}</td><td>{{ point.values[loop.index0] }}</td>{% endfor %}</tr>
+          {% else %}<tr><td colspan="{{ 1 + outcome_summary.equity_payload.series|length * 2 }}">No stored equity points.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+  <script>
+  (function () {
+    var payload = {{ outcome_summary.equity_payload|tojson }};
+    var canvas = document.getElementById('strategy-outcome-equity-chart');
+    var status = document.getElementById('strategy-outcome-equity-status');
+    var table = document.getElementById('strategy-outcome-equity-table');
+    var mode = document.getElementById('strategy-outcome-equity-mode');
+    function unavailable() { if (canvas) canvas.hidden = true; if (status) status.hidden = false; if (table) table.open = true; }
+    if (!canvas || typeof Chart === 'undefined') { unavailable(); return; }
+    try {
+      var oldChart = Chart.getChart(canvas);
+      if (oldChart) oldChart.destroy();
+      var palette = ['#1d4ed8', '#b45309', '#0f766e', '#be123c', '#6d28d9', '#0369a1', '#a16207', '#475569'];
+      var initialKey = mode && mode.value === 'indexed' ? 'values' : 'equity_values';
+      var chart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: { labels: payload.dates, datasets: payload.series.map(function (series, index) {
+          return { label: series.label, data: series[initialKey], borderColor: palette[index % palette.length], backgroundColor: palette[index % palette.length], borderWidth: 2, borderDash: index % 2 ? [6, 3] : [], pointRadius: payload.dates.length > 60 ? 0 : 2, pointHoverRadius: 5, fill: false, tension: 0.12 };
+        }) },
+        options: { responsive: true, interaction: { mode: 'index', intersect: false }, plugins: { legend: { display: true, position: 'bottom' }, tooltip: { mode: 'index', intersect: false } }, scales: { x: { title: { display: true, text: 'Date' } }, y: { title: { display: true, text: initialKey === 'values' ? 'Value index (first session = 100)' : 'Portfolio value ({{ outcome_summary.cohort.base_currency }})' } } } }
+      });
+      if (mode) {
+        mode.hidden = false;
+        mode.addEventListener('change', function () {
+          var key = mode.value === 'indexed' ? 'values' : 'equity_values';
+          chart.data.datasets.forEach(function (dataset, index) { dataset.data = payload.series[index][key]; });
+          chart.options.scales.y.title.text = key === 'values' ? 'Value index (first session = 100)' : 'Portfolio value ({{ outcome_summary.cohort.base_currency }})';
+          chart.update();
+        });
+      }
+    } catch (_error) { unavailable(); }
+  })();
+  </script>
+  {% endif %}
+  {% else %}
+  <div class="sm-alert sm-alert-warning" role="status">The bounded Backtest outcome summary is unavailable. Individual result pages remain available below.</div>
+  {% endif %}
+</section>
+
+{% set pending_detail = pending_experiment_detail %}
+<section id="strategy-pending-experiment" aria-labelledby="strategy-pending-experiment-heading" class="card sm-card mt-4">
+  <div class="card-body">
+    <h2 id="strategy-pending-experiment-heading" class="h5">Strategy experiment</h2>
+    {% if pending_detail %}
+      {% set experiment = pending_detail.experiment %}
+      <p><strong>Pending draft · {{ experiment.draft.strategy_id }}</strong> · {{ experiment.status.value }}</p>
+      <p class="mb-2">{{ experiment.draft.hypothesis }}</p>
+      <dl class="row mb-3">
+        <dt class="col-sm-3">Baseline</dt><dd class="col-sm-9"><a href="/strategy-manager/results/{{ experiment.draft.baseline_run_id }}">{{ experiment.draft.baseline_run_id }}</a></dd>
+        <dt class="col-sm-3">Locked Strategy</dt><dd class="col-sm-9">{{ experiment.draft.strategy_id }} · v{{ experiment.draft.strategy_api_version }} · source {{ experiment.draft.strategy_source_digest[:12] }}</dd>
+        <dt class="col-sm-3">Proposed change</dt><dd class="col-sm-9"><code>{{ experiment.draft.parameter_name }}</code>: {{ experiment.draft.baseline_value|tojson }} → {{ experiment.draft.proposed_value|tojson }}</dd>
+        <dt class="col-sm-3">Test</dt><dd class="col-sm-9">{{ experiment.draft.metric.value }} · expected {{ experiment.draft.expected_direction.value }} · {{ experiment.draft.effect_summary }}</dd>
+        <dt class="col-sm-3">Locked run inputs</dt><dd class="col-sm-9"><details><summary>View baseline manifest</summary><pre class="border p-2 mt-2" style="max-height:16rem;overflow:auto"><code>{{ pending_detail.locked_manifest_json }}</code></pre></details></dd>
+      </dl>
+      <div class="d-flex gap-2">
+        <a class="sm-btn sm-btn-primary" href="/strategy-manager/experiments/{{ experiment.id }}" hx-get="/strategy-manager/experiments/{{ experiment.id }}" hx-target="#tab-content" hx-swap="innerHTML">Review draft</a>
+        <form method="post" action="/strategy-manager/experiments/{{ experiment.id }}/discard" onsubmit="return window.confirm('Discard this experiment draft? It cannot be restored.');">
+          <input type="hidden" name="draft_digest" value="{{ experiment.draft_digest }}">
+          <button class="sm-btn sm-btn-secondary" type="submit">Discard draft</button>
+        </form>
+      </div>
+    {% else %}
+      <p class="text-muted mb-2">No pending Strategy experiment draft.</p>
+      <a href="/strategy-manager/experiments" hx-get="/strategy-manager/experiments" hx-target="#tab-content" hx-swap="innerHTML">View Strategy experiments</a>
+    {% endif %}
+  </div>
+</section>

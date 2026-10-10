@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import json
 import sqlite3
@@ -33,6 +33,7 @@ from app.services.backtest.strategy_job import (
     RegimeBenchmarkPinV1,
     RunUniverseSelectionV1,
 )
+from app.services.backtest.strategy_experiment_service import StrategyExperimentService
 from tests.backtest.test_run_input_manifest import _manifest
 from tests.backtest.test_strategy_job_repository import _seed_profile
 
@@ -155,7 +156,9 @@ def _seed_baseline(
                 manifest.strategy_id,
                 manifest.strategy_api_version,
                 manifest.strategy_source_digest,
-                json.dumps(dict(manifest.parameters), sort_keys=True, separators=(",", ":")),
+                json.dumps(
+                    dict(manifest.parameters), sort_keys=True, separators=(",", ":")
+                ),
                 manifest.profile_hash,
                 manifest.start_month,
                 manifest.end_month,
@@ -212,6 +215,47 @@ def _draft(manifest: RunInputManifestV1) -> StrategyExperimentDraftV1:
     )
 
 
+def test_pending_strategy_experiments_returns_only_bounded_live_drafts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repository = _repo(path)
+    manifest = _manifests()[0]
+    _seed_baseline(repository, path, manifest)
+    first_draft = _draft(manifest)
+    later_draft = first_draft.model_copy(
+        update={"created_at": NOW + timedelta(seconds=1)}
+    )
+    first = repository.create_strategy_experiment_draft(first_draft, "d" * 64)
+    later = repository.create_strategy_experiment_draft(later_draft, "e" * 64)
+    repository.discard_strategy_experiment(later.id, later.draft_digest)
+
+    pending = repository.pending_strategy_experiments(limit=1)
+
+    assert len(pending) == 1
+    assert pending[0].id == first.id
+    assert pending[0].status.value == "draft"
+    landing_details = StrategyExperimentService(repository).pending_details(limit=1)
+    assert len(landing_details) == 1
+    assert landing_details[0].experiment.id == first.id
+    assert '"strategy_id": "momentum_v1"' in landing_details[0].locked_manifest_json
+
+
+def test_pending_details_omit_experiment_that_settles_after_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = SimpleNamespace(
+        pending_strategy_experiments=lambda *, limit: (SimpleNamespace(id="draft-1"),)
+    )
+    service = StrategyExperimentService(repository, agent=SimpleNamespace())
+    settled = SimpleNamespace(
+        experiment=SimpleNamespace(status=ExperimentStatus.APPROVED)
+    )
+    monkeypatch.setattr(service, "detail", lambda _experiment_id: settled)
+
+    assert service.pending_details(limit=1) == ()
+
+
 @pytest.mark.parametrize("manifest", _manifests())
 def test_approval_clones_manifest_and_concurrent_retry_returns_one_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, manifest
@@ -227,9 +271,7 @@ def test_approval_clones_manifest_and_concurrent_retry_returns_one_candidate(
     candidate_manifest = type(manifest).model_validate(
         {**manifest.model_dump(mode="python"), "parameters": candidate_parameters}
     )
-    approval = StrategyExperimentApprovalV1(
-        approved_at=NOW, draft_digest=draft_digest
-    )
+    approval = StrategyExperimentApprovalV1(approved_at=NOW, draft_digest=draft_digest)
     barrier = Barrier(2)
 
     def approve():

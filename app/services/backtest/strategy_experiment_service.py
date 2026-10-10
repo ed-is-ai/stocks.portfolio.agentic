@@ -162,7 +162,9 @@ class StrategyExperimentService:
                 draft, draft_digest
             )
         except Exception:
-            logger.warning("strategy experiment draft persistence failed", exc_info=True)
+            logger.warning(
+                "strategy experiment draft persistence failed", exc_info=True
+            )
             return self._no_draft(
                 "rejected",
                 "The verified draft could not be stored, so no experiment was created.",
@@ -173,6 +175,23 @@ class StrategyExperimentService:
 
     def list(self) -> tuple[StrategyExperimentV1, ...]:
         return self._repository.list_strategy_experiments()
+
+    def pending_details(
+        self, *, limit: int = 1
+    ) -> tuple[StrategyExperimentDetailV1, ...]:
+        """Load a bounded newest-first set of actionable drafts for the landing."""
+        drafts = self._repository.pending_strategy_experiments(limit=limit)
+        details: list[StrategyExperimentDetailV1] = []
+        for draft in drafts:
+            try:
+                detail = self.detail(draft.id)
+            except StrategyJobNotFound:
+                # A draft may settle or disappear between the bounded query
+                # and detail read, so only current drafts remain actionable.
+                continue
+            if detail.experiment.status is ExperimentStatus.DRAFT:
+                details.append(detail)
+        return tuple(details)
 
     def attempt_audit(self):
         return self._repository.strategy_experiment_attempt_audit()
@@ -209,7 +228,9 @@ class StrategyExperimentService:
         if experiment.draft_digest != draft_digest:
             raise ValueError("The reviewed draft changed. Reload it before approval.")
         if experiment.candidate_run_id is not None:
-            return experiment, self._repository.strategy_job(experiment.candidate_run_id)
+            return experiment, self._repository.strategy_job(
+                experiment.candidate_run_id
+            )
         _, manifest, descriptor = self._verified_baseline(
             experiment.draft.baseline_run_id
         )
@@ -230,7 +251,9 @@ class StrategyExperimentService:
             metric=experiment.draft.metric,
             expected_direction=experiment.draft.expected_direction,
         )
-        parameters = self._validated_candidate_parameters(manifest, descriptor, proposal)
+        parameters = self._validated_candidate_parameters(
+            manifest, descriptor, proposal
+        )
         candidate_manifest = self._candidate_manifest(manifest, parameters)
         approval = StrategyExperimentApprovalV1(
             approved_at=self._clock(), draft_digest=draft_digest, actor=actor
@@ -243,7 +266,9 @@ class StrategyExperimentService:
         )
 
     def reconcile_candidate(self, candidate_run_id: str) -> StrategyExperimentV1 | None:
-        experiment = self._repository.strategy_experiment_for_candidate(candidate_run_id)
+        experiment = self._repository.strategy_experiment_for_candidate(
+            candidate_run_id
+        )
         if experiment is None or experiment.status is not ExperimentStatus.APPROVED:
             return experiment
         candidate_job = self._repository.strategy_job(candidate_run_id)
@@ -262,13 +287,17 @@ class StrategyExperimentService:
             else None
         )
         if baseline_result is None:
-            limitations.append("The baseline result is missing or failed integrity verification.")
+            limitations.append(
+                "The baseline result is missing or failed integrity verification."
+            )
         if candidate_job.status is not StrategyJobStatus.COMPLETE:
             limitations.append(
                 f"The candidate job ended as {candidate_job.status.value}; no win/loss conclusion is available."
             )
         elif candidate_result is None:
-            limitations.append("The candidate result is missing or failed integrity verification.")
+            limitations.append(
+                "The candidate result is missing or failed integrity verification."
+            )
 
         eligibility_reason: str | None = None
         baseline_manifest_digest: str | None = experiment.draft.baseline_manifest_digest
@@ -294,7 +323,9 @@ class StrategyExperimentService:
             candidate_manifest_digest = candidate_result.run_input_manifest_digest
         if baseline_result is not None and candidate_result is not None:
             try:
-                self._verify_pair_manifest(experiment, baseline_result, candidate_result)
+                self._verify_pair_manifest(
+                    experiment, baseline_result, candidate_result
+                )
             except (
                 BacktestIntegrityError,
                 StrategyJobNotFound,
@@ -315,7 +346,9 @@ class StrategyExperimentService:
                     )
                     if not eligibility.eligible:
                         eligibility_reason = (
-                            eligibility.reason.value if eligibility.reason else "ineligible"
+                            eligibility.reason.value
+                            if eligibility.reason
+                            else "ineligible"
                         )
                         limitations.append(
                             "The canonical comparison service found the result pair ineligible."
@@ -439,7 +472,9 @@ class StrategyExperimentService:
     ) -> dict[str, object]:
         declared_names = {parameter.name for parameter in descriptor.parameters}
         submitted = {
-            key: value for key, value in manifest.parameters.items() if key in declared_names
+            key: value
+            for key, value in manifest.parameters.items()
+            if key in declared_names
         }
         validation = validate_strategy_parameters(
             descriptor.parameters,
@@ -464,7 +499,10 @@ class StrategyExperimentService:
             baseline[proposal.parameter_name], proposal.proposed_value
         ):
             raise ValueError("proposal does not change its parameter")
-        candidate_declared = {**baseline, proposal.parameter_name: proposal.proposed_value}
+        candidate_declared = {
+            **baseline,
+            proposal.parameter_name: proposal.proposed_value,
+        }
         validation = validate_strategy_parameters(
             descriptor.parameters,
             cast(Mapping[str, JsonValue], candidate_declared),
@@ -502,7 +540,9 @@ class StrategyExperimentService:
         try:
             self._repository.append_strategy_experiment_attempt(
                 baseline_run_id=baseline_run_id,
-                event_type="draft_unavailable" if status == "unavailable" else "draft_rejected",
+                event_type="draft_unavailable"
+                if status == "unavailable"
+                else "draft_rejected",
                 details={"reason": reason, "hypothesis": hypothesis[:2000]},
             )
         except Exception:
@@ -533,7 +573,9 @@ class StrategyExperimentService:
             for event in result.events
         )
 
-    def _verify_pair_manifest(self, experiment, baseline_result, candidate_result) -> None:
+    def _verify_pair_manifest(
+        self, experiment, baseline_result, candidate_result
+    ) -> None:
         baseline_raw = self._repository.run_input_manifest_json(
             baseline_result.run_input_manifest_digest
         )
@@ -545,8 +587,12 @@ class StrategyExperimentService:
         baseline = read_run_input_manifest(baseline_raw)
         candidate = read_run_input_manifest(candidate_raw)
         if (
-            not baseline.accepts_stored_digest(baseline_result.run_input_manifest_digest)
-            or not candidate.accepts_stored_digest(candidate_result.run_input_manifest_digest)
+            not baseline.accepts_stored_digest(
+                baseline_result.run_input_manifest_digest
+            )
+            or not candidate.accepts_stored_digest(
+                candidate_result.run_input_manifest_digest
+            )
             or baseline.canonical_json() != experiment.draft.baseline_manifest_json
             or baseline.canonical_payload().get("schema_version")
             != candidate.canonical_payload().get("schema_version")

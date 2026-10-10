@@ -178,6 +178,62 @@ def test_self_comparison_is_rejected_without_a_db_lookup(tmp_path: Path) -> None
     assert eligibility.reason is ComparisonIneligibleReason.SELF_COMPARISON
 
 
+def test_recent_verified_results_inspects_at_most_twenty_five_candidates(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "bounded-results.db"
+    repo = _repo(path)
+    with sqlite3.connect(path) as conn:
+        conn.executemany(
+            """INSERT INTO strategy_jobs (
+                   id, job_type, status, enqueue_seq, claim_token, current_month,
+                   status_version, cancel_requested_at, created_at, updated_at
+               ) VALUES (?, 'backtest', 'complete', ?, NULL, NULL, 1, NULL, ?, ?)""",
+            [
+                (
+                    f"missing-result-{index:02d}",
+                    index + 1,
+                    NOW.isoformat(),
+                    NOW.isoformat(),
+                )
+                for index in range(30)
+            ],
+        )
+
+    page = repo.recent_verified_backtest_results(limit=25)
+
+    assert page.inspected_count == 25
+    assert page.missing_result_count == 25
+    assert page.integrity_excluded_count == 0
+    assert page.results == ()
+
+
+def test_recent_verified_results_counts_integrity_failures_without_returning_them(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "damaged-result.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id="damaged-run", enqueue_seq=1)
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER IF EXISTS backtest_result_evidence_immutable")
+        conn.execute(
+            """UPDATE backtest_results
+               SET metrics_json=?, note_version=note_version+1 WHERE run_id=?""",
+            (
+                '{"total_return": 99.0, "sharpe_ratio": null, '
+                '"win_rate": null, "max_drawdown": null}',
+                "damaged-run",
+            ),
+        )
+
+    page = repo.recent_verified_backtest_results(limit=25)
+
+    assert page.inspected_count == 1
+    assert page.integrity_excluded_count == 1
+    assert page.missing_result_count == 0
+    assert page.results == ()
+
+
 def test_missing_left_is_not_found(tmp_path: Path) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)
