@@ -56,6 +56,10 @@ from app.services.backtest.historical_price_evidence import (
     FX_PAIR,
     FX_SERIES_SECURITY_ID,
 )
+from app.services.backtest.etf_universe import (
+    ETF_UNIVERSE_HOST_PARAMS,
+    validate_etf_universe_pin,
+)
 from app.services.backtest.historical_scan_record import DetectorId, FrozenDict
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
 from app.services.backtest.sector_reference import (
@@ -446,6 +450,7 @@ class RunInputManifestV2(RunInputManifestV1):
         ):
             raise ValueError("runtime universe does not match selected universe")
         validate_sector_pin(self.parameters, selection.canonical_security_ids)
+        validate_etf_universe_pin(self.parameters)
         return self
 
 
@@ -770,7 +775,7 @@ def build_run_input_manifest(
     # in the sealed manifest, but do not require every Strategy descriptor to
     # declare the host's runtime control as a user-authored parameter.
     manifest_parameters = dict(submitted_parameters)
-    for host_param in SECTOR_HOST_PARAMS:
+    for host_param in (*SECTOR_HOST_PARAMS, *ETF_UNIVERSE_HOST_PARAMS):
         manifest_parameters.pop(host_param, None)
     regime_filter_enabled = manifest_parameters.pop("regime_filter_enabled", None)
     if regime_filter_enabled is not None and not isinstance(

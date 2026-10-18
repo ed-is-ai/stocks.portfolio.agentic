@@ -1,0 +1,4 @@
+interface:
+  display_name: "52-Week High Backtest"
+  short_description: "Backtest a 52-week-high proximity rule"
+  default_prompt: "Use $rtly-backtest-52-week-high to run a deterministic 52-week-high proximity backtest."

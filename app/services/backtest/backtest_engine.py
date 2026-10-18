@@ -1111,6 +1111,7 @@ class _Engine:
                 security_id=security_id,
                 quantity=position.shares,
                 average_cost=position.per_share_basis,
+                entry_session=position.entry_session,
             )
             for security_id, position in sorted(self.positions.items())
         )
@@ -1465,7 +1466,10 @@ class _Engine:
                 "integrity_error", session, "cost-basis arithmetic failed"
             ) from exc
         self.positions[order.security_id] = PositionState(
-            shares=shares, per_share_basis=per_share_basis
+            shares=shares,
+            per_share_basis=per_share_basis,
+            # A top-up keeps the original entry session (holding-period age).
+            entry_session=session if held is None else held.entry_session,
         )
         return EntryFillEventV1(
             security_id=order.security_id,
@@ -1540,7 +1544,9 @@ class _Engine:
         self.cash = quantize_eight(self.cash + proceeds_base)
         if remaining > 0:
             self.positions[order.security_id] = PositionState(
-                shares=remaining, per_share_basis=position.per_share_basis
+                shares=remaining,
+                per_share_basis=position.per_share_basis,
+                entry_session=position.entry_session,
             )
         else:
             del self.positions[order.security_id]

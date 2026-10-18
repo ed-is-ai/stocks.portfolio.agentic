@@ -74,6 +74,7 @@ from app.services.backtest.run_input_manifest import (
     build_run_input_manifest_v2,
     build_run_input_manifest_v3,
 )
+from app.services.backtest.etf_universe import ETF_UNIVERSE_HOST_PARAMS
 from app.services.backtest.sector_reference import SECTOR_HOST_PARAMS
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
@@ -403,7 +404,7 @@ class PreparationStageEngine(StageWalkEngine):
                 raise ValueError("selected evidence was not resolved")
             generic = dict(prep.parameters)
             generic.pop(s.universe_parameter, None)
-            for host_param in SECTOR_HOST_PARAMS:
+            for host_param in (*SECTOR_HOST_PARAMS, *ETF_UNIVERSE_HOST_PARAMS):
                 generic.pop(host_param, None)
             base = build_run_input_manifest(
                 project_root=self._project_root,

@@ -54,6 +54,14 @@ COMMON_PARAMETER_DEFAULTS = {
 }
 
 EXPECTED_LIVE_STRATEGY_DEFAULTS = {
+    "rtly-backtest-52-week-high": {
+        "high_lookback_sessions": 252,
+        "entry_proximity": 0.95,
+        "exit_proximity": 0.85,
+        "rebalance_cadence": "daily",
+        "maximum_loss_pct": 10.0,
+        **COMMON_PARAMETER_DEFAULTS,
+    },
     "rtly-backtest-buy-and-hold": {
         "entry_on_or_after": "2000-01-01",
         "top_x": 10,
@@ -71,6 +79,15 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "exit_funds_net": -1,
         "max_scan_age_days": 45,
         "maximum_loss_pct": 10.0,
+        **COMMON_PARAMETER_DEFAULTS,
+    },
+    "rtly-backtest-mean-reversion": {
+        "lookback_sessions": 20,
+        "entry_zscore": 2.0,
+        "exit_zscore": 0.0,
+        "max_holding_sessions": 10,
+        "trend_lookback_sessions": 200,
+        "maximum_loss_pct": 8.0,
         **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-minervini": {

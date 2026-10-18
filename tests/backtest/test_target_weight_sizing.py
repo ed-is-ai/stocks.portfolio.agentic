@@ -184,6 +184,34 @@ def test_trim_sells_part_before_the_top_up_buy() -> None:
     assert len(sink.candidate_audits) == 3
 
 
+def test_trim_and_top_up_keep_the_original_entry_session() -> None:
+    seen: dict[date, dict[str, date | None]] = {}
+
+    class _Recording(_TargetStrategy):
+        def exit_signals(self, view, portfolio, parameters):  # type: ignore[override]
+            seen[view.as_of_session] = {
+                p.security_id: p.entry_session for p in portfolio.positions
+            }
+            return super().exit_signals(view, portfolio, parameters)
+
+    output, _ = _run(
+        {
+            D0: [_target("sec-a", D0, "0.5"), _target("sec-b", D0, "0.5")],
+            D2: [_target("sec-a", D2, "0.5"), _target("sec-b", D2, "0.5")],
+        },
+        {
+            "sec-a": (100.0, _from(D2, 150.0, 150.0)),
+            "sec-b": (100.0, _from(D2, 120.0, 120.0)),
+        },
+        strategy_type=_Recording,
+    )
+
+    first_fill = _of(output, EntryFillEventV1)[0].fill_session
+    after = seen[max(seen)]
+    assert len(_of(output, ExitFillEventV1)) == 1  # sec-a was trimmed
+    assert after == {"sec-a": first_fill, "sec-b": first_fill}
+
+
 def test_target_zero_closes_the_position_fully() -> None:
     output, _ = _run(
         {D0: [_target("sec-a", D0, "1")], D2: [_target("sec-a", D2, "0")]},

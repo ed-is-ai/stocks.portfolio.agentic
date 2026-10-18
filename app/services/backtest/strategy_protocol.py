@@ -260,6 +260,9 @@ class PositionSummaryV1(_StrategyModel):
     security_id: str = Field(min_length=1)
     quantity: Decimal = Field(ge=Decimal(0))
     average_cost: Decimal = Field(gt=Decimal(0))
+    #: Session the position was opened (fill session), when the host knows it;
+    #: lets a Strategy apply a holding-period (time) stop.
+    entry_session: date | None = None
 
 
 class VolatilityObservationV1(_StrategyModel):
