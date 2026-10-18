@@ -312,12 +312,40 @@ def _buy_and_hold(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
     return list(selection.signals), []
 
 
+def _flow_scan(funds_net: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        security_id="sec-aapl",
+        as_of_session_date=_SHORT_AS_OF,
+        provenance_quality="observed_bau",
+        enrichment=SimpleNamespace(funds_net=funds_net),
+    )
+
+
+def _institutional_flow(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
+    strategy = _strategy(module)
+    parameters = {
+        "selected_securities": ["sec-aapl"],
+        "min_funds_net": 3,
+        "exit_funds_net": -1,
+        "max_scan_age_days": 45,
+        "maximum_loss_pct": 10.0,
+    }
+    history = pd.DataFrame({"close": [Decimal("85")]}, index=[_SHORT_AS_OF])
+    entry_view = _View(_SHORT_AS_OF, history, _flow_scan(5))
+    exit_view = _View(_SHORT_AS_OF, history, _flow_scan(-2))
+    return (
+        strategy.entry_signals(entry_view, parameters),
+        strategy.exit_signals(exit_view, _portfolio(_SHORT_AS_OF), parameters),
+    )
+
+
 #: One scenario driver per first-party Strategy Skill folder. A newly
 #: discovered Strategy without an entry here fails the coverage test
 #: below rather than silently escaping the explanation contract.
 SCENARIOS: dict[str, Callable[[ModuleType], tuple[list[Signal], list[Signal]]]] = {
     "rtly-backtest-buy-and-hold": _buy_and_hold,
     "rtly-backtest-darvas-box": _darvas,
+    "rtly-backtest-institutional-flow": _institutional_flow,
     "rtly-backtest-minervini": _minervini,
     "rtly-backtest-moving-average": _moving_average,
     "rtly-backtest-turtle-trend": _turtle,

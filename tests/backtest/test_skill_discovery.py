@@ -66,6 +66,13 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "volume_multiplier": 1.5,
         **COMMON_PARAMETER_DEFAULTS,
     },
+    "rtly-backtest-institutional-flow": {
+        "min_funds_net": 3,
+        "exit_funds_net": -1,
+        "max_scan_age_days": 45,
+        "maximum_loss_pct": 10.0,
+        **COMMON_PARAMETER_DEFAULTS,
+    },
     "rtly-backtest-minervini": {
         "minimum_vcp_score": 0,
         "minimum_trend_score": 85.0,
