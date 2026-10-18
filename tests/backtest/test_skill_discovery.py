@@ -81,6 +81,15 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "slow_window": 200,
         **COMMON_PARAMETER_DEFAULTS,
     },
+    "rtly-backtest-sector-rotation": {
+        "top_n_sectors": 3,
+        "momentum_lookback_sessions": 126,
+        "rebalance_cadence": "monthly",
+        "min_sector_members": 3,
+        "maximum_loss_pct": 15.0,
+        "sector_reference_version": "sector_reference.v1",
+        **COMMON_PARAMETER_DEFAULTS,
+    },
     "rtly-backtest-turtle-trend": {
         "entry_lookback_sessions": 20,
         "exit_lookback_sessions": 10,

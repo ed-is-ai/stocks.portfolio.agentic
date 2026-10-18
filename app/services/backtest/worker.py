@@ -74,6 +74,7 @@ from app.services.backtest.run_input_manifest import (
     build_run_input_manifest_v2,
     build_run_input_manifest_v3,
 )
+from app.services.backtest.sector_reference import SECTOR_HOST_PARAMS
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
     discover_strategies,
@@ -402,6 +403,8 @@ class PreparationStageEngine(StageWalkEngine):
                 raise ValueError("selected evidence was not resolved")
             generic = dict(prep.parameters)
             generic.pop(s.universe_parameter, None)
+            for host_param in SECTOR_HOST_PARAMS:
+                generic.pop(host_param, None)
             base = build_run_input_manifest(
                 project_root=self._project_root,
                 backtest_repo=self._repository,
@@ -1564,21 +1567,15 @@ class BacktestExecutionEngine:
         )
 
 
-def _reconcile_terminal_experiment(
-    repository: BacktestRepository, job_id: str
-) -> None:
+def _reconcile_terminal_experiment(repository: BacktestRepository, job_id: str) -> None:
     """Reconcile terminal candidate state from every worker exit path."""
     try:
         job = repository.strategy_job(job_id)
-        if (
-            job.job_type is not StrategyJobType.BACKTEST
-            or job.status
-            not in {
-                StrategyJobStatus.COMPLETE,
-                StrategyJobStatus.FAILED,
-                StrategyJobStatus.CANCELLED,
-            }
-        ):
+        if job.job_type is not StrategyJobType.BACKTEST or job.status not in {
+            StrategyJobStatus.COMPLETE,
+            StrategyJobStatus.FAILED,
+            StrategyJobStatus.CANCELLED,
+        }:
             return
         from app.services.backtest.strategy_experiment_service import (
             StrategyExperimentService,

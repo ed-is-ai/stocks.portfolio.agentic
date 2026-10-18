@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sector Rotation Backtest"
+  short_description: "Backtest top-sector momentum rotation"
+  default_prompt: "Use $rtly-backtest-sector-rotation to backtest a sector-rotation strategy."
