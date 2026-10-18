@@ -181,7 +181,6 @@ def _facts(
     view: MarketViewV1,
     sector: str | None,
     rank: _SectorRank,
-    top_n: int,
     cadence: object,
 ) -> list[ExplanationFactV1]:
     score = None if sector is None else rank.scores.get(sector)
@@ -201,7 +200,7 @@ def _facts(
         ),
         ExplanationFactV1(
             label="Leading sectors held",
-            observed=Decimal(top_n),
+            observed=Decimal(len(rank.leaders)),
             unit=EvidenceUnit.COUNT,
         ),
         ExplanationFactV1(label="Rebalance cadence", observed=str(cadence)),
@@ -214,10 +213,9 @@ def _entry_signal(
     sector: str,
     momentum: Decimal,
     rank: _SectorRank,
-    top_n: int,
     cadence: object,
 ) -> Signal:
-    facts = _facts(view, sector, rank, top_n, cadence)
+    facts = _facts(view, sector, rank, cadence)
     facts.append(
         ExplanationFactV1(
             label="Security momentum",
@@ -248,7 +246,6 @@ def _rotation_exit(
     security_id: str,
     sector: str | None,
     rank: _SectorRank,
-    top_n: int,
     cadence: object,
 ) -> Signal:
     return Signal(
@@ -261,7 +258,7 @@ def _rotation_exit(
                 SignalReasonV1(
                     code="sector_left_leaders",
                     summary="Sector left the leading sectors at rebalance.",
-                    facts=_facts(view, sector, rank, top_n, cadence),
+                    facts=_facts(view, sector, rank, cadence),
                 )
             ]
         ),
@@ -323,8 +320,61 @@ def _stop_exit(
     )
 
 
+class _Context(NamedTuple):
+    """One rebalance session's pinned sectors, readings and ranking."""
+
+    assignments: dict[str, str]
+    readings: dict[str, _Reading]
+    rank: _SectorRank
+    cadence: object
+
+
+def _context(view: MarketViewV1, parameters: StrategyParameters) -> _Context | None:
+    """Return the rebalance-session ranking, or ``None`` off-rebalance.
+
+    Only mapped securities are read, and the cheap two-session rebalance
+    check runs before the full lookback reads.
+    """
+    lookback = _int_parameter(
+        parameters, "momentum_lookback_sessions", DEFAULT_LOOKBACK
+    )
+    top_n = _int_parameter(parameters, "top_n_sectors", 3)
+    min_members = _int_parameter(parameters, "min_sector_members", 3)
+    assignments = _assignments(parameters)
+    if lookback is None or top_n is None or min_members is None or not assignments:
+        return None
+    mapped = tuple(sorted(assignments))
+    cadence = parameters.get("rebalance_cadence", "monthly")
+    if not _is_rebalance(view, _readings(view, mapped, 1), cadence):
+        return None
+    readings = _readings(view, mapped, lookback)
+    rank = _rank_sectors(assignments, readings, top_n, min_members)
+    return _Context(assignments, readings, rank, cadence)
+
+
 class SectorRotationStrategy:
     """Hold members of the leading sectors, rotating at each rebalance."""
+
+    def __init__(self) -> None:
+        self._session: tuple[MarketViewV1, date, str] | None = None
+        self._cached: _Context | None = None
+        self._no_entry: frozenset[str] = frozenset()
+
+    def _session_context(
+        self, view: MarketViewV1, parameters: StrategyParameters
+    ) -> _Context | None:
+        """Compute the context once per session, resetting session state."""
+        key = (
+            view,
+            view.as_of_session,
+            repr(sorted(parameters.items(), key=lambda item: item[0])),
+        )
+        current = self._session
+        if current is None or current[0] is not view or current[1:] != key[1:]:
+            self._session = key
+            self._cached = _context(view, parameters)
+            self._no_entry = frozenset()
+        return self._cached
 
     def evidence_requirements(
         self, parameters: StrategyParameters
@@ -340,56 +390,34 @@ class SectorRotationStrategy:
         )
         return StrategyEvidenceRequirementsV1(entry=(history,), exit=(history,))
 
-    def _context(
-        self, view: MarketViewV1, parameters: StrategyParameters
-    ) -> tuple[dict[str, str], dict[str, _Reading], _SectorRank, int, object] | None:
-        """Return the rebalance-session ranking, or ``None`` off-rebalance."""
-        lookback = _int_parameter(
-            parameters, "momentum_lookback_sessions", DEFAULT_LOOKBACK
-        )
-        top_n = _int_parameter(parameters, "top_n_sectors", 3)
-        min_members = _int_parameter(parameters, "min_sector_members", 3)
-        assignments = _assignments(parameters)
-        if None in (lookback, top_n, min_members) or not assignments:
-            return None
-        assert lookback is not None and top_n is not None and min_members is not None
-        readings = _readings(view, _universe(parameters), lookback)
-        cadence = parameters.get("rebalance_cadence", "monthly")
-        if not _is_rebalance(view, readings, cadence):
-            return None
-        rank = _rank_sectors(assignments, readings, top_n, min_members)
-        return assignments, readings, rank, top_n, cadence
-
     def entry_signals(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> list[Signal]:
+        """BUY leading-sector members not held or stopped out this session."""
         if not entry_signals_permitted(view, parameters, _universe(parameters)):
             return []
-        context = self._context(view, parameters)
+        context = self._session_context(view, parameters)
         if context is None:
             return []
-        assignments, readings, rank, top_n, cadence = context
+        assignments, readings, rank, cadence = context
         candidates = sorted(
             (
-                (readings[sid].momentum, sid)
+                (momentum, sid)
                 for sid, sector in assignments.items()
                 if sector in rank.leaders
-                and sid in readings
-                and readings[sid].momentum is not None
+                and sid not in self._no_entry
+                and (momentum := readings.get(sid, _Reading(None, None)).momentum)
+                is not None
             ),
-            key=lambda item: (-(item[0] or Decimal(0)), item[1]),
+            key=lambda item: (-item[0], item[1]),
         )
         count = len(candidates)
-        signals = []
-        for position, (momentum, sid) in enumerate(candidates):
-            assert momentum is not None
-            signal = _entry_signal(
-                view, sid, assignments[sid], momentum, rank, top_n, cadence
-            )
-            signals.append(
-                signal.model_copy(update={"priority": Decimal(count - position)})
-            )
-        return signals
+        return [
+            _entry_signal(
+                view, sid, assignments[sid], momentum, rank, cadence
+            ).model_copy(update={"priority": Decimal(count - position)})
+            for position, (momentum, sid) in enumerate(candidates)
+        ]
 
     def exit_signals(
         self,
@@ -397,6 +425,7 @@ class SectorRotationStrategy:
         portfolio: PortfolioView,
         parameters: StrategyParameters,
     ) -> list[Signal]:
+        """Stop-loss every session; rotate out at a rankable rebalance."""
         universe = set(_universe(parameters))
         held = sorted(
             (
@@ -406,9 +435,11 @@ class SectorRotationStrategy:
             ),
             key=lambda position: position.security_id,
         )
+        context = self._session_context(view, parameters)
+        # Held securities and this session's exits must not be re-bought.
+        self._no_entry = frozenset(p.security_id for p in held)
         if not held:
             return []
-        context = self._context(view, parameters)
         signals: dict[str, Signal] = {}
         for position in held:
             sid = position.security_id
@@ -416,12 +447,11 @@ class SectorRotationStrategy:
             close = _current_close(view, sid)
             if stop is not None and close is not None and close <= stop[0]:
                 signals[sid] = _stop_exit(view, sid, close, *stop)
-            elif context is not None:
-                assignments, _readings_, rank, top_n, cadence = context
-                sector = assignments.get(sid)
-                if sector not in rank.leaders:
+            elif context is not None and context.rank.scores:
+                sector = context.assignments.get(sid)
+                if sector not in context.rank.leaders:
                     signals[sid] = _rotation_exit(
-                        view, sid, sector, rank, top_n, cadence
+                        view, sid, sector, context.rank, context.cadence
                     )
         return [signals[sid] for sid in sorted(signals)]
 

@@ -61,8 +61,9 @@ parameters:
 
 Use `scripts/strategy.py` through the Backtest Engine. The host binds the
 Run's canonical selected-security tuple to `selected_securities` and the
-pinned `{security_id: sector}` mapping to `sector_assignments`, with its
-`sector_reference_digest`; both are sealed in the run manifest. A security
+pinned `{security_id: sector}` mapping to `sector_assignments`, with
+`sector_reference_digest` (the SHA-256 of the reference file it was resolved
+from); both are sealed in the run manifest. A security
 absent from `sector_assignments` is excluded, never grouped as "unknown", and
 missing or malformed assignments produce no signals.
 
@@ -74,8 +75,10 @@ members. Rank sectors by score descending, then sector name; the top
 
 Rebalance sessions are the first session of a new calendar month (or quarter),
 detected from the last two history sessions. Only then: BUY members of leading
-sectors, ranked within the batch by their own return via `Signal.priority`; and
-SELL a held security whose sector left the leading set or became unrankable.
+sectors that are not already held or stopped out this session, ranked within
+the batch by their own return via `Signal.priority`; and SELL a held security
+whose sector left the leading set or became unrankable. A rebalance with no
+rankable sector rotates nothing.
 Between rebalances no rotation signal fires. The `maximum_loss_pct` stop from
 average cost applies every session. Honour the regime filter via
 `entry_signals_permitted`. The engine owns BUY allocation and sizing.

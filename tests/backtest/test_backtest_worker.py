@@ -1924,3 +1924,95 @@ def test_initialization_mode_round_trips_and_reaches_the_engine(tmp_path) -> Non
         )._mode
         == "rebuild"
     )
+
+
+def test_preparation_seals_the_sector_pin_in_the_v2_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Launch -> worker: the pin skips the strict validator, then is sealed."""
+    from app.services.backtest.run_input_manifest import read_run_input_manifest
+    from app.services.backtest.sector_reference import (
+        SECTOR_ASSIGNMENTS_PARAM,
+        SECTOR_DIGEST_PARAM,
+        SECTOR_REFERENCE_VERSION,
+        SECTOR_REFERENCE_VERSION_PARAM,
+    )
+    from tests.backtest.test_run_input_manifest import _manifest as _base_manifest
+
+    path = tmp_path / "sector-pin.db"
+    repo = _job_repo(path)
+    _seed_selected_member(path)
+    pin = {
+        SECTOR_REFERENCE_VERSION_PARAM: SECTOR_REFERENCE_VERSION,
+        SECTOR_ASSIGNMENTS_PARAM: {"sec-001": "Technology"},
+        SECTOR_DIGEST_PARAM: "a" * 64,
+    }
+    prep = _prep("sector-pin")
+    accepted = repo.create_preparation_job(
+        prep.model_copy(update={"parameters": {**prep.parameters, **pin}})
+    )
+    claim = repo.claim_next_strategy_job()
+    assert claim
+    desc = _fake_descriptor().model_copy(
+        update={
+            "source_digest": accepted.preparation.strategy_source_digest,
+            "universe": StrategyUniverseContractV1(
+                schema_version="strategy_universe.v1",
+                mode="selected-securities",
+                parameter="symbols",
+            ),
+        }
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "discover_strategies",
+        lambda _root: type("D", (), {"strategies": (desc,)})(),
+    )
+    evidence = (
+        PinnedSecurityEvidenceV1(
+            security_id="sec-001", price_revision="7" * 64, action_revision="7" * 64
+        ),
+    )
+    monkeypatch.setattr(
+        worker_module.BacktestLaunchService,
+        "_resolve_roster_evidence",
+        lambda *_a, **_k: evidence,
+    )
+    validated: list[dict[str, object]] = []
+
+    def build(**kwargs: object) -> RunInputManifestV1:
+        validated.append(dict(cast(dict[str, object], kwargs["submitted_parameters"])))
+        return _base_manifest(
+            strategy_source_digest=accepted.preparation.strategy_source_digest,
+            profile_hash=prep.selection.profile_hash,
+            start_month="2026-05",
+            end_month="2026-05",
+            base_currency="USD",
+            securities=evidence,
+        )
+
+    monkeypatch.setattr(worker_module, "build_run_input_manifest", build)
+    monkeypatch.setattr(worker_module, "point_in_time_roster", lambda *_a: ())
+    monkeypatch.setattr(worker_module, "pinned_terminal_exits", lambda *_a: ())
+    sealed: list[BacktestSubmissionV1] = []
+    monkeypatch.setattr(
+        repo,
+        "seal_preparation_and_create_backtest",
+        lambda *_a, submission, **_k: sealed.append(submission),
+    )
+
+    worker_module.PreparationStageEngine(
+        repo,
+        prices=object(),  # type: ignore[arg-type]
+        fx=object(),  # type: ignore[arg-type]
+    ).run(accepted.job.id, claim.claim_token)
+
+    assert validated and SECTOR_ASSIGNMENTS_PARAM not in validated[0]
+    assert SECTOR_DIGEST_PARAM not in validated[0]
+    assert sealed and sealed[0].manifest_version == "run_input_manifest.v2"
+    manifest = read_run_input_manifest(sealed[0].canonical_manifest_json)
+    assert manifest.parameters[SECTOR_ASSIGNMENTS_PARAM] == {"sec-001": "Technology"}
+    assert manifest.parameters[SECTOR_DIGEST_PARAM] == "a" * 64
+    tampered = sealed[0].canonical_manifest_json.replace('"sec-001":', '"sec-999":')
+    with pytest.raises(ValueError, match="outside the selected universe"):
+        read_run_input_manifest(tampered)

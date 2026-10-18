@@ -206,3 +206,76 @@ def test_evidence_requirements_follow_lookback() -> None:
     requirements = SectorRotationStrategy().evidence_requirements(PARAMETERS)
 
     assert requirements.entry[0].minimum_sessions == 3
+
+
+def test_rebalance_without_rankable_sector_skips_rotation_exits() -> None:
+    params = {**PARAMETERS, "min_sector_members": 3}
+    exits = SectorRotationStrategy().exit_signals(
+        _View(), _portfolio(a1="200", c1="100"), params
+    )
+
+    # The risk stop still fires; c1 is not rotated out of an unranked market.
+    assert [(s.security_id, s.rule_id) for s in exits] == [
+        ("a1", "sector_rotation_maximum_loss_stop_v1")
+    ]
+
+
+def test_held_and_stopped_securities_are_not_rebought() -> None:
+    strategy = SectorRotationStrategy()
+    view = _View()
+
+    exits = strategy.exit_signals(view, _portfolio(a1="200", a2="100"), PARAMETERS)
+    entries = strategy.entry_signals(view, PARAMETERS)
+
+    assert [s.security_id for s in exits] == ["a1"]
+    assert entries == []
+    # A new session resets the exclusion.
+    assert [s.security_id for s in strategy.entry_signals(_View(), PARAMETERS)] == [
+        "a1",
+        "a2",
+    ]
+
+
+class _CountingView(_View):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.calls: list[tuple[str, int | None]] = []
+
+    def price_history(
+        self,
+        security_id: str,
+        *,
+        limit: int | None = None,
+        columns: object | None = None,
+    ) -> pd.DataFrame | None:
+        self.calls.append((security_id, limit))
+        return super().price_history(security_id, limit=limit, columns=columns)
+
+
+def test_off_rebalance_reads_only_two_sessions_of_mapped_securities() -> None:
+    sessions = [date(2026, 2, 1), date(2026, 2, 2), MID_MONTH]
+    view = _CountingView(as_of=MID_MONTH, sessions=sessions)
+
+    assert SectorRotationStrategy().entry_signals(view, PARAMETERS) == []
+    assert {sid for sid, _ in view.calls} == set(ASSIGNMENTS)
+    assert {limit for _, limit in view.calls} == {2}
+
+
+def test_rebalance_context_is_computed_once_per_session() -> None:
+    strategy = SectorRotationStrategy()
+    view = _CountingView()
+
+    strategy.exit_signals(view, _portfolio(), PARAMETERS)
+    strategy.entry_signals(view, PARAMETERS)
+
+    lookback_reads = [sid for sid, limit in view.calls if limit == 3]
+    assert sorted(lookback_reads) == sorted(ASSIGNMENTS)
+
+
+def test_leading_sectors_held_reports_actual_leaders() -> None:
+    params = {**PARAMETERS, "top_n_sectors": 5}
+    signals = SectorRotationStrategy().entry_signals(_View(), params)
+
+    assert signals and signals[0].explanation is not None
+    facts = {f.label: f.observed for f in signals[0].explanation.reasons[0].facts}
+    assert facts["Leading sectors held"] == Decimal(3)

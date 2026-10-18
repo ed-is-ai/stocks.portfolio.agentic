@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -73,6 +74,7 @@ from app.services.backtest.run_input_manifest import (
     build_run_input_manifest,
 )
 from app.services.backtest.sector_reference import (
+    SECTOR_ASSIGNMENTS_PARAM,
     SECTOR_HOST_PARAMS,
     SECTOR_REFERENCE_VERSION_PARAM,
     build_sector_pin,
@@ -418,7 +420,9 @@ class BacktestLaunchService:
         # runtimes also retain the older ``block_buy_on_downtrend_enabled``
         # parameter for backwards-compatible manifests, but V3 preparation
         # contracts use this explicit switch to bind the reference pin.
-        regime_filter_enabled = submitted_parameters.pop("regime_filter_enabled", None)
+        regime_filter_enabled = submitted_parameters.pop(
+            "regime_filter_enabled", None
+        )
         for host_param in SECTOR_HOST_PARAMS:
             submitted_parameters.pop(host_param, None)
         if regime_filter_enabled is not None and not isinstance(
@@ -478,9 +482,7 @@ class BacktestLaunchService:
             not isinstance(validated_parameters, tuple)
             and validated_parameters.get("regime_filter_enabled") is True
         ):
-            benchmark_id = validated_parameters.get(
-                "regime_filter_benchmark_security_id"
-            )
+            benchmark_id = validated_parameters.get("regime_filter_benchmark_security_id")
             if not isinstance(benchmark_id, str) or not benchmark_id:
                 references = [
                     security_id
@@ -635,7 +637,8 @@ class BacktestLaunchService:
         errors: list[LaunchFieldError],
     ) -> dict[str, Any]:
         """Seal the resolved sector assignments for a sector-aware Strategy."""
-        if SECTOR_REFERENCE_VERSION_PARAM not in {p.name for p in strategy.parameters}:
+        declared = {p.name for p in strategy.parameters}
+        if SECTOR_REFERENCE_VERSION_PARAM not in declared:
             return dict(parameters)
         selection = command.universe_selection
         if selection is None:
@@ -643,19 +646,32 @@ class BacktestLaunchService:
                 LaunchFieldError("form", "This Strategy requires a prepared universe.")
             )
             return dict(parameters)
+        try:
+            reference = load_sector_reference()
+        except ValueError as exc:
+            errors.append(
+                LaunchFieldError("form", f"Sector reference is unusable: {exc}")
+            )
+            return dict(parameters)
         symbols = {
             security_id: symbol
             for security_id, _mic, symbol, _evidence in (
                 self._backtest_repo.identity_rows()
             )
+            if isinstance(symbol, str) and symbol
         }
-        pin = build_sector_pin(
-            selection.canonical_security_ids, symbols, load_sector_reference()
-        )
-        if not pin["sector_assignments"]:
+        selected = selection.canonical_security_ids
+        pin = build_sector_pin(selected, symbols, reference)
+        assignments = cast(Mapping[str, str], pin[SECTOR_ASSIGNMENTS_PARAM])
+        min_members = parameters.get("min_sector_members", 1)
+        largest = max(Counter(assignments.values()).values(), default=0)
+        if largest < min_members:
             errors.append(
                 LaunchFieldError(
-                    "form", "No selected security has a pinned sector assignment."
+                    "form",
+                    f"No sector reaches {min_members} mapped members: "
+                    f"{len(assignments)} of {len(selected)} selected securities "
+                    "have a pinned sector assignment.",
                 )
             )
         return {**parameters, **pin}
@@ -755,9 +771,7 @@ class BacktestLaunchService:
                     profile_hash, snapshot_month
                 )
             else:
-                resolver = getattr(
-                    self._backtest_repo, "selected_member_revisions", None
-                )
+                resolver = getattr(self._backtest_repo, "selected_member_revisions", None)
                 members = (
                     resolver(profile_hash, snapshot_month, selected_security_ids)
                     if resolver is not None
@@ -790,9 +804,7 @@ class BacktestLaunchService:
                 identities = {
                     security_id: (symbol, currency)
                     for security_id, symbol, _mic, currency in getattr(
-                        self._backtest_repo,
-                        "roster_member_identities",
-                        lambda _profile: (),
+                        self._backtest_repo, "roster_member_identities", lambda _profile: ()
                     )(profile_hash)
                 }
                 if fallback is not None:

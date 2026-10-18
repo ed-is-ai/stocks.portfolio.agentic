@@ -1567,15 +1567,21 @@ class BacktestExecutionEngine:
         )
 
 
-def _reconcile_terminal_experiment(repository: BacktestRepository, job_id: str) -> None:
+def _reconcile_terminal_experiment(
+    repository: BacktestRepository, job_id: str
+) -> None:
     """Reconcile terminal candidate state from every worker exit path."""
     try:
         job = repository.strategy_job(job_id)
-        if job.job_type is not StrategyJobType.BACKTEST or job.status not in {
-            StrategyJobStatus.COMPLETE,
-            StrategyJobStatus.FAILED,
-            StrategyJobStatus.CANCELLED,
-        }:
+        if (
+            job.job_type is not StrategyJobType.BACKTEST
+            or job.status
+            not in {
+                StrategyJobStatus.COMPLETE,
+                StrategyJobStatus.FAILED,
+                StrategyJobStatus.CANCELLED,
+            }
+        ):
             return
         from app.services.backtest.strategy_experiment_service import (
             StrategyExperimentService,

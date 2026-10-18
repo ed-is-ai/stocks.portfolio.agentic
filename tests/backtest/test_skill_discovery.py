@@ -1177,3 +1177,21 @@ def test_source_digest_covers_every_declared_runtime_file(tmp_path: Path) -> Non
 
     (folder / "scripts" / "helper.py").write_text("WINDOW = 20\n", encoding="utf-8")
     assert _digest() == original  # deterministic, content-addressed
+
+
+def test_yaml_enum_values_list_is_coerced_to_the_strict_tuple() -> None:
+    """Regression: YAML authors enum_values as a list; the model wants a tuple."""
+    (parameter,) = skill_discovery_module._parameter_schema_from_frontmatter(
+        [
+            {
+                "name": "rebalance_cadence",
+                "type": "enum",
+                "default": "monthly",
+                "enum_values": ["monthly", "quarterly"],
+                "description": "Rebalance cadence.",
+                "required": False,
+            }
+        ]
+    )
+
+    assert parameter.enum_values == ("monthly", "quarterly")
