@@ -54,6 +54,14 @@ COMMON_PARAMETER_DEFAULTS = {
 }
 
 EXPECTED_LIVE_STRATEGY_DEFAULTS = {
+    "rtly-backtest-52-week-high": {
+        "high_lookback_sessions": 252,
+        "entry_proximity": 0.95,
+        "exit_proximity": 0.85,
+        "rebalance_cadence": "daily",
+        "maximum_loss_pct": 10.0,
+        **COMMON_PARAMETER_DEFAULTS,
+    },
     "rtly-backtest-buy-and-hold": {
         "entry_on_or_after": "2000-01-01",
         "top_x": 10,
