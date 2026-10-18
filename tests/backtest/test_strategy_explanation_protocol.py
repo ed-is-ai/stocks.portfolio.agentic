@@ -287,9 +287,14 @@ def _moving_average(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
 
 def _mean_reversion(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
     strategy = _strategy(module)
-    parameters = {"selected_securities": ["sec-aapl"], "lookback_sessions": 8}
-    dip = ["10", "11", "10", "11", "10", "11", "10", "3"]
-    rebound = ["10", "9", "10", "9", "10", "9", "10", "10"]
+    parameters = {
+        "selected_securities": ["sec-aapl"],
+        "lookback_sessions": 8,
+        "trend_lookback_sessions": 30,
+        "maximum_loss_pct": 8.0,
+    }
+    dip = [str(100 + 2 * index) for index in range(39)] + ["152"]
+    rebound = ["100", "90", "100", "90", "100", "90", "100", "100"]
     entry_view = _View(_SHORT_AS_OF, _moving_average_history(dip))
     exit_view = _View(_SHORT_AS_OF, _moving_average_history(rebound))
     return (

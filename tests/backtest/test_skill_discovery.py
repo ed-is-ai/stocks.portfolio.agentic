@@ -71,6 +71,8 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "entry_zscore": 2.0,
         "exit_zscore": 0.0,
         "max_holding_sessions": 10,
+        "trend_lookback_sessions": 200,
+        "maximum_loss_pct": 8.0,
         **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-minervini": {

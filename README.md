@@ -354,7 +354,7 @@ views; they do not fetch live data or import application business logic.
 | `rtly-backtest-buy-and-hold` | Passive one-security baseline with a configurable first-entry date. |
 | `rtly-backtest-darvas-box` | Darvas box breakout and box-bottom exit with volume confirmation. |
 | `rtly-backtest-minervini` | Stage 2 Minervini VCP breakout with trend, score, volume, pivot-extension, and loss gates. |
-| `rtly-backtest-mean-reversion` | Z-score oversold entry, mean-reversion or time-stop exit. |
+| `rtly-backtest-mean-reversion` | Z-score oversold entry in a rising-SMA uptrend; reversion, maximum-loss or time-stop exit. |
 | `rtly-backtest-moving-average` | Fast/slow simple-moving-average crossover. |
 | `rtly-backtest-turtle-trend` | Donchian-style entry-high and exit-low channels. |
 | `rtly-backtest-weinstein` | Weinstein Stage 2 breakout with relative-volume and trend exits. |

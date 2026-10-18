@@ -1200,6 +1200,57 @@ def test_split_effective_on_d_applied_exactly_once_before_signals_fills() -> Non
     assert len(marks) == 1 and marks[0].shares == 1000
 
 
+class _EntrySessionRecorder(_ScriptedStrategy):
+    """Records each session's ``(quantity, entry_session)`` exposure."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.seen: dict[date, tuple[tuple[Decimal, date | None], ...]] = {}
+
+    def exit_signals(
+        self,
+        view: MarketViewV1,
+        portfolio: PortfolioView,
+        parameters: StrategyParameters,
+    ) -> list[Signal]:
+        self.seen[view.as_of_session] = tuple(
+            (p.quantity, p.entry_session) for p in portfolio.positions
+        )
+        return super().exit_signals(view, portfolio, parameters)
+
+
+def test_entry_session_is_set_on_fill_and_survives_split() -> None:
+    start, end_exclusive = date(2024, 3, 1), date(2024, 4, 1)
+    sessions = _sessions("XNYS", start, end_exclusive)
+    d0, d1, d2, d3 = sessions[:4]
+    market_data, pinned = _build_security(
+        "sec-a",
+        "XNYS",
+        sessions,
+        revision=DIGEST_A,
+        open_price=100.0,
+        close_price=100.0,
+        split_by_session={d2: 2.0},
+    )
+    buy = Signal(security_id="sec-a", side=SignalSide.BUY, session=d0, rule_id="rb")
+    strategy = _EntrySessionRecorder(entries={d0: [buy]}, size_by_rule={"rb": 4})
+    manifest = _manifest(
+        securities=(pinned,), start_month=_month_str(start), end_month=_month_str(start)
+    )
+
+    run_simulation(
+        manifest=manifest,
+        strategy=strategy,
+        market_view_factory=_market_view_factory(),
+        security_market_data=(market_data,),
+    )
+
+    assert strategy.seen.get(d0, ()) == ()
+    assert strategy.seen[d1] == ((Decimal("500"), d1),)
+    assert strategy.seen[d2] == ((Decimal("1000"), d1),)
+    assert strategy.seen[d3] == ((Decimal("1000"), d1),)
+
+
 def test_full_exit_sells_current_post_split_shares_not_stale_scheduled_quantity() -> (
     None
 ):
