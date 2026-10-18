@@ -99,6 +99,14 @@ def _golden_output() -> tuple[str, int]:
         end_month=_month_str(start),
         starting_capital=Decimal("25000"),
         parameters={"max_concurrent_positions": 2},
+    ).model_copy(
+        # The manifest is input, not engine behaviour: pin the identities
+        # the golden was recorded under so its manifest_digest stays fixed
+        # across ENGINE_VERSION/PROTOCOL_SCHEMA_VERSION bumps.
+        update={
+            "engine_version": "backtest_engine.v10",
+            "protocol_schema_version": "strategy_protocol.v6",
+        }
     )
     sink = InMemorySessionBatchSink()
     output = run_simulation(
