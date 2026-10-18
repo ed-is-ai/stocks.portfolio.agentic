@@ -48,6 +48,7 @@ EVIDENCED_SESSIONS = 400
 #: Strategies whose rules read price evidence alone — the current OHLCV
 #: scan view can drive their live recommendations.
 HISTORY_ONLY_STRATEGIES = (
+    "rtly-backtest-52-week-high",
     "rtly-backtest-buy-and-hold",
     "rtly-backtest-darvas-box",
     # Declares only a current close: its funds_net enrichment has no
