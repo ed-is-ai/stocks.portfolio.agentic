@@ -81,6 +81,15 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "slow_window": 200,
         **COMMON_PARAMETER_DEFAULTS,
     },
+    "rtly-backtest-sector-rotation": {
+        "top_n_sectors": 3,
+        "momentum_lookback_sessions": 126,
+        "rebalance_cadence": "monthly",
+        "min_sector_members": 3,
+        "maximum_loss_pct": 15.0,
+        "sector_reference_version": "sector_reference.v1",
+        **COMMON_PARAMETER_DEFAULTS,
+    },
     "rtly-backtest-turtle-trend": {
         "entry_lookback_sessions": 20,
         "exit_lookback_sessions": 10,
@@ -1168,3 +1177,21 @@ def test_source_digest_covers_every_declared_runtime_file(tmp_path: Path) -> Non
 
     (folder / "scripts" / "helper.py").write_text("WINDOW = 20\n", encoding="utf-8")
     assert _digest() == original  # deterministic, content-addressed
+
+
+def test_yaml_enum_values_list_is_coerced_to_the_strict_tuple() -> None:
+    """Regression: YAML authors enum_values as a list; the model wants a tuple."""
+    (parameter,) = skill_discovery_module._parameter_schema_from_frontmatter(
+        [
+            {
+                "name": "rebalance_cadence",
+                "type": "enum",
+                "default": "monthly",
+                "enum_values": ["monthly", "quarterly"],
+                "description": "Rebalance cadence.",
+                "required": False,
+            }
+        ]
+    )
+
+    assert parameter.enum_values == ("monthly", "quarterly")

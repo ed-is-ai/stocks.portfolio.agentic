@@ -285,6 +285,28 @@ def _moving_average(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
     )
 
 
+def _sector_rotation(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
+    strategy = _strategy(module)
+    parameters = {
+        "selected_securities": ["sec-aapl", "sec-b"],
+        "sector_assignments": {"sec-aapl": "Utilities", "sec-b": "Tech"},
+        "top_n_sectors": 1,
+        "momentum_lookback_sessions": 2,
+        "rebalance_cadence": "monthly",
+        "min_sector_members": 1,
+        "maximum_loss_pct": 15,
+    }
+    history = pd.DataFrame(
+        {"close": [Decimal(value) for value in ("100", "110", "120")]},
+        index=[date(2025, 12, 30), date(2025, 12, 31), _SHORT_AS_OF],
+    )
+    view = _View(_SHORT_AS_OF, history)
+    return (
+        strategy.entry_signals(view, parameters),
+        strategy.exit_signals(view, _portfolio(_SHORT_AS_OF), parameters),
+    )
+
+
 def _buy_and_hold(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
     strategy = _strategy(module)
     parameters = {
@@ -320,6 +342,7 @@ SCENARIOS: dict[str, Callable[[ModuleType], tuple[list[Signal], list[Signal]]]] 
     "rtly-backtest-darvas-box": _darvas,
     "rtly-backtest-minervini": _minervini,
     "rtly-backtest-moving-average": _moving_average,
+    "rtly-backtest-sector-rotation": _sector_rotation,
     "rtly-backtest-turtle-trend": _turtle,
     "rtly-backtest-weinstein": _weinstein,
 }

@@ -58,6 +58,10 @@ from app.services.backtest.historical_price_evidence import (
 )
 from app.services.backtest.historical_scan_record import DetectorId, FrozenDict
 from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
+from app.services.backtest.sector_reference import (
+    SECTOR_HOST_PARAMS,
+    validate_sector_pin,
+)
 from app.services.backtest.skill_discovery import StrategyDescriptorV1
 from app.services.backtest.source_manifest import (
     SourceManifestArtifact,
@@ -441,6 +445,7 @@ class RunInputManifestV2(RunInputManifestV1):
             selection.canonical_security_ids
         ):
             raise ValueError("runtime universe does not match selected universe")
+        validate_sector_pin(self.parameters, selection.canonical_security_ids)
         return self
 
 
@@ -765,6 +770,8 @@ def build_run_input_manifest(
     # in the sealed manifest, but do not require every Strategy descriptor to
     # declare the host's runtime control as a user-authored parameter.
     manifest_parameters = dict(submitted_parameters)
+    for host_param in SECTOR_HOST_PARAMS:
+        manifest_parameters.pop(host_param, None)
     regime_filter_enabled = manifest_parameters.pop("regime_filter_enabled", None)
     if regime_filter_enabled is not None and not isinstance(
         regime_filter_enabled, bool
