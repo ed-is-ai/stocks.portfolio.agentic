@@ -32,6 +32,7 @@ import math
 from types import MappingProxyType
 from typing import (
     TYPE_CHECKING,
+    Any,
     Literal,
     Mapping,
     Protocol,
@@ -39,7 +40,15 @@ from typing import (
     runtime_checkable,
 )
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 from app.services.backtest.strategy_explanation import (
     ComparisonOperator,
@@ -117,6 +126,19 @@ class _StrategyModel(BaseModel):
     )
 
 
+def omit_none_fields(data: dict[str, Any], names: tuple[str, ...]) -> dict[str, Any]:
+    """Drop the named optional fields from a dump when they are ``None``.
+
+    Keeps payloads written before an optional field existed byte-identical,
+    so stored digests still verify (#118).
+    """
+    return {
+        key: value
+        for key, value in data.items()
+        if key not in names or value is not None
+    }
+
+
 class SignalSide(StrEnum):
     """The two-sided trading action a ``Signal`` requests (AD-20)."""
 
@@ -157,6 +179,16 @@ class Signal(_StrategyModel):
     #: ``explanation`` it is absent from ``sort_key``, so it never changes
     #: signal ordering when every candidate fits.
     priority: Decimal | None = None
+    #: Optional target portfolio weight in ``[0, 1]`` (#118). Acted on only
+    #: by Strategies implementing :class:`TargetWeightSizingV1`; absent from
+    #: ``sort_key`` and from dumps when ``None``.
+    target_weight: Decimal | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_target_weight(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        return omit_none_fields(handler(self), ("target_weight",))
 
     @model_validator(mode="after")
     def _no_future_dated_evidence(self) -> "Signal":
@@ -468,6 +500,14 @@ class InitialEntrySelectionProviderV1(Protocol):
     def initial_entry_selection(
         self, view: MarketViewV1, parameters: StrategyParameters
     ) -> InitialEntrySelectionV1: ...
+
+
+@runtime_checkable
+class TargetWeightSizingV1(Protocol):
+    """Optional capability: the engine sizes ``Signal.target_weight`` signals
+    as portfolio weights, trimming and topping up held positions (#118)."""
+
+    target_weight_sizing: Literal[True]
 
 
 #: What a stop level is built from (its unit) and the exit's own comparison.
@@ -1058,6 +1098,7 @@ __all__ = [
     "StrategyProtocolError",
     "StrategyProtocolErrorCode",
     "StrategyProtocolV1",
+    "TargetWeightSizingV1",
     "VolatilityObservationV1",
     "validate_entry_signals",
     "validate_exit_signals",
@@ -1065,4 +1106,5 @@ __all__ = [
     "validate_position_size",
     "validate_signal_explanations",
     "validate_strategy_parameters",
+    "omit_none_fields",
 ]
