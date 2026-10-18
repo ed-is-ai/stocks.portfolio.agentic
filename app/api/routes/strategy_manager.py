@@ -102,11 +102,13 @@ from app.services.backtest.strategy_job import (
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_experiment_service import StrategyExperimentService
 from app.services.backtest.strategy_outcomes import StrategyOutcomeService
+from app.services.backtest.strategy_insight_handoff import handoff_url
 from app.services.backtest.strategy_insights import (
+    StrategyManagerAgentOutcomeV1,
     StrategyManagerInsightsService,
     is_shareable_strategy_parameter,
 )
-from app.schemas.strategy_outcomes import OutcomeRunV1
+from app.schemas.strategy_outcomes import OutcomeRunV1, StrategyOutcomeSummaryV1
 from app.schemas.strategy_insights import (
     StrategyInsightParameterV1,
     StrategyQuestionContextV1,
@@ -658,6 +660,7 @@ async def strategy_manager_insights(
     request: Request,
     backtest: BacktestDep,
     service: AgentInsightsDep,
+    launch: LaunchDep,
     refresh: bool = Form(False),
 ) -> HTMLResponse:
     """Generate cited insights only after an explicit user submission."""
@@ -665,11 +668,46 @@ async def strategy_manager_insights(
     outcome = await asyncio.to_thread(
         service.generate_insights, summary, refresh=refresh
     )
+    handoffs = await asyncio.to_thread(
+        _experiment_handoffs, backtest, launch, summary, outcome
+    )
     return template_response(
         request,
         "_strategy_insights_panel.html",
-        {"outcome_summary": summary, "agent_outcome": outcome},
+        {
+            "outcome_summary": summary,
+            "agent_outcome": outcome,
+            "experiment_handoffs": handoffs,
+        },
     )
+
+
+def _experiment_handoffs(
+    backtest: BacktestRepository,
+    launch: BacktestLaunchService,
+    summary: StrategyOutcomeSummaryV1,
+    outcome: StrategyManagerAgentOutcomeV1,
+) -> dict[int, str]:
+    """Map hypothesis index to a GH-15 draft-form link; read-only, never drafts."""
+    if outcome.report is None or not outcome.report.hypotheses:
+        return {}
+    try:
+        baseline_ids = frozenset(o.id for o in backtest.strategy_experiment_baselines())
+        strategies = {s.strategy_id: s for s in launch.discover().strategies}
+    except Exception:  # noqa: BLE001 - no handoff offered when state is unknown
+        logger.warning("Strategy experiment handoff unavailable", exc_info=True)
+        return {}
+    links = {
+        index: handoff_url(
+            claim,
+            summary.runs,
+            baseline_ids=baseline_ids,
+            strategies=strategies,
+            declared=_strategy_question_context,
+        )
+        for index, claim in enumerate(outcome.report.hypotheses)
+    }
+    return {index: url for index, url in links.items() if url}
 
 
 def _strategy_question_context(
@@ -1750,13 +1788,22 @@ def _experiment_list_context(
 
 @router.get("/strategy-manager/experiments", response_class=HTMLResponse)
 def strategy_experiments(
-    request: Request, backtest: BacktestDep, experiments: ExperimentDep
+    request: Request,
+    backtest: BacktestDep,
+    experiments: ExperimentDep,
+    baseline_run_id: str = "",
+    hypothesis: str = "",
 ) -> HTMLResponse:
-    """Read-only list and draft form; this route is separate from the landing view."""
+    """Read-only list and draft form; optional query values only prefill it."""
     return template_response(
         request,
         "_strategy_experiments.html",
-        _experiment_list_context(backtest, experiments),
+        _experiment_list_context(
+            backtest,
+            experiments,
+            baseline_run_id=baseline_run_id[:200],
+            hypothesis=hypothesis[:2000],
+        ),
     )
 
 
