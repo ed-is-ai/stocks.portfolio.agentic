@@ -62,6 +62,15 @@ from app.services.backtest.benchmark_evidence import (
     BenchmarkEvidenceError,
     BenchmarkEvidenceService,
 )
+from app.services.backtest.etf_universe import (
+    BITCOIN_SLEEVE_PARAM,
+    ETF_EVIDENCE_REVISIONS_PARAM,
+    ETF_UNIVERSE_HOST_PARAMS,
+    ETF_UNIVERSE_VERSION,
+    ETF_UNIVERSE_VERSION_PARAM,
+    load_etf_universe,
+    resolve_etf_universe_pin,
+)
 from app.services.backtest.point_in_time_membership import (
     POINT_IN_TIME_POLICY_VERSION,
 )
@@ -423,7 +432,7 @@ class BacktestLaunchService:
         regime_filter_enabled = submitted_parameters.pop(
             "regime_filter_enabled", None
         )
-        for host_param in SECTOR_HOST_PARAMS:
+        for host_param in (*SECTOR_HOST_PARAMS, *ETF_UNIVERSE_HOST_PARAMS):
             submitted_parameters.pop(host_param, None)
         if regime_filter_enabled is not None and not isinstance(
             regime_filter_enabled, bool
@@ -474,6 +483,9 @@ class BacktestLaunchService:
 
         if not isinstance(validated_parameters, tuple):
             validated_parameters = self._bind_sector_pin(
+                strategy, command, validated_parameters, errors
+            )
+            validated_parameters = self._bind_etf_universe_pin(
                 strategy, command, validated_parameters, errors
             )
 
@@ -673,6 +685,41 @@ class BacktestLaunchService:
                     f"{len(assignments)} of {len(selected)} selected securities "
                     "have a pinned sector assignment.",
                 )
+            )
+        return {**parameters, **pin}
+
+    def _bind_etf_universe_pin(
+        self,
+        strategy: StrategyDescriptorV1,
+        command: BacktestLaunchCommandV1,
+        parameters: Mapping[str, Any],
+        errors: list[LaunchFieldError],
+    ) -> dict[str, Any]:
+        """Seal the ETF list digest and per-symbol evidence revisions."""
+        if ETF_UNIVERSE_VERSION_PARAM not in {p.name for p in strategy.parameters}:
+            return dict(parameters)
+        if parameters.get(ETF_UNIVERSE_VERSION_PARAM) != ETF_UNIVERSE_VERSION:
+            errors.append(LaunchFieldError("form", "Unsupported ETF universe version."))
+            return dict(parameters)
+        try:
+            universe = load_etf_universe()
+        except ValueError as exc:
+            errors.append(LaunchFieldError("form", str(exc)))
+            return dict(parameters)
+        pin, problems = resolve_etf_universe_pin(
+            universe,
+            self._historical_price_repo,
+            start=_month_start(command.start_month),
+            end=_month_after(command.end_month),
+            include_optional=parameters.get(BITCOIN_SLEEVE_PARAM) is True,
+        )
+        errors.extend(
+            LaunchFieldError("form", f"ETF evidence unavailable: {problem}")
+            for problem in problems
+        )
+        if not problems and not pin[ETF_EVIDENCE_REVISIONS_PARAM]:
+            errors.append(
+                LaunchFieldError("form", "No pinned ETF is listed in the run period.")
             )
         return {**parameters, **pin}
 

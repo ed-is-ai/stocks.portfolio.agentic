@@ -736,3 +736,12 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-101-103-strategy-manager-intelligence.md`
   summary: Bound or cache the metadata-only query that aggregates incomplete and deleted Backtest job counts.
   evidence: `recent_verified_backtest_results()` groups all non-complete/deleted `strategy_jobs` on each landing render; it reads no Result payloads, but query cost grows with job history.
+
+## Deferred from: GH-117 UCITS ETF reference universe (2026-10-18)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-117-ucits-etf-reference-universe.md`
+  summary: Teach the engine to trade the sealed `etf_evidence_revisions` (new manifest version + price path) so a run can use the ETF universe in place of a scanner selection.
+  evidence: The pin is sealed and validated in the run manifest, but `run_simulation`/`MarketView` only price `manifest.securities`, which must equal a scanner universe selection; no strategy declares `etf_universe_version` yet (Easy Rider work).
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-117-ucits-etf-reference-universe.md`
+  summary: Launch pin resolution uses only the newest covering revision; a newer gappy re-acquire hides an older complete one.
+  evidence: `HistoricalPriceRepository.covering_revision` returns one row ordered by `first_acquired_at DESC`.

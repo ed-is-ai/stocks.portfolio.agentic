@@ -1,0 +1,17 @@
+{
+  "version": "etf_universe.ucits.v1",
+  "entries": [
+    {"symbol": "VUSA.L", "role": "US equity", "asset_class": "equity", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2012-05-22", "optional": false},
+    {"symbol": "XMWX.L", "role": "Developed ex-US", "asset_class": "equity", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2024-08-27", "optional": false},
+    {"symbol": "VERX.L", "role": "Developed Europe ex-UK (long-history proxy)", "asset_class": "equity", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2014-09-30", "optional": false},
+    {"symbol": "VJPN.L", "role": "Japan (long-history proxy)", "asset_class": "equity", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2013-05-21", "optional": false},
+    {"symbol": "VFEM.L", "role": "Emerging markets", "asset_class": "equity", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2012-05-22", "optional": false},
+    {"symbol": "IBTL.L", "role": "US long Treasuries", "asset_class": "bond", "currency": "GBP", "quote_unit": "GBp", "exchange_timezone": "Europe/London", "inception": "2015-01-21", "optional": false},
+    {"symbol": "SGLO.L", "role": "Global government bonds", "asset_class": "bond", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2009-03-06", "optional": false},
+    {"symbol": "CMFP.L", "role": "Commodities", "asset_class": "commodity", "currency": "GBP", "quote_unit": "GBp", "exchange_timezone": "Europe/London", "inception": "2010-03-15", "optional": false},
+    {"symbol": "SGLN.L", "role": "Gold", "asset_class": "gold", "currency": "GBP", "quote_unit": "GBp", "exchange_timezone": "Europe/London", "inception": "2011-04-08", "optional": false},
+    {"symbol": "AGBP.L", "role": "Aggregate bonds (GBP hedged)", "asset_class": "bond", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2017-11-21", "optional": false},
+    {"symbol": "ERNS.L", "role": "Cash proxy", "asset_class": "cash", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "Europe/London", "inception": "2013-10-16", "optional": false},
+    {"symbol": "BTC-GBP", "role": "Bitcoin (optional)", "asset_class": "crypto", "currency": "GBP", "quote_unit": "GBP", "exchange_timezone": "UTC", "inception": "2014-09-17", "optional": true}
+  ]
+}
