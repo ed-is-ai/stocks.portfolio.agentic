@@ -543,6 +543,83 @@ def test_insights_post_is_the_only_route_that_invokes_generation(services, monke
     assert "No validated report." in response.text
 
 
+def test_insights_post_renders_experiment_links_without_drafting(services, monkeypatch):
+    repo, jobs = services
+    row = SimpleNamespace(
+        evidence_handle="R01",
+        run_id="run-1",
+        strategy_id="alpha",
+        result_url="/strategy-manager/results/run-1",
+    )
+    summary = SimpleNamespace(runs=(row,), cohort=SimpleNamespace(limitations=()))
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "StrategyOutcomeService",
+        lambda _repo: SimpleNamespace(build_summary=lambda: summary),
+    )
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "_strategy_question_context",
+        lambda _row, _strategy: SimpleNamespace(
+            declared_parameters=(SimpleNamespace(name="lookback"),)
+        ),
+    )
+    repo.strategy_experiment_baselines = lambda: (SimpleNamespace(id="run-1"),)
+    claims = tuple(
+        SimpleNamespace(text=text, evidence_handles=("R01",), strategy_ids=())
+        for text in ("Try a shorter lookback.", "A new breakout idea.")
+    )
+    report = SimpleNamespace(
+        observations=(), hypotheses=claims, strategies_to_explore=()
+    )
+    service = SimpleNamespace(
+        generate_insights=lambda _summary, *, refresh: SimpleNamespace(
+            state="completed", message=None, report=report, attempts=(), cached=False
+        )
+    )
+
+    def no_draft():
+        pytest.fail("rendering insights must not resolve the experiment service")
+
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: service
+    app.dependency_overrides[get_strategy_experiment_service] = no_draft
+    app.dependency_overrides[get_backtest_launch_service] = lambda: SimpleNamespace(
+        discover=lambda: SimpleNamespace(strategies=(STRATEGY_ALPHA,))
+    )
+
+    response = client.post(
+        "/strategy-manager/insights",
+        data={"refresh": "false"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert response.text.count("Explore as an experiment") == 1
+    assert "baseline_run_id=run-1" in response.text
+    assert "Research-only: not a single" in response.text
+    assert jobs.submissions == []
+
+
+def test_experiment_handoff_errors_mean_link_unavailable(monkeypatch) -> None:
+    def boom(*_args, **_kwargs):
+        raise ValueError("bad claim")
+
+    monkeypatch.setattr(strategy_manager_routes, "handoff_url", boom)
+    claim = SimpleNamespace(text="t", evidence_handles=("R01",), strategy_ids=())
+    outcome = SimpleNamespace(report=SimpleNamespace(hypotheses=(claim,)))
+    repo = SimpleNamespace(strategy_experiment_baselines=lambda: ())
+    launch = SimpleNamespace(discover=lambda: SimpleNamespace(strategies=()))
+    handoffs = strategy_manager_routes._experiment_handoffs
+
+    assert handoffs(
+        cast(Any, repo), cast(Any, launch), cast(Any, None), cast(Any, outcome)
+    ) == ({}, True)
+    repo.strategy_experiment_baselines = boom
+    assert handoffs(
+        cast(Any, repo), cast(Any, launch), cast(Any, None), cast(Any, outcome)
+    ) == ({}, True)
+
+
 def test_strategy_question_context_rejects_a_stale_strategy_source() -> None:
     row = SimpleNamespace(
         strategy_id="alpha",

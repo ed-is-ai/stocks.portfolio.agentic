@@ -24,9 +24,8 @@ DeclaredParameters = Callable[
 
 def _mentions(text: str, name: str) -> bool:
     pattern = re.escape(name).replace("_", "[_ ]")
-    return (
-        re.search(rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])", text, re.I) is not None
-    )
+    found = re.search(rf"(?<![A-Za-z0-9_]){pattern}(?![A-Za-z0-9_])", text, re.I)
+    return found is not None
 
 
 def handoff_url(
@@ -39,25 +38,36 @@ def handoff_url(
 ) -> str | None:
     """Return a prefilled draft-form link, or None when the idea is research-only.
 
-    Eligible: the cited runs belong to one currently discovered Strategy whose
-    source still matches, a cited run is a live verified baseline, and the text
-    names exactly one declared parameter of that Strategy.
+    Eligible: every cited handle is known, the cited runs (and any claimed
+    Strategy IDs) name one currently discovered Strategy, and the first cited
+    live verified baseline whose source still matches has exactly one declared
+    parameter named in the text.
     """
     by_handle = {row.evidence_handle: row for row in runs}
-    cited = [by_handle[h] for h in claim.evidence_handles if h in by_handle]
-    if not cited or len({row.strategy_id for row in cited}) != 1:
+    if any(handle not in by_handle for handle in claim.evidence_handles):
+        return None
+    cited = [by_handle[handle] for handle in claim.evidence_handles]
+    strategy_ids = {row.strategy_id for row in cited}
+    if len(strategy_ids) != 1:
+        return None
+    if claim.strategy_ids and set(claim.strategy_ids) != strategy_ids:
         return None
     strategy = strategies.get(cited[0].strategy_id)
-    baseline = next((row for row in cited if row.run_id in baseline_ids), None)
-    if strategy is None or baseline is None:
+    if strategy is None:
         return None
-    context = declared(baseline, strategy)
+    for baseline in (row for row in cited if row.run_id in baseline_ids):
+        if _names_one_declared_parameter(claim.text, declared(baseline, strategy)):
+            query = urlencode(
+                {"baseline_run_id": baseline.run_id, "hypothesis": claim.text}
+            )
+            return f"/strategy-manager/experiments?{query}"
+    return None
+
+
+def _names_one_declared_parameter(
+    text: str, context: StrategyQuestionContextV1 | None
+) -> bool:
     if context is None:
-        return None
-    named = [
-        p.name for p in context.declared_parameters if _mentions(claim.text, p.name)
-    ]
-    if len(named) != 1:
-        return None
-    query = urlencode({"baseline_run_id": baseline.run_id, "hypothesis": claim.text})
-    return f"/strategy-manager/experiments?{query}"
+        return False
+    named = [p.name for p in context.declared_parameters if _mentions(text, p.name)]
+    return len(named) == 1

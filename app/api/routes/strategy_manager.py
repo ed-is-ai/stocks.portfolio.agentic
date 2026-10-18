@@ -668,7 +668,7 @@ async def strategy_manager_insights(
     outcome = await asyncio.to_thread(
         service.generate_insights, summary, refresh=refresh
     )
-    handoffs = await asyncio.to_thread(
+    handoffs, handoffs_unavailable = await asyncio.to_thread(
         _experiment_handoffs, backtest, launch, summary, outcome
     )
     return template_response(
@@ -678,6 +678,7 @@ async def strategy_manager_insights(
             "outcome_summary": summary,
             "agent_outcome": outcome,
             "experiment_handoffs": handoffs,
+            "experiment_handoffs_unavailable": handoffs_unavailable,
         },
     )
 
@@ -687,27 +688,38 @@ def _experiment_handoffs(
     launch: BacktestLaunchService,
     summary: StrategyOutcomeSummaryV1,
     outcome: StrategyManagerAgentOutcomeV1,
-) -> dict[int, str]:
-    """Map hypothesis index to a GH-15 draft-form link; read-only, never drafts."""
+) -> tuple[dict[int, str], bool]:
+    """Map hypothesis index to a GH-15 draft-form link; read-only, never drafts.
+
+    The flag is True when eligibility could not be decided for some hypothesis,
+    so the panel says the link is unavailable rather than calling it research-only.
+    """
     if outcome.report is None or not outcome.report.hypotheses:
-        return {}
+        return {}, False
     try:
         baseline_ids = frozenset(o.id for o in backtest.strategy_experiment_baselines())
         strategies = {s.strategy_id: s for s in launch.discover().strategies}
     except Exception:  # noqa: BLE001 - no handoff offered when state is unknown
         logger.warning("Strategy experiment handoff unavailable", exc_info=True)
-        return {}
-    links = {
-        index: handoff_url(
-            claim,
-            summary.runs,
-            baseline_ids=baseline_ids,
-            strategies=strategies,
-            declared=_strategy_question_context,
-        )
-        for index, claim in enumerate(outcome.report.hypotheses)
-    }
-    return {index: url for index, url in links.items() if url}
+        return {}, True
+    links: dict[int, str] = {}
+    unavailable = False
+    for index, claim in enumerate(outcome.report.hypotheses):
+        try:
+            url = handoff_url(
+                claim,
+                summary.runs,
+                baseline_ids=baseline_ids,
+                strategies=strategies,
+                declared=_strategy_question_context,
+            )
+        except Exception:  # noqa: BLE001 - one bad claim must not fail the panel
+            logger.warning("Strategy experiment handoff failed", exc_info=True)
+            unavailable = True
+            continue
+        if url:
+            links[index] = url
+    return links, unavailable
 
 
 def _strategy_question_context(
@@ -1795,16 +1807,22 @@ def strategy_experiments(
     hypothesis: str = "",
 ) -> HTMLResponse:
     """Read-only list and draft form; optional query values only prefill it."""
+    baseline_run_id = _bounded_prefill(baseline_run_id.strip(), 200)
     return template_response(
         request,
         "_strategy_experiments.html",
         _experiment_list_context(
             backtest,
             experiments,
-            baseline_run_id=baseline_run_id[:200],
-            hypothesis=hypothesis[:2000],
+            baseline_run_id=baseline_run_id,
+            hypothesis=_bounded_prefill(hypothesis, 2000),
         ),
     )
+
+
+def _bounded_prefill(value: str, limit: int) -> str:
+    """Drop, rather than truncate, an over-long prefill value."""
+    return value if len(value) <= limit else ""
 
 
 @router.post(
