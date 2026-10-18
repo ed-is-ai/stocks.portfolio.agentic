@@ -102,11 +102,13 @@ from app.services.backtest.strategy_job import (
 from app.services.backtest.strategy_job_service import StrategyJobService
 from app.services.backtest.strategy_experiment_service import StrategyExperimentService
 from app.services.backtest.strategy_outcomes import StrategyOutcomeService
+from app.services.backtest.strategy_insight_handoff import handoff_url
 from app.services.backtest.strategy_insights import (
+    StrategyManagerAgentOutcomeV1,
     StrategyManagerInsightsService,
     is_shareable_strategy_parameter,
 )
-from app.schemas.strategy_outcomes import OutcomeRunV1
+from app.schemas.strategy_outcomes import OutcomeRunV1, StrategyOutcomeSummaryV1
 from app.schemas.strategy_insights import (
     StrategyInsightParameterV1,
     StrategyQuestionContextV1,
@@ -658,6 +660,7 @@ async def strategy_manager_insights(
     request: Request,
     backtest: BacktestDep,
     service: AgentInsightsDep,
+    launch: LaunchDep,
     refresh: bool = Form(False),
 ) -> HTMLResponse:
     """Generate cited insights only after an explicit user submission."""
@@ -665,11 +668,58 @@ async def strategy_manager_insights(
     outcome = await asyncio.to_thread(
         service.generate_insights, summary, refresh=refresh
     )
+    handoffs, handoffs_unavailable = await asyncio.to_thread(
+        _experiment_handoffs, backtest, launch, summary, outcome
+    )
     return template_response(
         request,
         "_strategy_insights_panel.html",
-        {"outcome_summary": summary, "agent_outcome": outcome},
+        {
+            "outcome_summary": summary,
+            "agent_outcome": outcome,
+            "experiment_handoffs": handoffs,
+            "experiment_handoffs_unavailable": handoffs_unavailable,
+        },
     )
+
+
+def _experiment_handoffs(
+    backtest: BacktestRepository,
+    launch: BacktestLaunchService,
+    summary: StrategyOutcomeSummaryV1,
+    outcome: StrategyManagerAgentOutcomeV1,
+) -> tuple[dict[int, str], bool]:
+    """Map hypothesis index to a GH-15 draft-form link; read-only, never drafts.
+
+    The flag is True when eligibility could not be decided for some hypothesis,
+    so the panel says the link is unavailable rather than calling it research-only.
+    """
+    if outcome.report is None or not outcome.report.hypotheses:
+        return {}, False
+    try:
+        baseline_ids = frozenset(o.id for o in backtest.strategy_experiment_baselines())
+        strategies = {s.strategy_id: s for s in launch.discover().strategies}
+    except Exception:  # noqa: BLE001 - no handoff offered when state is unknown
+        logger.warning("Strategy experiment handoff unavailable", exc_info=True)
+        return {}, True
+    links: dict[int, str] = {}
+    unavailable = False
+    for index, claim in enumerate(outcome.report.hypotheses):
+        try:
+            url = handoff_url(
+                claim,
+                summary.runs,
+                baseline_ids=baseline_ids,
+                strategies=strategies,
+                declared=_strategy_question_context,
+            )
+        except Exception:  # noqa: BLE001 - one bad claim must not fail the panel
+            logger.warning("Strategy experiment handoff failed", exc_info=True)
+            unavailable = True
+            continue
+        if url:
+            links[index] = url
+    return links, unavailable
 
 
 def _strategy_question_context(
@@ -1750,14 +1800,29 @@ def _experiment_list_context(
 
 @router.get("/strategy-manager/experiments", response_class=HTMLResponse)
 def strategy_experiments(
-    request: Request, backtest: BacktestDep, experiments: ExperimentDep
+    request: Request,
+    backtest: BacktestDep,
+    experiments: ExperimentDep,
+    baseline_run_id: str = "",
+    hypothesis: str = "",
 ) -> HTMLResponse:
-    """Read-only list and draft form; this route is separate from the landing view."""
+    """Read-only list and draft form; optional query values only prefill it."""
+    baseline_run_id = _bounded_prefill(baseline_run_id.strip(), 200)
     return template_response(
         request,
         "_strategy_experiments.html",
-        _experiment_list_context(backtest, experiments),
+        _experiment_list_context(
+            backtest,
+            experiments,
+            baseline_run_id=baseline_run_id,
+            hypothesis=_bounded_prefill(hypothesis, 2000),
+        ),
     )
+
+
+def _bounded_prefill(value: str, limit: int) -> str:
+    """Drop, rather than truncate, an over-long prefill value."""
+    return value if len(value) <= limit else ""
 
 
 @router.post(

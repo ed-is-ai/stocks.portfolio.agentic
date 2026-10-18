@@ -63,8 +63,10 @@ def _prepare_strategy_coverage() -> None:
         except BacktestIntegrityError:
             if not get_bootstrap_service().reset_pending():
                 raise
-            logging.getLogger(__name__).info(
-                "Skipping stale Strategy Manager coverage; profile refresh is required"
+            logging.getLogger(__name__).warning(
+                "Skipping stale Strategy Manager coverage; profile refresh is "
+                "required",
+                exc_info=True,
             )
 
 
