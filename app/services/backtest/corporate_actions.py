@@ -22,6 +22,7 @@ DIVIDEND_CASH_POLICY_VERSION = "DividendCashPolicyV2"
 class PositionState:
     shares: Decimal
     per_share_basis: Decimal
+    entry_session: date | None = None
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ def apply_split(
             updated = PositionState(
                 shares=position.shares * action.value,
                 per_share_basis=position.per_share_basis / action.value,
+                entry_session=position.entry_session,
             )
             value_after = quantize_eight(updated.shares * updated.per_share_basis)
     except DecimalException as exc:
