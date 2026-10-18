@@ -1025,6 +1025,7 @@ class _Engine:
                 security_id=security_id,
                 quantity=position.shares,
                 average_cost=position.per_share_basis,
+                entry_session=position.entry_session,
             )
             for security_id, position in sorted(self.positions.items())
         )
@@ -1353,7 +1354,9 @@ class _Engine:
                 "integrity_error", session, "cost-basis arithmetic failed"
             ) from exc
         self.positions[order.security_id] = PositionState(
-            shares=Decimal(fill_shares), per_share_basis=per_share_basis
+            shares=Decimal(fill_shares),
+            per_share_basis=per_share_basis,
+            entry_session=session,
         )
         return EntryFillEventV1(
             security_id=order.security_id,

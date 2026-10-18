@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mean Reversion Backtest"
+  short_description: "Backtest a deterministic oversold mean-reversion strategy"
+  default_prompt: "Use $rtly-backtest-mean-reversion to run a deterministic mean-reversion backtest."

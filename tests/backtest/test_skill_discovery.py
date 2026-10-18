@@ -66,6 +66,13 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "volume_multiplier": 1.5,
         **COMMON_PARAMETER_DEFAULTS,
     },
+    "rtly-backtest-mean-reversion": {
+        "lookback_sessions": 20,
+        "entry_zscore": 2.0,
+        "exit_zscore": 0.0,
+        "max_holding_sessions": 10,
+        **COMMON_PARAMETER_DEFAULTS,
+    },
     "rtly-backtest-minervini": {
         "minimum_vcp_score": 0,
         "minimum_trend_score": 85.0,
