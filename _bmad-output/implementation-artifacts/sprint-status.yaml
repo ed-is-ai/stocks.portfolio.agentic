@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-10
-last_updated: "2026-10-10 (GH-20 #101-103 implemented and verified)"
+last_updated: "2026-10-14 (GH-106 implemented and verified)"
 project: Agents.stocks
 project_key: NOKEY
 tracking_system: file-system
@@ -156,3 +156,4 @@ development_status:
   gh-20-2-generate-cited-claude-insights: done
   gh-20-3-strategy-scoped-evidence-copilot: done
   gh-20-4-hand-off-insights-to-bounded-experiments: backlog
+  gh-106-expand-whole-universe-through-backtest-period: review

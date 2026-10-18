@@ -117,7 +117,10 @@ from app.services.backtest.strategy_readiness_service import (
     StrategyReadinessService,
     profile_delta_projection,
 )
-from app.services.backtest.trading_calendar import TradingCalendar
+from app.services.backtest.trading_calendar import (
+    CalendarContractError,
+    TradingCalendar,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -469,6 +472,7 @@ def _strategy_manager_context(
         }
     else:
         profile_context = _profile_context(repo, active=active)
+    active_profile_configured = active is not None
     try:
         outcome_summary = StrategyOutcomeService(repo).build_summary()
     except Exception:  # noqa: BLE001
@@ -491,6 +495,7 @@ def _strategy_manager_context(
             pending_experiments[0] if pending_experiments else None
         ),
         "setup_required": setup_required,
+        "active_profile_configured": active_profile_configured,
         "ready_count": ready_count,
         "primary_cta": _primary_cta(
             setup_required=setup_required,
@@ -572,6 +577,35 @@ async def strategy_manager(
     setup: str | None = None,
 ) -> HTMLResponse:
     started = perf_counter()
+    if getattr(request.app.state, "strategy_preparation", "ready") == "failed":
+        error = (
+            "Startup verification could not validate snapshot coverage. "
+            "Strategy actions are paused until the historical evidence is repaired."
+        )
+        return template_response(
+            request,
+            "_strategy_manager.html",
+            {
+                "coverage": None,
+                "coverage_error": error,
+                "profile": None,
+                "qualification_available": False,
+                "qualification_reason": error,
+                "backtest_activities": (),
+                "backtest_activities_error": error,
+                "outcome_summary": None,
+                "agent_outcome": None,
+                "selected_evidence_handle": "",
+                "selected_result_id": "",
+                "pending_experiment_detail": None,
+                "setup_required": False,
+                "active_profile_configured": True,
+                "ready_count": 0,
+                "primary_cta": _READINESS_CTA,
+                "setup_notice": None,
+                "activated_at": None,
+            },
+        )
     try:
         ready_count, coverage_ready = _readiness_progress(readiness.evaluate())
         setup_required = bootstrap.is_setup_required()
@@ -1573,18 +1607,45 @@ async def submit_strategy_configuration(
             # whole-universe mode.  A historical snapshot can contain a
             # documented exclusion (for example a newly listed security
             # without the required history), which is a roster member but
-            # cannot be sealed as price/action evidence.  Resolve the full
-            # *runnable* universe from the requested start month instead.
-            try:
-                raw_security_ids = [
-                    security_id
-                    for security_id, _revision in backtest.snapshot_member_revisions(
-                        active.profile_hash, command.start_month
+            # cannot be sealed as price/action evidence. Resolve runnable
+            # members from every month in the requested interval so later
+            # point-in-time entrants are included in the selected universe.
+            requested_months: tuple[str, ...] = ()
+            for field, month in (
+                ("start_month", command.start_month),
+                ("end_month", command.end_month),
+            ):
+                try:
+                    TradingCalendar.months_inclusive(month, month)
+                except CalendarContractError:
+                    errors.setdefault(field, "Use a valid calendar month in YYYY-MM.")
+            if not ("start_month" in errors or "end_month" in errors):
+                if command.start_month > command.end_month:
+                    errors.setdefault(
+                        "end_month", "End month must be on or after start month."
                     )
-                ]
-            except BacktestIntegrityError as exc:
-                errors.setdefault("security_ids", str(exc))
-            if not raw_security_ids:
+                else:
+                    requested_months = TradingCalendar.months_inclusive(
+                        command.start_month, command.end_month
+                    )
+            if requested_months:
+                try:
+                    raw_security_ids = sorted(
+                        {
+                            security_id
+                            for month in requested_months
+                            for security_id, _revision in backtest.snapshot_member_revisions(
+                                active.profile_hash, month
+                            )
+                        }
+                    )
+                except BacktestIntegrityError as exc:
+                    errors.setdefault("security_ids", str(exc))
+            if (
+                not raw_security_ids
+                and "start_month" not in errors
+                and "end_month" not in errors
+            ):
                 errors.setdefault(
                     "security_ids",
                     "The selected period has no runnable securities.",

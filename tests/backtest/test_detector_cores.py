@@ -248,6 +248,68 @@ def test_vcp_accepts_a_recent_no_volume_window_as_a_valid_non_breakout() -> None
     assert vcp.vcp.dry_up_ratio is None
 
 
+def test_vcp_adapter_uses_unrounded_prices_from_bounded_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = list(_historical_rows())
+    chronological_window = rows[-detector_module.VCP_LOOKBACK_DAYS :]
+    high_index, low_index = 5, 10
+    high_row = chronological_window[high_index]
+    low_row = chronological_window[low_index]
+    rows[-detector_module.VCP_LOOKBACK_DAYS + high_index] = replace(
+        high_row,
+        open=Decimal("0.03"),
+        high=Decimal("0.04"),
+        low=Decimal("0.02"),
+        close=Decimal("0.03"),
+    )
+    rows[-detector_module.VCP_LOOKBACK_DAYS + low_index] = replace(
+        low_row,
+        open=Decimal("0.03"),
+        high=Decimal("0.04"),
+        low=Decimal("0.0021"),
+        close=Decimal("0.03"),
+    )
+    rounded_pattern = {
+        "valid_vcp": False,
+        "score": 0,
+        "contractions": [
+            {
+                "high_date": high_row.session.isoformat(),
+                "high_price": 0.04,
+                "low_date": low_row.session.isoformat(),
+                "low_price": 0.0,
+                "depth_pct": 94.75,
+                "high_idx": high_index,
+                "low_idx": low_index,
+            }
+        ],
+        "pivot_price": 0.04,
+        "atr_compression_ratio": None,
+        "wide_and_loose": False,
+        "right_side_range_ratio": None,
+    }
+    real_loader = detector_module._calculator_module
+
+    def loader(name: str):
+        if name == "vcp_pattern_calculator":
+            return SimpleNamespace(
+                calculate_vcp_pattern=lambda *_args, **_kwargs: rounded_pattern
+            )
+        return real_loader(name)
+
+    monkeypatch.setattr(detector_module, "_calculator_module", loader)
+
+    result = DETECTOR_REGISTRY[2].run(DetectorContext(tuple(rows)))
+
+    assert isinstance(result, VcpResultV1)
+    contraction = result.vcp.contractions[0]
+    assert contraction.high_price == Decimal("0.04")
+    assert contraction.low_price == Decimal("0.0021")
+    assert result.vcp.pivot_price == Decimal("0.04")
+    assert result.vcp.last_contraction_low == Decimal("0.0021")
+
+
 def test_vcp_calculator_skips_a_local_low_above_its_swing_high() -> None:
     calculator = detector_module._calculator_module("vcp_pattern_calculator")
 

@@ -177,7 +177,8 @@ def setup_env_stale_profile(monkeypatch):
 def test_setup_page_warns_before_reset(setup_env_stale_profile) -> None:
     response = client.get("/strategy-manager/setup")
     assert response.status_code == 200
-    assert "reset your data version" in response.text.lower()
+    assert "change the active data version" in response.text.lower()
+    assert "snapshots remain stored under the old profile" in response.text.lower()
     assert 'name="confirm_reset"' in response.text
 
 
@@ -391,6 +392,15 @@ def test_strategy_manager_shows_setup_banner(
     response = client.get("/strategy-manager")
     assert response.status_code == 200
     assert "Set up Strategy Manager" in response.text
+
+
+def test_strategy_manager_shows_refresh_message_for_stale_profile(
+    setup_env_stale_profile,
+) -> None:
+    response = client.get("/strategy-manager")
+    assert response.status_code == 200
+    assert "active scanner-data profile needs refreshing" in response.text.lower()
+    assert "no active scanner-data profile is configured" not in response.text.lower()
 
 
 def test_strategy_manager_no_setup_banner_when_active(
