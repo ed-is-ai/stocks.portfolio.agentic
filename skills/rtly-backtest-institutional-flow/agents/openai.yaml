@@ -1,0 +1,4 @@
+interface:
+  display_name: "Institutional Flow Backtest"
+  short_description: "Backtest a WhaleWisdom 13F net-fund-flow rule"
+  default_prompt: "Use $rtly-backtest-institutional-flow to run a deterministic institutional-flow backtest."
