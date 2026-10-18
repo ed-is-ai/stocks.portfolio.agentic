@@ -159,56 +159,13 @@ def run_vcp(context: DetectorContext) -> DetectorResultV1:
     ):
         raise ValueError("VCP contractions are malformed")
     contractions_data = cast(list[Mapping[str, object]], raw_contractions)
-    pivot_price = pattern["pivot_price"]
-    last_low = contractions_data[-1]["low_price"] if contractions_data else None
-    volume = _mapping(
-        _calculator_module("volume_pattern_calculator").calculate_volume_pattern(
-            newest_first,
-            pivot_price=pivot_price,
-            contractions=raw_contractions,
-            breakout_volume_ratio=VCP_BREAKOUT_VOLUME_RATIO,
-        ),
-        "volume pattern",
-    )
-    if all(row.volume == 0 for row in context.rows):
-        breakout, dry_up_ratio = False, None
-    else:
-        _keys(volume, "volume pattern", "breakout_volume_detected", "dry_up_ratio")
-        breakout, dry_up_ratio = (
-            _bool(volume["breakout_volume_detected"], "breakout volume"),
-            volume["dry_up_ratio"],
-        )
-    pivot = _mapping(
-        _calculator_module("pivot_proximity_calculator").calculate_pivot_proximity(
-            current_price=quote["price"],
-            pivot_price=pivot_price,
-            last_contraction_low=last_low,
-            breakout_volume=breakout,
-        ),
-        "pivot proximity",
-    )
-    _keys(pivot, "pivot proximity", "distance_from_pivot_pct")
-    sma200 = _decimal(trend["sma200"], nullable=True)
-    sma200_distance = (
-        (quote["price"] - float(sma200)) / float(sma200) * 100 if sma200 else None
-    )
-    execution = _mapping(
-        _calculator_module("execution_state").compute_execution_state(
-            distance_from_pivot_pct=pivot["distance_from_pivot_pct"],
-            price=quote["price"],
-            sma50=trend["sma50"],
-            sma200=trend["sma200"],
-            sma200_distance_pct=sma200_distance,
-            last_contraction_low=last_low,
-            breakout_volume=breakout,
-            max_sma200_extension=VCP_MAX_SMA200_EXTENSION,
-        ),
-        "execution state",
-    )
-    _keys(execution, "execution state", "state")
+    # The calculator rounds displayed prices to cents; preserve source precision here.
+    chronological_rows = context.rows[-VCP_LOOKBACK_DAYS:]
     bounded_sessions = {row.session for row in context.rows}
-    contractions: list[VcpContractionV1] = []
-    for index, item in enumerate(contractions_data, start=1):
+    contraction_evidence: list[
+        tuple[Mapping[str, object], date, date, int, int, Decimal, Decimal]
+    ] = []
+    for item in contractions_data:
         _keys(
             item,
             "VCP contraction",
@@ -232,17 +189,99 @@ def run_vcp(context: DetectorContext) -> DetectorResultV1:
             max(high_session, low_session) > context.rows[-1].session
             or high_session not in bounded_sessions
             or low_session not in bounded_sessions
-            or not 0 <= high_index <= low_index < VCP_LOOKBACK_DAYS
+            or not 0 <= high_index <= low_index < len(chronological_rows)
         ):
             raise ValueError("VCP contraction exceeds bounded evidence")
+        high_row, low_row = (
+            chronological_rows[high_index],
+            chronological_rows[low_index],
+        )
+        if high_row.session != high_session or low_row.session != low_session:
+            raise ValueError("VCP contraction dates do not match bounded evidence")
+        contraction_evidence.append(
+            (
+                item,
+                high_session,
+                low_session,
+                high_index,
+                low_index,
+                high_row.high,
+                low_row.low,
+            )
+        )
+
+    pivot_price = _decimal(pattern["pivot_price"], nullable=True)
+    last_low: Decimal | None = None
+    if contraction_evidence:
+        pivot_price = contraction_evidence[-1][5]
+        last_low = contraction_evidence[-1][6]
+    pivot_price_value = (
+        _finite_float(pivot_price) if pivot_price is not None else None
+    )
+    last_low_value = _finite_float(last_low) if last_low is not None else None
+    volume = _mapping(
+        _calculator_module("volume_pattern_calculator").calculate_volume_pattern(
+            newest_first,
+            pivot_price=pivot_price_value,
+            contractions=raw_contractions,
+            breakout_volume_ratio=VCP_BREAKOUT_VOLUME_RATIO,
+        ),
+        "volume pattern",
+    )
+    if all(row.volume == 0 for row in context.rows):
+        breakout, dry_up_ratio = False, None
+    else:
+        _keys(volume, "volume pattern", "breakout_volume_detected", "dry_up_ratio")
+        breakout, dry_up_ratio = (
+            _bool(volume["breakout_volume_detected"], "breakout volume"),
+            volume["dry_up_ratio"],
+        )
+    pivot = _mapping(
+        _calculator_module("pivot_proximity_calculator").calculate_pivot_proximity(
+            current_price=quote["price"],
+            pivot_price=pivot_price_value,
+            last_contraction_low=last_low_value,
+            breakout_volume=breakout,
+        ),
+        "pivot proximity",
+    )
+    _keys(pivot, "pivot proximity", "distance_from_pivot_pct")
+    sma200 = _decimal(trend["sma200"], nullable=True)
+    sma200_distance = (
+        (quote["price"] - float(sma200)) / float(sma200) * 100 if sma200 else None
+    )
+    execution = _mapping(
+        _calculator_module("execution_state").compute_execution_state(
+            distance_from_pivot_pct=pivot["distance_from_pivot_pct"],
+            price=quote["price"],
+            sma50=trend["sma50"],
+            sma200=trend["sma200"],
+            sma200_distance_pct=sma200_distance,
+            last_contraction_low=last_low_value,
+            breakout_volume=breakout,
+            max_sma200_extension=VCP_MAX_SMA200_EXTENSION,
+        ),
+        "execution state",
+    )
+    _keys(execution, "execution state", "state")
+    contractions: list[VcpContractionV1] = []
+    for index, (
+        item,
+        high_session,
+        low_session,
+        high_index,
+        low_index,
+        high_price,
+        low_price,
+    ) in enumerate(contraction_evidence, start=1):
         contractions.append(
             VcpContractionV1.model_validate(
                 {
                     "label": f"T{index}",
                     "high_session": high_session,
-                    "high_price": _decimal(item["high_price"]),
+                    "high_price": high_price,
                     "low_session": low_session,
-                    "low_price": _decimal(item["low_price"]),
+                    "low_price": low_price,
                     "depth_pct": _decimal(item["depth_pct"]),
                     "duration_sessions": low_index - high_index,
                 }
@@ -261,8 +300,8 @@ def run_vcp(context: DetectorContext) -> DetectorResultV1:
                 "breakout_volume_detected": breakout,
                 "num_contractions": len(contractions),
                 "contractions": tuple(contractions),
-                "pivot_price": _decimal(pivot_price, nullable=True),
-                "last_contraction_low": _decimal(last_low, nullable=True),
+                "pivot_price": pivot_price,
+                "last_contraction_low": last_low,
                 "atr_compression_ratio": _decimal(
                     pattern["atr_compression_ratio"], nullable=True
                 ),
