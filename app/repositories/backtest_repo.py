@@ -4602,17 +4602,9 @@ class BacktestRepository:
                 # rendering but never hashed -- mirror
                 # ``RunInputManifestV1.digest``.
                 submitted_payload.pop("python_runtime", None)
-                submitted_digest = sha256(
-                    json.dumps(
-                        submitted_payload,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                        allow_nan=False,
-                    ).encode("utf-8")
-                ).hexdigest()
                 if (
-                    submitted_digest != submission.run_input_manifest_digest
+                    manifest_digest(submitted_payload)
+                    != submission.run_input_manifest_digest
                 ):
                     raise StrategyJobConflict(
                         "run input manifest digest does not match its "

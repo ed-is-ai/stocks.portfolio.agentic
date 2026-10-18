@@ -22,7 +22,7 @@
   </div>
   {% if reset_pending %}
   <div class="sm-alert sm-alert-warning" role="alert">
-    <strong>This will change the active data version.</strong> The active profile is out of date (its detectors, roster, or ingestion version changed), so setup will capture a brand-new roster and activate a new profile. Existing monthly snapshots remain stored under the old profile, but they will not be reused by the new profile; historical data will need to be rebuilt.
+    <strong>This will change the active data version.</strong> The active profile is out of date (its detectors, roster, or ingestion version changed), so setup will capture a brand-new roster and activate a new profile. Existing monthly snapshots stay stored under the old profile but are not reused by the new one, so historical data must be rebuilt from scratch, which can take multiple days.
     {% if reset_snapshot_count %}
     The old profile has <strong>{{ reset_snapshot_count }} built monthly snapshots</strong>{% if reset_earliest_month and reset_latest_month %} ({{ reset_earliest_month }} to {{ reset_latest_month }}){% endif %}.
     {% endif %}
@@ -34,7 +34,7 @@
     {% if reset_pending %}
     <div class="form-check mb-2">
       <input class="form-check-input" type="checkbox" id="confirm_reset" name="confirm_reset" value="true" required>
-      <label class="form-check-label" for="confirm_reset">I understand this changes the active data version and requires historical data to be rebuilt for the new profile.</label>
+      <label class="form-check-label" for="confirm_reset">I understand this changes the active data version and requires a full historical rebuild for the new profile.</label>
     </div>
     {% endif %}
     <button class="sm-btn sm-btn-warning" type="submit"><i class="bi bi-gear-wide-connected"></i> {% if reset_pending %}Confirm reset{% else %}Confirm setup{% endif %}</button>
