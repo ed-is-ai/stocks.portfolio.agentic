@@ -3,6 +3,7 @@ title: 'Tradable UK UCITS ETF reference universe for asset-allocation backtests'
 type: 'feature'
 created: '2026-10-18'
 status: 'done'
+final_revision: '07fdcb669b7abc45c036e3863900721f495984fc'
 baseline_revision: '85f6403bbe55157b40615aed33057050f1aeddb9'
 review_loop_iteration: 0
 followup_review_recommended: false
