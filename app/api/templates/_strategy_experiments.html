@@ -28,6 +28,7 @@
           </option>
           {% endfor %}
         </select>
+        {% if baseline_run_id and baseline_run_id not in baselines | map(attribute='id') | list %}<p class="sm-alert sm-alert-warning" role="status">The suggested baseline is no longer available. Choose a verified baseline to continue.</p>{% endif %}
         <p class="form-text">Showing up to {{ baseline_limit }} recent completed runs that passed result verification.</p>
         {% if not baselines %}<p class="text-muted">No verified completed Backtests are available as baselines.</p>{% endif %}
         <label class="form-label" for="experiment-hypothesis">Hypothesis</label>

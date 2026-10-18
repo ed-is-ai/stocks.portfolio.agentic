@@ -29,11 +29,12 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Literal, Mapping, cast, get_args
+from typing import Any, Literal, Mapping, cast, get_args
 
 from app.core.config import ROOT_DIR, SKILLS_DIR
 from app.integrations.fx_history import (
@@ -71,6 +72,13 @@ from app.services.backtest.run_input_manifest import (
     SettlingExitType,
     TerminalExitV1,
     build_run_input_manifest,
+)
+from app.services.backtest.sector_reference import (
+    SECTOR_ASSIGNMENTS_PARAM,
+    SECTOR_HOST_PARAMS,
+    SECTOR_REFERENCE_VERSION_PARAM,
+    build_sector_pin,
+    load_sector_reference,
 )
 from app.services.backtest.skill_discovery import (
     StrategyDescriptorV1,
@@ -415,6 +423,8 @@ class BacktestLaunchService:
         regime_filter_enabled = submitted_parameters.pop(
             "regime_filter_enabled", None
         )
+        for host_param in SECTOR_HOST_PARAMS:
+            submitted_parameters.pop(host_param, None)
         if regime_filter_enabled is not None and not isinstance(
             regime_filter_enabled, bool
         ):
@@ -461,6 +471,11 @@ class BacktestLaunchService:
                 **validated_parameters,
                 "regime_filter_enabled": regime_filter_enabled,
             }
+
+        if not isinstance(validated_parameters, tuple):
+            validated_parameters = self._bind_sector_pin(
+                strategy, command, validated_parameters, errors
+            )
 
         regime_benchmark = command.regime_benchmark
         if (
@@ -613,6 +628,53 @@ class BacktestLaunchService:
             raise BacktestLaunchValidationError(
                 (LaunchFieldError("form", str(exc)),)
             ) from exc
+
+    def _bind_sector_pin(
+        self,
+        strategy: StrategyDescriptorV1,
+        command: BacktestLaunchCommandV1,
+        parameters: Mapping[str, Any],
+        errors: list[LaunchFieldError],
+    ) -> dict[str, Any]:
+        """Seal the resolved sector assignments for a sector-aware Strategy."""
+        declared = {p.name for p in strategy.parameters}
+        if SECTOR_REFERENCE_VERSION_PARAM not in declared:
+            return dict(parameters)
+        selection = command.universe_selection
+        if selection is None:
+            errors.append(
+                LaunchFieldError("form", "This Strategy requires a prepared universe.")
+            )
+            return dict(parameters)
+        try:
+            reference = load_sector_reference()
+        except ValueError as exc:
+            errors.append(
+                LaunchFieldError("form", f"Sector reference is unusable: {exc}")
+            )
+            return dict(parameters)
+        symbols = {
+            security_id: symbol
+            for security_id, _mic, symbol, _evidence in (
+                self._backtest_repo.identity_rows()
+            )
+            if isinstance(symbol, str) and symbol
+        }
+        selected = selection.canonical_security_ids
+        pin = build_sector_pin(selected, symbols, reference)
+        assignments = cast(Mapping[str, str], pin[SECTOR_ASSIGNMENTS_PARAM])
+        min_members = parameters.get("min_sector_members", 1)
+        largest = max(Counter(assignments.values()).values(), default=0)
+        if largest < min_members:
+            errors.append(
+                LaunchFieldError(
+                    "form",
+                    f"No sector reaches {min_members} mapped members: "
+                    f"{len(assignments)} of {len(selected)} selected securities "
+                    "have a pinned sector assignment.",
+                )
+            )
+        return {**parameters, **pin}
 
     def _resolve_strategy(self, strategy_id: str) -> StrategyDescriptorV1 | None:
         for strategy in self.discover().strategies:

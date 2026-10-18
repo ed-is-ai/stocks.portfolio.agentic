@@ -50,6 +50,9 @@ EVIDENCED_SESSIONS = 400
 HISTORY_ONLY_STRATEGIES = (
     "rtly-backtest-buy-and-hold",
     "rtly-backtest-darvas-box",
+    # Declares only a current close: its funds_net enrichment has no
+    # EvidenceKind, and its scan reader fails closed without it.
+    "rtly-backtest-institutional-flow",
     "rtly-backtest-moving-average",
     "rtly-backtest-turtle-trend",
 )

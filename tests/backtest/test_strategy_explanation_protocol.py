@@ -303,6 +303,28 @@ def _mean_reversion(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
     )
 
 
+def _sector_rotation(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
+    strategy = _strategy(module)
+    parameters = {
+        "selected_securities": ["sec-aapl", "sec-b"],
+        "sector_assignments": {"sec-aapl": "Utilities", "sec-b": "Tech"},
+        "top_n_sectors": 1,
+        "momentum_lookback_sessions": 2,
+        "rebalance_cadence": "monthly",
+        "min_sector_members": 1,
+        "maximum_loss_pct": 15,
+    }
+    history = pd.DataFrame(
+        {"close": [Decimal(value) for value in ("100", "110", "120")]},
+        index=[date(2025, 12, 30), date(2025, 12, 31), _SHORT_AS_OF],
+    )
+    view = _View(_SHORT_AS_OF, history)
+    return (
+        strategy.entry_signals(view, parameters),
+        strategy.exit_signals(view, _portfolio(_SHORT_AS_OF), parameters),
+    )
+
+
 def _buy_and_hold(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
     strategy = _strategy(module)
     parameters = {
@@ -330,6 +352,33 @@ def _buy_and_hold(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
     return list(selection.signals), []
 
 
+def _flow_scan(funds_net: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        security_id="sec-aapl",
+        as_of_session_date=_SHORT_AS_OF,
+        provenance_quality="observed_bau",
+        enrichment=SimpleNamespace(funds_net=funds_net),
+    )
+
+
+def _institutional_flow(module: ModuleType) -> tuple[list[Signal], list[Signal]]:
+    strategy = _strategy(module)
+    parameters = {
+        "selected_securities": ["sec-aapl"],
+        "min_funds_net": 3,
+        "exit_funds_net": -1,
+        "max_scan_age_days": 45,
+        "maximum_loss_pct": 10.0,
+    }
+    history = pd.DataFrame({"close": [Decimal("85")]}, index=[_SHORT_AS_OF])
+    entry_view = _View(_SHORT_AS_OF, history, _flow_scan(5))
+    exit_view = _View(_SHORT_AS_OF, history, _flow_scan(-2))
+    return (
+        strategy.entry_signals(entry_view, parameters),
+        strategy.exit_signals(exit_view, _portfolio(_SHORT_AS_OF), parameters),
+    )
+
+
 #: One scenario driver per first-party Strategy Skill folder. A newly
 #: discovered Strategy without an entry here fails the coverage test
 #: below rather than silently escaping the explanation contract.
@@ -337,8 +386,10 @@ SCENARIOS: dict[str, Callable[[ModuleType], tuple[list[Signal], list[Signal]]]] 
     "rtly-backtest-buy-and-hold": _buy_and_hold,
     "rtly-backtest-darvas-box": _darvas,
     "rtly-backtest-mean-reversion": _mean_reversion,
+    "rtly-backtest-institutional-flow": _institutional_flow,
     "rtly-backtest-minervini": _minervini,
     "rtly-backtest-moving-average": _moving_average,
+    "rtly-backtest-sector-rotation": _sector_rotation,
     "rtly-backtest-turtle-trend": _turtle,
     "rtly-backtest-weinstein": _weinstein,
 }

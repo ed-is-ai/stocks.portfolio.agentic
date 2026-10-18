@@ -569,8 +569,12 @@ def _parameter_schema_from_frontmatter(
     for index, entry in enumerate(raw_parameters):
         if not isinstance(entry, dict):
             raise ValueError(f"parameters[{index}] must be a mapping")
+        # The model is strict (tuples only); YAML can only author lists.
+        fields: dict[str, Any] = dict(entry)
+        if isinstance(fields.get("enum_values"), list):
+            fields["enum_values"] = tuple(fields["enum_values"])
         try:
-            parameters.append(StrategyParameterV1(**entry))
+            parameters.append(StrategyParameterV1(**fields))
         except (ValidationError, TypeError) as exc:
             raise ValueError(f"parameters[{index}] is invalid: {exc}") from exc
     return tuple(parameters)

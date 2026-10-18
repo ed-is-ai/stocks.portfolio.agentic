@@ -66,6 +66,13 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "volume_multiplier": 1.5,
         **COMMON_PARAMETER_DEFAULTS,
     },
+    "rtly-backtest-institutional-flow": {
+        "min_funds_net": 3,
+        "exit_funds_net": -1,
+        "max_scan_age_days": 45,
+        "maximum_loss_pct": 10.0,
+        **COMMON_PARAMETER_DEFAULTS,
+    },
     "rtly-backtest-mean-reversion": {
         "lookback_sessions": 20,
         "entry_zscore": 2.0,
@@ -88,6 +95,15 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
     "rtly-backtest-moving-average": {
         "fast_window": 50,
         "slow_window": 200,
+        **COMMON_PARAMETER_DEFAULTS,
+    },
+    "rtly-backtest-sector-rotation": {
+        "top_n_sectors": 3,
+        "momentum_lookback_sessions": 126,
+        "rebalance_cadence": "monthly",
+        "min_sector_members": 3,
+        "maximum_loss_pct": 15.0,
+        "sector_reference_version": "sector_reference.v1",
         **COMMON_PARAMETER_DEFAULTS,
     },
     "rtly-backtest-turtle-trend": {
@@ -1177,3 +1193,21 @@ def test_source_digest_covers_every_declared_runtime_file(tmp_path: Path) -> Non
 
     (folder / "scripts" / "helper.py").write_text("WINDOW = 20\n", encoding="utf-8")
     assert _digest() == original  # deterministic, content-addressed
+
+
+def test_yaml_enum_values_list_is_coerced_to_the_strict_tuple() -> None:
+    """Regression: YAML authors enum_values as a list; the model wants a tuple."""
+    (parameter,) = skill_discovery_module._parameter_schema_from_frontmatter(
+        [
+            {
+                "name": "rebalance_cadence",
+                "type": "enum",
+                "default": "monthly",
+                "enum_values": ["monthly", "quarterly"],
+                "description": "Rebalance cadence.",
+                "required": False,
+            }
+        ]
+    )
+
+    assert parameter.enum_values == ("monthly", "quarterly")
