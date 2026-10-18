@@ -108,6 +108,60 @@ def test_boot_without_active_profile_skips_preparation(monkeypatch) -> None:
         _wait_for_preparation(client, "ready")
 
 
+def test_boot_skips_stale_coverage_when_profile_refresh_is_required(
+    monkeypatch,
+) -> None:
+    from app.repositories.backtest_repo import BacktestIntegrityError
+
+    class StaleRepository:
+        def active_snapshot_profile(self):
+            return object()
+
+        def prepare_snapshot_coverage(self):
+            raise BacktestIntegrityError(
+                "snapshot profile detector manifests do not match the runtime authority"
+            )
+
+    class RefreshRequiredBootstrap:
+        def reset_pending(self):
+            return True
+
+    monkeypatch.setattr(
+        "app.api.app.get_backtest_repository", lambda: StaleRepository()
+    )
+    monkeypatch.setattr(
+        "app.api.app.get_bootstrap_service", lambda: RefreshRequiredBootstrap()
+    )
+
+    with TestClient(create_app(strategy_jobs_enabled=False)) as client:
+        _wait_for_preparation(client, "ready")
+
+
+def test_boot_keeps_integrity_failure_when_refresh_is_not_pending(monkeypatch) -> None:
+    from app.repositories.backtest_repo import BacktestIntegrityError
+
+    class InvalidRepository:
+        def active_snapshot_profile(self):
+            return object()
+
+        def prepare_snapshot_coverage(self):
+            raise BacktestIntegrityError("coverage projection is corrupt")
+
+    class NoRefreshBootstrap:
+        def reset_pending(self):
+            return False
+
+    monkeypatch.setattr(
+        "app.api.app.get_backtest_repository", lambda: InvalidRepository()
+    )
+    monkeypatch.setattr(
+        "app.api.app.get_bootstrap_service", lambda: NoRefreshBootstrap()
+    )
+
+    with TestClient(create_app(strategy_jobs_enabled=False)) as client:
+        _wait_for_preparation(client, "failed")
+
+
 def test_shutdown_joins_startup_preparation() -> None:
     started, release = threading.Event(), threading.Event()
     exiting, finished = threading.Event(), threading.Event()

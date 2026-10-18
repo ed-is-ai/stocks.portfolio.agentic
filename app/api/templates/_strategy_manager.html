@@ -17,7 +17,7 @@
   {% if setup_required %}
   <div class="sm-alert sm-alert-warning" role="alert">
     <div class="d-flex align-items-center gap-3">
-      <div><strong>Strategy Manager needs setup.</strong> No active scanner-data profile is configured. Run setup to qualify historical data, capture the securities list, and activate a profile.</div>
+      <div><strong>Strategy Manager needs setup.</strong> {% if active_profile_configured %}The active scanner-data profile needs refreshing to match the current detector and data-source versions.{% else %}No active scanner-data profile is configured.{% endif %} Run setup to qualify historical data, capture the securities list, and activate a profile.</div>
       <button class="sm-btn sm-btn-warning ms-auto" hx-get="/strategy-manager/setup" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-gear-wide-connected"></i> Set up Strategy Manager</button>
     </div>
   </div>

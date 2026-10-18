@@ -35,10 +35,12 @@ from app.core.config import STATIC_DIR
 from app.core import config
 from app.api.dependencies import (
     get_backtest_repository,
+    get_bootstrap_service,
     get_pipeline_service,
     get_strategy_job_service,
     get_strategy_notification_projector,
 )
+from app.repositories.backtest_repo import BacktestIntegrityError
 from app.services.pipeline_scheduler import (
     start_pipeline_scheduler,
     stop_pipeline_scheduler,
@@ -56,7 +58,14 @@ class StrategyJobLifecycleService(Protocol):
 def _prepare_strategy_coverage() -> None:
     repository = get_backtest_repository()
     if repository.active_snapshot_profile() is not None:
-        repository.prepare_snapshot_coverage()
+        try:
+            repository.prepare_snapshot_coverage()
+        except BacktestIntegrityError:
+            if not get_bootstrap_service().reset_pending():
+                raise
+            logging.getLogger(__name__).info(
+                "Skipping stale Strategy Manager coverage; profile refresh is required"
+            )
 
 
 def _run_scheduled_pipeline() -> None:

@@ -48,7 +48,10 @@ class UniverseFakeRepo(routes_helpers.FakeRepo):
         return list(self._securities)
 
     def snapshot_member_revisions(self, profile_hash, snapshot_month):
-        return tuple((security_id, f"revision-{security_id}") for security_id, *_ in self._securities)
+        return tuple(
+            (security_id, f"revision-{security_id}")
+            for security_id, *_ in self._securities
+        )
 
     def strategy_job(self, job_id):
         return SimpleNamespace(
@@ -381,10 +384,21 @@ def test_universe_selector_partial_reflects_explicit_whole_universe_true(
     assert "checked" in surrounding
 
 
-def test_configuration_submit_whole_universe_resolves_full_roster(
+def test_configuration_submit_whole_universe_expands_through_requested_period(
     universe_env,
 ) -> None:
     repo, launch = universe_env
+    monthly_members = {
+        "2024-01": (
+            ("sid_001", "revision-sid_001"),
+            ("sid_002", "revision-sid_002"),
+        ),
+        "2024-02": (
+            ("sid_002", "revision-sid_002"),
+            ("sid_003", "revision-sid_003"),
+        ),
+    }
+    repo.snapshot_member_revisions = lambda _profile_hash, month: monthly_members[month]
     response = client.post(
         "/strategy-manager/configuration",
         data={
@@ -410,6 +424,36 @@ def test_configuration_submit_whole_universe_resolves_full_roster(
         "sid_002",
         "sid_003",
     )
+
+
+def test_configuration_submit_whole_universe_omits_securities_first_seen_after_end(
+    universe_env,
+) -> None:
+    repo, launch = universe_env
+    repo.snapshot_member_revisions = lambda _profile_hash, month: (
+        ("sid_001", "revision-sid_001"),
+        ("sid_002", "revision-sid_002"),
+    )
+    response = client.post(
+        "/strategy-manager/configuration",
+        data={
+            "strategy_id": "alpha",
+            "profile_hash": PROFILE_HASH,
+            "activation_seq": "1",
+            "start_month": "2024-01",
+            "end_month": "2024-01",
+            "base_currency": "GBP",
+            "starting_capital": "10000",
+            "idempotency_key": "period-bounds",
+            "whole_universe": "true",
+        },
+        headers={"X-Auth-Token": "s3cret"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    command = launch.launch_calls[0]
+    assert command.universe_selection.canonical_security_ids == ("sid_001", "sid_002")
 
 
 def test_configuration_submit_whole_universe_excludes_unrunnable_members(
