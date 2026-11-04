@@ -283,7 +283,11 @@ class StrategyOutcomeService:
                         tuple[dict[str, object], ...], equity_payload["series"]
                     ):
                         if series["run_id"] in spy_ids:
-                            series = {**series, "label": "SPY Buy and Hold"}
+                            series = {
+                                **series,
+                                "label": "SPY Buy and Hold",
+                                "is_benchmark": True,
+                            }
                         renamed.append(series)
                     equity_payload["series"] = tuple(renamed)
             except BacktestIntegrityError:

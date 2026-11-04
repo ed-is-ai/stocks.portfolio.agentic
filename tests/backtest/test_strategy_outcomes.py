@@ -205,6 +205,8 @@ def test_selects_largest_latest_comparable_cohort_and_newest_per_strategy(
     assert summary.equity_mode == "indexed"
     assert summary.equity_payload is not None
     assert summary.equity_payload["series"][0]["label"] == "SPY Buy and Hold"
+    assert summary.equity_payload["series"][0]["is_benchmark"] is True
+    assert "is_benchmark" not in summary.equity_payload["series"][1]
     assert len(summary.equity_payload["dates"]) == 3
     assert [row["date"] for row in summary.equity_payload["table_rows"]] == [
         "2025-01-31",
@@ -218,6 +220,10 @@ def test_selects_largest_latest_comparable_cohort_and_newest_per_strategy(
     assert 'id="strategy-outcome-equity-chart"' in rendered
     assert "View monthly stored portfolio values and indexed growth" in rendered
     assert "SPY Buy and Hold" in rendered
+    assert "Strategies vs SPY" in rendered
+    assert 'id="strategy-outcome-drawdown-chart"' in rendered
+    assert 'id="strategy-outcome-start"' in rendered
+    assert 'id="strategy-outcome-end"' in rendered
     assert "2025-01" in rendered and "2025-02" in rendered
 
 
