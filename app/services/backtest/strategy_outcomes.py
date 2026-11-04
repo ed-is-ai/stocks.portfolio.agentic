@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 import logging
+import sqlite3
 from typing import Literal, cast
 from urllib.parse import quote
 
@@ -26,14 +28,33 @@ from app.services.backtest.backtest_engine import (
     ExitFillEventV1,
     TerminalSettlementEventV1,
 )
+from app.services.backtest.benchmark_series import (
+    BAD_EVIDENCE_NOTE,
+    NO_PIN_NOTE,
+    BenchmarkUnavailable,
+    EvidenceReader,
+    spy_total_return_series,
+)
 from app.services.backtest.result_presenter import (
     backtest_metrics_view,
     build_universe_view,
-    multi_comparison_equity_payload,
+    equity_lines_payload,
     provenance_view,
 )
+from app.services.backtest.run_input_manifest import read_run_input_manifest
 
 logger = logging.getLogger(__name__)
+
+BENCHMARK_LABEL = "SPY (benchmark)"
+MISMATCHED_PIN_NOTE = "The charted runs pin different SPY evidence."
+MISMATCHED_FX_NOTE = "The charted runs pin different GBP/USD rates."
+NO_USD_SECURITIES_NOTE = (
+    "This run holds no USD securities, so it pinned no GBP/USD rates."
+)
+AMBIGUOUS_FX_NOTE = "The run's GBP/USD rates are ambiguous."
+NO_SPY_REFERENCE_LIMITATION = (
+    "No pinned SPY reference is present in the selected outcome summary."
+)
 
 
 @dataclass(frozen=True)
@@ -50,8 +71,11 @@ class OutcomeSelectionV1:
 class StrategyOutcomeService:
     """Select a latest comparable cohort without changing comparison rules."""
 
-    def __init__(self, repository: BacktestRepository):
+    def __init__(
+        self, repository: BacktestRepository, prices: EvidenceReader | None = None
+    ):
         self._repository = repository
+        self._prices = prices
 
     def build_summary(self) -> StrategyOutcomeSummaryV1:
         try:
@@ -254,9 +278,24 @@ class StrategyOutcomeService:
         selected_spy_handle = next(
             (handles[run_id] for run_id in spy_ids if run_id in handles), None
         )
+        charted: tuple[BacktestResultV1, ...] = ()
         if selection.state == "cohort" and len(display_results) >= 2:
+            charted = display_results
+        elif selection.state == "individual" and display_results:
+            charted = (
+                min(
+                    display_results,
+                    key=lambda item: (-item.completed_at.timestamp(), item.run_id),
+                ),
+            )
+        benchmark, benchmark_note = (
+            (None, None) if spy_ids or not charted else self._benchmark(charted)
+        )
+        if selection.state == "individual" and benchmark is None:
+            charted = ()
+        if charted:
             try:
-                equity_payload = multi_comparison_equity_payload(display_results)
+                equity_payload = equity_lines_payload(charted, benchmark)
                 dates = cast(tuple[str, ...], equity_payload["dates"])
                 all_rows = cast(
                     tuple[dict[str, object], ...], equity_payload["table_rows"]
@@ -273,9 +312,7 @@ class StrategyOutcomeService:
                         if index in month_end_indexes
                     ),
                 }
-                starting_capital = {
-                    result.starting_capital for result in display_results
-                }
+                starting_capital = {result.starting_capital for result in charted}
                 equity_mode = "indexed" if len(starting_capital) > 1 else "currency"
                 if selected_spy_handle is not None:
                     renamed = []
@@ -283,7 +320,11 @@ class StrategyOutcomeService:
                         tuple[dict[str, object], ...], equity_payload["series"]
                     ):
                         if series["run_id"] in spy_ids:
-                            series = {**series, "label": "SPY Buy and Hold"}
+                            series = {
+                                **series,
+                                "label": "SPY Buy and Hold",
+                                "is_benchmark": True,
+                            }
                         renamed.append(series)
                     equity_payload["series"] = tuple(renamed)
             except BacktestIntegrityError:
@@ -292,6 +333,16 @@ class StrategyOutcomeService:
                 )
                 equity_payload = None
 
+        if equity_payload is not None and benchmark is not None:
+            cohort = cohort.model_copy(
+                update={
+                    "limitations": tuple(
+                        item
+                        for item in cohort.limitations
+                        if item != NO_SPY_REFERENCE_LIMITATION
+                    )
+                }
+            )
         return StrategyOutcomeSummaryV1(
             state=selection.state,
             inspected_count=page.inspected_count,
@@ -311,7 +362,60 @@ class StrategyOutcomeService:
             equity_mode=equity_mode,
             curve_error=curve_error,
             selected_spy_handle=selected_spy_handle,
+            benchmark_note=benchmark_note,
         )
+
+    def _benchmark(
+        self, charted: tuple[BacktestResultV1, ...]
+    ) -> tuple[tuple[str, tuple[Decimal, ...]] | None, str | None]:
+        """Return the SPY line for ``charted`` (as equity in the first run's
+        terms) or the note explaining why it is omitted."""
+        if self._prices is None:
+            return None, None
+        pins = [result.regime_benchmark for result in charted]
+        if any(pin is None for pin in pins):
+            return None, NO_PIN_NOTE
+        if len({pin.evidence_digest for pin in pins if pin is not None}) > 1:
+            return None, MISMATCHED_PIN_NOTE
+        try:
+            fx_pins = [self._fx_revision(result) for result in charted]
+        except (BacktestIntegrityError, ValueError, OSError, sqlite3.Error):
+            logger.warning("Run FX pin could not be read", exc_info=True)
+            return None, BAD_EVIDENCE_NOTE
+        note = next((note for _revision, note in fx_pins if note), None)
+        if note is not None:
+            return None, note
+        if len({revision for revision, _note in fx_pins}) > 1:
+            return None, MISMATCHED_FX_NOTE
+        lead = charted[0]
+        sessions = tuple(point.session for point in lead.equity_curve)
+        outcome = spy_total_return_series(lead, sessions, self._prices, fx_pins[0][0])
+        if isinstance(outcome, BenchmarkUnavailable):
+            return None, outcome.note
+        start = lead.equity_curve[0].total_equity_base
+        first = outcome.values[0]
+        return (
+            BENCHMARK_LABEL,
+            tuple(start * value / first for value in outcome.values),
+        ), None
+
+    def _fx_revision(self, result: BacktestResultV1) -> tuple[str | None, str | None]:
+        """Return ``(fx_revision, note)``: the GBP run's single pinned GBP/USD
+        revision, or the note saying why there is none. USD runs need none."""
+        if result.base_currency != "GBP":
+            return None, None
+        raw = self._repository.run_input_manifest_json(result.run_input_manifest_digest)
+        if raw is None:
+            return None, BAD_EVIDENCE_NOTE
+        manifest = read_run_input_manifest(raw)
+        revisions = {
+            item.fx_revision for item in manifest.securities if item.fx_revision
+        }
+        if not revisions:
+            return None, NO_USD_SECURITIES_NOTE
+        if len(revisions) > 1:
+            return None, AMBIGUOUS_FX_NOTE
+        return revisions.pop(), None
 
     def _select(self, results: tuple[BacktestResultV1, ...]) -> OutcomeSelectionV1:
         if not results:
@@ -503,9 +607,7 @@ class StrategyOutcomeService:
                 "Tested parameter settings differ, so comparisons do not isolate one parameter change."
             )
         if not any(row.is_spy_reference for row in rows):
-            limitations.append(
-                "No pinned SPY reference is present in the selected outcome summary."
-            )
+            limitations.append(NO_SPY_REFERENCE_LIMITATION)
         if selection.state != "cohort":
             limitations.append(
                 "No multi-Strategy comparable cohort was selected; do not rank independent outcomes."

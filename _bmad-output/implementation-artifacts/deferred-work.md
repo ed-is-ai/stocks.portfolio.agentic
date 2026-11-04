@@ -745,6 +745,15 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-117-ucits-etf-reference-universe.md`
   summary: Launch pin resolution uses only the newest covering revision; a newer gappy re-acquire hides an older complete one.
   evidence: `HistoricalPriceRepository.covering_revision` returns one row ordered by `first_acquired_at DESC`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-126-spy-benchmark-line.md`
+  summary: GBP runs whose universe holds no USD securities pin no GBP/USD rates, so they can never show the SPY benchmark line.
+  evidence: `run_input_manifest.py:684` sets `fx_revision` only for securities needing conversion; gh-126 shows a note instead of borrowing an FX series pinned elsewhere.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-126-spy-benchmark-line.md`
+  summary: A run whose first session is an XLON-only day before the first pinned SPY close gets no benchmark at all instead of starting the line at the next SPY close.
+  evidence: `benchmark_series._aligned` never backfills (frozen gh-126 rule), so an index-less first session makes the whole series unavailable.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-126-spy-benchmark-line.md`
+  summary: Unpinned v1/v2 results (24 of 115) never show the SPY line; resolving stored SPY evidence for them via `BenchmarkEvidenceService.resolve_existing` was left as Ask First.
+  evidence: Only v3 manifests carry `regime_benchmark`; `resolve_existing` also needs an exact warm-up window (see #127).
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-127-regime-pin-launch.md`
   summary: Share one minimum-session constant between launch (`benchmark_evidence.WORKER_MIN_BENCHMARK_SESSIONS`) and the worker's hard-coded `len(sessions) >= 200` check.
   evidence: gh-127 mirrors the worker's 200 by comment only (`worker.py:1469`); the spec forbade touching the worker pin checks.
