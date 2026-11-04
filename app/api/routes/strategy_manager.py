@@ -29,6 +29,7 @@ from app.api.dependencies import (
     get_backtest_launch_service,
     get_backtest_repository,
     get_bootstrap_service,
+    get_read_only_historical_price_repository,
     get_readiness_service,
     get_strategy_job_service,
     get_strategy_experiment_service,
@@ -46,6 +47,7 @@ from app.repositories.backtest_repo import (
     ComparisonEligibilityV1,
     tuning_parameters,
 )
+from app.repositories.historical_price_repo import HistoricalPriceRepository
 from app.services.backtest.backtest_launch_service import (
     BacktestLaunchCommandV1,
     BacktestLaunchService,
@@ -128,6 +130,9 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 _MAX_COMPARISON_PEERS = 7
 BacktestDep = Annotated[BacktestRepository, Depends(get_backtest_repository)]
+PricesDep = Annotated[
+    HistoricalPriceRepository, Depends(get_read_only_historical_price_repository)
+]
 JobsDep = Annotated[StrategyJobService, Depends(get_strategy_job_service)]
 LaunchDep = Annotated[BacktestLaunchService, Depends(get_backtest_launch_service)]
 StrategyManagerDep = Annotated[
@@ -451,6 +456,7 @@ def _initialization_context(
 def _strategy_manager_context(
     repo: BacktestRepository,
     *,
+    prices: HistoricalPriceRepository,
     experiments: StrategyExperimentService,
     setup_required: bool,
     ready_count: int,
@@ -476,7 +482,7 @@ def _strategy_manager_context(
         profile_context = _profile_context(repo, active=active)
     active_profile_configured = active is not None
     try:
-        outcome_summary = StrategyOutcomeService(repo).build_summary()
+        outcome_summary = StrategyOutcomeService(repo, prices).build_summary()
     except Exception:  # noqa: BLE001
         logger.warning("Strategy outcome summary unavailable", exc_info=True)
         outcome_summary = None
@@ -573,6 +579,7 @@ def _form_error_status(request: Request) -> int:
 async def strategy_manager(
     request: Request,
     backtest: BacktestDep,
+    prices: PricesDep,
     experiments: ExperimentDep,
     readiness: ReadinessDep,
     bootstrap: BootstrapDep,
@@ -636,6 +643,7 @@ async def strategy_manager(
             activated_at = None
     context = _strategy_manager_context(
         backtest,
+        prices=prices,
         experiments=experiments,
         setup_required=setup_required,
         ready_count=ready_count,

@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.services.backtest.backtest_engine import (
     ExitFillEventV1,
 )
 from app.services.backtest.result_presenter import (
+    equity_lines_payload,
     multi_comparison_equity_payload,
     performance_summary_view,
 )
@@ -154,3 +156,32 @@ def test_multi_comparison_fails_closed_when_equity_cannot_be_displayed() -> None
         BacktestIntegrityError, match="cannot be represented for display"
     ):
         multi_comparison_equity_payload((left, right))  # type: ignore[arg-type]
+
+
+def test_multi_comparison_keeps_its_two_result_guard() -> None:
+    single = _result(
+        "run-1",
+        (_point(1, equity="10000", cash="10000", positions="0", sequence=1),),
+    )
+
+    with pytest.raises(ValueError, match="at least two"):
+        multi_comparison_equity_payload((single,))  # type: ignore[arg-type]
+
+
+def test_single_result_with_benchmark_line_keeps_table_rectangular() -> None:
+    curve = (
+        _point(1, equity="10000", cash="10000", positions="0", sequence=1),
+        _point(2, equity="11000", cash="11000", positions="0", sequence=2),
+    )
+
+    payload: Any = equity_lines_payload(
+        (_result("run-1", curve),),  # type: ignore[arg-type]
+        ("SPY (benchmark)", (Decimal("10000"), Decimal("9000"))),
+    )
+
+    benchmark = payload["series"][1]
+    assert benchmark["is_benchmark"] is True
+    assert benchmark["label"] == "SPY (benchmark)"
+    assert benchmark["values"] == (100.0, 90.0)
+    assert payload["table_rows"][1]["equities"] == ("11,000.00", "9,000.00")
+    assert payload["table_rows"][1]["drawdowns"] == ("0.00%", "-10.00%")

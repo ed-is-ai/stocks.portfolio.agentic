@@ -66,10 +66,13 @@
   {% endif %}
 
   {% if outcome_summary.curve_error %}<div class="sm-alert sm-alert-warning" role="status">The stored equity curves could not be aligned: {{ outcome_summary.curve_error }}</div>{% endif %}
+  {% if outcome_summary.benchmark_note and not outcome_summary.curve_error %}<p class="small text-muted" id="strategy-outcome-benchmark-note" role="status">SPY benchmark not shown: {{ outcome_summary.benchmark_note }}</p>{% endif %}
   {% if outcome_summary.equity_payload %}
-  {% set has_spy = outcome_summary.selected_spy_handle is not none %}
+  {% set charted_run = outcome_summary.runs|selectattr('run_id', 'equalto', outcome_summary.equity_payload.series[0].run_id)|first %}
+  {% set chart_currency = outcome_summary.cohort.base_currency or (charted_run.base_currency if charted_run else '') %}
+  {% set has_spy = outcome_summary.selected_spy_handle is not none or outcome_summary.equity_payload.series|selectattr('is_benchmark')|list|length > 0 %}
   <h3 class="h5">{% if has_spy %}Strategies vs SPY{% else %}Portfolio value over time{% endif %}</h3>
-  <p class="small text-muted">The curves use stored daily portfolio values from the shared period, rebased to the start year you pick. {% if outcome_summary.equity_mode == 'indexed' %}Values are indexed to 100 because starting capital differs; this changes display only.{% else %}Values are shown in {{ outcome_summary.cohort.base_currency }}.{% endif %}{% if has_spy %} The benchmark is the pinned SPY Buy and Hold Result.{% endif %}</p>
+  <p class="small text-muted">The curves use stored daily portfolio values from the shared period, rebased to the start year you pick. {% if outcome_summary.equity_mode == 'indexed' %}Values are indexed to 100 because starting capital differs; this changes display only.{% else %}Values are shown in {{ chart_currency }}.{% endif %}{% if outcome_summary.selected_spy_handle is not none %} The benchmark is the pinned SPY Buy and Hold Result.{% elif has_spy %} The benchmark is SPY total return (dividends reinvested) from the price evidence pinned to the run{% if chart_currency == 'GBP' %}, converted at the run's pinned GBP/USD rates{% endif %}.{% endif %}</p>
   <div class="d-flex flex-wrap gap-3 align-items-end mb-2">
     <div style="min-width:min(100%,22rem);flex:1 1 22rem"><label for="strategy-outcome-start" class="form-label small mb-0">Period: <strong id="strategy-outcome-range-label"></strong></label>
       <div class="d-flex flex-column gap-1"><input type="range" class="form-range" id="strategy-outcome-start" min="0" max="0" step="1" value="0" disabled aria-label="Period start"><input type="range" class="form-range" id="strategy-outcome-end" min="0" max="0" step="1" value="0" disabled aria-label="Period end"></div></div>
@@ -93,7 +96,7 @@
     <div class="tbl-wrap mt-2" style="overflow-x:auto" tabindex="0" role="region" aria-label="Monthly stored portfolio valuations and indexed growth for each Strategy">
       <table class="table table-hover align-middle mono-num">
         <caption class="visually-hidden">Monthly last-session stored portfolio valuations and display-only indexed growth for verified comparable Backtest Results</caption>
-        <thead><tr><th scope="col">Month</th>{% for series in outcome_summary.equity_payload.series %}<th scope="col">{{ series.label }} · {{ outcome_summary.cohort.base_currency }}</th><th scope="col">Indexed growth</th>{% endfor %}</tr></thead>
+        <thead><tr><th scope="col">Month</th>{% for series in outcome_summary.equity_payload.series %}<th scope="col">{{ series.label }} · {{ chart_currency }}</th><th scope="col">Indexed growth</th>{% endfor %}</tr></thead>
         <tbody>
           {% for point in outcome_summary.equity_payload.table_rows %}
           <tr><th scope="row">{{ point.date[:7] }}</th>{% for series in outcome_summary.equity_payload.series %}<td>{{ point.equities[loop.index0] }}</td><td>{{ point.values[loop.index0] }}</td>{% endfor %}</tr>
@@ -105,7 +108,7 @@
   <script>
   (function () {
     var payload = {{ outcome_summary.equity_payload|tojson }};
-    var currency = {{ outcome_summary.cohort.base_currency|tojson }};
+    var currency = {{ chart_currency|tojson }};
     var currencyMode = {{ (outcome_summary.equity_mode == 'currency')|tojson }};
     var canvas = document.getElementById('strategy-outcome-equity-chart');
     var ddCanvas = document.getElementById('strategy-outcome-drawdown-chart');

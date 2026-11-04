@@ -3,11 +3,28 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import Any, cast
 
-from app.repositories.backtest_repo import RecentBacktestResultsV1
+from markupsafe import escape
+import pytest
+
+from app.repositories.backtest_repo import BacktestRepository, RecentBacktestResultsV1
 from app.api.templating import templates
 from app.services.backtest.metrics import MetricUnavailableReason
-from app.services.backtest.strategy_outcomes import StrategyOutcomeService
+from app.services.backtest.benchmark_series import (
+    BAD_EVIDENCE_NOTE,
+    NO_PIN_NOTE,
+    EvidenceReader,
+)
+from app.services.backtest.strategy_outcomes import (
+    AMBIGUOUS_FX_NOTE,
+    MISMATCHED_FX_NOTE,
+    MISMATCHED_PIN_NOTE,
+    NO_SPY_REFERENCE_LIMITATION,
+    NO_USD_SECURITIES_NOTE,
+    StrategyOutcomeService,
+)
+from tests.backtest.benchmark_fakes import FakePrices, fx_evidence, spy_evidence
 
 
 class _Repo:
@@ -85,6 +102,8 @@ def _result(
     starting_capital: str = "10000",
     security_ids: tuple[str, ...] = ("spy-security",),
     sharpe: float | None = 1.2,
+    base_currency: str = "USD",
+    pin_digest: str | None = None,
 ):
     sessions = (
         date(2025, 1, 2),
@@ -99,8 +118,18 @@ def _result(
         completed_at=completed_at,
         start_month="2025-01",
         end_month="2025-02",
-        base_currency="USD",
+        base_currency=base_currency,
         starting_capital=Decimal(starting_capital),
+        run_input_manifest_digest=f"manifest-{run_id}",
+        regime_benchmark=(
+            None
+            if pin_digest is None
+            else SimpleNamespace(
+                security_id="spy-security",
+                price_revision="spy",
+                evidence_digest=pin_digest,
+            )
+        ),
         profile_hash="pinned-profile",
         parameters={"lookback": 20, "selected_tickers": ["spy-security"]},
         universe_selection=SimpleNamespace(
@@ -368,3 +397,209 @@ def test_pinned_spy_is_not_relabelled_when_universe_is_not_exact_spy(monkeypatch
         series["label"] != "SPY Buy and Hold"
         for series in summary.equity_payload["series"]
     )
+
+
+def _service(repo, prices) -> StrategyOutcomeService:
+    return StrategyOutcomeService(
+        cast(BacktestRepository, repo), cast(EvidenceReader, prices)
+    )
+
+
+def _payload(summary) -> Any:
+    assert summary.equity_payload is not None
+    return summary.equity_payload
+
+
+def _benchmark_prices() -> FakePrices:
+    closes = (date(2025, 1, 2), date(2025, 1, 31), date(2025, 2, 28))
+    return FakePrices(
+        spy=spy_evidence(
+            [(session, close, 0.0) for session, close in zip(closes, (125, 150, 175))],
+            end="2025-03-31",
+        ),
+        fx=fx_evidence([(date(2025, 1, 2), 1.25)]),
+    )
+
+
+def _install_manifest_fx(monkeypatch, repo, revisions=("fx",), per_run=None):
+    """Fake each run's manifest: its securities carry ``revisions`` (or the
+    run's own entry in ``per_run``) as their ``fx_revision``."""
+    import app.services.backtest.strategy_outcomes as outcomes
+
+    by_run = per_run or {}
+    repo.run_input_manifest_json = lambda digest: digest.removeprefix("manifest-")
+    monkeypatch.setattr(
+        outcomes,
+        "read_run_input_manifest",
+        lambda run_id: SimpleNamespace(
+            securities=tuple(
+                SimpleNamespace(fx_revision=revision)
+                for revision in by_run.get(run_id, revisions)
+            )
+        ),
+    )
+
+
+def _render(summary):
+    return templates.get_template("_strategy_outcome_summary.html").render(
+        outcome_summary=summary, pending_experiment_detail=None
+    )
+
+
+def _pinned_cohort(base_currency="GBP", digests=("pin", "pin")):
+    completed = datetime(2025, 3, 1, tzinfo=timezone.utc)
+    return _Repo(
+        tuple(
+            _result(
+                f"{strategy}-run",
+                strategy,
+                "a",
+                completed,
+                base_currency=base_currency,
+                pin_digest=digest,
+            )
+            for strategy, digest in zip(("trend", "weinstein"), digests)
+        )
+    )
+
+
+def test_pinned_gbp_cohort_appends_spy_total_return_benchmark(monkeypatch):
+    _install_presenter_fakes(monkeypatch)
+    repo = _pinned_cohort()
+    _install_manifest_fx(monkeypatch, repo)
+
+    summary = _service(repo, _benchmark_prices()).build_summary()
+
+    assert summary.state == "cohort"
+    assert summary.benchmark_note is None
+    spy = _payload(summary)["series"][-1]
+    assert spy["run_id"] is None
+    assert spy["label"] == "SPY (benchmark)"
+    assert spy["is_benchmark"] is True
+    assert spy["values"] == (100.0, 120.0, 140.0)
+    assert spy["equity_values"] == (10000.0, 12000.0, 14000.0)
+    assert all(len(row["equities"]) == 3 for row in _payload(summary)["table_rows"])
+    assert NO_SPY_REFERENCE_LIMITATION not in summary.cohort.limitations
+    rendered = _render(summary)
+    assert "Strategies vs SPY" in rendered
+    assert "pinned GBP/USD rates" in rendered
+    assert "SPY Buy and Hold Result" not in rendered
+
+
+def test_single_pinned_run_is_charted_with_spy(monkeypatch):
+    _install_presenter_fakes(monkeypatch)
+    older = _result(
+        "old-run", "weinstein", "a", datetime(2025, 2, 1, tzinfo=timezone.utc)
+    )
+    newest = _result(
+        "new-run",
+        "weinstein",
+        "a",
+        datetime(2025, 3, 1, tzinfo=timezone.utc),
+        pin_digest="pin",
+    )
+    repo = _Repo((older, newest))
+
+    summary = _service(repo, _benchmark_prices()).build_summary()
+
+    assert summary.state == "individual"
+    series = _payload(summary)["series"]
+    assert [item["run_id"] for item in series] == ["new-run", None]
+    assert series[1]["equity_values"] == (10000.0, 12000.0, 14000.0)
+    assert summary.equity_mode == "currency"
+    rendered = _render(summary)
+    assert "Strategies vs SPY" in rendered
+    assert "Values are shown in USD." in rendered
+
+
+def test_single_unpinned_run_has_no_chart_and_a_note(monkeypatch):
+    _install_presenter_fakes(monkeypatch)
+    completed = datetime(2025, 3, 1, tzinfo=timezone.utc)
+    repo = _Repo((_result("only-run", "weinstein", "a", completed),))
+
+    summary = _service(repo, _benchmark_prices()).build_summary()
+
+    assert summary.equity_payload is None
+    assert summary.benchmark_note == "No pinned SPY evidence for this run."
+    assert "No pinned SPY evidence for this run." in _render(summary)
+
+
+def test_default_constructor_gives_no_benchmark_and_no_note(monkeypatch):
+    _install_presenter_fakes(monkeypatch)
+    repo = _pinned_cohort()
+
+    summary = StrategyOutcomeService(cast(BacktestRepository, repo)).build_summary()
+
+    assert summary.benchmark_note is None
+    assert len(_payload(summary)["series"]) == 2
+    assert NO_SPY_REFERENCE_LIMITATION in summary.cohort.limitations
+
+
+@pytest.mark.parametrize(
+    ("digests", "revisions", "per_run", "empty_prices", "note"),
+    [
+        ((None, "pin"), ("fx",), None, False, NO_PIN_NOTE),
+        (("pin", "pin"), (None,), None, False, NO_USD_SECURITIES_NOTE),
+        (("pin", "pin"), ("fx", "fx-2"), None, False, AMBIGUOUS_FX_NOTE),
+        (("pin", "other"), ("fx",), None, False, MISMATCHED_PIN_NOTE),
+        (
+            ("pin", "pin"),
+            ("fx",),
+            {"weinstein-run": ("fx-2",)},
+            False,
+            MISMATCHED_FX_NOTE,
+        ),
+        (("pin", "pin"), ("fx",), None, True, BAD_EVIDENCE_NOTE),
+    ],
+    ids=[
+        "unpinned",
+        "gbp-only-universe",
+        "ambiguous-fx",
+        "mismatched-pins",
+        "mismatched-fx",
+        "bad-evidence",
+    ],
+)
+def test_benchmark_failure_keeps_runs_and_sets_note(
+    monkeypatch, digests, revisions, per_run, empty_prices, note
+):
+    _install_presenter_fakes(monkeypatch)
+    repo = _pinned_cohort(digests=digests)
+    _install_manifest_fx(monkeypatch, repo, revisions, per_run)
+    prices = FakePrices() if empty_prices else _benchmark_prices()
+
+    summary = _service(repo, prices).build_summary()
+
+    assert summary.benchmark_note == note
+    assert len(_payload(summary)["series"]) == 2
+    assert not any(item.get("is_benchmark") for item in _payload(summary)["series"])
+    assert NO_SPY_REFERENCE_LIMITATION in summary.cohort.limitations
+    rendered = _render(summary)
+    assert str(escape(note)) in rendered
+    assert "Strategies vs SPY" not in rendered
+    with_curve_error = summary.model_copy(update={"curve_error": "Broken curves."})
+    assert str(escape(note)) not in _render(with_curve_error)
+
+
+def test_existing_spy_buy_and_hold_run_suppresses_pinned_benchmark(monkeypatch):
+    _install_presenter_fakes(monkeypatch)
+    completed = datetime(2025, 3, 1, tzinfo=timezone.utc)
+    repo = _Repo(
+        (
+            _result(
+                "buy-run",
+                "rtly-backtest-buy-and-hold",
+                "a",
+                completed,
+                pin_digest="pin",
+            ),
+            _result("wein-run", "weinstein", "a", completed, pin_digest="pin"),
+        )
+    )
+
+    summary = _service(repo, _benchmark_prices()).build_summary()
+
+    labels = [item["label"] for item in _payload(summary)["series"]]
+    assert labels[0] == "SPY Buy and Hold"
+    assert "SPY (benchmark)" not in labels
+    assert summary.benchmark_note is None
