@@ -90,3 +90,4 @@ class StrategyOutcomeSummaryV1(_OutcomeModel):
     equity_mode: Literal["currency", "indexed", "none"] = "none"
     curve_error: str | None = None
     selected_spy_handle: str | None = None
+    benchmark_note: str | None = None

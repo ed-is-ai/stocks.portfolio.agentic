@@ -20,6 +20,7 @@ from app.api.dependencies import (
     get_strategy_manager_insights_service,
     get_backtest_repository,
     get_bootstrap_service,
+    get_read_only_historical_price_repository,
     get_readiness_service,
     get_strategy_experiment_service,
     get_strategy_job_service,
@@ -452,11 +453,23 @@ class FakeJobs:
         return SimpleNamespace(job=SimpleNamespace(id="job-2"))
 
 
+class _NoPrices:
+    def get(self, data_revision):
+        raise LookupError(data_revision)
+
+
+NO_PRICES = _NoPrices()
+
+
 @pytest.fixture
 def services(monkeypatch):
     repo, jobs = FakeRepo(), FakeJobs()
     app.dependency_overrides[get_backtest_repository] = lambda: repo
     app.dependency_overrides[get_strategy_job_service] = lambda: jobs
+    # gh-126: never read the real historical price cache from route tests.
+    app.dependency_overrides[get_read_only_historical_price_repository] = lambda: (
+        NO_PRICES
+    )
     # gh-396: the landing now also reads readiness + bootstrap; the real
     # providers are @lru_cache'd against the real repo, so override both
     # with fakes built on this test's FakeRepo.
@@ -485,6 +498,21 @@ def services(monkeypatch):
         yield repo, jobs
     finally:
         app.dependency_overrides.clear()
+
+
+def test_landing_passes_read_only_prices_to_outcome_summary(services, monkeypatch):
+    seen = []
+
+    def fake_service(repo, prices=None):
+        seen.append(prices)
+        return SimpleNamespace(build_summary=lambda: None)
+
+    monkeypatch.setattr(strategy_manager_routes, "StrategyOutcomeService", fake_service)
+
+    response = client.get("/strategy-manager")
+
+    assert response.status_code == 200
+    assert seen == [NO_PRICES]
 
 
 def test_landing_get_never_resolves_the_model_service(services):

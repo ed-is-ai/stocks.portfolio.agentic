@@ -677,21 +677,31 @@ def comparison_equity_payload(
 def multi_comparison_equity_payload(
     results: Sequence[BacktestResultV1],
 ) -> dict[str, object]:
-    """Build indexed equity and drawdown paths for a small compatible
-    result group. Every curve must share the exact ordered session axis;
-    no missing date is interpolated or silently reindexed. Equity is
-    indexed to 100 on each run's first session so different starting
-    capital does not distort the comparison."""
+    """Require at least two Results, then build their shared-axis payload
+    with :func:`equity_lines_payload`."""
     if len(results) < 2:
         raise ValueError("a multi-result comparison needs at least two Results")
+    return equity_lines_payload(results)
+
+
+def equity_lines_payload(
+    results: Sequence[BacktestResultV1],
+    benchmark: tuple[str, Sequence[Decimal]] | None = None,
+) -> dict[str, object]:
+    """Build indexed equity and drawdown paths for Results sharing one
+    session axis, optionally appending a benchmark line given as
+    ``(label, equity per session)`` with ``run_id`` ``None`` and
+    ``is_benchmark``. Every curve must share the exact ordered session axis;
+    no missing date is interpolated or silently reindexed. Equity is indexed
+    to 100 on each line's first session so different starting capital does
+    not distort the comparison."""
+    if not results:
+        raise ValueError("an equity payload needs at least one Result")
     sessions = tuple(point.session for point in results[0].equity_curve)
     if not sessions:
         raise BacktestIntegrityError("comparison equity curve is empty")
 
-    series: list[dict[str, object]] = []
-    display_columns: list[tuple[str, ...]] = []
-    equity_columns: list[tuple[str, ...]] = []
-    drawdown_columns: list[tuple[str, ...]] = []
+    lines: list[tuple[dict[str, object], Sequence[Decimal]]] = []
     for result in results:
         result_sessions = tuple(point.session for point in result.equity_curve)
         if result_sessions != sessions:
@@ -699,72 +709,37 @@ def multi_comparison_equity_payload(
                 "comparison equity curves diverge: session dates do not match "
                 "between the selected Results"
             )
-        initial_equity = result.equity_curve[0].total_equity_base
-        if initial_equity <= 0:
-            raise BacktestIntegrityError(
-                "comparison equity curve has a non-positive starting value"
-            )
+        label = (
+            f"{result.strategy_id} v{result.strategy_api_version} ({result.run_id[:8]})"
+        )
+        equities = tuple(point.total_equity_base for point in result.equity_curve)
+        lines.append(({"run_id": result.run_id, "label": label}, equities))
+    if benchmark is not None:
+        label, equities = benchmark
+        if len(equities) != len(sessions):
+            raise BacktestIntegrityError("benchmark line does not match the sessions")
+        lines.append(({"run_id": None, "label": label, "is_benchmark": True}, equities))
 
-        values: list[float] = []
-        equity_values: list[float] = []
-        drawdowns: list[float] = []
-        value_displays: list[str] = []
-        equity_displays: list[str] = []
-        drawdown_displays: list[str] = []
-        peak = initial_equity
-        for point in result.equity_curve:
-            try:
-                indexed = (point.total_equity_base / initial_equity * 100).quantize(
-                    Decimal("0.01")
-                )
-                peak = max(peak, point.total_equity_base)
-                drawdown = ((point.total_equity_base / peak - 1) * 100).quantize(
-                    Decimal("0.01")
-                )
-                equity = point.total_equity_base.quantize(Decimal("0.01"))
-                indexed_value, equity_value, drawdown_value = map(
-                    float, (indexed, equity, drawdown)
-                )
-            except (DecimalException, OverflowError) as exc:
-                raise BacktestIntegrityError(
-                    "comparison equity values cannot be represented for display"
-                ) from exc
-            if not all(
-                math.isfinite(value)
-                for value in (indexed_value, equity_value, drawdown_value)
-            ):
-                raise BacktestIntegrityError(
-                    "comparison equity values exceed the display range"
-                )
-            values.append(indexed_value)
-            equity_values.append(equity_value)
-            drawdowns.append(drawdown_value)
-            value_displays.append(f"{indexed:,.2f}")
-            equity_displays.append(f"{equity:,.2f}")
-            drawdown_displays.append(f"{drawdown:,.2f}%")
-
+    series: list[dict[str, object]] = []
+    columns: list[tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = []
+    for identity, equities in lines:
+        values, equity_values, drawdowns, displays = _line_columns(equities)
         series.append(
             {
-                "run_id": result.run_id,
-                "label": (
-                    f"{result.strategy_id} v{result.strategy_api_version} "
-                    f"({result.run_id[:8]})"
-                ),
-                "values": tuple(values),
-                "equity_values": tuple(equity_values),
-                "drawdowns": tuple(drawdowns),
+                **identity,
+                "values": values,
+                "equity_values": equity_values,
+                "drawdowns": drawdowns,
             }
         )
-        display_columns.append(tuple(value_displays))
-        drawdown_columns.append(tuple(drawdown_displays))
-        equity_columns.append(tuple(equity_displays))
+        columns.append(displays)
 
     table_rows = tuple(
         {
             "date": session.isoformat(),
-            "values": tuple(column[index] for column in display_columns),
-            "equities": tuple(column[index] for column in equity_columns),
-            "drawdowns": tuple(column[index] for column in drawdown_columns),
+            "values": tuple(column[0][index] for column in columns),
+            "equities": tuple(column[1][index] for column in columns),
+            "drawdowns": tuple(column[2][index] for column in columns),
         }
         for index, session in enumerate(sessions)
     )
@@ -773,6 +748,61 @@ def multi_comparison_equity_payload(
         "series": tuple(series),
         "table_rows": table_rows,
     }
+
+
+def _line_columns(
+    equities: Sequence[Decimal],
+) -> tuple[
+    tuple[float, ...],
+    tuple[float, ...],
+    tuple[float, ...],
+    tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]],
+]:
+    """Index one equity path to 100, track drawdown, and format both."""
+    initial_equity = equities[0]
+    if initial_equity <= 0:
+        raise BacktestIntegrityError(
+            "comparison equity curve has a non-positive starting value"
+        )
+    values: list[float] = []
+    equity_values: list[float] = []
+    drawdowns: list[float] = []
+    value_displays: list[str] = []
+    equity_displays: list[str] = []
+    drawdown_displays: list[str] = []
+    peak = initial_equity
+    for total_equity in equities:
+        try:
+            indexed = (total_equity / initial_equity * 100).quantize(Decimal("0.01"))
+            peak = max(peak, total_equity)
+            drawdown = ((total_equity / peak - 1) * 100).quantize(Decimal("0.01"))
+            equity = total_equity.quantize(Decimal("0.01"))
+            indexed_value, equity_value, drawdown_value = map(
+                float, (indexed, equity, drawdown)
+            )
+        except (DecimalException, OverflowError) as exc:
+            raise BacktestIntegrityError(
+                "comparison equity values cannot be represented for display"
+            ) from exc
+        if not all(
+            math.isfinite(value)
+            for value in (indexed_value, equity_value, drawdown_value)
+        ):
+            raise BacktestIntegrityError(
+                "comparison equity values exceed the display range"
+            )
+        values.append(indexed_value)
+        equity_values.append(equity_value)
+        drawdowns.append(drawdown_value)
+        value_displays.append(f"{indexed:,.2f}")
+        equity_displays.append(f"{equity:,.2f}")
+        drawdown_displays.append(f"{drawdown:,.2f}%")
+    return (
+        tuple(values),
+        tuple(equity_values),
+        tuple(drawdowns),
+        (tuple(value_displays), tuple(equity_displays), tuple(drawdown_displays)),
+    )
 
 
 def _money(value: Decimal, currency: str) -> str:
