@@ -754,3 +754,12 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-126-spy-benchmark-line.md`
   summary: Unpinned v1/v2 results (24 of 115) never show the SPY line; resolving stored SPY evidence for them via `BenchmarkEvidenceService.resolve_existing` was left as Ask First.
   evidence: Only v3 manifests carry `regime_benchmark`; `resolve_existing` also needs an exact warm-up window (see #127).
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-127-regime-pin-launch.md`
+  summary: Share one minimum-session constant between launch (`benchmark_evidence.WORKER_MIN_BENCHMARK_SESSIONS`) and the worker's hard-coded `len(sessions) >= 200` check.
+  evidence: gh-127 mirrors the worker's 200 by comment only (`worker.py:1469`); the spec forbade touching the worker pin checks.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-127-regime-pin-launch.md`
+  summary: Readiness reports SPY coverage against the prepared-coverage end, while launch now requires an exact `_month_after(end_month)` end, so readiness can say ready for a launch that then finds no evidence.
+  evidence: `strategy_readiness_service.py:232-243` calls `resolve_existing` with its own end; gh-127 made the end match exact via `exact_end_revisions`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-127-regime-pin-launch.md`
+  summary: The plain (non-prepared) launch path cannot carry a regime pin; gh-127 rejects regime-filtered plain launches instead of supporting them.
+  evidence: `BacktestSubmissionV1` / `build_run_input_manifest` have no `regime_benchmark`; only the route builds commands and it always sets `universe_selection`.

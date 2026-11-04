@@ -47,6 +47,10 @@ from app.services.backtest.historical_price_evidence import (
     FX_SERIES_SECURITY_ID,
     FxSeriesFetcher,
 )
+from app.services.backtest.benchmark_evidence import (
+    BenchmarkEvidenceError,
+    BenchmarkEvidenceService,
+)
 from app.services.backtest.backtest_launch_service import (
     BacktestLaunchCommandV1,
     BacktestLaunchService,
@@ -56,6 +60,7 @@ from app.services.backtest.run_universe import run_universe_digest
 from app.services.backtest.strategy_job import (
     BacktestSubmissionV1,
     PreparationSubmissionV1,
+    RegimeBenchmarkPinV1,
     RunUniverseSelectionV1,
 )
 from app.services.backtest.strategy_job_service import StrategyJobService
@@ -72,6 +77,7 @@ FX_DIGEST: str = "e" * 64
 PRICE_REVISION: str = "1" * 64
 OTHER_REVISION: str = "2" * 64
 FX_SERIES_REVISION: str = "f" * 64
+SPY_REFERENCE: str = "spy-reference"
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +103,9 @@ class FakeBacktestRepo:
     stale_profile_hash: str | None = None
     stale_coverage_intervals: tuple[tuple[str, str], ...] = ()
     seen_coverage_profile_hashes: list[str | None] = field(default_factory=list)
+    reference_rows: tuple[tuple[str, str, str, str], ...] = (
+        (SPY_REFERENCE, "ARCX", "SPY", "s" * 64),
+    )
 
     def active_snapshot_profile(self):
         if self.active_profile_hash is None:
@@ -144,6 +153,9 @@ class FakeBacktestRepo:
 
     def roster_alias_revision(self, roster_digest: str):
         return ALIAS_DIGEST
+
+    def reference_identity_rows(self):
+        return self.reference_rows
 
 
 @dataclass
@@ -283,6 +295,39 @@ class StubFxSeriesFetcher:
         return SimpleNamespace(data_revision=self.revision)
 
 
+def _benchmark_pin() -> RegimeBenchmarkPinV1:
+    return RegimeBenchmarkPinV1(
+        security_id=SPY_REFERENCE,
+        identity_registry_revision="3" * 64,
+        alias_revision="4" * 64,
+        price_revision="5" * 64,
+        action_revision="5" * 64,
+        evidence_digest="5" * 64,
+        request_start=date(2025, 4, 1),
+        request_end=date(2026, 4, 1),
+        session_policy="canonical_exchange_sessions_v2",
+        calendar_mic="XNYS",
+        calendar_session_table_digest="6" * 64,
+        price_plane_policy_version="HistoricalMarketPlanesV1",
+    )
+
+
+@dataclass
+class FakeBenchmarkEvidence:
+    """Offline ``resolve_existing`` stand-in; ``pin=None`` models a resolver
+    that returns no pin, ``error`` a missing covering revision."""
+
+    pin: RegimeBenchmarkPinV1 | None = field(default_factory=_benchmark_pin)
+    error: BenchmarkEvidenceError | None = None
+    calls: list[tuple[str, int]] = field(default_factory=list)
+
+    def resolve_existing(self, security_id: str, *, start, end, ma_length: int):
+        self.calls.append((security_id, ma_length))
+        if self.error is not None:
+            raise self.error
+        return self.pin
+
+
 class FakeJobs:
     def __init__(self) -> None:
         self.submissions: list[BacktestSubmissionV1] = []
@@ -309,6 +354,7 @@ def _service(
     skills_root: Path = DISCOVERY_ROOT,
     fx_fetcher: StubFxFetcher | None = None,
     fx_series_fetcher: StubFxSeriesFetcher | None = None,
+    benchmark_evidence: FakeBenchmarkEvidence | None = None,
 ) -> tuple[BacktestLaunchService, FakeJobs]:
     jobs = jobs or FakeJobs()
     # Default to a definitively-missing stub so no test ever reaches the
@@ -327,6 +373,9 @@ def _service(
         project_root=PROJECT_ROOT,
         fx_fetcher=cast(ChainedFxQuoteFetcher, fetcher),
         fx_series_fetcher=cast(FxSeriesFetcher, series_fetcher),
+        benchmark_evidence=cast(
+            BenchmarkEvidenceService, benchmark_evidence or FakeBenchmarkEvidence()
+        ),
     )
     return service, jobs
 
@@ -649,6 +698,277 @@ def test_launch_accepts_host_bound_universe_for_preparation() -> None:
         "sec-aapl",
         "sec-msft",
     ]
+
+
+def _prepared_launch(
+    service: BacktestLaunchService,
+    *,
+    selected: tuple[str, ...] = ("sec-aapl",),
+    regime_benchmark: RegimeBenchmarkPinV1 | None = None,
+    **parameters: object,
+) -> None:
+    selection = RunUniverseSelectionV1(
+        profile_hash=PROFILE_HASH,
+        activation_seq=1,
+        universe_schema="strategy_universe.v1",
+        universe_mode="selected-securities",
+        universe_parameter="selected_securities",
+        canonical_security_ids=selected,
+        run_universe_digest=run_universe_digest(
+            selected,
+            universe_schema="strategy_universe.v1",
+            mode="selected-securities",
+            parameter="selected_securities",
+            profile_hash=PROFILE_HASH,
+        ),
+    )
+    service.launch(
+        _command(
+            idempotency_key="regime",
+            parameters={
+                "watch_security_id": "sec-aapl",
+                "selected_securities": list(selected),
+                **parameters,
+            },
+            universe_selection=selection,
+            regime_benchmark=regime_benchmark,
+        )
+    )
+
+
+def test_form_block_buy_binds_the_regime_pin() -> None:
+    """gh-127: the form's block-buy switch alone binds the SPY pin."""
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    _prepared_launch(service, block_buy_on_downtrend_enabled=True)
+
+    submission = jobs.preparation_submissions[0]
+    assert submission.regime_benchmark == _benchmark_pin()
+    assert submission.parameters["regime_filter_enabled"] is True
+    assert submission.parameters["regime_filter_benchmark_security_id"] == SPY_REFERENCE
+    assert evidence.calls == [(SPY_REFERENCE, 200)]
+
+
+def test_explicit_regime_off_contradicts_block_buy() -> None:
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        _prepared_launch(
+            service, regime_filter_enabled=False, block_buy_on_downtrend_enabled=True
+        )
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_enabled": (
+            "regime_filter_enabled=false contradicts "
+            "block_buy_on_downtrend_enabled=true."
+        )
+    }
+    assert evidence.calls == []
+    assert jobs.preparation_submissions == []
+
+
+def test_in_universe_benchmark_keeps_the_unpinned_path() -> None:
+    """gh-127 option 1: a benchmark in the trade universe binds no pin."""
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    _prepared_launch(
+        service,
+        block_buy_on_downtrend_enabled=True,
+        regime_filter_benchmark_security_id="sec-aapl",
+    )
+
+    submission = jobs.preparation_submissions[0]
+    assert submission.regime_benchmark is None
+    assert "regime_filter_enabled" not in submission.parameters
+    assert submission.parameters["regime_filter_benchmark_security_id"] == "sec-aapl"
+    assert evidence.calls == []
+
+
+def test_unknown_benchmark_is_a_field_error() -> None:
+    evidence = FakeBenchmarkEvidence(
+        error=BenchmarkEvidenceError("unknown reference identity")
+    )
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        _prepared_launch(
+            service,
+            block_buy_on_downtrend_enabled=True,
+            regime_filter_benchmark_security_id="sec-unknown",
+        )
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_benchmark_security_id": "unknown reference identity"
+    }
+    assert evidence.calls == [("sec-unknown", 200)]
+    assert jobs.preparation_submissions == []
+
+
+def test_non_default_ma_length_reaches_resolve_existing() -> None:
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    _prepared_launch(
+        service, block_buy_on_downtrend_enabled=True, regime_filter_ma_length=150
+    )
+
+    assert evidence.calls == [(SPY_REFERENCE, 150)]
+    assert jobs.preparation_submissions[0].regime_benchmark == _benchmark_pin()
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        (),
+        (
+            (SPY_REFERENCE, "ARCX", "SPY", "s" * 64),
+            ("spy-other", "ARCX", "SPY", "t" * 64),
+        ),
+    ],
+)
+def test_block_buy_needs_exactly_one_spy_reference(rows) -> None:
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(
+        backtest_repo=FakeBacktestRepo(reference_rows=rows),
+        benchmark_evidence=evidence,
+    )
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        _prepared_launch(service, block_buy_on_downtrend_enabled=True)
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_benchmark_security_id": (
+            "A single validated SPY benchmark reference is required."
+        )
+    }
+    assert evidence.calls == []
+    assert jobs.preparation_submissions == []
+
+
+PLAIN_REGIME_ERROR = (
+    "Regime-filtered launches need a prepared universe so the SPY pin can be carried."
+)
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"block_buy_on_downtrend_enabled": True},
+        {"regime_filter_enabled": True},
+    ],
+)
+def test_plain_launch_with_regime_gate_is_rejected(parameters) -> None:
+    """The plain path cannot carry a pin, so a gate-on launch is refused."""
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        service.launch(
+            _command(parameters={"watch_security_id": "sec-aapl", **parameters})
+        )
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_benchmark_security_id": PLAIN_REGIME_ERROR
+    }
+    assert evidence.calls == []
+    assert jobs.submissions == []
+
+
+def test_caller_supplied_matching_pin_is_carried_without_resolve() -> None:
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    _prepared_launch(
+        service, regime_benchmark=_benchmark_pin(), block_buy_on_downtrend_enabled=True
+    )
+
+    assert jobs.preparation_submissions[0].regime_benchmark == _benchmark_pin()
+    assert evidence.calls == []
+
+
+def test_caller_supplied_mismatched_pin_is_rejected() -> None:
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+    other = _benchmark_pin().model_copy(update={"security_id": "spy-other"})
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        _prepared_launch(
+            service, regime_benchmark=other, block_buy_on_downtrend_enabled=True
+        )
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_benchmark_security_id": (
+            "The selected benchmark does not match the validated SPY reference."
+        )
+    }
+    assert evidence.calls == []
+    assert jobs.preparation_submissions == []
+
+
+def test_auto_picked_spy_inside_the_universe_is_a_field_error() -> None:
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        _prepared_launch(
+            service,
+            selected=("sec-aapl", SPY_REFERENCE),
+            block_buy_on_downtrend_enabled=True,
+        )
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_benchmark_security_id": (
+            "The SPY reference must stay outside the trade universe."
+        )
+    }
+    assert evidence.calls == []
+    assert jobs.preparation_submissions == []
+
+
+def test_both_regime_flags_off_binds_no_pin() -> None:
+    evidence = FakeBenchmarkEvidence()
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    _prepared_launch(service, block_buy_on_downtrend_enabled=False)
+
+    submission = jobs.preparation_submissions[0]
+    assert submission.regime_benchmark is None
+    assert "regime_filter_enabled" not in submission.parameters
+    assert evidence.calls == []
+
+
+def test_block_buy_without_stored_evidence_is_rejected() -> None:
+    evidence = FakeBenchmarkEvidence(
+        error=BenchmarkEvidenceError("registered benchmark evidence is unavailable")
+    )
+    service, jobs = _service(benchmark_evidence=evidence)
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        _prepared_launch(service, block_buy_on_downtrend_enabled=True)
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_benchmark_security_id": (
+            "registered benchmark evidence is unavailable"
+        )
+    }
+    assert jobs.preparation_submissions == []
+
+
+def test_gate_on_launch_without_a_bound_pin_is_rejected() -> None:
+    service, jobs = _service(benchmark_evidence=FakeBenchmarkEvidence(pin=None))
+
+    with pytest.raises(BacktestLaunchValidationError) as exc_info:
+        _prepared_launch(service, block_buy_on_downtrend_enabled=True)
+
+    assert _field_errors(exc_info.value) == {
+        "param__regime_filter_benchmark_security_id": (
+            "The regime filter requires a bound SPY benchmark pin."
+        )
+    }
+    assert jobs.preparation_submissions == []
 
 
 # ---------------------------------------------------------------------------

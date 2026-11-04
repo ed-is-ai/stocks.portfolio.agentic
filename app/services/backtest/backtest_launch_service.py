@@ -138,6 +138,16 @@ _MAX_SUMMARIES = 3
 _FX_SERIES_WINDOW_BUFFER_DAYS = 7
 
 
+def _benchmark_in_universe(
+    benchmark: object, command: "BacktestLaunchCommandV1"
+) -> bool:
+    """Whether ``benchmark`` is a security in the prepared trade universe."""
+    selection = command.universe_selection
+    if selection is None or not isinstance(benchmark, str) or not benchmark:
+        return False
+    return benchmark in selection.canonical_security_ids
+
+
 def _month_start(month: str) -> date:
     """Return the first calendar day of a ``YYYY-MM`` month string."""
     return date.fromisoformat(f"{month}-01")
@@ -473,6 +483,28 @@ class BacktestLaunchService:
                     universe_parameter: bound_universe,
                 }
 
+        # gh-127: the form only sends ``block_buy_on_downtrend_enabled``; it
+        # switches the regime gate on, so it must bind the pin the same way.
+        # A benchmark inside the trade universe keeps the unpinned path.
+        if (
+            not isinstance(validated_parameters, tuple)
+            and validated_parameters.get("block_buy_on_downtrend_enabled") is True
+            and not _benchmark_in_universe(
+                validated_parameters.get("regime_filter_benchmark_security_id"),
+                command,
+            )
+        ):
+            if regime_filter_enabled is None:
+                regime_filter_enabled = True
+            elif regime_filter_enabled is False:
+                errors.append(
+                    LaunchFieldError(
+                        "param__regime_filter_enabled",
+                        "regime_filter_enabled=false contradicts "
+                        "block_buy_on_downtrend_enabled=true.",
+                    )
+                )
+
         if regime_filter_enabled is not None and not isinstance(
             validated_parameters, tuple
         ):
@@ -490,18 +522,32 @@ class BacktestLaunchService:
             )
 
         regime_benchmark = command.regime_benchmark
+        # True while the gate is on and no failure has been reported yet.
+        pin_required = False
         if (
             not isinstance(validated_parameters, tuple)
             and validated_parameters.get("regime_filter_enabled") is True
         ):
+            pin_required = True
             benchmark_id = validated_parameters.get("regime_filter_benchmark_security_id")
-            if not isinstance(benchmark_id, str) or not benchmark_id:
+            if command.universe_selection is None:
+                # Only a preparation submission carries the regime pin.
+                pin_required = False
+                errors.append(
+                    LaunchFieldError(
+                        "param__regime_filter_benchmark_security_id",
+                        "Regime-filtered launches need a prepared universe so the "
+                        "SPY pin can be carried.",
+                    )
+                )
+            if pin_required and (not isinstance(benchmark_id, str) or not benchmark_id):
                 references = [
                     security_id
                     for security_id, mic, symbol, _evidence in self._backtest_repo.reference_identity_rows()
                     if mic == "ARCX" and symbol == "SPY"
                 ]
                 if len(references) != 1:
+                    pin_required = False
                     errors.append(
                         LaunchFieldError(
                             "param__regime_filter_benchmark_security_id",
@@ -514,7 +560,16 @@ class BacktestLaunchService:
                         **validated_parameters,
                         "regime_filter_benchmark_security_id": benchmark_id,
                     }
-            if isinstance(benchmark_id, str) and benchmark_id:
+                    if _benchmark_in_universe(benchmark_id, command):
+                        pin_required = False
+                        errors.append(
+                            LaunchFieldError(
+                                "param__regime_filter_benchmark_security_id",
+                                "The SPY reference must stay outside the trade "
+                                "universe.",
+                            )
+                        )
+            if pin_required and isinstance(benchmark_id, str) and benchmark_id:
                 if regime_benchmark is None:
                     try:
                         regime_benchmark = self._benchmark_evidence.resolve_existing(
@@ -526,18 +581,28 @@ class BacktestLaunchService:
                             ),
                         )
                     except (BenchmarkEvidenceError, ValueError) as exc:
+                        pin_required = False
                         errors.append(
                             LaunchFieldError(
                                 "param__regime_filter_benchmark_security_id", str(exc)
                             )
                         )
                 elif regime_benchmark.security_id != benchmark_id:
+                    pin_required = False
                     errors.append(
                         LaunchFieldError(
                             "param__regime_filter_benchmark_security_id",
                             "The selected benchmark does not match the validated SPY reference.",
                         )
                     )
+        # A gate-on run without a pin fails closed and never trades.
+        if pin_required and regime_benchmark is None:
+            errors.append(
+                LaunchFieldError(
+                    "param__regime_filter_benchmark_security_id",
+                    "The regime filter requires a bound SPY benchmark pin.",
+                )
+            )
 
         if errors:
             raise BacktestLaunchValidationError(tuple(errors))
