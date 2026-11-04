@@ -685,3 +685,42 @@ def test_provider_check_migration_preserves_rows_and_widens_constraint(
         ).fetchone() == (2,)
     finally:
         conn.close()
+
+
+def _window_payload(start: date, end: date, close: float = 101.0):
+    request = HistoricalEvidenceRequest(
+        security_id="security-1",
+        alias_revision="alias-v1",
+        symbol="AAPL",
+        start=start,
+        end=end,
+        expected_currency="USD",
+        expected_quote_unit="USD",
+        expected_timezone="America/New_York",
+        expected_sessions=(date(2024, 1, 2),),
+        allowed_observed_symbols=("AAPL",),
+    )
+    return YFinanceHistoricalEvidenceAdapter(
+        lambda _: FakeTicker(close),
+        clock=lambda: datetime(2026, 8, 11, tzinfo=timezone.utc),
+    ).fetch(request)
+
+
+def test_exact_end_revisions_match_exact_end_latest_start_first(tmp_path) -> None:
+    """gh-127: a wider-end revision never shadows an exact-end one."""
+    repo = _repo(tmp_path)
+    early = _window_payload(date(2023, 12, 1), date(2024, 2, 1))
+    exact = _window_payload(date(2024, 1, 1), date(2024, 2, 1))
+    wider = _window_payload(date(2023, 12, 1), date(2024, 3, 1))
+    late = _window_payload(date(2024, 1, 2), date(2024, 2, 1))
+    for payload in (early, wider, late, exact):
+        repo.commit(payload)
+
+    revisions = repo.exact_end_revisions(
+        security_id="security-1",
+        requested_symbol="AAPL",
+        start="2024-01-01",
+        end="2024-02-01",
+    )
+
+    assert revisions == (exact.data_revision, early.data_revision)

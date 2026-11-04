@@ -1791,6 +1791,27 @@ class HistoricalPriceRepository:
             ).fetchone()
         return None if row is None else str(row[0])
 
+    def exact_end_revisions(
+        self, *, security_id: str, requested_symbol: str, start: str, end: str
+    ) -> tuple[str, ...]:
+        """Return every ``data_revision`` ending exactly at ``end`` and starting
+        on or before ``start``, in a deterministic order: latest start first,
+        then newest ``first_acquired_at``, then ``data_revision``.
+
+        Unlike :meth:`covering_revision`, a wider-end or newer revision can
+        never shadow an exact-end one (gh-127 regime benchmark pins).
+        """
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                """SELECT data_revision FROM historical_price_revisions
+                   WHERE security_id=? AND requested_symbol=?
+                     AND start_date<=? AND end_date=?
+                   ORDER BY start_date DESC, first_acquired_at DESC,
+                            data_revision""",
+                (security_id, requested_symbol, start, end),
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
     def get_unavailable_attempt(
         self,
         security_id: str,

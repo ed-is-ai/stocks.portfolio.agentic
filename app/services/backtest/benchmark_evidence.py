@@ -8,10 +8,15 @@ import math
 from typing import Callable
 
 from app.repositories.backtest_repo import (
+    BacktestIntegrityError,
     BacktestRepository,
     ReferenceIdentityRegistrationV1,
 )
-from app.repositories.historical_price_repo import HistoricalPriceRepository
+from app.repositories.historical_price_repo import (
+    EvidenceMissingError,
+    HistoricalEvidenceIntegrityError,
+    HistoricalPriceRepository,
+)
 from app.services.backtest.historical_price_evidence import (
     CANONICAL_EXCHANGE_SESSIONS_POLICY,
     HistoricalEvidencePayload,
@@ -22,6 +27,11 @@ from app.services.backtest.market_planes import PRICE_VOLUME_PLANE_VERSION
 from app.services.backtest.security_identity import AliasEntryV1, SecurityIdentityV1
 from app.services.backtest.strategy_job import RegimeBenchmarkPinV1
 from app.services.backtest.trading_calendar import TradingCalendar
+
+#: Minimum sessions ``worker._resolve_regime_benchmark`` requires of a pin.
+WORKER_MIN_BENCHMARK_SESSIONS = 200
+#: Most stored revisions ``resolve_existing`` verifies before giving up.
+MAX_BENCHMARK_CANDIDATES = 10
 
 
 class BenchmarkEvidenceError(ValueError):
@@ -188,12 +198,15 @@ class BenchmarkEvidenceService:
         """Build a pin from already-acquired reference evidence, offline."""
         if isinstance(ma_length, bool) or not isinstance(ma_length, int) or ma_length < 2:
             raise BenchmarkEvidenceError("benchmark moving-average length is invalid")
-        mic, symbol, _identity_evidence, identity_revision = (
-            self._backtest.reference_identity_details(security_id)
-        )
+        try:
+            mic, symbol, _identity_evidence, identity_revision = (
+                self._backtest.reference_identity_details(security_id)
+            )
+            alias_revision = self._backtest.reference_alias_revision(security_id)
+        except BacktestIntegrityError as exc:
+            raise BenchmarkEvidenceError(str(exc)) from exc
         if mic != "ARCX" or symbol != "SPY":
             raise BenchmarkEvidenceError("registered reference is not SPY on ARCX")
-        alias_revision = self._backtest.reference_alias_revision(security_id)
         decision_sessions = self._calendar.sessions_in_range("XNYS", start, end)
         if not decision_sessions:
             raise BenchmarkEvidenceError("benchmark interval has no decision sessions")
@@ -203,20 +216,84 @@ class BenchmarkEvidenceService:
         if len(prior) < ma_length:
             raise BenchmarkEvidenceError("benchmark history lacks SMA warm-up")
         request_start = prior[-ma_length]
-        revision = self._prices.covering_revision(
+        revisions = self._prices.exact_end_revisions(
             security_id=security_id,
             requested_symbol="SPY",
             start=request_start.isoformat(),
             end=end.isoformat(),
-        )
-        if revision is None:
+        )[:MAX_BENCHMARK_CANDIDATES]
+        if not revisions:
             raise BenchmarkEvidenceError("registered benchmark evidence is unavailable")
-        evidence = self._prices.verify(revision)
-        expected_sessions = self._calendar.sessions_in_range("XNYS", request_start, end)
+        failures: list[BenchmarkEvidenceError] = []
+        for revision in revisions:
+            try:
+                evidence_start = self._check_revision(
+                    revision,
+                    security_id=security_id,
+                    alias_revision=alias_revision,
+                    request_start=request_start,
+                    end=end,
+                    ma_length=ma_length,
+                )
+            except BenchmarkEvidenceError as exc:
+                failures.append(exc)
+                continue
+            return RegimeBenchmarkPinV1(
+                security_id=security_id,
+                identity_registry_revision=identity_revision,
+                alias_revision=alias_revision,
+                price_revision=revision,
+                action_revision=revision,
+                evidence_digest=revision,
+                request_start=evidence_start,
+                request_end=end,
+                session_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
+                calendar_mic="XNYS",
+                calendar_session_table_digest=self._calendar.session_table_digest(),
+                price_plane_policy_version=PRICE_VOLUME_PLANE_VERSION,
+            )
+        reasons = dict.fromkeys(str(failure) for failure in failures)
+        raise BenchmarkEvidenceError("; ".join(reasons))
+
+    def _check_revision(
+        self,
+        revision: str,
+        *,
+        security_id: str,
+        alias_revision: str,
+        request_start: date,
+        end: date,
+        ma_length: int,
+    ) -> date:
+        """Verify one stored revision for pinning; return its own start."""
+        try:
+            evidence = self._prices.verify(revision)
+            evidence_start = date.fromisoformat(evidence.start)
+        except (
+            EvidenceMissingError,
+            HistoricalEvidenceIntegrityError,
+            ValueError,
+        ) as exc:
+            raise BenchmarkEvidenceError(
+                "registered benchmark evidence is unreadable"
+            ) from exc
+        # Defensive: ``exact_end_revisions`` already filters on start, but the
+        # pin must satisfy the same window and session checks that
+        # ``worker._resolve_regime_benchmark`` and the preparation pin check
+        # (``backtest_repo.py`` ~4792) re-run against the revision's own start.
+        if evidence_start > request_start:
+            raise BenchmarkEvidenceError(
+                "registered benchmark evidence lacks SMA warm-up"
+            )
+        expected_sessions = self._calendar.sessions_in_range(
+            "XNYS", evidence_start, end
+        )
         observed_sessions = tuple(
             date.fromisoformat(str(row["session"])) for row in evidence.rows
         )
-        if observed_sessions != expected_sessions or len(observed_sessions) < ma_length:
+        if observed_sessions != expected_sessions or len(observed_sessions) < max(
+            ma_length, WORKER_MIN_BENCHMARK_SESSIONS
+        ):
             raise BenchmarkEvidenceError("registered benchmark evidence is incomplete")
         if (
             evidence.security_id != security_id
@@ -227,24 +304,10 @@ class BenchmarkEvidenceService:
             or evidence.currency != "USD"
             or evidence.quote_unit != "USD"
             or evidence.exchange_timezone != "America/New_York"
-            or evidence.start != request_start.isoformat()
             or evidence.end != end.isoformat()
         ):
             raise BenchmarkEvidenceError("registered benchmark evidence identity mismatch")
-        return RegimeBenchmarkPinV1(
-            security_id=security_id,
-            identity_registry_revision=identity_revision,
-            alias_revision=alias_revision,
-            price_revision=revision,
-            action_revision=revision,
-            evidence_digest=revision,
-            request_start=request_start,
-            request_end=end,
-            session_policy=CANONICAL_EXCHANGE_SESSIONS_POLICY,
-            calendar_mic="XNYS",
-            calendar_session_table_digest=self._calendar.session_table_digest(),
-            price_plane_policy_version=PRICE_VOLUME_PLANE_VERSION,
-        )
+        return evidence_start
 
     @staticmethod
     def _validate_payload(
