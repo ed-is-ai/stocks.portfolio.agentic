@@ -1,0 +1,113 @@
+---
+kind: backtest-strategy
+name: rtly-backtest-yau-weinstein
+display_name: Yau-Weinstein Refinement
+description: >
+  Backtest a deterministic long-only Weinstein Stage 2 breakout across the
+  Run's selected securities, ranking entries by Mansfield relative strength
+  against the pinned SPY reference, with the market-regime filter on at a
+  150-session average by default.
+api_version: 1
+common_parameter_defaults:
+  regime_filter_ma_length: 150
+  block_buy_on_downtrend_enabled: true
+runtime_files:
+  - scripts/strategy.py
+strategy_universe:
+  schema_version: strategy_universe.v1
+  mode: selected-securities
+  parameter: selected_securities
+parameters:
+  - name: breakout_lookback_sessions
+    type: integer
+    default: 50
+    description: Prior sessions used to establish the strict breakout high.
+    required: true
+    minimum: 2
+    maximum: 252
+  - name: minimum_relative_volume
+    type: number
+    default: 1.5
+    description: Inclusive current-volume multiple of the prior 50-session mean.
+    required: true
+    minimum: 0.0
+    maximum: 20.0
+  - name: maximum_loss_pct
+    type: number
+    default: 10.0
+    description: Inclusive loss threshold measured from average cost.
+    required: true
+    minimum: 0.0
+    maximum: 100.0
+  - name: enable_position_upgrade
+    type: boolean
+    default: false
+    description: >-
+      Sell the weakest held position (by percent above its 150-session SMA)
+      when a stronger unheld candidate clears the configured score margin.
+    required: true
+  - name: upgrade_score_margin_pct
+    type: number
+    default: 10.0
+    description: >-
+      Minimum percent-above-150-session-SMA edge the strongest unheld
+      candidate must hold over the weakest held position before an upgrade
+      exit fires.
+    required: true
+    minimum: 0.0
+    maximum: 1000.0
+---
+
+# Yau-Weinstein Refinement
+
+Use `scripts/strategy.py` through `StrategyProtocolV1`. The host binds the
+Run's canonical selected-security tuple to `selected_securities`; iterate it
+in that order and evaluate each selected security independently after the
+session close, accepting the engine's next-session-open fill convention.
+Require current bounded daily history and visible monthly scan evidence; emit
+nothing for a security whose evidence is missing, stale, or too short.
+
+Enter only when the visible scan and the dependency-neutral daily classifier
+both report Stage 2, the close strictly exceeds the prior configured high, and
+current volume meets the prior 50-session mean multiple. Exit the full
+position at the configured loss threshold, on a non-Stage-2 scan, or when the
+close falls below its current 150-session SMA.
+
+When more qualifying entries compete for slots, rank them by Mansfield
+relative strength against the pinned SPY reference, then current volume divided
+by the prior 50-session mean, then security ID ascending. Relative strength is
+`ratio_today / mean(ratio over the latest 252 sessions) - 1`, where `ratio` is
+the candidate's Run-currency close divided by the latest pinned SPY close (USD)
+on or before that session. Dividing by the ratio's own average, rather than
+subtracting SPY's return, is what makes the order differ from plain momentum:
+a constant offset cannot reorder candidates. Require exactly 252 bounded
+base-currency close rows per candidate (fewer is unavailable) and make one
+bounded read of 292 pinned SPY rows per session, the extra rows covering
+XNYS/XLON session differences. Missing relative-strength evidence (no pinned benchmark,
+short history, or a missing close) stays eligible, ranks after every valid
+reading, and is explained with its availability reason. The regime filter must
+be on, which is this Strategy's default, so the SPY reference is pinned. The
+candidate's GBP closes and SPY's USD closes share the GBP/USD move, which adds
+a little common noise; this is accepted.
+
+When `enable_position_upgrade` is true and all configured position slots are
+occupied after mechanical exits, also sell the weakest held position (lowest
+percent above its own 150-session SMA) when the strongest unheld candidate's
+percent-above-SMA reading exceeds the weakest holding's by at least
+`upgrade_score_margin_pct` points. This mirrors Weinstein's own
+practice of rotating capital toward leadership during a Stage 2 advance; it
+never overrides the mechanical exits above and never buys anything itself --
+the freed cash is picked up by the ordinary entry path on a later qualifying
+session.
+
+Suggest a stop (`stop_level`) for a held position at the close where
+tomorrow's own exit would fire: the higher of the maximum-loss stop from
+average cost and the close that breaks the next session's 150-session SMA (the
+mean of today's latest 149 closes). Declare no level, with a reason, when
+current closes are too short or `maximum_loss_pct` is missing or unusable
+(never a default).
+
+The engine owns BUY allocation and whole-share sizing.
+
+Do not pyramid, partially exit, simulate an intraday stop, access live state,
+or fetch data outside the supplied bounded views.

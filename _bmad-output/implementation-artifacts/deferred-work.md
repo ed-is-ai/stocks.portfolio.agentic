@@ -814,3 +814,14 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-130-portfolio-screen.md`
   summary: Weight flags use only valued holdings as the denominator and the default policy limit, so unpriced holdings overstate concentration.
   evidence: `PortfolioService._weights` and `max_position_pct` from `RiskPolicyV1()`.
+
+- source_spec: none
+  summary: Engine SPY idle-cash sleeve for #139 (hold US-listed SPY in USD with idle cash, sell to fund Stage 2 entries at next-session open, dividends, GBP valuation at the daily pinned GBP/USD rate).
+  evidence: Split from the Yau-Weinstein strategy (goal 1) on 2026-11-05 because it changes backtest_engine.py, the run manifest and the result schema, and applies to any strategy; needs its own spec and review. SPY is currently only a non-tradable RegimeBenchmarkPinV1 reference.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-139-yau-weinstein-strategy.md`
+  summary: Yau-Weinstein RS is unavailable (volume-then-ID fallback) for roughly the first 52 sessions of a run when the pinned SPY evidence starts at the MA warm-up (about 200 sessions) while RS needs 252.
+  evidence: `resolve_existing` accepts the latest start on or before the warm-up start with at least max(ma, 200) sessions, and `_ratios_to_benchmark` returns `benchmark_close_unavailable` when no SPY close precedes a candidate's earliest session.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-139-yau-weinstein-strategy.md`
+  summary: `rtly-backtest-yau-weinstein/scripts/strategy.py` duplicates Weinstein's entry/exit logic (runtimes cannot import siblings), so fixes to one must be mirrored by hand and nothing enforces that.
+  evidence: Strategy runtime import allowlist in `skill_discovery.py`; the files differ only in ranking, rule ids and explanation facts.

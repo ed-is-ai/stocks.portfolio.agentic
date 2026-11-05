@@ -417,6 +417,7 @@ SCENARIOS: dict[str, Callable[[ModuleType], tuple[list[Signal], list[Signal]]]] 
     "rtly-backtest-sector-rotation": _sector_rotation,
     "rtly-backtest-turtle-trend": _turtle,
     "rtly-backtest-weinstein": _weinstein,
+    "rtly-backtest-yau-weinstein": _weinstein,
 }
 
 
