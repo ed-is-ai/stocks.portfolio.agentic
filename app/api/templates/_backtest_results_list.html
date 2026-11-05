@@ -17,7 +17,7 @@
   {% elif not backtest_activities %}
   <div class="sm-alert sm-alert-info">
     No backtests yet.
-    <a href="/strategy-manager/configuration" hx-get="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML">Configure a Backtest</a>
+    <a href="/strategy-manager/configuration" hx-get="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML">New backtest</a>
   </div>
   {% else %}
   {% set damaged = backtest_failed_count | default(0) %}
@@ -52,8 +52,8 @@
            </td>
            <td class="text-wrap" style="max-width: 18rem">
             {%- if activity.tuning_parameters is none -%}(defaults)
-            {%- else -%}{% for key, value in activity.tuning_parameters|dictsort -%}{{ key }}={{ value }}{%- if not loop.last %}, {% endif -%}
-              {%- else -%}(universe selection only){% endfor -%}
+            {%- elif not activity.tuning_parameters -%}(universe selection only)
+            {%- else -%}<details><summary>View parameters</summary>{% for key, value in activity.tuning_parameters|dictsort -%}{{ key }}={{ value }}{%- if not loop.last %}, {% endif -%}{% endfor %}</details>
             {%- endif -%}
            </td>
            <td class="mono-num">{{ activity.start_month }} to {{ activity.end_month }}</td>
