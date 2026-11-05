@@ -82,6 +82,7 @@ class StrategyOutcomeSummaryV1(_OutcomeModel):
     cohort_strategy_count: int = Field(ge=0, le=25)
     integrity_excluded_count: int = Field(ge=0, le=25)
     missing_result_count: int = Field(ge=0, le=25)
+    unverified_count: int = Field(default=0, ge=0, le=25)
     job_exclusions: tuple[OutcomeExclusionCountV1, ...] = ()
     comparison_exclusions: tuple[OutcomeExclusionCountV1, ...] = ()
     runs: tuple[OutcomeRunV1, ...] = Field(max_length=25)

@@ -2272,6 +2272,8 @@ def test_list_backtest_activities_metrics_present_only_for_complete_job(
     assert completed.job.status is StrategyJobStatus.COMPLETE
     assert completed.metrics is not None
     assert completed.metric_availability is not None
+    assert completed.result_verdict == "verified"
+    assert activities[still_queued.job.id].result_verdict is None
 
 
 def test_list_backtest_activities_rejects_complete_job_missing_result(

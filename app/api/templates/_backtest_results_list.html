@@ -7,7 +7,12 @@
   {% if backtest_activities_error %}
   <div class="sm-alert sm-alert-danger" role="alert">
     Backtest results could not be loaded: {{ backtest_activities_error }}
-    <button type="button" class="sm-btn sm-btn-danger ms-2" hx-get="/strategy-manager/backtests" hx-target="#backtest-results-list" hx-swap="outerHTML">Reload</button>
+    <button type="button" class="sm-btn sm-btn-danger ms-2" hx-get="/strategy-manager/backtests?page={{ backtest_page | default(1) }}" hx-target="#backtest-results-list" hx-swap="outerHTML">Reload</button>
+  </div>
+  {% elif not backtest_activities and (backtest_page | default(1)) > 1 %}
+  <div class="sm-alert sm-alert-info">
+    No results on this page.
+    <a href="/strategy-manager/backtests?page=1" hx-get="/strategy-manager/backtests?page=1" hx-target="#backtest-results-list" hx-swap="outerHTML">Go to page 1</a>
   </div>
   {% elif not backtest_activities %}
   <div class="sm-alert sm-alert-info">
@@ -15,10 +20,10 @@
     <a href="/strategy-manager/configuration" hx-get="/strategy-manager/configuration" hx-target="#tab-content" hx-swap="innerHTML">Configure a Backtest</a>
   </div>
   {% else %}
-  {% set damaged = backtest_activities | selectattr("activity.result_error") | list %}
+  {% set damaged = backtest_failed_count | default(0) %}
   {% if damaged %}
   <div class="sm-alert sm-alert-warning" role="status">
-    {{ damaged | length }} stored result{{ "s" if damaged | length != 1 }} failed {{ "their" if damaged | length != 1 else "its" }} integrity check and show{{ "" if damaged | length != 1 else "s" }} no metrics.
+    {{ damaged }} stored result{{ "s" if damaged != 1 }} failed {{ "their" if damaged != 1 else "its" }} integrity check and show{{ "" if damaged != 1 else "s" }} no metrics.
   </div>
   {% endif %}
   <div class="tbl-wrap">
@@ -57,6 +62,8 @@
               <span{% if item.metrics.total_return.css_class %} class="{{ item.metrics.total_return.css_class }}"{% endif %}>{{ item.metrics.total_return.value }}</span>
             {%- elif activity.result_error -%}
               <span class="sm-result-error" title="{{ activity.result_error }}">Integrity check failed</span>
+            {%- elif activity.result_verdict == 'unverified' -%}
+              <span class="sm-muted-badge" title="Open this result to verify its stored evidence">Unverified</span>
             {%- else -%}
               <span aria-hidden="true">—</span><span class="visually-hidden">Not yet available</span>
             {%- endif -%}
@@ -81,5 +88,13 @@
       </tbody>
     </table>
   </div>
+  {% endif %}
+  {% set backtest_page = backtest_page | default(1) %}
+  {% if backtest_page > 1 or backtest_has_next %}
+  <nav aria-label="Backtest results pages" class="d-flex gap-2">
+    {% if backtest_page > 1 %}<a href="/strategy-manager/backtests?page={{ backtest_page - 1 }}" hx-get="/strategy-manager/backtests?page={{ backtest_page - 1 }}" hx-target="#backtest-results-list" hx-swap="outerHTML">Prev</a>{% endif %}
+    <span>Page {{ backtest_page }}</span>
+    {% if backtest_has_next %}<a href="/strategy-manager/backtests?page={{ backtest_page + 1 }}" hx-get="/strategy-manager/backtests?page={{ backtest_page + 1 }}" hx-target="#backtest-results-list" hx-swap="outerHTML">Next</a>{% endif %}
+  </nav>
   {% endif %}
 </section>

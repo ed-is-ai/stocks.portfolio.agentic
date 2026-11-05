@@ -8,7 +8,10 @@ from typing import Any, cast
 from markupsafe import escape
 import pytest
 
-from app.repositories.backtest_repo import BacktestRepository, RecentBacktestResultsV1
+from app.repositories.backtest_repo import (
+    BacktestRepository,
+    RecentBacktestResultSummariesV1,
+)
 from app.api.templating import templates
 from app.services.backtest.metrics import MetricUnavailableReason
 from app.services.backtest.benchmark_series import (
@@ -33,13 +36,17 @@ class _Repo:
         self.limit = None
         self.comparison_calls = []
 
-    def recent_verified_backtest_results(self, *, limit):
+    def recent_backtest_result_summaries(self, *, limit):
         self.limit = limit
-        return RecentBacktestResultsV1(
-            self.results[:limit], min(len(self.results), limit), 0, 0, ()
+        return RecentBacktestResultSummariesV1(
+            self.results[:limit], min(len(self.results), limit), 0, 0, 0, ()
         )
 
-    def is_comparable(self, left, right, *, left_result=None, right_result=None):
+    def with_display_evidence(self, summaries):
+        return tuple(summaries)
+
+    def compare_result_summaries(self, left_result, right_result):
+        left, right = left_result.run_id, right_result.run_id
         self.comparison_calls.append((left, right))
         eligible = left_result.cohort == right_result.cohort
         return SimpleNamespace(
@@ -58,7 +65,8 @@ class _Repo:
 
 
 class _LegacyWildcardRepo(_Repo):
-    def is_comparable(self, left, right, *, left_result=None, right_result=None):
+    def compare_result_summaries(self, left_result, right_result):
+        left, right = left_result.run_id, right_result.run_id
         self.comparison_calls.append((left, right))
         left_selection = left_result.universe_selection
         right_selection = right_result.universe_selection
@@ -84,7 +92,8 @@ class _GraphRepo(_Repo):
         super().__init__(results)
         self.compatible_pairs = {frozenset(pair) for pair in compatible_pairs}
 
-    def is_comparable(self, left, right, *, left_result=None, right_result=None):
+    def compare_result_summaries(self, left_result, right_result):
+        left, right = left_result.run_id, right_result.run_id
         self.comparison_calls.append((left, right))
         eligible = frozenset((left, right)) in self.compatible_pairs
         return SimpleNamespace(
@@ -150,7 +159,8 @@ def _result(
             ),
             win_rate_unavailable=None,
         ),
-        events=(),
+        closed_trade_count=0,
+        equity_point_count=len(sessions),
         equity_curve=tuple(
             SimpleNamespace(
                 session=session,
@@ -158,7 +168,7 @@ def _result(
             )
             for index, session in enumerate(sessions)
         ),
-        candidate_audit_summary=SimpleNamespace(recorded=True, candidate_count=12),
+        candidate_count=12,
         cohort=cohort,
     )
 
