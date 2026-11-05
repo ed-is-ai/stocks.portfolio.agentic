@@ -67,7 +67,7 @@ def test_severity_round_trips(tmp_path) -> None:
     item = repo.recent()[0]
 
     assert item.severity is NotificationSeverity.ERROR
-    assert item.deep_link_tab == "tab-runlog"
+    assert item.deep_link == "/runlog"
     assert item.icon == "bi-x-octagon"
 
 

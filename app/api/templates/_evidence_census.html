@@ -262,8 +262,8 @@
     <div class="dq-note-card">
       <span class="dq-note-l">Elsewhere</span>
       <span class="dq-note-v">
-        <a href="#" data-dq-goto="tab-settings">Provider config</a> &middot;
-        <a href="#" data-dq-goto="tab-portfolio">Reconciliation</a>
+        <a href="/settings">Provider config</a> &middot;
+        <a href="/portfolio">Reconciliation</a>
       </span>
       <p class="dq-note-so">API keys and cash reconciliation have their own
         screens.</p>
@@ -286,7 +286,7 @@
       <input type="search" id="dq-search" placeholder="Ticker, cause, currency…"
              aria-label="Filter securities">
       <p class="dq-rowcount" id="dq-count" aria-live="polite">{{ census.total }} rows</p>
-      <a href="#" class="dq-note" data-dq-goto="tab-portfolio">Per-security
+      <a href="/portfolio" class="dq-note">Per-security
         evidence detail (Portfolio recommendations, GH-624) →</a>
     </div>
     <div class="tbl-wrap">
@@ -440,13 +440,6 @@
     });
   });
 
-  document.querySelectorAll('[data-dq-goto]').forEach(function (link) {
-    link.addEventListener('click', function (event) {
-      event.preventDefault();
-      const tab = document.getElementById(link.dataset.dqGoto);
-      if (tab) { tab.click(); }
-    });
-  });
 
   const table = document.getElementById('dq-census');
   if (!table) { return; }

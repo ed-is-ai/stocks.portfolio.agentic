@@ -1,0 +1,111 @@
+/* App shell and Today (GH-128). Tokens come from tokens.css. */
+
+/* ── Top bar: brand, four tabs, account, freshness, Refresh, ⚙ ── */
+.shell-bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .5rem 2rem;
+  padding: 0 1.5rem; background: var(--navbar-grad); color: #fff;
+}
+.shell-brand {
+  color: #fff; font-weight: var(--fw-bold); font-size: var(--fs-lg);
+  letter-spacing: -0.01em; text-decoration: none;
+}
+.shell-brand:hover { color: #fff; }
+.shell-brand span { font-weight: 400; color: rgba(255, 255, 255, .6); }
+.shell-tabs { display: flex; flex-wrap: wrap; gap: 1.5rem; margin: 0; padding: 0; list-style: none; }
+.shell-tabs li { display: flex; align-items: center; gap: .35rem; }
+.shell-tab {
+  display: flex; align-items: center; min-height: 3.25rem; padding: 0 2px;
+  color: rgba(255, 255, 255, .65); font-weight: var(--fw-medium); text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+.shell-tab:hover { color: #fff; }
+.shell-tab.active { color: #fff; border-bottom-color: #fff; }
+.shell-tab:focus-visible, .shell-actions :focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.shell-actions { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; padding: .5rem 0; }
+.shell-account { display: inline-flex; align-items: center; gap: .5rem; font-size: var(--fs-sm); color: rgba(255, 255, 255, .65); }
+.shell-account-select {
+  font: inherit; color: #fff; background: #262626; border: 1px solid #3a3a3a;
+  padding: .3rem .5rem; min-height: 2.25rem; max-width: 14rem;
+}
+.shell-freshness { display: inline-flex; align-items: center; gap: .35rem; font-size: var(--fs-sm); color: rgba(255, 255, 255, .65); }
+.shell-freshness .refresh-freshness { color: inherit; }
+.shell-freshness .local-time { font-variant-numeric: tabular-nums; }
+.shell-refresh { display: inline-flex; align-items: center; gap: .35rem; background: #fff; color: var(--primary); font-weight: var(--fw-semibold); }
+.shell-refresh[aria-disabled="true"] { opacity: .65; cursor: wait; }
+.shell-gear { color: #fff; border: 1px solid #3a3a3a; }
+.shell-gear:hover, .shell-gear.show { color: #fff; background: rgba(255, 255, 255, .12); }
+
+/* ── Today badge (sits beside the Today tab) ─────────────────── */
+.notif-badge {
+  display: none; min-width: 1.15rem; padding: 0 .3rem;
+  background: var(--red); color: #fff; font-family: var(--font-num);
+  font-size: .68rem; font-weight: 700; line-height: 1.15rem; text-align: center;
+}
+.notif-badge.has-count, .notif-badge.is-unknown { display: inline-block; }
+.notif-badge.is-unknown { background: var(--muted); }
+
+/* ── The one disclosure (AD-10) ──────────────────────────────── */
+.disclosure > summary { cursor: pointer; color: var(--muted); font-size: var(--fs-xs); }
+.disclosure > summary:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.disclosure-body { margin-top: .35rem; font-size: var(--fs-xs); color: var(--muted); }
+
+/* ── Today ───────────────────────────────────────────────────── */
+.today { max-width: 78rem; margin: 0 auto; }
+.today-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem 1rem; margin-bottom: 1.5rem; }
+.today-head h1 { margin: 0; font-size: 1.75rem; font-weight: var(--fw-bold); letter-spacing: -0.02em; }
+.today-head h1:focus { outline: none; }
+.today-head h1:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.today-subtitle { margin: 0; color: var(--muted); }
+.today-regime.is-up { color: var(--green); }
+.today-regime.is-down { color: var(--red); }
+.today-grid {
+  display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 2rem; align-items: start;
+}
+@media (max-width: 900px) { .today-grid { grid-template-columns: minmax(0, 1fr); } }
+.today-main, .today-aside { display: flex; flex-direction: column; gap: 2rem; min-width: 0; }
+.today-h2 {
+  margin: 0 0 .6rem; font-size: var(--fs-xs); font-weight: var(--fw-bold);
+  letter-spacing: .06em; text-transform: uppercase;
+}
+.today-count { color: var(--muted); font-weight: var(--fw-medium); }
+.today-act-list { border-top: 2px solid var(--primary); }
+.today-act-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem;
+  padding: .85rem .25rem; border-bottom: 1px solid var(--border);
+}
+.today-act-text { flex: 1 1 20rem; min-width: 0; }
+.today-act-title { font-weight: var(--fw-semibold); }
+.today-act-detail { color: var(--muted); font-size: var(--fs-sm); margin: 0; }
+.today-chip {
+  font-size: .68rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase;
+  padding: .15rem .45rem; border: 1px solid currentColor;
+}
+.today-chip.tone-risk { color: var(--red); background: var(--red-bg); }
+.today-chip.tone-warn { color: var(--amber); background: var(--amber-bg); }
+.today-chip.tone-info { color: var(--blue); background: var(--blue-bg); }
+.today-chip.tone-good { color: var(--green); background: var(--green-bg); }
+.today-chip.tone-muted { color: var(--muted); background: var(--card); }
+.today-check-list { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--primary); }
+.today-check-row {
+  display: flex; gap: 1rem; align-items: baseline;
+  padding: .6rem .25rem; border-bottom: 1px solid var(--border);
+}
+.today-check-text { flex: 1; min-width: 0; }
+.today-link { font-size: var(--fs-sm); white-space: nowrap; }
+.today-dismiss { padding-left: .25rem; color: var(--muted); font-size: var(--fs-sm); }
+.today-empty, .today-note { color: var(--muted); font-size: var(--fs-sm); margin: .5rem 0 0; }
+.today-card { background: var(--card); border: 1px solid var(--border); padding: 1.1rem; }
+.today-value { font-size: 1.6rem; font-weight: var(--fw-bold); font-variant-numeric: tabular-nums; }
+.today-pnl, .today-card-meta, .today-buy-list { font-variant-numeric: tabular-nums; }
+.today-pnl.pos { color: var(--green); font-weight: var(--fw-semibold); }
+.today-pnl.neg { color: var(--red); font-weight: var(--fw-semibold); }
+.today-card-meta { color: var(--muted); font-size: var(--fs-sm); margin-top: .35rem; }
+.today-buys-head { display: flex; justify-content: space-between; align-items: baseline; }
+.today-buy-list { border-top: 1px solid var(--primary); }
+.today-buy-row { display: flex; gap: .75rem; padding: .6rem .25rem; border-bottom: 1px solid var(--border); }
+.today-buy-ticker { width: 5.5rem; overflow-wrap: anywhere; }
+.today-buy-meta { flex: 1; color: var(--muted); }
+.today-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: .15rem .75rem; margin: 0; }
+.today-facts dt { font-weight: var(--fw-semibold); }
+.today-facts dd { margin: 0; overflow-wrap: anywhere; }

@@ -1,16 +1,19 @@
-// One global refresh binding controls every action in the Refresh Data menu.
+// One global refresh binding controls every refresh action: the shell's
+// single Refresh and the variants in Settings (GH-128).
 (function () {
   const refreshButton = document.getElementById('refresh-data-button');
-  const refreshDropdown = refreshButton?.closest('.refresh-dropdown');
-  if (!refreshButton || !refreshDropdown) return;
-  const actionButtons = refreshDropdown.querySelectorAll('button[type="submit"]');
+  if (!refreshButton) return;
   let isRunning = false;
+
+  function actionButtons() {
+    return document.querySelectorAll('[data-refresh-action] button[type="submit"]');
+  }
 
   function setRunning(running) {
     isRunning = running;
     refreshButton.setAttribute('aria-disabled', String(running));
     refreshButton.classList.toggle('loading', running);
-    actionButtons.forEach((button) => { button.disabled = running; });
+    actionButtons().forEach((button) => { button.disabled = running; });
   }
 
   function formatRelativeAge(dateTime) {
@@ -27,85 +30,52 @@
   }
 
   function refreshRelativeAges() {
-    refreshDropdown.querySelectorAll('[data-refresh-age]').forEach((element) => {
+    document.querySelectorAll('[data-refresh-age]').forEach((element) => {
       const age = formatRelativeAge(element.dataset.refreshAge);
       if (age) element.textContent = age;
     });
   }
 
-  function syncStatusSlot() {
-    const description = document.getElementById('refresh-freshness-description');
-    if (!description) return;
-    refreshDropdown.style.setProperty(
-      '--refresh-status-height',
-      `${Math.ceil(description.getBoundingClientRect().height)}px`
-    );
-  }
-
-  refreshButton.addEventListener('shown.bs.dropdown', () => {
-    refreshDropdown.classList.add('status-open');
-    refreshRelativeAges();
-    window.requestAnimationFrame(syncStatusSlot);
-  });
-  refreshButton.addEventListener('hidden.bs.dropdown', () => {
-    refreshDropdown.classList.remove('status-open');
-  });
   refreshButton.addEventListener('pointerenter', refreshRelativeAges);
   refreshButton.addEventListener('focus', refreshRelativeAges);
-  refreshButton.addEventListener('click', (event) => {
-    if (!isRunning) return;
+  // A refresh already running ignores further clicks on any refresh action.
+  document.addEventListener('click', (event) => {
+    if (!isRunning || !event.target.closest?.('[data-refresh-action] button[type="submit"]')) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   }, true);
-  window.addEventListener('resize', () => {
-    if (refreshButton.classList.contains('show')) syncStatusSlot();
-  });
-  document.fonts?.ready.then(() => {
-    if (refreshButton.classList.contains('show')) syncStatusSlot();
-  });
 
-  document.body.addEventListener('htmx:beforeRequest', (event) => {
-    const requestPath = event.detail.requestConfig?.path
+  function requestPath(event) {
+    return event.detail.requestConfig?.path
       || event.detail.pathInfo?.requestPath
       || event.detail.elt?.getAttribute('hx-post');
-    if (requestPath === '/refresh-data') {
-      window.bootstrap?.Dropdown.getOrCreateInstance(refreshButton).hide();
-      refreshButton.focus();
-      setRunning(true);
-      // Give the service time to create the durable run artifact, then let the
-      // running status partial own its two-second polling lifecycle.
-      window.setTimeout(() => {
-        htmx.ajax('GET', '/pipeline-status', {
-          target: '#pipeline-status',
-          swap: 'innerHTML'
-        });
-      }, 250);
-    }
+  }
+
+  document.body.addEventListener('htmx:beforeRequest', (event) => {
+    if (requestPath(event) !== '/refresh-data') return;
+    setRunning(true);
+    // Give the service time to create the durable run artifact, then let the
+    // running status partial own its two-second polling lifecycle.
+    window.setTimeout(() => {
+      htmx.ajax('GET', '/pipeline-status', {
+        target: '#pipeline-status',
+        swap: 'innerHTML'
+      });
+    }, 250);
   });
 
   document.body.addEventListener('htmx:afterRequest', (event) => {
-    const requestPath = event.detail.requestConfig?.path
-      || event.detail.pathInfo?.requestPath
-      || event.detail.elt?.getAttribute('hx-post');
-    if (requestPath === '/refresh-data') setRunning(false);
+    if (requestPath(event) === '/refresh-data') setRunning(false);
   });
 
   document.body.addEventListener('htmx:afterSwap', (event) => {
+    if (event.detail.target.id === 'tab-content') refreshRelativeAges();
     if (event.detail.target.id !== 'pipeline-status') return;
     const state = event.detail.target.querySelector('[data-pipeline-state]')?.dataset.pipelineState;
     setRunning(state === 'running');
   });
 
-  document.body.addEventListener('htmx:oobAfterSwap', (event) => {
-    if (event.target.id !== 'refresh-freshness' || !refreshButton.classList.contains('show')) return;
-    refreshRelativeAges();
-    window.requestAnimationFrame(syncStatusSlot);
-  });
-
   document.body.addEventListener('htmx:responseError', (event) => {
-    const requestPath = event.detail.requestConfig?.path
-      || event.detail.pathInfo?.requestPath
-      || event.detail.elt?.getAttribute('hx-post');
-    if (requestPath === '/refresh-data') setRunning(false);
+    if (requestPath(event) === '/refresh-data') setRunning(false);
   });
 })();

@@ -80,10 +80,10 @@ def _free_port() -> int:
 
 
 def _quiet_desk() -> MagicMock:
-    """The bell's badge now counts the AI Desk's urgent items (GH-21); a
-    fake Desk keeps that poll off the real ledger and evidence stores."""
+    """The Today badge counts Today's Needs action items (GH-128); a fake
+    Desk keeps that poll off the real ledger and evidence stores."""
     desk = MagicMock()
-    desk.attention_count.return_value = 0
+    desk.badge_count.return_value = 0
     return desk
 
 
@@ -271,8 +271,7 @@ def sample_csv(tmp_path: Path) -> Path:
 
 
 def _load_portfolio_tab(page: Page, base_url: str) -> None:
-    page.goto(base_url + "/")
-    page.click("#tab-portfolio")
+    page.goto(base_url + "/portfolio")
     expect(page.locator("#portfolioSelect")).to_be_visible()
 
 

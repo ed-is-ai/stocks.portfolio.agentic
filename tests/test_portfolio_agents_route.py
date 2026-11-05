@@ -199,8 +199,8 @@ def test_all_live_sources_swap_into_the_rows_cards_and_strip(stack) -> None:
     assert "£150.00 · 7.5%" in _cell(stack, body, "open-risk")
     # 3 high risk findings (position, sector, capital at risk) + 1 Sell +
     # 1 exit evidence gap.
-    assert _cell(stack, body, "findings").strip() == "5"
-    assert "5 urgent findings." in body
+    assert _cell(stack, body, "findings").strip() == "4"
+    assert "4 findings need action." in body
     assert "partial" not in body
 
 
@@ -210,7 +210,7 @@ def test_no_strategy_is_declared_and_count_is_partial(stack) -> None:
 
     assert "No Strategy assigned" in _cell(stack, body, "strategy-AAA")
     assert "No Strategy assigned" in _cell(stack, body, "evidence-AAA")
-    assert "3 urgent findings." in body
+    assert "3 findings need action." in body
     assert _cell(stack, body, "findings").strip() == "3 · partial"
 
 
@@ -221,7 +221,7 @@ def test_zero_urgent_findings_with_a_gap_is_not_shown_clear(
     monkeypatch.setattr(stack.service, "risk_report", _raise)
     body = _agents(stack)
 
-    assert "No urgent findings." in body
+    assert "Nothing needs action." in body
     assert _cell(stack, body, "findings").strip() == "0 · partial"
     assert "is-clear" not in body
 
@@ -270,7 +270,7 @@ def test_thesis_cells_swap_in_and_count_nothing_by_default(stack) -> None:
 
     assert "Awaiting scan" in _cell(stack, body, "thesis-AAA")
     assert "No thesis" in _cell(stack, body, "thesis-BBB")
-    assert _cell(stack, body, "findings").strip() == "5"
+    assert _cell(stack, body, "findings").strip() == "4"
 
 
 def test_thesis_store_failure_is_caught_and_partial(
@@ -281,7 +281,7 @@ def test_thesis_store_failure_is_caught_and_partial(
 
     assert "Thesis unavailable" in _cell(stack, body, "thesis-AAA")
     assert "Thesis unavailable" in _cell(stack, body, "thesis-BBB")
-    assert _cell(stack, body, "findings").strip() == "5 · partial"
+    assert _cell(stack, body, "findings").strip() == "4 · partial"
     assert "not counted: Thesis unavailable." in body
 
 
@@ -367,8 +367,8 @@ def test_current_invalidated_thesis_is_an_urgent_finding(stack) -> None:
 
     assert _thesis_status(stack, body) == ("risk", "Invalidated")
     # It joins AAA's Sell as one exit item, both events expandable.
-    assert _cell(stack, body, "findings").strip() == "5"
-    assert "5 urgent findings." in body
+    assert _cell(stack, body, "findings").strip() == "4"
+    assert "4 findings need action." in body
     assert "AAA: thesis invalidated" in body
     assert "2 source events" in body
 
@@ -389,8 +389,8 @@ def test_current_warning_thesis_is_warn_toned_and_not_counted(
 
     assert _thesis_status(stack, body) == ("warn", status)
     assert "earlier run" not in _cell(stack, body, "thesis-AAA")
-    assert _cell(stack, body, "findings").strip() == "5"
-    assert "5 urgent findings." in body
+    assert _cell(stack, body, "findings").strip() == "4"
+    assert "4 findings need action." in body
     assert "AAA: thesis" not in body
 
 
@@ -649,7 +649,7 @@ def test_no_portfolios_still_queues_published_evidence(
     )
 
     assert [i.title for i in view.attention.items] == ["Congress source failed"]
-    assert view.attention.urgent_count == 0
+    assert len(view.attention.needs_action) == 0
 
 
 def test_a_failing_published_evidence_path_is_fail_soft(
@@ -685,8 +685,10 @@ def test_info_items_without_urgent_ones_are_introduced_not_shown_clear() -> None
     listed = _strip(build_agent_view(1, (), NO_ASSIGNMENT, risk, {}, published))
     empty = _strip(build_agent_view(1, (), NO_ASSIGNMENT, risk, {}))
 
-    assert "No urgent findings." in listed
-    assert listed.index("Also noted — not urgent") < listed.index("NEW: VCP Breakout")
+    assert "Nothing needs action." in listed
+    assert listed.index("Also noted — no action needed") < listed.index(
+        "NEW: VCP Breakout"
+    )
     assert "is-clear" not in listed
     assert "is-clear" in empty
     assert "Also noted" not in empty
@@ -706,4 +708,4 @@ def test_the_portfolio_tab_queues_the_desks_notification_events(stack) -> None:
 
     assert "Import rejected" in body
     # Listed for review, never counted urgent.
-    assert _cell(stack, body, "findings").strip() == "5"
+    assert _cell(stack, body, "findings").strip() == "4"

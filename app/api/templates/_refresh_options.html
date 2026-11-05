@@ -1,0 +1,65 @@
+{#- The refresh variants (GH-128): moved from the shell's Refresh menu to
+    Settings. The shell keeps one Refresh (the standard run); every form
+    here posts the same /refresh-data, whose response is the Scanner. -#}
+{% import "_macros.html" as macros %}
+<section class="refresh-options mt-4" aria-labelledby="refresh-options-title">
+  <h2 id="refresh-options-title" class="h6">Data refresh</h2>
+  <div class="refresh-menu-freshness">
+    {{ macros.freshness_detail(freshness, latest_attempt_error) }}
+    {% if next_scheduled_run %}
+    <div class="refresh-menu-schedule">
+      Next scheduled refresh:
+      <time class="local-time" datetime="{{ next_scheduled_run.isoformat() }}">{{ next_scheduled_run.strftime('%Y-%m-%d %H:%M %Z') }}</time>
+    </div>
+    {% endif %}
+  </div>
+  {# Reduced-coverage warnings sit with the buttons that start a run, so
+     the cost of running now is readable before the click. #}
+  {% if pipeline_warnings %}
+  <div class="refresh-coverage" role="note">
+    <p class="refresh-coverage-title">
+      <i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>
+      Reduced coverage
+    </p>
+    <ul class="refresh-coverage-list">
+      {% for warning in pipeline_warnings %}
+      <li><strong>{{ warning.name }}</strong> — {{ warning.impact }}</li>
+      {% endfor %}
+    </ul>
+    <p class="refresh-coverage-help">Add the missing configuration to <code>.env</code> for full coverage. Every refresh below still runs.</p>
+  </div>
+  {% endif %}
+  <form hx-post="/refresh-data" hx-target="#tab-content" hx-swap="innerHTML"
+        hx-push-url="/scanner" hx-indicator="#spinner" class="refresh-action" data-refresh-action>
+    <input type="hidden" name="extract" value="true">
+    <div class="refresh-action-copy">
+      <span class="refresh-action-title">Include institutional data</span>
+      <span class="refresh-action-help">Check the institutional sources, then run the scan and analysis.</span>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary" aria-label="Run refresh including institutional data">Run</button>
+  </form>
+  <form hx-post="/refresh-data" hx-target="#tab-content" hx-swap="innerHTML"
+        hx-push-url="/scanner" hx-indicator="#spinner" class="refresh-custom" data-refresh-action>
+    <input type="hidden" name="extract" value="true">
+    <span class="refresh-action-title">Custom refresh</span>
+    <span class="refresh-action-help mb-2">Choose which local source checks to bypass.</span>
+    <div class="form-check">
+      <input class="form-check-input" type="checkbox" value="true"
+             name="force_whale_wisdom" id="force-whale-wisdom">
+      <label class="form-check-label" for="force-whale-wisdom">
+        Force-check WhaleWisdom
+      </label>
+    </div>
+    <div class="form-check mt-2">
+      <input class="form-check-input" type="checkbox" value="true"
+             name="force_stocktwits" id="force-stocktwits">
+      <label class="form-check-label" for="force-stocktwits">
+        Force-check StockTwits Top 25
+      </label>
+    </div>
+    <button type="submit" class="btn btn-sm btn-primary mt-3">Run custom refresh</button>
+  </form>
+  <p class="refresh-guidance">
+    <strong>Source timing:</strong> WhaleWisdom reflects quarterly 13F filings published after quarter end. StockTwits data is refreshed weekly. Force-checking bypasses local reuse; it cannot make upstream data newer.
+  </p>
+</section>

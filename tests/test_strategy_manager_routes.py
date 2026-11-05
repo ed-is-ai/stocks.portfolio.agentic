@@ -876,7 +876,7 @@ def test_strategy_copilot_audits_catalog_failure_without_calling_provider(
 
 
 def test_main_renders_coverage_and_canonical_reconstruction_warning(services):
-    response = client.get("/partials/strategy-manager")
+    response = client.get("/partials/strategies")
     assert response.status_code == 200
     assert "Scanner v1" in response.text
     assert "Reconstructed (approximate)" in response.text
@@ -978,7 +978,7 @@ def test_main_logs_render_timing(services, caplog):
     repo, _ = services
 
     with caplog.at_level("INFO"):
-        response = client.get("/partials/strategy-manager")
+        response = client.get("/partials/strategies")
 
     assert response.status_code == 200
     # gh-396: landing now composes readiness + bootstrap state; each reads
@@ -1362,8 +1362,9 @@ def test_initialization_mutation_requires_guard(services):
 
 
 def test_tab_is_registered_in_the_application_shell():
-    response = client.get("/")
-    assert 'id="tab-strategy-manager"' in response.text
+    response = client.get("/strategies")
+    assert 'id="tab-strategies"' in response.text
+    assert 'hx-get="/partials/strategies"' in response.text
 
 
 def test_activity_shows_only_authoritative_running_month_and_one_live_region(services):
@@ -1948,7 +1949,7 @@ def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(servic
     repo.activity = _bootstrap_job(status=StrategyJobStatus.COMPLETE, status_version=9)
     text = client.get("/strategy-manager/activities/job-1").text
     assert "Strategy Manager is set up." in text
-    assert 'href="/strategy-manager"' in text
+    assert 'href="/strategies"' in text
     assert "hx-trigger=" not in text
     assert (
         client.get("/strategy-manager/activity-status").text.count(

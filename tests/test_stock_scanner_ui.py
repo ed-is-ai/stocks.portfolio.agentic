@@ -24,7 +24,7 @@ from app.api.dependencies import (
 )
 from app.api.stock_scanner_context import build_stock_scanner_context
 from app.api.routes.pipeline import refresh_data
-from app.api.routes.views import partial_runlog, partial_stock_scanner
+from app.api.routes.views import partial_runlog, partial_scanner
 from app.api.templating import templates
 from app.repositories.alerts_repo import AlertReadState
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
@@ -710,7 +710,10 @@ def test_legacy_scanner_ui_artifacts_are_removed() -> None:
     # current template) legitimately contains "_scanner.html" as a
     # substring, but never as its own quoted string literal — only the
     # removed legacy filename does.
-    forbidden = ('"_scanner.html"', "/partials/scanner", "python orchestrator.py")
+    # ``/partials/scanner`` is the Scanner tab's partial again since GH-128
+    # (the spine's ``/partials/<tab>`` convention); the old legacy screen's
+    # template name and run command stay retired.
+    forbidden = ('"_scanner.html"', "python orchestrator.py")
     source_paths = [
         *sorted((ROOT / "app" / "api").rglob("*.py")),
         *sorted(TEMPLATES.rglob("*.html")),
@@ -729,37 +732,42 @@ def test_dashboard_has_one_refresh_data_control() -> None:
     assert markup.count('id="refresh-data-button"') == 1
 
 
-def test_refresh_dropdown_exposes_three_actions_and_source_guidance() -> None:
+def test_the_shell_has_one_refresh_and_settings_holds_the_variants() -> None:
     markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
-    toggle = markup.split('id="refresh-data-button"', 1)[1].split("</button>", 1)[0]
-    menu = markup.split('class="dropdown-menu dropdown-menu-end refresh-menu', 1)[1]
+    form = markup.split('hx-post="/refresh-data"', 1)[1].split("</form>", 1)[0]
+    options = (TEMPLATES / "_refresh_options.html").read_text(encoding="utf-8")
 
-    assert 'data-bs-toggle="dropdown"' in toggle
-    assert 'hx-post="/refresh-data"' not in toggle
-    assert 'aria-label="Refresh Data"' in toggle
-    assert menu.count('hx-post="/refresh-data"') == 3
-    assert "Standard refresh" in menu
-    assert "Include institutional data" in menu
-    assert "Custom refresh" in menu
-    assert menu.count('name="extract" value="true"') == 2
-    assert 'name="force_whale_wisdom"' in menu
-    assert 'name="force_stocktwits"' in menu
-    assert "quarterly 13F filings published after quarter end" in menu
-    assert "StockTwits data is refreshed weekly" in menu
-    assert "cannot make upstream data newer" in menu
-    assert 'aria-label="Run standard refresh"' in menu
-    assert 'aria-label="Run refresh including institutional data"' in menu
+    # One Refresh in the shell: the standard run, no menu (GH-128).
+    assert markup.count('hx-post="/refresh-data"') == 1
+    assert 'id="refresh-data-button"' in form
+    assert 'name="extract"' not in form
+    assert 'data-bs-toggle="dropdown"' not in form
+    # The variants moved to Settings, with their source guidance.
+    assert options.count('hx-post="/refresh-data"') == 2
+    assert "Include institutional data" in options
+    assert "Custom refresh" in options
+    assert options.count('name="extract" value="true"') == 2
+    assert 'name="force_whale_wisdom"' in options
+    assert 'name="force_stocktwits"' in options
+    assert "quarterly 13F filings published after quarter end" in options
+    assert "StockTwits data is refreshed weekly" in options
+    assert "cannot make upstream data newer" in options
+    assert 'aria-label="Run refresh including institutional data"' in options
+    assert '{% include "_refresh_options.html" %}' in (
+        TEMPLATES / "_settings.html"
+    ).read_text(encoding="utf-8")
 
 
 def test_only_trade_forms_activate_portfolio_after_settle() -> None:
-    markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+    shell = (ROOT / "app/api/static/js/shell.js").read_text(encoding="utf-8")
 
-    assert "e.detail.elt?.getAttribute('hx-post') === '/trades'" in markup
-    assert "e.detail.elt && e.detail.elt.tagName === 'FORM'" not in markup
+    assert "e.detail.elt?.getAttribute('hx-post')" in shell
+    assert "post === '/trades'" in shell
+    assert "e.detail.elt && e.detail.elt.tagName === 'FORM'" not in shell
 
 
 def test_removed_scanner_partial_returns_not_found() -> None:
-    response = TestClient(app).get("/partials/scanner")
+    response = TestClient(app).get("/partials/stock-scanner")
     assert response.status_code == 404
 
 
@@ -777,9 +785,7 @@ def test_initial_and_completed_refresh_use_equivalent_stock_scanner_context() ->
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    initial = partial_stock_scanner(
-        _request("/partials/stock-scanner"), trader, portfolio, alerts
-    )
+    initial = partial_scanner(_request("/partials/scanner"), trader, portfolio, alerts)
     refreshed = refresh_data(
         _request("/refresh-data", method="POST"),
         trader,
@@ -929,7 +935,7 @@ def test_stock_scanner_and_refresh_http_paths_render_canonical_partial(
 
     try:
         client = TestClient(app)
-        initial = client.get("/partials/stock-scanner")
+        initial = client.get("/partials/scanner")
         refreshed = client.post(
             "/refresh-data",
             data={},
@@ -984,9 +990,7 @@ def test_stock_scanner_no_longer_renders_freshness_or_source_badges(
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    response = partial_stock_scanner(
-        _request("/partials/stock-scanner"), trader, portfolio, alerts
-    )
+    response = partial_scanner(_request("/partials/scanner"), trader, portfolio, alerts)
     markup = response.body.decode()
 
     assert "Last successful refresh" not in markup

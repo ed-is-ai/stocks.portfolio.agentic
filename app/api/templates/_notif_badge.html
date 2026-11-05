@@ -1,23 +1,24 @@
-{#- The bell's badge: the AI Desk's urgent attention count for the active
-    portfolio (GH-21). Polls itself while the page is visible, and on a
-    ``refresh`` event (the Desk loading or changing portfolio); an explicit
-    hx-target="this" so the outerHTML swap never inherits a target from the
-    bell link. Its hidden text completes the bell link's accessible name;
-    the page script announces changes in #notif-live. A count that could
-    not be computed shows "?", never zero. -#}
+{#- The Today tab's badge (GH-128): ``badge_count``, the number of Today
+    "Needs action" items for the active portfolio. Polls itself every 30s
+    while the page is visible (AD-2) and on ``refresh`` or an
+    ``attention-changed`` event; explicit hx-target/hx-push-url so the
+    outerHTML swap never inherits from the tab bar. Its hidden text names
+    the count for screen readers; shell.js announces changes in #notif-live.
+    A count that could not be computed shows "?", never zero. -#}
 {%- if count is none -%}
 {%- set label = "attention count unavailable" -%}
 {%- elif count -%}
-{%- set label = count ~ " urgent attention item" ~ ("" if count == 1 else "s") -%}
+{%- set label = count ~ " item" ~ ("" if count == 1 else "s") ~ " need" ~ ("s" if count == 1 else "") ~ " action" -%}
 {%- else -%}
-{%- set label = "no urgent attention items" -%}
+{%- set label = "nothing needs action" -%}
 {%- endif -%}
 <span id="notif-badge"
       class="notif-badge{{ ' is-unknown' if count is none else (' has-count' if count else '') }}"
       hx-get="/notifications/count"
-      hx-trigger="every 30s [document.visibilityState === 'visible'], refresh"
+      hx-trigger="every 30s [document.visibilityState === 'visible'], refresh, attention-changed from:body"
       hx-target="this"
       hx-swap="outerHTML"
+      hx-push-url="false"
       hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'
       data-announce="{{ label }}">
   {%- if count is none -%}<span aria-hidden="true">?</span>

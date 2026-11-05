@@ -10,6 +10,7 @@ days) lives here.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 
 from app.core import config
@@ -20,6 +21,16 @@ from app.schemas.notification import (
     NotificationCategory,
     NotificationSeverity,
 )
+
+#: Today's dismissed attention items, by stable item key (GH-128). An item
+#: stays hidden only while its ``fingerprint`` (its source events) matches.
+_DISMISSALS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS attention_dismissals (
+    key          TEXT PRIMARY KEY,
+    fingerprint  TEXT NOT NULL,
+    dismissed_at TEXT NOT NULL
+)
+"""
 
 #: Notifications older than this are pruned on write (#81 decision).
 DEFAULT_RETENTION_DAYS = 10
@@ -108,6 +119,7 @@ class NotificationsRepository:
                 "CREATE UNIQUE INDEX IF NOT EXISTS notifications_job_id_unique "
                 "ON notifications(job_id) WHERE job_id IS NOT NULL"
             )
+            conn.execute(_DISMISSALS_SCHEMA)
             conn.commit()
 
     def record(
@@ -237,7 +249,7 @@ class NotificationsRepository:
 
     def recent_warnings(self, since: datetime) -> list[Notification]:
         """Return undismissed warnings and errors created at or after
-        ``since``, newest first (the AI Desk's notification events, GH-21)."""
+        ``since``, newest first (Today's notification events, GH-128)."""
         with session(self._connect) as conn:
             rows = conn.execute(
                 f"SELECT {', '.join(_COLUMNS)} FROM notifications"
@@ -321,6 +333,28 @@ class NotificationsRepository:
                 (now, notification_id),
             )
             conn.commit()
+
+    def dismiss_attention(self, pairs: Iterable[tuple[str, str]]) -> None:
+        """Persist ``(key, fingerprint)`` dismissals of Today items; a later
+        dismissal of the same key replaces the earlier one."""
+        now = datetime.now(timezone.utc).isoformat()
+        with session(self._connect) as conn:
+            conn.executemany(
+                "INSERT INTO attention_dismissals (key, fingerprint, dismissed_at)"
+                " VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET"
+                " fingerprint=excluded.fingerprint,"
+                " dismissed_at=excluded.dismissed_at",
+                [(key, fingerprint, now) for key, fingerprint in pairs],
+            )
+            conn.commit()
+
+    def attention_dismissals(self) -> dict[str, str]:
+        """Every dismissed Today item key and the fingerprint it had."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                "SELECT key, fingerprint FROM attention_dismissals"
+            ).fetchall()
+        return {str(key): str(fingerprint) for key, fingerprint in rows}
 
     def prune_older_than(self, days: int) -> int:
         """Delete notifications older than ``days``; return rows removed."""

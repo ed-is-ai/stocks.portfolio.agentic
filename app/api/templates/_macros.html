@@ -101,3 +101,13 @@
   {%- endfor %}
 </ol>
 {% endmacro %}
+
+{% macro disclosure(summary, body=none) -%}
+{#- The one disclosure (GH-128, AD-10): run ids, digests, raised-by,
+    evidence lineage and caveats render only through this, collapsed by
+    default. ``body`` is text; for markup, use ``{% call %}`` instead. -#}
+<details class="disclosure">
+  <summary>{{ summary }}</summary>
+  <div class="disclosure-body">{% if body is not none %}{{ body }}{% else %}{{ caller() }}{% endif %}</div>
+</details>
+{%- endmacro %}

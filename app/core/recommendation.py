@@ -12,6 +12,7 @@ about the underlying thresholds (#58).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from app.schemas import StockRecord
@@ -100,6 +101,27 @@ def classify_recommendation(
         return Recommendation("watch", "Watch", "rec-watch", "other")
 
     return _NONE
+
+
+def is_buy_signal(rec: Recommendation) -> bool:
+    """Whether ``rec`` is in the BUY family (Buy and Buy · low vol)."""
+    return rec.filter_key == "buy"
+
+
+def buy_signals(
+    records: Iterable[StockRecord], held: Iterable[str] = ()
+) -> list[tuple[StockRecord, Recommendation]]:
+    """The BUY-family rows of ``records``, in input order (GH-128, AD-6).
+
+    The one source of buy signals for Today and the Scanner's Buy-signals
+    view; ``held`` only changes the Sell/Avoid text, never membership.
+    """
+    owned = set(held)
+    pairs = (
+        (r, classify_recommendation(r, is_portfolio_holding=r.ticker in owned))
+        for r in records
+    )
+    return [(r, rec) for r, rec in pairs if is_buy_signal(rec)]
 
 
 def actionability_rank(record: StockRecord) -> int:

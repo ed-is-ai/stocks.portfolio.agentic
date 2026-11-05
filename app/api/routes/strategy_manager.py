@@ -603,7 +603,7 @@ def _form_error_status(request: Request) -> int:
     return 200 if is_htmx_request(request) else 422
 
 
-@router.get("/partials/strategy-manager", response_class=HTMLResponse)
+@router.get("/partials/strategies", response_class=HTMLResponse)
 @router.get("/strategy-manager", response_class=HTMLResponse)
 def strategy_manager(
     request: Request,

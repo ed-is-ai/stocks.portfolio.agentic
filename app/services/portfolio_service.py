@@ -52,6 +52,7 @@ from app.services.portfolio_agent_view import (
     NOTIFICATIONS_UNAVAILABLE,
     PUBLISHED_EVIDENCE_UNAVAILABLE,
     PortfolioAgentView,
+    PortfolioSummary,
     PublishedEvidence,
     RecommendationOutcome,
     build_agent_view,
@@ -1636,11 +1637,9 @@ class PortfolioService:
 
     @staticmethod
     def _active_portfolio_id(portfolio_id: int | None, portfolios: list[Any]) -> int:
-        """Resolve the active portfolio: an unknown/None id falls back to the
-        first (migrated SIPP) portfolio. ``portfolios`` must be non-empty."""
-        if portfolio_id is None or not any(p.id == portfolio_id for p in portfolios):
-            return portfolios[0].id
-        return portfolio_id
+        """``resolve_portfolio_id`` for a non-empty ``portfolios``."""
+        pid = resolve_portfolio_id(portfolio_id, portfolios)
+        return portfolios[0].id if pid is None else pid
 
     def _priced_positions(
         self, snapshot: PortfolioInputSnapshot
@@ -1735,7 +1734,7 @@ class PortfolioService:
             )
         active_id = self._active_portfolio_id(portfolio_id, portfolios)
         snapshot = self.portfolio_input_snapshot(active_id, portfolios=portfolios)
-        positions, prices_as_of, _ = self._priced_positions(snapshot)
+        positions, prices_as_of, gbpusd = self._priced_positions(snapshot)
         try:
             outcome = recommend(active_id)
         except Exception:
@@ -1759,6 +1758,45 @@ class PortfolioService:
                 notifications,
                 active_id,
             ),
+            self._summary(
+                next(p.name for p in portfolios if p.id == active_id),
+                positions,
+                gbpusd,
+                snapshot.cash_balance,
+            ),
+        )
+
+    def _summary(
+        self,
+        name: str,
+        positions: Sequence[Position],
+        gbpusd: float | None,
+        cash: float | None,
+    ) -> PortfolioSummary:
+        """Headline totals from already-priced ``positions`` (no extra read):
+        market value plus cash, and unrealised P&L on the priced holdings."""
+        fx = gbpusd or _DEFAULT_GBPUSD
+        # Value and cost count only together, so a holding that cannot be
+        # converted never shows as a loss of its whole cost.
+        pairs = [
+            (v, c)
+            for p in positions
+            if p.current_value is not None
+            and (v := self._amount_in_gbp(p.current_value, p.price_currency, fx))
+            is not None
+            and (c := self._amount_in_gbp(p.total_cost, p.cost_currency, fx))
+            is not None
+        ]
+        value = sum(v for v, _ in pairs)
+        cost = sum(c for _, c in pairs)
+        pnl = value - cost
+        return PortfolioSummary(
+            name=name,
+            value_gbp=value + (cash or 0),
+            unrealised_gbp=pnl,
+            unrealised_pct=pnl / cost * 100 if cost else None,
+            cash_gbp=cash,
+            positions=sum(p.shares > 0 for p in positions),
         )
 
     def _safe_risk(self, portfolio_id: int | None) -> RiskReportV1 | None:
@@ -1818,6 +1856,19 @@ class PortfolioService:
             prices_as_of=prices_as_of,
             events=events,
         )
+
+
+def resolve_portfolio_id(
+    portfolio_id: int | None, portfolios: Sequence[Any]
+) -> int | None:
+    """The one server-side resolver of the selected portfolio (GH-128).
+
+    A known ``portfolio_id`` wins; an unknown or absent one falls back to
+    the first (migrated SIPP) portfolio; ``None`` when there are none.
+    """
+    if any(p.id == portfolio_id for p in portfolios):
+        return portfolio_id
+    return portfolios[0].id if portfolios else None
 
 
 def _with_notifications(

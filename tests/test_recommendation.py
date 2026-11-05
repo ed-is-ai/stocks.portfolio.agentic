@@ -1,6 +1,10 @@
 """Tests for watchlist actionability ranking and ordering."""
 
-from app.core.recommendation import actionability_rank, actionability_sort_key
+from app.core.recommendation import (
+    actionability_rank,
+    actionability_sort_key,
+    buy_signals,
+)
 from app.schemas import StockAnalysis, StockRecord, StockScan
 
 
@@ -73,3 +77,24 @@ class TestActionabilitySort:
         ordered = sorted([low, high], key=actionability_sort_key, reverse=True)
 
         assert [r.ticker for r in ordered] == ["HIGH", "LOW"]
+
+
+def test_buy_signals_are_the_buy_family_in_input_order() -> None:
+    low_vol = _record("LOWVOL", entry_zone="broken_out", score=8)
+    assert low_vol.analysis is not None
+    low_vol.analysis.volume_confirmed = False
+    buy = _record("BUY", entry_zone="broken_out", score=8)
+    assert buy.analysis is not None
+    buy.analysis.volume_confirmed = True
+    others = [
+        _record("ALERT", entry_zone="approaching", score=6),
+        _record("EXT", entry_zone="extended", score=9),
+        _record("NONE", with_analysis=False),
+    ]
+
+    pairs = buy_signals([low_vol, *others, buy], held=["BUY"])
+
+    assert [(r.ticker, rec.bucket) for r, rec in pairs] == [
+        ("LOWVOL", "buy_lowvol"),
+        ("BUY", "buy"),
+    ]

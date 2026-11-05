@@ -1,0 +1,129 @@
+{#- Today (GH-128): renders ``DeskService.today_items`` only. No grouping,
+    counting or dedup happens here (AD-5, AD-10); provenance sits behind
+    ``macros.disclosure``. A hidden poller re-requests the partial every 60s
+    with the revision it rendered; an unchanged revision answers 204. -#}
+{% import "_macros.html" as macros %}
+{% macro facts(item) -%}
+<dl class="today-facts">
+  {% for label, value in item.facts %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}
+  <dt>Item key</dt><dd><code>{{ item.key }}</code></dd>
+</dl>
+{%- endmacro %}
+{% set pid = view.portfolio_id if view.portfolio_id is not none else "" %}
+<div id="today" class="today" data-portfolio-id="{{ pid }}">
+  <span hidden
+        hx-get="/partials/today"
+        hx-trigger="every 60s [document.visibilityState === 'visible']"
+        hx-target="#today" hx-swap="outerHTML" hx-push-url="false"
+        hx-vals='{"portfolio_id": "{{ pid }}", "rev": "{{ revision or '' }}"}'></span>
+  <header class="today-head">
+    <h1 tabindex="-1">Today</h1>
+    <p class="today-subtitle">
+      <time datetime="{{ today.isoformat() }}">{{ today.strftime('%A') }} {{ today.day }} {{ today.strftime('%B') }}</time>
+      {%- if market_regime %} ·
+      {% if market_regime.spy_uptrend -%}
+      <strong class="today-regime is-up">S&amp;P 500 in confirmed uptrend</strong>
+      {%- else -%}
+      <strong class="today-regime is-down">S&amp;P 500 below its 200-day average</strong>
+      {%- endif %} · SPY 52-wk {{ '%+.1f'|format((market_regime.return_52w_pct | round(1)) + 0) }}%
+      {%- endif %}
+    </p>
+  </header>
+
+  <div class="today-grid">
+    <div class="today-main">
+      <section aria-labelledby="today-act">
+        <h2 id="today-act" class="today-h2">Needs action <span class="today-count">{{ view.needs_action | length }}</span></h2>
+        {% if view.needs_action %}
+        <div class="today-act-list">
+          {% for item in view.needs_action %}
+          <div class="today-act-row" data-item-key="{{ item.key }}">
+            <span class="today-chip tone-{{ item.tone }}">{{ item.chip }}</span>
+            <div class="today-act-text">
+              <div class="today-act-title">{{ item.title }}</div>
+              <div class="today-act-detail">{{ item.detail }}</div>
+              {% call macros.disclosure("Details") %}{{ facts(item) }}{% endcall %}
+            </div>
+            {% if item.action %}<a class="btn btn-sm btn-outline-dark today-action" href="{{ item.action.href }}">{{ item.action.label }}</a>{% endif %}
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="today-empty">Nothing needs action.</p>
+        {% endif %}
+      </section>
+
+      <section aria-labelledby="today-check">
+        <h2 id="today-check" class="today-h2">Worth checking <span class="today-count">{{ view.worth_checking | length }}</span></h2>
+        {% if view.worth_checking %}
+        <ul class="today-check-list">
+          {% for item in view.worth_checking %}
+          <li class="today-check-row" data-item-key="{{ item.key }}">
+            <div class="today-check-text">
+              <span>{{ item.title }}</span>
+              {% call macros.disclosure("Details") %}<p class="today-act-detail">{{ item.detail }}</p>{{ facts(item) }}{% endcall %}
+            </div>
+            {% if item.action %}<a class="today-link" href="{{ item.action.href }}">{{ item.action.label }}</a>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+        <button type="button" class="btn btn-link today-dismiss"
+                hx-post="/today/dismiss?portfolio_id={{ pid }}"
+                hx-target="#today" hx-swap="outerHTML" hx-push-url="false">Dismiss all {{ view.worth_checking | length }}</button>
+        {% else %}
+        <p class="today-empty">Nothing to check.</p>
+        {% endif %}
+        {% if view.unavailable %}
+        {{ macros.disclosure("Some sources could not be read", view.unavailable | join("; ")) }}
+        {% endif %}
+      </section>
+    </div>
+
+    <aside class="today-aside">
+      {% set s = view.summary %}
+      {% if s %}
+      <section class="today-card" aria-labelledby="today-portfolio">
+        <h2 id="today-portfolio" class="today-h2">{{ s.name }}</h2>
+        <div class="today-value">£{{ '{:,.2f}'.format(s.value_gbp) }}</div>
+        <div class="today-pnl {{ 'pos' if s.unrealised_gbp >= 0 else 'neg' }}">
+          {{ '+' if s.unrealised_gbp >= 0 else '−' }}£{{ '{:,.2f}'.format(s.unrealised_gbp | abs) }}
+          {%- if s.unrealised_pct is not none %} ({{ '%+.1f'|format(s.unrealised_pct) }}%){% endif %} unrealised
+        </div>
+        <div class="today-card-meta">
+          {%- if s.cash_gbp is not none %}£{{ '{:,.2f}'.format(s.cash_gbp) }} cash · {% endif -%}
+          {{ s.positions }} position{{ '' if s.positions == 1 else 's' }}
+        </div>
+        {% call macros.disclosure("Details") %}
+        <dl class="today-facts">
+          <dt>Analysis run</dt><dd>{{ view.run_id or 'Unknown' }}</dd>
+          <dt>Generated</dt><dd>{{ view.generated_at.strftime('%Y-%m-%d %H:%M UTC') if view.generated_at else 'Unknown' }}</dd>
+        </dl>
+        {% endcall %}
+      </section>
+      {% endif %}
+
+      <section aria-labelledby="today-buys">
+        <div class="today-buys-head">
+          <h2 id="today-buys" class="today-h2">Buy signals <span class="today-count">{{ view.buy_signal_count }}</span></h2>
+          <a class="today-link" href="/scanner">All in Scanner</a>
+        </div>
+        {% if view.buy_signals %}
+        <div class="today-buy-list">
+          {% for b in view.buy_signals %}
+          <div class="today-buy-row">
+            <strong class="today-buy-ticker">{{ b.ticker }}</strong>
+            <span class="today-buy-meta">{{ b.sector or '—' }}{% if b.score is not none %} · {{ b.score }}/10{% endif %} · {{ b.label }}</span>
+            <span class="today-buy-price">{% if b.price is not none %}{{ '%.2f'|format(b.price) }} {{ b.currency }}{% endif %}</span>
+          </div>
+          {% endfor %}
+        </div>
+        {% else %}
+        <p class="today-empty">No buy signals in the latest scan.</p>
+        {% endif %}
+        {% if view.other_setups %}
+        <p class="today-note">{{ view.other_setups }} other new setup{{ ' is' if view.other_setups == 1 else 's are' }} in the Scanner, not here.</p>
+        {% endif %}
+      </section>
+    </aside>
+  </div>
+</div>

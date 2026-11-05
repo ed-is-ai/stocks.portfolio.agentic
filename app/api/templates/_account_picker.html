@@ -1,0 +1,15 @@
+{#- The shell's account picker (GH-128, AD-12). ``selected`` is the server's
+    resolution of the browser's ``activePortfolio()``; a change re-points
+    every tab at the chosen portfolio through ``shell.js``. -#}
+<label id="account-picker" class="shell-account">
+  <span>Account</span>
+  {%- if portfolios %}
+  <select class="shell-account-select" aria-label="Account" onchange="selectPortfolio(this.value)">
+    {%- for p in portfolios %}
+    <option value="{{ p.id }}"{% if p.id == selected %} selected{% endif %}>{{ p.name }}</option>
+    {%- endfor %}
+  </select>
+  {%- else %}
+  <span class="shell-account-empty">No accounts</span>
+  {%- endif %}
+</label>

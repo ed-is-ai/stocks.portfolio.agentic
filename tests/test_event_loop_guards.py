@@ -110,7 +110,7 @@ async def test_a_blocked_strategy_manager_does_not_stall_settings(
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as http:
 
         async def strategy_manager() -> None:
-            await http.get("/partials/strategy-manager")
+            await http.get("/partials/strategies")
             order.append("strategy-manager")
 
         async with anyio.create_task_group() as tg:

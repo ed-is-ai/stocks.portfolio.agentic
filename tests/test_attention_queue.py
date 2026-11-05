@@ -83,8 +83,9 @@ def test_risk_first_order() -> None:
         "medium",
         "info",
     ]
-    # The run-wide source failure is listed but not counted.
-    assert queue.urgent_count == 2
+    # Held risks and exits need action; the source failure is worth checking.
+    assert [i.kind for i in queue.needs_action] == ["held_risk", "exit"]
+    assert [i.kind for i in queue.worth_checking] == ["evidence"]
 
 
 def test_sell_and_invalidated_thesis_group_into_one_exit_item() -> None:
@@ -175,19 +176,74 @@ def test_empty_queue_carries_unavailable_sources() -> None:
 
     assert queue.items == []
     assert queue.events == []
-    assert queue.urgent_count == 0
+    assert queue.needs_action == []
     assert queue.unavailable == ["Risk unavailable"]
 
 
-def test_run_wide_and_stale_only_items_are_listed_but_not_counted() -> None:
-    stale_thesis = THESIS.model_copy(update={"stale": True})
+def test_new_setups_are_neither_action_nor_worth_checking() -> None:
+    queue = _queue([SETUP, SOURCE, SELL])
 
-    queue = _queue([SOURCE, stale_thesis])
+    assert SETUP.source_event_id not in {
+        e
+        for i in [*queue.needs_action, *queue.worth_checking]
+        for e in i.source_event_ids
+    }
 
-    assert [item.kind for item in queue.items] == ["exit", "evidence"]
-    assert queue.urgent_count == 0
-    # A fresh event about this portfolio makes the same exit item count.
-    assert _queue([SOURCE, stale_thesis, SELL]).urgent_count == 1
+
+def test_a_rule_on_several_holdings_rolls_up_into_one_item() -> None:
+    stops = [
+        _event(f"stop-{s}", "held_risk", kind="no_stop", security_id=s)
+        for s in ("BBB", "AAA", "CCC")
+    ]
+
+    queue = _queue([*stops, CONCENTRATION])
+
+    concentration, rollup = queue.items
+    assert rollup.id == "rollup:held_risk:no_stop:1"
+    assert rollup.title == "3 holdings have no evidenced stop"
+    assert rollup.security_id is None
+    assert sorted(rollup.source_event_ids) == ["stop-AAA", "stop-BBB", "stop-CCC"]
+    assert rollup.summary.startswith("AAA, BBB, CCC.")
+    # The same holding's other risk is still its own item: listed once each.
+    assert concentration.security_id == "AAA"
+    assert concentration.source_event_ids == ["concentration"]
+    ids = [e for i in queue.items for e in i.source_event_ids]
+    assert sorted(ids) == sorted(e.source_event_id for e in queue.events)
+
+
+def test_a_rollup_id_is_run_independent_and_one_holding_is_not_rolled_up() -> None:
+    stops = [
+        _event(f"stop-{s}", "held_risk", kind="no_stop", security_id=s)
+        for s in ("AAA", "BBB")
+    ]
+    other_run = build_attention_queue(
+        stops, portfolio_id=1, analysis_run_id="run-2", unavailable=()
+    )
+
+    assert _queue(stops).items[0].id == other_run.items[0].id
+    (single,) = _queue(stops[:1]).items
+    assert single.id.startswith("attention:run-1:1:held_risk:")
+
+
+def test_rollups_are_per_portfolio() -> None:
+    events = [
+        _event(
+            f"gap-{p}-{s}",
+            "evidence",
+            kind="exit_evidence_gap",
+            security_id=s,
+            portfolio_id=p,
+        )
+        for p in (1, 2)
+        for s in ("AAA", "BBB")
+    ]
+
+    ids = sorted(i.id for i in _queue(events).items)
+
+    assert ids == [
+        "rollup:evidence:exit_evidence_gap:1",
+        "rollup:evidence:exit_evidence_gap:2",
+    ]
 
 
 def test_a_fresh_sell_with_a_stale_thesis_is_not_described_stale() -> None:

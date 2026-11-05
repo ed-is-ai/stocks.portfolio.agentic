@@ -763,3 +763,36 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-127-regime-pin-launch.md`
   summary: The plain (non-prepared) launch path cannot carry a regime pin; gh-127 rejects regime-filtered plain launches instead of supporting them.
   evidence: `BacktestSubmissionV1` / `build_run_input_manifest` have no `regime_benchmark`; only the route builds commands and it always sets `universe_selection`.
+
+## gh-128
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: Today has only "Dismiss all" for Worth checking; there is no per-item dismiss and no undo for a dismissal.
+  evidence: `DeskService.dismiss_worth_checking` persists every current item via `NotificationsRepository.dismiss_attention`; the mockup only shows "Dismiss all".
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: Realised P&L and Trade History are interim secondary pages (`/realised-pnl`, `/history`) under the gear menu until #130 folds them into `/portfolio/trades` and redirects them.
+  evidence: `SECONDARY_PAGES` in `app/api/routes/views.py`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: The Portfolio tab's agent attention strip still renders the whole queue (including new setups) and its own count; #130 replaces it with `risk_items(pid)`.
+  evidence: `_portfolio_agents.html` now counts `queue.needs_action` instead of the removed `urgent_count`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: Today is not yet measured against "fits on one screen with typical data" in a real browser with real data; only layout and breakpoints are tested with fixture data.
+  evidence: `tests/test_shell_browser.py` checks horizontal overflow at 1400/900/375 on the `tmp_path` stack.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: The legacy `"_scanner.html"` marker is still forbidden by `test_legacy_scanner_ui_artifacts_are_removed`; #129 must lift it when it creates `_scanner.html` per the spine's naming.
+  evidence: `tests/test_stock_scanner_ui.py`; `/partials/scanner` was allowed again by gh-128.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: `NotificationsRepository.recent_info` and `TradeReviewService.cached_reviews` lost their only app caller (the Desk rail and activity list) and could be removed.
+  evidence: grep for `recent_info(` / `cached_reviews(` in `app/`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: "Dismiss all" dismisses the Worth-checking items as built at POST time, not the rendered ones; send the rendered revision or keys.
+  evidence: The POST carries only portfolio_id, so an item that arrives between render and click is dismissed without being seen.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: Nothing prunes `attention_dismissals` rows.
+  evidence: Keys are now run-free, so growth is bounded by distinct subjects. The table is still read on every poll.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: A cold Today load can build the projection twice at once (badge and partial), and `partial_today` computes `revision()` twice.
+  evidence: `_CACHE_LOCK` guards only the dict; there is no single-flight build.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
+  summary: The 10-minute revision bucket re-renders `#today`, which closes any open Details disclosure.
+  evidence: `DESK_MAX_AGE` is part of `revision()`, and the poller swaps outerHTML.

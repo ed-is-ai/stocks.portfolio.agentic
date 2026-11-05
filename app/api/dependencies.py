@@ -39,7 +39,7 @@ from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.repositories.position_theses_repo import PositionThesesRepository
 from app.repositories.trade_annotations_repo import TradeAnnotationsRepository
 from app.api.stock_scanner_context import load_source_health
-from app.services.desk_service import ATTENTION_COUNTS, DeskService, file_revision
+from app.services.desk_service import TODAY_CACHE, DeskService, file_revision
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
@@ -402,12 +402,11 @@ def get_desk_service(
     notifications: Annotated[
         NotificationsRepository, Depends(get_notifications_repository)
     ],
-    trade_reviews: Annotated[TradeReviewService, Depends(get_trade_review_service)],
 ) -> DeskService:
-    """Compose the read-only AI Desk (GH-21) from the shared services.
+    """Compose the Desk service behind Today and its badge (GH-128).
 
     Not cached, so overriding any of the services it reads (as tests do)
-    takes effect; only the bell's short-lived count cache is shared.
+    takes effect; only the revision-keyed Today cache is shared.
     """
     return DeskService(
         trader,
@@ -415,10 +414,8 @@ def get_desk_service(
         recommendations.recommend,
         theses.statuses,
         notifications,
-        trade_reviews,
-        config.COPILOT_AUDIT_JSONL,
         load_source_health,
-        count_cache=ATTENTION_COUNTS,
+        cache=TODAY_CACHE,
         # trades.db is rollback-journal SQLite, so its stat moves on every
         # thesis, assignment or ledger write; the status file owns source health.
         input_revision=lambda: file_revision(TRADES_DB, PIPELINE_STATUS_JSON),

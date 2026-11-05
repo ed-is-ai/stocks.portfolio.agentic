@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.api.dependencies import (
     PORTFOLIO_WRITE,
@@ -42,8 +42,7 @@ from app.services.desk_service import notification_loader
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
-from app.services.pipeline_service import PipelineService
-from app.services.portfolio_service import PortfolioService
+from app.services.portfolio_service import PortfolioService, resolve_portfolio_id
 from app.services.position_thesis_service import PositionThesisService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.strategy_assignment_service import StrategyAssignmentService
@@ -64,39 +63,153 @@ def startup_status(request: Request) -> dict[str, str]:
     return {"status": request.app.state.strategy_preparation}
 
 
-@router.get("/", response_class=HTMLResponse)
-def index(request: Request) -> HTMLResponse:
-    """Render the shell, with freshness ready for the header affordance (#418).
+#: The four primary tabs: slug -> label (GH-128, AD-3). Each is a page at
+#: ``/<slug>`` whose partial is ``/partials/<slug>``.
+SHELL_TABS: dict[str, str] = {
+    "today": "Today",
+    "scanner": "Scanner",
+    "portfolio": "Portfolio",
+    "strategies": "Strategies",
+}
+#: Secondary shell pages reached from the ⚙ menu (AD-4). Realised P&L and
+#: Trade History are interim until #130 folds them into ``/portfolio/trades``.
+SECONDARY_PAGES: dict[str, str] = {
+    "runlog": "Run Log",
+    "data-quality": "Data Quality",
+    "settings": "Settings",
+    "realised-pnl": "Realised P&L",
+    "history": "Trade History",
+}
+SHELL_PAGES: dict[str, str] = {**SHELL_TABS, **SECONDARY_PAGES}
 
-    The refresh control is now the primary place freshness is discovered, so
-    it is server-rendered on first paint rather than waiting on (or failing
-    with) the load-triggered ``/pipeline-status`` fetch.
+
+def page_url(tab: str, sub: str | None = None) -> str:
+    """The pushed page URL of a tab or sub-view: ``/<tab>[/<sub>]``."""
+    return f"/{tab}/{sub}" if sub else f"/{tab}"
+
+
+def partial_url(tab: str, sub: str | None = None) -> str:
+    """The partial behind a page: ``/partials/<tab>[/<sub>]``."""
+    return f"/partials{page_url(tab, sub)}"
+
+
+def render_shell(request: Request, tab: str, sub: str | None = None) -> HTMLResponse:
+    """Render the full shell (``index.html``) with ``tab`` active (AD-3).
+
+    The page's content loads into ``#tab-content`` from its partial, with
+    the shell's resolved portfolio. Never branches on ``HX-Request``: a
+    pushed page URL always answers with the whole shell. Freshness is
+    server-rendered for the header note (#418).
     """
-    return render_shell(request, "stock-scanner")
-
-
-def render_shell(request: Request, active_tab: str) -> HTMLResponse:
-    """Render ``index.html`` with ``active_tab`` active and loaded first
-    (``stock-scanner`` for ``/``, ``desk`` for ``/desk``, GH-21)."""
+    if tab not in SHELL_PAGES:
+        raise ValueError(f"unknown shell page {tab!r}")
     return templates.TemplateResponse(
         request,
         "index.html",
         context={
             **build_freshness_context(),
-            #: Reduced-coverage warnings live in the Refresh Data menu, beside
-            #: the buttons that start a run, rather than in a confirmation
-            #: dialog after the click. They come from the process environment,
-            #: so first paint is the only time they can change.
-            "pipeline_warnings": PipelineService.missing_configuration(),
-            "active_tab": active_tab,
+            "tabs": SHELL_TABS,
+            "secondary_pages": SECONDARY_PAGES,
+            "active_tab": tab,
+            "page_url": page_url(tab, sub),
+            "partial_url": partial_url(tab, sub),
         },
     )
 
 
-@router.get("/partials/stock-scanner", response_class=HTMLResponse)
-def partial_stock_scanner(
+def _to_today(request: Request) -> RedirectResponse:
+    """Redirect to ``/today``, keeping the query (portfolio, item)."""
+    query = request.url.query
+    return RedirectResponse(f"/today?{query}" if query else "/today", 307)
+
+
+@router.get("/")
+def index(request: Request) -> RedirectResponse:
+    """``/`` is Today (AD-4)."""
+    return _to_today(request)
+
+
+@router.get("/desk")
+def desk(request: Request) -> RedirectResponse:
+    """The retired AI Desk URL lands on Today, preserving its query (AD-4)."""
+    return _to_today(request)
+
+
+@router.get("/today", response_class=HTMLResponse)
+def today_page(request: Request) -> HTMLResponse:
+    """The Today page in the full shell."""
+    return render_shell(request, "today")
+
+
+@router.get("/scanner", response_class=HTMLResponse)
+def scanner_page(request: Request) -> HTMLResponse:
+    """The Scanner page in the full shell."""
+    return render_shell(request, "scanner")
+
+
+@router.get("/portfolio", response_class=HTMLResponse)
+def portfolio_page(request: Request) -> HTMLResponse:
+    """The Portfolio page in the full shell."""
+    return render_shell(request, "portfolio")
+
+
+@router.get("/strategies", response_class=HTMLResponse)
+def strategies_page(request: Request) -> HTMLResponse:
+    """The Strategies page in the full shell."""
+    return render_shell(request, "strategies")
+
+
+@router.get("/runlog", response_class=HTMLResponse)
+def runlog_page(request: Request) -> HTMLResponse:
+    """The Run Log, a secondary shell page."""
+    return render_shell(request, "runlog")
+
+
+@router.get("/data-quality", response_class=HTMLResponse)
+def data_quality_page(request: Request) -> HTMLResponse:
+    """Data Quality, a secondary shell page."""
+    return render_shell(request, "data-quality")
+
+
+@router.get("/settings", response_class=HTMLResponse)
+def settings_page(request: Request) -> HTMLResponse:
+    """Settings (with the refresh variants), a secondary shell page."""
+    return render_shell(request, "settings")
+
+
+@router.get("/realised-pnl", response_class=HTMLResponse)
+def realised_pnl_page(request: Request) -> HTMLResponse:
+    """Realised P&L, an interim secondary page until #130."""
+    return render_shell(request, "realised-pnl")
+
+
+@router.get("/history", response_class=HTMLResponse)
+def history_page(request: Request) -> HTMLResponse:
+    """Trade History, an interim secondary page until #130."""
+    return render_shell(request, "history")
+
+
+@router.get("/partials/account-picker", response_class=HTMLResponse)
+def partial_account_picker(
+    request: Request, trader: TraderDep, portfolio_id: str | None = None
+) -> HTMLResponse:
+    """The shell's account picker, with the resolved portfolio selected."""
+    portfolios = trader.list_portfolios()
+    return templates.TemplateResponse(
+        request,
+        "_account_picker.html",
+        context={
+            "portfolios": portfolios,
+            "selected": resolve_portfolio_id(optional_int(portfolio_id), portfolios),
+        },
+    )
+
+
+@router.get("/partials/scanner", response_class=HTMLResponse)
+def partial_scanner(
     request: Request, trader: TraderDep, portfolio: PortfolioDep, alerts: AlertsDep
 ) -> HTMLResponse:
+    """The Scanner tab's content (the existing Stock Scanner screen)."""
     return templates.TemplateResponse(
         request,
         "_stock_scanner.html",
@@ -178,7 +291,7 @@ def partial_portfolio_agents(
     A plain ``def`` like ``partial_portfolio_risk``: the recommendation and
     risk evaluation read the ledger, scan artifact and price cache, so they
     run in the threadpool, lazily, after the tab has painted. The queue gets
-    the same notification events as the AI Desk (GH-21), so both show one
+    the same notification events as Today (GH-128), so both show one
     queue. Never mutates trades, cash flows, portfolios, Strategy
     assignments, theses or notifications; the risk valuation may fetch and
     cache an FX quote exactly as the Portfolio tab render does.
@@ -281,13 +394,9 @@ def partial_realised_pnl(
         return templates.TemplateResponse(
             request, "_realised_pnl.html", context={"no_portfolios": True}
         )
-    # Resolve the active portfolio: an unknown/None id falls back to the
-    # first portfolio, matching PortfolioService.default_portfolio_context.
-    active_id = pid
-    if active_id is None or not any(p.id == active_id for p in portfolios):
-        active_id = portfolios[0].id
+    active_id = resolve_portfolio_id(pid, portfolios)
     active_portfolio = next(p for p in portfolios if p.id == active_id)
-    summary = realised_pnl.compute_summary(active_id)
+    summary = realised_pnl.compute_summary(active_portfolio.id)
     # Projected from the summary already in hand -- never a second
     # compute_summary, which would re-run FIFO for the same render (#563).
     timeline = RealisedPnlService.timeline_points(summary)
@@ -330,11 +439,9 @@ def ack_unmatched_sell(
         return templates.TemplateResponse(
             request, "_unmatched_sells.html", context={"unmatched_sells": []}
         )
-    active_id = pid
-    if active_id is None or not any(p.id == active_id for p in portfolios):
-        active_id = portfolios[0].id
+    active_id = resolve_portfolio_id(pid, portfolios)
     active_portfolio = next(p for p in portfolios if p.id == active_id)
-    summary = realised_pnl.toggle_unmatched_sell_ack(trade_id, active_id)
+    summary = realised_pnl.toggle_unmatched_sell_ack(trade_id, active_portfolio.id)
     return templates.TemplateResponse(
         request,
         "_unmatched_sells.html",

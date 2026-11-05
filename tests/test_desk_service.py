@@ -1,17 +1,18 @@
-"""Real-stack tests for the read-only AI Desk view model (GH-21).
+"""Real-stack tests for the Desk service's Today projections (GH-128).
 
 Every store lives under ``tmp_path``: the ledger (``TraderAgent(db_path=...)``,
-never the default), theses, notifications, FX quotes, the published
-artifact and the copilot audit log.
+never the default), theses, notifications, FX quotes and the published
+artifact.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime, timedelta
+from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
 import pytest
 
@@ -24,39 +25,22 @@ from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.portfolio_recommendation import NO_ASSIGNMENT
 from app.schemas.position_thesis import ThesisContentV1
-from app.schemas.trade_review import ReviewRuleV1, TradeCheckV1, TradeReviewV1
 from app.services import portfolio_service as portfolio_service_module
+from app.services import desk_service as desk_module
 from app.services.desk_service import (
-    ACTIVITY_LIMIT,
-    AGENT_BOUNDARY,
-    AUDIT_TAIL_BYTES,
     DESK_MAX_AGE,
     DeskService,
-    DeskView,
+    TodayView,
     file_revision,
     raised_by_label,
 )
 from app.services.gbp_valuation_service import GbpValuationService
 from app.services.portfolio_service import PortfolioService
 from app.services.position_thesis_service import PositionThesisService
-from app.services.trade_review_service import TradeReviewService
 from app.services.trader_service import TraderService
-from tests.test_portfolio_agents_route import _result, _seed_thesis
+from tests.test_portfolio_agents_route import _result
 from tests.test_portfolio_risk_route import _record
 from tests.test_thesis_evaluator import make_record
-
-
-class FakeReviews:
-    """A trade-review cache that is warm (``cached``) or cold (``None``)."""
-
-    def __init__(self, cached: dict[int, TradeReviewV1] | None = None) -> None:
-        self.cached = cached
-
-    def cached_reviews(self) -> dict[int, TradeReviewV1] | None:
-        return self.cached
-
-    def reviews(self) -> dict[int, TradeReviewV1]:
-        raise AssertionError("the Desk must never compute a cold review scan")
 
 
 def _raise(*_args: object) -> object:
@@ -104,8 +88,6 @@ def desk_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
         artifact=artifact,
         theses=theses,
         notifications=notifications,
-        reviews=FakeReviews(),
-        audit=tmp_path / "copilot_audit.jsonl",
         recommend=lambda _pid: _result(),
         statuses=theses.statuses,
     )
@@ -115,341 +97,30 @@ def desk_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespa
         lambda pid: stack.recommend(pid),
         lambda pid: stack.statuses(pid),
         notifications,
-        cast(TradeReviewService, stack.reviews),
-        stack.audit,
         dict,
     )
     return stack
 
 
-def _view(stack: SimpleNamespace, item: str | None = None) -> DeskView:
-    return stack.desk().view(stack.pid, item)
+def _today(stack: SimpleNamespace) -> TodayView:
+    return stack.desk().today_items(stack.pid)
 
 
-def _rail(view: DeskView) -> dict[str, tuple[str, str]]:
-    return {w.name: (w.state, w.detail) for w in view.workflows}
-
-
-def test_the_queue_is_18s_queue_with_deterministic_chips(desk_stack) -> None:
-    first, second = _view(desk_stack), _view(desk_stack)
-
-    assert [d.item for d in first.items] == list(first.queue.items)
-    assert [(d.item.id, d.chip) for d in first.items] == [
-        (d.item.id, d.chip) for d in second.items
-    ]
-    assert [d.chip for d in first.items] == ["Risk", "Risk", "Risk", "Risk", "Review"]
-    assert first.queue.urgent_count == 5
-    assert first.chip_counts == {"Risk": 4, "Limited": 0, "Review": 1, "Ready": 0}
-
-
-def test_the_risk_strip_reads_the_view(desk_stack) -> None:
-    view = _view(desk_stack)
-
-    assert view.agent.open_risk.text == "£150.00 · 7.5%"
-    assert view.agent.risk_findings is not None and view.agent.risk_findings >= 3
-    # AAA's exit evidence is complete; BBB's is 166 / 200.
-    assert view.evidence_complete == (1, 2)
-
-
-def test_the_first_item_is_selected_and_facts_trace_the_item(desk_stack) -> None:
-    view = _view(desk_stack)
-    selected = view.selected
-
-    assert selected is not None and selected is view.items[0]
-    assert not view.missing_item
-    facts = dict(selected.facts)
-    assert facts["Portfolio"] == "SIPP"
-    assert facts["Severity"] == "High"
-    assert facts["Events"] == str(len(selected.events))
-    assert set(selected.item.evidence) <= set(selected.evidence)
-    assert ("Open Portfolio", "tab", "tab-portfolio") in [
-        (a.label, a.kind, a.target) for a in selected.actions
-    ]
-
-
-def test_a_deep_linked_item_is_selected(desk_stack) -> None:
-    target = _view(desk_stack).items[-1].item.id
-
-    view = _view(desk_stack, target)
-
-    assert view.selected is not None and view.selected.item.id == target
-    assert not view.missing_item
-
-
-def test_an_unknown_item_selects_the_first_with_a_note(desk_stack) -> None:
-    view = _view(desk_stack, "attention:gone")
-
-    assert view.missing_item
-    assert view.selected is view.items[0]
-
-
-def test_a_run_wide_thesis_warning_is_one_system_review_item(desk_stack) -> None:
-    desk_stack.recommend = lambda _pid: NO_ASSIGNMENT
-    desk_stack.notifications.record(
-        NotificationCategory.ALERT,
-        "thesis_evaluation_failed",
-        "Position thesis evaluation failed",
-        severity=NotificationSeverity.WARNING,
-        body="Thesis evaluation failed for portfolio ids: 1",
-        run_id="run-0",
-    )
-    before = _view(desk_stack)
-
-    (item,) = [d for d in before.items if d.item.raised_by == "System"]
-    assert item.chip == "Review"
-    assert item.item.portfolio_id is None
-    assert item.evidence[0].kind == "notification"
-    assert item.evidence[0].source == "alert"
-    # Run-wide: listed, never counted urgent.
-    desk_stack.notifications.dismiss(desk_stack.notifications.recent()[0].id)
-    assert before.queue.urgent_count == _view(desk_stack).queue.urgent_count
-
-
-def test_alert_and_source_notifications_are_not_duplicated(desk_stack) -> None:
-    before = len(_view(desk_stack).items)
-    desk_stack.notifications.record(
-        NotificationCategory.ALERT,
-        "stop_loss_hit",
-        "Stop loss hit — AAA",
-        severity=NotificationSeverity.WARNING,
-        ticker="AAA",
-    )
-    desk_stack.notifications.record(
-        NotificationCategory.SOURCE,
-        "source_failed",
-        "Source failed — StockTwits",
-        severity=NotificationSeverity.ERROR,
-        run_id="run-0",  # the published run: its source-health events cover it
-    )
-    desk_stack.notifications.record(
-        NotificationCategory.REFRESH, "refresh_done", "Refresh complete"
-    )
-
-    assert len(_view(desk_stack).items) == before
-
-
-def test_a_job_notification_links_to_its_run_page(desk_stack) -> None:
-    desk_stack.notifications.upsert_job_notification(
-        job_id="job-1",
-        job_status_version=3,
-        category=NotificationCategory.BACKTEST,
-        event_type="strategy_job_failed",
-        severity=NotificationSeverity.ERROR,
-        title="Backtest failed",
-        body="Status: failed.",
-        created_at=datetime.now(UTC),
-        target_url="/strategy-manager/activities/job-1",
-        actions=(),
-    )
-
-    (item,) = [d for d in _view(desk_stack).items if d.item.raised_by == "Backtest"]
-
-    assert [(a.label, a.target) for a in item.actions] == [
-        ("Open run", "/strategy-manager/activities/job-1")
-    ]
-
-
-def test_an_invalidated_thesis_links_to_its_editor(desk_stack) -> None:
-    _seed_thesis(
-        desk_stack, {"kind": "close_below_sma", "period": 50}, make_record(price=94.0)
-    )
-
-    (item,) = [d for d in _view(desk_stack).items if len(d.events) == 2]
-
-    assert (
-        "Open thesis editor",
-        "thesis",
-        f"/portfolios/{desk_stack.pid}/theses/AAA",
-    ) in [(a.label, a.kind, a.target) for a in item.actions]
-    assert _rail(_view(desk_stack))["Thesis monitor"] == (
-        "Live",
-        "1 active · 1 invalidated",
-    )
-
-
-def test_the_rail_reads_each_source(desk_stack) -> None:
-    rail = _rail(_view(desk_stack))
-
-    assert rail["Portfolio advisor"] == ("Live", "1 Sell")
-    assert rail["Research copilot"] == ("Live", "0 questions in 7 days")
-    assert rail["Thesis monitor"] == ("Live", "0 active · 0 invalidated")
-    assert rail["Portfolio risk"][0] == "Live"
-    assert rail["Alert triage"] == ("Live", "5 items · 5 urgent")
-    assert rail["Strategy experiments"] == ("Not built yet — #15", "")
-    assert rail["Data recovery"] == ("Not built yet — planned", "")
-    assert len(rail) == 8
-
-
-def test_no_strategy_is_declared_in_the_rail(desk_stack) -> None:
-    desk_stack.recommend = lambda _pid: NO_ASSIGNMENT
-
-    assert _rail(_view(desk_stack))["Portfolio advisor"] == (
-        "Live",
-        "No Strategy assigned",
-    )
-
-
-def test_a_cold_trade_review_cache_links_to_history(desk_stack) -> None:
-    (workflow,) = [w for w in _view(desk_stack).workflows if w.name == "Trade review"]
-
-    assert (workflow.state, workflow.detail) == ("Not computed yet", "")
-    assert workflow.action is not None
-    assert (workflow.action.label, workflow.action.target) == (
-        "Open History",
-        "tab-history",
-    )
-
-
-def _review(pid: int, day: date, *statuses: str) -> TradeReviewV1:
-    rule = ReviewRuleV1(id="r", wording="w")
-    return TradeReviewV1(
-        trade_id=1,
-        portfolio_id=pid,
-        ticker="AAA",
-        action="BUY",
-        trade_date=day,
-        checks=tuple(
-            TradeCheckV1.model_validate(
-                {"kind": "valid_setup", "status": s, "rule": rule, "calculation": "c"}
-            )
-            for s in statuses
-        ),
-    )
-
-
-def test_a_warm_trade_review_cache_counts_this_weeks_deviations(desk_stack) -> None:
-    today = datetime.now(UTC).date()
-    desk_stack.reviews.cached = {
-        1: _review(desk_stack.pid, today, "deviated", "followed", "deviated"),
-        2: _review(desk_stack.pid, today - timedelta(days=14), "deviated"),
-        3: _review(desk_stack.pid + 1, today, "deviated"),
-    }
-
-    assert _rail(_view(desk_stack))["Trade review"] == (
-        "Live",
-        "2 deviations this week",
-    )
-
-
-def test_each_failing_source_is_unavailable_alone(
-    desk_stack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(desk_stack.service, "risk_report", _raise)
-    monkeypatch.setattr(desk_stack.notifications, "recent_warnings", _raise)
-    desk_stack.statuses = _raise
-    desk_stack.recommend = _raise
-    desk_stack.reviews.cached_reviews = _raise
-    desk_stack.audit.mkdir()  # a directory: reading it raises OSError
-
-    view = _view(desk_stack)
-    rail = _rail(view)
-
-    for name in (
-        "Portfolio advisor",
-        "Research copilot",
-        "Thesis monitor",
-        "Portfolio risk",
-        "Trade review",
-    ):
-        assert rail[name] == ("Unavailable", ""), name
-    assert rail["Alert triage"][0] == "Live"
-    assert "Notifications" in view.agent.unavailable
-    assert "Risk unavailable" in view.agent.unavailable
-
-
-def _audit(path: Path, *stamps: datetime, junk: bool = False) -> None:
-    lines = [
-        json.dumps({"timestamp": s.isoformat(), "status": "answered"}) for s in stamps
-    ]
-    if junk:
-        lines.append("not json")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def test_copilot_questions_are_counted_for_seven_days(desk_stack) -> None:
-    now = datetime.now(UTC)
-    _audit(desk_stack.audit, now - timedelta(days=9), now, now, junk=True)
-
-    assert _rail(_view(desk_stack))["Research copilot"] == (
-        "Live",
-        "2 questions in 7 days",
-    )
-
-
-def test_a_cut_audit_tail_is_a_lower_bound(desk_stack) -> None:
-    now = datetime.now(UTC)
-    line = json.dumps({"timestamp": now.isoformat(), "pad": "x" * 1000})
-    count = AUDIT_TAIL_BYTES // len(line) + 5
-    desk_stack.audit.write_text((line + "\n") * count, encoding="utf-8")
-
-    state, detail = _rail(_view(desk_stack))["Research copilot"]
-
-    assert state == "Live"
-    assert detail.endswith("+ questions in 7 days")
-    assert int(detail.split("+")[0]) < count
-
-
-def test_an_empty_queue_has_no_items_or_selection(
-    desk_stack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(desk_stack.trader, "list_portfolios", lambda: [])
-
-    view = _view(desk_stack)
-
-    assert view.items == () and view.selected is None
-    assert view.portfolio_id is None
-
-
-def test_the_attention_count_is_the_urgent_count(desk_stack) -> None:
-    assert desk_stack.desk().attention_count(desk_stack.pid) == 5
-
-
-# --- GH-21 review fixes -----------------------------------------------------
-
-
-def _desk_at(stack: SimpleNamespace, clock: list[datetime]) -> DeskService:
-    """A Desk on a controllable clock with its own bell count cache."""
+def _desk_at(
+    stack: SimpleNamespace, clock: list[datetime], **kwargs: Any
+) -> DeskService:
+    """A Desk on a controllable clock with its own Today cache."""
     return DeskService(
         stack.trader,
         stack.service,
         stack.recommend,
         stack.statuses,
         stack.notifications,
-        cast(TradeReviewService, stack.reviews),
-        stack.audit,
         dict,
         now=lambda: clock[0],
-        count_cache={},
+        cache=OrderedDict(),
+        **kwargs,
     )
-
-
-def test_two_badge_polls_within_the_ttl_compute_once(
-    desk_stack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[object] = []
-    agent_view = desk_stack.service.agent_view
-
-    def spy(*args: object, **kwargs: object) -> object:
-        calls.append(args[0])
-        return agent_view(*args, **kwargs)
-
-    monkeypatch.setattr(desk_stack.service, "agent_view", spy)
-    clock = [datetime.now(UTC)]
-    desk = _desk_at(desk_stack, clock)
-
-    assert desk.attention_count(desk_stack.pid) == 5
-    clock[0] += timedelta(seconds=20)
-    assert desk.attention_count(desk_stack.pid) == 5
-    assert len(calls) == 1
-    # A new trade changes the key; the TTL expiring recomputes too.
-    desk_stack.agent.record_buy(
-        "CCC", 1, 1.0, "2026-01-03", portfolio_id=desk_stack.pid
-    )
-    desk.attention_count(desk_stack.pid)
-    assert len(calls) == 2
-    clock[0] += timedelta(seconds=61)
-    desk.attention_count(desk_stack.pid)
-    assert len(calls) == 3
 
 
 def _note(
@@ -467,72 +138,230 @@ def _note(
     )
 
 
-def test_a_portfolio_scoped_error_is_listed_but_never_urgent(desk_stack) -> None:
-    _note(desk_stack, "Import rejected", portfolio_id=desk_stack.pid)
+def test_today_splits_the_queue_into_action_and_checking(desk_stack) -> None:
+    view = _today(desk_stack)
 
-    view = _view(desk_stack)
-
-    (item,) = [d for d in view.items if d.item.title == "Import rejected"]
-    assert item.item.portfolio_id == desk_stack.pid
-    assert item.chip == "Review"
-    assert view.queue.urgent_count == 5
-    assert desk_stack.desk().attention_count(desk_stack.pid) == 5
-
-
-def test_each_notification_is_its_own_item_with_its_severity(desk_stack) -> None:
-    for job, severity in (
-        ("job-1", NotificationSeverity.ERROR),
-        ("job-2", NotificationSeverity.WARNING),
-    ):
-        desk_stack.notifications.upsert_job_notification(
-            job_id=job,
-            job_status_version=1,
-            category=NotificationCategory.BACKTEST,
-            event_type="strategy_job_failed",
-            severity=severity,
-            title=f"Backtest {job} failed",
-            body="Status: failed.",
-            created_at=datetime.now(UTC),
-            target_url=f"/strategy-manager/activities/{job}",
-            actions=(),
-        )
-
-    items = [d for d in _view(desk_stack).items if d.item.raised_by == "Backtest"]
-
-    assert sorted(d.item.title for d in items) == [
-        "Backtest job-1 failed",
-        "Backtest job-2 failed",
+    assert [i.kind for i in view.needs_action] == [
+        "held_risk",
+        "held_risk",
+        "held_risk",
+        "exit",
     ]
-    by_title = {d.item.title: d for d in items}
-    one, two = by_title["Backtest job-1 failed"], by_title["Backtest job-2 failed"]
-    assert dict(one.facts)["Notification severity"] == "Error"
-    assert dict(two.facts)["Notification severity"] == "Warning"
-    assert [a.target for a in one.actions] == ["/strategy-manager/activities/job-1"]
+    assert [i.title for i in view.worth_checking] == [
+        "BBB: exit evidence gap (166 / 200)"
+    ]
+    assert view.needs_action[0].action is not None
+    assert (
+        view.needs_action[0].action.href == f"/portfolio?portfolio_id={desk_stack.pid}"
+    )
+    # Provenance is carried for the disclosure, never in the title/detail.
+    facts = dict(view.needs_action[0].facts)
+    assert facts["Analysis run"] == "run-0"
+    assert facts["Raised by"] == "Portfolio risk"
 
 
-def test_an_in_window_error_is_not_truncated_by_newer_info_rows(desk_stack) -> None:
-    _note(desk_stack, "Import rejected")
-    for n in range(205):
-        _note(desk_stack, f"info {n}", NotificationSeverity.INFO)
+def test_one_projection_feeds_today_the_risk_card_and_the_badge(desk_stack) -> None:
+    desk = desk_stack.desk()
+    view = desk.today_items(desk_stack.pid)
+    risks = desk.risk_items(desk_stack.pid)
+
+    assert desk.badge_count(desk_stack.pid) == len(view.needs_action) == 4
+    assert risks == tuple(i for i in view.needs_action if i.kind == "held_risk")
+    # Each underlying risk appears once across Today (and so the card).
+    keys = [i.key for i in (*view.needs_action, *view.worth_checking)]
+    assert len(keys) == len(set(keys))
+
+
+def test_today_is_deterministic(desk_stack) -> None:
+    first, second = _today(desk_stack), _today(desk_stack)
+
+    assert first == second
+
+
+def test_new_setups_are_counted_for_the_scanner_never_listed(
+    desk_stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        portfolio_service_module,
+        "record_setups",
+        lambda _records, _held: [("NEW", "breakout", "Breakout")],
+    )
+
+    view = _today(desk_stack)
+
+    assert view.other_setups == 1
+    listed = [i.title for i in (*view.needs_action, *view.worth_checking)]
+    assert not any("NEW" in title for title in listed)
+
+
+def test_buy_signals_are_the_buy_family_only(
+    desk_stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    buy = make_record(price=50.0)
+    monkeypatch.setattr(
+        desk_module,
+        "buy_signals",
+        lambda records, held: [(r, SimpleNamespace(text="Buy")) for r in records],
+    )
+    monkeypatch.setattr(desk_stack.service, "load_analysis", lambda: [buy] * 7)
+
+    view = _today(desk_stack)
+
+    assert view.buy_signal_count == 7
+    assert len(view.buy_signals) == desk_module.BUY_SIGNAL_LIMIT
+    assert view.buy_signals[0].ticker == buy.ticker
+    assert view.buy_signals[0].label == "Buy"
+
+
+def test_the_portfolio_card_reads_the_agent_views_valuation(desk_stack) -> None:
+    summary = _today(desk_stack).summary
+
+    assert summary is not None
+    assert summary.name == "SIPP"
+    assert summary.cash_gbp == 1000.0
+    assert summary.positions == 2
+    # Only the priced holding (AAA) carries value and unrealised P&L.
+    assert summary.value_gbp == 2000.0
+    assert summary.unrealised_gbp == 100.0
+
+
+def test_an_empty_ledger_is_an_empty_today(
+    desk_stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(desk_stack.trader, "list_portfolios", lambda: [])
+
+    view = _today(desk_stack)
+
+    assert view.portfolio_id is None and view.needs_action == ()
+    assert view.summary is None
+
+
+def test_each_failing_source_is_declared_unavailable(
+    desk_stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(desk_stack.service, "risk_report", _raise)
+    monkeypatch.setattr(desk_stack.notifications, "recent_warnings", _raise)
+    desk_stack.statuses = _raise
+    desk_stack.recommend = _raise
+
+    view = _today(desk_stack)
+
+    assert "Notifications" in view.unavailable
+    assert "Risk unavailable" in view.unavailable
+
+
+def test_a_repeat_badge_poll_with_unchanged_inputs_builds_once(
+    desk_stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[object] = []
+    agent_view = desk_stack.service.agent_view
+
+    def spy(*args: object, **kwargs: object) -> object:
+        calls.append(args[0])
+        return agent_view(*args, **kwargs)
+
+    monkeypatch.setattr(desk_stack.service, "agent_view", spy)
+    clock = [datetime(2026, 1, 1, tzinfo=UTC)]
+    desk = _desk_at(desk_stack, clock)
+
+    assert desk.badge_count(desk_stack.pid) == 4
+    clock[0] += timedelta(seconds=30)
+    desk.badge_count(desk_stack.pid)
+    desk.today_items(desk_stack.pid)
+    desk.risk_items(desk_stack.pid)
+    assert len(calls) == 1
+    # A new trade changes the revision; so does the time bucket.
+    desk_stack.agent.record_buy(
+        "CCC", 1, 1.0, "2026-01-03", portfolio_id=desk_stack.pid
+    )
+    desk.badge_count(desk_stack.pid)
+    assert len(calls) == 2
+    clock[0] += DESK_MAX_AGE
+    desk.badge_count(desk_stack.pid)
+    assert len(calls) == 3
+
+
+def test_an_unavailable_revision_builds_uncached(
+    desk_stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    desk = desk_stack.desk()
+    monkeypatch.setattr(desk_stack.trader, "get_trade_revisions", _raise)
+
+    assert desk.revision(desk_stack.pid) is None
+    assert desk.badge_count(desk_stack.pid) == 4
+
+
+def test_dismiss_all_hides_worth_checking_until_its_evidence_changes(
+    desk_stack,
+) -> None:
+    desk = desk_stack.desk()
+    before = desk.today_items(desk_stack.pid)
+
+    assert desk.dismiss_worth_checking(desk_stack.pid) == 1
+
+    after = desk.today_items(desk_stack.pid)
+    assert after.worth_checking == ()
+    assert after.needs_action == before.needs_action
+    (item,) = before.worth_checking
+    assert desk_stack.notifications.attention_dismissals() == {
+        item.key: item.fingerprint
+    }
+    # A dismissal against older evidence (another fingerprint) no longer holds.
+    desk_stack.notifications.dismiss_attention([(item.key, "older-evidence")])
+    assert desk.today_items(desk_stack.pid).worth_checking == before.worth_checking
+
+
+def test_a_run_wide_thesis_warning_is_worth_checking(desk_stack) -> None:
+    desk_stack.recommend = lambda _pid: NO_ASSIGNMENT
+    _note(
+        desk_stack,
+        "Position thesis evaluation failed",
+        NotificationSeverity.WARNING,
+        category=NotificationCategory.ALERT,
+        event_type="thesis_evaluation_failed",
+        run_id="run-0",
+    )
+
+    view = _today(desk_stack)
+
+    (item,) = [i for i in view.worth_checking if "thesis" in i.title]
+    assert item.action is not None and item.action.href == "/scanner"
+    assert dict(item.facts)["Raised by"] == "System"
+
+
+def test_a_job_notification_links_to_its_run_page(desk_stack) -> None:
     desk_stack.notifications.upsert_job_notification(
-        job_id="old",
-        job_status_version=1,
+        job_id="job-1",
+        job_status_version=3,
         category=NotificationCategory.BACKTEST,
         event_type="strategy_job_failed",
         severity=NotificationSeverity.ERROR,
-        title="Too old",
-        body="",
-        created_at=datetime.now(UTC) - timedelta(days=8),
-        target_url=None,
+        title="Backtest failed",
+        body="Status: failed.",
+        created_at=datetime.now(UTC),
+        target_url="/strategy-manager/activities/job-1",
         actions=(),
     )
 
-    titles = [d.item.title for d in _view(desk_stack).items]
-    since = datetime.now(UTC) - timedelta(days=7)
-    rows = desk_stack.notifications.recent_warnings(since)
+    (item,) = [
+        i for i in _today(desk_stack).worth_checking if i.title == "Backtest failed"
+    ]
 
-    assert "Import rejected" in titles and "Too old" not in titles
-    assert [n.title for n in rows] == ["Import rejected"]
+    assert item.action is not None
+    assert (item.action.label, item.action.href) == (
+        "Open run",
+        "/strategy-manager/activities/job-1",
+    )
+
+
+def test_a_portfolio_error_is_worth_checking_and_never_counted(desk_stack) -> None:
+    _note(desk_stack, "Import rejected", portfolio_id=desk_stack.pid)
+    desk = desk_stack.desk()
+
+    titles = [i.title for i in desk.today_items(desk_stack.pid).worth_checking]
+
+    assert "Import rejected" in titles
+    assert desk.badge_count(desk_stack.pid) == 4
 
 
 def test_source_notifications_from_an_unpublished_run_are_listed(
@@ -547,144 +376,19 @@ def test_source_notifications_from_an_unpublished_run_are_listed(
             run_id=run,
         )
 
-    titles = [d.item.title for d in _view(desk_stack).items]
+    titles = [i.title for i in _today(desk_stack).worth_checking]
 
     assert "Source failed in run-failed" in titles
     assert "Source failed in run-0" not in titles
 
 
-def test_a_deep_link_from_an_earlier_run_selects_the_same_item(desk_stack) -> None:
-    target = _view(desk_stack).items[-1].item.id
-    earlier = target.replace("attention:run-0:", "attention:run-earlier:", 1)
-
-    view = _view(desk_stack, earlier)
-
-    assert view.selected is not None and view.selected.item.id == target
-    assert not view.missing_item
-    assert _view(desk_stack, "attention:run-earlier:9:exit:ZZZ").missing_item
-
-
 def test_raised_by_uses_human_labels() -> None:
     assert raised_by_label("risk_coach") == "Portfolio risk"
     assert raised_by_label("risk_coach, strategy") == "Portfolio risk and Strategy"
-    assert (
-        raised_by_label("pipeline, strategy, thesis_monitor")
-        == "System, Strategy and Thesis monitor"
-    )
     assert raised_by_label("Backtest") == "Backtest"
 
 
-def test_the_inspector_shows_raised_by_as_human_labels(desk_stack) -> None:
-    facts = [dict(d.facts)["Raised by"] for d in _view(desk_stack).items]
-
-    assert not [f for f in facts if "_" in f]
-    assert "Portfolio risk" in facts
-
-
-def test_chip_counts_partition_the_list(desk_stack) -> None:
-    _note(desk_stack, "Import rejected")
-    view = _view(desk_stack)
-
-    assert list(view.chip_counts) == ["Risk", "Limited", "Review", "Ready"]
-    assert sum(view.chip_counts.values()) == len(view.items)
-
-
-def test_the_boundary_wording_names_dismiss_as_the_only_change() -> None:
-    assert "only change is dismissing a notice" in AGENT_BOUNDARY
-    assert "open the screens where you act" in AGENT_BOUNDARY
-    assert "nothing here changes" not in AGENT_BOUNDARY
-
-
-def test_a_notification_item_can_be_dismissed_and_others_cannot(desk_stack) -> None:
-    note = _note(desk_stack, "Import rejected", portfolio_id=desk_stack.pid)
-
-    items = _view(desk_stack).items
-
-    by_ids = {d.notification_ids for d in items}
-    assert (note,) in by_ids
-    assert all(
-        d.notification_ids == ()
-        for d in items
-        if not any(r.kind == "notification" for r in d.evidence)
-    )
-
-
-def test_recent_activity_lists_this_portfolios_info_notices(desk_stack) -> None:
-    done = _note(
-        desk_stack,
-        "Backtest complete",
-        NotificationSeverity.INFO,
-        category=NotificationCategory.BACKTEST,
-        event_type="strategy_job_completed",
-    )
-    _note(
-        desk_stack,
-        "Other portfolio import",
-        NotificationSeverity.INFO,
-        portfolio_id=desk_stack.pid + 1,
-    )
-    _note(
-        desk_stack,
-        "AAA breakout",
-        NotificationSeverity.INFO,
-        category=NotificationCategory.ALERT,
-        event_type="breakout",
-        ticker="AAA",
-    )
-    _note(desk_stack, "An error", portfolio_id=desk_stack.pid)
-
-    view = _view(desk_stack)
-
-    assert [(a.note.id, a.note.title) for a in view.activity] == [
-        (done, "Backtest complete")
-    ]
-    assert view.activity[0].action.label and view.activity[0].label
-    assert not view.activity_unavailable
-
-
-def test_recent_activity_is_capped_and_unavailable_on_failure(desk_stack) -> None:
-    for i in range(ACTIVITY_LIMIT + 3):
-        _note(desk_stack, f"Import {i}", NotificationSeverity.INFO)
-
-    assert len(_view(desk_stack).activity) == ACTIVITY_LIMIT
-
-    desk_stack.notifications.recent_info = _raise
-    view = _view(desk_stack)
-    assert view.activity == () and view.activity_unavailable
-
-
-def _review_service(ids: list[int]) -> TradeReviewService:
-    trader = SimpleNamespace(
-        list_portfolios=lambda: [SimpleNamespace(id=i) for i in ids],
-        get_trade_revisions=lambda pids: {p: 1 for p in pids},
-    )
-    return TradeReviewService(
-        cast(TraderService, trader),
-        cast(Any, None),
-        cast(Any, SimpleNamespace(revision=lambda: 1)),
-        cast(Any, SimpleNamespace(history_revision=lambda: 1)),
-        store_revision=lambda: 1,
-        today=lambda: date(2026, 9, 29),
-    )
-
-
-def test_cached_reviews_never_waits_on_a_compute() -> None:
-    service = _review_service([1])
-    key = service._key([1])
-    assert key is not None
-    assert service.cached_reviews() is None  # cold
-    service._cache[key] = {}
-
-    with service._lock:  # a compute in progress holds the lock
-        assert service.cached_reviews() is None
-
-    assert service.cached_reviews() == {}
-
-
-# --- #132: the Desk timer's cheap revision ----------------------------------
-
-
-def test_the_desk_revision_moves_on_a_trade_a_note_and_a_bucket(
+def test_the_revision_moves_on_a_trade_a_note_a_dismissal_and_a_bucket(
     desk_stack,
 ) -> None:
     clock = [datetime(2026, 1, 1, tzinfo=UTC)]
@@ -704,29 +408,15 @@ def test_the_desk_revision_moves_on_a_trade_a_note_and_a_bucket(
     after_note = desk.revision(desk_stack.pid)
     assert after_note != after_trade
 
+    desk_stack.notifications.dismiss_attention([("k", "f")])
+    after_dismiss = desk.revision(desk_stack.pid)
+    assert after_dismiss != after_note
+
     clock[0] += DESK_MAX_AGE
-    assert desk.revision(desk_stack.pid) != after_note
+    assert desk.revision(desk_stack.pid) != after_dismiss
 
 
-def test_the_desk_revision_is_none_without_a_count_key(
-    desk_stack, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    desk = desk_stack.desk()
-    monkeypatch.setattr(desk, "_count_key", lambda _pid: None)
-
-    assert desk.revision(desk_stack.pid) is None
-
-
-def test_the_desk_revision_moves_when_the_review_cache_warms(desk_stack) -> None:
-    desk = _desk_at(desk_stack, [datetime(2026, 1, 1, tzinfo=UTC)])
-    cold = desk.revision(desk_stack.pid)
-
-    desk_stack.reviews.cached = {}
-
-    assert desk.revision(desk_stack.pid) != cold
-
-
-def test_the_desk_revision_moves_on_a_portfolio_rename(desk_stack) -> None:
+def test_the_revision_moves_on_a_portfolio_rename(desk_stack) -> None:
     desk = _desk_at(desk_stack, [datetime(2026, 1, 1, tzinfo=UTC)])
     before = desk.revision(desk_stack.pid)
 
@@ -735,19 +425,11 @@ def test_the_desk_revision_moves_on_a_portfolio_rename(desk_stack) -> None:
     assert desk.revision(desk_stack.pid) != before
 
 
-def test_the_desk_revision_moves_on_a_thesis_change(desk_stack) -> None:
+def test_the_revision_moves_on_a_thesis_change(desk_stack) -> None:
     clock = [datetime(2026, 1, 1, tzinfo=UTC)]
-    desk = DeskService(
-        desk_stack.trader,
-        desk_stack.service,
-        desk_stack.recommend,
-        desk_stack.statuses,
-        desk_stack.notifications,
-        cast(TradeReviewService, desk_stack.reviews),
-        desk_stack.audit,
-        dict,
-        now=lambda: clock[0],
-        count_cache={},
+    desk = _desk_at(
+        desk_stack,
+        clock,
         input_revision=lambda: file_revision(Path(desk_stack.agent.db_path)),
     )
     before = desk.revision(desk_stack.pid)
@@ -759,3 +441,54 @@ def test_the_desk_revision_moves_on_a_thesis_change(desk_stack) -> None:
     repo.add_version(desk_stack.pid, "AAA", content, "user", active=True)
 
     assert desk.revision(desk_stack.pid) != before
+
+
+def test_holdings_without_a_stop_are_one_rollup_with_one_action(desk_stack) -> None:
+    for ticker in ("CCC", "DDD"):
+        desk_stack.agent.record_buy(
+            ticker, 1, 10.0, "2026-01-02", portfolio_id=desk_stack.pid
+        )
+    desk_stack.agent.save_price_cache(
+        {"AAA": 100.0, "CCC": 10.0, "DDD": 10.0},
+        {"AAA": (100.0, "GBP"), "CCC": (10.0, "GBP"), "DDD": (10.0, "GBP")},
+    )
+    desk = desk_stack.desk()
+
+    view = desk.today_items(desk_stack.pid)
+
+    (rollup,) = [i for i in view.needs_action if i.key.startswith("rollup:")]
+    assert rollup.key == f"rollup:held_risk:no_stop:{desk_stack.pid}"
+    assert rollup.title == "2 holdings have no evidenced stop"
+    assert (rollup.chip, rollup.detail) == ("Stops", "CCC, DDD")
+    assert rollup.action is not None and rollup.action.label == "Set stops"
+    assert rollup in desk.risk_items(desk_stack.pid)
+    assert desk.badge_count(desk_stack.pid) == len(view.needs_action)
+
+
+def test_a_dismissal_key_and_fingerprint_survive_a_new_run() -> None:
+    """Regression: a new analysis run re-raising the same finding keeps it
+    dismissed; a changed finding brings it back."""
+    from app.agents.triage.queue import build_attention_queue
+    from app.agents.triage.sources import source_health_events
+    from app.schemas.source_health import SourceHealth, SourceName, SourceState
+
+    def keyed(run: str, state: SourceState) -> tuple[str, str]:
+        health = {
+            SourceName.STOCKTWITS: SourceHealth(
+                source=SourceName.STOCKTWITS, state=state
+            )
+        }
+        queue = build_attention_queue(
+            source_health_events(health, run_id=run),
+            portfolio_id=1,
+            analysis_run_id=run,
+            unavailable=(),
+        )
+        item = queue.worth_checking[0]
+        events = queue.events_for(item)
+        return desk_module.stable_key(item, run), desk_module.fingerprint(events)
+
+    first = keyed("run-a", SourceState.FAILED)
+    assert first == keyed("run-b", SourceState.FAILED)
+    assert "run-a" not in first[0]
+    assert keyed("run-b", SourceState.SKIPPED)[1] != first[1]

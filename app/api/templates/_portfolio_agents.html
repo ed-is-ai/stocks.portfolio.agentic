@@ -47,20 +47,20 @@
 {% endfor %}
 {{ cell("agent-" ~ scope ~ "-open-risk", view.open_risk, scope) }}
 {% set queue = view.attention %}
-{% set count = queue.urgent_count %}
+{% set count = queue.needs_action | length %}
 {% set tone = {"high": "risk", "medium": "warn", "info": "info"} %}
 {# A gap in any source makes the count partial, so it is never shown clear. #}
 {% set partial = view.unavailable | length > 0 %}
 <span id="agent-{{ scope }}-findings" data-agent-cell="{{ scope }}" class="agent-count{% if count %} neg{% endif %}" hx-swap-oob="true">{{ count }}{% if partial %} · partial{% endif %}</span>
 <div class="attention-strip{% if not queue.items and not partial %} is-clear{% endif %}" id="agent-{{ scope }}-attention" data-agent-cell="{{ scope }}" role="status" hx-swap-oob="true">
   {% if count %}
-  <strong>{{ count }} urgent finding{{ "s" if count != 1 }}.</strong>
+  <strong>{{ count }} finding{{ "s" if count != 1 }} need{{ "s" if count == 1 }} action.</strong>
   {% else %}
-  <strong>No urgent findings.</strong>
+  <strong>Nothing needs action.</strong>
   {% endif %}
   {% if partial %}<small>Partial — not counted: {{ view.unavailable | join(", ") }}.</small>{% endif %}
   {% if queue.items %}
-  {% if not count %}<span class="attention-aside">Also noted — not urgent</span>{% endif %}
+  {% if not count %}<span class="attention-aside">Also noted — no action needed</span>{% endif %}
   <ol class="attention-queue">
     {% for item in queue.items %}
     {% set events = queue.events_for(item) %}
