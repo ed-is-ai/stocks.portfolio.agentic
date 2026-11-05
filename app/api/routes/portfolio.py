@@ -21,6 +21,7 @@ from fastapi.responses import HTMLResponse
 
 from app.agents.trader.trader_agent import OpeningLotDuplicateError, SippImportError
 from app.api.dependencies import (
+    PORTFOLIO_WRITE,
     get_notifications_repository,
     get_portfolio_service,
     get_realised_pnl_service,
@@ -89,9 +90,7 @@ def _run_snapshot_backfill(trader: TraderService, portfolio_id: int) -> None:
 
 
 @router.get("/api/portfolio/backfill-status", response_class=HTMLResponse)
-async def backfill_status(
-    request: Request, portfolio_id: str | None = None
-) -> HTMLResponse:
+def backfill_status(request: Request, portfolio_id: str | None = None) -> HTMLResponse:
     """Render live snapshot-backfill progress for one portfolio (#508).
 
     Returns an empty body when nothing is known for the portfolio, which is
@@ -207,9 +206,9 @@ def _describe_issues(label: str, issues: list[str]) -> str:
 @router.post(
     "/api/portfolio/refresh",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def refresh_portfolio_prices(
+def refresh_portfolio_prices(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -344,9 +343,9 @@ async def refresh_portfolio_prices(
 @router.post(
     "/import-sipp",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def import_sipp(
+def import_sipp(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -386,7 +385,7 @@ async def import_sipp(
     which account types are valid for it.
     """
     filename = file.filename or ""
-    content = await file.read()
+    content = file.file.read()
 
     pid = optional_int(portfolio_id)
     if pid is None or not trader.portfolio_exists(pid):
@@ -661,9 +660,9 @@ def _quick_add_error(
 @router.post(
     "/portfolio/quick-add",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def quick_add_holding(
+def quick_add_holding(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -743,7 +742,7 @@ async def quick_add_holding(
 
 
 @router.get("/portfolio/{portfolio_id}/reconciliation", response_class=HTMLResponse)
-async def reconciliation_view(
+def reconciliation_view(
     request: Request, portfolio_id: int, trader: TraderDep
 ) -> HTMLResponse:
     """The dedicated cash-reconciliation view (Story 1.5, AC5) — every
@@ -831,9 +830,9 @@ def _same_day_ordering_warning(
 @router.post(
     "/portfolio/opening-lot",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def create_opening_lot(
+def create_opening_lot(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -892,9 +891,9 @@ async def create_opening_lot(
 @router.post(
     "/portfolio/opening-lot/{trade_id}/edit",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def edit_opening_lot(
+def edit_opening_lot(
     request: Request,
     trade_id: int,
     trader: TraderDep,
@@ -955,9 +954,9 @@ async def edit_opening_lot(
 @router.delete(
     "/portfolio/opening-lot/{trade_id}",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def delete_opening_lot(
+def delete_opening_lot(
     request: Request,
     trade_id: int,
     trader: TraderDep,
@@ -996,7 +995,7 @@ async def delete_opening_lot(
 @router.get(
     "/portfolio/{portfolio_id}/match-trace/{trade_id}", response_class=HTMLResponse
 )
-async def match_trace_view(
+def match_trace_view(
     request: Request,
     portfolio_id: int,
     trade_id: int,

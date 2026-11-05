@@ -753,7 +753,7 @@
       <i class="bi bi-bell" aria-hidden="true"></i><span class="visually-hidden">AI Desk,</span>
       <span id="notif-badge" class="notif-badge"
             hx-get="/notifications/count"
-            hx-trigger="load, every 20s [document.visibilityState === 'visible'], refresh"
+            hx-trigger="load, every 30s [document.visibilityState === 'visible'], refresh"
             hx-target="this" hx-swap="outerHTML"
             hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'></span>
     </a>
@@ -1873,7 +1873,7 @@
     return false;
   }
 </script>
-<script src="/static/js/watchlist.js?v=20260829-1"></script>
+<script src="/static/js/watchlist.js?v=20261104-1"></script>
 <script src="/static/js/pnl-table.js?v=20260909-1"></script>
 <script src="/static/js/pipeline-refresh.js"></script>
 <script src="/static/js/strategy-manager.js?v=20260824-1" defer></script>

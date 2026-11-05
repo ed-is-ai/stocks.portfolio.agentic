@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -1237,6 +1238,19 @@ CREATE TRIGGER IF NOT EXISTS backtest_result_immutable_delete
 BEFORE DELETE ON backtest_results
 BEGIN SELECT RAISE(ABORT, 'backtest result is immutable'); END;
 
+-- gh-133 (AD-11): the latest full-verification outcome per Result, keyed by
+-- the evidence it checked. List views trust only a current row.
+CREATE TABLE IF NOT EXISTS backtest_result_verdicts (
+    run_id TEXT PRIMARY KEY REFERENCES backtest_results(run_id),
+    result_digest TEXT NOT NULL CHECK(length(result_digest) = 64),
+    result_schema_version TEXT NOT NULL,
+    verifier_version TEXT NOT NULL,
+    metrics_digest TEXT NOT NULL CHECK(length(metrics_digest) = 64),
+    status TEXT NOT NULL CHECK(status IN ('verified', 'failed')),
+    detail TEXT,
+    verified_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS trade_log (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES backtest_results(run_id),
@@ -1484,6 +1498,129 @@ class BacktestIntegrityError(RuntimeError):
 _NOTE_MAX_CODE_POINTS = 10_000
 _BACKTEST_STAGING_BATCH_ENCODING = "json+zlib.v1"
 _BACKTEST_CANDIDATE_AUDIT_CONTRACT = "candidate_allocation_audit.v1"
+RESULT_VERIFIER_VERSION = "backtest_result_verifier.v1"
+"""Version of :meth:`BacktestRepository.backtest_result`'s verification rules
+(gh-133). Bump it whenever those rules change: every stored verdict then
+reads as unverified until the Result is opened or the startup backfill runs.
+``tests/backtest/test_backtest_repo_comparison.py`` pins the verification
+source to :data:`RESULT_VERIFIER_SOURCE_DIGEST` as a reminder."""
+RESULT_VERIFIER_SOURCE_DIGEST = (
+    "40732742bdc8bc7fefd9654cc275e71e23c5c8e5e25564f581c35bf131fe9b52"
+)
+"""sha256 of the verification source that :data:`RESULT_VERIFIER_VERSION`
+versions; update it together with a version bump (drift-guard test)."""
+_VERDICT_COLUMNS = (
+    "result_digest, result_schema_version, verifier_version, "
+    "metrics_digest, status, detail, verified_at"
+)
+_EQUITY_CURVE_SQL = """SELECT date, sequence, cash_base, positions_value_base,
+          total_equity_base
+   FROM equity_curve WHERE run_id=? ORDER BY date"""
+_VERDICT_SELECT = (
+    "v.result_digest, v.result_schema_version, v.verifier_version, "
+    "v.metrics_digest, v.status, v.detail"
+)
+
+
+def _metrics_digest(metrics_json: str) -> str:
+    """Return the sha256 hex digest of a stored ``metrics_json`` text."""
+    return sha256(metrics_json.encode("utf-8")).hexdigest()
+
+
+def _verdict_key(
+    result_digest: str, result_schema_version: str, metrics_json: str
+) -> tuple[str, str, str, str]:
+    """Return the verdict key a Result's current evidence must match."""
+    return (
+        result_digest,
+        result_schema_version,
+        RESULT_VERIFIER_VERSION,
+        _metrics_digest(metrics_json),
+    )
+
+
+def _verdict_status(
+    verdict: tuple[object, ...] | None,
+    *,
+    result_digest: str,
+    result_schema_version: str,
+    metrics_json: str,
+) -> Literal["verified", "failed", "unverified"]:
+    """Return a current verdict's status, or ``unverified`` (gh-133).
+
+    ``verdict`` holds ``_VERDICT_SELECT``'s columns; a missing or all-NULL
+    row, or one whose key no longer matches the Result, is ``unverified``.
+    """
+    if verdict is None or verdict[0] is None:
+        return "unverified"
+    stored = tuple(str(value) for value in verdict[:4])
+    if stored != _verdict_key(result_digest, result_schema_version, metrics_json):
+        return "unverified"
+    return "verified" if verdict[4] == "verified" else "failed"
+
+
+def _completion_verdict(
+    events: tuple[TradeLogEvent, ...],
+    equity_curve: tuple[EquityCurvePointV1, ...],
+) -> tuple[Literal["verified", "failed"], str | None]:
+    """Return the completion verdict after ``metrics.py``'s availability
+    check on the in-memory evidence -- the one check verify-on-open runs
+    that the digest alone does not cover (gh-133)."""
+    from app.services.backtest.metrics import (
+        ClosedTrade,
+        MetricsError,
+        metric_availability,
+    )
+
+    closed = tuple(event for event in events if isinstance(event, ClosedTrade))
+    try:
+        metric_availability(equity_curve=equity_curve, closed_trades=closed)
+    except MetricsError as exc:
+        return "failed", str(exc)
+    return "verified", None
+
+
+def _summary_candidate_count(
+    contract_version: object, manifest_count: object, manifest_version: object
+) -> int | None:
+    """Return a summary's candidate count from its audit manifest (gh-133).
+
+    A legacy (``none``) Result has no count. Any other contract needs a
+    manifest row of the expected version; a missing or invalid one raises
+    :class:`BacktestIntegrityError`, as a full Result read would."""
+    if contract_version == "none":
+        return None
+    if (
+        contract_version != _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+        or manifest_version != _BACKTEST_CANDIDATE_AUDIT_CONTRACT
+        or type(manifest_count) is not int
+        or manifest_count < 0
+    ):
+        raise BacktestIntegrityError("candidate audit manifest is invalid")
+    return manifest_count
+
+
+def _summary_availability(metrics: BacktestMetricsV1) -> MetricAvailabilityV1:
+    """Derive list-level availability from the stored Metrics alone (gh-133).
+
+    ``metrics_json`` stores no availability reasons (AD-8). A null Win Rate
+    happens only with no closed trades, so that reason is exact. A null
+    Sharpe has two possible reasons that need the Equity Curve to tell
+    apart, so it stays ``None`` (unknown) here; the list never renders
+    Sharpe and :meth:`BacktestRepository.with_display_evidence` sets the
+    exact reason for the rows that do."""
+    from app.services.backtest.metrics import (
+        MetricAvailabilityV1,
+        MetricUnavailableReason,
+    )
+
+    return MetricAvailabilityV1(
+        win_rate_unavailable=(
+            MetricUnavailableReason.NO_CLOSED_TRADES
+            if metrics.win_rate is None
+            else None
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -1632,13 +1769,50 @@ class BacktestResultV1:
 
 
 @dataclass(frozen=True)
-class RecentBacktestResultsV1:
-    """A bounded set of verified Result candidates and exclusion counts."""
+class BacktestResultSummaryV1:
+    """One verified Result's list-level projection (gh-133, AD-9).
 
-    results: tuple[BacktestResultV1, ...]
+    Holds the pinned run identity, the stored Metrics, completion time and
+    candidate count, never the Trade Log. ``metric_availability`` is derived
+    from null Metrics until :meth:`BacktestRepository.with_display_evidence`
+    attaches the Equity Curve, exact availability and the closed-trade and
+    equity-point counts."""
+
+    run_id: str
+    strategy_id: str
+    strategy_api_version: int
+    strategy_source_digest: str
+    parameters: dict[str, object]
+    profile_hash: str
+    start_month: str
+    end_month: str
+    ordered_month_digest: str
+    base_currency: str
+    starting_capital: Decimal
+    run_input_manifest_digest: str
+    execution_contract_digest: str
+    manifest_version: str
+    universe_selection: RunUniverseSelectionV1 | None
+    source_preparation_job_id: str | None
+    regime_benchmark: "RegimeBenchmarkPinV1 | None"
+    metrics: BacktestMetricsV1
+    metric_availability: MetricAvailabilityV1
+    completed_at: datetime
+    candidate_count: int | None
+    equity_curve: tuple[EquityCurvePointV1, ...] = ()
+    closed_trade_count: int = 0
+    equity_point_count: int = 0
+
+
+@dataclass(frozen=True)
+class RecentBacktestResultSummariesV1:
+    """A bounded set of verified Result summaries and exclusion counts."""
+
+    results: tuple[BacktestResultSummaryV1, ...]
     inspected_count: int
     integrity_excluded_count: int
     missing_result_count: int
+    unverified_count: int
     job_exclusion_counts: tuple[tuple[str, int], ...]
 
 
@@ -1670,6 +1844,8 @@ class BacktestActivitySummaryV1:
     tuning_parameters: dict[str, object] | None = None
     #: Why a complete job's stored Result failed verification (no Metrics).
     result_error: str | None = None
+    #: gh-133: the complete job's current verdict, ``None`` otherwise.
+    result_verdict: Literal["verified", "failed", "unverified"] | None = None
 
 
 class ComparisonIneligibleReason(StrEnum):
@@ -4986,96 +5162,148 @@ class BacktestRepository:
             ).fetchall()
         return tuple(_row_to_strategy_job(row) for row in rows)
 
-    def list_backtest_activities(self) -> tuple[BacktestActivitySummaryV1, ...]:
-        """Return every non-tombstoned Backtest job, newest first (AC 1).
+    def list_backtest_activities(
+        self, *, limit: int = 10, offset: int = 0
+    ) -> tuple[BacktestActivitySummaryV1, ...]:
+        """Return one page of non-tombstoned Backtest jobs, newest first (AC 1).
 
         Filters strictly to ``job_type='backtest' AND deleted_at IS NULL``,
         ordered by ``enqueue_seq DESC`` -- ``updated_at`` is never ordering
         authority (Story 2.8 Dev Notes). The parameter summary is built
         from each job's own persisted ``strategy_runs.parameters_json``
         (sorted by key, independent of whether the current Skill still
-        discovers that Strategy at all) and Metrics are attached only via
-        :meth:`backtest_result`'s verified-complete projection. A
-        ``complete`` job whose Result is missing, or a non-complete job
-        that unexpectedly has one, raises :class:`BacktestIntegrityError`
-        rather than silently returning a partial or zero-filled row. A
-        present Result that fails verification is listed with no Metrics
-        and its ``result_error``, so one damaged row is flagged rather than
-        hiding every other Backtest.
-        """
-        with session(self._connect) as conn:
-            job_rows = conn.execute(
-                f"SELECT {', '.join(_JOB_COLUMNS)} FROM strategy_jobs "
-                "WHERE job_type='backtest' AND deleted_at IS NULL "
-                "ORDER BY enqueue_seq DESC"
-            ).fetchall()
-            jobs = tuple(_row_to_strategy_job(row) for row in job_rows)
-            run_by_id: dict[str, tuple[object, ...]] = {
-                str(row[0]): row
-                for row in conn.execute(
-                    "SELECT id, strategy_id, strategy_api_version, "
-                    "parameters_json, start_month, end_month, "
-                    "profile_hash, selection_json FROM strategy_runs"
-                ).fetchall()
-            }
-            result_ids = {
-                str(row[0])
-                for row in conn.execute(
-                    "SELECT run_id FROM backtest_results"
-                ).fetchall()
-            }
+        discovers that Strategy at all). A ``complete`` job whose Result is
+        missing, or a non-complete job that unexpectedly has one, raises
+        :class:`BacktestIntegrityError` rather than silently returning a
+        partial or zero-filled row.
 
-        summaries: list[BacktestActivitySummaryV1] = []
-        for job in jobs:
-            run_row = run_by_id.get(job.id)
-            if run_row is None:
-                raise BacktestIntegrityError(
-                    f"backtest job {job.id!r} has no pinned strategy run"
-                )
-            try:
-                parameters = json.loads(str(run_row[3]))
-                if not isinstance(parameters, dict):
-                    raise ValueError("stored strategy run parameters are not an object")
-            except (json.JSONDecodeError, ValueError, TypeError) as exc:
-                raise BacktestIntegrityError(
-                    f"backtest job {job.id!r} has invalid stored parameters"
-                ) from exc
-            has_result = job.id in result_ids
-            is_complete = job.status is StrategyJobStatus.COMPLETE
-            if is_complete != has_result:
-                raise BacktestIntegrityError(
-                    f"backtest job {job.id!r} Result cardinality does not "
-                    "match its status"
-                )
-            metrics = None
-            availability = None
-            result_error = None
-            if is_complete:
-                try:
-                    result = self.backtest_result(job.id)
-                except BacktestIntegrityError as exc:
-                    result_error = str(exc)
-                else:
-                    metrics = result.metrics
-                    availability = result.metric_availability
-            universe_ids, universe_parameter = _parse_universe_selection(run_row[7])
-            summaries.append(
-                BacktestActivitySummaryV1(
-                    job=job,
-                    strategy_id=str(run_row[1]),
-                    strategy_api_version=int(str(run_row[2])),
-                    parameter_summary=_parameter_summary(parameters),
-                    start_month=str(run_row[4]),
-                    end_month=str(run_row[5]),
-                    metrics=metrics,
-                    metric_availability=availability,
-                    profile_hash=str(run_row[6]),
-                    universe_security_ids=universe_ids,
-                    tuning_parameters=tuning_parameters(parameters, universe_parameter),
-                    result_error=result_error,
-                )
+        gh-133 (AD-9): one paged JOIN, never a per-row
+        :meth:`backtest_result`. Metrics come from ``metrics_json`` only
+        under a current ``verified`` verdict; a current ``failed`` verdict
+        lists its ``result_error``; anything else is ``unverified``.
+        """
+        if type(limit) is not int or limit < 1:
+            raise ValueError("backtest activity limit must be a positive integer")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("backtest activity offset must be non-negative")
+        job_columns = ", ".join(f"job.{column}" for column in _JOB_COLUMNS)
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"""SELECT {job_columns},
+                          run.id, run.strategy_id, run.strategy_api_version,
+                          run.parameters_json, run.start_month, run.end_month,
+                          run.profile_hash, run.selection_json,
+                          result.run_id, result.result_digest,
+                          result.result_schema_version, result.metrics_json,
+                          {_VERDICT_SELECT}
+                   FROM strategy_jobs AS job
+                   LEFT JOIN strategy_runs AS run ON run.id = job.id
+                   LEFT JOIN backtest_results AS result ON result.run_id = job.id
+                   LEFT JOIN backtest_result_verdicts AS v ON v.run_id = job.id
+                   WHERE job.job_type='backtest' AND job.deleted_at IS NULL
+                   ORDER BY job.enqueue_seq DESC
+                   LIMIT ? OFFSET ?""",
+                (limit, offset),
+            ).fetchall()
+        width = len(_JOB_COLUMNS)
+        return tuple(
+            self._activity_summary(
+                _row_to_strategy_job(tuple(row)[:width]), tuple(row)[width:]
             )
-        return tuple(summaries)
+            for row in rows
+        )
+
+    def failed_backtest_result_count(self) -> int:
+        """Count live Backtests whose stored Result has a current ``failed``
+        verdict (gh-133), across every list page.
+
+        Only failed verdict rows are read, so this stays cheap; each is
+        checked against its Result's current key in Python because the
+        ``metrics_digest`` comparison needs sha256."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"""SELECT result.result_digest, result.result_schema_version,
+                          result.metrics_json, {_VERDICT_SELECT}
+                   FROM backtest_result_verdicts AS v
+                   JOIN backtest_results AS result ON result.run_id = v.run_id
+                   JOIN strategy_jobs AS job ON job.id = v.run_id
+                   WHERE v.status = 'failed' AND job.job_type = 'backtest'
+                     AND job.deleted_at IS NULL"""
+            ).fetchall()
+        return sum(
+            1
+            for row in rows
+            if _verdict_status(
+                tuple(row)[3:],
+                result_digest=str(row[0]),
+                result_schema_version=str(row[1]),
+                metrics_json=str(row[2]),
+            )
+            == "failed"
+        )
+
+    @staticmethod
+    def _activity_summary(
+        job: StrategyJobV1, row: tuple[object, ...]
+    ) -> BacktestActivitySummaryV1:
+        """Build one list row from ``list_backtest_activities``' JOIN tail."""
+        from app.services.backtest.metrics import BacktestMetricsV1
+
+        if row[0] is None:
+            raise BacktestIntegrityError(
+                f"backtest job {job.id!r} has no pinned strategy run"
+            )
+        try:
+            parameters = json.loads(str(row[3]))
+            if not isinstance(parameters, dict):
+                raise ValueError("stored strategy run parameters are not an object")
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise BacktestIntegrityError(
+                f"backtest job {job.id!r} has invalid stored parameters"
+            ) from exc
+        has_result = row[8] is not None
+        is_complete = job.status is StrategyJobStatus.COMPLETE
+        if is_complete != has_result:
+            raise BacktestIntegrityError(
+                f"backtest job {job.id!r} Result cardinality does not match its status"
+            )
+        metrics = None
+        availability = None
+        result_error = None
+        verdict: Literal["verified", "failed", "unverified"] | None = None
+        if is_complete:
+            verdict = _verdict_status(
+                row[12:18],
+                result_digest=str(row[9]),
+                result_schema_version=str(row[10]),
+                metrics_json=str(row[11]),
+            )
+            if verdict == "failed":
+                result_error = str(row[17] or "stored backtest result is invalid")
+            elif verdict == "verified":
+                try:
+                    metrics = BacktestMetricsV1.model_validate_json(str(row[11]))
+                except ValueError:  # pydantic's ValidationError included
+                    verdict = "failed"
+                    result_error = "stored backtest result is invalid"
+                else:
+                    availability = _summary_availability(metrics)
+        universe_ids, universe_parameter = _parse_universe_selection(row[7])
+        return BacktestActivitySummaryV1(
+            job=job,
+            strategy_id=str(row[1]),
+            strategy_api_version=int(str(row[2])),
+            parameter_summary=_parameter_summary(parameters),
+            start_month=str(row[4]),
+            end_month=str(row[5]),
+            metrics=metrics,
+            metric_availability=availability,
+            profile_hash=str(row[6]),
+            universe_security_ids=universe_ids,
+            tuning_parameters=tuning_parameters(parameters, universe_parameter),
+            result_error=result_error,
+            result_verdict=verdict,
+        )
 
     def latest_completed_backtest_result(self) -> BacktestResultV1 | None:
         """Return the newest durable, validated completed Backtest Result.
@@ -5106,32 +5334,56 @@ class BacktestRepository:
                 continue
         return None
 
-    def recent_verified_backtest_results(
+    def recent_backtest_result_summaries(
         self, *, limit: int = 25
-    ) -> RecentBacktestResultsV1:
-        """Read at most ``limit`` recent complete, live Result candidates.
+    ) -> RecentBacktestResultSummariesV1:
+        """Read at most ``limit`` recent complete, live Result summaries.
 
         Candidate rows are ordered by their persisted completion time and
-        stable run ID. Each candidate is returned only after the ordinary
-        Result digest and metric reconstruction checks pass. Failed,
+        stable run ID; the cap applies before any per-row read. gh-133: a
+        candidate is returned only under a current ``verified`` verdict --
+        a current ``failed`` verdict (or an invalid run identity or audit
+        manifest) counts as integrity-excluded. A missing or stale verdict
+        is counted as unverified and skipped without using up the cap, so a
+        verifier bump or partial backfill cannot empty the panel. Failed,
         cancelled, queued, running, and tombstoned jobs are counted through
-        a metadata-only aggregate and never cause Result/event/curve reads.
-        The candidate cap applies before Result verification, so a damaged
-        row cannot make the landing scan arbitrarily far back through history.
+        a metadata-only aggregate. Every read shares one session and none
+        touches the Trade Log or Equity Curve.
         """
         if type(limit) is not int or not 1 <= limit <= 25:
             raise ValueError("recent Backtest Result limit must be between 1 and 25")
         with session(self._connect) as conn:
-            rows = conn.execute(
-                """SELECT job.id, result.run_id
+            # Lazily iterated: reading stops once ``limit`` candidates with a
+            # current verdict (or no Result) have been inspected.
+            cursor = conn.execute(
+                f"""SELECT job.id, result.run_id, result.result_digest,
+                          result.result_schema_version, result.metrics_json,
+                          result.completed_at, result.audit_contract_version,
+                          audit.candidate_count, audit.audit_contract_version,
+                          {_VERDICT_SELECT}
                    FROM strategy_jobs AS job
                    LEFT JOIN backtest_results AS result ON result.run_id=job.id
+                   LEFT JOIN backtest_result_audit_manifests AS audit
+                     ON audit.run_id=job.id
+                   LEFT JOIN backtest_result_verdicts AS v ON v.run_id=job.id
                    WHERE job.job_type='backtest' AND job.status='complete'
                      AND job.deleted_at IS NULL
-                   ORDER BY result.completed_at DESC, job.id ASC
-                   LIMIT ?""",
-                (limit,),
-            ).fetchall()
+                   ORDER BY result.completed_at DESC, job.id ASC"""
+            )
+            counts: Counter[str] = Counter()
+            candidates: list[tuple[object, ...]] = []
+            for raw in cursor:
+                row = tuple(raw)
+                if row[1] is None:
+                    candidates.append(row)
+                elif self._summary_verdict(row) == "unverified":
+                    counts["unverified"] += 1
+                    continue
+                else:
+                    candidates.append(row)
+                if len(candidates) == limit:
+                    break
+            cursor.close()
             exclusion_rows = conn.execute(
                 """SELECT CASE WHEN deleted_at IS NOT NULL THEN 'deleted'
                                ELSE status END, COUNT(*)
@@ -5141,28 +5393,156 @@ class BacktestRepository:
                    GROUP BY CASE WHEN deleted_at IS NOT NULL THEN 'deleted'
                                  ELSE status END"""
             ).fetchall()
-
-        results: list[BacktestResultV1] = []
-        corrupt_count = 0
-        missing_count = 0
-        for row in rows:
-            run_id = str(row[0])
-            if row[1] is None:
-                missing_count += 1
-                continue
-            try:
-                results.append(self.backtest_result(run_id))
-            except (BacktestIntegrityError, StrategyJobNotFound, ValueError):
-                corrupt_count += 1
-        return RecentBacktestResultsV1(
+            results: list[BacktestResultSummaryV1] = []
+            for row in candidates:
+                outcome = self._result_summary_on_connection(conn, row)
+                if isinstance(outcome, str):
+                    counts[outcome] += 1
+                else:
+                    results.append(outcome)
+        return RecentBacktestResultSummariesV1(
             results=tuple(results),
-            inspected_count=len(rows),
-            integrity_excluded_count=corrupt_count,
-            missing_result_count=missing_count,
+            inspected_count=len(candidates),
+            integrity_excluded_count=counts["integrity"],
+            missing_result_count=counts["missing"],
+            # ponytail: clamped to the panel's 25-row schema bound; an exact
+            # backlog size would need its own unbounded count.
+            unverified_count=min(counts["unverified"], limit),
             job_exclusion_counts=tuple(
                 sorted((str(row[0]), int(row[1])) for row in exclusion_rows)
             ),
         )
+
+    @staticmethod
+    def _summary_verdict(
+        row: tuple[object, ...],
+    ) -> Literal["verified", "failed", "unverified"]:
+        """Return the current verdict of a ``recent_backtest_result_summaries``
+        row that has a Result."""
+        return _verdict_status(
+            row[9:15],
+            result_digest=str(row[2]),
+            result_schema_version=str(row[3]),
+            metrics_json=str(row[4]),
+        )
+
+    def _result_summary_on_connection(
+        self, conn: sqlite3.Connection, row: tuple[object, ...]
+    ) -> BacktestResultSummaryV1 | Literal["missing", "integrity"]:
+        """Build one summary from a ``recent_backtest_result_summaries`` row
+        with a current verdict, or name the exclusion bucket it falls into."""
+        from app.services.backtest.metrics import BacktestMetricsV1
+
+        if row[1] is None:
+            return "missing"
+        if self._summary_verdict(row) != "verified":
+            return "integrity"
+        try:
+            run = self._load_strategy_run_row(conn, str(row[0]))
+            metrics = BacktestMetricsV1.model_validate_json(str(row[4]))
+            completed_at = datetime.fromisoformat(str(row[5]))
+            candidate_count = _summary_candidate_count(row[6], row[7], row[8])
+        except (BacktestIntegrityError, StrategyJobNotFound, ValueError):
+            return "integrity"
+        return BacktestResultSummaryV1(
+            run_id=run.id,
+            strategy_id=run.strategy_id,
+            strategy_api_version=run.strategy_api_version,
+            strategy_source_digest=run.strategy_source_digest,
+            parameters=run.parameters,
+            profile_hash=run.profile_hash,
+            start_month=run.start_month,
+            end_month=run.end_month,
+            ordered_month_digest=run.ordered_month_digest,
+            base_currency=run.base_currency,
+            starting_capital=run.starting_capital,
+            run_input_manifest_digest=run.run_input_manifest_digest,
+            execution_contract_digest=run.execution_contract_digest,
+            manifest_version=run.manifest_version,
+            universe_selection=run.universe_selection,
+            source_preparation_job_id=run.source_preparation_job_id,
+            regime_benchmark=run.regime_benchmark,
+            metrics=metrics,
+            metric_availability=_summary_availability(metrics),
+            completed_at=completed_at,
+            candidate_count=candidate_count,
+        )
+
+    def with_display_evidence(
+        self, summaries: Iterable[BacktestResultSummaryV1]
+    ) -> tuple[BacktestResultSummaryV1, ...]:
+        """Return copies of ``summaries`` carrying their display evidence.
+
+        One session reads each run's Equity Curve and closed-trade count, so
+        the outcome panel can chart and caveat its few display rows without
+        rebuilding full Results. ``metric_availability`` becomes exact,
+        using ``metrics.py``'s rules on the curve and closed-trade count.
+        A summary whose evidence fails to parse is dropped (and logged), so
+        one damaged run never hides the others; callers count the gap.
+        """
+        from app.services.backtest.metrics import (
+            MetricAvailabilityV1,
+            MetricsError,
+            MetricUnavailableReason,
+            metric_availability,
+        )
+
+        items = tuple(summaries)
+        with session(self._connect) as conn:
+            evidence = [
+                (
+                    conn.execute(_EQUITY_CURVE_SQL, (item.run_id,)).fetchall(),
+                    int(
+                        conn.execute(
+                            """SELECT COUNT(*) FROM trade_log WHERE run_id=?
+                               AND kind IN ('exit_fill', 'terminal_settlement')""",
+                            (item.run_id,),
+                        ).fetchone()[0]
+                    ),
+                )
+                for item in items
+            ]
+        enriched: list[BacktestResultSummaryV1] = []
+        for item, (curve_rows, closed_count) in zip(items, evidence, strict=True):
+            try:
+                curve = self._parse_equity_curve_rows(curve_rows)
+                sharpe = metric_availability(
+                    equity_curve=curve, closed_trades=()
+                ).sharpe_unavailable
+            except (BacktestIntegrityError, MetricsError):
+                logger.warning(
+                    "Backtest result %s display evidence is invalid",
+                    item.run_id,
+                    exc_info=True,
+                )
+                continue
+            enriched.append(
+                replace(
+                    item,
+                    equity_curve=curve,
+                    metric_availability=MetricAvailabilityV1(
+                        win_rate_unavailable=(
+                            None
+                            if closed_count
+                            else MetricUnavailableReason.NO_CLOSED_TRADES
+                        ),
+                        sharpe_unavailable=sharpe,
+                    ),
+                    closed_trade_count=closed_count,
+                    equity_point_count=len(curve),
+                )
+            )
+        return tuple(enriched)
+
+    def compare_result_summaries(
+        self, left: BacktestResultSummaryV1, right: BacktestResultSummaryV1
+    ) -> ComparisonEligibilityV1:
+        """Apply the complete comparison predicate to two verified summaries.
+
+        The caller already restricted both to complete, live jobs, so this
+        delegates straight to the same predicate :meth:`is_comparable` uses.
+        """
+        return self._compare_verified_results(left, right)
 
     def is_comparable(
         self,
@@ -5287,7 +5667,9 @@ class BacktestRepository:
         return result
 
     def _compare_verified_results(
-        self, left_result: BacktestResultV1, right_result: BacktestResultV1
+        self,
+        left_result: BacktestResultV1 | BacktestResultSummaryV1,
+        right_result: BacktestResultV1 | BacktestResultSummaryV1,
     ) -> ComparisonEligibilityV1:
         """Apply the complete comparison predicate to verified Results."""
         if left_result.manifest_version != right_result.manifest_version:
@@ -5343,7 +5725,8 @@ class BacktestRepository:
 
     @staticmethod
     def _compare_eligible_results(
-        left: BacktestResultV1, right: BacktestResultV1
+        left: BacktestResultV1 | BacktestResultSummaryV1,
+        right: BacktestResultV1 | BacktestResultSummaryV1,
     ) -> ComparisonEligibilityV1:
         """Compare two already-loaded complete Results on exactly AD-19's
         six dimensions, returning the first mismatch's specific reason."""
@@ -7648,15 +8031,17 @@ class BacktestRepository:
         the independently paginated companion audit so its integrity errors
         stay local to that section and each request reads only one audit page.
         """
-        from app.services.backtest.metrics import (
-            BacktestMetricsV1,
-            ClosedTrade,
-            MetricsError,
-            metric_availability,
-        )
-
+        load_error: BacktestIntegrityError | None = None
+        strategy_run: _StrategyRunRow | None = None
+        initial_entry_selection: InitialEntrySelectionV1 | None = None
+        candidate_audit_summary: BacktestCandidateAuditSummaryV1 | None = None
+        event_rows: list[Any] = []
+        curve_rows: list[Any] = []
         with session(self._connect) as conn:
-            strategy_run = self._load_strategy_run_row(conn, run_id)
+            try:
+                strategy_run = self._load_strategy_run_row(conn, run_id)
+            except BacktestIntegrityError as exc:
+                load_error = exc
             row = conn.execute(
                 """SELECT result_schema_version, metrics_json, final_cash_base,
                           result_digest, note,
@@ -7665,30 +8050,85 @@ class BacktestRepository:
                 (run_id,),
             ).fetchone()
             if row is None:
+                if load_error is not None:
+                    raise load_error
                 raise StrategyJobNotFound(f"backtest result not found: {run_id}")
-            event_rows = conn.execute(
-                "SELECT event_json FROM trade_log WHERE run_id=? ORDER BY sequence",
+            verdict = conn.execute(
+                f"SELECT {_VERDICT_SELECT} FROM backtest_result_verdicts AS v "
+                "WHERE v.run_id=?",
                 (run_id,),
-            ).fetchall()
-            curve_rows = conn.execute(
-                """SELECT date, sequence, cash_base, positions_value_base,
-                          total_equity_base
-                   FROM equity_curve WHERE run_id=? ORDER BY date""",
-                (run_id,),
-            ).fetchall()
-            initial_entry_selection = self._load_entry_selection(
-                conn,
-                "backtest_result_entry_selection",
-                "backtest_result_entry_selection_decisions",
-                run_id,
-            )
-            candidate_audit_summary = (
-                self._load_backtest_candidate_audit_summary_on_connection(
-                    conn, run_id, str(row[7])
+            ).fetchone()
+            if load_error is None:
+                try:
+                    initial_entry_selection = self._load_entry_selection(
+                        conn,
+                        "backtest_result_entry_selection",
+                        "backtest_result_entry_selection_decisions",
+                        run_id,
+                    )
+                except BacktestIntegrityError as exc:
+                    load_error = exc
+            if load_error is None:
+                event_rows = conn.execute(
+                    "SELECT event_json FROM trade_log WHERE run_id=? ORDER BY sequence",
+                    (run_id,),
+                ).fetchall()
+                curve_rows = conn.execute(_EQUITY_CURVE_SQL, (run_id,)).fetchall()
+                candidate_audit_summary = (
+                    self._load_backtest_candidate_audit_summary_on_connection(
+                        conn, run_id, str(row[7])
+                    )
+                    if include_candidate_audit_summary
+                    else None
                 )
-                if include_candidate_audit_summary
-                else None
+
+        key = _verdict_key(str(row[3]), str(row[0]), str(row[1]))
+        observed = None if verdict is None else tuple(verdict)
+        if load_error is not None:
+            # gh-133: a damaged run identity or selection fails the Result as
+            # surely as a digest mismatch, so it is recorded (and not retried
+            # by every backfill). Candidate-audit errors stay local to that
+            # section and record nothing.
+            self._record_result_verdict(
+                run_id, observed, key, "failed", str(load_error)
             )
+            raise load_error
+        if strategy_run is None:  # unreachable: set whenever load_error is None
+            raise BacktestIntegrityError("stored strategy run is invalid")
+        try:
+            result = self._reconstruct_result(
+                run_id,
+                strategy_run,
+                tuple(row),
+                event_rows,
+                curve_rows,
+                initial_entry_selection,
+                candidate_audit_summary,
+            )
+        except BacktestIntegrityError as exc:
+            self._record_result_verdict(run_id, observed, key, "failed", str(exc))
+            raise
+        self._record_result_verdict(run_id, observed, key, "verified", None)
+        return result
+
+    def _reconstruct_result(
+        self,
+        run_id: str,
+        strategy_run: _StrategyRunRow,
+        row: tuple[Any, ...],
+        event_rows: list[Any],
+        curve_rows: list[Any],
+        initial_entry_selection: InitialEntrySelectionV1 | None,
+        candidate_audit_summary: BacktestCandidateAuditSummaryV1 | None,
+    ) -> BacktestResultV1:
+        """Run :meth:`backtest_result`'s schema, digest and metric checks on
+        rows it already read, returning the verified projection."""
+        from app.services.backtest.metrics import (
+            BacktestMetricsV1,
+            ClosedTrade,
+            MetricsError,
+            metric_availability,
+        )
 
         result_schema_version = str(row[0])
         if result_schema_version == "backtest_result.v1":
@@ -7713,18 +8153,7 @@ class BacktestRepository:
                 self._parse_trade_log_event(json.loads(str(item[0])))
                 for item in event_rows
             )
-            equity_curve = tuple(
-                self._parse_equity_curve_point(
-                    {
-                        "session": str(item[0]),
-                        "sequence": int(item[1]),
-                        "cash_base": str(item[2]),
-                        "positions_value_base": str(item[3]),
-                        "total_equity_base": str(item[4]),
-                    }
-                )
-                for item in curve_rows
-            )
+            equity_curve = self._parse_equity_curve_rows(curve_rows)
         except (
             json.JSONDecodeError,
             ValueError,
@@ -7782,6 +8211,114 @@ class BacktestRepository:
             regime_benchmark=strategy_run.regime_benchmark,
             initial_entry_selection=initial_entry_selection,
             candidate_audit_summary=candidate_audit_summary,
+        )
+
+    def _record_result_verdict(
+        self,
+        run_id: str,
+        observed: tuple[object, ...] | None,
+        key: tuple[str, str, str, str],
+        status: Literal["verified", "failed"],
+        detail: str | None,
+    ) -> None:
+        """Persist a verify-on-open outcome when it differs (gh-133, AD-11).
+
+        ``observed`` is the verdict row read in the verifying session. A
+        write is a short compare-and-swap on the observed digest and
+        verifier version (or an insert-or-ignore when none was observed),
+        so a concurrent writer that already moved the row wins silently.
+        A SQLite failure is logged and swallowed: it must never change the
+        verification outcome the caller returns or raises."""
+        if observed is not None and (
+            tuple(str(value) for value in observed[:4]) == key and observed[4] == status
+        ):
+            return
+        try:
+            self._write_result_verdict(run_id, observed, key, status, detail)
+        except sqlite3.Error:
+            logger.warning(
+                "Backtest result verdict could not be recorded for %s",
+                run_id,
+                exc_info=True,
+            )
+
+    def _write_result_verdict(
+        self,
+        run_id: str,
+        observed: tuple[object, ...] | None,
+        key: tuple[str, str, str, str],
+        status: Literal["verified", "failed"],
+        detail: str | None,
+    ) -> None:
+        values = (*key, status, detail, self._job_now())
+        with session(self._connect) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if observed is None:
+                conn.execute(
+                    f"""INSERT INTO backtest_result_verdicts (
+                           run_id, {_VERDICT_COLUMNS}
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(run_id) DO NOTHING""",
+                    (run_id, *values),
+                )
+                return
+            conn.execute(
+                """UPDATE backtest_result_verdicts
+                   SET result_digest=?, result_schema_version=?,
+                       verifier_version=?, metrics_digest=?, status=?,
+                       detail=?, verified_at=?
+                   WHERE run_id=? AND result_digest=?
+                     AND result_schema_version=? AND verifier_version=?
+                     AND metrics_digest=? AND status=?""",
+                (*values, run_id, *observed[:5]),
+            )
+
+    def backfill_backtest_result_verdicts(self) -> int:
+        """Verify every Result whose verdict is missing or not current.
+
+        The only backfill path (gh-133): each such Result goes through
+        :meth:`backtest_result`, which records the verdict; per-row
+        integrity failures are recorded as ``failed``, never raised. Current
+        rows are skipped, so a rerun on an unchanged checkout does nothing.
+        Returns how many of those Results now carry a current verdict. Any
+        per-row failure is logged and skipped so one Result cannot stop the
+        rest."""
+        stale = self._stale_verdict_run_ids()
+        for run_id in stale:
+            try:
+                self.backtest_result(run_id, include_candidate_audit_summary=False)
+            except (BacktestIntegrityError, StrategyJobNotFound):
+                continue
+            except Exception:  # noqa: BLE001 - one bad row must not stop the rest
+                logger.warning(
+                    "Backtest result verdict backfill failed for %s",
+                    run_id,
+                    exc_info=True,
+                )
+        return len(set(stale) - set(self._stale_verdict_run_ids()))
+
+    def _stale_verdict_run_ids(self) -> tuple[str, ...]:
+        """Return the run IDs whose Result has no current verdict."""
+        with session(self._connect) as conn:
+            rows = conn.execute(
+                f"""SELECT result.run_id, result.result_digest,
+                          result.result_schema_version, result.metrics_json,
+                          {_VERDICT_SELECT}
+                   FROM backtest_results AS result
+                   LEFT JOIN backtest_result_verdicts AS v
+                     ON v.run_id = result.run_id
+                   ORDER BY result.run_id"""
+            ).fetchall()
+        return tuple(
+            str(row[0])
+            for row in rows
+            if _verdict_status(
+                tuple(row)[4:],
+                result_digest=str(row[1]),
+                result_schema_version=str(row[2]),
+                metrics_json=str(row[3]),
+            )
+            == "unverified"
         )
 
     def backtest_result_candidate_audit_page(
@@ -8216,6 +8753,11 @@ class BacktestRepository:
         metrics_json = json.dumps(
             metrics.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         )
+        result_schema_version = (
+            "backtest_result.v2"
+            if initial_entry_selection is not None
+            else "backtest_result.v1"
+        )
         conn.execute(
             """INSERT INTO backtest_results (
                    run_id, result_schema_version, audit_contract_version,
@@ -8224,11 +8766,7 @@ class BacktestRepository:
                ) VALUES (?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)""",
             (
                 run_id,
-                (
-                    "backtest_result.v2"
-                    if initial_entry_selection is not None
-                    else "backtest_result.v1"
-                ),
+                result_schema_version,
                 (
                     "none"
                     if candidate_audit_promotion is None
@@ -8238,6 +8776,22 @@ class BacktestRepository:
                 str(final_cash_base),
                 result_digest,
                 completed_at,
+                completed_at,
+            ),
+        )
+        # gh-133: the digest was just computed from this same payload, so
+        # the Result is verified inside its own completion transaction once
+        # its metric availability reconstructs, as verify-on-open requires.
+        status, detail = _completion_verdict(events, equity_curve)
+        conn.execute(
+            f"""INSERT INTO backtest_result_verdicts (run_id, {_VERDICT_COLUMNS})
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(run_id) DO NOTHING""",
+            (
+                run_id,
+                *_verdict_key(result_digest, result_schema_version, metrics_json),
+                status,
+                detail,
                 completed_at,
             ),
         )
@@ -8648,6 +9202,27 @@ class BacktestRepository:
         # input. The model's own field constraints (patterns, ``gt``,
         # ``ge``, ``allow_inf_nan=False``) still apply either way.
         return model.model_validate(payload, strict=False)
+
+    @classmethod
+    def _parse_equity_curve_rows(
+        cls, curve_rows: Iterable[Any]
+    ) -> tuple[EquityCurvePointV1, ...]:
+        """Parse ``_EQUITY_CURVE_SQL`` rows into typed Equity Curve points."""
+        try:
+            return tuple(
+                cls._parse_equity_curve_point(
+                    {
+                        "session": str(item[0]),
+                        "sequence": int(item[1]),
+                        "cash_base": str(item[2]),
+                        "positions_value_base": str(item[3]),
+                        "total_equity_base": str(item[4]),
+                    }
+                )
+                for item in curve_rows
+            )
+        except (ValueError, TypeError, InvalidOperation) as exc:
+            raise BacktestIntegrityError("stored backtest result is invalid") from exc
 
     @staticmethod
     def _parse_equity_curve_point(payload: object) -> EquityCurvePointV1:

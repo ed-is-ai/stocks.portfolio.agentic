@@ -6,13 +6,13 @@ GET routes only render repository state.  All lifecycle changes stay behind
 
 from __future__ import annotations
 
-import asyncio
 from datetime import date, datetime, timedelta, timezone
 from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 import logging
 import math
 import re
+import threading
 from time import perf_counter
 from collections.abc import Mapping, Sequence
 from typing import Annotated, Literal, cast
@@ -36,6 +36,7 @@ from app.api.dependencies import (
     get_strategy_manager_agent,
     get_strategy_manager_insights_service,
 )
+from app.api.params import request_form
 from app.api.templating import is_htmx_request, template_response, templates
 from app.core import config
 from app.core.security import require_local_or_token
@@ -129,6 +130,9 @@ from app.services.backtest.trading_calendar import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _MAX_COMPARISON_PEERS = 7
+_BACKTEST_PAGE_SIZE = 10
+#: Keeps the SQL OFFSET inside SQLite's integer range.
+_MAX_BACKTEST_PAGE = 100_000
 BacktestDep = Annotated[BacktestRepository, Depends(get_backtest_repository)]
 PricesDep = Annotated[
     HistoricalPriceRepository, Depends(get_read_only_historical_price_repository)
@@ -358,14 +362,28 @@ def _initialization_history(
     return tuple(history)
 
 
-def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
-    """Return the Backtest results list, or an explicit integrity alert
-    (Story 2.8 AC 1, 7) -- a repository/integrity error is not an empty
-    list, so the list template must be able to tell the two apart."""
+def _backtest_activities_context(
+    repo: BacktestRepository, page: int = 1
+) -> dict[str, object]:
+    """Return one page of the Backtest results list, or an explicit
+    integrity alert (Story 2.8 AC 1, 7) -- a repository/integrity error is
+    not an empty list, so the list template must be able to tell the two
+    apart. gh-133: one extra row is read only to know whether a next page
+    exists."""
+    paging = {"backtest_page": page, "backtest_has_next": False}
     try:
-        activities = repo.list_backtest_activities()
+        activities = repo.list_backtest_activities(
+            limit=_BACKTEST_PAGE_SIZE + 1, offset=(page - 1) * _BACKTEST_PAGE_SIZE
+        )
     except BacktestIntegrityError as exc:
-        return {"backtest_activities": (), "backtest_activities_error": str(exc)}
+        return {
+            "backtest_activities": (),
+            "backtest_activities_error": str(exc),
+            **paging,
+        }
+    paging["backtest_has_next"] = len(activities) > _BACKTEST_PAGE_SIZE
+    activities = activities[:_BACKTEST_PAGE_SIZE]
+    failed_count = repo.failed_backtest_result_count()
     # gh-434: universe resolution is memoised per distinct key within this
     # request -- one roster read per profile_hash, one runnable-universe
     # read per (profile_hash, start_month). A missing snapshot month only
@@ -423,7 +441,18 @@ def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
             for activity in activities
         ),
         "backtest_activities_error": None,
+        "backtest_failed_count": failed_count,
+        **paging,
     }
+
+
+def _page_number(raw: str | None) -> int:
+    """Parse a 1-based ``?page=`` value, falling back to 1 when invalid."""
+    try:
+        page = int(raw or "1")
+    except ValueError:
+        return 1
+    return page if 1 <= page <= _MAX_BACKTEST_PAGE else 1
 
 
 def _initialization_context(
@@ -576,7 +605,7 @@ def _form_error_status(request: Request) -> int:
 
 @router.get("/partials/strategy-manager", response_class=HTMLResponse)
 @router.get("/strategy-manager", response_class=HTMLResponse)
-async def strategy_manager(
+def strategy_manager(
     request: Request,
     backtest: BacktestDep,
     prices: PricesDep,
@@ -664,7 +693,7 @@ async def strategy_manager(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def strategy_manager_insights(
+def strategy_manager_insights(
     request: Request,
     backtest: BacktestDep,
     service: AgentInsightsDep,
@@ -672,12 +701,10 @@ async def strategy_manager_insights(
     refresh: bool = Form(False),
 ) -> HTMLResponse:
     """Generate cited insights only after an explicit user submission."""
-    summary = await asyncio.to_thread(StrategyOutcomeService(backtest).build_summary)
-    outcome = await asyncio.to_thread(
-        service.generate_insights, summary, refresh=refresh
-    )
-    handoffs, handoffs_unavailable = await asyncio.to_thread(
-        _experiment_handoffs, backtest, launch, summary, outcome
+    summary = StrategyOutcomeService(backtest).build_summary()
+    outcome = service.generate_insights(summary, refresh=refresh)
+    handoffs, handoffs_unavailable = _experiment_handoffs(
+        backtest, launch, summary, outcome
     )
     return template_response(
         request,
@@ -775,7 +802,7 @@ def _strategy_question_context(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def strategy_manager_copilot_ask(
+def strategy_manager_copilot_ask(
     request: Request,
     backtest: BacktestDep,
     launch: LaunchDep,
@@ -787,11 +814,10 @@ async def strategy_manager_copilot_ask(
     clean_question = question
     if not question.strip():
         raise HTTPException(status_code=422, detail="question is required")
-    summary = await asyncio.to_thread(StrategyOutcomeService(backtest).build_summary)
+    summary = StrategyOutcomeService(backtest).build_summary()
     row = next((item for item in summary.runs if item.run_id == result_id), None)
     if row is None:
-        await asyncio.to_thread(
-            service.record_unavailable_question,
+        service.record_unavailable_question(
             summary,
             question=clean_question,
             reason="evidence_unavailable",
@@ -800,11 +826,10 @@ async def strategy_manager_copilot_ask(
             status_code=409, detail="selected Strategy evidence is no longer available"
         )
     try:
-        discovery = await asyncio.to_thread(launch.discover)
+        discovery = launch.discover()
     except Exception:  # noqa: BLE001 - catalog failure must never trigger a model call
         logger.warning("Strategy catalog unavailable for evidence Q&A", exc_info=True)
-        await asyncio.to_thread(
-            service.record_unavailable_question,
+        service.record_unavailable_question(
             summary,
             question=clean_question,
             reason="strategy_discovery_unavailable",
@@ -829,8 +854,7 @@ async def strategy_manager_copilot_ask(
         None if strategy is None else _strategy_question_context(row, strategy)
     )
     if strategy_context is None:
-        await asyncio.to_thread(
-            service.record_unavailable_question,
+        service.record_unavailable_question(
             summary,
             question=clean_question,
             reason="strategy_source_mismatch",
@@ -847,8 +871,7 @@ async def strategy_manager_copilot_ask(
                 "copilot_unavailable": "The current Strategy definition does not match this verified result, so no model request was sent.",
             },
         )
-    outcome = await asyncio.to_thread(
-        service.ask,
+    outcome = service.ask(
         summary,
         question=clean_question,
         strategy=strategy_context,
@@ -873,7 +896,7 @@ async def strategy_manager_copilot_ask(
 
 
 @router.get("/strategy-manager/setup", response_class=HTMLResponse)
-async def strategy_setup(
+def strategy_setup(
     request: Request,
     backtest: BacktestDep,
     bootstrap: BootstrapDep,
@@ -917,7 +940,7 @@ async def strategy_setup(
     "/strategy-manager/setup",
     dependencies=[Depends(require_local_or_token)],
 )
-async def submit_strategy_setup(
+def submit_strategy_setup(
     request: Request,
     backtest: BacktestDep,
     bootstrap: BootstrapDep,
@@ -997,7 +1020,7 @@ async def submit_strategy_setup(
 
 
 @router.get("/strategy-manager/readiness", response_class=HTMLResponse)
-async def strategy_readiness(
+def strategy_readiness(
     request: Request,
     backtest: BacktestDep,
     readiness: ReadinessDep,
@@ -1021,7 +1044,7 @@ async def strategy_readiness(
 
 
 @router.get("/strategy-manager/diagnostics", response_class=HTMLResponse)
-async def strategy_diagnostics(request: Request) -> Response:
+def strategy_diagnostics(request: Request) -> Response:
     """Diagnostics folded into Readiness (gh-396); keep the deep link alive
     so recovery links and bookmarks never 404."""
     return RedirectResponse(
@@ -1038,7 +1061,7 @@ async def strategy_diagnostics(request: Request) -> Response:
     "/strategy-manager/configuration/universe",
     response_class=HTMLResponse,
 )
-async def universe_selector(
+def universe_selector(
     request: Request,
     backtest: BacktestDep,
     q: str = "",
@@ -1070,9 +1093,7 @@ async def universe_selector(
 
 
 @router.get("/strategy-manager/initialization", response_class=HTMLResponse)
-async def historical_initialization(
-    request: Request, backtest: BacktestDep
-) -> Response:
+def historical_initialization(request: Request, backtest: BacktestDep) -> Response:
     return template_response(
         request, "_historical_initialization.html", _initialization_context(backtest)
     )
@@ -1083,7 +1104,7 @@ async def historical_initialization(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def submit_initialization(
+def submit_initialization(
     request: Request,
     backtest: BacktestDep,
     jobs: JobsDep,
@@ -1516,7 +1537,7 @@ def _decode_launch_form(
 
 
 @router.get("/strategy-manager/configuration", response_class=HTMLResponse)
-async def strategy_configuration(
+def strategy_configuration(
     request: Request,
     launch: LaunchDep,
     backtest: BacktestDep,
@@ -1535,7 +1556,7 @@ async def strategy_configuration(
 
 
 @router.get("/strategy-manager/configuration/fields", response_class=HTMLResponse)
-async def strategy_configuration_fields(
+def strategy_configuration_fields(
     request: Request,
     launch: LaunchDep,
     backtest: BacktestDep,
@@ -1574,11 +1595,12 @@ async def strategy_configuration_fields(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def submit_strategy_configuration(
+def submit_strategy_configuration(
     request: Request,
     launch: LaunchDep,
     backtest: BacktestDep,
     agent: StrategyManagerDep,
+    form: Annotated[FormData, Depends(request_form)],
 ) -> Response:
     """Validate and launch a Backtest (Story 2.7 AC 6-8).
 
@@ -1587,7 +1609,6 @@ async def submit_strategy_configuration(
     the durable Activity URL only after an accepted enqueue. Never
     persists anything before every validation step has passed.
     """
-    form = await request.form()
     submitted_strategy_id = form.get("strategy_id")
     strategy = None
     if isinstance(submitted_strategy_id, str) and submitted_strategy_id:
@@ -1780,10 +1801,13 @@ async def submit_strategy_configuration(
 
 
 @router.get("/strategy-manager/backtests", response_class=HTMLResponse)
-async def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLResponse:
+def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLResponse:
     """Render the standalone Backtest results list (Story 2.8 AC 2, 7)."""
+    page = _page_number(request.query_params.get("page"))
     return template_response(
-        request, "_backtest_results_list.html", _backtest_activities_context(backtest)
+        request,
+        "_backtest_results_list.html",
+        _backtest_activities_context(backtest, page),
     )
 
 
@@ -2225,31 +2249,66 @@ def _activity_context_for_bar(
 ) -> dict[str, object]:
     """Assemble one job's bar context without the full activity page load."""
     stage_progress = _stage_progress(job) if job.job_type in STAGE_JOB_TYPES else None
-    backtest_progress = None
-    initialization_progress = None
-    #: The n/total count is decoration; the run's own state is the point.
-    #: A detail row that is missing or unreadable must cost the count, never
-    #: the whole bar -- blanking it would read as "nothing is running".
-    try:
-        if job.job_type is StrategyJobType.BACKTEST and job.current_month:
-            backtest_progress = _backtest_progress(
-                repo.strategy_run(job.id), job.current_month
-            )
-        elif job.job_type is StrategyJobType.INITIALIZATION:
-            initialization_progress = _initialization_progress(
-                repo.initialization_run(job.id),
-                repo.initialization_progress(job.id),
-                job.created_at,
-            )
-    except Exception:  # noqa: BLE001 -- see above; the bar still renders
-        logger.warning("activity bar progress unavailable", exc_info=True)
+    backtest_progress, initialization_progress = _cached_bar_progress(repo, job)
     return _activity_bar(
         job, stage_progress, backtest_progress, initialization_progress
     )
 
 
+#: Single-slot ``((job.id, status_version), progress pair)`` cache so the
+#: 2 s bar poll does not re-read the run tables while the job is unchanged
+#: (#132, AD-2/AD-14). ``_activity_bar`` still runs every poll so elapsed
+#: time stays live.
+_BarProgress = tuple[Mapping[str, object] | None, Mapping[str, object] | None]
+_ACTIVITY_BAR_CACHE: tuple[tuple[str, int], _BarProgress] | None = None
+_ACTIVITY_BAR_CACHE_LOCK = threading.Lock()
+
+
+def _cached_bar_progress(repo: BacktestRepository, job: StrategyJobV1) -> _BarProgress:
+    """Return the bar's progress pair, re-read only when the job revision moves.
+
+    A running initialization is never cached: its progress advances without
+    a ``status_version`` bump. A failed read is ``(None, None)``, not cached.
+    """
+    global _ACTIVITY_BAR_CACHE
+    bypass = (
+        job.job_type is StrategyJobType.INITIALIZATION
+        and job.status is StrategyJobStatus.RUNNING
+    )
+    key = (job.id, job.status_version)
+    with _ACTIVITY_BAR_CACHE_LOCK:
+        cached = _ACTIVITY_BAR_CACHE
+    if not bypass and cached is not None and cached[0] == key:
+        return cached[1]
+    #: The n/total count is decoration; the run's own state is the point.
+    #: A detail row that is missing or unreadable must cost the count, never
+    #: the whole bar -- blanking it would read as "nothing is running".
+    try:
+        pair = _read_bar_progress(repo, job)
+    except Exception:  # noqa: BLE001 -- see above; the bar still renders
+        logger.warning("activity bar progress unavailable", exc_info=True)
+        return None, None
+    if not bypass:
+        with _ACTIVITY_BAR_CACHE_LOCK:
+            _ACTIVITY_BAR_CACHE = (key, pair)
+    return pair
+
+
+def _read_bar_progress(repo: BacktestRepository, job: StrategyJobV1) -> _BarProgress:
+    """Read the bar's ``(backtest, initialization)`` progress pair."""
+    if job.job_type is StrategyJobType.BACKTEST and job.current_month:
+        return _backtest_progress(repo.strategy_run(job.id), job.current_month), None
+    if job.job_type is StrategyJobType.INITIALIZATION:
+        return None, _initialization_progress(
+            repo.initialization_run(job.id),
+            repo.initialization_progress(job.id),
+            job.created_at,
+        )
+    return None, None
+
+
 @router.get("/strategy-manager/activity-status", response_class=HTMLResponse)
-async def strategy_activity_status_bar(
+def strategy_activity_status_bar(
     request: Request, backtest: BacktestDep
 ) -> HTMLResponse:
     """Render the Strategy Manager tab's fixed status bar (#593).
@@ -2270,7 +2329,7 @@ async def strategy_activity_status_bar(
 
 
 @router.get("/strategy-manager/activities/{job_id}", response_class=HTMLResponse)
-async def strategy_activity(
+def strategy_activity(
     request: Request, job_id: str, backtest: BacktestDep, jobs: JobsDep
 ) -> Response:
     try:
@@ -2282,7 +2341,7 @@ async def strategy_activity(
 
 
 @router.get("/strategy-manager/activities/{job_id}/status", response_class=HTMLResponse)
-async def strategy_activity_status(
+def strategy_activity_status(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -2310,7 +2369,7 @@ async def strategy_activity_status(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def cancel_strategy_job(
+def cancel_strategy_job(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -2333,7 +2392,7 @@ async def cancel_strategy_job(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def restart_strategy_job(
+def restart_strategy_job(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -2364,7 +2423,7 @@ async def restart_strategy_job(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def delete_initialization(
+def delete_initialization(
     request: Request,
     job_id: str,
     backtest: BacktestDep,
@@ -2542,7 +2601,7 @@ def _note_context(
 
 
 @router.get("/strategy-manager/results/{run_id}", response_class=HTMLResponse)
-async def backtest_result_view(
+def backtest_result_view(
     request: Request, run_id: str, backtest: BacktestDep
 ) -> Response:
     """Render a completed Backtest's standalone Result page (AC 1).
@@ -2578,7 +2637,7 @@ async def backtest_result_view(
     "/strategy-manager/results/{run_id}/candidate-audit",
     response_class=HTMLResponse,
 )
-async def backtest_candidate_audit_page_view(
+def backtest_candidate_audit_page_view(
     request: Request, run_id: str, backtest: BacktestDep, page: int = 1
 ) -> Response:
     """Return one bounded candidate-audit page from persisted evidence."""
@@ -2622,7 +2681,7 @@ async def backtest_candidate_audit_page_view(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def submit_backtest_result_note(
+def submit_backtest_result_note(
     request: Request,
     run_id: str,
     backtest: BacktestDep,
@@ -2836,7 +2895,7 @@ def _revalidate_eligibility(
 
 
 @router.get("/strategy-manager/compare", response_class=HTMLResponse)
-async def compare_picker(
+def compare_picker(
     request: Request,
     backtest: BacktestDep,
     run_id: str,
@@ -2885,10 +2944,11 @@ async def compare_picker(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def submit_compare(
+def submit_compare(
     request: Request,
     backtest: BacktestDep,
     run_id: Annotated[str, Form()],
+    form: Annotated[FormData, Depends(request_form)],
 ) -> Response:
     """Guarded Compare submit (AC 4, 5) -- revalidates eligibility via
     ``is_comparable`` on every submit (never trusting a rendered
@@ -2900,7 +2960,6 @@ async def submit_compare(
     the Result, its note, nor its evidence manifest is ever mutated
     here.
     """
-    form = await request.form()
     candidate_run_ids = [str(value) for value in form.getlist("candidate_run_ids")]
     if not candidate_run_ids:
         legacy_candidate = form.get("candidate_run_id")
@@ -2982,7 +3041,7 @@ def _multi_comparison_integrity_response(
 
 
 @router.get("/strategy-manager/comparisons", response_class=HTMLResponse)
-async def multi_comparison_view(
+def multi_comparison_view(
     request: Request,
     backtest: BacktestDep,
     run_id: str,
@@ -3117,7 +3176,7 @@ def _comparison_context(
     "/strategy-manager/comparisons/{run_id_a}/{run_id_b}",
     response_class=HTMLResponse,
 )
-async def comparison_view(
+def comparison_view(
     request: Request, run_id_a: str, run_id_b: str, backtest: BacktestDep
 ) -> Response:
     """Render two eligible Backtest Results side by side (Story 3.3).

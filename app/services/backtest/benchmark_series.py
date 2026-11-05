@@ -12,7 +12,7 @@ import logging
 import sqlite3
 from typing import Protocol
 
-from app.repositories.backtest_repo import BacktestResultV1
+from app.repositories.backtest_repo import BacktestResultSummaryV1, BacktestResultV1
 from app.repositories.historical_price_repo import StoredHistoricalEvidence
 from app.services.backtest.currency import prepare_fx_closes
 from app.services.backtest.market_planes import provider_decimal
@@ -57,7 +57,7 @@ class BenchmarkUnavailable:
 
 
 def spy_total_return_series(
-    result: BacktestResultV1,
+    result: BacktestResultV1 | BacktestResultSummaryV1,
     sessions: Sequence[date],
     prices: EvidenceReader,
     fx_revision: str | None,

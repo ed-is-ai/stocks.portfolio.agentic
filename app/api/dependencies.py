@@ -6,8 +6,10 @@ are cached so each service is a singleton for the process, matching the previous
 module-level ``trader`` instance.
 """
 
+from collections.abc import Iterator
 from functools import lru_cache
 import sqlite3
+import threading
 from typing import Annotated
 
 from fastapi import Depends
@@ -19,7 +21,7 @@ from app.agents.thesis.drafter import ThesisDraftClient
 from app.agents.trade_review.weekly import TradeReviewClient
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.core import config
-from app.core.config import ALERTS_DB, TRADES_DB
+from app.core.config import ALERTS_DB, PIPELINE_STATUS_JSON, TRADES_DB
 from app.integrations.fx_history import (
     BankOfEnglandFxSeriesFetcher,
     ChainedFxQuoteFetcher,
@@ -37,7 +39,7 @@ from app.repositories.portfolio_dispatch_repo import PortfolioDispatchRepository
 from app.repositories.position_theses_repo import PositionThesesRepository
 from app.repositories.trade_annotations_repo import TradeAnnotationsRepository
 from app.api.stock_scanner_context import load_source_health
-from app.services.desk_service import ATTENTION_COUNTS, DeskService
+from app.services.desk_service import ATTENTION_COUNTS, DeskService, file_revision
 from app.services.integration_config_service import IntegrationConfigService
 from app.services.pipeline_service import PipelineService
 from app.services.portfolio_service import PortfolioService
@@ -61,6 +63,27 @@ from app.services.backtest.strategy_readiness_service import (
 )
 from app.services.backtest.strategy_experiment_service import StrategyExperimentService
 from app.services.backtest.strategy_insights import StrategyManagerInsightsService
+
+
+# ponytail: one process-wide lock; per-portfolio locks if writes ever contend.
+_PORTFOLIO_WRITE_LOCK = threading.Lock()
+
+
+def serialized_portfolio_write() -> Iterator[None]:
+    """Hold the portfolio write lock for one handler (#132).
+
+    Sync handlers run concurrently in the threadpool; money-mutating routes
+    (trades, imports, opening lots, portfolios) read-modify-write the ledger
+    and cash, so they take this lock to run one at a time, as they did when
+    they were ``async`` on the single event loop.
+    """
+    with _PORTFOLIO_WRITE_LOCK:
+        yield
+
+
+#: Route dependency for every portfolio/trade/cash write. ``scope="function"``
+#: releases the lock when the handler returns, before background tasks run.
+PORTFOLIO_WRITE = Depends(serialized_portfolio_write, scope="function")
 
 
 @lru_cache
@@ -396,4 +419,7 @@ def get_desk_service(
         config.COPILOT_AUDIT_JSONL,
         load_source_health,
         count_cache=ATTENTION_COUNTS,
+        # trades.db is rollback-journal SQLite, so its stat moves on every
+        # thesis, assignment or ledger write; the status file owns source health.
+        input_revision=lambda: file_revision(TRADES_DB, PIPELINE_STATUS_JSON),
     )

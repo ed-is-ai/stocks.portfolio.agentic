@@ -14,7 +14,7 @@ from urllib.parse import quote
 from app.repositories.backtest_repo import (
     BacktestIntegrityError,
     BacktestRepository,
-    BacktestResultV1,
+    BacktestResultSummaryV1,
 )
 from app.schemas.strategy_outcomes import (
     OutcomeCohortV1,
@@ -23,10 +23,6 @@ from app.schemas.strategy_outcomes import (
     OutcomeProvenanceV1,
     OutcomeRunV1,
     StrategyOutcomeSummaryV1,
-)
-from app.services.backtest.backtest_engine import (
-    ExitFillEventV1,
-    TerminalSettlementEventV1,
 )
 from app.services.backtest.benchmark_series import (
     BAD_EVIDENCE_NOTE,
@@ -61,7 +57,7 @@ NO_SPY_REFERENCE_LIMITATION = (
 class OutcomeSelectionV1:
     """Internal selection state retained only for one service call."""
 
-    results: tuple[BacktestResultV1, ...]
+    results: tuple[BacktestResultSummaryV1, ...]
     state: Literal["cohort", "individual", "empty", "unavailable"]
     comparison_exclusions: tuple[OutcomeExclusionCountV1, ...]
     cohort_candidate_count: int
@@ -79,29 +75,16 @@ class StrategyOutcomeService:
 
     def build_summary(self) -> StrategyOutcomeSummaryV1:
         try:
-            page = self._repository.recent_verified_backtest_results(limit=25)
+            page = self._repository.recent_backtest_result_summaries(limit=25)
+            selection = self._select(page.results)
+            # gh-133: only the few display rows read their Equity Curve.
+            display_results = self._repository.with_display_evidence(selection.results)
         except Exception:  # noqa: BLE001 - a summary failure must not hide landing
             logger.warning(
                 "Verified Strategy outcomes could not be loaded", exc_info=True
             )
-            cohort = OutcomeCohortV1(
-                is_comparable_cohort=False,
-                limitations=("Verified Backtest results are unavailable.",),
-            )
-            return StrategyOutcomeSummaryV1(
-                state="unavailable",
-                inspected_count=0,
-                verified_count=0,
-                cohort_candidate_count=0,
-                cohort_strategy_count=0,
-                integrity_excluded_count=0,
-                missing_result_count=0,
-                cohort=cohort,
-                runs=(),
-            )
+            return self._unavailable_summary()
 
-        selection = self._select(page.results)
-        display_results = selection.results
         if not page.results:
             cohort = self._cohort(selection, [])
             return StrategyOutcomeSummaryV1(
@@ -112,6 +95,7 @@ class StrategyOutcomeService:
                 cohort_strategy_count=0,
                 integrity_excluded_count=page.integrity_excluded_count,
                 missing_result_count=page.missing_result_count,
+                unverified_count=page.unverified_count,
                 job_exclusions=tuple(
                     OutcomeExclusionCountV1(reason=reason, count=count)
                     for reason, count in page.job_exclusion_counts
@@ -154,122 +138,133 @@ class StrategyOutcomeService:
             for index, result in enumerate(display_results, start=1)
         }
         rows: list[OutcomeRunV1] = []
+        dropped_ids: set[str] = set()
         for result in display_results:
-            handle = handles[result.run_id]
-            selection_pin = result.universe_selection
-            ids = (
-                None if selection_pin is None else selection_pin.canonical_security_ids
-            )
-            identities = roster_cache[result.profile_hash]
-            if ids:
-                runnable_key = (result.profile_hash, result.start_month)
-                if runnable_key not in universe_cache:
-                    try:
-                        universe_cache[runnable_key] = tuple(
-                            security_id
-                            for security_id, _revision in self._repository.snapshot_member_revisions(
-                                result.profile_hash, result.start_month
-                            )
-                        )
-                    except BacktestIntegrityError:
-                        universe_cache[runnable_key] = None
-            universe = build_universe_view(
-                ids,
-                identities,
-                runnable_ids=(
-                    None
-                    if not ids
-                    else universe_cache.get((result.profile_hash, result.start_month))
-                ),
-            )
             try:
-                coverage = provenance_cache.get(result.profile_hash)
-                if coverage is None:
-                    coverage = self._repository.snapshot_coverage(result.profile_hash)
-                    provenance_cache[result.profile_hash] = coverage
-                provenance = tuple(
-                    OutcomeProvenanceV1(
-                        quality=(
-                            entry.provenance_quality
-                            if entry.provenance_quality
-                            in {
-                                "observed_bau",
-                                "best_effort_reconstructed",
-                                "unavailable",
-                            }
-                            else "unavailable"
-                        ),
-                        snapshot_count=entry.snapshot_count,
-                    )
-                    for entry in provenance_view(result, coverage).entries
+                handle = handles[result.run_id]
+                selection_pin = result.universe_selection
+                ids = (
+                    None
+                    if selection_pin is None
+                    else selection_pin.canonical_security_ids
                 )
+                identities = roster_cache[result.profile_hash]
+                if ids:
+                    runnable_key = (result.profile_hash, result.start_month)
+                    if runnable_key not in universe_cache:
+                        try:
+                            universe_cache[runnable_key] = tuple(
+                                security_id
+                                for security_id, _revision in self._repository.snapshot_member_revisions(
+                                    result.profile_hash, result.start_month
+                                )
+                            )
+                        except BacktestIntegrityError:
+                            universe_cache[runnable_key] = None
+                universe = build_universe_view(
+                    ids,
+                    identities,
+                    runnable_ids=(
+                        None
+                        if not ids
+                        else universe_cache.get(
+                            (result.profile_hash, result.start_month)
+                        )
+                    ),
+                )
+                try:
+                    coverage = provenance_cache.get(result.profile_hash)
+                    if coverage is None:
+                        coverage = self._repository.snapshot_coverage(
+                            result.profile_hash
+                        )
+                        provenance_cache[result.profile_hash] = coverage
+                    provenance = tuple(
+                        OutcomeProvenanceV1(
+                            quality=(
+                                entry.provenance_quality
+                                if entry.provenance_quality
+                                in {
+                                    "observed_bau",
+                                    "best_effort_reconstructed",
+                                    "unavailable",
+                                }
+                                else "unavailable"
+                            ),
+                            snapshot_count=entry.snapshot_count,
+                        )
+                        for entry in provenance_view(result, coverage).entries
+                    )
+                except (BacktestIntegrityError, ValueError):
+                    provenance = ()
+                metric_availability = {
+                    "sharpe_ratio": (
+                        None
+                        if result.metric_availability.sharpe_unavailable is None
+                        else result.metric_availability.sharpe_unavailable.value
+                    ),
+                    "win_rate": (
+                        None
+                        if result.metric_availability.win_rate_unavailable is None
+                        else result.metric_availability.win_rate_unavailable.value
+                    ),
+                }
+                parameters = dict(result.parameters)
+                if selection_pin is not None:
+                    parameters.pop(selection_pin.universe_parameter, None)
+                metrics = OutcomeMetricsV1(
+                    total_return=result.metrics.total_return,
+                    sharpe_ratio=result.metrics.sharpe_ratio,
+                    win_rate=result.metrics.win_rate,
+                    max_drawdown=result.metrics.max_drawdown,
+                )
+                formatted_metrics = backtest_metrics_view(
+                    result.metrics, result.metric_availability
+                )
+                metric_display = {
+                    "total_return": formatted_metrics.total_return.value,
+                    "sharpe_ratio": formatted_metrics.sharpe_ratio.value,
+                    "win_rate": formatted_metrics.win_rate.value,
+                    "max_drawdown": formatted_metrics.max_drawdown.value,
+                }
+                row = OutcomeRunV1(
+                    run_id=result.run_id,
+                    evidence_handle=handle,
+                    result_url=f"/strategy-manager/results/{quote(result.run_id, safe='')}",
+                    strategy_id=result.strategy_id,
+                    strategy_api_version=result.strategy_api_version,
+                    strategy_source_digest=result.strategy_source_digest,
+                    completed_at=result.completed_at,
+                    start_month=result.start_month,
+                    end_month=result.end_month,
+                    base_currency=result.base_currency,
+                    starting_capital=str(result.starting_capital),
+                    profile_hash=result.profile_hash,
+                    parameters=parameters,
+                    universe=universe.tickers,
+                    metrics=metrics,
+                    metric_display=metric_display,
+                    metric_availability=metric_availability,
+                    closed_trade_count=result.closed_trade_count,
+                    equity_point_count=result.equity_point_count,
+                    candidate_count=result.candidate_count,
+                    provenance=provenance,
+                    is_spy_reference=result.run_id in spy_ids,
+                )
+                rows.append(row)
             except (BacktestIntegrityError, ValueError):
-                provenance = ()
-            metric_availability = {
-                "sharpe_ratio": (
-                    None
-                    if result.metric_availability.sharpe_unavailable is None
-                    else result.metric_availability.sharpe_unavailable.value
-                ),
-                "win_rate": (
-                    None
-                    if result.metric_availability.win_rate_unavailable is None
-                    else result.metric_availability.win_rate_unavailable.value
-                ),
-            }
-            closed_trade_count = sum(
-                isinstance(event, (ExitFillEventV1, TerminalSettlementEventV1))
-                for event in result.events
-            )
-            parameters = dict(result.parameters)
-            if selection_pin is not None:
-                parameters.pop(selection_pin.universe_parameter, None)
-            candidate_summary = result.candidate_audit_summary
-            candidate_count = (
-                candidate_summary.candidate_count
-                if candidate_summary is not None and candidate_summary.recorded
-                else None
-            )
-            metrics = OutcomeMetricsV1(
-                total_return=result.metrics.total_return,
-                sharpe_ratio=result.metrics.sharpe_ratio,
-                win_rate=result.metrics.win_rate,
-                max_drawdown=result.metrics.max_drawdown,
-            )
-            formatted_metrics = backtest_metrics_view(
-                result.metrics, result.metric_availability
-            )
-            metric_display = {
-                "total_return": formatted_metrics.total_return.value,
-                "sharpe_ratio": formatted_metrics.sharpe_ratio.value,
-                "win_rate": formatted_metrics.win_rate.value,
-                "max_drawdown": formatted_metrics.max_drawdown.value,
-            }
-            row = OutcomeRunV1(
-                run_id=result.run_id,
-                evidence_handle=handle,
-                result_url=f"/strategy-manager/results/{quote(result.run_id, safe='')}",
-                strategy_id=result.strategy_id,
-                strategy_api_version=result.strategy_api_version,
-                strategy_source_digest=result.strategy_source_digest,
-                completed_at=result.completed_at,
-                start_month=result.start_month,
-                end_month=result.end_month,
-                base_currency=result.base_currency,
-                starting_capital=str(result.starting_capital),
-                profile_hash=result.profile_hash,
-                parameters=parameters,
-                universe=universe.tickers,
-                metrics=metrics,
-                metric_display=metric_display,
-                metric_availability=metric_availability,
-                closed_trade_count=closed_trade_count,
-                equity_point_count=len(result.equity_curve),
-                candidate_count=candidate_count,
-                provenance=provenance,
-                is_spy_reference=result.run_id in spy_ids,
-            )
-            rows.append(row)
+                # gh-133: one damaged display row is dropped and counted as
+                # integrity-excluded rather than hiding the whole panel.
+                logger.warning(
+                    "Outcome row %s could not be built", result.run_id, exc_info=True
+                )
+                dropped_ids.add(result.run_id)
+        display_results = tuple(
+            result for result in display_results if result.run_id not in dropped_ids
+        )
+        integrity_excluded_count = page.integrity_excluded_count + (
+            len(selection.results) - len(display_results)
+        )
 
         cohort = self._cohort(selection, rows)
         equity_payload = None
@@ -278,7 +273,7 @@ class StrategyOutcomeService:
         selected_spy_handle = next(
             (handles[run_id] for run_id in spy_ids if run_id in handles), None
         )
-        charted: tuple[BacktestResultV1, ...] = ()
+        charted: tuple[BacktestResultSummaryV1, ...] = ()
         if selection.state == "cohort" and len(display_results) >= 2:
             charted = display_results
         elif selection.state == "individual" and display_results:
@@ -349,8 +344,9 @@ class StrategyOutcomeService:
             verified_count=len(page.results),
             cohort_candidate_count=selection.cohort_candidate_count,
             cohort_strategy_count=selection.cohort_strategy_count,
-            integrity_excluded_count=page.integrity_excluded_count,
+            integrity_excluded_count=min(integrity_excluded_count, 25),
             missing_result_count=page.missing_result_count,
+            unverified_count=page.unverified_count,
             job_exclusions=tuple(
                 OutcomeExclusionCountV1(reason=reason, count=count)
                 for reason, count in page.job_exclusion_counts
@@ -365,8 +361,26 @@ class StrategyOutcomeService:
             benchmark_note=benchmark_note,
         )
 
+    @staticmethod
+    def _unavailable_summary() -> StrategyOutcomeSummaryV1:
+        """Return the explicit unavailable state for a failed summary read."""
+        return StrategyOutcomeSummaryV1(
+            state="unavailable",
+            inspected_count=0,
+            verified_count=0,
+            cohort_candidate_count=0,
+            cohort_strategy_count=0,
+            integrity_excluded_count=0,
+            missing_result_count=0,
+            cohort=OutcomeCohortV1(
+                is_comparable_cohort=False,
+                limitations=("Verified Backtest results are unavailable.",),
+            ),
+            runs=(),
+        )
+
     def _benchmark(
-        self, charted: tuple[BacktestResultV1, ...]
+        self, charted: tuple[BacktestResultSummaryV1, ...]
     ) -> tuple[tuple[str, tuple[Decimal, ...]] | None, str | None]:
         """Return the SPY line for ``charted`` (as equity in the first run's
         terms) or the note explaining why it is omitted."""
@@ -399,7 +413,9 @@ class StrategyOutcomeService:
             tuple(start * value / first for value in outcome.values),
         ), None
 
-    def _fx_revision(self, result: BacktestResultV1) -> tuple[str | None, str | None]:
+    def _fx_revision(
+        self, result: BacktestResultSummaryV1
+    ) -> tuple[str | None, str | None]:
         """Return ``(fx_revision, note)``: the GBP run's single pinned GBP/USD
         revision, or the note saying why there is none. USD runs need none."""
         if result.base_currency != "GBP":
@@ -417,7 +433,9 @@ class StrategyOutcomeService:
             return None, AMBIGUOUS_FX_NOTE
         return revisions.pop(), None
 
-    def _select(self, results: tuple[BacktestResultV1, ...]) -> OutcomeSelectionV1:
+    def _select(
+        self, results: tuple[BacktestResultSummaryV1, ...]
+    ) -> OutcomeSelectionV1:
         if not results:
             return OutcomeSelectionV1((), "empty", (), 0, 0)
 
@@ -441,12 +459,7 @@ class StrategyOutcomeService:
                 left = results[left_index]
                 right = results[right_index]
                 try:
-                    eligibility = self._repository.is_comparable(
-                        left.run_id,
-                        right.run_id,
-                        left_result=left,
-                        right_result=right,
-                    )
+                    eligibility = self._repository.compare_result_summaries(left, right)
                 except (BacktestIntegrityError, ValueError):
                     pair_facts[(left_index, right_index)] = (False, "integrity_error")
                 else:
@@ -562,9 +575,9 @@ class StrategyOutcomeService:
 
     @staticmethod
     def _latest_per_strategy(
-        results: tuple[BacktestResultV1, ...],
-    ) -> tuple[BacktestResultV1, ...]:
-        newest: dict[str, BacktestResultV1] = {}
+        results: tuple[BacktestResultSummaryV1, ...],
+    ) -> tuple[BacktestResultSummaryV1, ...]:
+        newest: dict[str, BacktestResultSummaryV1] = {}
         for result in results:
             current = newest.get(result.strategy_id)
             if (

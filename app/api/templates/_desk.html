@@ -13,8 +13,15 @@
   <div id="desk-refresh" hidden
        hx-get="/partials/desk" hx-target="#tab-content" hx-swap="innerHTML"
        hx-sync="#tab-content:drop"
-       hx-trigger="portfolio-agents-refresh from:body, every 60s [document.visibilityState === 'visible']"
+       hx-trigger="portfolio-agents-refresh from:body"
        hx-vals='js:{portfolio_id: "{{ pid }}", item: (typeof deskSelectedId === "function" ? deskSelectedId() : "")}'></div>
+  {# The timer sends the revision it rendered: unchanged inputs answer 204
+     (no swap), so an idle Desk costs one cheap digest per minute (#132). #}
+  <div id="desk-refresh-timer" hidden
+       hx-get="/partials/desk" hx-target="#tab-content" hx-swap="innerHTML"
+       hx-sync="#tab-content:drop"
+       hx-trigger="every 60s [document.visibilityState === 'visible']"
+       hx-vals='js:{portfolio_id: "{{ pid }}", item: (typeof deskSelectedId === "function" ? deskSelectedId() : ""), rev: "{{ revision or '' }}"}'></div>
   <div class="desk-heading">
     <h1 id="desk-heading">AI Desk</h1>
     <p>What needs attention, why it matters and the evidence behind it.</p>

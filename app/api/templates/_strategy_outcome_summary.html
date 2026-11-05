@@ -14,12 +14,13 @@
   <p class="small text-muted">Checked {{ outcome_summary.inspected_count }} of at most {{ outcome_summary.candidate_limit }} latest completed Result candidates; {{ outcome_summary.verified_count }} passed integrity validation.</p>
   {% if outcome_summary.cohort.limitations %}<ul class="small text-muted">{% for limitation in outcome_summary.cohort.limitations %}<li>{{ limitation }}</li>{% endfor %}</ul>{% endif %}
 
-  {% if outcome_summary.integrity_excluded_count or outcome_summary.missing_result_count or outcome_summary.job_exclusions or outcome_summary.comparison_exclusions %}
+  {% if outcome_summary.integrity_excluded_count or outcome_summary.missing_result_count or outcome_summary.unverified_count or outcome_summary.job_exclusions or outcome_summary.comparison_exclusions %}
   <details class="mb-3">
     <summary>Coverage and exclusions</summary>
     <ul class="mb-0 mt-2">
       {% if outcome_summary.integrity_excluded_count %}<li>{{ outcome_summary.integrity_excluded_count }} candidate{{ 's' if outcome_summary.integrity_excluded_count != 1 }} failed Result integrity validation.</li>{% endif %}
       {% if outcome_summary.missing_result_count %}<li>{{ outcome_summary.missing_result_count }} completed job{{ 's' if outcome_summary.missing_result_count != 1 }} had no stored Result.</li>{% endif %}
+      {% if outcome_summary.unverified_count %}<li>{{ outcome_summary.unverified_count }} Result candidate{{ 's' if outcome_summary.unverified_count != 1 }} awaiting integrity verification.</li>{% endif %}
       {% for exclusion in outcome_summary.job_exclusions %}<li>{{ exclusion.count }} {{ exclusion.reason|replace('_', ' ') }} job{{ 's' if exclusion.count != 1 }} excluded.</li>{% endfor %}
       {% for exclusion in outcome_summary.comparison_exclusions %}<li>{{ exclusion.count }} Result candidate{{ 's' if exclusion.count != 1 }} excluded from the selected cohort: {{ exclusion.reason|replace('_', ' ') }}.</li>{% endfor %}
     </ul>

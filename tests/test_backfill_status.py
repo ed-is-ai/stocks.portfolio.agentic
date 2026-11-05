@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from fastapi.testclient import TestClient
+
+import app.api.routes.portfolio as portfolio_routes
+from app.api.app import app
 from app.services.backfill_status import (
     _TERMINAL_TTL,
     BackfillStatusTracker,
@@ -118,3 +122,48 @@ def test_elapsed_seconds_is_frozen_once_finished() -> None:
     second = tracker.get(7).elapsed_seconds  # type: ignore[union-attr]
 
     assert first == second  # a finished run's clock does not keep ticking
+
+
+# --- #132: the poll answers straight from the in-memory tracker -------------
+
+
+class _OnlyGet:
+    """A tracker stand-in that exposes ``get`` alone and counts its reads."""
+
+    def __init__(self, tracker: BackfillStatusTracker) -> None:
+        self._tracker = tracker
+        self.reads = 0
+
+    def get(self, portfolio_id: int):
+        self.reads += 1
+        return self._tracker.get(portfolio_id)
+
+
+def _poll(monkeypatch, tracker: BackfillStatusTracker) -> tuple[_OnlyGet, list[str]]:
+    fake = _OnlyGet(tracker)
+    monkeypatch.setattr(portfolio_routes, "backfill_tracker", fake)
+    client = TestClient(app)
+    bodies = [
+        client.get("/api/portfolio/backfill-status?portfolio_id=7").text
+        for _ in range(2)
+    ]
+    return fake, bodies
+
+
+def test_a_repeat_backfill_poll_reads_only_the_tracker(monkeypatch) -> None:
+    fake, bodies = _poll(monkeypatch, _begun())
+
+    assert fake.reads == 2
+    assert bodies[0] == bodies[1]
+    assert 'hx-trigger="every 2s"' in bodies[0]
+
+
+def test_a_terminal_backfill_poll_is_a_one_shot_reload(monkeypatch) -> None:
+    tracker = _begun()
+    tracker.complete(7, days_done=100, rows_written=31)
+
+    fake, bodies = _poll(monkeypatch, tracker)
+
+    assert fake.reads == 2
+    assert 'hx-trigger="load delay:8s"' in bodies[0]
+    assert "every 2s" not in bodies[0]

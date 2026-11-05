@@ -15,6 +15,7 @@ import sqlite3
 from typing import AsyncIterator, Protocol
 
 from fastapi import FastAPI
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.api.routes import (
@@ -64,10 +65,15 @@ def _prepare_strategy_coverage() -> None:
             if not get_bootstrap_service().reset_pending():
                 raise
             logging.getLogger(__name__).warning(
-                "Skipping stale Strategy Manager coverage; profile refresh is "
-                "required",
+                "Skipping stale Strategy Manager coverage; profile refresh is required",
                 exc_info=True,
             )
+
+
+def _backfill_result_verdicts() -> None:
+    # gh-133: runs after preparation, off the event loop, so a slow or failing
+    # backfill never delays or fails Strategy Manager preparation.
+    get_backtest_repository().backfill_backtest_result_verdicts()
 
 
 def _run_scheduled_pipeline() -> None:
@@ -128,19 +134,29 @@ def create_app(
             else:
                 _app.state.strategy_preparation = "ready"
 
+        async def backfill() -> None:
+            await preparation
+            try:
+                await asyncio.to_thread(_backfill_result_verdicts)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Backtest result verdict backfill failed"
+                )
+
         _app.state.strategy_preparation = "pending"
         preparation = asyncio.create_task(prepare())
         _app.state.strategy_preparation_task = preparation
+        backfilling = asyncio.create_task(backfill())
         try:
             yield
         finally:
             # to_thread cancellation does not stop SQLite work. Join the owned
-            # task before shutdown rather than leaving its thread detached.
+            # tasks before shutdown rather than leaving their threads detached.
             try:
                 try:
-                    await asyncio.shield(preparation)
+                    await asyncio.shield(backfilling)
                 except asyncio.CancelledError:
-                    await preparation
+                    await backfilling
                     raise
             finally:
                 stop_pipeline_scheduler()
@@ -148,12 +164,13 @@ def create_app(
                     service.shutdown()
 
     app = FastAPI(title="Stock Trader", lifespan=lifespan)
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
     app.state.strategy_preparation = "ready"
 
     @app.middleware("http")
     async def wait_for_strategy_preparation(request, call_next):
-        # A synchronous coverage lock inside an async route would otherwise
-        # block the event loop (including splash status polling) during boot.
+        # Hold Strategy Manager requests until boot-time coverage is ready, so
+        # a handler never blocks a threadpool worker on the coverage lock.
         if app.state.strategy_preparation == "pending" and (
             request.url.path.startswith("/strategy-manager")
             or request.url.path == "/partials/strategy-manager"

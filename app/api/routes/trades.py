@@ -6,7 +6,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app.api.dependencies import get_portfolio_service, get_trader_service
+from app.api.dependencies import (
+    PORTFOLIO_WRITE,
+    get_portfolio_service,
+    get_trader_service,
+)
 from app.api.params import optional_int
 from app.api.templating import templates
 from app.core.security import require_local_or_token
@@ -33,8 +37,8 @@ def _reject_missing_portfolio(
     )
 
 
-@router.post("/trades", dependencies=[Depends(require_local_or_token)])
-async def record_trade(
+@router.post("/trades", dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE])
+def record_trade(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -88,8 +92,11 @@ async def record_trade(
     return templates.TemplateResponse(request, "_portfolio.html", context=context)
 
 
-@router.delete("/trades/{trade_id}", dependencies=[Depends(require_local_or_token)])
-async def delete_trade(trade_id: int, trader: TraderDep) -> RedirectResponse:
+@router.delete(
+    "/trades/{trade_id}",
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
+)
+def delete_trade(trade_id: int, trader: TraderDep) -> RedirectResponse:
     """Delete a trade by ID and redirect to the history partial."""
     trader.delete_trade(trade_id)
     return RedirectResponse("/partials/history", status_code=303)

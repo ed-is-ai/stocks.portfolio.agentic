@@ -35,6 +35,8 @@ a.ticker:hover {
   text-align: center;
 }
 
+.sc.wl-sepa { min-width: 2.2rem; }
+
 .sc-hi { background: var(--green-bg); color: var(--green); }
 .sc-mid { background: var(--amber-bg); color: var(--amber); }
 .sc-lo { background: var(--red-bg); color: var(--red); }
@@ -355,13 +357,17 @@ a.ticker:hover {
  * this width instead of squeezing text. */
 .wl-table { min-width: 62rem; }
 
-/* Sticky Ticker (left) / Buy action (right). Selectors key off the
- * semantic wl-col-* class, never column position, so sticky offsets
- * keep working if columns are hidden or reordered later. */
+/* Body cells carry no class (#134): they are styled by position. The
+ * order is fixed by the thead th[data-col] order and COLUMNS in
+ * watchlist.js (a test keeps them equal). Hidden cells (.wl-hidden)
+ * stay in the DOM, so nth-child positions never shift. Ticker is
+ * td:first-child and the actions are td:last-child; both are locked. */
+
+/* Sticky Ticker (left) / Buy action (right). */
 #watchlist-table th.wl-col-ticker,
-#watchlist-table td.wl-col-ticker,
+#watchlist-table tbody td:first-child,
 #watchlist-table th.wl-col-buy,
-#watchlist-table td.wl-col-buy {
+#watchlist-table tbody td:last-child {
   position: sticky;
   z-index: 3;
   background: white;
@@ -374,23 +380,102 @@ a.ticker:hover {
   z-index: 4;
   background: var(--primary);
 }
-#watchlist-table td.wl-col-ticker,
+#watchlist-table tbody td:first-child,
 #watchlist-table th.wl-col-ticker {
   left: 0;
   white-space: nowrap;
   box-shadow: 2px 0 4px rgba(15, 23, 42, 0.08);
 }
-#watchlist-table td.wl-col-buy,
+#watchlist-table tbody td:last-child,
 #watchlist-table th.wl-col-buy {
   right: 0;
   box-shadow: -2px 0 4px rgba(15, 23, 42, 0.08);
 }
 /* Sync the pinned cells' background with row hover so they never
  * look "cut out" of the row while scrolled. */
-#watchlist-table tbody tr:hover td.wl-col-ticker,
-#watchlist-table tbody tr:hover td.wl-col-buy {
+#watchlist-table tbody tr:hover td:first-child,
+#watchlist-table tbody tr:hover td:last-child {
   background: #f8fafc;
 }
+
+/* Row actions appear on row hover or keyboard focus; touch devices
+ * (no hover) always show them. */
+#watchlist-table tbody td:last-child > button { opacity: 0; }
+#watchlist-table tbody tr:hover td:last-child > button,
+#watchlist-table tbody tr:focus-within td:last-child > button { opacity: 1; }
+@media (hover: none), (any-pointer: coarse) {
+  #watchlist-table tbody td:last-child > button { opacity: 1; }
+}
+
+/* Positional cell styles that used to be inline or per-cell classes. */
+#watchlist-table tbody tr td:nth-child(2) {
+  color: var(--bs-secondary-color);
+  font-size: 0.76rem;
+}
+#watchlist-table tbody td:nth-child(12) { font-weight: var(--fw-semibold); }
+#watchlist-table tbody td:nth-child(14),
+#watchlist-table tbody td:nth-child(15) { color: var(--bs-secondary-color); }
+.wl-tgt {
+  color: var(--bs-secondary-color);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.wl-rr { color: #94a3b8; }
+.cong,
+.fund { cursor: help; white-space: nowrap; font-size: 0.76rem; }
+#watchlist-table .cell-sub { font-size: 0.68rem; }
+/* Static tooltips: watchlist.js sets title from data-tip on render. */
+#watchlist-table [data-tip] { cursor: help; }
+
+/* Client-side pager (#134); buttons reuse .btn-filter. */
+/* Why? button: one class carrying Bootstrap 5.3.3's
+ * .btn .btn-outline-secondary .btn-sm .py-0 .px-1 .ms-1 styles (#134). */
+.wl-why {
+  display: inline-block;
+  margin-left: 0.25rem;
+  padding: 0 0.25rem;
+  font-size: 0.875rem;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--bs-secondary);
+  text-align: center;
+  text-decoration: none;
+  vertical-align: middle;
+  cursor: pointer;
+  user-select: none;
+  border: var(--bs-border-width) solid var(--bs-secondary);
+  border-radius: var(--bs-border-radius-sm);
+  background-color: transparent;
+  transition: color 0.15s ease-in-out, background-color 0.15s ease-in-out,
+    border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+.wl-why:hover,
+.wl-why:focus-visible,
+.wl-why:active {
+  color: var(--bs-white);
+  background-color: var(--bs-secondary);
+  border-color: var(--bs-secondary);
+}
+.wl-why:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 0.25rem rgba(var(--bs-secondary-rgb), 0.5);
+}
+@media (prefers-reduced-motion: reduce) {
+  .wl-why { transition: none; }
+}
+
+.wl-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+.wl-pager .btn-filter:disabled { opacity: 0.5; cursor: default; }
+.wl-pager .btn-filter:disabled:hover { border-color: var(--border); color: var(--muted); }
 
 /* ── Focus-visible states (keyboard access) ──────────────────────
  * Ticker links, sort headers, filter/dropdown toggles and row
@@ -460,9 +545,9 @@ a.ticker:focus-visible,
 
 /* ── #392 Funds (institutional 13F) column — mirrors Congress ───── */
 #watchlist-table th.wl-col-funds,
-#watchlist-table td.wl-col-funds,
+#watchlist-table tbody td:nth-child(8),
 #watchlist-table th.wl-col-congress,
-#watchlist-table td.wl-col-congress {
+#watchlist-table tbody td:nth-child(7) {
   text-align: center;
   white-space: nowrap;
 }
@@ -488,10 +573,10 @@ a.ticker:focus-visible,
 
 /* Qualify-band cell tint — a faint wash separating signal columns
  * from the trade-execution math. */
-#watchlist-table td.wl-qualify { background: color-mix(in srgb, var(--blue-bg) 35%, transparent); }
-#watchlist-table tbody tr:hover td.wl-qualify { background: color-mix(in srgb, var(--blue-bg) 55%, var(--surface)); }
-#watchlist-table td.wl-col-ticker.wl-qualify { background: var(--card); }
-#watchlist-table tbody tr:hover td.wl-col-ticker.wl-qualify { background: var(--surface); }
+#watchlist-table tbody td:nth-child(-n+10) { background: color-mix(in srgb, var(--blue-bg) 35%, transparent); }
+#watchlist-table tbody tr:hover td:nth-child(-n+10) { background: color-mix(in srgb, var(--blue-bg) 55%, var(--surface)); }
+#watchlist-table tbody td:first-child { background: var(--card); }
+#watchlist-table tbody tr:hover td:first-child { background: var(--surface); }
 
 /* ── #394 Score-band pill tint (10/9/8…) ─────────────────────────
  * Layered on top of the existing sc-hi/mid/lo backgrounds. */
@@ -501,9 +586,19 @@ a.ticker:focus-visible,
 .sc-band-4, .sc-band-3, .sc-band-2, .sc-band-1 { box-shadow: inset 0 0 0 1px var(--red); }
 
 /* ── #394 Inline RSI meter ───────────────────────────────────────── */
-.wl-rsi { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.76rem; }
-.wl-rsi-track {
+/* Track = ::before, marker = ::after (#134): no per-row spans. The
+ * marker is placed against the .wl-rsi box, whose first flex item is the
+ * track, so its left edge is the track's left edge. */
+.wl-rsi {
   position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.76rem;
+}
+.wl-rsi::before {
+  content: "";
+  flex: none;
   width: 3.2rem;
   height: 0.42rem;
   border-radius: 0.25rem;
@@ -517,17 +612,25 @@ a.ticker:focus-visible,
     var(--red-bg) 100%
   );
 }
-.wl-rsi-marker {
+.wl-rsi::after {
+  content: "";
   position: absolute;
   top: 50%;
+  left: calc(3.2rem * var(--rsi-pos, 0) / 100);
   width: 2px;
   height: 0.72rem;
   margin-left: -1px;
   transform: translateY(-50%);
   background: var(--primary);
 }
-.wl-rsi-hot .wl-rsi-marker { background: var(--red); }
-.wl-rsi-cold .wl-rsi-marker { background: var(--blue); }
+.wl-rsi-hot::after { background: var(--red); }
+.wl-rsi-cold::after { background: var(--blue); }
+/* Marker position, rounded to 5%. */
+.wl-rsi-p0 { --rsi-pos: 0; } .wl-rsi-p5 { --rsi-pos: 5; } .wl-rsi-p10 { --rsi-pos: 10; } .wl-rsi-p15 { --rsi-pos: 15; } .wl-rsi-p20 { --rsi-pos: 20; }
+.wl-rsi-p25 { --rsi-pos: 25; } .wl-rsi-p30 { --rsi-pos: 30; } .wl-rsi-p35 { --rsi-pos: 35; } .wl-rsi-p40 { --rsi-pos: 40; } .wl-rsi-p45 { --rsi-pos: 45; }
+.wl-rsi-p50 { --rsi-pos: 50; } .wl-rsi-p55 { --rsi-pos: 55; } .wl-rsi-p60 { --rsi-pos: 60; } .wl-rsi-p65 { --rsi-pos: 65; } .wl-rsi-p70 { --rsi-pos: 70; }
+.wl-rsi-p75 { --rsi-pos: 75; } .wl-rsi-p80 { --rsi-pos: 80; } .wl-rsi-p85 { --rsi-pos: 85; } .wl-rsi-p90 { --rsi-pos: 90; } .wl-rsi-p95 { --rsi-pos: 95; }
+.wl-rsi-p100 { --rsi-pos: 100; }
 .wl-rsi-val { font-variant-numeric: tabular-nums; }
 .wl-rsi-cold .wl-rsi-val { color: var(--blue); }
 .wl-rsi-hot .wl-rsi-val { color: var(--red); }
@@ -536,6 +639,7 @@ a.ticker:focus-visible,
 #watchlist-table.wl-compact tbody td { padding: 0.14rem 0.55rem; font-size: var(--fs-2xs); }
 #watchlist-table.wl-compact thead th { padding: 0.34rem 0.55rem; }
 #watchlist-table.wl-compact .cell-sub,
-#watchlist-table.wl-compact .wl-rsi-track { display: none; }
+#watchlist-table.wl-compact .wl-rsi::before,
+#watchlist-table.wl-compact .wl-rsi::after { display: none; }
 /* .wl-density is also a .btn-filter, so .btn-filter.active supplies the
  * active styling — no separate rule needed here. */

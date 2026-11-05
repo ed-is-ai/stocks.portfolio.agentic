@@ -1,5 +1,8 @@
 """Shared request-parameter helpers for the API routes."""
 
+from fastapi import Request
+from fastapi.datastructures import FormData
+
 CHART_RANGES = ("1M", "3M", "12M", "3Y", "5Y")
 DEFAULT_CHART_RANGE = "12M"
 
@@ -37,3 +40,13 @@ def optional_int(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+async def request_form(request: Request) -> FormData:
+    """Read the form body for a sync handler (#132, AD-1).
+
+    A plain ``def`` handler runs in the threadpool and cannot await the
+    body, so the one true async read lives in this dependency. It is the
+    only allowlisted coroutine in ``tests/test_event_loop_guards.py``.
+    """
+    return await request.form()

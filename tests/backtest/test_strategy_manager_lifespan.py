@@ -101,6 +101,9 @@ def test_boot_without_active_profile_skips_preparation(monkeypatch) -> None:
         def prepare_snapshot_coverage(self):
             raise AssertionError("No active profile should skip preparation")
 
+        def backfill_backtest_result_verdicts(self):
+            return 0
+
     monkeypatch.setattr(
         "app.api.app.get_backtest_repository", lambda: EmptyRepository()
     )
@@ -122,6 +125,9 @@ def test_boot_skips_stale_coverage_when_profile_refresh_is_required(
                 "snapshot profile detector manifests do not match the runtime authority"
             )
 
+        def backfill_backtest_result_verdicts(self):
+            return 0
+
     class RefreshRequiredBootstrap:
         def reset_pending(self):
             return True
@@ -135,6 +141,73 @@ def test_boot_skips_stale_coverage_when_profile_refresh_is_required(
 
     with TestClient(create_app(strategy_jobs_enabled=False)) as client:
         _wait_for_preparation(client, "ready")
+
+
+def test_boot_backfills_result_verdicts_after_coverage(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Repository:
+        def active_snapshot_profile(self):
+            return object()
+
+        def prepare_snapshot_coverage(self):
+            calls.append("coverage")
+
+        def backfill_backtest_result_verdicts(self):
+            calls.append("backfill")
+            return 0
+
+    monkeypatch.setattr("app.api.app.get_backtest_repository", lambda: Repository())
+
+    with TestClient(create_app(strategy_jobs_enabled=False)) as client:
+        _wait_for_preparation(client, "ready")
+
+    assert calls == ["coverage", "backfill"]
+
+
+def test_backfill_runs_after_failed_preparation_and_never_fails_it(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    backfilled = threading.Event()
+
+    class Repository:
+        def backfill_backtest_result_verdicts(self):
+            calls.append("backfill")
+            backfilled.set()
+            raise RuntimeError("verdict backfill broke")
+
+    def prepare() -> None:
+        calls.append("prepare")
+        raise ValueError("coverage broke")
+
+    monkeypatch.setattr("app.api.app.get_backtest_repository", lambda: Repository())
+    app = create_app(strategy_jobs_enabled=False, prepare_strategy_coverage=prepare)
+    with TestClient(app) as client:
+        _wait_for_preparation(client, "failed")
+        assert backfilled.wait(3)
+        assert client.get("/").status_code == 200
+
+    assert calls == ["prepare", "backfill"]
+
+
+def test_slow_backfill_does_not_delay_preparation(monkeypatch) -> None:
+    release = threading.Event()
+
+    class Repository:
+        def backfill_backtest_result_verdicts(self):
+            assert release.wait(3)
+            return 0
+
+    monkeypatch.setattr("app.api.app.get_backtest_repository", lambda: Repository())
+    app = create_app(
+        strategy_jobs_enabled=False, prepare_strategy_coverage=lambda: None
+    )
+    with TestClient(app) as client:
+        try:
+            _wait_for_preparation(client, "ready")
+        finally:
+            release.set()
 
 
 def test_boot_keeps_integrity_failure_when_refresh_is_not_pending(monkeypatch) -> None:

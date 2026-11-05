@@ -1,6 +1,5 @@
 """Pipeline routes — trigger a data refresh (money-mutating guard)."""
 
-import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, Request
@@ -33,7 +32,7 @@ AlertsDep = Annotated[AlertsRepository, Depends(get_alerts_repository)]
 
 
 @router.get("/pipeline-status", response_class=HTMLResponse)
-async def pipeline_status(request: Request) -> HTMLResponse:
+def pipeline_status(request: Request) -> HTMLResponse:
     """Render the bottom status bar without blocking a running refresh."""
     return templates.TemplateResponse(
         request,
@@ -51,7 +50,7 @@ async def pipeline_status(request: Request) -> HTMLResponse:
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def refresh_data(
+def refresh_data(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -72,9 +71,7 @@ async def refresh_data(
     """
     # The run outcome (success or failure) is surfaced by the live
     # /pipeline-status bar; no inline completion banner is rendered here.
-    await asyncio.to_thread(
-        pipeline.run_once, extract, force_whale_wisdom, force_stocktwits
-    )
+    pipeline.run_once(extract, force_whale_wisdom, force_stocktwits)
     return templates.TemplateResponse(
         request,
         "_stock_scanner.html",
