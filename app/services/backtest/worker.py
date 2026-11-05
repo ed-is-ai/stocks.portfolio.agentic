@@ -840,8 +840,14 @@ class _StagingSink:
             self.initial_entry_selection = initial_entry_selection
         for event in events:
             if isinstance(event, EntryFillEventV1):
-                self.open_positions[event.security_id] = Decimal(event.shares)
-            elif isinstance(event, (ExitFillEventV1, TerminalSettlementEventV1)):
+                held = self.open_positions.get(event.security_id, Decimal(0))
+                self.open_positions[event.security_id] = held + event.shares
+            elif isinstance(event, ExitFillEventV1):
+                # A target-weight trim (#118) sells part of the position.
+                held = self.open_positions.pop(event.security_id, Decimal(0))
+                if held > event.shares:
+                    self.open_positions[event.security_id] = held - event.shares
+            elif isinstance(event, TerminalSettlementEventV1):
                 self.open_positions.pop(event.security_id, None)
             elif isinstance(event, SplitAppliedEventV1):
                 self.open_positions[event.security_id] = event.shares_after
@@ -1568,21 +1574,15 @@ class BacktestExecutionEngine:
         )
 
 
-def _reconcile_terminal_experiment(
-    repository: BacktestRepository, job_id: str
-) -> None:
+def _reconcile_terminal_experiment(repository: BacktestRepository, job_id: str) -> None:
     """Reconcile terminal candidate state from every worker exit path."""
     try:
         job = repository.strategy_job(job_id)
-        if (
-            job.job_type is not StrategyJobType.BACKTEST
-            or job.status
-            not in {
-                StrategyJobStatus.COMPLETE,
-                StrategyJobStatus.FAILED,
-                StrategyJobStatus.CANCELLED,
-            }
-        ):
+        if job.job_type is not StrategyJobType.BACKTEST or job.status not in {
+            StrategyJobStatus.COMPLETE,
+            StrategyJobStatus.FAILED,
+            StrategyJobStatus.CANCELLED,
+        }:
             return
         from app.services.backtest.strategy_experiment_service import (
             StrategyExperimentService,

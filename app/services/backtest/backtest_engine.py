@@ -54,7 +54,15 @@ from decimal import Decimal, DecimalException, ROUND_DOWN
 from enum import StrEnum
 from typing import Any, Literal, MutableMapping, Protocol, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_serializer,
+    field_validator,
+    model_serializer,
+)
 
 from app.services.backtest.corporate_actions import (
     PositionState,
@@ -62,6 +70,7 @@ from app.services.backtest.corporate_actions import (
     apply_split,
 )
 from app.services.backtest.currency import (
+    CurrencyConversion,
     CurrencyPolicyError,
     PreparedFxCloses,
     convert_to_base,
@@ -93,6 +102,8 @@ from app.services.backtest.strategy_protocol import (
     StrategyProtocolError,
     StrategyProtocolErrorCode,
     StrategyProtocolV1,
+    TargetWeightSizingV1,
+    omit_none_fields,
     validate_entry_signals,
     validate_exit_signals,
     validate_initial_entry_selection,
@@ -172,6 +183,10 @@ class SkipReasonCode(StrEnum):
     NO_PRICE_AFTER_EVIDENCE_END = "no_price_after_evidence_end"
     #: A fill session before the first observation (a point-in-time joiner).
     NO_PRICE_BEFORE_EVIDENCE_START = "no_price_before_evidence_start"
+    #: A session's target weights fall outside [0, 1] or sum above 1 (#118).
+    TARGET_WEIGHTS_INVALID = "target_weights_invalid"
+    #: A target weight from a Strategy without ``TargetWeightSizingV1``.
+    TARGET_WEIGHT_NOT_ENABLED = "target_weight_not_enabled"
 
 
 class CandidateAuditDisposition(StrEnum):
@@ -268,8 +283,14 @@ class SkippedSignalEventV1(_EngineModel):
     sequence: int = Field(ge=1)
 
 
+#: Target-weight fill fields (#118), omitted from dumps when ``None`` so
+#: slot-sized events keep their stored bytes and digests.
+_TARGET_FILL_FIELDS = ("target_weight", "current_weight")
+
+
 class EntryFillEventV1(_EngineModel):
-    """One executed BUY fill opening a position."""
+    """One executed BUY fill opening a position, or -- for a target-weight
+    Strategy -- adding ``shares`` to an open one (#118)."""
 
     kind: Literal["entry_fill"] = "entry_fill"
     security_id: str = Field(min_length=1)
@@ -285,11 +306,20 @@ class EntryFillEventV1(_EngineModel):
     fx_session: date | None = None
     fx_revision: str | None = None
     sequence: int = Field(ge=1)
+    #: The order's target weight and the security's weight before the fill.
+    target_weight: Decimal | None = None
+    current_weight: Decimal | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_target_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        return omit_none_fields(handler(self), _TARGET_FILL_FIELDS)
 
 
 class ExitFillEventV1(_EngineModel):
-    """One executed SELL fill fully closing a position (V1's full-exit
-    model -- never a partial close)."""
+    """One executed SELL fill closing a position. Slot-sized Strategies only
+    fully exit; a target-weight trim sells part and keeps it open (#118)."""
 
     kind: Literal["exit_fill"] = "exit_fill"
     security_id: str = Field(min_length=1)
@@ -307,6 +337,14 @@ class ExitFillEventV1(_EngineModel):
     fx_session: date | None = None
     fx_revision: str | None = None
     sequence: int = Field(ge=1)
+    target_weight: Decimal | None = None
+    current_weight: Decimal | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_target_fields(
+        self, handler: SerializerFunctionWrapHandler
+    ) -> dict[str, Any]:
+        return omit_none_fields(handler(self), _TARGET_FILL_FIELDS)
 
     @field_validator("shares", mode="before")
     @classmethod
@@ -472,6 +510,8 @@ class PendingOrderV1:
     #: ``None`` remains the legacy/full-exit path.
     allocation_target_base: Decimal | None = None
     audit_evidence: CandidateAuditEvidenceV1 | None = None
+    #: Target-weight order (#118): the fill trades toward this weight.
+    target_weight: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -672,6 +712,27 @@ def _slot_rank(signal: Signal) -> tuple[bool, Decimal]:
     return (False, -signal.priority)
 
 
+def _valid_target_weights(signals: list[Signal]) -> bool:
+    """Whether every weight is in ``[0, 1]`` and they sum to at most 1.
+
+    The sum counts only the first target per security: a repeat is skipped
+    as a conflict later, so it must not void the whole session.
+    """
+    weights = [signal.target_weight or Decimal(0) for signal in signals]
+    first: dict[str, Decimal] = {}
+    for signal, weight in zip(signals, weights):
+        first.setdefault(signal.security_id, weight)
+    return all(0 <= weight <= 1 for weight in weights) and sum(first.values()) <= 1
+
+
+def _target_order_key(
+    decision: tuple[Signal, SignalSide, date],
+) -> tuple[int, str, str]:
+    """Schedule target trims/closes before top-ups/opens (#118)."""
+    signal, side, _ = decision
+    return (_SIDE_RANK[side], signal.security_id, signal.rule_id)
+
+
 def _fill_sort_key(order: PendingOrderV1) -> tuple[date, int, str, date, str]:
     """Fills materialize in ``(fill_session, side_rank, security_id,
     signal_session, deterministic_sort_key)`` order per the Determinism
@@ -733,6 +794,13 @@ class _Engine:
                 "max_concurrent_positions must be a positive integer",
             )
         self.max_concurrent_positions: int | None = cap
+        self.target_weight_sizing = (
+            isinstance(strategy, TargetWeightSizingV1)
+            and strategy.target_weight_sizing is True
+        )
+        self.rebalance_tolerance = (
+            self._rebalance_tolerance() if self.target_weight_sizing else Decimal(0)
+        )
 
         if not isinstance(strategy, StrategyProtocolV1):
             raise _fatal(
@@ -933,11 +1001,29 @@ class _Engine:
         self.initial_entry_selection: InitialEntrySelectionV1 | None = None
         self._last_observations: dict[str, date] = {}
 
+    def _rebalance_tolerance(self) -> Decimal:
+        """Read the optional absolute weight drift band (default 0)."""
+        raw = self.manifest_parameters.get("rebalance_tolerance", 0)
+        if isinstance(raw, bool) or not isinstance(raw, (int, float, Decimal)):
+            raw = -1
+        tolerance = Decimal(str(raw))
+        if not tolerance.is_finite() or not 0 <= tolerance <= 1:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                self.start_date,
+                "rebalance_tolerance must be a number in [0, 1]",
+            )
+        return tolerance
+
     # -- sequencing -----------------------------------------------------
 
     def _next_seq(self) -> int:
         self._sequence += 1
         return self._sequence
+
+    def _next_candidate_sequence(self) -> int:
+        self._candidate_audit_sequence += 1
+        return self._candidate_audit_sequence
 
     # -- calendar/price lookups ------------------------------------------
 
@@ -1261,6 +1347,8 @@ class _Engine:
                 "is not a positive price",
             )
         plane = self.market_data[order.security_id]
+        if order.target_weight is not None:
+            return self._execute_target(order, plane, price_native, session)
         if order.side is SignalSide.BUY:
             return self._execute_buy(order, plane, price_native, session)
         return self._execute_sell(order, plane, price_native, session)
@@ -1332,6 +1420,22 @@ class _Engine:
                 session,
                 "whole-share BUY cost exceeded its reserved allocation target",
             )
+        return self._debit_buy(
+            order, plane, price_native, session, fill_shares, conversion
+        )
+
+    def _debit_buy(
+        self,
+        order: PendingOrderV1,
+        plane: _EngineSecurityContext,
+        price_native: Decimal,
+        session: date,
+        fill_shares: int,
+        conversion: CurrencyConversion,
+        current_weight: Decimal | None = None,
+    ) -> TradeLogEvent:
+        """Pay for ``fill_shares`` and open, or add to, the position."""
+        cost_base = conversion.base_amount
         if cost_base > self.cash:
             return self._skip_order(
                 order,
@@ -1346,17 +1450,26 @@ class _Engine:
                 session,
                 "cash balance went negative",
             )
+        held = self.positions.get(order.security_id)
         try:
             with deterministic_decimal_context():
-                per_share_basis = quantize_eight(cost_base / Decimal(fill_shares))
+                if held is None:
+                    shares = Decimal(fill_shares)
+                    per_share_basis = quantize_eight(cost_base / shares)
+                else:  # target-weight top-up: weighted-average basis
+                    shares = held.shares + fill_shares
+                    per_share_basis = quantize_eight(
+                        (held.per_share_basis * held.shares + cost_base) / shares
+                    )
         except DecimalException as exc:
             raise _fatal(
                 "integrity_error", session, "cost-basis arithmetic failed"
             ) from exc
         self.positions[order.security_id] = PositionState(
-            shares=Decimal(fill_shares),
+            shares=shares,
             per_share_basis=per_share_basis,
-            entry_session=session,
+            # A top-up keeps the original entry session (holding-period age).
+            entry_session=session if held is None else held.entry_session,
         )
         return EntryFillEventV1(
             security_id=order.security_id,
@@ -1372,6 +1485,8 @@ class _Engine:
             fx_session=conversion.fx_session,
             fx_revision=conversion.fx_revision,
             sequence=self._next_seq(),
+            target_weight=order.target_weight,
+            current_weight=current_weight,
         )
 
     def _execute_sell(
@@ -1394,7 +1509,20 @@ class _Engine:
         # scheduled -- a split effective on this fill session already
         # adjusted ``position.shares`` in ``_apply_actions`` above, and the
         # order's original ``requested_shares`` is not re-derived for it.
-        fill_shares = position.shares
+        return self._credit_sell(order, plane, price_native, session, position.shares)
+
+    def _credit_sell(
+        self,
+        order: PendingOrderV1,
+        plane: _EngineSecurityContext,
+        price_native: Decimal,
+        session: date,
+        fill_shares: Decimal,
+        current_weight: Decimal | None = None,
+    ) -> TradeLogEvent:
+        """Sell ``fill_shares``; the position stays open with an unchanged
+        per-share basis unless every held share is sold."""
+        position = self.positions[order.security_id]
         try:
             with deterministic_decimal_context():
                 native_proceeds = price_native * fill_shares
@@ -1406,16 +1534,22 @@ class _Engine:
         proceeds_base = conversion.base_amount
         try:
             with deterministic_decimal_context():
-                cost_basis_base = quantize_eight(
-                    position.per_share_basis * position.shares
-                )
+                cost_basis_base = quantize_eight(position.per_share_basis * fill_shares)
                 realized_pnl_base = quantize_eight(proceeds_base - cost_basis_base)
+                remaining = position.shares - fill_shares
         except DecimalException as exc:
             raise _fatal(
                 "integrity_error", session, "realized P&L arithmetic failed"
             ) from exc
         self.cash = quantize_eight(self.cash + proceeds_base)
-        del self.positions[order.security_id]
+        if remaining > 0:
+            self.positions[order.security_id] = PositionState(
+                shares=remaining,
+                per_share_basis=position.per_share_basis,
+                entry_session=position.entry_session,
+            )
+        else:
+            del self.positions[order.security_id]
         return ExitFillEventV1(
             security_id=order.security_id,
             signal_session=order.signal_session,
@@ -1432,6 +1566,136 @@ class _Engine:
             fx_session=conversion.fx_session,
             fx_revision=conversion.fx_revision,
             sequence=self._next_seq(),
+            target_weight=order.target_weight,
+            current_weight=current_weight,
+        )
+
+    # -- target-weight fills (#118) ---------------------------------------
+
+    def _execute_target(
+        self,
+        order: PendingOrderV1,
+        plane: _EngineSecurityContext,
+        price_native: Decimal,
+        session: date,
+    ) -> TradeLogEvent:
+        """Trade whole shares toward the order's target weight at this open.
+
+        Equity is cash plus this security at the fill open and every other
+        holding at its latest close before this session (no look-ahead).
+        """
+        assert order.target_weight is not None
+        one_share = self._convert(price_native, plane, valuation_session=session)
+        if one_share.base_amount <= 0:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                session,
+                "converted per-share target cost is not positive",
+            )
+        position = self.positions.get(order.security_id)
+        held = Decimal(0) if position is None else position.shares
+        try:
+            with deterministic_decimal_context():
+                held_value = self._convert(
+                    price_native * held, plane, valuation_session=session
+                ).base_amount
+                equity = quantize_eight(
+                    self.cash + held_value + self._others_value(order, session)
+                )
+                desired = int(order.target_weight * equity // one_share.base_amount)
+                current_weight = (
+                    quantize_eight(held_value / equity) if equity > 0 else Decimal(0)
+                )
+                delta = Decimal(desired) - held
+                affordable = int(self.cash // one_share.base_amount)
+        except DecimalException as exc:
+            raise _fatal(
+                "integrity_error", session, "target-weight arithmetic failed"
+            ) from exc
+        if order.side is SignalSide.SELL:
+            # Whole shares only; a close sells everything, split fractions too.
+            sell = held if desired == 0 else Decimal(int(-delta))
+            if sell <= 0:
+                return self._skip_target_zero(order, session)
+            return self._credit_sell(
+                order, plane, price_native, session, sell, current_weight
+            )
+        whole = int(delta)
+        if whole <= 0:
+            return self._skip_target_zero(order, session)
+        if (
+            position is None
+            and self.max_concurrent_positions is not None
+            and len(self.positions) >= self.max_concurrent_positions
+        ):
+            return self._skip_order(
+                order,
+                session,
+                SkipReasonCode.MAX_CONCURRENT_POSITIONS,
+                "concurrent position limit reached at fill time",
+            )
+        fill_shares = min(whole, affordable)
+        if fill_shares == 0:
+            return self._skip_order(
+                order,
+                session,
+                SkipReasonCode.INSUFFICIENT_CASH,
+                "simulated cash cannot buy one whole share at the fill open",
+            )
+        conversion = self._target_buy_cost(plane, price_native, session, fill_shares)
+        # FX rounding of the whole lot can exceed cash by 1e-8: buy one fewer.
+        while fill_shares > 1 and conversion.base_amount > self.cash:
+            fill_shares -= 1
+            conversion = self._target_buy_cost(
+                plane, price_native, session, fill_shares
+            )
+        return self._debit_buy(
+            order, plane, price_native, session, fill_shares, conversion, current_weight
+        )
+
+    def _target_buy_cost(
+        self,
+        plane: _EngineSecurityContext,
+        price_native: Decimal,
+        session: date,
+        fill_shares: int,
+    ) -> CurrencyConversion:
+        try:
+            with deterministic_decimal_context():
+                native_cost = price_native * Decimal(fill_shares)
+        except DecimalException as exc:
+            raise _fatal(
+                "integrity_error", session, "fill cost arithmetic failed"
+            ) from exc
+        return self._convert(native_cost, plane, valuation_session=session)
+
+    def _others_value(self, order: PendingOrderV1, session: date) -> Decimal:
+        """Base value of every holding except ``order``'s, at prior closes.
+
+        A holding with no earlier close (bought at this open) is valued at
+        its cost basis, never at this session's close (no look-ahead).
+        """
+        prior = session - timedelta(days=1)
+        total = Decimal(0)
+        for security_id, position in sorted(self.positions.items()):
+            if security_id == order.security_id:
+                continue
+            if self._latest_row_on_or_before(security_id, prior) is None:
+                total += quantize_eight(position.per_share_basis * position.shares)
+                continue
+            total += self._mark_position_value(
+                security_id, position, session, price_as_of=prior
+            )
+        return total
+
+    def _skip_target_zero(
+        self, order: PendingOrderV1, session: date
+    ) -> SkippedSignalEventV1:
+        return self._skip_order(
+            order,
+            session,
+            SkipReasonCode.POSITION_SIZE_ZERO,
+            "target-weight trade is zero or reversed at the fill open",
         )
 
     def _skip_order(
@@ -1466,9 +1730,14 @@ class _Engine:
         )
 
     def _mark_position_value(
-        self, security_id: str, position: PositionState, session: date
+        self,
+        security_id: str,
+        position: PositionState,
+        session: date,
+        *,
+        price_as_of: date | None = None,
     ) -> Decimal:
-        row = self._latest_row_on_or_before(security_id, session)
+        row = self._latest_row_on_or_before(security_id, price_as_of or session)
         if row is None:
             raise _fatal(
                 SimulationErrorCode.MISSING_REQUIRED_CLOSE,
@@ -1537,6 +1806,9 @@ class _Engine:
                     self.strategy.entry_signals(view, self.manifest_parameters)
                 )
             combined = sorted(exits + entries, key=_engine_signal_sort_key)
+            targets = [s for s in combined if s.target_weight is not None]
+            if targets:
+                combined = [s for s in combined if s.target_weight is None]
             pending_before = dict(self.pending)
             sequence_before = self._sequence
             candidate_sequence_before = self._candidate_audit_sequence
@@ -1679,6 +1951,10 @@ class _Engine:
                             allocation_target_base=target,
                             audit_evidence=evidence,
                         )
+                if targets:
+                    self._process_target_signals(
+                        targets, session, session_events, equity_base, candidate_audits
+                    )
             except Exception:
                 self.pending = pending_before
                 self._sequence = sequence_before
@@ -1689,6 +1965,200 @@ class _Engine:
             return selection
         except StrategyProtocolError as exc:
             raise _fatal(exc.code, session, str(exc)) from exc
+
+    # -- target-weight signals (#118) ------------------------------------
+
+    def _process_target_signals(
+        self,
+        signals: list[Signal],
+        session: date,
+        session_events: list[TradeLogEvent],
+        equity_base: Decimal,
+        candidate_audits: list[CandidateAuditV1],
+    ) -> None:
+        """Schedule one order per security toward its target weight.
+
+        The order side comes from the signal-session close: SELL when above
+        target, BUY when below, none within ``rebalance_tolerance``. An
+        invalid session fails closed with no orders at all. A holding the
+        session names no target for is left as it is; emit 0 to close it.
+        """
+        failure: tuple[SkipReasonCode, str] | None = None
+        if not self.target_weight_sizing:
+            failure = (
+                SkipReasonCode.TARGET_WEIGHT_NOT_ENABLED,
+                "strategy does not implement target-weight sizing",
+            )
+        elif not _valid_target_weights(signals):
+            failure = (
+                SkipReasonCode.TARGET_WEIGHTS_INVALID,
+                "target weights must each be in [0, 1] and sum to at most 1",
+            )
+        if failure is not None:
+            for signal in signals:
+                skip = self._skip_signal(signal, session, *failure)
+                self._record_target_skip(signal, skip, session_events, candidate_audits)
+            return
+        decisions: list[tuple[Signal, SignalSide, date]] = []
+        seen: set[str] = set()
+        for signal in signals:
+            skip = self._signal_conflict(signal, session)
+            if skip is None and signal.security_id in seen:
+                skip = self._skip_signal(
+                    signal,
+                    session,
+                    SkipReasonCode.POSITION_CONFLICT,
+                    "another target for this security is in this session",
+                )
+            if skip is None:
+                seen.add(signal.security_id)
+                decision, skip = self._decide_target(signal, session, equity_base)
+                if decision is not None:
+                    decisions.append(decision)
+            if skip is not None:
+                self._record_target_skip(signal, skip, session_events, candidate_audits)
+        for decision in sorted(decisions, key=_target_order_key):
+            skip = self._schedule_target(decision, session)
+            if skip is not None:
+                traded = decision[0].model_copy(update={"side": decision[1]})
+                self._record_target_skip(traded, skip, session_events, candidate_audits)
+
+    def _decide_target(
+        self, signal: Signal, session: date, equity_base: Decimal
+    ) -> tuple[tuple[Signal, SignalSide, date] | None, SkippedSignalEventV1 | None]:
+        """Pick the order side, or no order inside the drift band."""
+        assert signal.target_weight is not None
+        if equity_base <= 0:
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.ALLOCATION_UNAFFORDABLE,
+                "portfolio equity is not positive",
+            )
+        position = self.positions.get(signal.security_id)
+        held_value = (
+            Decimal(0)
+            if position is None
+            else self._mark_position_value(signal.security_id, position, session)
+        )
+        with deterministic_decimal_context():
+            drift = signal.target_weight - held_value / equity_base
+        closing = signal.target_weight == 0 and position is not None
+        if not closing and (
+            abs(drift) <= self.rebalance_tolerance
+            or self._whole_share_delta(signal, position, session, equity_base) == 0
+        ):
+            return None, None
+        fill_session = self._next_mic_session(signal.security_id, session)
+        if fill_session is None:
+            return None, self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.FILL_BEYOND_END,
+                "no fillable session remains before the normalized end",
+            )
+        side = SignalSide.SELL if drift < 0 else SignalSide.BUY
+        return (signal, side, fill_session), None
+
+    def _whole_share_delta(
+        self,
+        signal: Signal,
+        position: PositionState | None,
+        session: date,
+        equity_base: Decimal,
+    ) -> int | None:
+        """Whole shares to trade at the signal close, ``None`` if unpriced.
+
+        Skips orders that whole-share rounding would turn into no trade.
+        """
+        assert signal.target_weight is not None
+        row = self._latest_row_on_or_before(signal.security_id, session)
+        if row is None or row.close is None or row.close <= 0:
+            return None
+        plane = self.market_data[signal.security_id]
+        one_share = self._convert(row.close, plane, valuation_session=session)
+        if one_share.base_amount <= 0:
+            return None
+        held = Decimal(0) if position is None else position.shares
+        with deterministic_decimal_context():
+            desired = int(signal.target_weight * equity_base // one_share.base_amount)
+            return int(Decimal(desired) - held)
+
+    def _schedule_target(
+        self, decision: tuple[Signal, SignalSide, date], session: date
+    ) -> SkippedSignalEventV1 | None:
+        signal, side, fill_session = decision
+        # Skips and audits carry the side the engine will trade, not the
+        # side the strategy declared.
+        signal = signal.model_copy(update={"side": side})
+        opens = side is SignalSide.BUY and signal.security_id not in self.positions
+        if opens and self._target_book_full(fill_session):
+            return self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.MAX_CONCURRENT_POSITIONS,
+                "concurrent position limit reached",
+            )
+        evidence = None
+        if side is SignalSide.BUY:
+            evidence = self._candidate_audit_evidence(
+                signal,
+                self._next_candidate_sequence(),
+                intended_fill_session=fill_session,
+            )
+        self.pending[signal.security_id] = PendingOrderV1(
+            security_id=signal.security_id,
+            side=side,
+            signal_session=session,
+            fill_session=fill_session,
+            rule_id=signal.rule_id,
+            requested_shares=None,
+            audit_evidence=evidence,
+            target_weight=signal.target_weight,
+        )
+        return None
+
+    def _target_book_full(self, fill_session: date) -> bool:
+        """Whether a new open finds every slot taken, counting full closes
+        that fill on or before it as freed."""
+        cap = self.max_concurrent_positions
+        if cap is None:
+            return False
+        orders = self.pending.values()
+        opening = sum(
+            1
+            for order in orders
+            if order.side is SignalSide.BUY and order.security_id not in self.positions
+        )
+        closing = sum(
+            1
+            for order in orders
+            if order.side is SignalSide.SELL
+            and order.fill_session <= fill_session
+            and (order.target_weight is None or order.target_weight == 0)
+        )
+        return len(self.positions) + opening - closing >= cap
+
+    def _record_target_skip(
+        self,
+        signal: Signal,
+        skip: SkippedSignalEventV1,
+        session_events: list[TradeLogEvent],
+        candidate_audits: list[CandidateAuditV1],
+    ) -> None:
+        """Append a target skip; a BUY-side skip also gets its audit."""
+        session_events.append(skip)
+        if skip.side is not SignalSide.BUY:
+            return
+        candidate_audits.append(
+            self._finalize_candidate_audit(
+                self._candidate_audit_evidence(signal, self._next_candidate_sequence()),
+                outcome_session=skip.signal_session,
+                disposition=CandidateAuditDisposition.PREFLIGHT_REJECTED,
+                reason_code=skip.reason.value,
+                event_sequence=skip.sequence,
+            )
+        )
 
     def _candidate_audit_evidence(
         self,
@@ -1964,34 +2434,9 @@ class _Engine:
         known before any target is reserved.  That is what makes every
         accepted candidate receive the same base-currency target.
         """
-        if signal.session != session:
-            return None, self._skip_signal(
-                signal,
-                session,
-                SkipReasonCode.SIGNAL_SESSION_MISMATCH,
-                "signal session does not match the invoking session",
-            )
-        if signal.security_id not in self.market_data:
-            return None, self._skip_signal(
-                signal,
-                session,
-                SkipReasonCode.INELIGIBLE_SECURITY,
-                "security is not pinned for this Run",
-            )
-        if self._exited(signal.security_id, session):
-            return None, self._skip_signal(
-                signal,
-                session,
-                SkipReasonCode.SECURITY_EXITED,
-                "security has left the market",
-            )
-        if signal.security_id in self.pending:
-            return None, self._skip_signal(
-                signal,
-                session,
-                SkipReasonCode.POSITION_CONFLICT,
-                "an order is already pending for this security",
-            )
+        conflict = self._signal_conflict(signal, session)
+        if conflict is not None:
+            return None, conflict
         if signal.security_id in self.positions:
             return None, self._skip_signal(
                 signal,
@@ -2008,6 +2453,41 @@ class _Engine:
                 "no fillable session remains before the normalized end",
             )
         return fill_session, None
+
+    def _signal_conflict(
+        self, signal: Signal, session: date
+    ) -> SkippedSignalEventV1 | None:
+        """Reject a signal for the wrong session, an unpinned or exited
+        security, or one that already has a pending order."""
+        if signal.session != session:
+            return self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.SIGNAL_SESSION_MISMATCH,
+                "signal session does not match the invoking session",
+            )
+        if signal.security_id not in self.market_data:
+            return self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.INELIGIBLE_SECURITY,
+                "security is not pinned for this Run",
+            )
+        if self._exited(signal.security_id, session):
+            return self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.SECURITY_EXITED,
+                "security has left the market",
+            )
+        if signal.security_id in self.pending:
+            return self._skip_signal(
+                signal,
+                session,
+                SkipReasonCode.POSITION_CONFLICT,
+                "an order is already pending for this security",
+            )
+        return None
 
     def _skip_signal(
         self, signal: Signal, session: date, reason: SkipReasonCode, detail: str
