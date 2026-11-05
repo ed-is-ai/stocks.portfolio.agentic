@@ -1,3 +1,4 @@
+{% import "_macros.html" as macros %}
 {%- macro dval(x) -%}{{ '%.4f'|format(x) if x is number else '' }}{%- endmacro -%}
 {%- macro dv(v) -%}{% if v is not none and v != '' %} data-val="{{ v }}"{% endif %}{%- endmacro -%}
 {% if not records %}
@@ -6,65 +7,38 @@
   <span>No analysis results found. Use <strong>Refresh Data</strong> to run the pipeline.</span>
 </div>
 {% else %}
-{% include "_market_regime.html" %}
-{% if market_narrative %}
-<div id="market-narrative" class="alert border-0 mt-1" style="background:#eef2ff;border:1px solid #c7d2fe" role="note" aria-label="Market narrative">
-  <div class="d-flex align-items-center justify-content-between gap-2 mb-1">
-    <div class="fw-bold small text-uppercase" style="letter-spacing:.06em;color:#4338ca">Market Narrative</div>
-    <button id="market-narrative-toggle" class="btn btn-sm p-1 lh-1" type="button"
-            aria-expanded="true" aria-controls="market-narrative-details"
-            aria-label="Collapse market narrative" title="Collapse market narrative">
-      <i class="bi bi-chevron-up" aria-hidden="true"></i>
-    </button>
-  </div>
-  <div class="fw-bold mb-1">{{ market_narrative.headline }}</div>
-  <div id="market-narrative-details">
-    <ul class="mb-1 small">
-      {% for bullet in market_narrative.bullets %}
-      <li>{{ bullet }}</li>
-      {% endfor %}
-    </ul>
-    <div class="small fst-italic text-muted">{{ market_narrative.not_advice }}</div>
-    {% if market_narrative.sources %}
-    <div class="small mt-1" style="color:#94a3b8">
-      Sources:
-      {% for source in market_narrative.sources %}
-      {% if source.url %}<a href="{{ source.url }}" style="color:#4338ca">{{ source.label }}</a>{% else %}{{ source.label }}{% endif %}{% if not loop.last %}, {% endif %}
-      {% endfor %}
-    </div>
-    {% endif %}
-  </div>
-</div>
-{% endif %}
-<div class="tbl-toolbar wl-toolbar" id="wl-toolbar">
-  <div class="wl-toolbar-info">
-    <i class="bi bi-bar-chart-line me-1"></i>
-    <span id="wl-match-count">{{ records|length }}</span> of {{ records|length }} shown
-    <span class="wl-hint">&middot; CANSLIM /14 &middot; Momentum /14 &middot; SEPA /8 &mdash; click headers to sort, shift-click for multi-sort</span>
-  </div>
-  <div class="wl-toolbar-controls">
-    <label class="wl-search">
-      <i class="bi bi-search" aria-hidden="true"></i>
-      <input type="search" id="wl-search" placeholder="Search ticker / sector"
-             aria-label="Search ticker or sector" autocomplete="off">
-    </label>
-    <button class="btn-filter" data-filter="breakout" type="button" aria-pressed="false"
-            title="Entry zone transitioned to broken_out this run">Fresh VCP breakout</button>
-    <button class="btn-filter" data-filter="myb" type="button" aria-pressed="false"
-            title="Cleared its multi-year base pivot price">Multi-year base breakout</button>
-    <button class="btn-filter" data-filter="sepa8" type="button" aria-pressed="false"
-            title="Meets all 8/8 Minervini SEPA trend template conditions">SEPA trend template 8/8</button>
-    <button class="btn-filter" data-filter="alert" type="button" aria-pressed="false"
-            title="Stage 2, approaching entry with score ≥ 5 — watch for a breakout">Approaching entry</button>
-    <button class="btn-filter" data-filter="uk" type="button" aria-pressed="false"
-            title="Tickers listed on the London Stock Exchange (.L)">UK listings</button>
-    <!-- Ranges / Columns / Views / Reset controls are mounted here by watchlist.js -->
-    <div class="wl-adv" id="wl-adv"></div>
-  </div>
+{#- One title line and one toolbar row (#129). Counts and groups come from
+    the context (AD-10); watchlist.js owns every filter, sort and page. #}
+<header class="wl-head">
+  <h1 tabindex="-1">Scanner</h1>
+  <p class="wl-subtitle">{{ records|length }} stocks · <strong>{{ buy_signal_count }} buy signal{{ '' if buy_signal_count == 1 else 's' }}</strong>{% include "_market_regime.html" %}</p>
+  <label class="wl-search">
+    <i class="bi bi-search" aria-hidden="true"></i>
+    <input type="search" id="wl-search" placeholder="Ticker or sector"
+           aria-label="Search ticker or sector" autocomplete="off">
+  </label>
+</header>
+<div class="wl-toolbar" id="wl-toolbar" role="toolbar" aria-label="Scanner filters">
+  <button class="btn-filter" id="wl-filter-all" type="button" aria-pressed="true"
+          title="Clear the quick filters">All</button>
+  <button class="btn-filter" data-filter="buy" type="button" aria-pressed="false"
+          title="BUY and BUY · LOW VOL rows, the same list as Today">Buy signals · {{ buy_signal_count }}</button>
+  <button class="btn-filter" data-filter="breakout" type="button" aria-pressed="false"
+          title="Entry zone transitioned to broken_out this run">Fresh VCP</button>
+  <button class="btn-filter" data-filter="myb" type="button" aria-pressed="false"
+          title="Cleared its multi-year base pivot price">Base breakout</button>
+  <button class="btn-filter" data-filter="sepa8" type="button" aria-pressed="false"
+          title="Meets all 8/8 Minervini SEPA trend template conditions">SEPA 8/8</button>
+  <button class="btn-filter" data-filter="alert" type="button" aria-pressed="false"
+          title="Stage 2, approaching entry with score ≥ 5 — watch for a breakout">Near entry</button>
+  <button class="btn-filter" data-filter="uk" type="button" aria-pressed="false"
+          title="Tickers listed on the London Stock Exchange (.L)">UK</button>
+  {#- Filters / Columns / Views are mounted here by watchlist.js #}
+  <div class="wl-adv" id="wl-adv"></div>
 </div>
 <div class="tbl-wrap wl-tbl-wrap">
   <table class="table table-hover align-middle wl-table" id="watchlist-table">
-    <thead>
+    <thead title="Click a header to sort; shift-click to add a second sort">
       <tr class="wl-group-row">
         <th class="wl-group-label wl-group-qualify" id="wl-group-qualify" colspan="10" scope="colgroup"
             data-cols="ticker,sector,score,stage,sepa,rsi,congress,funds,canslim,momentum">Qualify</th>
@@ -82,7 +56,7 @@
         <th class="wl-col wl-col-funds wl-qualify" data-col="funds" title="Net institutional 13F filers adding vs trimming last quarter (WhaleWisdom, quarterly ~45-day lag, sparse coverage). ±3 net nudges the score."><button class="wl-sort" data-col="funds" type="button">Funds<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-canslim wl-qualify" data-col="canslim" title="CANSLIM fundamental score /14"><button class="wl-sort" data-col="canslim" type="button">CANSLIM<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-momentum wl-qualify" data-col="momentum" title="Technical momentum score /14"><button class="wl-sort" data-col="momentum" type="button">Momentum<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
-        <th class="wl-col wl-col-rec" data-col="rec"><button class="wl-sort" data-col="rec" type="button">Rec<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
+        <th class="wl-col wl-col-rec" data-col="rec"><button class="wl-sort" data-col="rec" type="button">Signal<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-price" data-col="price"><button class="wl-sort" data-col="price" type="button">Price<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-vsentry" data-col="vsentry" title="Current price distance to entry"><button class="wl-sort" data-col="vsentry" type="button">vs Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
         <th class="wl-col wl-col-entry" data-col="entry" title="Next entry price"><button class="wl-sort" data-col="entry" type="button">Entry<span class="wl-sort-ind" aria-hidden="true"></span></button></th>
@@ -135,11 +109,12 @@
          all derive from the same thresholds. See #58. #}
       {%- set rec = recommendations[r.ticker] %}
       {%- set alert_state = alert_states[r.ticker] %}
+      {%- set watch = r.ticker in watching %}
       {#- Mirrors app.core.recommendation._BUCKET_RANK — higher sorts first. #}
       {%- set rank_by_bucket = {"no_analysis": 0, "sell": 0, "avoid": 0, "none": 1, "extended": 2, "watch": 3, "alert": 4, "buy_lowvol": 5, "buy": 5} %}
       {%- set dash = '<span class="text-muted">—</span>' | safe %}
       {#- Flags are emitted only when true; watchlist.js reads absence as false. -#}
-      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec.filter_key }}"{% if a and a.fresh_breakout %} data-breakout="true"{% endif %}{% if a and a.multiyear_breakout %} data-myb="true"{% endif %}{% if is_uk %} data-market="uk"{% endif %}>
+      <tr data-sepa="{{ sepa_count }}" data-rec="{{ rec.filter_key }}"{% if a and a.fresh_breakout %} data-breakout="true"{% endif %}{% if a and a.multiyear_breakout %} data-myb="true"{% endif %}{% if is_uk %} data-market="uk"{% endif %}{% if watch %} data-watch="true"{% endif %}>
         {#- Ticker #}<td{{ dv(r.ticker) }}><a href="{{ yahoo_url }}" target="_blank" rel="noopener" class="ticker">{{ r.ticker }}</a>
           {%- if a and a.fresh_breakout %} <span class="badge-vcp" data-tip="vcp">VCP</span>{% endif %}
           {%- if a and a.multiyear_breakout %} <span class="badge-myb" data-tip="myb{% if a.multiyear_pivot is not none %}:{{ sym }}{{ '%.2f'|format(a.multiyear_pivot) }}{% endif %}">MYB</span>{% endif %}
@@ -183,17 +158,13 @@
         {#- Momentum /14 #}<td{{ dv(momentum_val) }}>
           {%- if momentum_val != '' %}<span class="sc {% if momentum_val >= 10 %}sc-hi{% elif momentum_val >= 6 %}sc-mid{% else %}sc-lo{% endif %}">{{ momentum_val }}/14</span>{% else %}{{ dash }}{% endif -%}
         </td>
-        {#- Recommendation #}<td{{ dv(rank_by_bucket.get(rec.bucket)) }}>
-          {%- if a %}
-            {%- if rec.bucket in ("none", "no_analysis") %}<span class="rec-none">{{ rec.text }}</span>
-            {%- else %}<span class="rec {{ rec.css_class }}">{{ rec.text }}</span>{% endif %}
-            {%- if alert_state.email_eligible %}
-              {%- if alert_state.suppressed -%}
-                <span class="cell-sub" data-tip="cooldown"><i class="bi bi-envelope-slash"></i> already alerted{% if alert_state.next_eligible_at %}, next eligible {{ alert_state.next_eligible_at.strftime('%Y-%m-%d %H:%M') }} UTC{% endif %}</span>
-              {%- else -%}
-                <span class="cell-sub" data-tip="mail"><i class="bi bi-envelope"></i> will email next run</span>
-              {%- endif %}
-            {%- endif %}
+        {#- Signal: one label; the alert state is a tooltip (#129). Watching =
+            an already-alerted Stay Alert (context.watching). #}
+        {%- set tip = ('cooldown' ~ (':' ~ alert_state.next_eligible_at.strftime('%Y-%m-%d %H:%M') if alert_state.next_eligible_at else '')) if alert_state.suppressed else ('mail' if alert_state.email_eligible else '') %}
+        {%- set tip_attr = (' data-tip="' ~ tip ~ '"') | safe if tip else '' %}
+        {#- 3.5 mirrors WATCHING_RANK, so a Signal sort keeps the group. -#}<td{{ dv(3.5 if watch else rank_by_bucket.get(rec.bucket)) }}>
+          {%- if watch %}<span class="rec rec-watching"{{ tip_attr }}>Watching</span>
+          {%- elif a %}<span class="{{ 'rec-none' if rec.bucket in ('none', 'no_analysis') else 'rec ' ~ rec.css_class }}"{{ tip_attr }}>{{ rec.text }}</span>
           {%- endif -%}
         </td>
         {#- Price #}<td{{ dv(dval(r.price)) }}>{{ sym }}{{ "%.2f"|format(r.price) }}</td>
@@ -238,5 +209,22 @@
     </tbody>
   </table>
 </div>
-<nav id="wl-pager" class="wl-pager" aria-label="Scanner pages"></nav>
+<nav id="wl-pager" class="wl-pager" aria-label="Scanner pages" tabindex="-1"></nav>
+{% if market_narrative %}
+{#- The narrative, its caveat and sources sit behind the one disclosure,
+    below the table, instead of a banner above it (#129, AD-10). #}
+<div id="market-narrative" class="wl-narrative">
+  {% call macros.disclosure("Market narrative · " ~ market_narrative.headline) %}
+  <ul class="mb-1">
+    {% for bullet in market_narrative.bullets %}<li>{{ bullet }}</li>{% endfor %}
+  </ul>
+  <div class="fst-italic">{{ market_narrative.not_advice }}</div>
+  {% if market_narrative.sources %}
+  <div>Sources:
+    {% for source in market_narrative.sources %}{% if source.url %}<a href="{{ source.url }}">{{ source.label }}</a>{% else %}{{ source.label }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+  </div>
+  {% endif %}
+  {% endcall %}
+</div>
+{% endif %}
 {% endif %}
