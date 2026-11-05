@@ -37,6 +37,7 @@ from app.api.dependencies import (
     get_strategy_manager_insights_service,
 )
 from app.api.params import request_form
+from app.api.routes.views import render_shell
 from app.api.templating import is_htmx_request, template_response, templates
 from app.core import config
 from app.core.security import require_local_or_token
@@ -181,7 +182,7 @@ _READINESS_CTA: dict[str, str] = {
     "href": "/strategy-manager/readiness",
 }
 _CONFIGURE_CTA: dict[str, str] = {
-    "label": "Configure a Backtest",
+    "label": "New backtest",
     "href": "/strategy-manager/configuration",
 }
 _SETUP_NOTICES = frozenset({"already"})
@@ -268,7 +269,7 @@ def _primary_cta(
     historical data; any remaining prerequisite still not READY (roster,
     qualification, discovery) -> Review readiness so the user is never
     sent to Configure while a prerequisite is unmet; all five READY ->
-    Configure a Backtest.
+    New backtest.
     """
     if setup_required:
         return _SETUP_CTA
@@ -383,7 +384,7 @@ def _backtest_activities_context(
         }
     paging["backtest_has_next"] = len(activities) > _BACKTEST_PAGE_SIZE
     activities = activities[:_BACKTEST_PAGE_SIZE]
-    failed_count = repo.failed_backtest_result_count()
+    failed_count = _failed_result_count(repo)
     # gh-434: universe resolution is memoised per distinct key within this
     # request -- one roster read per profile_hash, one runnable-universe
     # read per (profile_hash, start_month). A missing snapshot month only
@@ -523,7 +524,7 @@ def _strategy_manager_context(
     return {
         **_coverage_context(repo),
         **profile_context,
-        **_backtest_activities_context(repo),
+        "backtest_failed_count": _failed_result_count(repo),
         "outcome_summary": outcome_summary,
         "agent_outcome": None,
         "selected_evidence_handle": "",
@@ -542,6 +543,16 @@ def _strategy_manager_context(
         "setup_notice": setup_notice,
         "activated_at": activated_at,
     }
+
+
+def _failed_result_count(repo: BacktestRepository) -> int:
+    """Count Results with a current failed verdict for the landing link
+    (gh-131); a read failure hides the link rather than the landing."""
+    try:
+        return repo.failed_backtest_result_count()
+    except Exception:  # noqa: BLE001 - the link is decoration
+        logger.warning("Failed Result count unavailable", exc_info=True)
+        return 0
 
 
 def _validate_months(start_month: str, end_month: str) -> dict[str, str]:
@@ -622,15 +633,14 @@ def strategy_manager(
         )
         return template_response(
             request,
-            "_strategy_manager.html",
+            "_strategies.html",
             {
                 "coverage": None,
                 "coverage_error": error,
                 "profile": None,
                 "qualification_available": False,
                 "qualification_reason": error,
-                "backtest_activities": (),
-                "backtest_activities_error": error,
+                "backtest_failed_count": 0,
                 "outcome_summary": None,
                 "agent_outcome": None,
                 "selected_evidence_handle": "",
@@ -680,12 +690,15 @@ def strategy_manager(
         setup_notice=setup_notice,
         activated_at=activated_at,
     )
-    response = template_response(request, "_strategy_manager.html", context)
+    response = template_response(request, "_strategies.html", context)
     logger.info(
         "Strategy Manager tab rendered in %.1fms",
         (perf_counter() - started) * 1_000,
     )
     return response
+
+
+_ASK_PANEL = "_strategy_ask.html"
 
 
 @router.post(
@@ -701,21 +714,34 @@ def strategy_manager_insights(
     refresh: bool = Form(False),
 ) -> HTMLResponse:
     """Generate cited insights only after an explicit user submission."""
+    return template_response(
+        request,
+        _ASK_PANEL,
+        _insights_panel_context(backtest, service, launch, refresh=refresh),
+    )
+
+
+def _insights_panel_context(
+    backtest: BacktestRepository,
+    service: StrategyManagerInsightsService,
+    launch: BacktestLaunchService,
+    *,
+    refresh: bool,
+) -> dict[str, object]:
+    """Run the existing insights prompt over all latest results."""
     summary = StrategyOutcomeService(backtest).build_summary()
     outcome = service.generate_insights(summary, refresh=refresh)
     handoffs, handoffs_unavailable = _experiment_handoffs(
         backtest, launch, summary, outcome
     )
-    return template_response(
-        request,
-        "_strategy_insights_panel.html",
-        {
-            "outcome_summary": summary,
-            "agent_outcome": outcome,
-            "experiment_handoffs": handoffs,
-            "experiment_handoffs_unavailable": handoffs_unavailable,
-        },
-    )
+    return {
+        "outcome_summary": summary,
+        "agent_outcome": outcome,
+        "experiment_handoffs": handoffs,
+        "experiment_handoffs_unavailable": handoffs_unavailable,
+        "selected_result_id": "",
+        "submitted_question": "",
+    }
 
 
 def _experiment_handoffs(
@@ -811,41 +837,120 @@ def strategy_manager_copilot_ask(
     result_id: str = Form(..., min_length=1, max_length=200),
 ) -> HTMLResponse:
     """Answer one bounded question about one locally selected verified Strategy."""
-    clean_question = question
     if not question.strip():
         raise HTTPException(status_code=422, detail="question is required")
+    return template_response(
+        request,
+        _ASK_PANEL,
+        _question_panel_context(backtest, launch, service, question, result_id),
+    )
+
+
+@router.post(
+    "/strategy-manager/ask",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_local_or_token)],
+)
+def strategy_manager_ask(
+    request: Request,
+    backtest: BacktestDep,
+    launch: LaunchDep,
+    service: AgentInsightsDep,
+    question: str = Form("", max_length=500),
+    result_id: str = Form("", max_length=200),
+    refresh: bool = Form(False),
+) -> HTMLResponse:
+    """The one Ask Claude box (gh-131), routed to the existing prompts.
+
+    No selected result means "all latest results" and runs the insights
+    prompt, which takes no question, so a typed question there sends
+    nothing. Refresh always re-runs the insights prompt. A selected result
+    runs the question prompt; a blank question there sends nothing. Every
+    outcome renders the panel (200) so htmx always swaps it.
+    """
+    if refresh or (not result_id and not question.strip()):
+        context = _insights_panel_context(backtest, service, launch, refresh=refresh)
+    elif not result_id or not question.strip():
+        context = _ask_notice(
+            backtest,
+            result_id,
+            question,
+            "Choose one strategy under About to ask a question."
+            if question.strip()
+            else "Type a question about the selected strategy.",
+        )
+    else:
+        try:
+            context = _question_panel_context(
+                backtest, launch, service, question, result_id
+            )
+        except HTTPException as exc:
+            if exc.status_code != 409:
+                raise
+            context = _ask_notice(
+                backtest,
+                "",
+                question,
+                "The selected result is no longer available; choose another.",
+            )
+    return template_response(request, _ASK_PANEL, context)
+
+
+def _ask_notice(
+    backtest: BacktestRepository, result_id: str, question: str, notice: str
+) -> dict[str, object]:
+    """Re-render the Ask box with a notice and no model request."""
+    return {
+        "outcome_summary": StrategyOutcomeService(backtest).build_summary(),
+        "agent_outcome": None,
+        "selected_result_id": result_id,
+        "submitted_question": question,
+        "copilot_unavailable": f"{notice} No model request was sent.",
+    }
+
+
+def _question_panel_context(
+    backtest: BacktestRepository,
+    launch: BacktestLaunchService,
+    service: StrategyManagerInsightsService,
+    question: str,
+    result_id: str,
+) -> dict[str, object]:
+    """Run the existing question prompt about one verified result.
+
+    Raises 409 when the selected result left the outcome summary.
+    """
     summary = StrategyOutcomeService(backtest).build_summary()
     row = next((item for item in summary.runs if item.run_id == result_id), None)
     if row is None:
         service.record_unavailable_question(
             summary,
-            question=clean_question,
+            question=question,
             reason="evidence_unavailable",
         )
         raise HTTPException(
             status_code=409, detail="selected Strategy evidence is no longer available"
         )
+    context: dict[str, object] = {
+        "outcome_summary": summary,
+        "agent_outcome": None,
+        "selected_result_id": row.run_id,
+        "submitted_question": question,
+        "copilot_unavailable": None,
+    }
     try:
         discovery = launch.discover()
     except Exception:  # noqa: BLE001 - catalog failure must never trigger a model call
         logger.warning("Strategy catalog unavailable for evidence Q&A", exc_info=True)
         service.record_unavailable_question(
             summary,
-            question=clean_question,
+            question=question,
             reason="strategy_discovery_unavailable",
         )
-        return template_response(
-            request,
-            "_strategy_copilot_panel.html",
-            {
-                "outcome_summary": summary,
-                "agent_outcome": None,
-                "selected_evidence_handle": row.evidence_handle,
-                "selected_result_id": row.run_id,
-                "submitted_question": clean_question,
-                "copilot_unavailable": "The current Strategy catalog is unavailable, so no model request was sent.",
-            },
+        context["copilot_unavailable"] = (
+            "The current Strategy catalog is unavailable, so no model request was sent."
         )
+        return context
     strategy = next(
         (item for item in discovery.strategies if item.strategy_id == row.strategy_id),
         None,
@@ -856,38 +961,20 @@ def strategy_manager_copilot_ask(
     if strategy_context is None:
         service.record_unavailable_question(
             summary,
-            question=clean_question,
+            question=question,
             reason="strategy_source_mismatch",
         )
-        return template_response(
-            request,
-            "_strategy_copilot_panel.html",
-            {
-                "outcome_summary": summary,
-                "agent_outcome": None,
-                "selected_evidence_handle": row.evidence_handle,
-                "selected_result_id": row.run_id,
-                "submitted_question": clean_question,
-                "copilot_unavailable": "The current Strategy definition does not match this verified result, so no model request was sent.",
-            },
+        context["copilot_unavailable"] = (
+            "The current Strategy definition does not match this verified "
+            "result, so no model request was sent."
         )
-    outcome = service.ask(
+        return context
+    context["agent_outcome"] = service.ask(
         summary,
-        question=clean_question,
+        question=question,
         strategy=strategy_context,
     )
-    return template_response(
-        request,
-        "_strategy_copilot_panel.html",
-        {
-            "outcome_summary": summary,
-            "agent_outcome": outcome,
-            "selected_evidence_handle": row.evidence_handle,
-            "selected_result_id": row.run_id,
-            "submitted_question": clean_question,
-            "copilot_unavailable": None,
-        },
-    )
+    return context
 
 
 # ---------------------------------------------------------------------------
@@ -1811,6 +1898,23 @@ def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLResponse:
     )
 
 
+@router.get("/strategies/runs", response_class=HTMLResponse)
+def strategies_runs_page(request: Request) -> HTMLResponse:
+    """The All runs sub-view of Strategies in the full shell (gh-131, AD-3)."""
+    return render_shell(request, "strategies", "runs")
+
+
+@router.get("/partials/strategies/runs", response_class=HTMLResponse)
+def strategies_runs(request: Request, backtest: BacktestDep) -> HTMLResponse:
+    """Every Backtest run, 10 per page, from the summary query (AD-9)."""
+    page = _page_number(request.query_params.get("page"))
+    return templates.TemplateResponse(
+        request,
+        "_strategies_runs.html",
+        _backtest_activities_context(backtest, page),
+    )
+
+
 def _experiment_list_context(
     backtest: BacktestRepository,
     experiments: StrategyExperimentService,
@@ -2136,6 +2240,8 @@ def _activity_bar(
     if isinstance(started, datetime) and isinstance(updated, datetime):
         finished = updated if job.status.terminal else datetime.now(timezone.utc)
         elapsed = max(0.0, (finished - started).total_seconds())
+    if job.job_type is StrategyJobType.BACKTEST:
+        suffix["running"] = " running"  # gh-131: "Backtest running"
     return {
         "state": state,
         "icon": _ACTIVITY_BAR_ICONS[state],

@@ -328,6 +328,12 @@ class StrategyOutcomeService:
                 )
                 equity_payload = None
 
+        if equity_payload is not None:
+            vs_spy = _vs_spy_displays(equity_payload)
+            rows = [
+                row.model_copy(update={"vs_spy_display": vs_spy.get(row.run_id)})
+                for row in rows
+            ]
         if equity_payload is not None and benchmark is not None:
             cohort = cohort.model_copy(
                 update={
@@ -648,6 +654,35 @@ class StrategyOutcomeService:
             base_currency=None if first is None else first.base_currency,
             limitations=tuple(dict.fromkeys(limitations)),
         )
+
+
+def _vs_spy_displays(payload: dict[str, object]) -> dict[str, str]:
+    """Map each charted run id to its signed total-return gap against the
+    charted SPY line, in percentage points, over the shared sessions (gh-131).
+
+    Empty when no benchmark series is charted or a line starts at zero.
+    """
+    series = cast(tuple[dict[str, object], ...], payload["series"])
+    benchmark = next((item for item in series if item.get("is_benchmark")), None)
+    if benchmark is None:
+        return {}
+
+    def growth(item: dict[str, object]) -> float | None:
+        values = cast(tuple[float, ...], item["equity_values"])
+        return values[-1] / values[0] - 1 if values and values[0] else None
+
+    spy = growth(benchmark)
+    if spy is None:
+        return {}
+    displays: dict[str, str] = {}
+    for item in series:
+        run_growth = growth(item)
+        if item is benchmark or item.get("run_id") is None or run_growth is None:
+            continue
+        gap = round((run_growth - spy) * 100, 1)
+        sign = "\u2212" if gap < 0 else "+"
+        displays[str(item["run_id"])] = f"{sign}{abs(gap):.1f} pts"
+    return displays
 
 
 __all__ = ["StrategyOutcomeService"]

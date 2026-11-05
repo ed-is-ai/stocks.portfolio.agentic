@@ -1,0 +1,55 @@
+{#- Strategies landing (gh-131): one primary action, the latest result per
+    strategy, one Ask Claude box and the experiment card. Coverage detail
+    and caveats render only through macros.disclosure (AD-10). -#}
+{% import "_macros.html" as macros %}
+{% from "_macros.html" import provenance_label %}
+<section class="sm-page" aria-labelledby="strategies-heading">
+  <header class="sm-page-head d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+    <div>
+      <h1 id="strategies-heading" tabindex="-1" class="sm-page-title h3 mb-1">Strategies</h1>
+      {% if coverage_error %}<p class="text-muted mb-0">Historical data needs attention.</p>
+      {% elif coverage and coverage.snapshot_count %}
+      <p class="text-muted mb-0">{% if setup_required %}Historical data (setup needed){% else %}Historical data ready{% endif %} · {{ coverage.earliest_month }} to {{ coverage.latest_month }} · {{ coverage.snapshot_count }} monthly snapshots</p>
+      {% call macros.disclosure("Data details") %}
+      <dl class="row mb-0 mono-num"><dt class="col-sm-4">Data version</dt><dd class="col-sm-8">{{ coverage.display_version }}</dd><dt class="col-sm-4"><span title="A stretch of months with continuous historical data you can backtest over.">Backtestable periods</span></dt><dd class="col-sm-8">{% for interval in coverage.intervals %}{{ interval.start_month }}–{{ interval.end_month }}{% if not loop.last %}; {% endif %}{% endfor %}</dd></dl>
+      {% for source in coverage.provenance %}<p class="mb-0"><strong>{{ provenance_label(source.provenance_quality) }}:</strong> {{ source.snapshot_count }} snapshots {% for interval in source.intervals %}({{ interval.start_month }}–{{ interval.end_month }}){% endfor %}</p>{% if source.provenance_quality == 'best_effort_reconstructed' %}<p class="mb-0">Best-effort yfinance. Survivorship-biased reconstruction; not a point-in-time market universe.</p>{% endif %}{% endfor %}
+      <p class="mb-0 mt-1"><a href="/strategy-manager/readiness" hx-get="/strategy-manager/readiness" hx-target="#tab-content" hx-swap="innerHTML">Readiness and data preparation</a></p>
+      {% endcall %}
+      {% else %}<p class="text-muted mb-0">Historical monthly snapshots must be prepared before a backtest can run.</p>{% endif %}
+    </div>
+    <div class="d-flex flex-column align-items-start align-items-md-end gap-1">
+      <button class="sm-btn sm-btn-primary" hx-get="{{ primary_cta.href }}" hx-target="#tab-content" hx-swap="innerHTML"><i class="bi bi-play-circle"></i> {{ primary_cta.label }}</button>
+      {% if primary_cta.href != '/strategy-manager/configuration' %}
+      <p class="text-muted small mb-0">{{ ready_count }} of 5 prerequisites ready.{% if primary_cta.href != '/strategy-manager/readiness' %} <a href="/strategy-manager/readiness" hx-get="/strategy-manager/readiness" hx-target="#tab-content" hx-swap="innerHTML">Readiness</a>{% endif %}</p>
+      {% endif %}
+    </div>
+  </header>
+  {% if setup_notice == 'already' %}
+  <div class="sm-alert sm-alert-success" role="alert"><strong>Strategy Manager is already set up.</strong> {% if activated_at %}Verified at {{ activated_at.strftime('%Y-%m-%d %H:%M UTC') }}. {% endif %}No recapture or new profile is needed.</div>
+  {% endif %}
+  {% if setup_required %}
+  <div class="sm-alert sm-alert-warning" role="alert"><strong>Strategy Manager needs setup.</strong> {% if active_profile_configured %}The active scanner-data profile needs refreshing to match the current detector and data-source versions.{% else %}No active scanner-data profile is configured.{% endif %} Run setup to qualify historical data, capture the securities list, and activate a profile.</div>
+  {% endif %}
+  {% if coverage_error %}<div class="sm-alert sm-alert-danger" role="alert">Coverage evidence needs attention: {{ coverage_error }}</div>{% endif %}
+  {% include "_strategy_outcome_summary.html" %}
+  {% include "_strategy_ask.html" %}
+  {% include "_strategy_experiment_card.html" %}
+  {% if outcome_summary %}
+  {% call macros.disclosure("About these results") %}
+  {% if outcome_summary.state == 'cohort' %}<p class="mb-1">The latest comparable cohort contains {{ outcome_summary.cohort_candidate_count }} verified Results across {{ outcome_summary.cohort_strategy_count }} Strategies. Shared period: {{ outcome_summary.cohort.period_start }} to {{ outcome_summary.cohort.period_end }} · currency: {{ outcome_summary.cohort.base_currency }}.</p>
+  {% elif outcome_summary.state == 'individual' %}<p class="mb-1">No comparable multi-Strategy cohort was found. The latest result for each Strategy is shown individually; outcomes are not ranked across rows.</p>{% endif %}
+  <p class="mb-1">Checked {{ outcome_summary.inspected_count }} of at most {{ outcome_summary.candidate_limit }} latest completed Result candidates; {{ outcome_summary.verified_count }} passed integrity validation.</p>
+  {% if outcome_summary.cohort.limitations %}<ul class="mb-1">{% for limitation in outcome_summary.cohort.limitations %}<li>{{ limitation }}</li>{% endfor %}</ul>{% endif %}
+  {% if outcome_summary.integrity_excluded_count or outcome_summary.missing_result_count or outcome_summary.unverified_count or outcome_summary.job_exclusions or outcome_summary.comparison_exclusions %}
+  <p class="mb-0">Coverage and exclusions:</p>
+  <ul class="mb-0">
+    {% if outcome_summary.integrity_excluded_count %}<li>{{ outcome_summary.integrity_excluded_count }} candidate{{ 's' if outcome_summary.integrity_excluded_count != 1 }} failed Result integrity validation.</li>{% endif %}
+    {% if outcome_summary.missing_result_count %}<li>{{ outcome_summary.missing_result_count }} completed job{{ 's' if outcome_summary.missing_result_count != 1 }} had no stored Result.</li>{% endif %}
+    {% if outcome_summary.unverified_count %}<li>{{ outcome_summary.unverified_count }} Result candidate{{ 's' if outcome_summary.unverified_count != 1 }} awaiting integrity verification.</li>{% endif %}
+    {% for exclusion in outcome_summary.job_exclusions %}<li>{{ exclusion.count }} {{ exclusion.reason|replace('_', ' ') }} job{{ 's' if exclusion.count != 1 }} excluded.</li>{% endfor %}
+    {% for exclusion in outcome_summary.comparison_exclusions %}<li>{{ exclusion.count }} Result candidate{{ 's' if exclusion.count != 1 }} excluded from the selected cohort: {{ exclusion.reason|replace('_', ' ') }}.</li>{% endfor %}
+  </ul>
+  {% endif %}
+  {% endcall %}
+  {% endif %}
+</section>

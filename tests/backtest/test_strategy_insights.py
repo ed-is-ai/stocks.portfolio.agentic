@@ -457,7 +457,7 @@ def test_sensitive_parameter_names_are_not_shareable() -> None:
 
 
 def test_insight_panel_keeps_local_limits_and_links_each_claim_to_results() -> None:
-    rendered = templates.get_template("_strategy_insights_panel.html").render(
+    rendered = templates.get_template("_strategy_ask.html").render(
         outcome_summary=_summary(),
         agent_outcome=SimpleNamespace(
             state="completed",

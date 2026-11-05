@@ -1118,6 +1118,42 @@ def test_lists_page_ten_rows_without_rebuilding_results(
     assert summary.runs
 
 
+def test_strategies_screen_reads_summaries_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AD-9 (gh-131): the Strategies landing and All runs contexts never
+    rebuild a full Result per row."""
+    from types import SimpleNamespace
+
+    from app.api.routes import strategy_manager as routes
+
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    for index in range(12):
+        _complete_run(path, repo, run_id=f"run-{index:02d}", enqueue_seq=index + 1)
+    calls = _count_backtest_result_calls(monkeypatch)
+
+    landing = routes._strategy_manager_context(
+        repo,
+        prices=None,  # type: ignore[arg-type]
+        experiments=SimpleNamespace(  # type: ignore[arg-type]
+            pending_details=lambda *, limit: ()
+        ),
+        setup_required=False,
+        ready_count=5,
+        coverage_ready=True,
+        setup_notice=None,
+        activated_at=None,
+    )
+    runs = routes._backtest_activities_context(repo, 2)
+
+    assert calls == []
+    assert landing["outcome_summary"] is not None
+    assert landing["backtest_failed_count"] == 0
+    assert "backtest_activities" not in landing
+    assert len(runs["backtest_activities"]) == 2  # type: ignore[arg-type]
+
+
 def test_summaries_carry_display_evidence_and_compare(tmp_path: Path) -> None:
     path = tmp_path / "backtest.db"
     repo = _repo(path)

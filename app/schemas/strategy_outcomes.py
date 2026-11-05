@@ -54,6 +54,9 @@ class OutcomeRunV1(_OutcomeModel):
     candidate_count: int | None = Field(default=None, ge=0)
     provenance: tuple[OutcomeProvenanceV1, ...]
     is_spy_reference: bool = False
+    #: gh-131: signed total-return difference against the charted SPY line,
+    #: e.g. ``"+3.1 pts"``; ``None`` when no SPY line is charted for the row.
+    vs_spy_display: str | None = None
 
 
 class OutcomeExclusionCountV1(_OutcomeModel):

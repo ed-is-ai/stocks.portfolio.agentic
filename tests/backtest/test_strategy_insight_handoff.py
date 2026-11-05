@@ -127,7 +127,7 @@ def _render(handoffs, unavailable=False):
         ),
     )
     row = SimpleNamespace(evidence_handle="R01", result_url="/r/1")
-    return templates.get_template("_strategy_insights_panel.html").render(
+    return templates.get_template("_strategy_ask.html").render(
         outcome_summary=SimpleNamespace(
             runs=(row,), cohort=SimpleNamespace(limitations=())
         ),
@@ -145,7 +145,7 @@ def test_panel_offers_explore_only_for_eligible_hypotheses() -> None:
     assert 'hx-get="/strategy-manager/experiments?x=1"' in eligible
     assert 'hx-target="#tab-content"' in eligible
     assert "Explore as an experiment" in eligible
-    assert "<form" in eligible and eligible.count("<form") == 1  # only Generate
+    assert "<form" in eligible and eligible.count("<form") == 1  # the one Ask box
     unsupported = _render({})
     assert "Explore as an experiment" not in unsupported
     assert "Research-only" in unsupported
