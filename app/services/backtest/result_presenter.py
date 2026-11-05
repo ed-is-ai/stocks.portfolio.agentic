@@ -19,6 +19,7 @@ import math
 from app.repositories.backtest_repo import (
     BacktestCandidateAuditPageV1,
     BacktestIntegrityError,
+    BacktestResultSummaryV1,
     BacktestResultV1,
 )
 from app.services.backtest.backtest_engine import (
@@ -685,7 +686,7 @@ def multi_comparison_equity_payload(
 
 
 def equity_lines_payload(
-    results: Sequence[BacktestResultV1],
+    results: Sequence[BacktestResultV1 | BacktestResultSummaryV1],
     benchmark: tuple[str, Sequence[Decimal]] | None = None,
 ) -> dict[str, object]:
     """Build indexed equity and drawdown paths for Results sharing one
@@ -1091,7 +1092,7 @@ def _clip_interval(
 
 
 def provenance_view(
-    result: BacktestResultV1, coverage: CoverageSummaryV1
+    result: BacktestResultV1 | BacktestResultSummaryV1, coverage: CoverageSummaryV1
 ) -> ProvenanceViewV1:
     """Filter ``coverage.provenance`` (the *whole* pinned profile's
     coverage) down to the Result's own ``[start_month, end_month]``

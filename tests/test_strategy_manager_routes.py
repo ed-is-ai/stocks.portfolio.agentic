@@ -32,7 +32,7 @@ from app.repositories.backtest_repo import (
     BacktestIntegrityError,
     BacktestRepository,
     BacktestResultV1,
-    RecentBacktestResultsV1,
+    RecentBacktestResultSummariesV1,
     ComparisonCandidateV1,
     ComparisonEligibilityV1,
     ComparisonIneligibleReason,
@@ -392,14 +392,24 @@ class FakeRepo:
             ),
         )
 
-    def list_backtest_activities(self):
+    def list_backtest_activities(self, *, limit=10, offset=0):
         if self.backtest_activities_error is not None:
             raise self.backtest_activities_error
-        return self.backtest_activities
+        return tuple(self.backtest_activities)[offset : offset + limit]
 
-    def recent_verified_backtest_results(self, *, limit=25):
+    def failed_backtest_result_count(self):
+        return sum(
+            1
+            for item in self.backtest_activities
+            if getattr(item, "result_error", None)
+        )
+
+    def recent_backtest_result_summaries(self, *, limit=25):
         assert limit == 25
-        return RecentBacktestResultsV1((), 0, 0, 0, ())
+        return RecentBacktestResultSummariesV1((), 0, 0, 0, 0, ())
+
+    def with_display_evidence(self, summaries):
+        return tuple(summaries)
 
     def pending_strategy_experiments(self, *, limit=1):
         assert limit == 1
@@ -4902,3 +4912,116 @@ def test_activity_bar_always_rereads_a_running_initialization(services, monkeypa
     client.get("/strategy-manager/activity-status")
 
     assert len(calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# gh-133: paged results list and the Unverified marker.
+# ---------------------------------------------------------------------------
+
+
+def _paged_activities(count: int) -> tuple[BacktestActivitySummaryV1, ...]:
+    """``count`` complete rows, newest (highest ``enqueue_seq``) first."""
+    return tuple(
+        _universe_activity(
+            job=cast(
+                StrategyJobV1,
+                SimpleNamespace(
+                    id=f"job-{seq:02d}",
+                    enqueue_seq=seq,
+                    status=StrategyJobStatus.COMPLETE,
+                    cancel_requested_at=None,
+                    created_at=datetime(2024, 1, 5, 9, 0, tzinfo=timezone.utc),
+                ),
+            ),
+            result_verdict="verified",
+        )
+        for seq in range(count, 0, -1)
+    )
+
+
+def test_backtests_list_second_page_renders_last_rows_with_prev(services, monkeypatch):
+    repo, _ = services
+    repo.backtest_activities = _paged_activities(12)
+    monkeypatch.setattr(
+        repo,
+        "backtest_result",
+        lambda *_a, **_k: pytest.fail("list must not rebuild Results"),
+    )
+
+    response = client.get("/strategy-manager/backtests?page=2")
+
+    assert response.status_code == 200
+    text = response.text
+    assert ">Run 2<" in text and ">Run 1<" in text
+    assert ">Run 3<" not in text
+    assert 'hx-get="/strategy-manager/backtests?page=1"' in text
+    assert "?page=3" not in text
+
+
+def test_backtests_list_first_page_has_next_only(services):
+    repo, _ = services
+    repo.backtest_activities = _paged_activities(12)
+
+    text = client.get("/strategy-manager/backtests").text
+
+    assert ">Run 12<" in text and ">Run 3<" in text
+    assert ">Run 2<" not in text
+    assert 'hx-get="/strategy-manager/backtests?page=2"' in text
+    assert ">Prev<" not in text
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-3", "999999999999"])
+def test_backtests_list_invalid_page_falls_back_to_first(services, raw):
+    repo, _ = services
+    repo.backtest_activities = _paged_activities(12)
+
+    text = client.get(f"/strategy-manager/backtests?page={raw}").text
+
+    assert ">Run 12<" in text
+    assert ">Prev<" not in text
+
+
+def test_backtests_list_marks_unverified_rows(services):
+    repo, _ = services
+    repo.backtest_activities = (
+        _universe_activity(
+            metrics=None, metric_availability=None, result_verdict="unverified"
+        ),
+    )
+
+    text = client.get("/strategy-manager/backtests").text
+
+    assert "Unverified" in text
+    assert "Integrity check failed" not in text
+
+
+def test_backtests_list_past_the_end_is_not_the_empty_state(services):
+    repo, _ = services
+    repo.backtest_activities = _paged_activities(3)
+
+    text = client.get("/strategy-manager/backtests?page=5").text
+
+    assert "No results on this page." in text
+    assert "No backtests yet" not in text
+    assert 'hx-get="/strategy-manager/backtests?page=1"' in text
+
+
+def test_backtests_list_reload_keeps_the_requested_page(services):
+    repo, _ = services
+    repo.backtest_activities_error = BacktestIntegrityError("damaged list")
+
+    text = client.get("/strategy-manager/backtests?page=3").text
+
+    assert 'hx-get="/strategy-manager/backtests?page=3"' in text
+
+
+def test_backtests_list_banner_counts_failed_results_on_every_page(
+    services, monkeypatch
+):
+    repo, _ = services
+    repo.backtest_activities = _paged_activities(3)
+    monkeypatch.setattr(repo, "failed_backtest_result_count", lambda: 4)
+
+    text = client.get("/strategy-manager/backtests").text
+
+    assert "4 stored results failed their integrity check" in text

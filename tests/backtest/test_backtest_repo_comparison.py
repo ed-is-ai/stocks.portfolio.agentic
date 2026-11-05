@@ -6,17 +6,23 @@ on-disk SQLite, reusing ``test_backtest_repo_results.py``'s
 
 from __future__ import annotations
 
+import hashlib
+import inspect
 from pathlib import Path
 import sqlite3
+import threading
 
 import pytest
 
 from app.repositories.backtest_repo import (
+    RESULT_VERIFIER_SOURCE_DIGEST,
+    RESULT_VERIFIER_VERSION,
     BacktestIntegrityError,
     BacktestRepository,
     ComparisonEligibilityV1,
     ComparisonIneligibleReason,
 )
+from app.services.backtest.strategy_outcomes import StrategyOutcomeService
 from app.services.backtest.strategy_job import StrategyJobNotFound
 from app.services.backtest.trading_calendar import TradingCalendar
 
@@ -178,7 +184,7 @@ def test_self_comparison_is_rejected_without_a_db_lookup(tmp_path: Path) -> None
     assert eligibility.reason is ComparisonIneligibleReason.SELF_COMPARISON
 
 
-def test_recent_verified_results_inspects_at_most_twenty_five_candidates(
+def test_recent_result_summaries_inspect_at_most_twenty_five_candidates(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "bounded-results.db"
@@ -200,7 +206,7 @@ def test_recent_verified_results_inspects_at_most_twenty_five_candidates(
             ],
         )
 
-    page = repo.recent_verified_backtest_results(limit=25)
+    page = repo.recent_backtest_result_summaries(limit=25)
 
     assert page.inspected_count == 25
     assert page.missing_result_count == 25
@@ -208,7 +214,7 @@ def test_recent_verified_results_inspects_at_most_twenty_five_candidates(
     assert page.results == ()
 
 
-def test_recent_verified_results_counts_integrity_failures_without_returning_them(
+def test_recent_result_summaries_count_tampered_metrics_unverified_then_failed(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "damaged-result.db"
@@ -226,12 +232,20 @@ def test_recent_verified_results_counts_integrity_failures_without_returning_the
             ),
         )
 
-    page = repo.recent_verified_backtest_results(limit=25)
+    page = repo.recent_backtest_result_summaries(limit=25)
 
-    assert page.inspected_count == 1
-    assert page.integrity_excluded_count == 1
+    assert page.inspected_count == 0
+    assert page.unverified_count == 1
+    assert page.integrity_excluded_count == 0
     assert page.missing_result_count == 0
     assert page.results == ()
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.backtest_result("damaged-run")
+    page = repo.recent_backtest_result_summaries(limit=25)
+
+    assert page.unverified_count == 0
+    assert page.integrity_excluded_count == 1
 
 
 def test_missing_left_is_not_found(tmp_path: Path) -> None:
@@ -821,6 +835,557 @@ def test_list_flags_a_tampered_result_and_keeps_the_others(tmp_path: Path) -> No
     by_id = {a.job.id: a for a in repo.list_backtest_activities()}
 
     assert by_id[OTHER_ID].metrics is None
-    assert by_id[OTHER_ID].result_error == "stored backtest result digest is invalid"
+    assert by_id[OTHER_ID].result_verdict == "unverified"
+    assert by_id[OTHER_ID].result_error is None
     assert by_id[ANCHOR_ID].metrics is not None
+    assert by_id[ANCHOR_ID].result_verdict == "verified"
     assert by_id[ANCHOR_ID].result_error is None
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.backtest_result(OTHER_ID)
+
+    verdict = _verdict(path, OTHER_ID)
+    assert verdict is not None
+    assert verdict[4:6] == ("failed", "stored backtest result digest is invalid")
+    by_id = {a.job.id: a for a in repo.list_backtest_activities()}
+    assert by_id[OTHER_ID].result_verdict == "failed"
+    assert by_id[OTHER_ID].result_error == "stored backtest result digest is invalid"
+
+
+# ---------------------------------------------------------------------------
+# gh-133: Result verdicts and list summaries (AD-9, AD-11)
+# ---------------------------------------------------------------------------
+
+
+def _verdict(path: Path, run_id: str) -> tuple[object, ...] | None:
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            """SELECT result_digest, result_schema_version, verifier_version,
+                      metrics_digest, status, detail
+               FROM backtest_result_verdicts WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+    return None if row is None else tuple(row)
+
+
+def _current_key(path: Path, run_id: str) -> tuple[object, ...]:
+    with sqlite3.connect(path) as conn:
+        digest, schema, metrics_json = conn.execute(
+            """SELECT result_digest, result_schema_version, metrics_json
+               FROM backtest_results WHERE run_id=?""",
+            (run_id,),
+        ).fetchone()
+    return (
+        digest,
+        schema,
+        RESULT_VERIFIER_VERSION,
+        hashlib.sha256(metrics_json.encode("utf-8")).hexdigest(),
+    )
+
+
+def _execute(path: Path, *statements: str) -> None:
+    with sqlite3.connect(path) as conn:
+        for statement in statements:
+            conn.execute(statement)
+
+
+def _tamper_trade_log(path: Path, run_id: str) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute("DROP TRIGGER IF EXISTS trade_log_immutable_update")
+        conn.execute(
+            """UPDATE trade_log SET event_json=replace(event_json, '"50', '"51')
+               WHERE run_id=? AND kind='exit_fill'""",
+            (run_id,),
+        )
+
+
+def _count_backtest_result_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+    original = BacktestRepository.backtest_result
+
+    def counting(self: BacktestRepository, run_id: str, **kwargs: bool):
+        calls.append(run_id)
+        return original(self, run_id, **kwargs)
+
+    monkeypatch.setattr(BacktestRepository, "backtest_result", counting)
+    return calls
+
+
+def test_fresh_completion_records_a_current_verified_verdict(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+
+    verdict = _verdict(path, ANCHOR_ID)
+    (activity,) = repo.list_backtest_activities()
+
+    assert verdict is not None
+    assert verdict[:4] == _current_key(path, ANCHOR_ID)
+    assert verdict[4:] == ("verified", None)
+    assert activity.result_verdict == "verified"
+    assert activity.metrics is not None
+    assert activity.metric_availability is not None
+
+
+def test_missing_verdict_lists_unverified_without_metrics(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _execute(path, "DELETE FROM backtest_result_verdicts")
+
+    (activity,) = repo.list_backtest_activities()
+    page = repo.recent_backtest_result_summaries(limit=25)
+
+    assert activity.result_verdict == "unverified"
+    assert activity.metrics is None
+    assert activity.result_error is None
+    assert page.results == ()
+    assert page.unverified_count == 1
+
+
+def test_bumped_verifier_is_unverified_until_open_rewrites_it(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _execute(path, "UPDATE backtest_result_verdicts SET verifier_version='old.v0'")
+
+    assert repo.list_backtest_activities()[0].result_verdict == "unverified"
+
+    repo.backtest_result(ANCHOR_ID)
+
+    verdict = _verdict(path, ANCHOR_ID)
+    assert verdict is not None
+    assert verdict[:4] == _current_key(path, ANCHOR_ID)
+    assert repo.list_backtest_activities()[0].result_verdict == "verified"
+
+
+def test_tampered_evidence_stays_verified_until_opened(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _tamper_trade_log(path, ANCHOR_ID)
+
+    assert repo.list_backtest_activities()[0].result_verdict == "verified"
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.backtest_result(ANCHOR_ID)
+
+    (activity,) = repo.list_backtest_activities()
+    assert activity.result_verdict == "failed"
+    assert activity.metrics is None
+    assert activity.result_error is not None
+    assert repo.recent_backtest_result_summaries().integrity_excluded_count == 1
+
+
+def test_failed_verdict_still_runs_full_verification_on_open(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _execute(
+        path,
+        "UPDATE backtest_result_verdicts SET status='failed', detail='stale'",
+    )
+
+    result = repo.backtest_result(ANCHOR_ID)
+
+    assert result.run_id == ANCHOR_ID
+    assert result.events
+    assert _verdict(path, ANCHOR_ID) == (
+        *_current_key(path, ANCHOR_ID),
+        "verified",
+        None,
+    )
+
+
+def test_concurrent_opens_of_a_stale_verdict_leave_one_current_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both readers observe the same stale row before either writes; the
+    late writer then tries a conflicting outcome, which only the CAS stops."""
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _execute(path, "UPDATE backtest_result_verdicts SET verifier_version='old.v0'")
+    observed = threading.Barrier(2)
+    first_written = threading.Event()
+    errors: list[BaseException] = []
+    original = BacktestRepository._write_result_verdict
+
+    def interleaved(self, run_id, observed_row, key, status, detail):
+        observed.wait(3)
+        if threading.current_thread().name == "late":
+            assert first_written.wait(3)
+            status, detail = "failed", "late stale writer"
+        original(self, run_id, observed_row, key, status, detail)
+        first_written.set()
+
+    monkeypatch.setattr(BacktestRepository, "_write_result_verdict", interleaved)
+
+    def open_result() -> None:
+        try:
+            _repo(path).backtest_result(ANCHOR_ID)
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=open_result, name=name) for name in ("early", "late")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    with sqlite3.connect(path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM backtest_result_verdicts").fetchone()
+    assert errors == []
+    assert count == (1,)
+    assert _verdict(path, ANCHOR_ID) == (
+        *_current_key(path, ANCHOR_ID),
+        "verified",
+        None,
+    )
+
+
+def test_backfill_records_failures_and_a_rerun_does_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    _execute(path, "DELETE FROM backtest_result_verdicts")
+    _tamper_trade_log(path, OTHER_ID)
+
+    assert repo.backfill_backtest_result_verdicts() == 2
+
+    anchor = _verdict(path, ANCHOR_ID)
+    other = _verdict(path, OTHER_ID)
+    assert anchor is not None and anchor[4] == "verified"
+    assert other is not None and other[4] == "failed"
+    calls = _count_backtest_result_calls(monkeypatch)
+    assert repo.backfill_backtest_result_verdicts() == 0
+    assert calls == []
+
+
+def test_verdict_write_failure_never_changes_the_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    _execute(path, "UPDATE backtest_result_verdicts SET verifier_version='old.v0'")
+    _tamper_trade_log(path, OTHER_ID)
+
+    def failing_write(*_args: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(repo, "_write_result_verdict", failing_write)
+
+    assert repo.backtest_result(ANCHOR_ID).run_id == ANCHOR_ID
+    with pytest.raises(BacktestIntegrityError):
+        repo.backtest_result(OTHER_ID)
+    verdict = _verdict(path, ANCHOR_ID)
+    assert verdict is not None and verdict[2] == "old.v0"
+
+
+def test_missing_run_writes_no_verdict(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+
+    with pytest.raises(StrategyJobNotFound):
+        repo.backtest_result("missing-run")
+    assert _verdict(path, "missing-run") is None
+
+
+def test_lists_page_ten_rows_without_rebuilding_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    for index in range(12):
+        _complete_run(path, repo, run_id=f"run-{index:02d}", enqueue_seq=index + 1)
+    calls = _count_backtest_result_calls(monkeypatch)
+
+    first = repo.list_backtest_activities()
+    second = repo.list_backtest_activities(limit=10, offset=10)
+    summary = StrategyOutcomeService(repo).build_summary()
+
+    assert calls == []
+    assert len(first) == 10
+    assert [item.job.id for item in second] == ["run-01", "run-00"]
+    assert summary.verified_count == 12
+    assert summary.runs
+
+
+def test_summaries_carry_display_evidence_and_compare(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+
+    page = repo.recent_backtest_result_summaries()
+    left, right = repo.with_display_evidence(page.results)
+    full = repo.backtest_result(ANCHOR_ID)
+    anchor = left if left.run_id == ANCHOR_ID else right
+
+    assert anchor.equity_curve == full.equity_curve
+    assert anchor.metric_availability == full.metric_availability
+    assert anchor.metrics == full.metrics
+    assert anchor.equity_point_count == len(full.equity_curve)
+    assert anchor.closed_trade_count == 1
+    assert repo.compare_result_summaries(left, right).eligible is True
+
+
+# ---------------------------------------------------------------------------
+# gh-133 review patches
+# ---------------------------------------------------------------------------
+
+#: Every ``BacktestRepository`` method whose rules decide a Result's verdict.
+_VERIFIER_METHODS = (
+    "backtest_result",
+    "_reconstruct_result",
+    "_load_strategy_run_row",
+    "_load_entry_selection",
+    "_canonical_result_payload",
+    "_parse_trade_log_event",
+    "_parse_equity_curve_rows",
+    "_parse_equity_curve_point",
+)
+
+
+def _verifier_source_digest() -> str:
+    from app.services.backtest import metrics
+
+    sources = [
+        inspect.getsource(getattr(BacktestRepository, name))
+        for name in _VERIFIER_METHODS
+    ]
+    sources.append(inspect.getsource(metrics))
+    return hashlib.sha256("\n".join(sources).encode("utf-8")).hexdigest()
+
+
+def test_result_verifier_version_tracks_the_verification_source() -> None:
+    assert _verifier_source_digest() == RESULT_VERIFIER_SOURCE_DIGEST, (
+        "Backtest Result verification source changed: bump "
+        "RESULT_VERIFIER_VERSION in app/repositories/backtest_repo.py if the "
+        "verification rules changed, then set RESULT_VERIFIER_SOURCE_DIGEST to "
+        f"{_verifier_source_digest()!r}."
+    )
+
+
+def _seed_two_runs(path: Path) -> BacktestRepository:
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2)
+    return repo
+
+
+def test_backfill_survives_unexpected_errors_and_counts_current_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _seed_two_runs(path)
+    _execute(path, "DELETE FROM backtest_result_verdicts")
+    original = BacktestRepository.backtest_result
+
+    def flaky(self: BacktestRepository, run_id: str, **kwargs: bool):
+        if run_id == OTHER_ID:
+            raise RuntimeError("unexpected")
+        return original(self, run_id, **kwargs)
+
+    monkeypatch.setattr(BacktestRepository, "backtest_result", flaky)
+
+    assert repo.backfill_backtest_result_verdicts() == 1
+    assert _verdict(path, OTHER_ID) is None
+
+
+def test_backfill_records_a_damaged_run_identity_as_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _seed_two_runs(path)
+    _execute(
+        path,
+        "DELETE FROM backtest_result_verdicts",
+        "DROP TRIGGER IF EXISTS strategy_run_immutable_update",
+        f"UPDATE strategy_runs SET starting_capital='bad' WHERE id='{OTHER_ID}'",
+    )
+
+    assert repo.backfill_backtest_result_verdicts() == 2
+
+    other = _verdict(path, OTHER_ID)
+    assert other is not None and other[4:] == (
+        "failed",
+        "stored strategy run is invalid",
+    )
+    calls = _count_backtest_result_calls(monkeypatch)
+    assert repo.backfill_backtest_result_verdicts() == 0
+    assert calls == []
+
+
+def test_list_flags_invalid_metrics_under_a_matching_verdict(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    bad = '{"total_return": "oops"}'
+    _execute(
+        path,
+        "DROP TRIGGER IF EXISTS backtest_result_evidence_immutable",
+        f"UPDATE backtest_results SET metrics_json='{bad}', "
+        "note_version=note_version+1",
+        "UPDATE backtest_result_verdicts SET metrics_digest="
+        f"'{hashlib.sha256(bad.encode()).hexdigest()}'",
+    )
+
+    (activity,) = repo.list_backtest_activities()
+
+    assert activity.result_verdict == "failed"
+    assert activity.metrics is None
+    assert activity.result_error == "stored backtest result is invalid"
+
+
+def test_outcome_panel_drops_a_run_with_damaged_display_evidence(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    # A second Strategy makes both runs one cohort, so both are display rows.
+    _complete_run(path, repo, run_id=OTHER_ID, enqueue_seq=2, strategy_id="other_v1")
+    _execute(
+        path,
+        "DROP TRIGGER IF EXISTS equity_curve_immutable_update",
+        f"UPDATE equity_curve SET cash_base='garbage' WHERE run_id='{OTHER_ID}'",
+    )
+
+    page = repo.recent_backtest_result_summaries()
+    (kept,) = repo.with_display_evidence(page.results)
+    summary = StrategyOutcomeService(repo).build_summary()
+
+    assert kept.run_id == ANCHOR_ID
+    assert summary.state != "unavailable"
+    assert [run.run_id for run in summary.runs] == [ANCHOR_ID]
+    assert summary.integrity_excluded_count == 1
+
+
+def test_completion_records_failed_when_metric_availability_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.services.backtest import metrics
+
+    def broken(**_kwargs: object) -> None:
+        raise metrics.MetricsError("empty_equity_curve", "equity curve is empty")
+
+    monkeypatch.setattr(metrics, "metric_availability", broken)
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+
+    verdict = _verdict(path, ANCHOR_ID)
+    assert verdict is not None
+    assert verdict[:4] == _current_key(path, ANCHOR_ID)
+    assert verdict[4:] == ("failed", "equity curve is empty")
+
+
+def test_unchanged_outcome_with_a_different_detail_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _tamper_trade_log(path, ANCHOR_ID)
+    with pytest.raises(BacktestIntegrityError):
+        repo.backtest_result(ANCHOR_ID)
+    _execute(path, "UPDATE backtest_result_verdicts SET detail='older wording'")
+    writes: list[object] = []
+    monkeypatch.setattr(repo, "_write_result_verdict", lambda *a: writes.append(a))
+
+    with pytest.raises(BacktestIntegrityError):
+        repo.backtest_result(ANCHOR_ID)
+
+    assert writes == []
+
+
+def test_verdict_cas_rejects_a_changed_metrics_digest(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    observed = _verdict(path, ANCHOR_ID)
+    assert observed is not None
+    stale = (*observed[:3], "0" * 64, *observed[4:])
+    digest, schema, version, metrics_digest = map(str, _current_key(path, ANCHOR_ID))
+    key = (digest, schema, version, metrics_digest)
+
+    repo._write_result_verdict(ANCHOR_ID, stale, key, "failed", "stale writer")
+
+    assert _verdict(path, ANCHOR_ID) == observed
+
+
+def test_recent_summaries_exclude_a_contract_without_its_audit_manifest(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    _complete_run(path, repo, run_id=ANCHOR_ID, enqueue_seq=1)
+    _execute(
+        path,
+        "DROP TRIGGER IF EXISTS backtest_result_evidence_immutable",
+        "UPDATE backtest_results SET "
+        "audit_contract_version='candidate_allocation_audit.v1', "
+        "note_version=note_version+1",
+    )
+
+    page = repo.recent_backtest_result_summaries()
+
+    assert page.results == ()
+    assert page.integrity_excluded_count == 1
+
+
+def test_recent_summaries_cap_skips_unverified_rows(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    for index in range(3):
+        _complete_run(path, repo, run_id=f"run-{index}", enqueue_seq=index + 1)
+    newest = repo.recent_backtest_result_summaries(limit=2).results[0].run_id
+    _execute(path, f"DELETE FROM backtest_result_verdicts WHERE run_id='{newest}'")
+
+    page = repo.recent_backtest_result_summaries(limit=2)
+
+    assert len(page.results) == 2
+    assert newest not in {item.run_id for item in page.results}
+    assert page.unverified_count == 1
+    assert page.inspected_count == 2
+
+
+def test_list_availability_does_not_invent_a_sharpe_reason() -> None:
+    from app.repositories.backtest_repo import _summary_availability
+    from app.services.backtest.metrics import (
+        BacktestMetricsV1,
+        MetricUnavailableReason,
+    )
+
+    availability = _summary_availability(
+        BacktestMetricsV1(
+            total_return=0.1, sharpe_ratio=None, win_rate=None, max_drawdown=0.0
+        )
+    )
+
+    assert availability.win_rate_unavailable is MetricUnavailableReason.NO_CLOSED_TRADES
+    assert availability.sharpe_unavailable is None
+
+
+def test_failed_result_count_spans_every_page(tmp_path: Path) -> None:
+    path = tmp_path / "backtest.db"
+    repo = _repo(path)
+    for index in range(12):
+        _complete_run(path, repo, run_id=f"run-{index:02d}", enqueue_seq=index + 1)
+    for run_id in ("run-00", "run-01"):
+        _tamper_trade_log(path, run_id)
+        with pytest.raises(BacktestIntegrityError):
+            repo.backtest_result(run_id)
+
+    first_page = repo.list_backtest_activities()
+
+    assert not any(item.result_error for item in first_page)
+    assert repo.failed_backtest_result_count() == 2

@@ -130,6 +130,9 @@ from app.services.backtest.trading_calendar import (
 router = APIRouter()
 logger = logging.getLogger(__name__)
 _MAX_COMPARISON_PEERS = 7
+_BACKTEST_PAGE_SIZE = 10
+#: Keeps the SQL OFFSET inside SQLite's integer range.
+_MAX_BACKTEST_PAGE = 100_000
 BacktestDep = Annotated[BacktestRepository, Depends(get_backtest_repository)]
 PricesDep = Annotated[
     HistoricalPriceRepository, Depends(get_read_only_historical_price_repository)
@@ -359,14 +362,28 @@ def _initialization_history(
     return tuple(history)
 
 
-def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
-    """Return the Backtest results list, or an explicit integrity alert
-    (Story 2.8 AC 1, 7) -- a repository/integrity error is not an empty
-    list, so the list template must be able to tell the two apart."""
+def _backtest_activities_context(
+    repo: BacktestRepository, page: int = 1
+) -> dict[str, object]:
+    """Return one page of the Backtest results list, or an explicit
+    integrity alert (Story 2.8 AC 1, 7) -- a repository/integrity error is
+    not an empty list, so the list template must be able to tell the two
+    apart. gh-133: one extra row is read only to know whether a next page
+    exists."""
+    paging = {"backtest_page": page, "backtest_has_next": False}
     try:
-        activities = repo.list_backtest_activities()
+        activities = repo.list_backtest_activities(
+            limit=_BACKTEST_PAGE_SIZE + 1, offset=(page - 1) * _BACKTEST_PAGE_SIZE
+        )
     except BacktestIntegrityError as exc:
-        return {"backtest_activities": (), "backtest_activities_error": str(exc)}
+        return {
+            "backtest_activities": (),
+            "backtest_activities_error": str(exc),
+            **paging,
+        }
+    paging["backtest_has_next"] = len(activities) > _BACKTEST_PAGE_SIZE
+    activities = activities[:_BACKTEST_PAGE_SIZE]
+    failed_count = repo.failed_backtest_result_count()
     # gh-434: universe resolution is memoised per distinct key within this
     # request -- one roster read per profile_hash, one runnable-universe
     # read per (profile_hash, start_month). A missing snapshot month only
@@ -424,7 +441,18 @@ def _backtest_activities_context(repo: BacktestRepository) -> dict[str, object]:
             for activity in activities
         ),
         "backtest_activities_error": None,
+        "backtest_failed_count": failed_count,
+        **paging,
     }
+
+
+def _page_number(raw: str | None) -> int:
+    """Parse a 1-based ``?page=`` value, falling back to 1 when invalid."""
+    try:
+        page = int(raw or "1")
+    except ValueError:
+        return 1
+    return page if 1 <= page <= _MAX_BACKTEST_PAGE else 1
 
 
 def _initialization_context(
@@ -1775,8 +1803,11 @@ def submit_strategy_configuration(
 @router.get("/strategy-manager/backtests", response_class=HTMLResponse)
 def strategy_backtests(request: Request, backtest: BacktestDep) -> HTMLResponse:
     """Render the standalone Backtest results list (Story 2.8 AC 2, 7)."""
+    page = _page_number(request.query_params.get("page"))
     return template_response(
-        request, "_backtest_results_list.html", _backtest_activities_context(backtest)
+        request,
+        "_backtest_results_list.html",
+        _backtest_activities_context(backtest, page),
     )
 
 

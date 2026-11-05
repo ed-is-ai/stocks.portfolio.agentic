@@ -70,6 +70,12 @@ def _prepare_strategy_coverage() -> None:
             )
 
 
+def _backfill_result_verdicts() -> None:
+    # gh-133: runs after preparation, off the event loop, so a slow or failing
+    # backfill never delays or fails Strategy Manager preparation.
+    get_backtest_repository().backfill_backtest_result_verdicts()
+
+
 def _run_scheduled_pipeline() -> None:
     # Scheduled runs refresh institutional sources so observed scan records
     # carry current enrichment (#2, #7).
@@ -128,19 +134,29 @@ def create_app(
             else:
                 _app.state.strategy_preparation = "ready"
 
+        async def backfill() -> None:
+            await preparation
+            try:
+                await asyncio.to_thread(_backfill_result_verdicts)
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Backtest result verdict backfill failed"
+                )
+
         _app.state.strategy_preparation = "pending"
         preparation = asyncio.create_task(prepare())
         _app.state.strategy_preparation_task = preparation
+        backfilling = asyncio.create_task(backfill())
         try:
             yield
         finally:
             # to_thread cancellation does not stop SQLite work. Join the owned
-            # task before shutdown rather than leaving its thread detached.
+            # tasks before shutdown rather than leaving their threads detached.
             try:
                 try:
-                    await asyncio.shield(preparation)
+                    await asyncio.shield(backfilling)
                 except asyncio.CancelledError:
-                    await preparation
+                    await backfilling
                     raise
             finally:
                 stop_pipeline_scheduler()
