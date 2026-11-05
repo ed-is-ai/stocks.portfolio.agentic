@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -155,6 +156,44 @@ SORTABLE_COLUMNS = (
 )
 
 
+JS_PATH = ROOT / "app" / "api" / "static" / "js" / "watchlist.js"
+CSS_PATH = ROOT / "app" / "api" / "static" / "css" / "watchlist.css"
+
+
+def _thead_cols(html: str) -> list[str]:
+    """Return the header th[data-col] keys in table order."""
+    return re.findall(r'<th class="wl-col [^"]*" data-col="([a-z]+)"', html)
+
+
+def _js_columns() -> list[str]:
+    """Return the column keys of the COLUMNS declaration in watchlist.js."""
+    js = JS_PATH.read_text("utf-8")
+    block = re.search(r"const COLUMNS = \[(.*?)\];", js, flags=re.S)
+    assert block is not None, "COLUMNS declaration not found"
+    return re.findall(r"col: '([a-z]+)'", block[1])
+
+
+def _rows(html: str) -> list[str]:
+    """Return each rendered body row's markup."""
+    return re.findall(r"<tr data-sepa.*?</tr>", html, flags=re.S)
+
+
+def _cell_vals(html: str) -> list[dict[str, str | None]]:
+    """Map each body row's cells to the thead keys, like watchlist.js does.
+
+    Body cells carry no data-col (#134); the value is ``None`` when the cell
+    omits data-val.
+    """
+    cols = _thead_cols(html)
+    table = []
+    for row in _rows(html):
+        cells = re.findall(r"<td([^>]*)>", row)
+        assert len(cells) == len(cols)
+        vals = [re.search(r'data-val="([^"]*)"', attrs) for attrs in cells]
+        table.append({col: m.group(1) if m else None for col, m in zip(cols, vals)})
+    return table
+
+
 def test_stock_scanner_splits_score_entry_stop_into_sortable_columns() -> None:
     html = _render_stock_scanner()
     # Each split-out metric now owns a header cell with a stable data-col key.
@@ -166,16 +205,19 @@ def test_stock_scanner_splits_score_entry_stop_into_sortable_columns() -> None:
 
 
 def test_stock_scanner_cells_carry_canonical_numeric_data_values() -> None:
-    html = _render_stock_scanner()
+    row = _cell_vals(_render_stock_scanner())[0]
     # Sorting/filtering read these data-val attributes, never the rendered text.
-    assert 'data-col="score" data-val="8"' in html
-    assert 'data-col="canslim" data-val="12"' in html
-    assert 'data-col="momentum" data-val="11"' in html
-    assert 'data-col="sepa" data-val="8"' in html
-    assert 'data-col="risk" data-val="8.0000"' in html
+    assert row["ticker"] == "AAPL.L"
+    assert row["score"] == "8"
+    assert row["canslim"] == "12"
+    assert row["momentum"] == "11"
+    assert row["sepa"] == "8"
+    assert row["risk"] == "8.0000"
+    assert row["price"] == "98.0000"
+    assert row["buy"] is None
     # The Buy-recommendation row exposes its actionability rank for sorting
     # (mirrors app.core.recommendation._BUCKET_RANK, the canonical source).
-    assert 'data-col="rec" data-val="5"' in html
+    assert row["rec"] == "5"
 
 
 def test_scanner_context_batches_alert_reads_for_multi_ticker_records() -> None:
@@ -243,18 +285,22 @@ def test_stock_scanner_prices_use_currency_symbol() -> None:
     assert "$100.00" in html
 
 
-def test_stock_scanner_missing_values_render_empty_data_val() -> None:
-    html = _render_stock_scanner()
-    # The analysis-less TSLA row must leave numeric data-val empty so those
-    # cells sort last and are excluded from active range filters.
-    assert 'data-col="score" data-val=""' in html
-    assert 'data-col="canslim" data-val=""' in html
+def test_stock_scanner_missing_values_omit_data_val() -> None:
+    row = _cell_vals(_render_stock_scanner())[1]
+    # The analysis-less TSLA row must omit numeric data-val so those cells
+    # sort last and are excluded from active range filters (cellVal -> null).
+    for col in ("score", "stage", "sepa", "canslim", "momentum", "entry", "stop"):
+        assert row[col] is None, col
+    for col in ("vsentry", "vsstop", "risk", "targets", "rsi", "sector"):
+        assert row[col] is None, col
+    assert row["price"] == "200.0000"
+    assert 'data-val=""' not in _render_stock_scanner()
 
 
 def test_stock_scanner_congress_column_renders_net_and_tooltip() -> None:
     html = _render_stock_scanner()
     # Net = combined buys − sells (3 − 13 = -10); Senate counts appear in the tip.
-    assert 'data-col="congress" data-val="-10"' in html
+    assert _cell_vals(html)[0]["congress"] == "-10"
     assert "Congress: 3 buys / 13 sells" in html
     assert "Senate: 1 buys / 4 sells" in html
 
@@ -262,14 +308,14 @@ def test_stock_scanner_congress_column_renders_net_and_tooltip() -> None:
 def test_stock_scanner_congress_empty_when_no_data() -> None:
     html = _render_stock_scanner()
     # The analysis-less TSLA row has no congressional data → empty, sorts last.
-    assert 'data-col="congress" data-val=""' in html
+    assert _cell_vals(html)[1]["congress"] is None
 
 
 def test_stock_scanner_funds_column_renders_net_and_tooltip() -> None:
     html = _render_stock_scanner()
     # Net comes straight from the precomputed funds_net (8); the tooltip breaks
     # out adding vs trimming filers.
-    assert 'data-col="funds" data-val="8"' in html
+    assert _cell_vals(html)[0]["funds"] == "8"
     assert "Funds: 12 adding / 4 trimming (last quarter 13F)" in html
     assert "wl-col-funds wl-qualify" in html
 
@@ -277,7 +323,7 @@ def test_stock_scanner_funds_column_renders_net_and_tooltip() -> None:
 def test_stock_scanner_funds_empty_when_no_data() -> None:
     html = _render_stock_scanner()
     # The analysis-less TSLA row has no 13F data → empty, sorts last like Congress.
-    assert 'data-col="funds" data-val=""' in html
+    assert _cell_vals(html)[1]["funds"] is None
 
 
 def test_stock_scanner_funds_column_is_sortable_and_grouped() -> None:
@@ -309,8 +355,35 @@ def test_stock_scanner_group_headers_declare_bands_and_js_resyncs_colspan() -> N
 
 def test_stock_scanner_rsi_meter_replaces_bare_number() -> None:
     html = _render_stock_scanner()
-    assert "wl-rsi-track" in html
-    assert "wl-rsi-marker" in html
+    # Track and marker are CSS pseudo-elements placed by a wl-rsi-pNN class.
+    assert '<span class="wl-rsi wl-rsi-p60" data-tip="rsi">' in html
+    assert '<span class="wl-rsi-val text-muted">62.0</span>' in html
+    css = CSS_PATH.read_text("utf-8")
+    assert ".wl-rsi::before" in css and ".wl-rsi::after" in css
+    assert ".wl-rsi-p60 { --rsi-pos: 60; }" in css
+    assert "#watchlist-table.wl-compact .wl-rsi::before" in css
+
+
+def test_stock_scanner_row_flags_omit_false_values() -> None:
+    """False flags are omitted; watchlist.js only tests for 'true'/'uk'."""
+    rows = _rows(_render_stock_scanner())
+    assert rows[0].startswith(
+        '<tr data-sepa="8" data-rec="buy" data-breakout="true" data-market="uk">'
+    )
+    assert "data-breakout" not in rows[1] and "data-myb" not in rows[1]
+    assert "data-market" not in rows[1] and 'data-sepa="0"' in rows[1]
+    js = JS_PATH.read_text("utf-8")
+    assert "breakout: (row) => row.dataset.breakout === 'true'" in js
+    assert "myb: (row) => row.dataset.myb === 'true'" in js
+    assert "uk: (row) => row.dataset.market === 'uk'" in js
+
+
+def test_stock_scanner_why_button_uses_single_class() -> None:
+    html = _render_stock_scanner()
+    assert '<button class="wl-why" hx-post="/copilot/ask"' in html
+    assert "btn-outline-secondary" not in html
+    css = CSS_PATH.read_text("utf-8")
+    assert ".wl-why {" in css and ".wl-why:focus-visible" in css
 
 
 def test_stock_scanner_toolbar_exposes_search_and_control_mount() -> None:
@@ -320,19 +393,157 @@ def test_stock_scanner_toolbar_exposes_search_and_control_mount() -> None:
     assert 'id="wl-match-count"' in html
 
 
-def test_stock_scanner_columns_carry_semantic_classes_not_nth_child() -> None:
-    """Every header and data cell gets a stable wl-col-<name> class.
+def test_stock_scanner_thead_order_matches_js_columns() -> None:
+    """Headers keep their wl-col-<name> class; body cells are positional.
 
-    Sticky positioning (and any other column-specific styling) keys off
-    these semantic classes instead of nth-child, so it survives column
-    hiding/reordering. Regression test for issue #43.
+    watchlist.js maps th[data-col] order to cell index and watchlist.css
+    styles body cells by nth-child (#134), so the thead order must equal
+    COLUMNS in watchlist.js.
     """
     html = _render_stock_scanner()
     for col in (*SORTABLE_COLUMNS, "buy"):
         assert f'class="wl-col wl-col-{col}' in html, (
             f"missing semantic class for {col}"
         )
-    assert "nth-child" not in html
+    thead, js_cols = _thead_cols(html), _js_columns()
+    assert len(thead) == 19 and len(js_cols) == 19
+    assert thead == js_cols
+
+
+def test_stock_scanner_css_positions_match_columns() -> None:
+    """Every positional body-cell selector in watchlist.css hits its column."""
+    css = CSS_PATH.read_text("utf-8")
+    cols = _js_columns()
+    expected = {
+        2: "sector",
+        7: "congress",
+        8: "funds",
+        12: "price",
+        14: "entry",
+        15: "stop",
+    }
+    used = {int(n) for n in re.findall(r"td:nth-child\((\d+)\)", css)}
+    assert used == set(expected), used
+    for index, col in expected.items():
+        assert cols[index - 1] == col, (index, col)
+    assert "td:first-child" in css and cols[0] == "ticker"
+    assert "td:last-child" in css and cols[-1] == "buy"
+    # The qualify tint covers td:nth-child(-n+N): N equals the Qualify band.
+    band = re.findall(r"td:nth-child\(-n\+(\d+)\)", css)
+    assert band and set(band) == {"10"}
+    html = _render_stock_scanner()
+    group = re.search(r'colspan="(\d+)" scope="colgroup"\s+data-cols="([^"]+)"', html)
+    assert group is not None
+    qualify = group[2].split(",")
+    assert int(group[1]) == len(qualify) == 10
+    assert qualify == cols[:10]
+
+
+def test_stock_scanner_rows_are_lean() -> None:
+    """Rows carry no inline styles, HTML comments or per-cell classes (#134)."""
+    html = _render_stock_scanner()
+    rows = _rows(html)
+    assert len(rows) == 2
+    for row in rows:
+        assert "style=" not in row
+        assert "<!--" not in row
+        assert 'class="wl-col' not in row
+        assert "data-col=" not in row
+        assert "title=" not in row.replace('data-bs-toggle="tooltip" title=', "")
+        assert "\n" not in row
+        # Actions render exactly once per row.
+        assert row.count("Record Buy") == 1
+        assert row.count('hx-post="/copilot/ask"') == 1
+    assert '<nav id="wl-pager" class="wl-pager"' in html
+
+
+def test_stock_scanner_tbody_carries_copilot_htmx_attrs() -> None:
+    """Why? buttons inherit their hx target/sync and status hooks (#134)."""
+    html = _render_stock_scanner()
+    tbody = html[html.index("<tbody") : html.index(">", html.index("<tbody"))]
+    assert 'hx-target="#copilot-body"' in tbody
+    assert 'hx-swap="innerHTML"' in tbody
+    assert 'hx-sync="#copilot-body:replace"' in tbody
+    assert (
+        "hx-on::before-request=\"event.target.matches('.wl-why') &amp;&amp; "
+        "copilotStatus('Asking…')\"" in tbody
+    )
+    assert "hx-on::send-error=" in tbody and "hx-on::response-error=" in tbody
+    assert 'title="Why? Ask the Research Copilot"' in html
+    why = re.search(r"<button[^>]*>Why\?</button>", html)
+    assert why is not None
+    assert 'data-bs-toggle="offcanvas" data-bs-target="#copilotPanel"' in why[0]
+
+
+def test_stock_scanner_rows_use_data_tip_keys() -> None:
+    """Static tooltips are keys the client expands on first hover (#134)."""
+    rows = _rows(_render_stock_scanner())
+    assert 'data-tip="sepa:11111111"' in rows[0]
+    assert 'data-tip="rsi"' in rows[0]
+    assert 'data-tip="vcp"' in rows[0]
+    assert 'data-tip="uk"' in rows[0]
+    assert "wl-rsi wl-rsi-p60" in rows[0]
+    # Bootstrap reads the congress/funds title, so it stays server-side.
+    assert 'data-bs-toggle="tooltip" title="Congress: 3 buys' in rows[0]
+    js = JS_PATH.read_text("utf-8")
+    for text in (
+        "'P>SMA150&200', 'SMA150>200', 'SMA200↑', 'SMA50>150&200'",
+        "'≥25%abvLow', '≤25%frmHigh', 'RSLeader', 'P>SMA50'",
+        "' — 30 oversold / 70 overbought'",
+        "'VCP breakout — entry zone just transitioned to broken_out this run'",
+        "'London Stock Exchange (LSE)'",
+        "'Multi-year base breakout — cleared ' + arg + ' pivot'",
+        "will be included in the next alert run.",
+        "until the cooldown clears.",
+        "function decorateRows()",
+        "node.title = tipText(node);",
+        "why.type = 'button';",
+        "'Why ' + ticker + '? Ask the Research Copilot'",
+        "buy.type = 'button';",
+        "decorateRows();",
+    ):
+        assert text in js, text
+
+
+def test_stock_scanner_js_pages_matches_client_side() -> None:
+    js = JS_PATH.read_text("utf-8")
+    assert "const PAGE_SIZE = 50;" in js
+    assert "row.hidden = true;" in js
+    assert "row.style.display" not in js
+    assert "if (resetPage) page = 0;" in js
+    assert "render(true);" in js and "apply(true);" in js
+    # Sort and column changes keep the current page.
+    assert "state.presetId = null;\n    apply();" in js
+    assert "'aria-live': 'polite'" in js
+    assert "btn.focus({ preventScroll: true });" in js
+    assert "wrap.scrollTop = 0;" in js
+    assert "getElementById('wl-pager')" in js
+    assert "nav.hidden = total <= PAGE_SIZE;" in js
+    assert "row.cells[idx]" in js
+    assert "'wl-state-v1'" in js and "'wl-presets-v1'" in js
+
+
+def test_stock_scanner_zero_price_row_still_offers_record_buy() -> None:
+    """A price of 0 and no analysis renders without errors (#134 matrix)."""
+    from app.core.alerting import build_alert_ui_state
+    from app.core.recommendation import classify_recommendation
+
+    record = _sample_records()[1].model_copy(update={"price": 0.0})
+    html = templates.get_template("_stock_scanner.html").render(
+        records=[record],
+        portfolio_tickers=set(),
+        recommendations={"TSLA": classify_recommendation(record)},
+        alert_states={
+            "TSLA": build_alert_ui_state(
+                record, has_watching=False, last_alerted_at=None
+            )
+        },
+    )
+    row = _cell_vals(html)[0]
+    assert row["vsentry"] is None and row["vsstop"] is None
+    assert row["price"] == "0.0000"
+    assert "openBuy('TSLA', 0.0, null, null)" in html
+    assert html.count("Record Buy") == 1
 
 
 def test_stock_scanner_table_wrap_and_ticker_buy_columns_are_sticky() -> None:
@@ -348,16 +559,21 @@ def test_stock_scanner_table_wrap_and_ticker_buy_columns_are_sticky() -> None:
     # #394 adds a wl-qualify band class to the Qualify-side cells.
     assert 'class="wl-col wl-col-ticker wl-qualify" data-col="ticker"' in html
     assert 'class="wl-col wl-col-buy" data-col="buy"' in html
+    assert _thead_cols(html)[0] == "ticker" and _thead_cols(html)[-1] == "buy"
 
     css = (ROOT / "app" / "api" / "static" / "css" / "watchlist.css").read_text(
         encoding="utf-8"
     )
     assert ".wl-tbl-wrap" in css
     assert "overflow-x: auto" in css
-    assert "th.wl-col-ticker" in css and "td.wl-col-ticker" in css
-    assert "th.wl-col-buy" in css and "td.wl-col-buy" in css
+    assert "th.wl-col-ticker" in css and "tbody td:first-child" in css
+    assert "th.wl-col-buy" in css and "tbody td:last-child" in css
     assert "position: sticky" in css
-    assert "nth-child" not in css
+    # Row actions are revealed on hover and keyboard focus (#134).
+    assert "tr:focus-within td:last-child > button" in css
+    assert "@media (hover: none)" in css
+    assert "#watchlist-table [data-tip] { cursor: help; }" in css
+    assert "@media (hover: none), (any-pointer: coarse)" in css
 
 
 def test_stock_scanner_css_has_focus_visible_and_touch_target_rules() -> None:
@@ -692,7 +908,7 @@ def test_stock_scanner_frontend_assets_are_served() -> None:
 def test_dashboard_cache_busts_watchlist_controller() -> None:
     markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
 
-    assert 'src="/static/js/watchlist.js?v=20260829-1"' in markup
+    assert 'src="/static/js/watchlist.js?v=20261104-1"' in markup
     assert 'src="/static/js/watchlist.js"' not in markup
 
 
@@ -917,3 +1133,52 @@ def test_runlog_long_error_expands_without_hover(tmp_path, monkeypatch) -> None:
     assert f'<div class="rl-error-full">{long_error}</div>' in markup
     assert f'title="{long_error}"' not in markup
     assert markup.count('<details class="rl-error">') == 1
+
+
+def _render_records(records: list[StockRecord], recommendations: dict) -> str:
+    """Render the scanner partial for ``records`` with given recommendations."""
+    from app.core.alerting import build_alert_ui_state
+
+    return templates.get_template("_stock_scanner.html").render(
+        records=records,
+        portfolio_tickers=set(),
+        recommendations=recommendations,
+        alert_states={
+            r.ticker: build_alert_ui_state(r, has_watching=False, last_alerted_at=None)
+            for r in records
+        },
+    )
+
+
+def test_stock_scanner_myb_without_pivot_renders() -> None:
+    from app.core.recommendation import classify_recommendation
+
+    base = _sample_records()[0]
+    assert base.analysis is not None
+    analysis = base.analysis.model_copy(
+        update={"multiyear_breakout": True, "multiyear_pivot": None}
+    )
+    record = base.model_copy(update={"analysis": analysis})
+    html = _render_records([record], {record.ticker: classify_recommendation(record)})
+    assert '<span class="badge-myb" data-tip="myb">MYB</span>' in html
+    js = JS_PATH.read_text("utf-8")
+    assert ": 'Multi-year base breakout';" in js
+
+
+def test_stock_scanner_rsi_zero_is_a_value() -> None:
+    from app.core.recommendation import classify_recommendation
+
+    record = _sample_records()[0].model_copy(update={"rsi14": 0.0})
+    html = _render_records([record], {record.ticker: classify_recommendation(record)})
+    assert _cell_vals(html)[0]["rsi"] == "0.0000"
+    assert '<span class="wl-rsi wl-rsi-p0 wl-rsi-cold" data-tip="rsi">' in html
+
+
+def test_stock_scanner_unknown_bucket_omits_rec_data_val() -> None:
+    record = _sample_records()[0]
+    rec = SimpleNamespace(
+        bucket="mystery", filter_key="other", text="?", css_class="rec-avoid"
+    )
+    html = _render_records([record], {record.ticker: rec})
+    assert _cell_vals(html)[0]["rec"] is None
+    assert 'data-val=""' not in html

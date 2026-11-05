@@ -199,7 +199,16 @@ def test_why_button_and_ask_form_reset_panel_and_sync(post) -> None:
     scanner = (ROOT / "app" / "api" / "templates" / "_stock_scanner.html").read_text()
 
     _ui_assertions(panel)
-    _ui_assertions(scanner)
+    # The scanner's handlers live on <tbody> and only react to .wl-why (#134).
+    guard = "event.target.matches('.wl-why') &amp;&amp; "
+    assert 'hx-sync="#copilot-body:replace"' in scanner
+    assert f"hx-on::before-request=\"{guard}copilotStatus('Asking…')\"" in scanner
+    assert f"hx-on::response-error=\"{guard}copilotStatus('Copilot request failed." in (
+        scanner
+    )
+    assert f"hx-on::send-error=\"{guard}copilotStatus('Copilot request failed." in (
+        scanner
+    )
     assert "hx-disabled-elt=\"find button[type='submit']\"" in panel
 
 
