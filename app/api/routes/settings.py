@@ -45,7 +45,7 @@ def _settings_context(
 
 
 @router.get("/partials/settings", response_class=HTMLResponse)
-async def partial_settings(request: Request, config: ConfigDep) -> HTMLResponse:
+def partial_settings(request: Request, config: ConfigDep) -> HTMLResponse:
     """Render the Settings/Integrations tab."""
     return templates.TemplateResponse(
         request, "_settings.html", context=_settings_context(config)
@@ -57,7 +57,7 @@ async def partial_settings(request: Request, config: ConfigDep) -> HTMLResponse:
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def save_settings(
+def save_settings(
     request: Request,
     config: ConfigDep,
     fmp_api_key: Annotated[str, Form()] = "",
@@ -100,7 +100,7 @@ async def save_settings(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def clear_setting(
+def clear_setting(
     request: Request,
     config: ConfigDep,
     key: Annotated[str, Form()],
@@ -130,7 +130,7 @@ async def clear_setting(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def rotate_token(request: Request, config: ConfigDep) -> HTMLResponse:
+def rotate_token(request: Request, config: ConfigDep) -> HTMLResponse:
     """Generate and persist a new ``APP_AUTH_TOKEN``, revealed once."""
     token = config.rotate_token()
     response = templates.TemplateResponse(

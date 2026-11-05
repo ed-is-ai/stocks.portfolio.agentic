@@ -276,6 +276,21 @@ class NotificationsRepository:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    def revision(self) -> tuple[int, int, int, int, int, str | None]:
+        """One cheap aggregate that moves on any record, read or dismiss.
+
+        ``SUM(job_status_version)`` and ``MAX(created_at)`` also move on an
+        in-place job upsert, which keeps the row's id.
+        """
+        with session(self._connect) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0), COUNT(read_at),"
+                " COUNT(dismissed_at), COALESCE(SUM(job_status_version), 0),"
+                " MAX(created_at) FROM notifications"
+            ).fetchone()
+        count, top, read, dismissed, versions, newest = row
+        return (int(count), int(top), int(read), int(dismissed), int(versions), newest)
+
     def mark_read(self, notification_id: int) -> None:
         """Mark a single notification read (idempotent)."""
         now = datetime.now(timezone.utc).isoformat()

@@ -31,7 +31,7 @@ from app.api.dependencies import (
 from app.core import config
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.services.desk_service import ORDERING_NOTE
-from tests.test_desk_service import desk_stack  # noqa: F401 -- fixture
+from tests.test_desk_service import _desk_at, desk_stack  # noqa: F401 -- fixture
 from tests.test_portfolio_risk_route import _dump
 from tests.test_views_index_freshness import _use_artifact
 
@@ -373,7 +373,7 @@ def _index() -> str:
 
 
 def test_the_badge_polls_only_while_the_page_is_visible(stack) -> None:
-    visible = "every 20s [document.visibilityState === 'visible'], refresh"
+    visible = "every 30s [document.visibilityState === 'visible'], refresh"
     badge = client.get("/notifications/count", params={"portfolio_id": stack.pid})
 
     assert f'hx-trigger="{visible}"' in badge.text
@@ -404,12 +404,17 @@ def test_the_whole_desk_refreshes_keeping_the_selection(stack) -> None:
 
     assert 'hx-get="/partials/desk"' in refresher
     assert 'hx-target="#tab-content"' in refresher
-    assert (
-        "portfolio-agents-refresh from:body, "
-        "every 60s [document.visibilityState === 'visible']"
-    ) in refresher
+    assert 'hx-trigger="portfolio-agents-refresh from:body"' in refresher
     assert "deskSelectedId()" in refresher
     assert 'hx-sync="#tab-content:drop"' in refresher
+    assert "rev:" not in refresher
+    start = body.index('id="desk-refresh-timer"')
+    timer = body[start : body.index(">", start)]
+    assert "hx-trigger=\"every 60s [document.visibilityState === 'visible']\"" in (
+        timer
+    )
+    assert "deskSelectedId()" in timer
+    assert 'hx-sync="#tab-content:drop"' in timer
     # The queue no longer refreshes on its own.
     assert (
         "hx-get"
@@ -499,3 +504,55 @@ def test_a_late_desk_response_cannot_rewrite_another_tabs_url(stack) -> None:
     assert "!deskTabActive()) return;" in index
     select = body[body.index('<select id="desk-portfolio"') :].split(">", 1)[0]
     assert 'hx-sync="#tab-content:replace"' in select
+
+
+def _timer_rev(body: str) -> str:
+    """The revision the Desk timer sends back (#132)."""
+    match = re.search(r'rev: "([0-9a-f]*)"', body)
+    assert match is not None
+    return match.group(1)
+
+
+def test_an_unchanged_desk_timer_poll_answers_204(stack, monkeypatch) -> None:
+    # A frozen clock, so the two requests cannot straddle a DESK_MAX_AGE bucket.
+    clock = [datetime.now(UTC)]
+    monkeypatch.setitem(
+        app.dependency_overrides, get_desk_service, lambda: _desk_at(stack, clock)
+    )
+    rev = _timer_rev(_desk(stack))
+    assert rev
+    calls: list[object] = []
+    monkeypatch.setattr(
+        "app.services.desk_service.DeskService.view",
+        lambda *args, **kwargs: calls.append(args),
+    )
+
+    resp = client.get("/partials/desk", params={"portfolio_id": stack.pid, "rev": rev})
+
+    assert resp.status_code == 204
+    assert resp.text == ""
+    assert calls == []
+
+
+def test_a_stale_desk_rev_renders_the_new_revision(stack) -> None:
+    rev = _timer_rev(_desk(stack))
+
+    body = _desk(stack, rev="0" * 16)
+
+    assert _timer_rev(body) == rev
+    assert 'id="desk"' in body
+
+
+def test_a_missing_rev_always_renders(stack) -> None:
+    assert 'id="desk"' in _desk(stack)
+
+
+def test_a_revision_of_none_always_renders(stack, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.desk_service.DeskService.revision", lambda *_: None
+    )
+
+    body = _desk(stack, rev="")
+
+    assert _timer_rev(body) == ""
+    assert 'id="desk"' in _desk(stack, rev="anything")

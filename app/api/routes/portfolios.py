@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
+    PORTFOLIO_WRITE,
     get_notifications_repository,
     get_portfolio_recommendation_service,
     get_portfolio_service,
@@ -99,9 +100,9 @@ def _warning_response(
 @router.post(
     "/portfolios",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def create_portfolio(
+def create_portfolio(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -124,9 +125,9 @@ async def create_portfolio(
 @router.post(
     "/portfolios/{portfolio_id}/rename",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def rename_portfolio(
+def rename_portfolio(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -146,9 +147,9 @@ async def rename_portfolio(
 @router.post(
     "/portfolios/{portfolio_id}/delete",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def delete_portfolio(
+def delete_portfolio(
     request: Request,
     trader: TraderDep,
     portfolio: PortfolioDep,
@@ -192,9 +193,9 @@ async def delete_portfolio(
 @router.post(
     "/portfolios/{portfolio_id}/strategy",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def assign_strategy(
+def assign_strategy(
     request: Request,
     portfolio: PortfolioDep,
     assignment: StrategyAssignmentDep,
@@ -243,9 +244,9 @@ async def assign_strategy(
 @router.post(
     "/portfolios/{portfolio_id}/strategy/clear",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def clear_strategy(
+def clear_strategy(
     request: Request,
     portfolio: PortfolioDep,
     assignment: StrategyAssignmentDep,
@@ -260,7 +261,7 @@ async def clear_strategy(
 @router.post(
     "/portfolios/{portfolio_id}/positions/{ticker:path}/stop",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
 def set_position_stop(
     request: Request,
@@ -353,7 +354,7 @@ def _positive_decimal(raw: str | None) -> Decimal | None:
     "/portfolios/{portfolio_id}/recommendations",
     response_class=HTMLResponse,
 )
-async def portfolio_recommendations(
+def portfolio_recommendations(
     request: Request,
     recommendations: RecommendationDep,
     trader: TraderDep,

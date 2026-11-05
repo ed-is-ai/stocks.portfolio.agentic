@@ -15,7 +15,7 @@
 <span id="notif-badge"
       class="notif-badge{{ ' is-unknown' if count is none else (' has-count' if count else '') }}"
       hx-get="/notifications/count"
-      hx-trigger="every 20s [document.visibilityState === 'visible'], refresh"
+      hx-trigger="every 30s [document.visibilityState === 'visible'], refresh"
       hx-target="this"
       hx-swap="outerHTML"
       hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'

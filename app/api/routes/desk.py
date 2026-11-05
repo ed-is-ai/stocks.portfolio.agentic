@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 
 from app.api.dependencies import get_desk_service
 from app.api.params import optional_int
@@ -34,7 +34,7 @@ ITEM_NOT_FOUND = "That item is no longer in the queue."
 
 
 @router.get("/desk", response_class=HTMLResponse)
-async def desk(request: Request) -> HTMLResponse:
+def desk(request: Request) -> HTMLResponse:
     """Render the shell with the AI Desk tab active; its content loads into
     ``#tab-content`` from the URL's ``portfolio_id`` and ``item``."""
     return render_shell(request, "desk")
@@ -46,10 +46,21 @@ def partial_desk(
     desk: DeskDep,
     portfolio_id: str | None = None,
     item: str | None = None,
-) -> HTMLResponse:
-    """Render the whole Desk for a portfolio with ``item`` selected."""
-    view = desk.view(optional_int(portfolio_id), item or None)
-    return templates.TemplateResponse(request, "_desk.html", _context(view))
+    rev: str | None = None,
+) -> Response:
+    """Render the whole Desk for a portfolio with ``item`` selected.
+
+    The 60s timer sends the ``rev`` it last rendered; an unchanged
+    revision answers 204 so htmx keeps the page without rebuilding it.
+    """
+    pid = optional_int(portfolio_id)
+    revision = desk.revision(pid)
+    if rev and rev == revision:
+        return Response(status_code=204)
+    view = desk.view(pid, item or None)
+    return templates.TemplateResponse(
+        request, "_desk.html", {**_context(view), "revision": revision}
+    )
 
 
 @router.get("/partials/desk/queue", response_class=HTMLResponse)

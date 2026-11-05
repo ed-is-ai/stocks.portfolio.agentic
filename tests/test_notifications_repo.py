@@ -134,3 +134,45 @@ def test_recent_info_returns_undismissed_info_since(tmp_path) -> None:
     since = datetime.now(timezone.utc) - timedelta(days=1)
     assert [n.id for n in repo.recent_info(since)] == [kept]
     assert repo.recent_info(datetime.now(timezone.utc) + timedelta(days=1)) == []
+
+
+def test_revision_moves_on_record_read_and_dismiss(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    empty = repo.revision()
+    assert repo.revision() == empty
+
+    first = repo.record(NotificationCategory.ALERT, "breakout", "One")
+    recorded = repo.revision()
+    assert recorded != empty
+
+    repo.mark_read(first)
+    read = repo.revision()
+    assert read != recorded
+
+    repo.dismiss(first)
+    assert repo.revision() != read
+
+
+def test_revision_moves_on_an_in_place_job_upsert(tmp_path) -> None:
+    repo = _repo(tmp_path)
+    created = datetime.now(timezone.utc)
+
+    def upsert(version: int) -> int:
+        return repo.upsert_job_notification(
+            job_id="job-1",
+            job_status_version=version,
+            category=NotificationCategory.BACKTEST,
+            event_type="strategy_job_failed",
+            severity=NotificationSeverity.ERROR,
+            title="Backtest failed",
+            body="Status: failed.",
+            created_at=created,
+            target_url=None,
+            actions=(),
+        )
+
+    first_id = upsert(1)
+    before = repo.revision()
+
+    assert upsert(2) == first_id
+    assert repo.revision() != before

@@ -11,6 +11,7 @@ computed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -122,6 +123,9 @@ TAB_LABELS: dict[str, str] = {
 }
 #: How long the bell's attention count is reused for unchanged inputs.
 COUNT_TTL = timedelta(seconds=60)
+#: Longest a Desk timer poll may answer "unchanged" for inputs its revision
+#: does not capture (prices, freshness labels).
+DESK_MAX_AGE = timedelta(minutes=10)
 #: The bell's cached counts, shared by every request's DeskService.
 ATTENTION_COUNTS: dict[tuple[object, ...], tuple[datetime, int]] = {}
 _COUNTS_LOCK = threading.Lock()
@@ -210,6 +214,12 @@ class DeskView:
         return {chip: sum(i.chip == chip for i in self.items) for chip in CHIP_TONES}
 
 
+def file_revision(*paths: Path) -> tuple[tuple[int, int] | None, ...]:
+    """Each file's ``(mtime_ns, size)``, or None when it is absent."""
+    stats = (path.stat() if path.exists() else None for path in paths)
+    return tuple(None if st is None else (st.st_mtime_ns, st.st_size) for st in stats)
+
+
 class DeskService:
     """Assemble the AI Desk from the agents' existing outputs (read-only)."""
 
@@ -225,6 +235,7 @@ class DeskService:
         source_health: Callable[[], Mapping[SourceName, SourceHealth]],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         count_cache: dict[tuple[object, ...], tuple[datetime, int]] | None = None,
+        input_revision: Callable[[], object] = lambda: None,
     ) -> None:
         self._trader = trader
         self._portfolio = portfolio
@@ -236,12 +247,13 @@ class DeskService:
         self._source_health = source_health
         self._now = now
         self._counts = {} if count_cache is None else count_cache
+        self._input_revision = input_revision
 
     def attention_count(self, portfolio_id: int | None) -> int:
         """The urgent attention count the masthead bell shows.
 
         Reused for ``COUNT_TTL`` while the portfolio, published artifact and
-        trade ledgers are unchanged, so the 20s poll does not rebuild the
+        trade ledgers are unchanged, so the 30s poll does not rebuild the
         agent view. Notifications are not read: they never count urgent.
         """
         now = self._now()
@@ -271,6 +283,31 @@ class DeskService:
             logger.warning("Attention count key unavailable", exc_info=True)
             return None
         return (portfolio_id, mtime, revisions)
+
+    def revision(self, portfolio_id: int | None) -> str | None:
+        """A short digest of the Desk's cheap inputs, or None (always render).
+
+        Covers the count key (artifact, trade ledgers), the portfolio names,
+        the notifications table, the copilot audit log, whether the trade
+        review cache is warm, ``input_revision`` (theses, Strategy
+        assignments, source health) and a ``DESK_MAX_AGE`` time bucket that
+        bounds staleness from inputs the digest does not see (prices).
+        """
+        key = self._count_key(portfolio_id)
+        if key is None:
+            return None
+        try:
+            names = tuple((p.id, p.name) for p in self._trader.list_portfolios())
+            notes = self._notifications.revision()
+            audit = file_revision(self._audit_path)
+            reviews_warm = self._trade_reviews.cached_reviews() is not None
+            inputs = self._input_revision()
+        except Exception:
+            logger.warning("Desk revision unavailable", exc_info=True)
+            return None
+        bucket = int(self._now().timestamp() // DESK_MAX_AGE.total_seconds())
+        raw = repr((key, names, notes, audit, reviews_warm, inputs, bucket)).encode()
+        return hashlib.sha1(raw, usedforsecurity=False).hexdigest()[:16]
 
     def view(self, portfolio_id: int | None, item_id: str | None = None) -> DeskView:
         """Build the Desk for ``portfolio_id`` with ``item_id`` selected (the

@@ -2,9 +2,12 @@ from datetime import datetime, timedelta, timezone
 import json
 
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
+import pytest
 
 from app.api.app import app
 import app.api.stock_scanner_context as stock_scanner_context_module
+import app.schemas.analysis_artifact as analysis_artifact_module
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
 from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.pipeline_status import PipelineStage, PipelineState, StageState
@@ -400,3 +403,97 @@ def test_pipeline_status_fresh_freshness_copy_and_icon(monkeypatch, tmp_path) ->
     assert "bi-clock-fill" not in markup
     assert "Last successful refresh" in markup
     assert '<time class="local-time" datetime="' in markup
+
+
+# --- #132: the artifact meta is parsed once per file revision ---------------
+
+
+def _spy_meta_parse(monkeypatch) -> list[object]:
+    """Count uncached artifact-meta parses behind ``read_analysis_artifact_meta``."""
+    calls: list[object] = []
+    real = analysis_artifact_module._parse_artifact_meta
+
+    def spy(path):
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(analysis_artifact_module, "_parse_artifact_meta", spy)
+    return calls
+
+
+def _point_status_at(monkeypatch, tmp_path, analysis_path) -> None:
+    monkeypatch.setattr(stock_scanner_context_module, "ANALYSIS_JSON", analysis_path)
+    repo = PipelineStatusRepository(tmp_path / "status.json")
+    monkeypatch.setattr(stock_scanner_context_module, "_status_repository", repo)
+    monkeypatch.setattr(pipeline_service_module, "_status_repository", repo)
+
+
+def _write_artifact(path, run_id: str, generated_at: datetime) -> None:
+    path.write_text(
+        json.dumps(
+            build_analysis_payload([], run_id=run_id, generated_at=generated_at)
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_pipeline_status_parses_an_unchanged_artifact_once(
+    monkeypatch, tmp_path
+) -> None:
+    analysis_path = tmp_path / "analysis_results.json"
+    _write_artifact(analysis_path, "run-a", datetime.now(timezone.utc))
+    _point_status_at(monkeypatch, tmp_path, analysis_path)
+    calls = _spy_meta_parse(monkeypatch)
+
+    first = client.get("/pipeline-status").text
+    second = client.get("/pipeline-status").text
+
+    assert len(calls) == 1
+    assert "freshness-fresh" in first and "freshness-fresh" in second
+
+
+def test_pipeline_status_reparses_a_rewritten_artifact(monkeypatch, tmp_path) -> None:
+    analysis_path = tmp_path / "analysis_results.json"
+    _write_artifact(analysis_path, "run-a", datetime.now(timezone.utc))
+    _point_status_at(monkeypatch, tmp_path, analysis_path)
+    calls = _spy_meta_parse(monkeypatch)
+    assert "freshness-fresh" in client.get("/pipeline-status").text
+
+    stale = datetime.now(timezone.utc) - timedelta(days=30)
+    _write_artifact(analysis_path, "run-older", stale)
+
+    assert "freshness-stale" in client.get("/pipeline-status").text
+    assert len(calls) == 2
+
+
+def test_a_missing_or_corrupt_artifact_reads_unknown_and_is_not_cached(
+    monkeypatch, tmp_path
+) -> None:
+    analysis_path = tmp_path / "analysis_results.json"
+    _point_status_at(monkeypatch, tmp_path, analysis_path)
+    calls = _spy_meta_parse(monkeypatch)
+
+    assert "Last successful refresh unknown" in client.get("/pipeline-status").text
+    assert calls == []
+    assert analysis_artifact_module.read_analysis_artifact_meta(analysis_path) is None
+
+    analysis_path.write_text("{not json", encoding="utf-8")
+    assert "Last successful refresh unknown" in client.get("/pipeline-status").text
+    parsed = len(calls)
+    assert parsed >= 1
+    client.get("/pipeline-status")
+    assert len(calls) > parsed
+    assert analysis_path.resolve() not in analysis_artifact_module._META_CACHE
+
+
+def test_the_cached_artifact_meta_cannot_be_mutated(tmp_path) -> None:
+    path = tmp_path / "analysis.json"
+    _write_artifact(path, "run-a", datetime.now(timezone.utc))
+    meta = analysis_artifact_module.read_analysis_artifact_meta(path)
+    assert meta is not None
+
+    with pytest.raises(ValidationError):
+        meta.run_id = "run-b"  # type: ignore[misc]
+
+    again = analysis_artifact_module.read_analysis_artifact_meta(path)
+    assert again is not None and again.run_id == "run-a"
