@@ -48,6 +48,7 @@ def mocked_import(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     mock_portfolio = MagicMock()
     mock_portfolio.default_portfolio_context.return_value = {}
     mock_portfolio.portfolio_partial_context.return_value = {}
+    mock_portfolio.covering_range.side_effect = lambda _pid, range_key: range_key
     mock_notifications = MagicMock()
     app.dependency_overrides[get_trader_service] = lambda: mock_trader
     app.dependency_overrides[get_portfolio_service] = lambda: mock_portfolio
@@ -1232,17 +1233,14 @@ def test_route_module_no_longer_imports_sipp_import_dir():
     assert not hasattr(portfolio_route, "SIPP_IMPORT_DIR")
 
 
-def test_rendered_portfolio_partial_includes_portfolio_select_element():
+def test_rendered_portfolio_partial_includes_the_import_queue_controls():
     """Structural regression guard for Gate 2 (AC3/AC4): index.html's
-    handleSippImportSubmit keys off `#portfolioSelect` to disable/re-enable
-    the account selector for the duration of an in-flight import queue.
-    This proves the element the JS depends on is actually present in a
-    normal (non-empty) rendered `_portfolio.html` partial, so a future
-    markup rename can't silently break Gate 2's lock/discard logic without
-    a test failing. This is a structural proof only — it does not execute
-    JavaScript or prove the runtime disable/discard behavior itself; see
-    the story's Dev Notes "No JS Test Harness Exists" for why, and the new
-    Playwright module for the behavioral proof."""
+    handleSippImportSubmit disables the queue's own controls for the
+    duration of an in-flight import. Since GH-130 the account selector is
+    the shell's picker, so the tab renders no second ``#portfolioSelect``
+    (the JS guards its absence) and the submit button the browser tests
+    observe must be present. Structural only; see
+    ``test_portfolio_import_queue_browser`` for the behavioral proof."""
     mock_trader = MagicMock()
     mock_trader.list_portfolios.return_value = [
         Portfolio(id=1, name="SIPP", created_at="2024-01-01")
@@ -1257,7 +1255,8 @@ def test_rendered_portfolio_partial_includes_portfolio_select_element():
     ctx = service.default_portfolio_context(1)
     html = templates.get_template("_portfolio.html").render(**ctx)
 
-    assert 'id="portfolioSelect"' in html
+    assert 'id="importSubmitBtn"' in html
+    assert 'id="portfolioSelect"' not in html
 
 
 # --- Story 3.4: IG, a contract-only provider --------------------------------

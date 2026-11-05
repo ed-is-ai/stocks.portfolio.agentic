@@ -96,7 +96,12 @@ def record_trade(
     "/trades/{trade_id}",
     dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-def delete_trade(trade_id: int, trader: TraderDep) -> RedirectResponse:
-    """Delete a trade by ID and redirect to the history partial."""
+def delete_trade(
+    request: Request, trade_id: int, trader: TraderDep
+) -> RedirectResponse:
+    """Delete a trade by ID and redirect to Portfolio's trades partial,
+    keeping the query (the portfolio being viewed, AD-4)."""
     trader.delete_trade(trade_id)
-    return RedirectResponse("/partials/history", status_code=303)
+    query = request.url.query
+    url = "/partials/portfolio/trades"
+    return RedirectResponse(f"{url}?{query}" if query else url, status_code=303)

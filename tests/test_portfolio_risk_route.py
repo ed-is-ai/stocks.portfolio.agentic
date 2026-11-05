@@ -75,22 +75,21 @@ def test_risk_partial_renders_policy_findings_and_inputs(stack) -> None:
     resp = client.get("/partials/portfolio/risk", params={"portfolio_id": pid})
     assert resp.status_code == 200
     body = resp.text
-    # Policy limits are visible, not hidden in a tooltip.
-    assert "max position 20%" in body
-    assert "max sector 35%" in body
-    assert "max capital at risk to stops 6%" in body
-    assert "Confidence: limited" in body
-    # AAA is 50% of £2,000 and 7.5% is at risk to its BUY-trade stop.
-    assert 'data-risk-kind="position_concentration"' in body
-    assert 'data-risk-kind="sector_concentration"' in body
-    assert "Capital at risk to stops is 7.5%" in body
-    assert "AAA (BUY trade stop 85.00 GBP)" in body
-    assert "£150.00 (7.5%)" in body
-    assert "£2,000.00" in body
-    assert 'data-risk-kind="unpriced"' in body
-    assert 'data-risk-kind="unknown_sector"' in body
-    # High findings come before medium/info ones.
-    assert body.index("position_concentration") < body.index('"unpriced"')
+    lines, notes = body.split('<details class="disclosure">', 1)
+    # GH-130: the queued (high) findings are one line each, high first.
+    assert "Risk check" in lines and "3 issues" in lines
+    assert lines.count('class="portfolio-risk-item"') == 3
+    assert "AAA is 50.0% of the portfolio" in lines
+    assert "Capital at risk to stops is 7.5%" in lines
+    assert "Energy is 50.0% of the portfolio" in lines
+    # Policy, limitations and unqueued findings sit behind the disclosure.
+    assert "Policy and sector notes" in notes
+    assert "Max position 20%" in notes and "max sector 35%" in notes
+    assert "max capital at risk 6%" in notes
+    assert "1 holding(s) unpriced and excluded from percentages." in notes
+    assert "Unknown sector (BBB): " in notes
+    assert "BBB is unpriced: " in notes
+    assert "unpriced" not in lines and "Unknown sector" not in lines
 
 
 def test_risk_partial_performs_no_writes(stack) -> None:

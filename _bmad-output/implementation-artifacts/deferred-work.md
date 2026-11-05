@@ -796,3 +796,21 @@ Genuine follow-ups, each needing product direction:
 - source_spec: `_bmad-output/implementation-artifacts/spec-gh-128-today-and-shell.md`
   summary: The 10-minute revision bucket re-renders `#today`, which closes any open Details disclosure.
   evidence: `DESK_MAX_AGE` is part of `revision()`, and the poller swaps outerHTML.
+
+## Deferred from GH-130 (Portfolio screen)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-130-portfolio-screen.md`
+  summary: The Risk check partial builds the risk report twice (once inside `risk_items`, once for the policy notes).
+  evidence: `partial_portfolio_risk` calls `desk.risk_items` and `portfolio.risk_report`; the Desk projection is cached per revision but the report is not shared with it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-130-portfolio-screen.md`
+  summary: The agents partial still builds the whole `PortfolioAgentView` though only Stop suggestions are rendered now.
+  evidence: `partial_portfolio_agents` is unchanged; strategy, risk, evidence and thesis cells are built and not swapped.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-130-portfolio-screen.md`
+  summary: `index.html` gear menu still has a divider keyed on the retired `realised-pnl` slug (dead branch); AD-13 reserves `index.html` to #128.
+  evidence: `app/api/templates/index.html` `{% if slug == "realised-pnl" %}`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-130-portfolio-screen.md`
+  summary: A failed `/partials/history/weekly` leaves the weekly section empty (no unavailable message now that "Loading…" is gone), and the Trades list spans all accounts.
+  evidence: `_history.html` `#trade-weekly` has no after-request fallback; `_history_context` takes every portfolio id.
+- source_spec: `_bmad-output/implementation-artifacts/spec-gh-130-portfolio-screen.md`
+  summary: Weight flags use only valued holdings as the denominator and the default policy limit, so unpriced holdings overstate concentration.
+  evidence: `PortfolioService._weights` and `max_position_pct` from `RiskPolicyV1()`.

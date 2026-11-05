@@ -1,0 +1,29 @@
+{# Portfolio's Trades & realised P&L sub-view (GH-130): the selected
+   portfolio's realised P&L, then the trade history. #}
+<link rel="stylesheet" href="/static/css/portfolio.css?v=20261105-1">
+<section class="portfolio-screen" data-active-portfolio="{{ active_portfolio.id if active_portfolio else '' }}">
+  <header class="portfolio-head">
+    <div class="portfolio-head-title">
+      <h1>{{ active_portfolio.name if active_portfolio else "Portfolio" }}</h1>
+    </div>
+    {% set sub = "trades" %}{% include "_portfolio_nav.html" %}
+  </header>
+  <section class="portfolio-trades-section" aria-labelledby="portfolio-realised-h">
+    <h2 id="portfolio-realised-h" class="portfolio-label">Realised P&amp;L</h2>
+    {% include "_realised_pnl.html" %}
+  </section>
+  {% if not no_portfolios %}
+  <section class="portfolio-trades-section" aria-labelledby="portfolio-history-h">
+    <h2 id="portfolio-history-h" class="portfolio-label">Trades</h2>
+    <p class="text-muted" style="font-size:0.78rem">All accounts.</p>
+    {% include "_history.html" %}
+  </section>
+  {% endif %}
+</section>
+<script>
+  (function () {
+    var host = document.querySelector('[data-active-portfolio]');
+    var id = host ? host.getAttribute('data-active-portfolio') : '';
+    if (id && window.setActivePortfolio) setActivePortfolio(id);
+  })();
+</script>

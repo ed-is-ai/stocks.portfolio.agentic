@@ -12,9 +12,7 @@
    placeholders; any placeholder a response did not fill -- every cell when
    the request failed -- declares itself instead of staying blank. #}
 <section id="trade-weekly" class="trade-weekly" hx-get="/partials/history/weekly"
-         hx-trigger="load" hx-swap="outerHTML" aria-label="Weekly process summary">
-  <span class="text-muted">Loading weekly process review…</span>
-</section>
+         hx-trigger="load" hx-swap="outerHTML" aria-label="Weekly process summary"></section>
 <div hx-get="/partials/history/process" hx-trigger="load, trade-process-refresh from:body"
      hx-swap="none" hx-sync="this:replace"
      hx-on::after-request="tradeProcessUnavailable(event)"></div>
@@ -58,7 +56,7 @@
         <td>${{ "%.2f"|format(t.price) }}</td>
         <td class="fw-semibold">${{ "%.2f"|format(t.shares * t.price) }}</td>
         <td class="text-muted" style="font-size:0.76rem">{{ t.notes }}</td>
-        <td><span id="process-{{ t.id }}" class="agent-cell" data-process-placeholder>Loading…</span></td>
+        <td><span id="process-{{ t.id }}" class="agent-cell" data-process-placeholder></span></td>
         <td>
           {% if t.source == 'opening_lot' %}
             {% if ol_status == 'unconsumed' %}
@@ -99,7 +97,7 @@
           <button class="btn btn-link btn-sm text-danger p-0"
                   style="font-size:1rem"
                   title="Delete trade"
-                  hx-delete="/trades/{{ t.id }}"
+                  hx-delete="/trades/{{ t.id }}{% if active_portfolio %}?portfolio_id={{ active_portfolio.id }}{% endif %}"
                   hx-target="#tab-content"
                   hx-swap="innerHTML"
                   hx-confirm="Delete this trade?">
