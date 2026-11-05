@@ -98,8 +98,27 @@
     density: 'comfortable',
   });
 
+  // Rows shown per page (#134). The page number is never persisted.
+  const PAGE_SIZE = 50;
+
+  // Static tooltip text, built on first hover/focus from a row's data-tip key
+  // so the server does not repeat it on every row (#134).
+  const SEPA_TIP_LABELS = [
+    'P>SMA150&200', 'SMA150>200', 'SMA200↑', 'SMA50>150&200',
+    '≥25%abvLow', '≤25%frmHigh', 'RSLeader', 'P>SMA50',
+  ];
+  const STATIC_TIPS = {
+    vcp: 'VCP breakout — entry zone just transitioned to broken_out this run',
+    uk: 'London Stock Exchange (LSE)',
+    mail: "Meets the email-alert criteria and isn't on cooldown — will be included in the next alert run.",
+    cooldown: "Already alerted — the same event won't email again until the cooldown clears. This explains why the badge is still showing without a new email.",
+  };
+
   let state = loadState();
   let originalRows = []; // server-provided (actionable-first) order
+  let sortedRows = []; // originalRows in the current sort order
+  let colIndex = new Map(); // column key -> cell index, from thead th[data-col]
+  let page = 0;
 
   // ── Persistence ────────────────────────────────────────────────
   function loadState() {
@@ -162,10 +181,19 @@
     return node;
   }
 
+  // Body cells carry no data-col (#134): map each key to its thead position.
+  function buildColIndex() {
+    colIndex = new Map();
+    const t = table();
+    if (!t) return;
+    t.querySelectorAll('thead th[data-col]').forEach((th, i) => colIndex.set(th.dataset.col, i));
+  }
+
   // Canonical value for a row/column, read from the cell's data-val.
   // Returns a number, a non-empty string, or null when the value is unavailable.
   function cellVal(row, col) {
-    const cell = row.querySelector('[data-col="' + col + '"]');
+    const idx = colIndex.get(col);
+    const cell = idx === undefined ? null : row.cells[idx];
     if (!cell) return null;
     const raw = cell.dataset.val;
     if (raw === undefined || raw === '') return null;
@@ -178,8 +206,14 @@
     const hidden = new Set(state.hidden);
     COLUMNS.forEach(({ col }) => {
       const on = hidden.has(col);
-      document.querySelectorAll('#watchlist-table [data-col="' + col + '"]').forEach((cell) => {
-        cell.classList.toggle('wl-hidden', on);
+      document.querySelectorAll('#watchlist-table thead th[data-col="' + col + '"]').forEach((th) => {
+        th.classList.toggle('wl-hidden', on);
+      });
+      const idx = colIndex.get(col);
+      if (idx === undefined) return;
+      originalRows.forEach((row) => {
+        const cell = row.cells[idx];
+        if (cell) cell.classList.toggle('wl-hidden', on);
       });
     });
     // Keep the Qualify/Execute group-label spans in step with the columns
@@ -242,6 +276,7 @@
       });
     }
     rows.forEach((r) => body.appendChild(r));
+    sortedRows = rows;
     updateSortIndicators();
   }
 
@@ -288,11 +323,11 @@
     apply();
   }
 
-  // ── Filtering (toggles + query + ranges) ───────────────────────
+  // ── Filtering (toggles + query + ranges) + paging ──────────────
   function applyFilters() {
     const q = state.query.trim().toLowerCase();
-    let shown = 0;
-    originalRows.forEach((row) => {
+    const matches = [];
+    sortedRows.forEach((row) => {
       let ok = true;
       for (const f of state.filters) {
         const test = TOGGLE_FILTERS[f];
@@ -315,15 +350,93 @@
           if (max != null && v > max) { ok = false; break; }
         }
       }
-      row.style.display = ok ? '' : 'none';
-      if (ok) shown += 1;
+      row.hidden = true;
+      if (ok) matches.push(row);
     });
+    const pages = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
+    page = Math.min(page, pages - 1); // clamp when the match count shrinks
+    const start = page * PAGE_SIZE;
+    matches.slice(start, start + PAGE_SIZE).forEach((row) => { row.hidden = false; });
     const counter = document.getElementById('wl-match-count');
-    if (counter) counter.textContent = String(shown);
+    if (counter) counter.textContent = String(matches.length);
+    renderPager(matches.length);
+  }
+
+  function renderPager(total) {
+    const nav = document.getElementById('wl-pager');
+    if (!nav) return;
+    nav.innerHTML = '';
+    nav.hidden = total <= PAGE_SIZE;
+    if (nav.hidden) return;
+    const last = Math.ceil(total / PAGE_SIZE) - 1;
+    const go = (to, dir) => () => {
+      page = to;
+      applyFilters();
+      const wrap = document.querySelector('.wl-tbl-wrap');
+      if (wrap) { wrap.scrollTop = 0; wrap.scrollIntoView({ block: 'nearest' }); }
+      // Keep focus on the activated control; fall back to its sibling.
+      const btn = nav.querySelector('[data-dir="' + dir + '"]:not(:disabled)')
+        || nav.querySelector('[data-dir]:not(:disabled)');
+      if (btn) btn.focus({ preventScroll: true });
+    };
+    const first = page * PAGE_SIZE + 1;
+    const end = Math.min(total, first + PAGE_SIZE - 1);
+    nav.appendChild(el('button', {
+      class: 'btn-filter', type: 'button', text: 'Prev', 'aria-label': 'Previous page',
+      'data-dir': 'prev', disabled: page === 0 ? 'disabled' : null, onclick: go(page - 1, 'prev'),
+    }));
+    nav.appendChild(el('span', {
+      class: 'wl-pager-info', 'aria-live': 'polite', text: first + '–' + end + ' of ' + total,
+    }));
+    nav.appendChild(el('button', {
+      class: 'btn-filter', type: 'button', text: 'Next', 'aria-label': 'Next page',
+      'data-dir': 'next', disabled: page >= last ? 'disabled' : null, onclick: go(page + 1, 'next'),
+    }));
+  }
+
+  function tipText(node) {
+    const tip = node.dataset.tip || '';
+    const sep = tip.indexOf(':');
+    const key = sep < 0 ? tip : tip.slice(0, sep);
+    const arg = sep < 0 ? '' : tip.slice(sep + 1);
+    if (key === 'sepa') {
+      return SEPA_TIP_LABELS.map((label, i) => label + ':' + (arg[i] === '1' ? '✓' : '✗')).join(' | ');
+    }
+    if (key === 'rsi') {
+      const val = node.querySelector('.wl-rsi-val');
+      return 'RSI ' + (val ? val.textContent : '') + ' — 30 oversold / 70 overbought';
+    }
+    if (key === 'myb') {
+      return arg ? 'Multi-year base breakout — cleared ' + arg + ' pivot' : 'Multi-year base breakout';
+    }
+    return STATIC_TIPS[key] || '';
+  }
+
+  // Attributes that would otherwise repeat on every row (#134): tooltips from
+  // data-tip keys (so keyboard and assistive tech get them without hovering)
+  // and the action buttons' type and accessible name.
+  function decorateRows() {
+    const t = table();
+    if (!t) return;
+    t.querySelectorAll('tbody [data-tip]').forEach((node) => { node.title = tipText(node); });
+    originalRows.forEach((row) => {
+      const ticker = row.cells[0] ? row.cells[0].dataset.val : '';
+      const buy = row.querySelector('.btn-buy-sm');
+      if (buy) buy.type = 'button';
+      const why = row.querySelector('.wl-why');
+      if (!why) return;
+      why.type = 'button';
+      const label = 'Why ' + ticker + '? Ask the Research Copilot';
+      why.setAttribute('aria-label', label);
+      why.title = label;
+    });
   }
 
   // ── Apply everything + persist ─────────────────────────────────
-  function apply() {
+  // resetPage: the matching row set changed (filters, search, ranges, presets),
+  // so start again from the first page. Sort, columns and density keep it.
+  function apply(resetPage) {
+    if (resetPage) page = 0;
     applyColumns();
     applyDensity();
     applySort();
@@ -371,7 +484,7 @@
           if (cur[0] == null && cur[1] == null) delete state.ranges[f.col];
           else state.ranges[f.col] = cur;
           state.presetId = null;
-          apply();
+          apply(true);
         },
       });
       return el('div', { class: 'wl-range-row' }, [
@@ -383,7 +496,7 @@
     });
     const clear = el('button', {
       class: 'wl-panel-action', type: 'button', text: 'Clear all ranges',
-      onclick: () => { state.ranges = {}; state.presetId = null; render(); },
+      onclick: () => { state.ranges = {}; state.presetId = null; render(true); },
     });
     return el('div', { class: 'wl-dd-panel wl-ranges-panel' }, rows.concat([clear]));
   }
@@ -485,7 +598,7 @@
     if (!preset) return;
     state = Object.assign(defaultState(), JSON.parse(JSON.stringify(preset.state)));
     state.presetId = id;
-    render();
+    render(true);
   }
 
   function savePreset(name) {
@@ -517,10 +630,10 @@
   }
 
   // ── Render / init ──────────────────────────────────────────────
-  function render() {
+  function render(resetPage) {
     buildAdv();
     syncStatic();
-    apply();
+    apply(resetPage);
   }
 
   function init() {
@@ -528,7 +641,10 @@
     const body = tbody();
     if (!body) return; // not the watchlist partial
     originalRows = Array.prototype.slice.call(body.rows);
-    render();
+    sortedRows = originalRows.slice();
+    buildColIndex();
+    decorateRows();
+    render(true);
   }
 
   // ── Global event wiring (bound once) ───────────────────────────
@@ -549,7 +665,7 @@
       toggle.classList.toggle('active', on);
       toggle.setAttribute('aria-pressed', String(on));
       state.presetId = null;
-      apply();
+      apply(true);
       return;
     }
     const sortBtn = event.target.closest('#watchlist-table .wl-sort');
@@ -564,7 +680,7 @@
     if (event.target.id === 'wl-search') {
       state.query = event.target.value;
       state.presetId = null;
-      apply();
+      apply(true);
     }
   });
 
