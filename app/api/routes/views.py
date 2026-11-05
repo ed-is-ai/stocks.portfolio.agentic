@@ -212,7 +212,7 @@ def partial_scanner(
     """The Scanner tab's content (the existing Stock Scanner screen)."""
     return templates.TemplateResponse(
         request,
-        "_stock_scanner.html",
+        "_scanner.html",
         context=build_stock_scanner_context(trader, portfolio, alerts),
     )
 

@@ -1,19 +1,10 @@
-{# Regime banner (#387). `(x | round(1)) + 0` normalises -0.0 -> 0.0 so a
-   tiny negative return never renders as "-0.0%". #}
-{% if market_regime %}
-{% if market_regime.is_degraded %}
-<div id="market-regime" class="alert mt-1" style="background:#e5e7eb;color:#374151" role="note" aria-label="Market regime">
-  <span class="fw-bold">Market regime unavailable</span>
-</div>
-{% elif market_regime.spy_uptrend %}
-<div id="market-regime" class="alert mt-1" style="background:#dcfce7;color:#166534" role="note" aria-label="Market regime">
-  <span class="fw-bold">S&amp;P 500 in confirmed uptrend</span>
-  <span class="ms-2">SPY 52-wk {{ '%+.1f'|format((market_regime.return_52w_pct | round(1)) + 0) }}%</span>
-</div>
-{% else %}
-<div id="market-regime" class="alert mt-1" style="background:#fee2e2;color:#991b1b" role="note" aria-label="Market regime">
-  <span class="fw-bold">S&amp;P 500 below its 200-day average</span>
-  <span class="ms-2">SPY 52-wk {{ '%+.1f'|format((market_regime.return_52w_pct | round(1)) + 0) }}%</span>
-</div>
-{% endif %}
-{% endif %}
+{# Regime text for the Scanner title line (#387, inline since #129).
+   `(x | round(1)) + 0` normalises -0.0 -> 0.0 so a tiny negative return
+   never renders as "-0.0%". #}
+{%- if market_regime %} ·
+{% if market_regime.is_degraded -%}
+<span id="market-regime" class="wl-regime is-unknown">Market regime unavailable</span>
+{%- else -%}
+<span id="market-regime" class="wl-regime {{ 'is-up' if market_regime.spy_uptrend else 'is-down' }}">S&amp;P 500 {{ 'in confirmed uptrend' if market_regime.spy_uptrend else 'below its 200-day average' }}</span> · SPY 52-wk {{ '%+.1f'|format((market_regime.return_52w_pct | round(1)) + 0) }}%
+{%- endif %}
+{%- endif %}

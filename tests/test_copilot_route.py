@@ -167,7 +167,7 @@ def test_ask_requires_local_or_token(post, monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_scanner_row_has_why_button_and_index_has_panel() -> None:
     record = _record()
-    html = templates.get_template("_stock_scanner.html").render(
+    html = templates.get_template("_scanner.html").render(
         records=[record],
         portfolio_tickers=set(),
         recommendations={"ZETA": classify_recommendation(record)},
@@ -196,7 +196,7 @@ def test_why_button_and_ask_form_reset_panel_and_sync(post) -> None:
     send, _ = post
     client, _ = _fake_client(None)
     panel = send(client, {"ticker": "ZETA"}).text
-    scanner = (ROOT / "app" / "api" / "templates" / "_stock_scanner.html").read_text()
+    scanner = (ROOT / "app" / "api" / "templates" / "_scanner.html").read_text()
 
     _ui_assertions(panel)
     # The scanner's handlers live on <tbody> and only react to .wl-why (#134).
