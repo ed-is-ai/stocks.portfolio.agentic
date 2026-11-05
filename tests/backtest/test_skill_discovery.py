@@ -127,6 +127,17 @@ EXPECTED_LIVE_STRATEGY_DEFAULTS = {
         "upgrade_score_margin_pct": 10.0,
         **COMMON_PARAMETER_DEFAULTS,
     },
+    "rtly-backtest-yau-weinstein": {
+        "breakout_lookback_sessions": 50,
+        "minimum_relative_volume": 1.5,
+        "maximum_loss_pct": 10.0,
+        "enable_position_upgrade": False,
+        "upgrade_score_margin_pct": 10.0,
+        **COMMON_PARAMETER_DEFAULTS,
+        # ``common_parameter_defaults`` in its SKILL.md: regime filter on, MA 150.
+        "block_buy_on_downtrend_enabled": True,
+        "regime_filter_ma_length": 150,
+    },
 }
 
 #: The packaging/universe frontmatter every ``kind: backtest-strategy``
@@ -195,12 +206,22 @@ def test_live_backtest_strategies_expose_common_regime_filter_params() -> None:
         by_name = {p.name: p for p in descriptor.parameters}
         for name in COMMON_PARAMETER_DEFAULTS:
             assert [p.name for p in descriptor.parameters].count(name) == 1
+        expected = EXPECTED_LIVE_STRATEGY_DEFAULTS[strategy_id]
         assert by_name["block_buy_on_downtrend_enabled"].type == "boolean"
-        assert by_name["block_buy_on_downtrend_enabled"].default is False
+        assert (
+            by_name["block_buy_on_downtrend_enabled"].default
+            is expected["block_buy_on_downtrend_enabled"]
+        )
         assert by_name["regime_filter_benchmark_security_id"].default == ""
-        assert by_name["regime_filter_ma_length"].default == 200
+        assert (
+            by_name["regime_filter_ma_length"].default
+            == (expected["regime_filter_ma_length"])
+        )
         assert by_name["max_concurrent_positions"].default == 10
-        assert descriptor.default_parameters["block_buy_on_downtrend_enabled"] is False
+        assert (
+            descriptor.default_parameters["block_buy_on_downtrend_enabled"]
+            is expected["block_buy_on_downtrend_enabled"]
+        )
 
 
 @pytest.mark.parametrize("bad_top_x", [True, 0, -1, 1.5, "10"])
@@ -808,6 +829,72 @@ def _write_skill(
         encoding="utf-8",
     )
     return folder
+
+
+def test_common_parameter_defaults_override_only_the_default(tmp_path: Path) -> None:
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "overrides-regime",
+        parameters=(
+            "parameters: []\n"
+            "common_parameter_defaults:\n"
+            "  regime_filter_ma_length: 150\n"
+            "  block_buy_on_downtrend_enabled: true\n"
+        ),
+    )
+
+    descriptor = discover_strategies(root).strategies[0]
+    by_name = {p.name: p for p in descriptor.parameters}
+
+    assert by_name["regime_filter_ma_length"].default == 150
+    assert by_name["regime_filter_ma_length"].minimum == 2
+    assert by_name["regime_filter_ma_length"].maximum == 400
+    assert by_name["block_buy_on_downtrend_enabled"].default is True
+    assert by_name["block_buy_on_downtrend_enabled"].type == "boolean"
+    assert by_name["max_concurrent_positions"].default == 10
+
+
+@pytest.mark.parametrize(
+    ("overrides", "code"),
+    [
+        ("  max_concurrent_positions: 5\n", "invalid_parameter_schema"),
+        ("  regime_filter_benchmark_security_id: abc\n", "invalid_parameter_schema"),
+        ("  regime_filter_ma_length: '150'\n", "invalid_parameter_schema"),
+        ("  block_buy_on_downtrend_enabled: 1\n", "invalid_parameter_schema"),
+        ("  regime_filter_ma_length: 1000\n", "invalid_defaults"),
+        ("  regime_filter_ma_length: true\n", "invalid_parameter_schema"),
+        ("  1: x\n  a: y\n", "invalid_parameter_schema"),
+    ],
+)
+def test_invalid_common_parameter_default_override_isolates_the_skill(
+    tmp_path: Path, overrides: str, code: str
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "bad-override",
+        parameters="parameters: []\ncommon_parameter_defaults:\n" + overrides,
+    )
+    _write_skill(root, "good-neighbour")
+
+    result = discover_strategies(root)
+
+    assert [w.code for w in result.warnings] == [code]
+    assert [d.strategy_id for d in result.strategies] == ["good-neighbour"]
+
+
+def test_non_mapping_common_parameter_defaults_isolates_the_skill(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(
+        root,
+        "list-override",
+        parameters="parameters: []\ncommon_parameter_defaults: [1]\n",
+    )
+
+    assert _only_warning(root, "list-override").code == "invalid_parameter_schema"
 
 
 def test_skill_redeclaring_max_concurrent_positions_fails_discovery(

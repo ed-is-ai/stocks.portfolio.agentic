@@ -1,0 +1,4 @@
+interface:
+  display_name: "Yau-Weinstein Refinement"
+  short_description: "Weinstein breakouts ranked by relative strength vs SPY"
+  default_prompt: "Use $rtly-backtest-yau-weinstein to run a Weinstein stage breakout backtest ranked by Mansfield relative strength against SPY."

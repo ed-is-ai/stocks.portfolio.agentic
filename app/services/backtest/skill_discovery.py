@@ -580,6 +580,49 @@ def _parameter_schema_from_frontmatter(
     return tuple(parameters)
 
 
+#: Host-owned parameters whose *default* (never their type, bounds or
+#: description) a Strategy may change through ``common_parameter_defaults``.
+OVERRIDABLE_COMMON_DEFAULTS = frozenset(
+    {"regime_filter_ma_length", "block_buy_on_downtrend_enabled"}
+)
+
+
+def _common_parameters_with_defaults(
+    raw_overrides: object,
+) -> tuple[StrategyParameterV1, ...]:
+    """Return the common parameters with a Strategy's default overrides applied.
+
+    Raises ``ValueError`` for a non-mapping, an unlisted name, or a value that
+    does not have the parameter's declared type. Range problems are left to
+    the ordinary default validation, so they surface as ``invalid_defaults``.
+    """
+    if raw_overrides is None:
+        return COMMON_BACKTEST_STRATEGY_PARAMETERS
+    if not isinstance(raw_overrides, dict):
+        raise ValueError("'common_parameter_defaults' must be a mapping")
+    unlisted = sorted(
+        str(name) for name in set(raw_overrides) - OVERRIDABLE_COMMON_DEFAULTS
+    )
+    if unlisted:
+        raise ValueError(
+            f"'common_parameter_defaults' may only override "
+            f"{sorted(OVERRIDABLE_COMMON_DEFAULTS)}, got {unlisted}"
+        )
+    common: list[StrategyParameterV1] = []
+    for parameter in COMMON_BACKTEST_STRATEGY_PARAMETERS:
+        if parameter.name not in raw_overrides:
+            common.append(parameter)
+            continue
+        fields = parameter.model_dump() | {"default": raw_overrides[parameter.name]}
+        try:
+            common.append(StrategyParameterV1(**fields))
+        except (ValidationError, TypeError) as exc:
+            raise ValueError(
+                f"common_parameter_defaults.{parameter.name} is invalid: {exc}"
+            ) from exc
+    return tuple(common)
+
+
 # ---------------------------------------------------------------------------
 # Packaging, import-safety and universe contract validation
 # ---------------------------------------------------------------------------
@@ -938,7 +981,18 @@ def _process_folder(folder: Path, skills_root: Path) -> _FolderOutcome:
                 f"{', '.join(sorted(clash))}",
                 field="parameters",
             )
-        schema = schema + COMMON_BACKTEST_STRATEGY_PARAMETERS
+        try:
+            common = _common_parameters_with_defaults(
+                parsed.get("common_parameter_defaults")
+            )
+        except ValueError as exc:
+            return _warning(
+                name,
+                "invalid_parameter_schema",
+                str(exc),
+                field="common_parameter_defaults",
+            )
+        schema = schema + common
 
     try:
         validated_defaults = validate_strategy_parameters(
