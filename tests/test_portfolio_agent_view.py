@@ -149,8 +149,8 @@ def test_all_live_sources_join_onto_holdings() -> None:
     # Only the exit path counts for a holding; an entry diagnostic is ignored.
     assert aaa.evidence == AgentCell("Complete", "good")
     assert bbb.evidence.text == "166 / 200"
-    # 2 high findings + 1 Sell + 1 exit evidence gap, risk first.
-    assert view.attention.urgent_count == 4
+    # 2 high findings + 1 Sell need action; the exit evidence gap does not.
+    assert len(view.attention.needs_action) == 3
     assert [i.kind for i in view.attention.items] == [
         "held_risk",
         "held_risk",
@@ -309,7 +309,9 @@ def test_thesis_cell_states() -> None:
     )
     assert "AAA: thesis invalidated" in _event_titles(view)
     # The invalidation joins AAA's Sell as one exit item with both events.
-    assert view.attention.urgent_count == _thesis_view(None).attention.urgent_count
+    assert len(view.attention.needs_action) == len(
+        _thesis_view(None).attention.needs_action
+    )
     exit_item = next(i for i in view.attention.items if i.kind == "exit")
     assert len(exit_item.source_event_ids) == 2
 
@@ -375,4 +377,4 @@ def test_published_evidence_joins_the_queue() -> None:
     ]
     assert view.attention.analysis_run_id == "run-9"
     # Run-wide evidence is listed but never counted against this portfolio.
-    assert view.attention.urgent_count == 0
+    assert len(view.attention.needs_action) == 0

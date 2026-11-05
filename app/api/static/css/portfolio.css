@@ -1,0 +1,77 @@
+/* Portfolio screen (GH-130). Tokens come from tokens.css. */
+
+.portfolio-screen { max-width: 78rem; margin: 0 auto; }
+.portfolio-label {
+  margin: 0; font-size: var(--fs-2xs, .7rem); font-weight: var(--fw-bold, 700);
+  letter-spacing: .06em; text-transform: uppercase; color: var(--muted);
+}
+
+/* ── Header: name and meta, sub-views, three actions ─────────── */
+.portfolio-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 1rem; margin-bottom: 1.5rem; }
+.portfolio-head-title { flex: 1 1 24rem; min-width: 0; }
+.portfolio-head h1 { margin: 0; font-size: 1.75rem; font-weight: var(--fw-bold, 700); letter-spacing: -0.02em; }
+.portfolio-head h1:focus { outline: none; }
+.portfolio-head h1:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.portfolio-head-meta { margin: .25rem 0 0; color: var(--muted); }
+.portfolio-views { display: flex; gap: 1.25rem; font-weight: var(--fw-semibold, 600); }
+.portfolio-views a { color: var(--muted); text-decoration: none; padding-bottom: .25rem; border-bottom: 2px solid transparent; }
+.portfolio-views a[aria-current="page"] { color: var(--primary); border-bottom-color: var(--primary); }
+.portfolio-views a:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.portfolio-head-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+
+/* ── Three headline numbers, then market value and cost basis ── */
+.portfolio-headline {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  border-top: 2px solid var(--primary); border-bottom: 1px solid var(--border); margin-bottom: 1.5rem;
+}
+.portfolio-figure { padding: 1rem .25rem; }
+.portfolio-figure-value {
+  font-size: 1.75rem; font-weight: var(--fw-bold, 700); letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.portfolio-figure-value.pos { color: var(--green); }
+.portfolio-figure-value.neg { color: var(--red); }
+.portfolio-figure-pct { font-size: 1rem; }
+.portfolio-figure-secondary {
+  padding: 1rem .25rem; align-self: end; color: var(--muted);
+  font-size: var(--fs-sm, .82rem); font-variant-numeric: tabular-nums;
+}
+
+/* ── Holdings and the side column ────────────────────────────── */
+.portfolio-body {
+  display: grid; grid-template-columns: minmax(0, 2fr) minmax(17rem, 1fr);
+  gap: 1.5rem; align-items: start; margin-top: 1.5rem;
+}
+@media (max-width: 1080px) { .portfolio-body { grid-template-columns: minmax(0, 1fr); } }
+.portfolio-holdings { min-width: 0; }
+.portfolio-holdings > .portfolio-label { margin-bottom: .6rem; }
+.portfolio-holdings-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.portfolio-sub { font-size: .72rem; }
+.portfolio-cash-row td { color: var(--muted); }
+.weight-over { background: var(--amber-bg); color: var(--amber); font-weight: var(--fw-bold, 700); padding: .1rem .35rem; }
+.portfolio-set-stop { font-weight: var(--fw-semibold, 600); }
+.portfolio-stop-slot { margin-top: .35rem; }
+/* Row actions render once per row and show on hover or keyboard focus. */
+.portfolio-row-actions { white-space: nowrap; opacity: 0; transition: opacity var(--dur-fast, 180ms); }
+.portfolio-row:hover .portfolio-row-actions,
+.portfolio-row:focus-within .portfolio-row-actions { opacity: 1; }
+@media (hover: none) { .portfolio-row-actions { opacity: 1; } }
+.portfolio-holdings .disclosure { margin-top: .75rem; border-bottom: 1px solid var(--border); padding-bottom: .5rem; }
+.portfolio-side { min-width: 0; display: flex; flex-direction: column; gap: 1rem; }
+.portfolio-copilot-hint { margin: 0; color: var(--muted); font-size: var(--fs-sm, .82rem); }
+
+/* ── Risk check card ─────────────────────────────────────────── */
+.portfolio-risk-card { background: var(--card); border: 1px solid var(--border); padding: 1.25rem; }
+.portfolio-risk-head { display: flex; justify-content: space-between; align-items: baseline; }
+.portfolio-risk-count { color: var(--muted); font-size: var(--fs-sm, .82rem); }
+.portfolio-risk-list { list-style: none; margin: .85rem 0 0; padding: 0; }
+.portfolio-risk-item { padding: .75rem 0; border-top: 1px solid var(--border); }
+.portfolio-risk-title { font-weight: var(--fw-semibold, 600); }
+.portfolio-risk-detail { color: var(--muted); font-size: var(--fs-sm, .82rem); }
+.portfolio-risk-empty { margin: .85rem 0 0; color: var(--muted); }
+.portfolio-risk-card .disclosure { margin-top: .5rem; padding-top: .5rem; border-top: 1px solid var(--border); }
+.portfolio-risk-notes { margin: 0; padding-left: 1rem; }
+
+/* ── Trades & realised P&L ───────────────────────────────────── */
+.portfolio-trades-section { margin-bottom: 2rem; }
+.portfolio-trades-section > .portfolio-label { margin-bottom: .6rem; }

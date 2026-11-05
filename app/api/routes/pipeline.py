@@ -74,6 +74,6 @@ def refresh_data(
     pipeline.run_once(extract, force_whale_wisdom, force_stocktwits)
     return templates.TemplateResponse(
         request,
-        "_stock_scanner.html",
+        "_scanner.html",
         context=build_stock_scanner_context(trader, portfolio, alerts),
     )

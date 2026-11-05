@@ -1,7 +1,7 @@
 """Route tests for the notification centre (#80): the bell badge and the
 read/dismiss routes. The dropdown panel is gone (GH-21); the badge shows the
-AI Desk's urgent count, faked here (the real count is in
-``tests/test_desk_routes.py``)."""
+Today badge count, faked here (the real count is in
+``tests/test_today_routes.py``)."""
 
 from types import SimpleNamespace
 
@@ -33,7 +33,7 @@ def repo(tmp_path, monkeypatch, desk):
     monkeypatch.setitem(
         overrides,
         get_desk_service,
-        lambda: SimpleNamespace(attention_count=lambda _pid: desk.count),
+        lambda: SimpleNamespace(badge_count=lambda _pid: desk.count),
     )
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
     return repository
@@ -95,7 +95,9 @@ def test_dismiss_removes_from_feed(repo) -> None:
     assert response.status_code == 204
     assert repo.recent() == []
     # The AI Desk re-renders on this event, so the notice leaves it.
-    assert response.headers["HX-Trigger"] == "portfolio-agents-refresh"
+    assert response.headers["HX-Trigger"] == (
+        "portfolio-agents-refresh, attention-changed"
+    )
 
 
 def test_the_dropdown_panel_is_gone(repo) -> None:

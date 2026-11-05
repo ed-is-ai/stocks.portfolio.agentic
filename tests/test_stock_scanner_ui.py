@@ -22,9 +22,12 @@ from app.api.dependencies import (
     get_portfolio_service,
     get_trader_service,
 )
-from app.api.stock_scanner_context import build_stock_scanner_context
+from app.api.stock_scanner_context import (
+    build_stock_scanner_context,
+    watching_tickers,
+)
 from app.api.routes.pipeline import refresh_data
-from app.api.routes.views import partial_runlog, partial_stock_scanner
+from app.api.routes.views import partial_runlog, partial_scanner
 from app.api.templating import templates
 from app.repositories.alerts_repo import AlertReadState
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
@@ -121,11 +124,13 @@ def _render_stock_scanner(*, market_narrative=None, market_regime=None) -> str:
         )
         for record in records
     }
-    return templates.get_template("_stock_scanner.html").render(
+    return templates.get_template("_scanner.html").render(
         records=records,
         portfolio_tickers=portfolio_tickers,
         recommendations=recommendations,
         alert_states=alert_states,
+        watching=watching_tickers(recommendations, alert_states),
+        buy_signal_count=1,
         freshness=calculate_freshness(None),
         source_health=[],
         latest_attempt_error=None,
@@ -235,10 +240,13 @@ def test_scanner_context_batches_alert_reads_for_multi_ticker_records() -> None:
     context = build_stock_scanner_context(trader, portfolio, alerts)
 
     assert context["alert_states"]["AAPL.L"].suppressed is True
+    # An already-alerted buy stays a BUY, outside the Watching group (#129).
+    assert context["watching"] == frozenset()
+    assert context["buy_signal_count"] == 2
     # The regime banner reads this key; a rename/typo would slip past the
     # template-only tests otherwise (#387).
     assert "market_regime" in context
-    alerts.states_for_tickers.assert_called_once_with(("AAPL.L", "AAPL.L", "TSLA"))
+    alerts.states_for_tickers.assert_called_once_with(("AAPL.L", "TSLA", "AAPL.L"))
     alerts.has_watching.assert_not_called()
     alerts.last_alerted_at.assert_not_called()
 
@@ -265,7 +273,7 @@ def test_stock_scanner_prices_use_currency_symbol() -> None:
         )
 
     records = [_row("ULVR.L", "GBP", 45.0), _row("AAPL", "USD", 100.0)]
-    html = templates.get_template("_stock_scanner.html").render(
+    html = templates.get_template("_scanner.html").render(
         records=records,
         portfolio_tickers=set(),
         recommendations={
@@ -390,7 +398,9 @@ def test_stock_scanner_toolbar_exposes_search_and_control_mount() -> None:
     html = _render_stock_scanner()
     assert 'id="wl-search"' in html
     assert 'id="wl-adv"' in html
-    assert 'id="wl-match-count"' in html
+    assert 'id="wl-filter-all"' in html
+    # The match count now lives in the footer the controller renders (#129).
+    assert "id: 'wl-match-count'" in JS_PATH.read_text("utf-8")
 
 
 def test_stock_scanner_thead_order_matches_js_columns() -> None:
@@ -512,13 +522,17 @@ def test_stock_scanner_js_pages_matches_client_side() -> None:
     assert "row.style.display" not in js
     assert "if (resetPage) page = 0;" in js
     assert "render(true);" in js and "apply(true);" in js
-    # Sort and column changes keep the current page.
+    # Sort and column changes keep the rows already shown.
     assert "state.presetId = null;\n    apply();" in js
     assert "'aria-live': 'polite'" in js
-    assert "btn.focus({ preventScroll: true });" in js
-    assert "wrap.scrollTop = 0;" in js
     assert "getElementById('wl-pager')" in js
-    assert "nav.hidden = total <= PAGE_SIZE;" in js
+    # "Show next 50" reveals more rows client-side (#129, AD-7).
+    assert "matches.slice(0, (page + 1) * PAGE_SIZE)" in js
+    assert "'Show next ' + Math.min(PAGE_SIZE, total - shown)" in js
+    assert "'Showing ' + shown + ' of ' + total" in js
+    assert (
+        "(nav.querySelector('.wl-more') || nav).focus({ preventScroll: true });" in js
+    )
     assert "row.cells[idx]" in js
     assert "'wl-state-v1'" in js and "'wl-presets-v1'" in js
 
@@ -529,7 +543,7 @@ def test_stock_scanner_zero_price_row_still_offers_record_buy() -> None:
     from app.core.recommendation import classify_recommendation
 
     record = _sample_records()[1].model_copy(update={"price": 0.0})
-    html = templates.get_template("_stock_scanner.html").render(
+    html = templates.get_template("_scanner.html").render(
         records=[record],
         portfolio_tickers=set(),
         recommendations={"TSLA": classify_recommendation(record)},
@@ -593,12 +607,12 @@ def test_stock_scanner_js_persists_state_and_seeds_presets() -> None:
     )
     assert "wl-state-v1" in js
     assert "wl-presets-v1" in js
-    assert "marketNarrativeCollapsed: true" in js
-    assert "state.marketNarrativeCollapsed = !state.marketNarrativeCollapsed" in js
-    assert "applyMarketNarrative();" in js
-    # #394 density toggle persisted in the same wl-state-v1 object.
-    assert "density: 'comfortable'" in js
-    assert "wl-density-toggle" in js
+    # The narrative toggle is gone: the disclosure is collapsed natively.
+    assert "marketNarrative" not in js
+    # #394 density persisted in the same wl-state-v1 object; compact is the
+    # default since #129 and the toggle lives in the Columns panel.
+    assert "density: 'compact'" in js
+    assert "id: 'wl-density-toggle'" in js
     assert "wl-compact" in js
     assert "htmx:afterSettle" in js
     for preset in ("Buy-ready", "UK breakouts", "Low-risk Stage 2"):
@@ -621,15 +635,12 @@ def test_market_narrative_renders_accessible_collapsible_details() -> None:
         ),
     )
 
+    # Behind the one disclosure, below the table, not a banner (#129, AD-10).
     assert 'id="market-narrative"' in html
-    assert 'id="market-narrative-toggle"' in html
-    # Rendered expanded server-side so the details stay reachable without JS;
-    # the controller collapses on load when state.marketNarrativeCollapsed.
-    assert 'aria-expanded="true"' in html
-    assert 'aria-controls="market-narrative-details"' in html
-    assert 'aria-label="Collapse market narrative"' in html
-    assert 'id="market-narrative-details"' in html
-    assert 'id="market-narrative-details" hidden' not in html
+    assert html.index('id="market-narrative"') > html.index("</table>")
+    assert '<details class="disclosure">' in html
+    assert "<summary>Market narrative · Breadth is improving</summary>" in html
+    assert 'href="https://example.com/breadth"' in html
     assert "Breadth is improving" in html
     assert "Technology leads the current scan." in html
 
@@ -649,8 +660,11 @@ def test_market_regime_banner_risk_on() -> None:
 
     assert 'id="market-regime"' in html
     assert "S&amp;P 500 in confirmed uptrend" in html
-    assert "#dcfce7" in html
+    assert 'class="wl-regime is-up"' in html
     assert "+18.4%" in html
+    # Inline in the title line, not a banner (#129).
+    assert html.index('id="market-regime"') < html.index("</p>")
+    assert 'class="alert' not in html
 
 
 def test_market_regime_banner_risk_off() -> None:
@@ -659,7 +673,7 @@ def test_market_regime_banner_risk_off() -> None:
     )
 
     assert "S&amp;P 500 below its 200-day average" in html
-    assert "#fee2e2" in html
+    assert 'class="wl-regime is-down"' in html
     assert "-6.1%" in html
 
 
@@ -704,13 +718,12 @@ def _request(path: str, method: str = "GET") -> Request:
 
 
 def test_legacy_scanner_ui_artifacts_are_removed() -> None:
-    assert not (TEMPLATES / "_scanner.html").exists()
-
-    # Quoted-literal form, not a bare substring: "_stock_scanner.html" (the
-    # current template) legitimately contains "_scanner.html" as a
-    # substring, but never as its own quoted string literal — only the
-    # removed legacy filename does.
-    forbidden = ('"_scanner.html"', "/partials/scanner", "python orchestrator.py")
+    # ``_scanner.html`` is the Scanner tab's template again since GH-129 (the
+    # spine's ``_<tab>.html`` convention); the pre-rename name and the old
+    # legacy run command stay retired.
+    assert (TEMPLATES / "_scanner.html").exists()
+    assert not (TEMPLATES / "_stock_scanner.html").exists()
+    forbidden = ('"_stock_scanner.html"', "python orchestrator.py")
     source_paths = [
         *sorted((ROOT / "app" / "api").rglob("*.py")),
         *sorted(TEMPLATES.rglob("*.html")),
@@ -729,37 +742,42 @@ def test_dashboard_has_one_refresh_data_control() -> None:
     assert markup.count('id="refresh-data-button"') == 1
 
 
-def test_refresh_dropdown_exposes_three_actions_and_source_guidance() -> None:
+def test_the_shell_has_one_refresh_and_settings_holds_the_variants() -> None:
     markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
-    toggle = markup.split('id="refresh-data-button"', 1)[1].split("</button>", 1)[0]
-    menu = markup.split('class="dropdown-menu dropdown-menu-end refresh-menu', 1)[1]
+    form = markup.split('hx-post="/refresh-data"', 1)[1].split("</form>", 1)[0]
+    options = (TEMPLATES / "_refresh_options.html").read_text(encoding="utf-8")
 
-    assert 'data-bs-toggle="dropdown"' in toggle
-    assert 'hx-post="/refresh-data"' not in toggle
-    assert 'aria-label="Refresh Data"' in toggle
-    assert menu.count('hx-post="/refresh-data"') == 3
-    assert "Standard refresh" in menu
-    assert "Include institutional data" in menu
-    assert "Custom refresh" in menu
-    assert menu.count('name="extract" value="true"') == 2
-    assert 'name="force_whale_wisdom"' in menu
-    assert 'name="force_stocktwits"' in menu
-    assert "quarterly 13F filings published after quarter end" in menu
-    assert "StockTwits data is refreshed weekly" in menu
-    assert "cannot make upstream data newer" in menu
-    assert 'aria-label="Run standard refresh"' in menu
-    assert 'aria-label="Run refresh including institutional data"' in menu
+    # One Refresh in the shell: the standard run, no menu (GH-128).
+    assert markup.count('hx-post="/refresh-data"') == 1
+    assert 'id="refresh-data-button"' in form
+    assert 'name="extract"' not in form
+    assert 'data-bs-toggle="dropdown"' not in form
+    # The variants moved to Settings, with their source guidance.
+    assert options.count('hx-post="/refresh-data"') == 2
+    assert "Include institutional data" in options
+    assert "Custom refresh" in options
+    assert options.count('name="extract" value="true"') == 2
+    assert 'name="force_whale_wisdom"' in options
+    assert 'name="force_stocktwits"' in options
+    assert "quarterly 13F filings published after quarter end" in options
+    assert "StockTwits data is refreshed weekly" in options
+    assert "cannot make upstream data newer" in options
+    assert 'aria-label="Run refresh including institutional data"' in options
+    assert '{% include "_refresh_options.html" %}' in (
+        TEMPLATES / "_settings.html"
+    ).read_text(encoding="utf-8")
 
 
 def test_only_trade_forms_activate_portfolio_after_settle() -> None:
-    markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
+    shell = (ROOT / "app/api/static/js/shell.js").read_text(encoding="utf-8")
 
-    assert "e.detail.elt?.getAttribute('hx-post') === '/trades'" in markup
-    assert "e.detail.elt && e.detail.elt.tagName === 'FORM'" not in markup
+    assert "e.detail.elt?.getAttribute('hx-post')" in shell
+    assert "post === '/trades'" in shell
+    assert "e.detail.elt && e.detail.elt.tagName === 'FORM'" not in shell
 
 
 def test_removed_scanner_partial_returns_not_found() -> None:
-    response = TestClient(app).get("/partials/scanner")
+    response = TestClient(app).get("/partials/stock-scanner")
     assert response.status_code == 404
 
 
@@ -777,9 +795,7 @@ def test_initial_and_completed_refresh_use_equivalent_stock_scanner_context() ->
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    initial = partial_stock_scanner(
-        _request("/partials/stock-scanner"), trader, portfolio, alerts
-    )
+    initial = partial_scanner(_request("/partials/scanner"), trader, portfolio, alerts)
     refreshed = refresh_data(
         _request("/refresh-data", method="POST"),
         trader,
@@ -793,7 +809,7 @@ def test_initial_and_completed_refresh_use_equivalent_stock_scanner_context() ->
     assert (
         initial_response.template.name
         == refreshed_response.template.name
-        == "_stock_scanner.html"
+        == "_scanner.html"
     )
     # Records are sorted actionable-first, so both paths return an equivalent
     # (equal) list rather than the same object as load_analysis returned.
@@ -849,7 +865,7 @@ def test_refresh_completion_banner_removed() -> None:
     from app.services.freshness_service import calculate_freshness
 
     records = _sample_records()
-    html = templates.get_template("_stock_scanner.html").render(
+    html = templates.get_template("_scanner.html").render(
         records=records,
         portfolio_tickers=set(),
         recommendations={
@@ -904,7 +920,7 @@ def test_stock_scanner_frontend_assets_are_served() -> None:
 def test_dashboard_cache_busts_watchlist_controller() -> None:
     markup = (TEMPLATES / "index.html").read_text(encoding="utf-8")
 
-    assert 'src="/static/js/watchlist.js?v=20261104-1"' in markup
+    assert 'src="/static/js/watchlist.js?v=20261105-129"' in markup
     assert 'src="/static/js/watchlist.js"' not in markup
 
 
@@ -929,7 +945,7 @@ def test_stock_scanner_and_refresh_http_paths_render_canonical_partial(
 
     try:
         client = TestClient(app)
-        initial = client.get("/partials/stock-scanner")
+        initial = client.get("/partials/scanner")
         refreshed = client.post(
             "/refresh-data",
             data={},
@@ -984,9 +1000,7 @@ def test_stock_scanner_no_longer_renders_freshness_or_source_badges(
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    response = partial_stock_scanner(
-        _request("/partials/stock-scanner"), trader, portfolio, alerts
-    )
+    response = partial_scanner(_request("/partials/scanner"), trader, portfolio, alerts)
     markup = response.body.decode()
 
     assert "Last successful refresh" not in markup
@@ -1133,7 +1147,7 @@ def _render_records(records: list[StockRecord], recommendations: dict) -> str:
     """Render the scanner partial for ``records`` with given recommendations."""
     from app.core.alerting import build_alert_ui_state
 
-    return templates.get_template("_stock_scanner.html").render(
+    return templates.get_template("_scanner.html").render(
         records=records,
         portfolio_tickers=set(),
         recommendations=recommendations,

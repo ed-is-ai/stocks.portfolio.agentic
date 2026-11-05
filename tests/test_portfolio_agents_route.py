@@ -37,22 +37,18 @@ from app.schemas.portfolio_recommendation import (
     RecommendationResultV1,
     RecommendationV1,
 )
-from app.agents.triage.sources import setup_events
 from app.api.routes import views as views_module
-from app.api.templating import templates
 from app.schemas.source_health import SourceHealth, SourceName, SourceState
 from app.services import portfolio_service as portfolio_service_module
 from app.services.portfolio_agent_view import (
     PortfolioAgentView,
-    PublishedEvidence,
     RecommendationOutcome,
-    build_agent_view,
 )
+from app.services.desk_service import notification_loader
 from app.services.portfolio_service import PortfolioService
 from app.services.position_thesis_service import PositionThesisService
 from app.services.trader_service import TraderService
 from tests.test_alert_digest_held import _buy_record
-from tests.test_portfolio_agent_view import _risk
 from tests.test_portfolio_risk_route import _dump, _record
 from tests._stop_helpers import stop_level
 from tests.test_thesis_evaluator import FRESH, META, make_record
@@ -173,62 +169,68 @@ def _agents(stack: SimpleNamespace) -> str:
     return resp.text
 
 
-def _oob(body: str, element_id: str) -> str:
-    """Return the text of the out-of-band element ``element_id``."""
-    pattern = rf'id="{element_id}"[^>]*hx-swap-oob="true"[^>]*>(.*?)</(?:span|div)>\n'
-    match = re.search(pattern, body, re.S)
-    assert match is not None, element_id
-    return re.sub(r"<[^>]+>", " ", match.group(1))
+def _view(stack: SimpleNamespace) -> PortfolioAgentView:
+    """The agent view exactly as the agents route builds it (GH-130: the
+    route swaps only its stop suggestions; the rest feeds the queue)."""
+    return stack.service.agent_view(
+        stack.pid,
+        stack.outcome["recommend"],
+        stack.theses.statuses,
+        dict,
+        notification_loader(stack.notifications, datetime.now(UTC)),
+    )
 
 
-def _cell(stack: SimpleNamespace, body: str, name: str) -> str:
-    """Return the text of this portfolio's out-of-band element ``name``."""
-    return _oob(body, f"agent-{stack.pid}-{name}")
+def _text(view: PortfolioAgentView, ticker: str, name: str) -> str:
+    """A holding row's agent cell as ``"text note"``."""
+    row = next(r for r in view.rows if r.slug == ticker)
+    cell = getattr(row, name)
+    return f"{cell.text} {cell.note}"
 
 
-def test_all_live_sources_swap_into_the_rows_cards_and_strip(stack) -> None:
-    body = _agents(stack)
+def _needs_action(view: PortfolioAgentView) -> str:
+    """The queue's urgent count as the old strip showed it."""
+    count = len(view.attention.needs_action)
+    return f"{count} · partial" if view.unavailable else str(count)
 
-    assert "Sell" in _cell(stack, body, "strategy-AAA")
-    assert "Hold" in _cell(stack, body, "strategy-BBB")
-    assert "50.0%" in _cell(stack, body, "risk-AAA")
+
+def test_all_live_sources_build_the_rows_cards_and_queue(stack) -> None:
+    view = _view(stack)
+
+    assert "Sell" in _text(view, "AAA", "strategy")
+    assert "Hold" in _text(view, "BBB", "strategy")
+    assert "50.0%" in _text(view, "AAA", "risk")
     # The row is flagged by its own high concentration finding.
-    assert 'class="status risk">50.0%' in body
-    assert "166 / 200" in _cell(stack, body, "evidence-BBB")
-    assert "Complete" in _cell(stack, body, "evidence-AAA")
-    assert "£150.00 · 7.5%" in _cell(stack, body, "open-risk")
+    assert next(r for r in view.rows if r.slug == "AAA").risk.tone == "risk"
+    assert "166 / 200" in _text(view, "BBB", "evidence")
+    assert "Complete" in _text(view, "AAA", "evidence")
+    assert "£150.00 · 7.5%" in f"{view.open_risk.text} {view.open_risk.note}"
     # 3 high risk findings (position, sector, capital at risk) + 1 Sell +
     # 1 exit evidence gap.
-    assert _cell(stack, body, "findings").strip() == "5"
-    assert "5 urgent findings." in body
-    assert "partial" not in body
+    assert _needs_action(view) == "4"
 
 
 def test_no_strategy_is_declared_and_count_is_partial(stack) -> None:
     stack.outcome["recommend"] = lambda _pid: NO_ASSIGNMENT
-    body = _agents(stack)
+    view = _view(stack)
 
-    assert "No Strategy assigned" in _cell(stack, body, "strategy-AAA")
-    assert "No Strategy assigned" in _cell(stack, body, "evidence-AAA")
-    assert "3 urgent findings." in body
-    assert _cell(stack, body, "findings").strip() == "3 · partial"
+    assert "No Strategy assigned" in _text(view, "AAA", "strategy")
+    assert "No Strategy assigned" in _text(view, "AAA", "evidence")
+    assert _needs_action(view) == "3 · partial"
 
 
-def test_zero_urgent_findings_with_a_gap_is_not_shown_clear(
+def test_zero_urgent_findings_with_a_gap_is_partial(
     stack, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     stack.outcome["recommend"] = lambda _pid: NO_ASSIGNMENT
     monkeypatch.setattr(stack.service, "risk_report", _raise)
-    body = _agents(stack)
 
-    assert "No urgent findings." in body
-    assert _cell(stack, body, "findings").strip() == "0 · partial"
-    assert "is-clear" not in body
+    assert _needs_action(_view(stack)) == "0 · partial"
 
 
 def test_recommendation_failure_is_caught(stack) -> None:
     stack.outcome["recommend"] = _raise
-    cell = _cell(stack, _agents(stack), "strategy-AAA")
+    cell = _text(_view(stack), "AAA", "strategy")
 
     assert "Strategy unavailable" in cell
     assert "Recommendations could not be evaluated" in cell
@@ -236,11 +238,11 @@ def test_recommendation_failure_is_caught(stack) -> None:
 
 def test_risk_failure_is_caught(stack, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(stack.service, "risk_report", _raise)
-    body = _agents(stack)
+    view = _view(stack)
 
-    assert "Risk unavailable" in _cell(stack, body, "risk-AAA")
-    assert "Unavailable" in _cell(stack, body, "open-risk")
-    assert "not counted: Risk unavailable." in body
+    assert "Risk unavailable" in _text(view, "AAA", "risk")
+    assert "Unavailable" in view.open_risk.text
+    assert "Risk unavailable" in view.unavailable
 
 
 def test_no_portfolios_survives_a_failing_risk_report(
@@ -255,7 +257,7 @@ def test_no_portfolios_survives_a_failing_risk_report(
     assert view.unavailable == ("Risk unavailable",)
 
 
-def test_thesis_cells_swap_in_and_count_nothing_by_default(stack) -> None:
+def test_thesis_cells_build_and_count_nothing_by_default(stack) -> None:
     content = ThesisContentV1.model_validate(
         {
             "rationale": "r",
@@ -266,23 +268,23 @@ def test_thesis_cells_swap_in_and_count_nothing_by_default(stack) -> None:
     PositionThesesRepository(db.make_connect(lambda: stack.agent.db_path)).add_version(
         stack.pid, "AAA", content, "user", active=True
     )
-    body = _agents(stack)
+    view = _view(stack)
 
-    assert "Awaiting scan" in _cell(stack, body, "thesis-AAA")
-    assert "No thesis" in _cell(stack, body, "thesis-BBB")
-    assert _cell(stack, body, "findings").strip() == "5"
+    assert "Awaiting scan" in _text(view, "AAA", "thesis")
+    assert "No thesis" in _text(view, "BBB", "thesis")
+    assert _needs_action(view) == "4"
 
 
 def test_thesis_store_failure_is_caught_and_partial(
     stack, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(stack.theses, "statuses", _raise)
-    body = _agents(stack)
+    view = _view(stack)
 
-    assert "Thesis unavailable" in _cell(stack, body, "thesis-AAA")
-    assert "Thesis unavailable" in _cell(stack, body, "thesis-BBB")
-    assert _cell(stack, body, "findings").strip() == "5 · partial"
-    assert "not counted: Thesis unavailable." in body
+    assert "Thesis unavailable" in _text(view, "AAA", "thesis")
+    assert "Thesis unavailable" in _text(view, "BBB", "thesis")
+    assert _needs_action(view) == "4 · partial"
+    assert "Thesis unavailable" in view.unavailable
 
 
 class _Ancestors(HTMLParser):
@@ -348,29 +350,29 @@ def _seed_thesis(
     _publish(stack, META.run_id)
 
 
-def _thesis_status(stack: SimpleNamespace, body: str) -> tuple[str, str]:
+def _thesis_status(stack: SimpleNamespace, view: PortfolioAgentView) -> tuple[str, str]:
     """Return the AAA Thesis cell's (tone, status text)."""
-    match = re.search(
-        rf'id="agent-{stack.pid}-thesis-AAA"[^>]*>\s*'
-        r'<span class="status (\w+)">([^<]+)</span>',
-        body,
-    )
-    assert match is not None
-    return match.group(1), match.group(2)
+    row = next(r for r in view.rows if r.slug == "AAA")
+    return row.thesis.tone, row.thesis.text
 
 
 def test_current_invalidated_thesis_is_an_urgent_finding(stack) -> None:
     _seed_thesis(
         stack, {"kind": "close_below_sma", "period": 50}, make_record(price=94.0)
     )
-    body = _agents(stack)
+    view = _view(stack)
 
-    assert _thesis_status(stack, body) == ("risk", "Invalidated")
-    # It joins AAA's Sell as one exit item, both events expandable.
-    assert _cell(stack, body, "findings").strip() == "5"
-    assert "5 urgent findings." in body
-    assert "AAA: thesis invalidated" in body
-    assert "2 source events" in body
+    assert _thesis_status(stack, view) == ("risk", "Invalidated")
+    # It joins AAA's Sell as one exit item with both events.
+    assert _needs_action(view) == "4"
+    (item,) = [
+        i
+        for i in view.attention.items
+        if any(
+            e.title == "AAA: thesis invalidated" for e in view.attention.events_for(i)
+        )
+    ]
+    assert len(view.attention.events_for(item)) == 2
 
 
 @pytest.mark.parametrize(
@@ -385,13 +387,12 @@ def test_current_warning_thesis_is_warn_toned_and_not_counted(
     stack, record: StockRecord, status: str
 ) -> None:
     _seed_thesis(stack, {"kind": "close_below_stop"}, record)
-    body = _agents(stack)
+    view = _view(stack)
 
-    assert _thesis_status(stack, body) == ("warn", status)
-    assert "earlier run" not in _cell(stack, body, "thesis-AAA")
-    assert _cell(stack, body, "findings").strip() == "5"
-    assert "5 urgent findings." in body
-    assert "AAA: thesis" not in body
+    assert _thesis_status(stack, view) == ("warn", status)
+    assert "earlier run" not in _text(view, "AAA", "thesis")
+    assert _needs_action(view) == "4"
+    assert not any(i.title.startswith("AAA: thesis") for i in view.attention.items)
 
 
 def test_agents_partial_performs_no_writes(stack) -> None:
@@ -409,9 +410,10 @@ def test_agents_partial_never_evaluates_a_newly_published_run(stack) -> None:
     before = _dump(stack.agent.db_path)
     assert any("thesis_evaluations" in line for line in before)
 
-    body = _agents(stack)
+    _agents(stack)
+    view = _view(stack)
 
-    assert "last checked on an earlier run" in _cell(stack, body, "thesis-AAA")
+    assert "last checked on an earlier run" in _text(view, "AAA", "thesis")
     assert _dump(stack.agent.db_path) == before
 
 
@@ -427,45 +429,33 @@ def test_tab_renders_scoped_placeholders_and_one_lazy_loader(stack) -> None:
     assert (
         f"hx-on::after-request=\"portfolioAgentsUnavailable('{pid}', event)\"" in html
     )
-    # Every id and placeholder is scoped to this portfolio, so a late
-    # response for another portfolio cannot match (or blank) them.
-    for name in (
-        "strategy-AAA",
-        "risk-BBB",
-        "evidence-BBB",
-        "thesis-BBB",
-        "open-risk",
-        "findings",
-        "attention",
-    ):
-        assert f'id="agent-{pid}-{name}"' in html
-    # Four cells per row, three cards/strip, and the Stop suggestion for BBB,
-    # the one holding without a recorded stop.
+    # GH-130: the only lazy agent slot is the Stop suggestion for BBB, the
+    # one holding without a recorded stop, scoped to this portfolio so a
+    # late response for another portfolio cannot match it. It starts empty
+    # and hidden behind "Set stop" -- never a "Loading…" placeholder.
     assert f'id="agent-{pid}-stop-BBB"' in html
     assert f'id="agent-{pid}-stop-AAA"' not in html
-    assert html.count(f'data-agent-placeholder="{pid}"') == 4 * 2 + 3 + 1
+    assert html.count(f'data-agent-placeholder="{pid}"') == 1
     assert "data-agent-placeholder>" not in html
-    assert "Thesis monitor not available yet" not in html
+    assert "Loading" not in html
+    assert f'aria-controls="stop-slot-{pid}-BBB"' in html
+    assert f'id="stop-slot-{pid}-BBB" class="portfolio-stop-slot" hidden' in html
     # A static Thesis button per row opens the editor outside #tab-content,
     # and a thesis write reloads the agent layer.
     assert f'hx-get="/portfolios/{pid}/theses/AAA"' in html
     assert html.count('hx-target="#thesis-editor-modal-target"') == 2
     assert 'hx-trigger="load, portfolio-agents-refresh from:body"' in html
-    assert not re.search(r"\(#1[34]\)", html)
-    # The aside: context, declared portfolio-level gap, target, boundary.
+    # The copilot aside: hidden until a holding is selected; target and
+    # boundary in place.
+    assert 'id="portfolio-assistant"' in html
+    aside = html.split('id="portfolio-assistant"', 1)[1].split(">", 1)[0]
+    assert "hidden" in aside
     assert 'id="portfolio-copilot-body"' in html
-    assert (
-        "Portfolio-level answers are not available: the Research copilot "
-        "explains one security at a time. Use Why? on a holding."
-    ) in html
+    assert "Portfolio-level answers are not available" not in html
     assert (
         "<strong>Read-only.</strong> The model explains and proposes. Typed "
         "services calculate; state-changing jobs require approval."
     ) in html
-    # The new cards are appended after Cash, in the existing grid.
-    grid = html.split('class="portfolio-summary-grid"', 1)[1].split("</section>")[0]
-    assert grid.index(">Cash</div>") < grid.index(">Open risk</div>")
-    assert grid.index(">Open risk</div>") < grid.index(">Agent findings</div>")
 
 
 def test_partial_ids_match_the_tab_placeholders(stack) -> None:
@@ -501,12 +491,13 @@ def test_stop_cell_declares_no_strategy(stack) -> None:
 
 def test_row_why_posts_to_the_aside_without_the_offcanvas(stack) -> None:
     html = client.get("/partials/portfolio", params={"portfolio_id": stack.pid}).text
-    row = html.split(f'id="agent-{stack.pid}-strategy-AAA"', 1)[1]
-    row = row.split("</td>", 1)[0]
+    row = html.split('aria-label="Why? Ask the Research Copilot about AAA"', 1)[1]
+    row = row.split("</button>", 1)[0]
 
     assert 'hx-post="/copilot/ask"' in row
     assert 'hx-vals=\'{"target": "#portfolio-copilot-body", "ticker": "AAA"}\'' in row
     assert 'hx-target="#portfolio-copilot-body"' in row
+    assert "portfolioShowCopilot();" in row
     assert 'hx-on::after-request="revealPortfolioCopilot()"' in row
     assert "offcanvas" not in row
 
@@ -522,16 +513,16 @@ def test_failure_fallback_and_chart_include_are_in_place() -> None:
     # only once it stacks below the holdings.
     assert "if (!body) return;" in index
     assert "window.matchMedia('(max-width: 1080px)').matches" in index
-    assert "grid-template-columns: minmax(0, 1fr) 340px" in index
     include = (
         '{% if chart_has_history %}{% include "_portfolio_chart.html" %}{% endif %}'
     )
     assert template.count(include) == 1
-    # The aside sits beside the holdings only, below the chart and cards.
+    # GH-130 order: headline numbers, the chart, then holdings beside the
+    # risk card and copilot.
     assert (
-        template.index(include)
-        < template.index('class="portfolio-summary-grid"')
-        < template.index('class="portfolio-holdings-layout"')
+        template.index('class="portfolio-headline"')
+        < template.index(include)
+        < template.index('class="portfolio-body"')
     )
 
 
@@ -588,7 +579,6 @@ def test_no_published_artifact_is_unavailable_not_unknown_freshness(stack) -> No
 
     assert "Published analysis" in view.unavailable
     assert not any(e.kind.startswith("analysis_") for e in view.attention.events)
-    assert "not counted: Published analysis." in _agents(stack)
 
 
 def test_a_legacy_artifact_keeps_the_unknown_freshness_item(stack) -> None:
@@ -649,7 +639,7 @@ def test_no_portfolios_still_queues_published_evidence(
     )
 
     assert [i.title for i in view.attention.items] == ["Congress source failed"]
-    assert view.attention.urgent_count == 0
+    assert len(view.attention.needs_action) == 0
 
 
 def test_a_failing_published_evidence_path_is_fail_soft(
@@ -659,37 +649,14 @@ def test_a_failing_published_evidence_path_is_fail_soft(
     monkeypatch.setattr(portfolio_service_module, "record_setups", _raise)
 
     view = _view_with(stack)
-    body = _agents(stack)
 
     assert "Published evidence" in view.unavailable
     assert not any(
         e.raised_by in ("scanner", "pipeline") for e in view.attention.events
     )
     assert "Published evidence failed" in caplog.text
-    assert "Sell" in _cell(stack, body, "strategy-AAA")
-    assert "166 / 200" in _cell(stack, body, "evidence-BBB")
-    assert "not counted: Published evidence." in body
-
-
-def _strip(view: PortfolioAgentView) -> str:
-    return templates.get_template("_portfolio_agents.html").render(view=view)
-
-
-def test_info_items_without_urgent_ones_are_introduced_not_shown_clear() -> None:
-    setup = setup_events(
-        [("NEW", "breakout", "VCP Breakout")], run_id="run-1", observed_at=None
-    )
-    published = PublishedEvidence(run_id="run-1", events=tuple(setup))
-    risk = _risk()
-
-    listed = _strip(build_agent_view(1, (), NO_ASSIGNMENT, risk, {}, published))
-    empty = _strip(build_agent_view(1, (), NO_ASSIGNMENT, risk, {}))
-
-    assert "No urgent findings." in listed
-    assert listed.index("Also noted — not urgent") < listed.index("NEW: VCP Breakout")
-    assert "is-clear" not in listed
-    assert "is-clear" in empty
-    assert "Also noted" not in empty
+    assert "Sell" in _text(view, "AAA", "strategy")
+    assert "166 / 200" in _text(view, "BBB", "evidence")
 
 
 def test_the_portfolio_tab_queues_the_desks_notification_events(stack) -> None:
@@ -702,8 +669,8 @@ def test_the_portfolio_tab_queues_the_desks_notification_events(stack) -> None:
         portfolio_id=stack.pid,
     )
 
-    body = _agents(stack)
+    view = _view(stack)
 
-    assert "Import rejected" in body
+    assert "Import rejected" in [i.title for i in view.attention.items]
     # Listed for review, never counted urgent.
-    assert _cell(stack, body, "findings").strip() == "5"
+    assert _needs_action(view) == "4"

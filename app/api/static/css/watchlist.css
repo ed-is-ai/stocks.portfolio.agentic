@@ -88,6 +88,7 @@ a.ticker:hover {
 .rec-extended { background: var(--orange-bg); color: var(--orange); }
 .rec-alert { background: var(--blue-bg); color: var(--blue); }
 .rec-watch { background: var(--purple-bg); color: var(--purple); }
+.rec-watching { background: #e3eaf6; color: #23467a; }
 .rec-none { color: #94a3b8; font-size: var(--fs-xs); font-style: italic; }
 
 .badge-vcp,
@@ -125,6 +126,23 @@ a.ticker:hover {
 .btn-filter[data-filter="breakout"].active { background: #f97316; border-color: #f97316; }
 .btn-filter[data-filter="myb"].active { background: var(--purple); border-color: var(--purple); }
 .btn-filter[data-filter="uk"].active { background: #1d4ed8; border-color: #1d4ed8; }
+
+/* ── Scanner title line and toolbar (#129) ─────────────────────────
+ * One title line (count · buy signals · regime, search on the right)
+ * and one chip row; Filters / Columns / Views sit at its right end. */
+.wl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 1rem; margin-bottom: 0.6rem; }
+.wl-head h1 { margin: 0; font-size: 1.75rem; font-weight: var(--fw-bold); letter-spacing: -0.02em; }
+.wl-head h1:focus { outline: none; }
+.wl-head h1:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+.wl-subtitle { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+.wl-subtitle strong { color: var(--primary); }
+.wl-regime.is-up { color: var(--green); font-weight: var(--fw-semibold); }
+.wl-regime.is-down { color: var(--red); font-weight: var(--fw-semibold); }
+.wl-head .wl-search { margin-left: auto; min-height: 2.25rem; width: 17.5rem; max-width: 100%; }
+.wl-head .wl-search input { flex: 1; min-width: 0; font-size: var(--fs-sm); }
+#wl-toolbar { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 0.6rem; }
+#wl-toolbar .btn-filter { padding: 0.3rem 0.7rem; }
+#wl-toolbar .wl-adv { margin-left: auto; }
 
 /* ── Advanced toolbar (search / ranges / columns / views) ──────── */
 .wl-toolbar { flex-wrap: wrap; gap: 0.5rem; align-items: flex-start; }
@@ -398,6 +416,24 @@ a.ticker:hover {
   background: #f8fafc;
 }
 
+/* Both actions sit on one line so they never double a row's height. */
+#watchlist-table tbody td:last-child { white-space: nowrap; }
+
+/* The "Watching" divider row (#129): one full-width cell, placed by
+ * watchlist.js. It must not inherit the sticky first/last-cell styles. */
+#watchlist-table tbody tr.wl-divider td,
+#watchlist-table tbody tr.wl-divider:hover td {
+  position: static;
+  box-shadow: none;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding-top: 0.6rem;
+}
+
 /* Row actions appear on row hover or keyboard focus; touch devices
  * (no hover) always show them. */
 #watchlist-table tbody td:last-child > button { opacity: 0; }
@@ -469,13 +505,12 @@ a.ticker:hover {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 0.4rem;
   margin-top: 0.5rem;
   font-size: var(--fs-xs);
   color: var(--muted);
 }
-.wl-pager .btn-filter:disabled { opacity: 0.5; cursor: default; }
-.wl-pager .btn-filter:disabled:hover { border-color: var(--border); color: var(--muted); }
 
 /* ── Focus-visible states (keyboard access) ──────────────────────
  * Ticker links, sort headers, filter/dropdown toggles and row
@@ -636,10 +671,10 @@ a.ticker:focus-visible,
 .wl-rsi-hot .wl-rsi-val { color: var(--red); }
 
 /* ── #394 Compact density ────────────────────────────────────────── */
-#watchlist-table.wl-compact tbody td { padding: 0.14rem 0.55rem; font-size: var(--fs-2xs); }
+#watchlist-table.wl-compact tbody td { padding: 0.14rem 0.55rem; font-size: var(--fs-2xs); white-space: nowrap; }
 #watchlist-table.wl-compact thead th { padding: 0.34rem 0.55rem; }
 #watchlist-table.wl-compact .cell-sub,
 #watchlist-table.wl-compact .wl-rsi::before,
 #watchlist-table.wl-compact .wl-rsi::after { display: none; }
-/* .wl-density is also a .btn-filter, so .btn-filter.active supplies the
- * active styling — no separate rule needed here. */
+/* The market narrative sits behind the disclosure below the table. */
+.wl-narrative { margin-top: 0.5rem; }

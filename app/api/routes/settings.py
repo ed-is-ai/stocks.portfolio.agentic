@@ -13,8 +13,10 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import get_integration_config_service
+from app.api.stock_scanner_context import build_freshness_context
 from app.api.templating import templates
 from app.core.security import require_local_or_token
+from app.services.pipeline_service import PipelineService
 from app.services.integration_config_service import (
     IntegrationConfigError,
     IntegrationConfigService,
@@ -39,7 +41,13 @@ _FORM_TO_ENV = {
 def _settings_context(
     config: IntegrationConfigService, **updates: object
 ) -> dict[str, object]:
-    context: dict[str, object] = {"fields": config.status()}
+    context: dict[str, object] = {
+        "fields": config.status(),
+        # The refresh variants live here, beside their reduced-coverage
+        # warnings and schedule, rather than in the shell's one Refresh.
+        **build_freshness_context(),
+        "pipeline_warnings": PipelineService.missing_configuration(),
+    }
     context.update(updates)
     return context
 

@@ -235,6 +235,8 @@ def test_selects_largest_latest_comparable_cohort_and_newest_per_strategy(
     ]
     assert summary.selected_spy_handle == "R01"
     assert summary.runs[0].is_spy_reference
+    assert summary.runs[0].vs_spy_display is None
+    assert summary.runs[1].vs_spy_display is not None
     assert summary.runs[1].metrics.sharpe_ratio is None
     assert (
         summary.runs[1].metric_availability["sharpe_ratio"]
@@ -348,8 +350,9 @@ def test_single_strategy_is_shown_without_a_cross_strategy_curve(monkeypatch):
         outcome_summary=summary,
         pending_experiment_detail=None,
     )
-    assert "No comparable multi-Strategy cohort was found" in rendered
-    assert "outcomes are not ranked across rows" in rendered
+    assert "Latest result per strategy" in rendered
+    assert "not ranked against each other" in rendered
+    assert "only-run" in rendered
 
 
 def test_pending_experiment_remains_visible_when_outcome_summary_fails():
@@ -374,8 +377,9 @@ def test_pending_experiment_remains_visible_when_outcome_summary_fails():
     detail = SimpleNamespace(experiment=experiment, locked_manifest_json="{}")
 
     rendered = templates.get_template("_strategy_outcome_summary.html").render(
-        outcome_summary=None,
-        pending_experiment_detail=detail,
+        outcome_summary=None
+    ) + templates.get_template("_strategy_experiment_card.html").render(
+        pending_experiment_detail=detail
     )
 
     assert "The bounded Backtest outcome summary is unavailable." in rendered
@@ -494,6 +498,10 @@ def test_pinned_gbp_cohort_appends_spy_total_return_benchmark(monkeypatch):
     assert "Strategies vs SPY" in rendered
     assert "pinned GBP/USD rates" in rendered
     assert "SPY Buy and Hold Result" not in rendered
+    # gh-131: every charted row carries its total-return gap to SPY.
+    assert summary.runs and all(row.vs_spy_display for row in summary.runs)
+    gap = summary.runs[0].vs_spy_display
+    assert gap is not None and gap in rendered
 
 
 def test_single_pinned_run_is_charted_with_spy(monkeypatch):
@@ -613,3 +621,29 @@ def test_existing_spy_buy_and_hold_run_suppresses_pinned_benchmark(monkeypatch):
     assert labels[0] == "SPY Buy and Hold"
     assert "SPY (benchmark)" not in labels
     assert summary.benchmark_note is None
+
+
+def test_vs_spy_is_the_signed_total_return_gap_in_points():
+    from app.services.backtest.strategy_outcomes import _vs_spy_displays
+
+    runs: tuple[dict[str, object], ...] = (
+        {"run_id": "up", "equity_values": (100.0, 150.0)},
+        {"run_id": "down", "equity_values": (100.0, 110.0)},
+        {"run_id": "flat-start", "equity_values": (0.0, 10.0)},
+    )
+    spy: dict[str, object] = {
+        "run_id": None,
+        "is_benchmark": True,
+        "equity_values": (50.0, 60.0),
+    }
+    zero_spy: dict[str, object] = {**spy, "equity_values": (0.0, 1.0)}
+
+    assert _vs_spy_displays({"series": (*runs, spy)}) == {
+        "up": "+30.0 pts",
+        "down": "\u221210.0 pts",
+    }
+    assert _vs_spy_displays({"series": runs}) == {}
+    tiny: dict[str, object] = {"run_id": "tiny", "equity_values": (100.0, 119.97)}
+    assert _vs_spy_displays({"series": (tiny, spy)}) == {"tiny": "+0.0 pts"}
+    no_start: dict[str, object] = {"series": (runs[0], zero_spy)}
+    assert _vs_spy_displays(no_start) == {}

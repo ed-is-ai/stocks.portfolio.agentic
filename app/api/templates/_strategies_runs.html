@@ -1,0 +1,9 @@
+{#- All runs (gh-131): the Strategies sub-view at /strategies/runs. The list
+    pages 10 at a time over the #133 summary query (AD-9). -#}
+<section class="sm-page" aria-labelledby="strategies-runs-heading">
+  <header class="sm-page-head mb-2">
+    <a href="/strategies" hx-get="/partials/strategies" hx-push-url="/strategies" hx-target="#tab-content" hx-swap="innerHTML" class="small">← Strategies</a>
+    <h1 id="strategies-runs-heading" tabindex="-1" class="sm-page-title h3 mb-0">All runs</h1>
+  </header>
+  {% include "_backtest_results_list.html" %}
+</section>

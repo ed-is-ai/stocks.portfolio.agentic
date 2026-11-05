@@ -46,7 +46,8 @@ def test_index_renders_fresh_affordance_beside_refresh_control(
     # Fresh is deliberately quiet: detail remains attached to the single
     # keyboard/touch dropdown target, but there is no persistent icon/time.
     assert "bi-clock-fill" not in markup
-    assert 'aria-label="Refresh Data"' in markup
+    button = markup.split('id="refresh-data-button"', 1)[1].split("</button>", 1)[0]
+    assert "<span>Refresh</span>" in button
     freshness_tag = markup.split('id="refresh-freshness"', 1)[1].split(">", 1)[0]
     assert 'aria-live="polite"' not in freshness_tag
     assert 'aria-describedby="refresh-freshness-description"' in markup
@@ -62,24 +63,16 @@ def test_index_renders_primary_navigation_in_user_flow_order(
 ) -> None:
     _use_artifact(monkeypatch, tmp_path, datetime.now(timezone.utc))
 
-    markup = client.get("/").text
-    tab_bar = markup.split('<ul class="nav nav-tabs" id="mainTabs"', 1)[1].split(
-        "</ul>", 1
-    )[0]
-    tab_ids = [
-        "tab-stock-scanner",
-        "tab-portfolio",
-        "tab-realised-pnl",
-        "tab-strategy-manager",
-        "tab-history",
-        "tab-runlog",
-        "tab-desk",
-        "tab-settings",
-    ]
+    markup = client.get("/today").text
+    tab_bar = markup.split('<ul id="shell-tabs"', 1)[1].split("</ul>", 1)[0]
+    tab_ids = ["tab-today", "tab-scanner", "tab-portfolio", "tab-strategies"]
 
     assert [tab_bar.index(f'id="{tab_id}"') for tab_id in tab_ids] == sorted(
         tab_bar.index(f'id="{tab_id}"') for tab_id in tab_ids
     )
+    # Secondary pages live under the gear menu, not the tab bar.
+    for retired in ("tab-runlog", "tab-settings", "tab-desk", "tab-history"):
+        assert f'id="{retired}"' not in markup
 
 
 def test_index_renders_stale_affordance_with_caution_sentence(
@@ -171,9 +164,9 @@ def test_index_reserves_no_permanent_space_for_the_status_bar(
 
     assert "body { padding-bottom: calc(2.5rem" not in markup
     for tab, bar in (
-        ("tab-stock-scanner", "pipeline-status"),
+        ("tab-scanner", "pipeline-status"),
         ("tab-portfolio", "portfolio-backfill-status"),
-        ("tab-strategy-manager", "strategy-activity-status"),
+        ("tab-strategies", "strategy-activity-status"),
     ):
         assert f"body:has(#{tab}.active):has(#{bar} > .pipeline-status)" in markup
 
@@ -194,15 +187,16 @@ def test_refresh_menu_carries_reduced_coverage_warnings(monkeypatch, tmp_path) -
         ),
     )
 
-    markup = client.get("/").text
+    markup = client.get("/partials/settings").text
 
     assert 'class="refresh-coverage"' in markup
     assert "Reduced coverage" in markup
     assert "Anthropic API key" in markup
     assert "Summaries disabled." in markup
-    # The warnings must sit inside the Refresh Data menu, above its actions.
-    menu = markup.split('class="dropdown-menu dropdown-menu-end refresh-menu', 1)[1]
-    assert menu.index('class="refresh-coverage"') < menu.index("Standard refresh")
+    # The warnings sit with the refresh variants in Settings, above them.
+    assert markup.index('class="refresh-coverage"') < markup.index(
+        "Include institutional data"
+    )
     # The dialog and its container are gone for good.
     assert "Continue with partial refresh" not in markup
     assert 'id="pipeline-confirmation"' not in markup
@@ -214,7 +208,7 @@ def test_refresh_menu_omits_the_warning_block_when_fully_configured(
     _use_artifact(monkeypatch, tmp_path, datetime.now(timezone.utc))
     monkeypatch.setattr(PipelineService, "missing_configuration", staticmethod(list))
 
-    markup = client.get("/").text
+    markup = client.get("/partials/settings").text
 
     # The stylesheet always defines the class; only the element is gated.
     assert 'class="refresh-coverage"' not in markup

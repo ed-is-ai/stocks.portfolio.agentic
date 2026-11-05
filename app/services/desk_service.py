@@ -1,32 +1,32 @@
-"""Read-only view model for the AI Desk screen (GH-21).
+"""The Desk service: Today's three projections over the triage queue.
 
-The Desk renders #18's attention queue for one portfolio -- built by
-``PortfolioService.agent_view`` exactly as the Portfolio tab builds it, plus
-recent warning notifications -- with a workflows rail, a risk strip and an
-evidence inspector. Every figure comes from a typed source or a cheap read;
-a failing source is shown unavailable, never guessed. Nothing here writes,
-enqueues a job or calls an LLM, and a cold trade-review cache is never
-computed.
+Today (GH-128, replacing the GH-21 AI Desk) renders #18's attention queue
+for one portfolio -- built by ``PortfolioService.agent_view`` exactly as the
+Portfolio tab builds it, plus recent warning notifications. The service
+exposes exactly three projections, all from one cached build per input
+revision (AD-2, AD-5):
+
+* ``today_items(pid)`` -- the whole Today view;
+* ``risk_items(pid)`` -- its held-position risks, for the Portfolio card;
+* ``badge_count(pid)`` -- how many Today items need action.
+
+Nothing here calls an LLM or computes a cold trade-review cache; the only
+write is persisting a "Dismiss all" against each item's stable key.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import threading
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
-from urllib.parse import quote
 
-from app.agents.triage.sources import (
-    NOTIFICATION_LABELS,
-    NOTIFICATION_WINDOW,
-    notification_events,
-)
+from app.agents.triage.sources import NOTIFICATION_WINDOW, notification_events
+from app.core.recommendation import buy_signals
 from app.repositories.notifications_repo import NotificationsRepository
 from app.schemas.attention import (
     AttentionCategory,
@@ -35,64 +35,30 @@ from app.schemas.attention import (
     AttentionQueueV1,
     run_key,
 )
-from app.schemas.evidence_ref import EvidenceRefV1
-from app.schemas.notification import Notification, NotificationCategory
+from app.schemas.notification import Notification
 from app.schemas.position_thesis import ThesisSummary
+from app.schemas.record import StockRecord
 from app.schemas.source_health import SourceHealth, SourceName
-from app.schemas.trade_review import iso_week
-from app.services.freshness_service import Freshness, calculate_freshness
+from app.services import portfolio_service as portfolio_module
 from app.services.portfolio_agent_view import (
-    STRATEGY_UNAVAILABLE,
     PortfolioAgentView,
+    PortfolioSummary,
     RecommendationOutcome,
 )
-from app.services import portfolio_service as portfolio_module
 from app.services.portfolio_service import NotificationLoader, PortfolioService
-from app.services.trade_review_service import TradeReviewService
 from app.services.trader_service import TraderService
 
 logger = logging.getLogger(__name__)
 
-Chip = Literal["Risk", "Limited", "Review", "Ready"]
-ActionKind = Literal["tab", "href", "thesis"]
-
-CHIPS: dict[AttentionCategory, Chip] = {
-    "held_risk": "Risk",
-    "exit": "Risk",
-    "evidence": "Review",
-    "new_setup": "Ready",
+#: Each category's chip and tone; a stale-only item reads "Stale".
+CHIPS: dict[AttentionCategory, tuple[str, str]] = {
+    "held_risk": ("Risk", "risk"),
+    "exit": ("Exit", "risk"),
+    "evidence": ("Check", "info"),
+    "new_setup": ("Setup", "good"),
 }
-CHIP_TONES: dict[Chip, str] = {
-    "Risk": "risk",
-    "Limited": "warn",
-    "Review": "info",
-    "Ready": "good",
-}
-CATEGORY_LABELS: dict[AttentionCategory, str] = {
-    "held_risk": "Held-position risk",
-    "exit": "Exit",
-    "evidence": "Evidence",
-    "new_setup": "New setup",
-}
-ORDERING_NOTE = (
-    "Ordered by deterministic risk policy: held-position risk, exits, "
-    "evidence, then new setups."
-)
-AGENT_BOUNDARY = (
-    "Agents explain and propose; typed services calculate. The Desk's only "
-    "change is dismissing a notice; its links open the screens where you act "
-    "(the thesis editor there can save or draft)."
-)
-CONTEXT_NOTE = (
-    "Desk changes nothing but dismissed notices · No broker connection · "
-    "Job approvals arrive with Strategy experiments"
-)
-#: Recent-activity notices shown under the queue.
-ACTIVITY_LIMIT = 10
-MISSING_ITEM = "That item is no longer in the queue; showing the first item."
-UNAVAILABLE = "Unavailable"
-LIVE = "Live"
-NOT_COMPUTED = "Not computed yet"
+#: Chips for rollups whose rule reads better than its category.
+RULE_CHIPS: dict[str, tuple[str, str]] = {"no_stop": ("Stops", "warn")}
 #: Human names for the queue's internal ``raised_by`` values; notification
 #: events already carry their category label.
 RAISED_BY_LABELS: dict[str, str] = {
@@ -104,114 +70,90 @@ RAISED_BY_LABELS: dict[str, str] = {
     "alert_agent": "Alerts",
     "trade_review": "Trade review",
 }
-#: The tab each source's items are acted on from today.
-_RAISED_BY_TABS: dict[str, str] = {
-    "risk_coach": "tab-portfolio",
-    "strategy": "tab-portfolio",
-    "thesis_monitor": "tab-portfolio",
-    "alert_agent": "tab-portfolio",
-    "pipeline": "tab-runlog",
-    "scanner": "tab-stock-scanner",
-    "trade_review": "tab-history",
+#: Where each source's items are acted on: (label, shell page).
+SOURCE_ACTIONS: dict[str, tuple[str, str]] = {
+    "risk_coach": ("Review position", "/portfolio"),
+    "alert_agent": ("Review position", "/portfolio"),
+    "strategy": ("Review in Portfolio", "/portfolio"),
+    "thesis_monitor": ("Review thesis", "/portfolio"),
+    "pipeline": ("Open Run Log", "/runlog"),
+    "scanner": ("Open Scanner", "/scanner"),
 }
-TAB_LABELS: dict[str, str] = {
-    "tab-portfolio": "Open Portfolio",
-    "tab-runlog": "Open Run Log",
-    "tab-stock-scanner": "Open Stock Scanner",
-    "tab-history": "Open Trade History",
-    "tab-strategy-manager": "Open Strategy Manager",
+#: A rollup rule's own action, when it is clearer than its source's.
+RULE_ACTIONS: dict[str, tuple[str, str]] = {"no_stop": ("Set stops", "/portfolio")}
+PAGE_LABELS: dict[str, str] = {
+    "/scanner": "Open Scanner",
+    "/portfolio": "Open Portfolio",
+    "/strategies": "Open Strategies",
+    "/runlog": "Open Run Log",
 }
-#: How long the bell's attention count is reused for unchanged inputs.
-COUNT_TTL = timedelta(seconds=60)
-#: Longest a Desk timer poll may answer "unchanged" for inputs its revision
-#: does not capture (prices, freshness labels).
+#: Buy signals Today lists; the rest are one click away in the Scanner.
+BUY_SIGNAL_LIMIT = 5
+#: Longest a cached Today may be reused for inputs its revision does not
+#: capture (prices, freshness labels).
 DESK_MAX_AGE = timedelta(minutes=10)
-#: The bell's cached counts, shared by every request's DeskService.
-ATTENTION_COUNTS: dict[tuple[object, ...], tuple[datetime, int]] = {}
-_COUNTS_LOCK = threading.Lock()
-#: How far back the rail counts copilot questions.
-COPILOT_WINDOW = timedelta(days=7)
-#: Bytes of the copilot audit log read from its end (one line per question).
-AUDIT_TAIL_BYTES = 1 << 20
+#: How many revisions (portfolios x recent inputs) a cache keeps.
+CACHE_SIZE = 16
+_CACHE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
-class DeskAction:
-    """A link to where the user acts on an item today; never a mutation."""
+class TodayAction:
+    """A link to the shell page where the user acts on an item."""
 
     label: str
-    kind: ActionKind
-    target: str
+    href: str
 
 
 @dataclass(frozen=True)
-class DeskItem:
-    """One queue item with its chip, original events, evidence and links."""
+class TodayItem:
+    """One attention item as Today shows it; ``key`` is its stable id."""
 
-    item: AttentionItemV1
-    chip: Chip
-    events: tuple[AttentionEventV1, ...]
-    evidence: tuple[EvidenceRefV1, ...]
+    key: str
+    kind: AttentionCategory
+    chip: str
+    tone: str
+    title: str
+    detail: str
+    action: TodayAction | None
+    #: The item's source events, hashed: a dismissal holds while it matches.
+    fingerprint: str
+    #: Provenance shown only behind ``macros.disclosure`` (AD-10).
     facts: tuple[tuple[str, str], ...]
-    actions: tuple[DeskAction, ...]
-    #: Notifications behind this item, which the inspector can dismiss.
-    notification_ids: tuple[int, ...] = ()
-
-    @property
-    def tone(self) -> str:
-        """The chip's colour tone."""
-        return CHIP_TONES[self.chip]
 
 
 @dataclass(frozen=True)
-class ActivityNote:
-    """One INFO notice (a job finished, an import done) and its link."""
+class BuySignal:
+    """One BUY-family scanner row (AD-6)."""
 
-    note: Notification
-    action: DeskAction
-
-    @property
-    def label(self) -> str:
-        """The notice's category, as the queue labels notification events."""
-        return NOTIFICATION_LABELS[self.note.category]
-
-
-@dataclass(frozen=True)
-class Workflow:
-    """One rail row: a capability, its state and its current reading."""
-
-    name: str
-    state: str
-    detail: str = ""
-    action: DeskAction | None = None
+    ticker: str
+    label: str
+    sector: str | None
+    score: int | None
+    price: float | None
+    currency: str
 
 
 @dataclass(frozen=True)
-class DeskView:
-    """Everything the Desk partial renders for one portfolio."""
+class TodayView:
+    """Everything the Today partial renders for one portfolio."""
 
-    portfolios: tuple[tuple[int, str], ...]
     portfolio_id: int | None
-    agent: PortfolioAgentView
-    items: tuple[DeskItem, ...]
-    selected: DeskItem | None
-    missing_item: bool
-    workflows: tuple[Workflow, ...]
-    freshness: Freshness
-    evidence_complete: tuple[int, int]
-    activity: tuple[ActivityNote, ...] = ()
-    #: True when the recent-activity read failed (shown as unavailable).
-    activity_unavailable: bool = False
+    needs_action: tuple[TodayItem, ...]
+    worth_checking: tuple[TodayItem, ...]
+    buy_signals: tuple[BuySignal, ...]
+    #: Every BUY-family row, of which ``buy_signals`` is the head.
+    buy_signal_count: int
+    #: Queued new setups, which Today leaves to the Scanner.
+    other_setups: int
+    summary: PortfolioSummary | None
+    unavailable: tuple[str, ...]
+    generated_at: datetime | None
+    run_id: str | None
 
-    @property
-    def queue(self) -> AttentionQueueV1:
-        """#18's queue the items were built from."""
-        return self.agent.attention
 
-    @property
-    def chip_counts(self) -> dict[Chip, int]:
-        """Items per chip, in chip order: a partition of the list."""
-        return {chip: sum(i.chip == chip for i in self.items) for chip in CHIP_TONES}
+#: Today views cached per input revision, shared by every request (AD-14).
+TODAY_CACHE: OrderedDict[str, TodayView] = OrderedDict()
 
 
 def file_revision(*paths: Path) -> tuple[tuple[int, int] | None, ...]:
@@ -221,7 +163,7 @@ def file_revision(*paths: Path) -> tuple[tuple[int, int] | None, ...]:
 
 
 class DeskService:
-    """Assemble the AI Desk from the agents' existing outputs (read-only)."""
+    """Today's projections from the agents' existing outputs."""
 
     def __init__(
         self,
@@ -230,11 +172,9 @@ class DeskService:
         recommend: Callable[[int], RecommendationOutcome],
         theses: Callable[[int], Mapping[str, ThesisSummary]],
         notifications: NotificationsRepository,
-        trade_reviews: TradeReviewService,
-        audit_path: Path,
         source_health: Callable[[], Mapping[SourceName, SourceHealth]],
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
-        count_cache: dict[tuple[object, ...], tuple[datetime, int]] | None = None,
+        cache: OrderedDict[str, TodayView] | None = None,
         input_revision: Callable[[], object] = lambda: None,
     ) -> None:
         self._trader = trader
@@ -242,192 +182,129 @@ class DeskService:
         self._recommend = recommend
         self._theses = theses
         self._notifications = notifications
-        self._trade_reviews = trade_reviews
-        self._audit_path = audit_path
         self._source_health = source_health
         self._now = now
-        self._counts = {} if count_cache is None else count_cache
+        self._cache: OrderedDict[str, TodayView] = (
+            OrderedDict() if cache is None else cache
+        )
         self._input_revision = input_revision
 
-    def attention_count(self, portfolio_id: int | None) -> int:
-        """The urgent attention count the masthead bell shows.
-
-        Reused for ``COUNT_TTL`` while the portfolio, published artifact and
-        trade ledgers are unchanged, so the 30s poll does not rebuild the
-        agent view. Notifications are not read: they never count urgent.
-        """
-        now = self._now()
-        key = self._count_key(portfolio_id)
-        with _COUNTS_LOCK:
-            hit = None if key is None else self._counts.get(key)
-        if hit is not None and hit[0] > now:
-            return hit[1]
-        count = self._portfolio.agent_view(
-            portfolio_id, self._recommend, self._theses, self._source_health
-        ).attention.urgent_count
+    def today_items(self, portfolio_id: int | None) -> TodayView:
+        """Today for ``portfolio_id``, reused while its revision holds."""
+        key = self.revision(portfolio_id)
         if key is not None:
-            with _COUNTS_LOCK:
-                for stale in [k for k, (end, _) in self._counts.items() if end <= now]:
-                    del self._counts[stale]
-                self._counts[key] = (now + COUNT_TTL, count)
-        return count
+            with _CACHE_LOCK:
+                hit = self._cache.get(key)
+                if hit is not None:
+                    self._cache.move_to_end(key)
+                    return hit
+        view = self._build(portfolio_id)
+        if key is not None:
+            with _CACHE_LOCK:
+                self._cache[key] = view
+                while len(self._cache) > CACHE_SIZE:
+                    self._cache.popitem(last=False)
+        return view
 
-    def _count_key(self, portfolio_id: int | None) -> tuple[object, ...] | None:
-        """What the count depends on cheaply, or None (bypass the cache)."""
+    def risk_items(self, portfolio_id: int | None) -> tuple[TodayItem, ...]:
+        """Today's held-position risks: the Portfolio risk card's rows."""
+        return tuple(
+            i
+            for i in self.today_items(portfolio_id).needs_action
+            if i.kind == "held_risk"
+        )
+
+    def badge_count(self, portfolio_id: int | None) -> int:
+        """The Today tab's badge: how many items need action."""
+        return len(self.today_items(portfolio_id).needs_action)
+
+    def dismiss_worth_checking(self, portfolio_id: int | None) -> int:
+        """Persist a dismissal of every Worth checking item; return how many."""
+        items = self.today_items(portfolio_id).worth_checking
+        self._notifications.dismiss_attention((i.key, i.fingerprint) for i in items)
+        return len(items)
+
+    def revision(self, portfolio_id: int | None) -> str | None:
+        """A short digest of Today's cheap inputs, or None (always rebuild).
+
+        Covers the portfolio, the published artifact, the trade ledgers and
+        portfolio names, the notifications table and dismissals,
+        ``input_revision`` (theses, Strategy assignments, source health) and
+        a ``DESK_MAX_AGE`` time bucket that bounds staleness from inputs the
+        digest does not see (prices).
+        """
         try:
-            ids = [p.id for p in self._trader.list_portfolios()]
+            portfolios = self._trader.list_portfolios()
+            ids = [p.id for p in portfolios]
             revisions = tuple(sorted(self._trader.get_trade_revisions(ids).items()))
             artifact = portfolio_module.ANALYSIS_JSON
             mtime = artifact.stat().st_mtime_ns if artifact.exists() else None
-        except Exception:
-            logger.warning("Attention count key unavailable", exc_info=True)
-            return None
-        return (portfolio_id, mtime, revisions)
-
-    def revision(self, portfolio_id: int | None) -> str | None:
-        """A short digest of the Desk's cheap inputs, or None (always render).
-
-        Covers the count key (artifact, trade ledgers), the portfolio names,
-        the notifications table, the copilot audit log, whether the trade
-        review cache is warm, ``input_revision`` (theses, Strategy
-        assignments, source health) and a ``DESK_MAX_AGE`` time bucket that
-        bounds staleness from inputs the digest does not see (prices).
-        """
-        key = self._count_key(portfolio_id)
-        if key is None:
-            return None
-        try:
-            names = tuple((p.id, p.name) for p in self._trader.list_portfolios())
+            names = tuple((p.id, p.name) for p in portfolios)
             notes = self._notifications.revision()
-            audit = file_revision(self._audit_path)
-            reviews_warm = self._trade_reviews.cached_reviews() is not None
+            dismissed = sorted(self._notifications.attention_dismissals().items())
             inputs = self._input_revision()
         except Exception:
-            logger.warning("Desk revision unavailable", exc_info=True)
+            logger.warning("Today revision unavailable", exc_info=True)
             return None
         bucket = int(self._now().timestamp() // DESK_MAX_AGE.total_seconds())
-        raw = repr((key, names, notes, audit, reviews_warm, inputs, bucket)).encode()
+        raw = repr(
+            (portfolio_id, mtime, revisions, names, notes, dismissed, inputs, bucket)
+        ).encode()
         return hashlib.sha1(raw, usedforsecurity=False).hexdigest()[:16]
 
-    def view(self, portfolio_id: int | None, item_id: str | None = None) -> DeskView:
-        """Build the Desk for ``portfolio_id`` with ``item_id`` selected (the
-        first item when it is absent or no longer queued)."""
+    def _build(self, portfolio_id: int | None) -> TodayView:
+        """Build Today from the agent view and the published artifact."""
         notes: dict[str, Notification] = {}
         agent = self._agent_view(portfolio_id, notes)
-        portfolios = tuple((p.id, p.name) for p in self._trader.list_portfolios())
-        names = dict(portfolios)
         queue = agent.attention
-        items = tuple(_desk_item(queue, i, names, notes) for i in queue.items)
-        selected = _find(items, item_id, queue.analysis_run_id)
-        activity = self._activity(agent.portfolio_id)
-        return DeskView(
-            portfolios=portfolios,
-            portfolio_id=agent.portfolio_id,
-            agent=agent,
-            items=items,
-            selected=selected or (items[0] if items else None),
-            missing_item=item_id is not None and selected is None,
-            workflows=self._workflows(agent),
-            freshness=calculate_freshness(agent.generated_at),
-            evidence_complete=(
-                sum(r.evidence.text == "Complete" for r in agent.rows),
-                len(agent.rows),
+        dismissed = self._dismissals()
+        pid = agent.portfolio_id
+        checking = (_today_item(queue, i, notes, pid) for i in queue.worth_checking)
+        try:
+            signals = buy_signals(
+                self._portfolio.load_analysis(), self._trader.held_tickers()
+            )
+        except Exception:
+            logger.warning("Buy signals unavailable for Today", exc_info=True)
+            signals = []
+        return TodayView(
+            portfolio_id=pid,
+            needs_action=tuple(
+                _today_item(queue, i, notes, pid) for i in queue.needs_action
             ),
-            activity=activity or (),
-            activity_unavailable=activity is None,
+            worth_checking=tuple(
+                i for i in checking if dismissed.get(i.key) != i.fingerprint
+            ),
+            buy_signals=tuple(
+                _buy_signal(r, rec.text) for r, rec in signals[:BUY_SIGNAL_LIMIT]
+            ),
+            buy_signal_count=len(signals),
+            other_setups=sum(i.kind == "new_setup" for i in queue.items),
+            summary=agent.summary,
+            unavailable=agent.unavailable,
+            generated_at=agent.generated_at,
+            run_id=queue.analysis_run_id,
         )
 
-    def _activity(self, portfolio_id: int | None) -> tuple[ActivityNote, ...] | None:
-        """This window's INFO notices for the portfolio or the whole app,
-        newest first; per-security alerts are left to the queue. None when
-        the read fails."""
+    def _dismissals(self) -> Mapping[str, str]:
+        """Persisted dismissals; none when the read fails (items stay shown)."""
         try:
-            notes = self._notifications.recent_info(self._now() - NOTIFICATION_WINDOW)
+            return self._notifications.attention_dismissals()
         except Exception:
-            logger.warning("Recent activity unavailable", exc_info=True)
-            return None
-        kept = [
-            n
-            for n in notes
-            if n.portfolio_id in (None, portfolio_id)
-            and not (n.category == NotificationCategory.ALERT and n.ticker)
-        ]
-        return tuple(
-            ActivityNote(n, _notification_action(n)) for n in kept[:ACTIVITY_LIMIT]
-        )
+            logger.warning("Attention dismissals unreadable", exc_info=True)
+            return {}
 
     def _agent_view(
         self, portfolio_id: int | None, notes: dict[str, Notification]
     ) -> PortfolioAgentView:
         """#18's queue through ``agent_view``, with notification events; the
-        notifications read is kept in ``notes`` for the inspector's links."""
+        notifications read is kept in ``notes`` for the items' links."""
         return self._portfolio.agent_view(
             portfolio_id,
             self._recommend,
             self._theses,
             self._source_health,
             notification_loader(self._notifications, self._now(), notes),
-        )
-
-    def _workflows(self, agent: PortfolioAgentView) -> tuple[Workflow, ...]:
-        """The eight rail rows, each read from its own source."""
-        queue = agent.attention
-        return (
-            _advisor(agent.advisor),
-            self._copilot(),
-            _thesis(agent.theses),
-            (
-                Workflow("Portfolio risk", UNAVAILABLE)
-                if agent.risk_findings is None
-                else Workflow(
-                    "Portfolio risk", LIVE, _plural(agent.risk_findings, "finding")
-                )
-            ),
-            self._trade_review(agent.portfolio_id),
-            Workflow(
-                "Alert triage",
-                LIVE,
-                f"{_plural(len(queue.items), 'item')} · {queue.urgent_count} urgent",
-            ),
-            Workflow("Strategy experiments", "Not built yet — #15"),
-            Workflow("Data recovery", "Not built yet — planned"),
-        )
-
-    def _copilot(self) -> Workflow:
-        """Questions asked in the last 7 days, from the audit log's tail."""
-        try:
-            count, partial = _recent_questions(
-                self._audit_path, self._now() - COPILOT_WINDOW
-            )
-        except OSError:
-            logger.warning("Copilot audit unreadable", exc_info=True)
-            return Workflow("Research copilot", UNAVAILABLE)
-        plus = "+" if partial else ""
-        return Workflow("Research copilot", LIVE, f"{count}{plus} questions in 7 days")
-
-    def _trade_review(self, portfolio_id: int | None) -> Workflow:
-        """Deviations this week from a warm review cache; a cold one is "Not
-        computed yet" with a link to History, never a scan."""
-        history = DeskAction("Open History", "tab", "tab-history")
-        try:
-            reviews = self._trade_reviews.cached_reviews()
-        except Exception:
-            logger.warning("Trade review cache unreadable", exc_info=True)
-            return Workflow("Trade review", UNAVAILABLE)
-        if reviews is None:
-            return Workflow("Trade review", NOT_COMPUTED, "", history)
-        week = iso_week(self._now().date())
-        deviations = sum(
-            check.status == "deviated"
-            for review in reviews.values()
-            if review.portfolio_id == portfolio_id and review.week == week
-            for check in review.checks
-        )
-        return Workflow(
-            "Trade review",
-            LIVE,
-            f"{_plural(deviations, 'deviation')} this week",
-            history,
         )
 
 
@@ -438,7 +315,7 @@ def notification_loader(
 ) -> NotificationLoader:
     """``agent_view``'s notification events: this window's warnings and
     errors, read by the repository's query; each one read is kept in
-    ``notes`` by id when given (the Desk's links and facts)."""
+    ``notes`` by id when given (Today's links)."""
 
     def load(portfolio_id: int | None, run_id: str | None) -> list[AttentionEventV1]:
         recent = repo.recent_warnings(now - NOTIFICATION_WINDOW)
@@ -462,170 +339,102 @@ def raised_by_label(raised_by: str) -> str:
     return f"{', '.join(labels[:-1])} and {labels[-1]}"
 
 
-def _find(
-    items: Sequence[DeskItem], item_id: str | None, run_id: str | None
-) -> DeskItem | None:
-    """The item with ``item_id``, else the same item from another run (ids
-    embed the run key, so a deep link survives a new published run)."""
-    if not item_id:
-        return None
-    exact = next((d for d in items if d.item.id == item_id), None)
-    if exact is not None or not item_id.startswith("attention:"):
-        return exact
+def stable_key(item: AttentionItemV1, run_id: str | None) -> str:
+    """The item's id without its analysis run, so a dismissal survives a new
+    run that raises the same item; rollup ids are already run-free."""
     prefix = f"attention:{run_key(run_id)}:"
-    return next(
-        (d for d in items if item_id.endswith(":" + d.item.id.removeprefix(prefix))),
-        None,
-    )
+    if item.id.startswith(prefix):
+        return "attention:" + item.id.removeprefix(prefix)
+    return item.id
 
 
-def _plural(count: int, noun: str) -> str:
-    return f"{count} {noun}{'' if count == 1 else 's'}"
+def fingerprint(events: Sequence[AttentionEventV1]) -> str:
+    """A short, order-free, run-free digest of what the item says: each
+    event's rule, security and title. A changed finding changes it."""
+    parts = sorted(f"{e.kind}|{e.security_id or ''}|{e.title}" for e in events)
+    raw = "\n".join(parts).encode()
+    return hashlib.sha1(raw, usedforsecurity=False).hexdigest()[:16]
 
 
-def _advisor(advisor: str) -> Workflow:
-    if advisor == STRATEGY_UNAVAILABLE:
-        return Workflow("Portfolio advisor", UNAVAILABLE)
-    return Workflow("Portfolio advisor", LIVE, advisor)
-
-
-def _thesis(theses: Mapping[str, ThesisSummary] | None) -> Workflow:
-    """Active theses and how many the current run found invalidated."""
-    if theses is None:
-        return Workflow("Thesis monitor", UNAVAILABLE)
-    active = [s for s in theses.values() if s.active is not None]
-    invalidated = sum(
-        s.current and s.latest is not None and s.latest.status == "invalidated"
-        for s in active
-    )
-    return Workflow(
-        "Thesis monitor", LIVE, f"{len(active)} active · {invalidated} invalidated"
-    )
-
-
-def _recent_questions(path: Path, since: datetime) -> tuple[int, bool]:
-    """Count audit lines since ``since`` in the log's last ``AUDIT_TAIL_BYTES``.
-
-    Returns the count and whether it is a lower bound (the tail was cut
-    while still inside the window). A missing log is zero questions.
-    """
-    try:
-        with path.open("rb") as handle:
-            size = handle.seek(0, 2)
-            handle.seek(max(0, size - AUDIT_TAIL_BYTES))
-            lines = handle.read().decode("utf-8", "replace").splitlines()
-    except FileNotFoundError:
-        return 0, False
-    cut = size > AUDIT_TAIL_BYTES
-    stamps = [s for s in map(_timestamp, lines[1:] if cut else lines) if s]
-    recent = sum(stamp >= since for stamp in stamps)
-    # Cut while still inside the window: older questions lie beyond the tail.
-    return recent, cut and recent == len(stamps)
-
-
-def _timestamp(line: str) -> datetime | None:
-    """One audit line's aware timestamp, or None if the line is malformed."""
-    try:
-        stamp = datetime.fromisoformat(json.loads(line)["timestamp"])
-    except (ValueError, KeyError, TypeError):
-        return None
-    return stamp if stamp.tzinfo else stamp.replace(tzinfo=UTC)
-
-
-def _desk_item(
+def _today_item(
     queue: AttentionQueueV1,
     item: AttentionItemV1,
-    portfolios: Mapping[int, str],
     notes: Mapping[str, Notification],
-) -> DeskItem:
-    """One item with its chip, facts, full provenance and action links."""
-    events = tuple(queue.events_for(item))
-    chip: Chip = "Limited" if all(e.stale for e in events) else CHIPS[item.kind]
-    return DeskItem(
-        item=item,
+    portfolio_id: int | None,
+) -> TodayItem:
+    """One queue item with its chip, one-line detail, action and provenance."""
+    events = queue.events_for(item)
+    rollup = item.id.startswith("rollup:")
+    rule = events[0].kind if events else ""
+    if events and all(e.stale for e in events):
+        chip, tone = "Stale", "muted"
+    else:
+        chip, tone = (RULE_CHIPS.get(rule) if rollup else None) or CHIPS[item.kind]
+    if rollup:
+        detail = ", ".join(sorted({e.security_id or "" for e in events}))
+    else:
+        detail = events[0].summary if events else item.summary
+    return TodayItem(
+        key=stable_key(item, queue.analysis_run_id),
+        kind=item.kind,
         chip=chip,
-        events=events,
-        evidence=tuple(
-            dict.fromkeys([*item.evidence, *(r for e in events for r in e.evidence)])
-        ),
-        facts=_facts(item, events, portfolios, notes),
-        actions=_actions(events, notes),
-        notification_ids=tuple(
-            dict.fromkeys(
-                int(r.id)
-                for e in events
-                for r in e.evidence
-                if r.kind == "notification" and r.id.isdigit()
-            )
+        tone=tone,
+        title=item.title,
+        detail=detail,
+        action=_action(events, rollup, notes, portfolio_id),
+        fingerprint=fingerprint(events),
+        facts=(
+            ("Why it is here", item.summary),
+            ("Raised by", raised_by_label(item.raised_by)),
+            ("Evidence as of", item.as_of.isoformat() if item.as_of else "Unknown"),
+            ("Signals", str(len(events))),
+            ("Analysis run", queue.analysis_run_id or "Unknown"),
         ),
     )
 
 
-def _facts(
-    item: AttentionItemV1,
+def _action(
     events: Sequence[AttentionEventV1],
-    portfolios: Mapping[int, str],
+    rollup: bool,
     notes: Mapping[str, Notification],
-) -> tuple[tuple[str, str], ...]:
-    """The inspector's fact table; a notification item adds its own
-    severity (warning or error)."""
-    portfolio = (
-        "All portfolios (run-wide)"
-        if item.portfolio_id is None
-        else portfolios.get(item.portfolio_id, f"Portfolio {item.portfolio_id}")
-    )
-    observed = item.observed_at
-    severities = [
-        notes[r.id].severity.value.title()
-        for r in item.evidence
-        if r.kind == "notification" and r.id in notes
-    ]
-    facts = (
-        ("Category", CATEGORY_LABELS[item.kind]),
-        ("Severity", item.severity.title()),
-        ("Portfolio", portfolio),
-        ("Security", item.security_id or "—"),
+    portfolio_id: int | None,
+) -> TodayAction | None:
+    """The one link for an item: a notification's run or category page,
+    else its rollup rule's, else its first source's page."""
+    if not events:
+        return None
+    lead = events[0]
+    note = next(
         (
-            "Observed at",
-            observed.strftime("%Y-%m-%d %H:%M UTC") if observed else "Unknown",
+            notes[r.id]
+            for r in lead.evidence
+            if r.kind == "notification" and r.id in notes
         ),
-        ("Evidence as of", item.as_of.isoformat() if item.as_of else "Unknown"),
-        ("Raised by", raised_by_label(item.raised_by)),
-        ("Events", str(len(events))),
+        None,
     )
-    if not severities:
-        return facts
-    return (*facts, ("Notification severity", ", ".join(severities)))
+    if note is not None:
+        if note.target_url:
+            return TodayAction("Open run", note.target_url)
+        return TodayAction(PAGE_LABELS.get(note.deep_link, "Open"), note.deep_link)
+    found = (RULE_ACTIONS.get(lead.kind) if rollup else None) or SOURCE_ACTIONS.get(
+        lead.raised_by
+    )
+    if found is None:
+        return None
+    label, page = found
+    if page == "/portfolio" and portfolio_id is not None:
+        page = f"/portfolio?portfolio_id={portfolio_id}"
+    return TodayAction(label, page)
 
 
-def _actions(
-    events: Sequence[AttentionEventV1], notes: Mapping[str, Notification]
-) -> tuple[DeskAction, ...]:
-    """Links to where each event is acted on today, in event order."""
-    actions: list[DeskAction] = []
-    for event in events:
-        tab = _RAISED_BY_TABS.get(event.raised_by)
-        if tab is not None:
-            actions.append(DeskAction(TAB_LABELS[tab], "tab", tab))
-        if event.kind == "thesis_invalidated" and event.portfolio_id is not None:
-            security = quote(event.security_id or "", safe="")
-            actions.append(
-                DeskAction(
-                    "Open thesis editor",
-                    "thesis",
-                    f"/portfolios/{event.portfolio_id}/theses/{security}",
-                )
-            )
-        for ref in event.evidence:
-            note = notes.get(ref.id) if ref.kind == "notification" else None
-            if note is not None:
-                actions.append(_notification_action(note))
-    return tuple(dict.fromkeys(actions))
-
-
-def _notification_action(note: Notification) -> DeskAction:
-    """The run page a job notification points at, else its category's tab."""
-    if note.target_url:
-        return DeskAction("Open run", "href", note.target_url)
-    tab = note.deep_link_tab
-    return DeskAction(TAB_LABELS.get(tab, "Open"), "tab", tab)
+def _buy_signal(record: StockRecord, label: str) -> BuySignal:
+    """A scanner record's Today row."""
+    analysis = record.analysis
+    return BuySignal(
+        ticker=record.ticker,
+        label=label,
+        sector=record.sector,
+        score=analysis.score if analysis else None,
+        price=record.price,
+        currency=record.currency,
+    )

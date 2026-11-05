@@ -6,6 +6,7 @@ from decimal import Decimal
 import html
 from pathlib import Path
 import re
+import sqlite3
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -13,6 +14,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.app import app
+from app.schemas.strategy_outcomes import (
+    OutcomeCohortV1,
+    OutcomeMetricsV1,
+    OutcomeRunV1,
+    StrategyOutcomeSummaryV1,
+)
 import app.api.routes.strategy_manager as strategy_manager_routes
 from app.agents.strategy_manager import StrategyManagerAgent
 from app.api.dependencies import (
@@ -538,8 +545,9 @@ def test_landing_get_never_resolves_the_model_service(services):
     response = client.get("/strategy-manager")
 
     assert response.status_code == 200
-    assert "Explain these backtests" in response.text
-    assert "Ask about a Strategy" in response.text
+    # gh-131: one Ask Claude box replaces the two forms.
+    assert response.text.count("Ask Claude") == 1
+    assert "Explain these backtests" not in response.text
 
 
 def test_insights_post_is_the_only_route_that_invokes_generation(services, monkeypatch):
@@ -876,7 +884,7 @@ def test_strategy_copilot_audits_catalog_failure_without_calling_provider(
 
 
 def test_main_renders_coverage_and_canonical_reconstruction_warning(services):
-    response = client.get("/partials/strategy-manager")
+    response = client.get("/partials/strategies")
     assert response.status_code == 200
     assert "Scanner v1" in response.text
     assert "Reconstructed (approximate)" in response.text
@@ -978,7 +986,7 @@ def test_main_logs_render_timing(services, caplog):
     repo, _ = services
 
     with caplog.at_level("INFO"):
-        response = client.get("/partials/strategy-manager")
+        response = client.get("/partials/strategies")
 
     assert response.status_code == 200
     # gh-396: landing now composes readiness + bootstrap state; each reads
@@ -1017,12 +1025,18 @@ def test_landing_cta_is_prepare_data_when_no_coverage(services):
 
 
 def test_landing_cta_is_configure_when_all_ready(services):
+    # gh-131: when everything is ready the header is one New backtest
+    # button -- no prerequisite count, Readiness or Prepare links.
     response = client.get("/strategy-manager")
     assert response.status_code == 200
-    assert "Configure a Backtest" in response.text
+    assert "New backtest</button>" in response.text
     assert 'hx-get="/strategy-manager/configuration"' in response.text
-    assert response.text.count("Prepare historical data") == 1
-    assert "5 of 5 prerequisites ready." in response.text
+    assert "Prepare historical data" not in response.text
+    assert "prerequisites ready" not in response.text
+    visible = re.sub(r"<details.*?</details>", "", response.text, flags=re.S)
+    assert 'hx-get="/strategy-manager/readiness"' not in visible
+    # Readiness stays reachable from the collapsed data details.
+    assert "Readiness and data preparation" in response.text
 
 
 def test_landing_cta_is_review_readiness_at_four_of_five(services):
@@ -1035,9 +1049,8 @@ def test_landing_cta_is_review_readiness_at_four_of_five(services):
     assert response.status_code == 200
     assert "4 of 5 prerequisites ready." in response.text
     assert "Review readiness</button>" in response.text
-    # The primary CTA is not the Configure button (the removed dead-end);
-    # "Configure a Backtest" still appears as an <a> in the results list.
-    assert "Configure a Backtest</button>" not in response.text
+    # The primary CTA is not the New backtest button (the removed dead-end).
+    assert "New backtest</button>" not in response.text
 
 
 def test_landing_cta_is_setup_when_active_profile_is_stale(services):
@@ -1362,8 +1375,9 @@ def test_initialization_mutation_requires_guard(services):
 
 
 def test_tab_is_registered_in_the_application_shell():
-    response = client.get("/")
-    assert 'id="tab-strategy-manager"' in response.text
+    response = client.get("/strategies")
+    assert 'id="tab-strategies"' in response.text
+    assert 'hx-get="/partials/strategies"' in response.text
 
 
 def test_activity_shows_only_authoritative_running_month_and_one_live_region(services):
@@ -1521,6 +1535,7 @@ def test_backtest_activity_shows_inclusive_progress_and_project_buttons(services
     # The month count belongs to the pinned bar; the page keeps the
     # cancellation note and the run controls beside it.
     bar = client.get("/strategy-manager/activity-status").text
+    assert "Backtest running" in bar
     assert "Months" in bar
     assert ">2/3<" in bar
     assert 'class="pipeline-stage running"' in bar
@@ -1948,7 +1963,7 @@ def test_bootstrap_activity_complete_shows_confirmation_and_stops_polling(servic
     repo.activity = _bootstrap_job(status=StrategyJobStatus.COMPLETE, status_version=9)
     text = client.get("/strategy-manager/activities/job-1").text
     assert "Strategy Manager is set up." in text
-    assert 'href="/strategy-manager"' in text
+    assert 'href="/strategies"' in text
     assert "hx-trigger=" not in text
     assert (
         client.get("/strategy-manager/activity-status").text.count(
@@ -2846,7 +2861,7 @@ def test_backtests_list_empty_state(services):
     response = client.get("/strategy-manager/backtests")
     assert response.status_code == 200
     assert "No backtests yet." in response.text
-    assert "Configure a Backtest" in response.text
+    assert "New backtest" in response.text
 
 
 def test_backtests_list_integrity_error_alert(services):
@@ -5025,3 +5040,367 @@ def test_backtests_list_banner_counts_failed_results_on_every_page(
     text = client.get("/strategy-manager/backtests").text
 
     assert "4 stored results failed their integrity check" in text
+
+
+# ---------------------------------------------------------------------------
+# gh-131: the simplified Strategies screen
+# ---------------------------------------------------------------------------
+
+
+def _outcome_row(index: int, **overrides: object) -> OutcomeRunV1:
+    values: dict[str, object] = {
+        "run_id": f"run-{index}",
+        "evidence_handle": f"R{index:02d}",
+        "result_url": f"/strategy-manager/results/run-{index}",
+        "strategy_id": f"strategy-{index}",
+        "strategy_api_version": 1,
+        "strategy_source_digest": "a" * 64,
+        "completed_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+        "start_month": "2020-01",
+        "end_month": "2025-12",
+        "base_currency": "USD",
+        "starting_capital": "100000",
+        "profile_hash": "profile",
+        "parameters": {"lookback_secret_knob": 20},
+        "universe": ("AAA",),
+        "metrics": OutcomeMetricsV1(
+            total_return=0.1, sharpe_ratio=1.0, win_rate=0.5, max_drawdown=-0.2
+        ),
+        "metric_display": {
+            "total_return": "+10.0%",
+            "sharpe_ratio": "1.00",
+            "win_rate": "50.0%",
+            "max_drawdown": "-20.0%",
+        },
+        "metric_availability": {"sharpe_ratio": None, "win_rate": None},
+        "closed_trade_count": 12,
+        "equity_point_count": 3,
+        "provenance": (),
+    }
+    values.update(overrides)
+    return OutcomeRunV1.model_validate(values)
+
+
+def _outcome_summary(*rows: OutcomeRunV1) -> StrategyOutcomeSummaryV1:
+    return StrategyOutcomeSummaryV1(
+        state="individual",
+        inspected_count=len(rows),
+        verified_count=len(rows),
+        cohort_candidate_count=0,
+        cohort_strategy_count=0,
+        integrity_excluded_count=0,
+        missing_result_count=0,
+        runs=rows,
+        cohort=OutcomeCohortV1(
+            is_comparable_cohort=False,
+            limitations=("Historical tested configurations, not future returns.",),
+        ),
+    )
+
+
+def _stub_summary(monkeypatch, summary) -> None:
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "StrategyOutcomeService",
+        lambda _repo, _prices=None: SimpleNamespace(build_summary=lambda: summary),
+    )
+
+
+def _outside_disclosures(markup: str) -> str:
+    """The markup a user sees before opening any ``<details>``."""
+    return re.sub(r"<details.*?</details>", "", markup, flags=re.S)
+
+
+def test_landing_shows_five_latest_rows_then_show_more(services, monkeypatch):
+    _stub_summary(
+        monkeypatch, _outcome_summary(*(_outcome_row(i) for i in range(1, 8)))
+    )
+
+    text = client.get("/partials/strategies").text
+
+    assert "Latest result per strategy" in text
+    assert "not ranked against each other" in text
+    assert text.count("<tr hidden data-more-row>") == 2
+    assert text.count('aria-label="Open the strategy-') == 7
+    assert "Show more</button>" in text
+    assert 'hx-get="/partials/strategies/runs"' in text
+    assert 'hx-push-url="/strategies/runs"' in text
+
+
+def test_landing_without_extra_rows_has_no_show_more(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+
+    text = client.get("/partials/strategies").text
+
+    assert "data-more-row" not in text
+    assert "Show more" not in text
+
+
+def test_landing_shows_vs_spy_and_benchmark_markers(services, monkeypatch):
+    _stub_summary(
+        monkeypatch,
+        _outcome_summary(
+            _outcome_row(1, vs_spy_display="+3.1 pts"),
+            _outcome_row(2, is_spy_reference=True),
+            _outcome_row(3),
+        ),
+    )
+
+    text = client.get("/partials/strategies").text
+
+    assert "+3.1 pts" in text
+    assert ">benchmark<" in text
+    assert '<th scope="col">vs SPY</th>' in text
+
+
+def test_landing_has_no_parameter_dumps_and_one_claude_form(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+
+    text = client.get("/partials/strategies").text
+    visible = _outside_disclosures(text)
+
+    assert "lookback_secret_knob" not in text
+    assert "<code" not in visible
+    assert text.count('hx-post="/strategy-manager/ask"') == 1
+    assert "/strategy-manager/insights" not in text
+    assert "/strategy-manager/copilot/ask" not in text
+    # Caveats live only in the collapsed "About these results" disclosure.
+    assert "About these results" in text
+    assert "not future returns" not in visible
+    assert '<details class="disclosure">' in text
+
+
+def test_landing_h1_takes_focus_ring_only_on_keyboard(services):
+    text = client.get("/partials/strategies").text
+    css = Path("app/api/static/css/theme.css").read_text(encoding="utf-8")
+
+    assert 'class="sm-page-title h3 mb-1">Strategies</h1>' in text
+    assert ".sm-page-title:focus { outline: none; }" in css
+    assert ".sm-page-title:focus-visible {" in css
+
+
+def test_landing_links_failed_integrity_results(services, monkeypatch):
+    repo, _ = services
+    repo.failed_backtest_result_count = lambda: 3
+
+    text = client.get("/partials/strategies").text
+
+    assert "3 results failed integrity check</a>" in text
+
+
+def test_landing_hides_failed_link_when_the_count_fails(services):
+    repo, _ = services
+
+    def broken() -> int:
+        raise sqlite3.OperationalError("locked")
+
+    repo.failed_backtest_result_count = broken
+
+    response = client.get("/partials/strategies")
+
+    assert response.status_code == 200
+    assert "failed integrity check" not in response.text
+
+
+def test_landing_never_lists_runs_inline(services, monkeypatch):
+    repo, _ = services
+
+    def no_list(**_kwargs: object) -> tuple[object, ...]:
+        pytest.fail("the landing must not read the runs list")
+
+    monkeypatch.setattr(repo, "list_backtest_activities", no_list)
+
+    response = client.get("/partials/strategies")
+
+    assert response.status_code == 200
+    assert 'id="backtest-results-list"' not in response.text
+
+
+def _ask_service(calls: list[tuple[str, object]]) -> SimpleNamespace:
+    outcome = SimpleNamespace(
+        state="unavailable",
+        message="No validated report.",
+        report=None,
+        answer=None,
+        attempts=(),
+        cached=False,
+    )
+    return SimpleNamespace(
+        generate_insights=lambda _summary, *, refresh: (
+            calls.append(("insights", refresh)) or outcome
+        ),
+        ask=lambda _summary, *, question, strategy: (
+            calls.append(("question", question)) or outcome
+        ),
+        record_unavailable_question=lambda *_args, **_kwargs: None,
+    )
+
+
+def test_ask_about_all_results_runs_the_insights_prompt(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+    calls: list[tuple[str, object]] = []
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: (
+        _ask_service(calls)
+    )
+
+    response = client.post(
+        "/strategy-manager/ask",
+        data={"result_id": "", "question": ""},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("insights", False)]
+    assert 'id="strategy-ask"' in response.text
+
+
+def test_ask_question_without_a_strategy_sends_nothing(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+    calls: list[tuple[str, object]] = []
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: (
+        _ask_service(calls)
+    )
+
+    response = client.post(
+        "/strategy-manager/ask",
+        data={"result_id": "", "question": "Which is best?"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == []
+    assert "Choose one strategy under About" in response.text
+    assert "Which is best?" in response.text
+
+
+def test_ask_refresh_with_a_strategy_selected_reruns_insights(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+    calls: list[tuple[str, object]] = []
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: (
+        _ask_service(calls)
+    )
+
+    response = client.post(
+        "/strategy-manager/ask",
+        data={"result_id": "run-1", "question": "", "refresh": "true"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("insights", True)]
+
+
+def test_ask_about_a_stale_result_renders_a_notice(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+    calls: list[tuple[str, object]] = []
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: (
+        _ask_service(calls)
+    )
+
+    response = client.post(
+        "/strategy-manager/ask",
+        data={"result_id": "gone", "question": "Why?"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == []
+    assert "no longer available" in response.text
+
+
+def test_ask_refresh_reruns_the_insights_prompt(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+    calls: list[tuple[str, object]] = []
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: (
+        _ask_service(calls)
+    )
+
+    response = client.post(
+        "/strategy-manager/ask",
+        data={"refresh": "true"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("insights", True)]
+    assert "Your question was not sent" not in response.text
+
+
+def test_ask_about_one_result_runs_the_question_prompt(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+    monkeypatch.setattr(
+        strategy_manager_routes,
+        "_strategy_question_context",
+        lambda _row, _strategy: SimpleNamespace(strategy_id="strategy-1"),
+    )
+    app.dependency_overrides[get_backtest_launch_service] = lambda: SimpleNamespace(
+        discover=lambda: SimpleNamespace(
+            strategies=(SimpleNamespace(strategy_id="strategy-1"),)
+        )
+    )
+    calls: list[tuple[str, object]] = []
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: (
+        _ask_service(calls)
+    )
+
+    response = client.post(
+        "/strategy-manager/ask",
+        data={"result_id": "run-1", "question": "Why?"},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [("question", "Why?")]
+    assert '<option value="run-1" selected>' in response.text
+
+
+def test_ask_about_one_result_without_a_question_sends_nothing(services, monkeypatch):
+    _stub_summary(monkeypatch, _outcome_summary(_outcome_row(1)))
+    calls: list[tuple[str, object]] = []
+    app.dependency_overrides[get_strategy_manager_insights_service] = lambda: (
+        _ask_service(calls)
+    )
+
+    response = client.post(
+        "/strategy-manager/ask",
+        data={"result_id": "run-1", "question": "   "},
+        headers={"X-Auth-Token": "s3cret"},
+    )
+
+    assert response.status_code == 200
+    assert calls == []
+    assert "No model request was sent." in response.text
+
+
+def test_ask_requires_local_or_token(services):
+    response = client.post("/strategy-manager/ask", data={"result_id": ""})
+
+    assert response.status_code == 403
+
+
+def test_all_runs_page_and_partial(services):
+    page = client.get("/strategies/runs")
+    partial = client.get("/partials/strategies/runs?page=2")
+    bad_page = client.get("/partials/strategies/runs?page=abc")
+
+    assert page.status_code == 200
+    assert 'id="shell-tabs"' in page.text
+    assert 'hx-get="/partials/strategies/runs"' in page.text
+    assert partial.status_code == 200
+    assert ">All runs</h1>" in partial.text
+    assert 'id="backtest-results-list"' in partial.text
+    assert bad_page.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "/strategy-manager",
+        "/strategy-manager/readiness",
+        "/strategy-manager/backtests",
+        "/strategy-manager/initialization",
+        "/strategy-manager/activity-status",
+    ],
+)
+def test_old_strategy_manager_links_still_resolve(services, url):
+    assert client.get(url).status_code == 200

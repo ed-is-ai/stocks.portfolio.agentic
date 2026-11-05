@@ -57,6 +57,8 @@ _ATTENTION_SEVERITIES = (NotificationSeverity.WARNING, NotificationSeverity.ERRO
 POSITION_KINDS = frozenset(
     {"position_concentration", "below_stop", "unpriced", "no_stop"}
 )
+#: Medium findings queued anyway: a missing stop needs action (GH-128).
+QUEUED_RISK_KINDS = frozenset({"no_stop"})
 HeldHit = Literal["stop", "target"]
 #: Every held sell signal a run raises: the stop/target predicate, a
 #: trailing stop, or a held security's watched-setup stop.
@@ -154,7 +156,9 @@ def risk_events(
     positions: Sequence[Position],
     prices_as_of: str | None,
 ) -> list[AttentionEventV1]:
-    """High-severity Risk Coach findings as ``held_risk`` events."""
+    """High-severity Risk Coach findings, plus every holding without an
+    evidenced stop (``QUEUED_RISK_KINDS``), as ``held_risk`` events; the
+    queue rolls the stop findings up into one item (GH-128)."""
     canonical = {p.display_symbol: p.ticker for p in positions}
     as_of = _price_date(prices_as_of)
     return [
@@ -178,7 +182,7 @@ def risk_events(
             raised_by="risk_coach",
         )
         for f in report.findings
-        if f.severity == "high"
+        if f.severity == "high" or f.kind in QUEUED_RISK_KINDS
     ]
 
 

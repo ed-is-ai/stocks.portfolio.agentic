@@ -173,7 +173,7 @@ def create_app(
         # a handler never blocks a threadpool worker on the coverage lock.
         if app.state.strategy_preparation == "pending" and (
             request.url.path.startswith("/strategy-manager")
-            or request.url.path == "/partials/strategy-manager"
+            or request.url.path.startswith("/partials/strategies")
         ):
             await asyncio.shield(app.state.strategy_preparation_task)
         return await call_next(request)

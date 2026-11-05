@@ -33,7 +33,7 @@
     { col: 'funds', label: 'Funds' },
     { col: 'canslim', label: 'CANSLIM' },
     { col: 'momentum', label: 'Momentum' },
-    { col: 'rec', label: 'Rec' },
+    { col: 'rec', label: 'Signal' },
     { col: 'price', label: 'Price' },
     { col: 'vsentry', label: 'vs Entry' },
     { col: 'entry', label: 'Entry' },
@@ -45,7 +45,12 @@
   ];
 
   // Sensible default visible set: hide the denser secondary metrics up front.
-  const DEFAULT_HIDDEN = ['canslim', 'momentum', 'vsstop'];
+  // Congress and Funds are almost always empty, and Targets is three lines
+  // tall, so they start hidden too (#129); all stay available in Columns.
+  const DEFAULT_HIDDEN = ['canslim', 'momentum', 'vsstop', 'congress', 'funds', 'targets'];
+  // Saved states older than this layout get the #129 defaults once.
+  const LAYOUT = 2;
+  const LAYOUT_HIDDEN = ['congress', 'funds', 'targets'];
 
   // Default sort direction per column when a header is first clicked.
   const DEFAULT_DIR = {
@@ -55,6 +60,7 @@
   const dirFor = (col) => DEFAULT_DIR[col] || 'desc';
 
   const TOGGLE_FILTERS = {
+    buy: (row) => row.dataset.rec === 'buy', // BUY family, as on Today (AD-6)
     sepa8: (row) => row.dataset.sepa === '8',
     alert: (row) => row.dataset.rec === 'alert',
     breakout: (row) => row.dataset.breakout === 'true',
@@ -94,11 +100,11 @@
     sortKeys: [],
     hidden: DEFAULT_HIDDEN.slice(),
     presetId: null,
-    marketNarrativeCollapsed: true,
-    density: 'comfortable',
+    density: 'compact',
+    layout: LAYOUT,
   });
 
-  // Rows shown per page (#134). The page number is never persisted.
+  // Rows revealed per "Show next" step (#134, #129). Never persisted.
   const PAGE_SIZE = 50;
 
   // Static tooltip text, built on first hover/focus from a row's data-tip key
@@ -113,20 +119,36 @@
     mail: "Meets the email-alert criteria and isn't on cooldown — will be included in the next alert run.",
     cooldown: "Already alerted — the same event won't email again until the cooldown clears. This explains why the badge is still showing without a new email.",
   };
+  const DIVIDER_TEXT = 'Already alerted · watching';
 
   let state = loadState();
   let originalRows = []; // server-provided (actionable-first) order
   let sortedRows = []; // originalRows in the current sort order
   let colIndex = new Map(); // column key -> cell index, from thead th[data-col]
-  let page = 0;
+  let page = 0; // extra "Show next" steps taken past the first PAGE_SIZE rows
+  let divider = null; // the "Watching" group row, placed by applyFilters
 
   // ── Persistence ────────────────────────────────────────────────
   function loadState() {
     try {
       const raw = localStorage.getItem(STATE_KEY);
-      if (raw) return Object.assign(defaultState(), JSON.parse(raw));
+      if (raw) return migrate(JSON.parse(raw));
     } catch (e) { /* ignore corrupt state */ }
     return defaultState();
+  }
+
+  // A state saved before #129 still holds the old density and hidden list,
+  // so the new defaults would never reach it: apply them once, then the
+  // user's own choices win. Filters, sort and presets are untouched.
+  function migrate(saved) {
+    const next = Object.assign(defaultState(), saved);
+    if (!Array.isArray(next.hidden)) next.hidden = DEFAULT_HIDDEN.slice();
+    if (!(saved.layout >= LAYOUT)) {
+      next.density = 'compact';
+      next.hidden = Array.from(new Set(next.hidden.concat(LAYOUT_HIDDEN)));
+      next.layout = LAYOUT;
+    }
+    return next;
   }
 
   function saveState() {
@@ -150,23 +172,6 @@
   // ── DOM helpers ────────────────────────────────────────────────
   const table = () => document.getElementById('watchlist-table');
   const tbody = () => { const t = table(); return t ? t.querySelector('tbody') : null; };
-
-  function applyMarketNarrative() {
-    const toggle = document.getElementById('market-narrative-toggle');
-    const details = document.getElementById('market-narrative-details');
-    if (!toggle || !details) return;
-    const collapsed = state.marketNarrativeCollapsed === true;
-    details.hidden = collapsed;
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-    const label = collapsed ? 'Expand market narrative' : 'Collapse market narrative';
-    toggle.setAttribute('aria-label', label);
-    toggle.title = label;
-    const icon = toggle.querySelector('i');
-    if (icon) {
-      icon.classList.toggle('bi-chevron-down', collapsed);
-      icon.classList.toggle('bi-chevron-up', !collapsed);
-    }
-  }
 
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
@@ -233,18 +238,8 @@
     if (t) t.classList.toggle('wl-compact', compact);
     const wrap = document.querySelector('.wl-tbl-wrap');
     if (wrap) wrap.classList.toggle('wl-compact', compact);
-    const btn = document.getElementById('wl-density-toggle');
-    if (btn) {
-      btn.setAttribute('aria-pressed', String(compact));
-      btn.classList.toggle('active', compact);
-      btn.innerHTML = densityLabel(compact);
-    }
-  }
-
-  // Icon reflects state: collapsed rows when compact, expanded when not.
-  function densityLabel(compact) {
-    const icon = compact ? 'bi-arrows-collapse' : 'bi-arrows-expand';
-    return '<i class="bi ' + icon + '"></i> ' + (compact ? 'Compact' : 'Comfortable');
+    const box = document.getElementById('wl-density-toggle');
+    if (box) box.checked = compact;
   }
 
   // ── Sorting ────────────────────────────────────────────────────
@@ -353,44 +348,60 @@
       row.hidden = true;
       if (ok) matches.push(row);
     });
-    const pages = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
-    page = Math.min(page, pages - 1); // clamp when the match count shrinks
-    const start = page * PAGE_SIZE;
-    matches.slice(start, start + PAGE_SIZE).forEach((row) => { row.hidden = false; });
-    const counter = document.getElementById('wl-match-count');
-    if (counter) counter.textContent = String(matches.length);
-    renderPager(matches.length);
+    const steps = Math.max(1, Math.ceil(matches.length / PAGE_SIZE));
+    page = Math.min(page, steps - 1); // clamp when the match count shrinks
+    const shown = matches.slice(0, (page + 1) * PAGE_SIZE);
+    shown.forEach((row) => { row.hidden = false; });
+    placeDivider(shown);
+    renderPager(shown.length, matches.length);
   }
 
-  function renderPager(total) {
+  // In recommended order the context ranks already-alerted rows as one run
+  // (#129), so the "Watching" divider only goes before the first of them.
+  // An explicit sort mixes them in, so it shows no divider.
+  function placeDivider(shown) {
+    if (!divider) return;
+    const first = state.sortKeys.length ? null : shown.find((r) => r.dataset.watch === 'true');
+    if (!first) { divider.remove(); return; }
+    const hidden = new Set(state.hidden);
+    divider.cells[0].colSpan = COLUMNS.filter((c) => !hidden.has(c.col)).length;
+    first.before(divider);
+  }
+
+  function sortLabel() {
+    if (!state.sortKeys.length) return 'recommendation';
+    return state.sortKeys.map((k) => {
+      const col = COLUMNS.find((c) => c.col === k.field);
+      return col ? col.label : k.field;
+    }).join(', ');
+  }
+
+  // Footer: "Showing a of b · sorted by …", plus Recommended order when a
+  // sort is active and "Show next 50" while rows remain (#129).
+  function renderPager(shown, total) {
     const nav = document.getElementById('wl-pager');
     if (!nav) return;
     nav.innerHTML = '';
-    nav.hidden = total <= PAGE_SIZE;
-    if (nav.hidden) return;
-    const last = Math.ceil(total / PAGE_SIZE) - 1;
-    const go = (to, dir) => () => {
-      page = to;
-      applyFilters();
-      const wrap = document.querySelector('.wl-tbl-wrap');
-      if (wrap) { wrap.scrollTop = 0; wrap.scrollIntoView({ block: 'nearest' }); }
-      // Keep focus on the activated control; fall back to its sibling.
-      const btn = nav.querySelector('[data-dir="' + dir + '"]:not(:disabled)')
-        || nav.querySelector('[data-dir]:not(:disabled)');
-      if (btn) btn.focus({ preventScroll: true });
-    };
-    const first = page * PAGE_SIZE + 1;
-    const end = Math.min(total, first + PAGE_SIZE - 1);
-    nav.appendChild(el('button', {
-      class: 'btn-filter', type: 'button', text: 'Prev', 'aria-label': 'Previous page',
-      'data-dir': 'prev', disabled: page === 0 ? 'disabled' : null, onclick: go(page - 1, 'prev'),
-    }));
     nav.appendChild(el('span', {
-      class: 'wl-pager-info', 'aria-live': 'polite', text: first + '–' + end + ' of ' + total,
+      class: 'wl-pager-info', id: 'wl-match-count', 'aria-live': 'polite',
+      text: 'Showing ' + shown + ' of ' + total + ' · sorted by ' + sortLabel(),
     }));
+    if (state.sortKeys.length) {
+      nav.appendChild(el('button', {
+        class: 'btn-filter wl-reset', type: 'button', text: 'Recommended order',
+        onclick: () => { state.sortKeys = []; state.presetId = null; apply(); },
+      }));
+    }
+    if (shown >= total) return;
     nav.appendChild(el('button', {
-      class: 'btn-filter', type: 'button', text: 'Next', 'aria-label': 'Next page',
-      'data-dir': 'next', disabled: page >= last ? 'disabled' : null, onclick: go(page + 1, 'next'),
+      class: 'btn-filter wl-more', type: 'button',
+      text: 'Show next ' + Math.min(PAGE_SIZE, total - shown),
+      onclick: () => {
+        page += 1;
+        applyFilters();
+        // Keep focus in the footer, even once the last rows are shown.
+        (nav.querySelector('.wl-more') || nav).focus({ preventScroll: true });
+      },
     }));
   }
 
@@ -405,6 +416,9 @@
     if (key === 'rsi') {
       const val = node.querySelector('.wl-rsi-val');
       return 'RSI ' + (val ? val.textContent : '') + ' — 30 oversold / 70 overbought';
+    }
+    if (key === 'cooldown' && arg) {
+      return STATIC_TIPS.cooldown + ' Next eligible ' + arg + ' UTC.';
     }
     if (key === 'myb') {
       return arg ? 'Multi-year base breakout — cleared ' + arg + ' pivot' : 'Multi-year base breakout';
@@ -521,7 +535,19 @@
       class: 'wl-panel-action', type: 'button', text: 'Reset to default columns',
       onclick: () => { state.hidden = DEFAULT_HIDDEN.slice(); state.presetId = null; render(); },
     });
-    return el('div', { class: 'wl-dd-panel wl-columns-panel' }, items.concat([reset]));
+    const density = el('label', { class: 'wl-col-item wl-density' }, [
+      el('input', {
+        type: 'checkbox', id: 'wl-density-toggle', class: 'wl-col-check',
+        checked: state.density === 'compact' ? 'checked' : null,
+        onchange: (e) => {
+          state.density = e.target.checked ? 'compact' : 'comfortable';
+          applyDensity();
+          saveState();
+        },
+      }),
+      el('span', { text: 'Compact rows' }),
+    ]);
+    return el('div', { class: 'wl-dd-panel wl-columns-panel' }, items.concat([density, reset]));
   }
 
   function buildViewsPanel() {
@@ -562,23 +588,6 @@
     adv.appendChild(dropdown('Filters', 'sliders', buildRangesPanel()));
     adv.appendChild(dropdown('Columns', 'layout-three-columns', buildColumnsPanel()));
     adv.appendChild(dropdown('Views', 'bookmark-star', buildViewsPanel()));
-    adv.appendChild(el('button', {
-      class: 'btn-filter wl-density' + (state.density === 'compact' ? ' active' : ''),
-      id: 'wl-density-toggle', type: 'button',
-      'aria-pressed': String(state.density === 'compact'),
-      title: 'Toggle Comfortable / Compact row density',
-      html: densityLabel(state.density === 'compact'),
-      onclick: () => {
-        state.density = state.density === 'compact' ? 'comfortable' : 'compact';
-        applyDensity();
-        saveState();
-      },
-    }));
-    adv.appendChild(el('button', {
-      class: 'btn-filter wl-reset', type: 'button',
-      html: '<i class="bi bi-arrow-counterclockwise"></i> Recommended order',
-      onclick: () => { state.sortKeys = []; state.presetId = null; apply(); },
-    }));
   }
 
   // Sync the server-rendered controls (search box, toggle buttons) to state.
@@ -590,13 +599,21 @@
       btn.classList.toggle('active', on);
       btn.setAttribute('aria-pressed', String(on));
     });
+    const all = document.getElementById('wl-filter-all');
+    if (all) {
+      const on = !state.filters.length;
+      all.classList.toggle('active', on);
+      all.setAttribute('aria-pressed', String(on));
+    }
   }
 
   // ── Presets ────────────────────────────────────────────────────
   function applyPreset(id) {
     const preset = loadPresets().find((p) => p.id === id);
     if (!preset) return;
+    const density = state.density; // a view never changes row density
     state = Object.assign(defaultState(), JSON.parse(JSON.stringify(preset.state)));
+    state.density = density;
     state.presetId = id;
     render(true);
   }
@@ -637,11 +654,11 @@
   }
 
   function init() {
-    applyMarketNarrative();
     const body = tbody();
     if (!body) return; // not the watchlist partial
     originalRows = Array.prototype.slice.call(body.rows);
     sortedRows = originalRows.slice();
+    divider = el('tr', { class: 'wl-divider' }, [el('td', { text: DIVIDER_TEXT })]);
     buildColIndex();
     decorateRows();
     render(true);
@@ -649,21 +666,13 @@
 
   // ── Global event wiring (bound once) ───────────────────────────
   document.body.addEventListener('click', (event) => {
-    const narrativeToggle = event.target.closest('#market-narrative-toggle');
-    if (narrativeToggle) {
-      state.marketNarrativeCollapsed = !state.marketNarrativeCollapsed;
-      applyMarketNarrative();
-      saveState();
-      return;
-    }
-    const toggle = event.target.closest('#wl-toolbar [data-filter]');
+    const toggle = event.target.closest('#wl-toolbar [data-filter], #wl-filter-all');
     if (toggle) {
       const filter = toggle.dataset.filter;
-      if (state.filters.includes(filter)) state.filters = state.filters.filter((f) => f !== filter);
+      if (!filter) state.filters = []; // "All" clears the quick filters
+      else if (state.filters.includes(filter)) state.filters = state.filters.filter((f) => f !== filter);
       else state.filters.push(filter);
-      const on = state.filters.includes(filter);
-      toggle.classList.toggle('active', on);
-      toggle.setAttribute('aria-pressed', String(on));
+      syncStatic();
       state.presetId = null;
       apply(true);
       return;

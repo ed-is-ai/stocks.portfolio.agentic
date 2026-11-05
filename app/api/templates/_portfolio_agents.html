@@ -1,21 +1,10 @@
-{# GH-19 agent layer: out-of-band swaps only, onto the placeholders
+{# GH-19 agent layer: out-of-band swaps only, into the Stop slots
    _portfolio.html renders, scoped to the portfolio the view was built for.
    Read-only; every figure comes from the typed PortfolioAgentView. Every
-   element carries data-agent-cell so a failed refresh can mark it stale. #}
+   element carries data-agent-cell so a failed refresh can mark it stale.
+   Since GH-130 the risk picture is the Risk check card, so only the stop
+   suggestions are swapped here. #}
 {% set scope = view.portfolio_id if view.portfolio_id is not none else "none" %}
-{% macro cell(id, c, scope) -%}
-<span id="{{ id }}" class="agent-cell" data-agent-cell="{{ scope }}" hx-swap-oob="true">
-  {%- if c.tone == "muted" %}<span>{{ c.text }}</span>
-  {%- else %}<span class="status {{ c.tone }}">{{ c.text }}</span>{% endif %}
-  {%- if c.note %}<small>{{ c.note }}</small>{% endif -%}
-</span>
-{%- endmacro %}
-{% for row in view.rows %}
-{{ cell("agent-" ~ scope ~ "-strategy-" ~ row.slug, row.strategy, scope) }}
-{{ cell("agent-" ~ scope ~ "-risk-" ~ row.slug, row.risk, scope) }}
-{{ cell("agent-" ~ scope ~ "-evidence-" ~ row.slug, row.evidence, scope) }}
-{{ cell("agent-" ~ scope ~ "-thesis-" ~ row.slug, row.thesis, scope) }}
-{% endfor %}
 {# The Stop column's suggestion for holdings without a recorded stop, from
    the assigned Strategy's own stop rule. "Use" posts the full-precision
    level, which the set-stop route recomputes and accepts only exactly. #}
@@ -45,40 +34,3 @@
   {% endif %}
 </div>
 {% endfor %}
-{{ cell("agent-" ~ scope ~ "-open-risk", view.open_risk, scope) }}
-{% set queue = view.attention %}
-{% set count = queue.urgent_count %}
-{% set tone = {"high": "risk", "medium": "warn", "info": "info"} %}
-{# A gap in any source makes the count partial, so it is never shown clear. #}
-{% set partial = view.unavailable | length > 0 %}
-<span id="agent-{{ scope }}-findings" data-agent-cell="{{ scope }}" class="agent-count{% if count %} neg{% endif %}" hx-swap-oob="true">{{ count }}{% if partial %} · partial{% endif %}</span>
-<div class="attention-strip{% if not queue.items and not partial %} is-clear{% endif %}" id="agent-{{ scope }}-attention" data-agent-cell="{{ scope }}" role="status" hx-swap-oob="true">
-  {% if count %}
-  <strong>{{ count }} urgent finding{{ "s" if count != 1 }}.</strong>
-  {% else %}
-  <strong>No urgent findings.</strong>
-  {% endif %}
-  {% if partial %}<small>Partial — not counted: {{ view.unavailable | join(", ") }}.</small>{% endif %}
-  {% if queue.items %}
-  {% if not count %}<span class="attention-aside">Also noted — not urgent</span>{% endif %}
-  <ol class="attention-queue">
-    {% for item in queue.items %}
-    {% set events = queue.events_for(item) %}
-    <li class="attention-item" data-attention-id="{{ item.id }}">
-      <span class="status {{ tone[item.severity] }}">{{ item.severity }}</span>
-      <strong>{{ item.title }}</strong>
-      <span>{{ item.summary }}</span>
-      {% if item.as_of %}<time datetime="{{ item.as_of.isoformat() }}">{{ item.as_of.isoformat() }}</time>{% endif %}
-      <details>
-        <summary>{{ events | length }} source event{{ "s" if events | length != 1 }}</summary>
-        <ul>
-          {% for event in events %}
-          <li>{{ event.title }} — {{ event.summary }} <small>{{ event.raised_by }}{% if event.as_of %} · {{ event.as_of.isoformat() }}{% endif %}</small></li>
-          {% endfor %}
-        </ul>
-      </details>
-    </li>
-    {% endfor %}
-  </ol>
-  {% endif %}
-</div>

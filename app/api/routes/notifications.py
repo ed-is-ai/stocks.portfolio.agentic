@@ -1,8 +1,8 @@
-"""Notification-centre routes — the bell badge and read/dismiss (#80, GH-21).
+"""Notification-centre routes — the Today badge and read/dismiss (#80, GH-128).
 
-The bell is a link to the AI Desk; its polled badge shows the Desk's urgent
-attention count. The dropdown is gone (GH-21): notifications reach the user
-as AI Desk queue items. Mutating endpoints (mark-read, mark-all-read,
+The Today tab carries the polled badge: how many Today items need action.
+The bell and its dropdown are gone: notifications reach the user as Today
+items. Mutating endpoints (mark-read, mark-all-read,
 dismiss) are kept, guarded by ``require_local_or_token`` like every other
 state change in the app, and answer ``204 No Content``.
 """
@@ -34,30 +34,31 @@ NotificationsDep = Annotated[
 DeskDep = Annotated[DeskService, Depends(get_desk_service)]
 
 
-#: Response header that makes the AI Desk re-render after a dismiss.
-DESK_REFRESH = {"HX-Trigger": "portfolio-agents-refresh"}
+#: Response header that makes Today's attention re-render after a dismiss.
+DESK_REFRESH = {"HX-Trigger": "portfolio-agents-refresh, attention-changed"}
 
 
 @router.get("/notifications/count", response_class=HTMLResponse)
 def notifications_count(
     request: Request, desk: DeskDep, portfolio_id: str | None = None
 ) -> HTMLResponse:
-    """Return the bell badge: the AI Desk's urgent count for the portfolio.
+    """Return the Today badge: ``badge_count`` for the portfolio (AD-5).
 
-    Polled by the bell. Pending Strategy job notifications are projected
-    first so the Desk's notification items stay current; a failure to count
-    renders the badge's "?" (count unavailable) state. A plain ``def``: the
-    count reads the ledger, scan artifact and price cache in the threadpool,
-    and is cached briefly per input revision by the Desk service.
+    Polled from the Today tab every 30s or slower (AD-2). Pending Strategy
+    job notifications are projected first so Today's notification items stay
+    current; a failure to count renders the badge's "?" (count unavailable)
+    state. A plain ``def``: the count reads the ledger, scan artifact and
+    price cache in the threadpool, cached per input revision by the Desk
+    service, so a repeat poll with unchanged inputs never rebuilds.
     """
     try:
         get_strategy_notification_projector().project_pending()
     except sqlite3.OperationalError:
         pass
     try:
-        count: int | None = desk.attention_count(optional_int(portfolio_id))
+        count: int | None = desk.badge_count(optional_int(portfolio_id))
     except Exception:
-        logger.warning("Attention count failed for the bell", exc_info=True)
+        logger.warning("Badge count failed for the Today tab", exc_info=True)
         count = None
     return templates.TemplateResponse(request, "_notif_badge.html", {"count": count})
 
@@ -94,7 +95,7 @@ def mark_all_notifications_read(notifications: NotificationsDep) -> HTMLResponse
 def dismiss_notification(
     notification_id: int, notifications: NotificationsDep
 ) -> HTMLResponse:
-    """Dismiss one notification so it leaves the AI Desk queue."""
+    """Dismiss one notification so it leaves Today."""
     notifications.dismiss(notification_id)
-    # The AI Desk re-renders on this event, so the dismissed notice leaves it.
+    # Attention views re-render on these events, so the notice leaves them.
     return HTMLResponse(status_code=204, headers=DESK_REFRESH)

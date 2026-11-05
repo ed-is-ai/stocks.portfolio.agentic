@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/static/css/watchlist.css">
   <link rel="stylesheet" href="/static/css/splash.css">
   <link rel="stylesheet" href="/static/css/data_quality.css?v=20260917-1">
+  <link rel="stylesheet" href="/static/css/shell.css?v=20261105-1">
   <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <style>
@@ -21,73 +22,6 @@
       background: var(--surface);
       color: var(--primary);
     }
-
-    /* ── Navbar — flat masthead, not a gradient banner ────────────── */
-    .navbar {
-      background: var(--navbar-grad) !important;
-      padding: 0.6rem 1.25rem;
-      border-bottom: 1px solid var(--border);
-    }
-    .navbar-brand {
-      font-weight: var(--fw-bold);
-      font-size: var(--fs-lg);
-      letter-spacing: -0.01em;
-      color: white !important;
-      display: flex;
-      align-items: center;
-      gap: 0.55rem;
-    }
-    /* Logo mark: flat ink square, no gradient badge */
-    .brand-mark {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 1.6rem;
-      height: 1.6rem;
-      border-radius: var(--radius-sm);
-      background: rgba(255,255,255,0.12);
-    }
-    .brand-mark .bi { color: #fff; font-size: 1rem; }
-    .brand-name { color: #fff; }
-    .brand-name em { font-style: normal; color: rgba(255,255,255,0.6); }
-    .navbar-tag {
-      font-size: var(--fs-sm);
-      color: rgba(255,255,255,0.55);
-      padding-left: 0.7rem;
-      border-left: 1px solid rgba(255,255,255,0.16);
-    }
-
-    /* ── Tab bar — hairline underline, no active-tab gradient ──────── */
-    .tab-bar {
-      background: white;
-      border-bottom: 1px solid var(--border);
-      padding: 0 0.5rem;
-      display: flex;
-      align-items: flex-end;
-      overflow-x: auto;
-    }
-    .nav-tabs { border: none; flex-wrap: nowrap; }
-    .nav-tabs .nav-link { white-space: nowrap; }
-    .nav-tabs .nav-item { margin-bottom: -1px; }
-    .nav-tabs .nav-link {
-      border: none;
-      border-bottom: 2px solid transparent;
-      border-radius: 0;
-      color: var(--muted);
-      font-size: var(--fs-md);
-      font-weight: var(--fw-medium);
-      padding: 0.65rem 1rem;
-      transition: color .15s, border-color .15s;
-    }
-    .nav-tabs .nav-link:hover { color: var(--primary); background: none; border-bottom-color: var(--border); }
-    .nav-tabs .nav-link.active {
-      color: var(--primary);
-      font-weight: var(--fw-semibold);
-      border-bottom: 2px solid var(--primary);
-      background: none;
-    }
-    .nav-tabs .nav-link.active .bi { color: var(--primary); }
-    .nav-tabs .nav-link .bi { margin-right: 0.3rem; font-size: 0.82rem; }
 
     /* ── Content panel — flat, hairline border, no shadow/rounding ─── */
     #tab-content {
@@ -509,12 +443,12 @@
        itself -- that container also hosts the scan-failure toast, which must
        still fire from any tab. */
     .pipeline-status-bar > .pipeline-status { display: none; }
-    body:has(#tab-stock-scanner.active) #pipeline-status > .pipeline-status,
+    body:has(#tab-scanner.active) #pipeline-status > .pipeline-status,
     body:has(#tab-portfolio.active) #portfolio-backfill-status > .pipeline-status,
-    body:has(#tab-strategy-manager.active) #strategy-activity-status > .pipeline-status { display: flex; }
-    body:has(#tab-stock-scanner.active) #pipeline-status:has(> .pipeline-status),
+    body:has(#tab-strategies.active) #strategy-activity-status > .pipeline-status { display: flex; }
+    body:has(#tab-scanner.active) #pipeline-status:has(> .pipeline-status),
     body:has(#tab-portfolio.active) #portfolio-backfill-status:has(> .pipeline-status),
-    body:has(#tab-strategy-manager.active) #strategy-activity-status:has(> .pipeline-status) { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); padding-bottom: env(safe-area-inset-bottom, 0px); }
+    body:has(#tab-strategies.active) #strategy-activity-status:has(> .pipeline-status) { position: fixed; bottom: 0; left: 0; right: 0; z-index: 20; background: white; border-top: 1px solid var(--border); box-shadow: 0 -2px 8px rgba(0,0,0,.06); padding-bottom: env(safe-area-inset-bottom, 0px); }
     .pipeline-status-link { display: flex; align-items: center; gap: 1rem; flex: 1; min-width: 0; color: inherit; text-decoration: none; }
     .pipeline-status { min-height: 2.35rem; display: flex; align-items: center; gap: 1rem; padding: .45rem 1.25rem; font-size: .78rem; color: var(--muted); overflow-x: auto; }
     .pipeline-status-summary, .pipeline-stages, .pipeline-stage { display: flex; align-items: center; gap: .4rem; white-space: nowrap; }
@@ -540,7 +474,6 @@
        only a compact colour/icon cue (sr-only description for a11y); the
        full detail is static text at the top of the opened menu, visible
        to every input method alike -- no hover, no separate reveal. */
-    .navbar-actions { min-width: 0; }
     .refresh-dropdown { position: relative; }
     .refresh-data-toggle { display: inline-flex; align-items: center; gap: .35rem; }
     .refresh-freshness { display: inline-flex; align-items: center; color: #475569; }
@@ -577,18 +510,12 @@
     .refresh-freshness-cue { animation: freshness-cue .9s ease-out 1; }
     @keyframes freshness-cue { 0% { opacity: 0; transform: translateY(-2px); } 60% { opacity: 1; } 100% { opacity: 1; transform: none; } }
     @media (prefers-reduced-motion: reduce) { .pipeline-status.running, .pipeline-status.running .pipeline-status-summary > .bi, .refresh-freshness-cue { animation: none; } }
-    @media (max-width: 420px) {
-      .navbar { padding-inline: .6rem; }
-      .navbar-brand { margin-right: 0; }
-      .brand-name { display: none; }
-      .refresh-data-toggle { max-width: 9.5rem; }
-    }
     /* Reserve room for the fixed pipeline status bar (incl. its own
        safe-area padding) only while it is on screen -- an idle page pays
        no permanent dead space at the page foot (#418). */
-    body:has(#tab-stock-scanner.active):has(#pipeline-status > .pipeline-status),
+    body:has(#tab-scanner.active):has(#pipeline-status > .pipeline-status),
     body:has(#tab-portfolio.active):has(#portfolio-backfill-status > .pipeline-status),
-    body:has(#tab-strategy-manager.active):has(#strategy-activity-status > .pipeline-status) { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
+    body:has(#tab-strategies.active):has(#strategy-activity-status > .pipeline-status) { padding-bottom: calc(2.5rem + env(safe-area-inset-bottom, 0px)); }
     /* Reduced-coverage note in the Refresh Data menu (replaces the old
        "continue with partial refresh" confirmation dialog). */
     .refresh-coverage { border: 1px solid var(--amber); background: var(--amber-bg); border-radius: .4rem; padding: .55rem .7rem; margin-bottom: .75rem; }
@@ -652,8 +579,8 @@
     // "Usable" needs BOTH gates, or the splash hands off to the #tab-content
     // spinner and the user sees two loading treatments back to back:
     //   1. fonts resolved + document loaded  (self-hosted Inter, page parsed)
-    //   2. the first htmx swap into #tab-content has landed — the Watchlist
-    //      tab fetches /partials/stock-scanner on `load`, which completes
+    //   2. the first htmx swap into #tab-content has landed — the page's
+    //      tab fetches its partial on `load`, which completes
     //      AFTER window.load, so waiting on window.load alone is not enough.
     var pageLoaded = false;
     var tabSwapped = false;
@@ -736,185 +663,82 @@
   })();
 </script>
 
-<!-- Navbar -->
-<nav class="navbar d-flex justify-content-between align-items-center">
-  <div class="d-flex align-items-center gap-3">
-    <span class="navbar-brand">
-      <span class="brand-mark"><i class="bi bi-graph-up-arrow"></i></span>
-      <span class="brand-name">Stock<em>Manager</em></span>
-    </span>
-  </div>
-  <div class="navbar-actions d-flex align-items-center gap-2">
-    <!-- Attention bell (GH-21): a link to the AI Desk carrying its urgent
-         count; the notifications dropdown is gone. Its accessible name is
-         "AI Desk" plus the badge's hidden count text; #notif-live
-         announces a changed count politely. -->
-    <a id="nav-bell-btn" class="btn btn-sm nav-bell-btn" href="/desk" title="AI Desk">
-      <i class="bi bi-bell" aria-hidden="true"></i><span class="visually-hidden">AI Desk,</span>
-      <span id="notif-badge" class="notif-badge"
-            hx-get="/notifications/count"
-            hx-trigger="load, every 30s [document.visibilityState === 'visible'], refresh"
-            hx-target="this" hx-swap="outerHTML"
-            hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'></span>
-    </a>
-    <span id="notif-live" class="visually-hidden" aria-live="polite"></span>
-    <div class="dropdown refresh-dropdown">
-      <button id="refresh-data-button" type="button"
-              class="btn btn-sm btn-light btn-refresh dropdown-toggle refresh-data-toggle"
-              data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"
-              aria-label="Refresh Data"
-              aria-describedby="refresh-freshness-description">
-        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i>
-        <span>Refresh Data</span>
-        {{ macros.freshness_affordance(freshness, latest_attempt_error, variant='control') }}
-      </button>
-      <div class="dropdown-menu dropdown-menu-end refresh-menu p-3">
-        <div class="refresh-menu-freshness">
-          {{ macros.freshness_detail(freshness, latest_attempt_error) }}
-          {% if next_scheduled_run %}
-          <div class="refresh-menu-schedule">
-            Next scheduled refresh:
-            <time class="local-time" datetime="{{ next_scheduled_run.isoformat() }}">{{ next_scheduled_run.strftime('%Y-%m-%d %H:%M %Z') }}</time>
-          </div>
-          {% endif %}
-        </div>
-        {# Reduced-coverage warnings sit with the buttons that start a run, so
-           the cost of running now is readable before the click rather than in
-           a confirmation dialog after it. #}
-        {% if pipeline_warnings %}
-        <div class="refresh-coverage" role="note">
-          <p class="refresh-coverage-title">
-            <i class="bi bi-exclamation-triangle-fill" aria-hidden="true"></i>
-            Reduced coverage
-          </p>
-          <ul class="refresh-coverage-list">
-            {% for warning in pipeline_warnings %}
-            <li><strong>{{ warning.name }}</strong> — {{ warning.impact }}</li>
-            {% endfor %}
-          </ul>
-          <p class="refresh-coverage-help">Add the missing configuration to <code>.env</code> for full coverage. Every refresh below still runs.</p>
-        </div>
+<!-- Shell top bar (GH-128): four tabs, account, freshness, one Refresh, ⚙. -->
+<header class="shell-bar">
+  <a class="shell-brand" href="/today">Stock<span>Manager</span></a>
+  <nav aria-label="Main">
+    <ul id="shell-tabs" class="shell-tabs">
+      {% for slug, label in tabs.items() %}
+      <li>
+        {# Each tab hx-gets its partial and pushes its page URL (AD-3); a
+           new tab request aborts one still in flight. #}
+        <a id="tab-{{ slug }}" data-tab="{{ slug }}" href="/{{ slug }}"
+           class="shell-tab{{ ' active' if slug == active_tab else '' }}"
+           {% if slug == active_tab %}aria-current="page"{% endif %}
+           hx-get="/partials/{{ slug }}" hx-push-url="/{{ slug }}"
+           hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+           hx-sync="#tab-content:replace"
+           hx-vals='js:{...shellParams()}'>{{ label }}</a>
+        {% if slug == "today" %}
+        {# The Today badge sits beside, not inside, the hx link, so it never
+           inherits the tab's hx-push-url or hx-sync. #}
+        <span id="notif-badge" class="notif-badge"
+              hx-get="/notifications/count"
+              hx-trigger="load, every 30s [document.visibilityState === 'visible'], refresh, attention-changed from:body"
+              hx-target="this" hx-swap="outerHTML" hx-push-url="false"
+              hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'></span>
         {% endif %}
-        <form hx-post="/refresh-data"
-              hx-target="#tab-content" hx-swap="innerHTML"
-              hx-indicator="#spinner" class="refresh-action">
-          <div class="refresh-action-copy">
-            <span class="refresh-action-title">Standard refresh</span>
-            <span class="refresh-action-help">Run the scan and analysis using locally cached institutional data.</span>
-          </div>
-          <button type="submit" class="btn btn-sm btn-primary" aria-label="Run standard refresh">Run</button>
-        </form>
-        <form hx-post="/refresh-data"
-              hx-target="#tab-content" hx-swap="innerHTML"
-              hx-indicator="#spinner" class="refresh-action">
-          <input type="hidden" name="extract" value="true">
-          <div class="refresh-action-copy">
-            <span class="refresh-action-title">Include institutional data</span>
-            <span class="refresh-action-help">Check the institutional sources, then run the scan and analysis.</span>
-          </div>
-          <button type="submit" class="btn btn-sm btn-primary" aria-label="Run refresh including institutional data">Run</button>
-        </form>
-        <form hx-post="/refresh-data"
-              hx-target="#tab-content" hx-swap="innerHTML"
-              hx-indicator="#spinner" class="refresh-custom">
-          <input type="hidden" name="extract" value="true">
-          <span class="refresh-action-title">Custom refresh</span>
-          <span class="refresh-action-help mb-2">Choose which local source checks to bypass.</span>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" value="true"
-                   name="force_whale_wisdom" id="force-whale-wisdom">
-            <label class="form-check-label" for="force-whale-wisdom">
-              Force-check WhaleWisdom
-            </label>
-          </div>
-          <div class="form-check mt-2">
-            <input class="form-check-input" type="checkbox" value="true"
-                   name="force_stocktwits" id="force-stocktwits">
-            <label class="form-check-label" for="force-stocktwits">
-              Force-check StockTwits Top 25
-            </label>
-          </div>
-          <button type="submit" class="btn btn-sm btn-primary mt-3">Run custom refresh</button>
-        </form>
-        <p class="refresh-guidance">
-          <strong>Source timing:</strong> WhaleWisdom reflects quarterly 13F filings published after quarter end. StockTwits data is refreshed weekly. Force-checking bypasses local reuse; it cannot make upstream data newer.
-        </p>
-      </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </nav>
+  <span id="notif-live" class="visually-hidden" aria-live="polite"></span>
+  <div class="shell-actions">
+    <span id="account-picker" class="shell-account"
+          hx-get="/partials/account-picker" hx-trigger="load" hx-swap="outerHTML"
+          hx-vals='js:{portfolio_id: activePortfolio()}'></span>
+    <span class="shell-freshness">
+      {{ macros.freshness_affordance(freshness, latest_attempt_error, variant='control') }}
+      {% if freshness.refreshed_at %}Data from <time class="local-time" datetime="{{ freshness.refreshed_at.isoformat() }}">{{ freshness.refreshed_at.strftime('%H:%M') }}</time>{% else %}No data yet{% endif %}
+    </span>
+    {# One Refresh: the standard run. Its variants live in Settings. #}
+    <form class="shell-refresh-form" hx-post="/refresh-data" hx-target="#tab-content"
+          hx-swap="innerHTML" hx-push-url="/scanner" hx-indicator="#spinner"
+          data-refresh-action>
+      <button id="refresh-data-button" type="submit" class="btn btn-sm shell-refresh"
+              aria-describedby="refresh-freshness-description">
+        <i class="bi bi-arrow-clockwise" aria-hidden="true"></i><span>Refresh</span>
+      </button>
+    </form>
+    <div class="dropdown">
+      <button id="shell-gear" type="button" class="btn btn-sm shell-gear dropdown-toggle"
+              data-bs-toggle="dropdown" aria-expanded="false"
+              aria-label="Settings, run log and data quality">
+        <i class="bi bi-gear" aria-hidden="true"></i>
+      </button>
+      <ul id="shell-gear-menu" class="dropdown-menu dropdown-menu-end">
+        {% for slug, label in secondary_pages.items() %}
+        {% if slug == "realised-pnl" %}<li><hr class="dropdown-divider"></li>{% endif %}
+        <li><a class="dropdown-item{{ ' active' if slug == active_tab else '' }}" data-page="{{ slug }}" href="/{{ slug }}"
+               hx-get="/partials/{{ slug }}" hx-push-url="/{{ slug }}"
+               hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+               hx-sync="#tab-content:replace"
+               hx-vals='js:{...shellParams()}'>{{ label }}</a></li>
+        {% endfor %}
+      </ul>
     </div>
     <span id="spinner" class="htmx-indicator spinner-border spinner-border-sm text-light"></span>
   </div>
-</nav>
+</header>
 
 <div class="container-fluid mt-3 px-3">
 
-  <!-- Tab bar -->
-  <div class="tab-bar">
-    {# hx-sync (inherited by every tab link): a new tab request aborts one
-       still in flight, so a slow response never lands on another tab. #}
-    <ul class="nav nav-tabs" id="mainTabs" hx-sync="#tab-content:replace">
-      <li class="nav-item">
-        {% set on_desk = active_tab == "desk" %}
-        <a class="nav-link{{ '' if on_desk else ' active' }}" id="tab-stock-scanner"
-           hx-get="/partials/stock-scanner" hx-target="#tab-content" hx-trigger="click{{ '' if on_desk else ', load' }}" hx-indicator="#spinner">
-          <i class="bi bi-eye"></i>Stock Scanner
-        </a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" id="tab-portfolio"
-           hx-get="/partials/portfolio" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
-           hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : ""), range: (typeof activeChartRange === "function" ? activeChartRange() : "12M")}'>
-          <i class="bi bi-briefcase"></i>Portfolio
-        </a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" id="tab-realised-pnl"
-           hx-get="/partials/realised-pnl" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
-           hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'>
-          <i class="bi bi-arrow-repeat"></i>Realised P&amp;L
-        </a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" id="tab-strategy-manager"
-           hx-get="/partials/strategy-manager" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
-          <i class="bi bi-graph-up-arrow"></i>Strategy Manager
-        </a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" id="tab-history"
-           hx-get="/partials/history" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
-          <i class="bi bi-clock-history"></i>Trade History
-        </a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" id="tab-runlog"
-           hx-get="/partials/runlog" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
-          <i class="bi bi-journal-text"></i>Run Log
-        </a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" id="tab-data-quality"
-           hx-get="/partials/data-quality" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner"
-           hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'>
-          <i class="bi bi-clipboard-data"></i>Data Quality
-        </a>
-      </li>
-      <li class="nav-item">
-        {# AI Desk (GH-21): its own URL. The first load honours /desk's
-           portfolio_id and item, then the active portfolio. #}
-        <a class="nav-link{{ ' active' if on_desk else '' }}" id="tab-desk" href="/desk"
-           hx-get="/partials/desk" hx-target="#tab-content" hx-trigger="click{{ ', load' if on_desk else '' }}" hx-indicator="#spinner"
-           hx-vals='js:{portfolio_id: (typeof deskParam === "function" && deskParam("portfolio_id")) || (typeof activePortfolio === "function" ? activePortfolio() : ""), item: (typeof deskParam === "function" ? deskParam("item") : "")}'>
-          <i class="bi bi-inbox"></i>AI Desk
-        </a>
-      </li>
-      <li class="nav-item">
-        <a class="nav-link" id="tab-settings"
-           hx-get="/partials/settings" hx-target="#tab-content" hx-trigger="click" hx-indicator="#spinner">
-          <i class="bi bi-gear"></i>Settings
-        </a>
-      </li>
-    </ul>
-  </div>
+  {# Loads this page's partial once, with the shell's resolved portfolio.
+     It sits outside #tab-content so content never inherits its hx-vals. #}
+  <span id="shell-loader" hidden
+        hx-get="{{ partial_url }}" hx-trigger="load" hx-target="#tab-content"
+        hx-swap="innerHTML" hx-indicator="#spinner" hx-sync="#tab-content:replace"
+        hx-vals='js:{...shellParams()}'></span>
 
   <!-- Tab content -->
   <div id="tab-content">
@@ -1141,7 +965,6 @@
   document.addEventListener('hidden.bs.modal', (event) => {
     if (event.target.id !== 'thesisEditorModal') return;
     if (thesisOpener && thesisOpener.isConnected) thesisOpener.focus();
-    else document.querySelector('#desk [role="option"][aria-selected="true"]')?.focus();
   });
   // GH-19: once the aside stacks below the holdings, bring a row's Why?
   // answer into view.
@@ -1301,116 +1124,12 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/shell.js?v=20261105-1"></script>
 <script>
   // Bootstrap provides Escape and focus trapping; keep the safer action first.
   document.addEventListener('shown.bs.modal', (event) => {
     event.target.querySelector('[data-initial-focus]')?.focus();
   });
-
-  // Active-portfolio selection is per-browser (localStorage), like the
-  // watchlist controls (#147). "" means "no selection / use the default".
-  function activePortfolio() {
-    return localStorage.getItem('activePortfolioId') || '';
-  }
-  function setActivePortfolio(id) {
-    if (id === null || id === undefined || id === '') {
-      localStorage.removeItem('activePortfolioId');
-    } else {
-      localStorage.setItem('activePortfolioId', String(id));
-    }
-  }
-
-  // Portfolio value-chart range is per-browser too (#421). Absent -> "12M".
-  function activeChartRange() {
-    try {
-      return localStorage.getItem('activeChartRange') || '12M';
-    } catch (e) {
-      return '12M';
-    }
-  }
-  function setChartRange(range) {
-    try {
-      if (!range) {
-        localStorage.removeItem('activeChartRange');
-      } else {
-        localStorage.setItem('activeChartRange', String(range));
-      }
-    } catch (e) {
-      /* localStorage unavailable (private mode, disabled) — no-op */
-    }
-  }
-
-  // Chart markers are per-browser too, and default to HIDDEN: on a busy
-  // portfolio the buy/sell triangles and the amber estimate diamonds land on
-  // nearly every point and bury the value line the chart exists to show
-  // (#542). One preference covers both kinds -- they are the same visual
-  // noise to the reader. Same try/catch shape as activeChartRange: private
-  // mode must fall back to the default, never throw out of the chart's init.
-  function showChartMarkers() {
-    try {
-      return localStorage.getItem('showChartMarkers') === '1';
-    } catch (e) {
-      return false;
-    }
-  }
-  function setChartMarkers(on) {
-    try {
-      if (on) {
-        localStorage.setItem('showChartMarkers', '1');
-      } else {
-        localStorage.removeItem('showChartMarkers');
-      }
-    } catch (e) {
-      /* localStorage unavailable (private mode, disabled) — no-op */
-    }
-  }
-
-  // Pure client-side (#542): every marker is already in the chart, so
-  // flipping them needs no server round-trip and no new route. What "on"
-  // actually means to the chart lives with the chart, in
-  // __portfolioApplyMarkers -- only that fragment knows which points are
-  // estimated. Here we just move the preference and ask.
-  function toggleChartMarkers() {
-    const on = !showChartMarkers();
-    setChartMarkers(on);
-    if (window.__portfolioApplyMarkers) window.__portfolioApplyMarkers(on);
-    syncChartMarkerButton();
-  }
-
-  // The toggle lives in the always-rendered card shell, so every render of
-  // that shell (page load, range swap, backfill re-render) has to restate
-  // the persisted choice on it.
-  function syncChartMarkerButton() {
-    const btn = document.getElementById('chartMarkerToggle');
-    if (!btn) return;
-    const on = showChartMarkers();
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    btn.classList.toggle('btn-primary', on);
-    btn.classList.toggle('btn-outline-secondary', !on);
-    const label = btn.querySelector('[data-marker-label]');
-    if (label) label.textContent = on ? 'Hide markers' : 'Show markers';
-  }
-
-  // Swap a full-page partial into #tab-content *through htmx* (#541).
-  // `el.innerHTML = html` never executes the fragment's <script> tags and
-  // never processes its hx-* attributes, so the chart card came back inert:
-  // its Chart.js init never ran and its own range buttons were dead until a
-  // browser reload. htmx does both. The plain assignment stays as the
-  // fallback for the (impossible in this page, but cheap) case of htmx
-  // being absent.
-  function swapTabContent(html) {
-    const target = document.getElementById('tab-content');
-    if (!target) return;
-    if (window.htmx && typeof window.htmx.swap === 'function') {
-      // The spec key is `swapStyle`, not `swap` -- htmx falls back to
-      // config.defaultSwapStyle when it is missing, so the wrong key works
-      // by accident today and silently changes behaviour the moment that
-      // default is set to anything else.
-      htmx.swap('#tab-content', html, { swapStyle: 'innerHTML' });
-    } else {
-      target.innerHTML = html;
-    }
-  }
 
   function openBuy(ticker, price, entry, stop) {
     document.getElementById('buy-portfolio-id').value = activePortfolio();
@@ -1446,127 +1165,6 @@
     document.getElementById('sell-date').value   = new Date().toISOString().slice(0,10);
     new bootstrap.Modal(document.getElementById('sellModal')).show();
   }
-
-  // AI Desk (GH-21). The URL follows the tab (replaceState, no history
-  // entry), so a reload of /desk lands back on the Desk with its portfolio
-  // and selected item; / behaves as before.
-  function deskParam(name) {
-    return new URLSearchParams(location.search).get(name) || '';
-  }
-  function deskSelectedId() {
-    return document.querySelector('#desk [role="option"][aria-selected="true"]')?.dataset.itemId || '';
-  }
-  // replaceState is debounced (the last URL within 250ms wins) and guarded,
-  // so fast arrow-key navigation cannot hit the browser's rate limit.
-  let replaceUrlTimer = null;
-  function replaceUrl(path) {
-    clearTimeout(replaceUrlTimer);
-    replaceUrlTimer = setTimeout(() => {
-      try { history.replaceState(null, '', path); } catch (err) { /* rate-limited */ }
-    }, 250);
-  }
-  function deskTabActive() {
-    return document.getElementById('tab-desk')?.classList.contains('active');
-  }
-  function deskSyncUrl() {
-    const desk = document.getElementById('desk');
-    if (!desk || !deskTabActive()) return;
-    const params = new URLSearchParams();
-    if (desk.dataset.portfolioId) params.set('portfolio_id', desk.dataset.portfolioId);
-    if (deskSelectedId()) params.set('item', deskSelectedId());
-    const query = params.toString();
-    replaceUrl('/desk' + (query ? '?' + query : ''));
-  }
-  // Swap the inspector from the item's pre-rendered <template>: no request.
-  // A user selection is announced; a queue refresh re-renders silently.
-  function selectDeskItem(option, byUser) {
-    const options = document.querySelectorAll('#desk [role="option"]');
-    options.forEach((o) => {
-      o.setAttribute('aria-selected', String(o === option));
-      o.tabIndex = o === option ? 0 : -1;
-    });
-    const body = document.getElementById('desk-inspector-body');
-    const template = document.getElementById(option.dataset.template);
-    if (body && template) {
-      body.replaceChildren(template.content.cloneNode(true));
-      if (window.htmx) htmx.process(body);
-    }
-    if (byUser) {
-      document.getElementById('desk-announcer').textContent = 'Selected: ' + option.dataset.title;
-      option.focus();
-    }
-    deskSyncUrl();
-  }
-  document.addEventListener('click', (e) => {
-    const option = e.target.closest('#desk [role="option"]');
-    if (option) { selectDeskItem(option, true); return; }
-    const link = e.target.closest('[data-desk-tab]');
-    if (!link) return;
-    e.preventDefault();
-    document.getElementById(link.dataset.deskTab)?.click();
-  });
-  document.addEventListener('keydown', (e) => {
-    const option = e.target.closest?.('#desk [role="option"]');
-    if (!option) return;
-    const options = [...document.querySelectorAll('#desk [role="option"]')];
-    const index = options.indexOf(option);
-    const next = { ArrowDown: index + 1, ArrowUp: index - 1, Home: 0, End: options.length - 1 }[e.key];
-    if (next === undefined || !options[next]) return;
-    e.preventDefault();
-    selectDeskItem(options[next], true);
-  });
-  // A Desk render (load, portfolio change or refresh): remember its
-  // portfolio for the other tabs, point the bell at it, keep focus on the
-  // selected option if the listbox had it, and sync the URL. The server
-  // renders the whole Desk, inspector included, so a refreshed empty queue
-  // shows "Nothing selected". A late Desk response after the user left the
-  // tab changes nothing.
-  let deskHadFocus = false;
-  document.body.addEventListener('htmx:beforeSwap', (e) => {
-    if (e.detail.target.id === 'tab-content') {
-      deskHadFocus = !!document.activeElement?.closest('#desk [role="option"]');
-    }
-  });
-  document.body.addEventListener('htmx:afterSettle', (e) => {
-    const desk = document.getElementById('desk');
-    if (!desk || e.detail.target.id !== 'tab-content' || !deskTabActive()) return;
-    setActivePortfolio(desk.dataset.portfolioId);
-    if (window.htmx && document.getElementById('notif-badge')) htmx.trigger('#notif-badge', 'refresh');
-    const selected = desk.querySelector('[role="option"][aria-selected="true"]');
-    if (selected && deskHadFocus) selected.focus();
-    deskHadFocus = false;
-    deskSyncUrl();
-  });
-  // A changed bell count is announced politely (not the first one).
-  let lastBadgeAnnouncement = null;
-  document.body.addEventListener('htmx:afterSettle', () => {
-    const text = document.getElementById('notif-badge')?.dataset.announce;
-    if (text === undefined || text === lastBadgeAnnouncement) return;
-    if (lastBadgeAnnouncement !== null) document.getElementById('notif-live').textContent = text;
-    lastBadgeAnnouncement = text;
-  });
-
-  // Keep active tab in sync with navigation clicks
-  document.getElementById('mainTabs').addEventListener('click', function(e) {
-    const link = e.target.closest('.nav-link');
-    if (!link) return;
-    document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
-    link.classList.add('active');
-    const path = link.id === 'tab-desk' ? '/desk' : '/';
-    if (location.pathname !== path) replaceUrl(path);
-  });
-
-  // After a trade form (from a modal) updates #tab-content, activate the Portfolio tab.
-  // Other forms target the same region (including Refresh Data), so match the
-  // trade route rather than treating every form as a trade.
-  document.body.addEventListener('htmx:afterSettle', function(e) {
-    if (e.detail.target.id !== 'tab-content') return;
-    if (e.detail.elt?.getAttribute('hx-post') === '/trades') {
-      document.querySelectorAll('#mainTabs .nav-link').forEach(t => t.classList.remove('active'));
-      document.getElementById('tab-portfolio').classList.add('active');
-      replaceUrl('/');
-    }
-  });
 
   async function refreshPortfolioPrices() {
     const btn = document.getElementById('refreshBtn');
@@ -1873,9 +1471,9 @@
     return false;
   }
 </script>
-<script src="/static/js/watchlist.js?v=20261104-1"></script>
+<script src="/static/js/watchlist.js?v=20261105-129"></script>
 <script src="/static/js/pnl-table.js?v=20260909-1"></script>
-<script src="/static/js/pipeline-refresh.js"></script>
+<script src="/static/js/pipeline-refresh.js?v=20261105-1"></script>
 <script src="/static/js/strategy-manager.js?v=20260824-1" defer></script>
 </body>
 </html>

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from app.agents.scanner.market_narrative import load_market_narrative
@@ -12,9 +13,11 @@ from app.core.recommendation import (
     Recommendation,
     actionability_sort_key,
     classify_recommendation,
+    is_buy_signal,
 )
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.pipeline_status_repo import PipelineStatusRepository
+from app.schemas import StockRecord
 from app.schemas.analysis_artifact import read_analysis_artifact_meta
 from app.schemas.pipeline_status import PipelineState, PipelineStatus
 from app.schemas.source_health import SourceHealth, SourceName
@@ -24,6 +27,9 @@ from app.services.portfolio_service import PortfolioService
 from app.services.trader_service import TraderService
 
 _status_repository = PipelineStatusRepository(PIPELINE_STATUS_JSON)
+#: Where the Scanner's "Watching" group ranks: below Stay Alert (4), above
+#: Watch (3), so in recommended order its rows are contiguous (#129).
+WATCHING_RANK = 3.5
 
 
 def _load_current_owner() -> PipelineStatus | None:
@@ -62,6 +68,23 @@ def build_freshness_context() -> dict[str, Any]:
     }
 
 
+def watching_tickers(
+    recommendations: Mapping[str, Recommendation],
+    alert_states: Mapping[str, AlertUiState],
+) -> frozenset[str]:
+    """Tickers in the Scanner's "Watching" group (#129).
+
+    Stay Alert rows that were already alerted (on cooldown or watched). A buy
+    keeps its BUY label above the divider, so the Buy-signals chip, the labels
+    and Today agree (AD-6); Sell/Avoid/Extended keep their own label and rank.
+    """
+    return frozenset(
+        ticker
+        for ticker, state in alert_states.items()
+        if state.suppressed and recommendations[ticker].bucket == "alert"
+    )
+
+
 def build_stock_scanner_context(
     trader: TraderService,
     portfolio: PortfolioService,
@@ -72,17 +95,18 @@ def build_stock_scanner_context(
 
     Records are sorted actionable-first (then by score) so the most tradable
     setups surface at the top regardless of the order persisted on disk.
+    Already-alerted rows (``watching``) rank as one group just below Stay
+    Alert, so the screen's "Watching" divider needs no client-side regrouping.
 
     Also precomputes, per ticker, the canonical recommendation bucket and
-    the alert cooldown/suppression state (#58) so the template only renders
-    fields rather than re-deriving the underlying thresholds in Jinja.
+    the alert cooldown/suppression state (#58), plus the BUY-family count
+    (AD-6, the same source as Today), so the template only renders fields
+    rather than re-deriving thresholds, groups or counts in Jinja (AD-10).
 
     Freshness and source-health context live on the bottom status bar
     (`/pipeline-status`, see `app.api.routes.pipeline`) instead of here (#71).
     """
-    records = sorted(
-        portfolio.load_analysis(), key=actionability_sort_key, reverse=True
-    )
+    records = portfolio.load_analysis()
     # "Held" spans every portfolio: a ticker owned in any account counts (#147).
     portfolio_tickers = trader.held_tickers()
     tickers = tuple(record.ticker for record in records)
@@ -102,12 +126,22 @@ def build_stock_scanner_context(
                 alert_read_state.last_alerted_at if alert_read_state else None
             ),
         )
+    watching = watching_tickers(recommendations, alert_states)
+
+    def order(record: StockRecord) -> tuple[float, int, int, int]:
+        rank, score, canslim, momentum = actionability_sort_key(record)
+        tier = WATCHING_RANK if record.ticker in watching else rank
+        return (tier, score, canslim, momentum)
 
     context: dict[str, Any] = {
-        "records": records,
+        "records": sorted(records, key=order, reverse=True),
         "portfolio_tickers": portfolio_tickers,
         "recommendations": recommendations,
         "alert_states": alert_states,
+        "watching": watching,
+        "buy_signal_count": sum(
+            is_buy_signal(recommendations[r.ticker]) for r in records
+        ),
         "market_narrative": load_market_narrative(),
         "market_regime": load_market_regime(),
     }

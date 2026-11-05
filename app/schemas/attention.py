@@ -25,6 +25,8 @@ CATEGORY_SEVERITY: dict[AttentionCategory, AttentionSeverity] = {
     "new_setup": "info",
 }
 CATEGORY_ORDER: tuple[AttentionCategory, ...] = tuple(CATEGORY_SEVERITY)
+#: The categories Today lists under "Needs action" and the badge counts.
+NEEDS_ACTION: tuple[AttentionCategory, ...] = ("held_risk", "exit")
 SEVERITY_ORDER: tuple[AttentionSeverity, ...] = ("high", "medium", "info")
 
 
@@ -93,20 +95,17 @@ class AttentionQueueV1(BaseModel):
     unavailable: list[str]
 
     @property
-    def urgent_count(self) -> int:
-        """Items about this portfolio, high or medium, with fresh evidence.
+    def needs_action(self) -> list[AttentionItemV1]:
+        """Today's "Needs action": held-position risks and exits (GH-128).
 
-        Run-wide items (source health, freshness), items whose every event
-        is stale and notification items (GH-21, reviewed on the AI Desk) are
-        listed but not counted.
+        The Today badge is exactly this list's length.
         """
-        return sum(
-            item.portfolio_id is not None
-            and item.severity != "info"
-            and not any(ref.kind == "notification" for ref in item.evidence)
-            and not all(event.stale for event in self.events_for(item))
-            for item in self.items
-        )
+        return [item for item in self.items if item.kind in NEEDS_ACTION]
+
+    @property
+    def worth_checking(self) -> list[AttentionItemV1]:
+        """Today's "Worth checking": evidence and data items (GH-128)."""
+        return [item for item in self.items if item.kind == "evidence"]
 
     def events_for(self, item: AttentionItemV1) -> list[AttentionEventV1]:
         """The original events grouped into ``item``, in queue order."""

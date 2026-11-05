@@ -1,0 +1,15 @@
+{# Portfolio's two sub-views (GH-130, AD-3): each link hx-gets its partial
+   and pushes its page URL; ``sub`` names the one shown. #}
+{% set views = [
+  ("holdings", "Holdings", "/portfolio", "/partials/portfolio"),
+  ("trades", "Trades & realised P&L", "/portfolio/trades", "/partials/portfolio/trades"),
+] %}
+<nav class="portfolio-views" aria-label="Portfolio views">
+  {% for slug, label, page, partial in views %}
+  <a href="{{ page }}" data-portfolio-view="{{ slug }}"{% if slug == sub %} aria-current="page"{% endif %}
+     hx-get="{{ partial }}" hx-push-url="{{ page }}"
+     hx-target="#tab-content" hx-swap="innerHTML" hx-indicator="#spinner"
+     hx-sync="#tab-content:replace"
+     hx-vals='js:{...shellParams()}'>{{ label }}</a>
+  {% endfor %}
+</nav>

@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import re
 
+from app.api.stock_scanner_context import watching_tickers
 from app.api.templating import templates
 from app.core.alerting import build_alert_ui_state
 from app.core.recommendation import classify_recommendation
@@ -18,6 +19,7 @@ from app.schemas.scan import CANSLIMScore, MomentumScore, StockAnalysis
 ROW_COUNT = 722
 MAX_AVG_ROW_BYTES = 1800  # relaxed from 1024, then 1640, by the user
 MAX_GZIP_BYTES = 300_000
+ALERTED_AT = "2026-11-01T10:00:00+00:00"
 SECTORS = ("Technology", "Healthcare", "Financial Services", "Industrials")
 SEPA_KEYS = (
     "above_150_200",
@@ -84,18 +86,23 @@ def _record(i: int) -> StockRecord:
 
 def _render(records: list[StockRecord]) -> str:
     """Render the real scanner partial with the real context helpers."""
-    return templates.get_template("_stock_scanner.html").render(
+    recommendations = {r.ticker: classify_recommendation(r) for r in records}
+    alert_states = {
+        r.ticker: build_alert_ui_state(
+            r,
+            has_watching=n % 4 == 0,  # some "already alerted" rows
+            # ...with a dated cooldown tooltip, the heaviest Signal cell.
+            last_alerted_at=ALERTED_AT if n % 4 == 0 else None,
+        )
+        for n, r in enumerate(records)
+    }
+    return templates.get_template("_scanner.html").render(
         records=records,
         portfolio_tickers=set(),
-        recommendations={r.ticker: classify_recommendation(r) for r in records},
-        alert_states={
-            r.ticker: build_alert_ui_state(
-                r,
-                has_watching=n % 4 == 0,  # some "already alerted" lines
-                last_alerted_at=None,
-            )
-            for n, r in enumerate(records)
-        },
+        recommendations=recommendations,
+        alert_states=alert_states,
+        watching=watching_tickers(recommendations, alert_states),
+        buy_signal_count=0,
         market_regime=None,
         market_narrative=None,
     )
@@ -107,4 +114,5 @@ def test_fixture_rows_fit_raw_and_gzip_budgets() -> None:
     assert len(rows) == ROW_COUNT
     average = sum(len(row.encode()) for row in rows) / ROW_COUNT
     assert average <= MAX_AVG_ROW_BYTES, f"average row {average:.0f} B"
+    assert sum('data-watch="true"' in row for row in rows) > 100
     assert len(gzip.compress(html.encode(), 6)) < MAX_GZIP_BYTES

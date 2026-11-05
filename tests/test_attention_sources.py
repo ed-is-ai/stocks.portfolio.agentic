@@ -41,11 +41,12 @@ from tests.test_thesis_evaluator import FRESH, META, make_record, make_thesis
 AT = datetime(2026, 9, 28, 21, tzinfo=UTC)
 
 
-def test_only_high_risk_findings_become_held_risk_events() -> None:
+def test_high_risk_and_missing_stop_findings_become_held_risk_events() -> None:
     report = _risk(
         _finding("position_concentration", "high", "BBB is 40%", "BBB"),
         _finding("capital_at_risk", "high", "Capital at risk is 9%", "AAA", "BBB"),
         _finding("no_stop", "medium", "AAA has no stop", "AAA"),
+        _finding("unknown_sector", "info", "AAA has no sector", "AAA"),
     )
 
     events = risk_events(
@@ -55,6 +56,7 @@ def test_only_high_risk_findings_become_held_risk_events() -> None:
     assert [(e.category, e.kind, e.security_id) for e in events] == [
         ("held_risk", "position_concentration", "0P0.L"),
         ("held_risk", "capital_at_risk", None),
+        ("held_risk", "no_stop", "AAA"),
     ]
     assert events[0].as_of == date(2026, 9, 28)
     assert events[0].source_event_id == "risk:1:position_concentration:BBB"
@@ -300,7 +302,7 @@ def test_only_queueable_notifications_become_events() -> None:
     assert events[-1].raised_by == "System"
 
 
-def test_a_run_wide_notification_item_is_not_urgent() -> None:
+def test_a_run_wide_notification_item_is_worth_checking_not_action() -> None:
     queue = build_attention_queue(
         notification_events([_note(1)], portfolio_id=1, now=AT),
         portfolio_id=1,
@@ -309,4 +311,5 @@ def test_a_run_wide_notification_item_is_not_urgent() -> None:
     )
 
     assert len(queue.items) == 1
-    assert queue.urgent_count == 0
+    assert queue.needs_action == []
+    assert len(queue.worth_checking) == 1

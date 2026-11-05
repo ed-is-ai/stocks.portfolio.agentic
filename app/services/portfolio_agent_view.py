@@ -110,6 +110,18 @@ class HoldingAgentRow:
 
 
 @dataclass(frozen=True)
+class PortfolioSummary:
+    """Today's portfolio card: GBP totals already valued by the service."""
+
+    name: str
+    value_gbp: float
+    unrealised_gbp: float
+    unrealised_pct: float | None
+    cash_gbp: float | None
+    positions: int
+
+
+@dataclass(frozen=True)
 class PortfolioAgentView:
     """Everything the agents partial swaps into the Portfolio tab."""
 
@@ -129,6 +141,8 @@ class PortfolioAgentView:
     theses: ThesisStates = None
     #: When the published analysis run behind the queue was generated.
     generated_at: datetime | None = None
+    #: The portfolio's headline totals (``None`` when there is no portfolio).
+    summary: PortfolioSummary | None = None
 
 
 @dataclass(frozen=True)
@@ -164,6 +178,7 @@ def build_agent_view(
     risk: RiskReportV1 | None,
     theses: ThesisStates,
     published: PublishedEvidence = NO_PUBLISHED_EVIDENCE,
+    summary: PortfolioSummary | None = None,
 ) -> PortfolioAgentView:
     """Join ``outcome``, ``risk`` and ``theses`` (``None`` = failed) onto
     ``positions``, and queue them with ``published`` for attention.
@@ -215,6 +230,7 @@ def build_agent_view(
         risk_findings=None if risk is None else len(risk.findings),
         theses=theses,
         generated_at=published.generated_at,
+        summary=summary,
     )
 
 

@@ -111,7 +111,7 @@ def test_lifespan_starts_and_stops_the_schedule(monkeypatch) -> None:
 
     with TestClient(create_app(strategy_jobs_enabled=False)) as client:
         assert pipeline_scheduler.next_scheduled_run() is not None
-        page = client.get("/")
+        page = client.get("/partials/settings")
         assert "Next scheduled refresh" in page.text
 
     assert pipeline_scheduler.next_scheduled_run() is None
@@ -119,6 +119,6 @@ def test_lifespan_starts_and_stops_the_schedule(monkeypatch) -> None:
 
 def test_menu_omits_next_run_when_unscheduled() -> None:
     with TestClient(create_app(strategy_jobs_enabled=False)) as client:
-        page = client.get("/")
+        page = client.get("/partials/settings")
 
     assert "Next scheduled refresh" not in page.text

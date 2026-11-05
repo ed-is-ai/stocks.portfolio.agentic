@@ -5,7 +5,7 @@ completed data-refresh run, a source-health failure during a run, or a
 SIPP CSV import. The
 repository (``app.repositories.notifications_repo``) owns the table; this
 module owns the shape and the small amount of derived presentation logic
-(icon, deep-link target) the AI Desk inspector needs.
+(icon, deep-link target) Today's items need.
 """
 
 from __future__ import annotations
@@ -40,14 +40,14 @@ class NotificationSeverity(StrEnum):
     ERROR = "error"
 
 
-#: Tab (element id in ``index.html``) each category deep-links to on click.
-_DEEP_LINK_TABS: dict[NotificationCategory, str] = {
-    NotificationCategory.ALERT: "tab-stock-scanner",
-    NotificationCategory.REFRESH: "tab-runlog",
-    NotificationCategory.SOURCE: "tab-runlog",
-    NotificationCategory.PORTFOLIO: "tab-portfolio",
-    NotificationCategory.STRATEGY_INITIALIZATION: "tab-strategy-manager",
-    NotificationCategory.BACKTEST: "tab-strategy-manager",
+#: Shell page URL each category deep-links to (GH-128).
+_DEEP_LINKS: dict[NotificationCategory, str] = {
+    NotificationCategory.ALERT: "/scanner",
+    NotificationCategory.REFRESH: "/runlog",
+    NotificationCategory.SOURCE: "/runlog",
+    NotificationCategory.PORTFOLIO: "/portfolio",
+    NotificationCategory.STRATEGY_INITIALIZATION: "/strategies",
+    NotificationCategory.BACKTEST: "/strategies",
 }
 
 #: bootstrap-icons glyph per severity.
@@ -84,9 +84,9 @@ class Notification(BaseModel):
         return self.read_at is not None
 
     @property
-    def deep_link_tab(self) -> str:
-        """Return the tab element id this notification navigates to."""
-        return _DEEP_LINK_TABS[self.category]
+    def deep_link(self) -> str:
+        """Return the shell page URL this notification navigates to."""
+        return _DEEP_LINKS[self.category]
 
     @property
     def icon(self) -> str:

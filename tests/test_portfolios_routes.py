@@ -114,6 +114,7 @@ def refresh_mocks(monkeypatch: pytest.MonkeyPatch):
     mock_portfolio.positions_from_input_snapshot.return_value = positions
     mock_portfolio.gbpusd_rate.return_value = 1.25
     mock_portfolio.load_ticker_aliases.return_value = {}
+    mock_portfolio.covering_range.side_effect = lambda _pid, range_key: range_key
     mock_portfolio.fetch_all_prices_with_failures.return_value = (
         {"AAPL": 100.0},
         {},

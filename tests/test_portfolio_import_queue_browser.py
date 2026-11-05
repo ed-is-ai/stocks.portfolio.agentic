@@ -17,8 +17,9 @@ same kind of dependency overrides used elsewhere in this suite (a mocked
 Jinja templates render) -- hermetic, no real database or SIPP CSV touched.
 
 Scope: exactly the two behaviors named in Gate 2's last task --
-  (a) ``#portfolioSelect`` is disabled for the duration of an in-flight
-      import queue, and re-enabled once it finishes.
+  (a) the queue's controls (``#importSubmitBtn``) are disabled for the
+      duration of an in-flight import queue, and re-enabled once it
+      finishes.
   (b) a response for an import whose captured portfolio ID no longer
       matches the active view is discarded -- never written into
       ``#tab-content``.
@@ -67,6 +68,11 @@ from app.services.portfolio_service import PortfolioService
 
 app = create_app(strategy_jobs_enabled=False, prepare_strategy_coverage=lambda: None)
 
+# The queue's own lock indicator. Since GH-130 the account selector is the
+# shell's picker, outside the tab, so the queue's submit button -- disabled
+# and re-enabled on the same paths -- is what these tests observe.
+IMPORT_BUTTON = "#importSubmitBtn"
+
 # How long the mocked import "processing" takes server-side. Long enough
 # that Playwright's assertions can reliably observe the mid-flight disabled
 # state before it resolves, short enough the module stays fast.
@@ -80,10 +86,10 @@ def _free_port() -> int:
 
 
 def _quiet_desk() -> MagicMock:
-    """The bell's badge now counts the AI Desk's urgent items (GH-21); a
-    fake Desk keeps that poll off the real ledger and evidence stores."""
+    """The Today badge counts Today's Needs action items (GH-128); a fake
+    Desk keeps that poll off the real ledger and evidence stores."""
     desk = MagicMock()
-    desk.attention_count.return_value = 0
+    desk.badge_count.return_value = 0
     return desk
 
 
@@ -271,9 +277,8 @@ def sample_csv(tmp_path: Path) -> Path:
 
 
 def _load_portfolio_tab(page: Page, base_url: str) -> None:
-    page.goto(base_url + "/")
-    page.click("#tab-portfolio")
-    expect(page.locator("#portfolioSelect")).to_be_visible()
+    page.goto(base_url + "/portfolio")
+    expect(page.locator("#portfolio-more")).to_be_visible()
 
 
 def _open_import_dropdown(page: Page) -> None:
@@ -325,7 +330,7 @@ def test_selector_disabled_during_queue_then_reenabled(
 
     # Disabled almost immediately -- well before the mocked server-side
     # delay elapses.
-    expect(page.locator("#portfolioSelect")).to_be_disabled(timeout=2000)
+    expect(page.locator(IMPORT_BUTTON)).to_be_disabled(timeout=2000)
 
     # Once the queue's single request resolves, the successful import's
     # response replaces #tab-content wholesale with a freshly rendered,
@@ -333,7 +338,7 @@ def test_selector_disabled_during_queue_then_reenabled(
     # false again" -- see index.html's early-return-branch comment for the
     # other half, the offline/every-file-failed path, which this test does
     # not exercise).
-    expect(page.locator("#portfolioSelect")).to_be_enabled(
+    expect(page.locator(IMPORT_BUTTON)).to_be_enabled(
         timeout=int((_IMPORT_DELAY_S + 4) * 1000)
     )
 
@@ -365,7 +370,7 @@ def test_response_for_switched_away_portfolio_is_discarded(
 
     # Confirms the request is genuinely in flight (not already resolved)
     # before switching the active portfolio out from under it.
-    expect(page.locator("#portfolioSelect")).to_be_disabled(timeout=2000)
+    expect(page.locator(IMPORT_BUTTON)).to_be_disabled(timeout=2000)
     page.evaluate("window.setActivePortfolio('999')")
 
     # Deterministic completion signal rather than a blind sleep: the
@@ -374,7 +379,7 @@ def test_response_for_switched_away_portfolio_is_discarded(
     # whichever it is, by the time this succeeds the response has been
     # fully handled one way or the other, so the assertion below can't
     # pass vacuously by checking before the response ever arrived.
-    expect(page.locator("#portfolioSelect")).to_be_enabled(
+    expect(page.locator(IMPORT_BUTTON)).to_be_enabled(
         timeout=int((_IMPORT_DELAY_S + 4) * 1000)
     )
 
@@ -426,7 +431,7 @@ def test_discard_reports_files_already_imported_mid_batch_switch(
     page.wait_for_timeout(int((_IMPORT_DELAY_S + 0.2) * 1000))
     page.evaluate("window.setActivePortfolio('999')")
 
-    expect(page.locator("#portfolioSelect")).to_be_enabled(
+    expect(page.locator(IMPORT_BUTTON)).to_be_enabled(
         timeout=int((_IMPORT_DELAY_S * 2 + 4) * 1000)
     )
 
