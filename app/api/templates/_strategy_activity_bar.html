@@ -7,7 +7,7 @@
 <div class="pipeline-status {{ activity_bar.state }}"
      data-strategy-activity-state="{{ activity_bar.state }}"
      hx-get="/strategy-manager/activity-status"
-     hx-trigger="every {{ 2 if activity_bar.running else 10 }}s"
+     hx-trigger="every {{ 2 if activity_bar.running else 30 }}s"
      hx-target="#strategy-activity-status" hx-swap="innerHTML">
   <a href="{{ activity_bar.href }}" hx-get="{{ activity_bar.href }}"
      hx-target="#tab-content" hx-swap="innerHTML" class="pipeline-status-link">
@@ -15,6 +15,6 @@
   </a>
 </div>
 {% else %}
-<span hx-get="/strategy-manager/activity-status" hx-trigger="every 10s"
+<span hx-get="/strategy-manager/activity-status" hx-trigger="every 30s"
       hx-target="#strategy-activity-status" hx-swap="innerHTML"></span>
 {% endif %}

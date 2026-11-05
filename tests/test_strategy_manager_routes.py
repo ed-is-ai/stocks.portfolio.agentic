@@ -494,6 +494,8 @@ def services(monkeypatch):
         lambda _root: SimpleNamespace(strategies=(object(),), warnings=()),
     )
     monkeypatch.setenv("APP_AUTH_TOKEN", "s3cret")
+    # gh-132: the bar's progress cache must never leak between tests.
+    monkeypatch.setattr(strategy_manager_routes, "_ACTIVITY_BAR_CACHE", None)
     try:
         yield repo, jobs
     finally:
@@ -4685,7 +4687,7 @@ def test_activity_status_bar_is_empty_but_keeps_watching_when_idle(services):
 
     assert "pipeline-status" not in text
     # An idle tab still has to notice a run that starts elsewhere.
-    assert 'hx-trigger="every 10s"' in text
+    assert 'hx-trigger="every 30s"' in text
 
 
 def test_activity_status_bar_drops_a_run_that_finished_long_ago(services):
@@ -4840,3 +4842,63 @@ def test_standalone_shell_offers_a_way_back():
     assert 'class="shell-back"' in shell
     assert 'href="/"' in shell
     assert "Back to Stock Manager" in shell
+
+
+# gh-132: the 2s bar poll re-reads run tables only when the job revision moves.
+
+
+def _bar_job(job_type, status, version: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        id="job-1",
+        job_type=job_type,
+        status=status,
+        status_version=version,
+        current_month="2024-02",
+        current_stage=None,
+        cancel_requested_at=None,
+        failed_month=None,
+        failure_detail=None,
+        deleted_at=None,
+        created_at=datetime(2026, 8, 29, tzinfo=timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+
+def _count_calls(monkeypatch, repo, name: str) -> list[object]:
+    calls: list[object] = []
+    real = getattr(repo, name)
+
+    def spy(job_id):
+        calls.append(job_id)
+        return real(job_id)
+
+    monkeypatch.setattr(repo, name, spy)
+    return calls
+
+
+def test_activity_bar_reads_backtest_progress_once_per_revision(services, monkeypatch):
+    repo, _ = services
+    calls = _count_calls(monkeypatch, repo, "strategy_run")
+    repo.activity = _bar_job(StrategyJobType.BACKTEST, StrategyJobStatus.RUNNING, 5)
+
+    first = client.get("/strategy-manager/activity-status").text
+    second = client.get("/strategy-manager/activity-status").text
+
+    assert ">2/3<" in first and ">2/3<" in second
+    assert len(calls) == 1
+    repo.activity = _bar_job(StrategyJobType.BACKTEST, StrategyJobStatus.RUNNING, 6)
+    client.get("/strategy-manager/activity-status")
+    assert len(calls) == 2
+
+
+def test_activity_bar_always_rereads_a_running_initialization(services, monkeypatch):
+    repo, _ = services
+    calls = _count_calls(monkeypatch, repo, "initialization_run")
+    repo.activity = _bar_job(
+        StrategyJobType.INITIALIZATION, StrategyJobStatus.RUNNING, 4
+    )
+
+    client.get("/strategy-manager/activity-status")
+    client.get("/strategy-manager/activity-status")
+
+    assert len(calls) == 2

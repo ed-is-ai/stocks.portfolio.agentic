@@ -23,6 +23,7 @@ from datetime import date, datetime
 from hashlib import sha256
 import json
 from pathlib import Path
+import threading
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -145,7 +146,13 @@ class CurrentAnalysisEvidenceV1(_FrozenArtifactModel):
 
 
 class AnalysisArtifactMeta(BaseModel):
-    """Ownership metadata embedded in the promoted analysis artifact."""
+    """Ownership metadata embedded in the promoted analysis artifact.
+
+    Frozen: ``read_analysis_artifact_meta`` hands one cached instance to
+    every caller (#132).
+    """
+
+    model_config = ConfigDict(frozen=True)
 
     run_id: str
     generated_at: datetime
@@ -211,6 +218,12 @@ def read_analysis_artifact(path: Path) -> AnalysisArtifact | None:
         return None
 
 
+# ponytail: one entry per resolved path, unbounded across paths; callers
+# only ever read a handful of artifact paths.
+_META_CACHE: dict[Path, tuple[tuple[int, int, int], AnalysisArtifactMeta]] = {}
+_META_CACHE_LOCK = threading.Lock()
+
+
 def read_analysis_artifact_meta(path: Path) -> AnalysisArtifactMeta | None:
     """Return the embedded ownership metadata for *path*, or None if absent.
 
@@ -221,7 +234,30 @@ def read_analysis_artifact_meta(path: Path) -> AnalysisArtifactMeta | None:
     ``current_evidence`` or any other section — freshness must stay
     readable even when a corrupt or incompatible evidence block would make
     ``read_analysis_artifact``'s full-model validation reject the file.
+
+    Memoised per path on ``(mtime_ns, size, ino)`` so a 2 s status poll
+    does not re-parse the multi-MB artifact (#132). A missing file or a
+    ``None`` result is never cached.
     """
+    resolved = path.resolve()
+    try:
+        stat = resolved.stat()
+    except OSError:
+        return None
+    key = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+    with _META_CACHE_LOCK:
+        cached = _META_CACHE.get(resolved)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    meta = _parse_artifact_meta(resolved)
+    if meta is not None:
+        with _META_CACHE_LOCK:
+            _META_CACHE[resolved] = (key, meta)
+    return meta
+
+
+def _parse_artifact_meta(path: Path) -> AnalysisArtifactMeta | None:
+    """Uncached full read of *path*'s ``meta``; None when unreadable."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):

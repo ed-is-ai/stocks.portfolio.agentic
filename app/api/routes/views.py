@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.dependencies import (
+    PORTFOLIO_WRITE,
     get_alerts_repository,
     get_notifications_repository,
     get_portfolio_recommendation_service,
@@ -58,13 +59,13 @@ RealisedPnlDep = Annotated[RealisedPnlService, Depends(get_realised_pnl_service)
 
 
 @router.get("/startup-status")
-async def startup_status(request: Request) -> dict[str, str]:
+def startup_status(request: Request) -> dict[str, str]:
     """Report boot preparation without reading the evidence database."""
     return {"status": request.app.state.strategy_preparation}
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index(request: Request) -> HTMLResponse:
+def index(request: Request) -> HTMLResponse:
     """Render the shell, with freshness ready for the header affordance (#418).
 
     The refresh control is now the primary place freshness is discovered, so
@@ -93,7 +94,7 @@ def render_shell(request: Request, active_tab: str) -> HTMLResponse:
 
 
 @router.get("/partials/stock-scanner", response_class=HTMLResponse)
-async def partial_stock_scanner(
+def partial_stock_scanner(
     request: Request, trader: TraderDep, portfolio: PortfolioDep, alerts: AlertsDep
 ) -> HTMLResponse:
     return templates.TemplateResponse(
@@ -104,7 +105,7 @@ async def partial_stock_scanner(
 
 
 @router.get("/partials/portfolio", response_class=HTMLResponse)
-async def partial_portfolio(
+def partial_portfolio(
     request: Request,
     portfolio: PortfolioDep,
     portfolio_id: str | None = None,
@@ -121,7 +122,7 @@ async def partial_portfolio(
 
 
 @router.get("/partials/portfolio/chart", response_class=HTMLResponse)
-async def partial_portfolio_chart(
+def partial_portfolio_chart(
     request: Request,
     portfolio: PortfolioDep,
     portfolio_id: str | None = None,
@@ -307,9 +308,9 @@ def partial_realised_pnl(
 @router.post(
     "/trades/{trade_id}/ack",
     response_class=HTMLResponse,
-    dependencies=[Depends(require_local_or_token)],
+    dependencies=[Depends(require_local_or_token), PORTFOLIO_WRITE],
 )
-async def ack_unmatched_sell(
+def ack_unmatched_sell(
     request: Request,
     trade_id: int,
     trader: TraderDep,
@@ -345,7 +346,7 @@ async def ack_unmatched_sell(
 
 
 @router.get("/partials/history", response_class=HTMLResponse)
-async def partial_history(
+def partial_history(
     request: Request, trader: TraderDep, realised_pnl: RealisedPnlDep
 ) -> HTMLResponse:
     # Trade History spans every portfolio; a name map feeds the Portfolio
@@ -384,7 +385,7 @@ def _run_date(start: str | None) -> date | None:
 
 
 @router.get("/partials/runlog", response_class=HTMLResponse)
-async def partial_runlog(request: Request) -> HTMLResponse:
+def partial_runlog(request: Request) -> HTMLResponse:
     runs: list[dict] = []
     if PIPELINE_RUNS_CSV.exists():
         with open(PIPELINE_RUNS_CSV, newline="", encoding="utf-8-sig") as fh:

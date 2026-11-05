@@ -67,7 +67,7 @@ def notifications_count(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def mark_notification_read(
+def mark_notification_read(
     notification_id: int, notifications: NotificationsDep
 ) -> HTMLResponse:
     """Mark one notification read."""
@@ -80,7 +80,7 @@ async def mark_notification_read(
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def mark_all_notifications_read(notifications: NotificationsDep) -> HTMLResponse:
+def mark_all_notifications_read(notifications: NotificationsDep) -> HTMLResponse:
     """Mark every notification read."""
     notifications.mark_all_read()
     return HTMLResponse(status_code=204)
@@ -91,7 +91,7 @@ async def mark_all_notifications_read(notifications: NotificationsDep) -> HTMLRe
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def dismiss_notification(
+def dismiss_notification(
     notification_id: int, notifications: NotificationsDep
 ) -> HTMLResponse:
     """Dismiss one notification so it leaves the AI Desk queue."""

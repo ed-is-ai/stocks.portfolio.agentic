@@ -753,7 +753,7 @@
       <i class="bi bi-bell" aria-hidden="true"></i><span class="visually-hidden">AI Desk,</span>
       <span id="notif-badge" class="notif-badge"
             hx-get="/notifications/count"
-            hx-trigger="load, every 20s [document.visibilityState === 'visible'], refresh"
+            hx-trigger="load, every 30s [document.visibilityState === 'visible'], refresh"
             hx-target="this" hx-swap="outerHTML"
             hx-vals='js:{portfolio_id: (typeof activePortfolio === "function" ? activePortfolio() : "")}'></span>
     </a>

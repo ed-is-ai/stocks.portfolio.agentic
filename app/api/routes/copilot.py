@@ -4,7 +4,6 @@ Read-only apart from the copilot's single appended audit line. The Claude
 call runs in a worker thread so a slow answer never blocks the event loop.
 """
 
-import asyncio
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -43,7 +42,7 @@ COPILOT_TARGETS = frozenset({DEFAULT_TARGET, "#portfolio-copilot-body"})
     response_class=HTMLResponse,
     dependencies=[Depends(require_local_or_token)],
 )
-async def copilot_ask(
+def copilot_ask(
     request: Request,
     trader: TraderDep,
     client: CopilotDep,
@@ -58,9 +57,7 @@ async def copilot_ask(
     """
     if not ticker.strip():
         raise HTTPException(status_code=422, detail="ticker is required")
-    outcome = await asyncio.to_thread(
-        _ask, ticker, question.strip() or DEFAULT_QUESTION, trader, client
-    )
+    outcome = _ask(ticker, question.strip() or DEFAULT_QUESTION, trader, client)
     return templates.TemplateResponse(
         request,
         "_copilot_panel.html",

@@ -547,10 +547,7 @@ def test_removed_scanner_partial_returns_not_found() -> None:
     assert response.status_code == 404
 
 
-@pytest.mark.asyncio
-async def test_initial_and_completed_refresh_use_equivalent_stock_scanner_context() -> (
-    None
-):
+def test_initial_and_completed_refresh_use_equivalent_stock_scanner_context() -> None:
     records = []
     trader = MagicMock()
     trader.get_portfolio.return_value = [SimpleNamespace(ticker="AAPL")]
@@ -564,10 +561,10 @@ async def test_initial_and_completed_refresh_use_equivalent_stock_scanner_contex
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    initial = await partial_stock_scanner(
+    initial = partial_stock_scanner(
         _request("/partials/stock-scanner"), trader, portfolio, alerts
     )
-    refreshed = await refresh_data(
+    refreshed = refresh_data(
         _request("/refresh-data", method="POST"),
         trader,
         portfolio,
@@ -599,8 +596,7 @@ async def test_initial_and_completed_refresh_use_equivalent_stock_scanner_contex
     assert "refresh_status" not in refreshed_response.context
 
 
-@pytest.mark.asyncio
-async def test_refresh_data_threads_extract_flag_to_run_once() -> None:
+def test_refresh_data_threads_extract_flag_to_run_once() -> None:
     trader = MagicMock()
     trader.get_portfolio.return_value = []
     portfolio = MagicMock()
@@ -612,7 +608,7 @@ async def test_refresh_data_threads_extract_flag_to_run_once() -> None:
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    await refresh_data(
+    refresh_data(
         _request("/refresh-data", method="POST"),
         trader,
         portfolio,
@@ -772,10 +768,8 @@ def test_stock_scanner_no_longer_renders_freshness_or_source_badges(
     alerts.has_watching.return_value = False
     alerts.last_alerted_at.return_value = None
 
-    response = __import__("asyncio").run(
-        partial_stock_scanner(
-            _request("/partials/stock-scanner"), trader, portfolio, alerts
-        )
+    response = partial_stock_scanner(
+        _request("/partials/stock-scanner"), trader, portfolio, alerts
     )
     markup = response.body.decode()
 
@@ -821,7 +815,7 @@ def test_runlog_renders_structured_partial_coverage_and_legacy_fallback(
         )
     monkeypatch.setattr(views_module, "PIPELINE_RUNS_CSV", path)
 
-    response = __import__("asyncio").run(partial_runlog(_request("/partials/runlog")))
+    response = partial_runlog(_request("/partials/runlog"))
     markup = response.body.decode()
 
     assert "PARTIAL" in markup
@@ -875,7 +869,7 @@ def test_runlog_cached_badges_show_input_age(tmp_path, monkeypatch) -> None:
         )
     monkeypatch.setattr(views_module, "PIPELINE_RUNS_CSV", path)
 
-    response = __import__("asyncio").run(partial_runlog(_request("/partials/runlog")))
+    response = partial_runlog(_request("/partials/runlog"))
     markup = " ".join(response.body.decode().split())
 
     assert "StockTwits: Cached &middot; 2d" in markup
@@ -910,7 +904,7 @@ def test_runlog_long_error_expands_without_hover(tmp_path, monkeypatch) -> None:
         )
     monkeypatch.setattr(views_module, "PIPELINE_RUNS_CSV", path)
 
-    response = __import__("asyncio").run(partial_runlog(_request("/partials/runlog")))
+    response = partial_runlog(_request("/partials/runlog"))
     markup = response.body.decode()
 
     assert '<details class="rl-error">' in markup

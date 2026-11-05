@@ -23,14 +23,17 @@ from app.repositories.position_theses_repo import PositionThesesRepository
 from app.schemas.analysis_artifact import build_analysis_payload
 from app.schemas.notification import NotificationCategory, NotificationSeverity
 from app.schemas.portfolio_recommendation import NO_ASSIGNMENT
+from app.schemas.position_thesis import ThesisContentV1
 from app.schemas.trade_review import ReviewRuleV1, TradeCheckV1, TradeReviewV1
 from app.services import portfolio_service as portfolio_service_module
 from app.services.desk_service import (
     ACTIVITY_LIMIT,
     AGENT_BOUNDARY,
     AUDIT_TAIL_BYTES,
+    DESK_MAX_AGE,
     DeskService,
     DeskView,
+    file_revision,
     raised_by_label,
 )
 from app.services.gbp_valuation_service import GbpValuationService
@@ -676,3 +679,83 @@ def test_cached_reviews_never_waits_on_a_compute() -> None:
         assert service.cached_reviews() is None
 
     assert service.cached_reviews() == {}
+
+
+# --- #132: the Desk timer's cheap revision ----------------------------------
+
+
+def test_the_desk_revision_moves_on_a_trade_a_note_and_a_bucket(
+    desk_stack,
+) -> None:
+    clock = [datetime(2026, 1, 1, tzinfo=UTC)]
+    desk = _desk_at(desk_stack, clock)
+    first = desk.revision(desk_stack.pid)
+    assert first is not None
+    clock[0] += DESK_MAX_AGE / 2
+    assert desk.revision(desk_stack.pid) == first
+
+    desk_stack.agent.record_buy(
+        "CCC", 1, 1.0, "2026-01-03", portfolio_id=desk_stack.pid
+    )
+    after_trade = desk.revision(desk_stack.pid)
+    assert after_trade != first
+
+    _note(desk_stack, "Import failed")
+    after_note = desk.revision(desk_stack.pid)
+    assert after_note != after_trade
+
+    clock[0] += DESK_MAX_AGE
+    assert desk.revision(desk_stack.pid) != after_note
+
+
+def test_the_desk_revision_is_none_without_a_count_key(
+    desk_stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    desk = desk_stack.desk()
+    monkeypatch.setattr(desk, "_count_key", lambda _pid: None)
+
+    assert desk.revision(desk_stack.pid) is None
+
+
+def test_the_desk_revision_moves_when_the_review_cache_warms(desk_stack) -> None:
+    desk = _desk_at(desk_stack, [datetime(2026, 1, 1, tzinfo=UTC)])
+    cold = desk.revision(desk_stack.pid)
+
+    desk_stack.reviews.cached = {}
+
+    assert desk.revision(desk_stack.pid) != cold
+
+
+def test_the_desk_revision_moves_on_a_portfolio_rename(desk_stack) -> None:
+    desk = _desk_at(desk_stack, [datetime(2026, 1, 1, tzinfo=UTC)])
+    before = desk.revision(desk_stack.pid)
+
+    assert desk_stack.agent.rename_portfolio(desk_stack.pid, "ISA")
+
+    assert desk.revision(desk_stack.pid) != before
+
+
+def test_the_desk_revision_moves_on_a_thesis_change(desk_stack) -> None:
+    clock = [datetime(2026, 1, 1, tzinfo=UTC)]
+    desk = DeskService(
+        desk_stack.trader,
+        desk_stack.service,
+        desk_stack.recommend,
+        desk_stack.statuses,
+        desk_stack.notifications,
+        cast(TradeReviewService, desk_stack.reviews),
+        desk_stack.audit,
+        dict,
+        now=lambda: clock[0],
+        count_cache={},
+        input_revision=lambda: file_revision(Path(desk_stack.agent.db_path)),
+    )
+    before = desk.revision(desk_stack.pid)
+    repo = PositionThesesRepository(db.make_connect(lambda: desk_stack.agent.db_path))
+    content = ThesisContentV1.model_validate(
+        {"rationale": "r", "expected_setup": "s", "rules": [{"kind": "stage_2_lost"}]}
+    )
+
+    repo.add_version(desk_stack.pid, "AAA", content, "user", active=True)
+
+    assert desk.revision(desk_stack.pid) != before
