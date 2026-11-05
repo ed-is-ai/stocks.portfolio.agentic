@@ -242,15 +242,16 @@ def test_portfolio_partial_strategy_control_gates_recommendations(
 
     assert assigned.status_code == 200
     assert "Change strategy" in assigned.text
-    assert 'aria-label="Selected strategy: Alpha"' in assigned.text
-    assert assigned.text.index("Change strategy") < assigned.text.index(
-        'aria-label="Selected strategy: Alpha"'
+    # GH-130: the header names the strategy; the controls sit in the ⋯ menu.
+    assert "Strategy: Alpha" in assigned.text
+    assert assigned.text.index("Strategy: Alpha") < assigned.text.index(
+        "Change strategy"
     )
     assert 'hx-get="/portfolios/7/recommendations"' in assigned.text
 
     assert unavailable.status_code == 200
     assert "Repair strategy" in unavailable.text
-    assert 'aria-label="Selected strategy unavailable: ghost"' in unavailable.text
+    assert "Strategy: ghost" in unavailable.text and "unavailable" in unavailable.text
     assert "Select an available strategy to view recommendations" in unavailable.text
     assert 'hx-get="/portfolios/7/recommendations"' not in unavailable.text
     assert "Scan data is missing" not in unavailable.text

@@ -223,7 +223,8 @@ def refresh_portfolio_prices(
     the default (#541). Unknown or absent resolves to ``DEFAULT_CHART_RANGE``.
     """
     pid = optional_int(portfolio_id)
-    selected_range = chart_range(range_key)
+    # The same covering range the tab opened on (GH-130).
+    selected_range = portfolio.covering_range(pid, chart_range(range_key))
     input_snapshot = None
     try:
         input_snapshot = portfolio.portfolio_input_snapshot(

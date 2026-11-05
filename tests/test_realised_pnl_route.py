@@ -1,4 +1,4 @@
-"""Tests for GET /partials/realised-pnl (#177).
+"""Tests for GET /partials/portfolio/trades, the realised P&L half (#177, GH-130).
 
 Regression-guards AC2 against the #147/#169 empty-string ``portfolio_id``
 422 bug class, and smoke-tests the no-portfolios / zero-round-trips states.
@@ -22,9 +22,9 @@ _AUTH = {"X-Auth-Token": "s3cret"}
 
 
 def test_realised_pnl_route_runs_blocking_work_in_fastapi_threadpool() -> None:
-    from app.api.routes.views import partial_realised_pnl
+    from app.api.routes.views import partial_portfolio_trades
 
-    assert not inspect.iscoroutinefunction(partial_realised_pnl)
+    assert not inspect.iscoroutinefunction(partial_portfolio_trades)
 
 
 def _stat_card(html: str, label: str) -> str:
@@ -53,6 +53,7 @@ def mocked():
         total_realised_pnl_gbp=0.0,
         round_trip_count=0,
     )
+    mock_realised_pnl.get_history_presentation.return_value = ([], {})
     app.dependency_overrides[get_trader_service] = lambda: mock_trader
     app.dependency_overrides[get_realised_pnl_service] = lambda: mock_realised_pnl
     try:
@@ -62,25 +63,25 @@ def mocked():
 
 
 def test_blank_portfolio_id_does_not_422(mocked):
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": ""})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": ""})
     assert resp.status_code == 200
 
 
 def test_omitted_portfolio_id_does_not_422(mocked):
-    resp = client.get("/partials/realised-pnl")
+    resp = client.get("/partials/portfolio/trades")
     assert resp.status_code == 200
 
 
 def test_unknown_portfolio_id_falls_back_to_first_portfolio(mocked):
     _, mock_realised_pnl = mocked
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "999"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "999"})
     assert resp.status_code == 200
     mock_realised_pnl.compute_summary.assert_called_once_with(1)
 
 
 def test_valid_portfolio_id_used_directly(mocked):
     _, mock_realised_pnl = mocked
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     mock_realised_pnl.compute_summary.assert_called_once_with(1)
 
@@ -88,13 +89,13 @@ def test_valid_portfolio_id_used_directly(mocked):
 def test_no_portfolios_renders_empty_state_without_calling_service(mocked):
     mock_trader, mock_realised_pnl = mocked
     mock_trader.list_portfolios.return_value = []
-    resp = client.get("/partials/realised-pnl")
+    resp = client.get("/partials/portfolio/trades")
     assert resp.status_code == 200
     mock_realised_pnl.compute_summary.assert_not_called()
 
 
 def test_zero_round_trips_shows_empty_state_copy(mocked):
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     assert "No Round-trips yet for this account." in resp.text
     assert _stat_card(resp.text, "Wins").strip() == "0"
@@ -107,7 +108,7 @@ def test_zero_round_trips_shows_empty_state_copy(mocked):
 
 
 def test_strip_order_and_dropped_gross_tiles(mocked):
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     labels = [
         re.sub(r"<[^>]+>", "", raw).replace("&amp;", "&").strip()
@@ -172,7 +173,7 @@ def test_split_average_tiles_render_populated_values(mocked):
         average_win_pct=12.5,
         average_loss_pct=-4.2,
     )
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     assert "+12.5%" in _stat_card(resp.text, "Avg Win %")
     assert "-4.2%" in _stat_card(resp.text, "Avg Loss %")
@@ -200,7 +201,7 @@ def test_history_uses_service_owned_cached_presentation(mocked):
         {7: "unconsumed"},
     )
 
-    resp = client.get("/partials/history")
+    resp = client.get("/partials/portfolio/trades")
 
     assert resp.status_code == 200
     mock_realised_pnl.get_history_presentation.assert_called_once_with([1])
@@ -250,7 +251,7 @@ def test_round_trip_rows_are_flat_with_prices_in_the_result_tooltip(mocked):
         round_trip_count=3,
     )
 
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
 
     assert resp.status_code == 200
     # Every header now carries a .wl-sort button with a data-col.
@@ -297,7 +298,7 @@ def test_toolbar_exposes_search_and_columns_mount(mocked):
         total_realised_pnl_gbp=10.0,
         round_trip_count=1,
     )
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     assert 'id="pnl-search"' in resp.text
     assert 'type="search"' in resp.text
@@ -306,7 +307,7 @@ def test_toolbar_exposes_search_and_columns_mount(mocked):
 
 
 def test_toolbar_absent_when_no_round_trips(mocked):
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     assert 'id="pnl-search"' not in resp.text
 
@@ -320,7 +321,7 @@ def test_currency_symbol_on_stake_and_price_cells(mocked):
         total_realised_pnl_gbp=10.0,
         round_trip_count=1,
     )
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     table = resp.text[resp.text.index('id="pnl-table"') : resp.text.index("</table>")]
     assert '<td data-col="stake" data-val="100.0000">$100.00</td>' in table
@@ -417,7 +418,7 @@ def test_ack_route_falls_back_to_first_portfolio_when_unknown(mocked_with_token)
 def test_unmatched_panel_hidden_when_zero_unmatched_sells(mocked):
     """AC #3: zero unmatched sells -> the panel div renders but is empty
     inside, no <details> at all."""
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
     assert resp.status_code == 200
     assert 'id="unmatched-sells-panel"' in resp.text
     assert "<details class=" not in resp.text
@@ -437,7 +438,7 @@ def test_unmatched_panel_open_when_mixed_ack_state(mocked):
         ],
     )
 
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
 
     assert resp.status_code == 200
     assert "<details class=" in resp.text
@@ -456,7 +457,7 @@ def test_unmatched_panel_collapsed_when_all_acknowledged(mocked):
         unmatched_sells=[_unmatched(1, "2026-08-01T00:00:00+00:00")],
     )
 
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
 
     assert resp.status_code == 200
     assert "<details class=" in resp.text
@@ -474,7 +475,7 @@ def test_ack_toggle_button_copy_unacknowledged_vs_acknowledged(mocked):
         unmatched_sells=[_unmatched(1, None)],
     )
 
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
 
     assert "Mark as known transfer" in resp.text
     assert "Dismiss" not in resp.text
@@ -488,7 +489,7 @@ def test_ack_toggle_button_copy_unacknowledged_vs_acknowledged(mocked):
         unmatched_sells=[_unmatched(1, "2026-08-09T12:00:00+00:00")],
     )
 
-    resp = client.get("/partials/realised-pnl", params={"portfolio_id": "1"})
+    resp = client.get("/partials/portfolio/trades", params={"portfolio_id": "1"})
 
     assert "Undo" in resp.text
     assert "Acknowledged 2026-08-09" in resp.text

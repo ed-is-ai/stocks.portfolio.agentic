@@ -23,6 +23,7 @@ from typing import Any, ClassVar, cast
 
 from app.agents.analyst.exit_evaluator import ExitEvaluator
 from app.agents.triage.sources import (
+    QUEUED_RISK_KINDS,
     freshness_events,
     record_setups,
     setup_events,
@@ -40,7 +41,7 @@ from app.schemas.analysis_artifact import (
 from app.schemas.attention import AttentionEventV1
 from app.schemas.portfolio_import import ProviderOption
 from app.schemas.portfolio_recommendation import NO_ASSIGNMENT, EvaluationUnavailable
-from app.schemas.portfolio_risk import RiskReportV1
+from app.schemas.portfolio_risk import RiskFindingV1, RiskPolicyV1, RiskReportV1
 from app.schemas.position_thesis import ThesisSummary
 from app.schemas.record import StockRecord
 from app.schemas.source_health import SourceHealth, SourceName
@@ -917,6 +918,24 @@ class PortfolioService:
                 fully_covers = True
         return availability
 
+    def covering_range(self, portfolio_id: int | None, range_key: str) -> str:
+        """``range_key``, or the narrowest preset that already holds every
+        stored point when that is narrower (GH-130).
+
+        A wider preset than that would render the same series on a mostly
+        blank axis, so the chart opens on the history that exists. Without
+        a portfolio or stored snapshots the requested preset stands.
+        """
+        if portfolio_id is None:
+            return range_key
+        earliest = self._trader.earliest_snapshot_timestamp(portfolio_id)
+        if not isinstance(earliest, str):
+            return range_key
+        for preset in CHART_RANGE_DAYS:
+            if preset == range_key or self.chart_cutoff_iso(preset) <= earliest:
+                return preset
+        return range_key
+
     def _load_portfolio_history(
         self, portfolio_id: int | None = None, range_key: str = DEFAULT_CHART_RANGE
     ) -> dict:
@@ -1280,6 +1299,8 @@ class PortfolioService:
         Enriches positions with exit signals/next pivots, computes GBP-equivalent
         summary totals, and serialises chart data. Rendering stays in the route.
         """
+        if input_snapshot is None:
+            range_key = self.covering_range(portfolio_id, range_key)
         snapshot = input_snapshot or self.portfolio_input_snapshot(
             portfolio_id, cash_balance=cash_balance, range_key=range_key
         )
@@ -1458,8 +1479,25 @@ class PortfolioService:
         strategy_freshness = (
             assignment_service.freshness() if assignment_service else None
         )
+        weights, cash_weight = self._weights(
+            positions, fx, effective_cash_balance, total_value_gbp
+        )
         return {
             "positions": positions,
+            # GH-130: the headline numbers, valued exactly as Today's card.
+            "summary": self._summary(
+                active_portfolio.name if active_portfolio else "Portfolio",
+                positions,
+                gbpusd_rate,
+                effective_cash_balance,
+            ),
+            "position_weights": weights,
+            "cash_weight": cash_weight,
+            "max_position_pct": float(RiskPolicyV1().max_position_pct),
+            "holding_columns": holding_columns(positions),
+            "foreign_cash": [
+                c for c in cash_balances_by_currency if c["currency"] != "GBP"
+            ],
             "portfolio_id": portfolio_id,
             "portfolios": portfolios,
             "active_portfolio": active_portfolio,
@@ -1522,6 +1560,26 @@ class PortfolioService:
             ),
         }
 
+    def _weights(
+        self,
+        positions: Sequence[Position],
+        fx: float,
+        cash: float | None,
+        total_gbp: float,
+    ) -> tuple[dict[str, float], float | None]:
+        """Each valued holding's, and the GBP cash's, percentage of
+        ``total_gbp``; empty when the total is not positive."""
+        if total_gbp <= 0:
+            return {}, None
+        weights = {
+            p.ticker: value / total_gbp * 100
+            for p in positions
+            if p.current_value is not None
+            and (value := self._amount_in_gbp(p.current_value, p.price_currency, fx))
+            is not None
+        }
+        return weights, None if cash is None else cash / total_gbp * 100
+
     def chart_fragment_context(
         self, portfolio_id: int | None, range_key: str = DEFAULT_CHART_RANGE
     ) -> dict:
@@ -1539,6 +1597,7 @@ class PortfolioService:
         ):
             active_id = portfolios[0].id
 
+        range_key = self.covering_range(active_id, range_key)
         chart_data = self._load_portfolio_history(active_id, range_key)
         chart_range = (
             range_key if range_key in CHART_RANGE_DAYS else DEFAULT_CHART_RANGE
@@ -1621,6 +1680,7 @@ class PortfolioService:
                 "strategy_freshness": None,
             }
         active_id = self._active_portfolio_id(portfolio_id, portfolios)
+        range_key = self.covering_range(active_id, range_key)
         snapshot = self.portfolio_input_snapshot(
             active_id, portfolios=portfolios, range_key=range_key
         )
@@ -1856,6 +1916,38 @@ class PortfolioService:
             prices_as_of=prices_as_of,
             events=events,
         )
+
+
+def holding_columns(positions: Sequence[Position]) -> dict[str, bool]:
+    """Which optional holdings columns have a value in any row (GH-130);
+    a column empty for every row is not rendered."""
+    return {
+        "last_pivot": any(p.entry_price for p in positions),
+        "next_pivot": any(p.next_pivot for p in positions),
+        "signal": any(p.exit_signal for p in positions),
+    }
+
+
+def risk_notes(report: RiskReportV1) -> tuple[str, ...]:
+    """The Risk check card's notes: the report's limitations, then every
+    finding the triage queue does not take (AD-5), so none shows twice.
+
+    Queued findings (high severity or ``QUEUED_RISK_KINDS``) reach the card
+    only through ``DeskService.risk_items``; the GBP cash line is a figure
+    the headline already shows, not a note.
+    """
+    findings = tuple(
+        _risk_note(f)
+        for f in report.findings
+        if f.severity != "high" and f.kind not in QUEUED_RISK_KINDS and f.kind != "cash"
+    )
+    return (*report.limitations, *findings)
+
+
+def _risk_note(finding: RiskFindingV1) -> str:
+    """``"Title (A, B): detail"``, naming only tickers the title does not."""
+    names = ", ".join(t for t in finding.tickers if t not in finding.title)
+    return f"{finding.title}{f' ({names})' if names else ''}: {finding.detail}"
 
 
 def resolve_portfolio_id(

@@ -3,9 +3,10 @@
 import csv
 import json
 import logging
-from collections.abc import Mapping
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -13,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from app.api.dependencies import (
     PORTFOLIO_WRITE,
     get_alerts_repository,
+    get_desk_service,
     get_notifications_repository,
     get_portfolio_recommendation_service,
     get_portfolio_service,
@@ -38,11 +40,17 @@ from app.core.config import PIPELINE_RUNS_CSV
 from app.core.security import require_local_or_token
 from app.repositories.alerts_repo import AlertsRepository
 from app.repositories.notifications_repo import NotificationsRepository
-from app.services.desk_service import notification_loader
+from app.schemas.portfolio_risk import RiskReportV1
+from app.schemas.trade import Portfolio
+from app.services.desk_service import DeskService, TodayItem, notification_loader
 from app.services.portfolio_recommendation_service import (
     PortfolioRecommendationService,
 )
-from app.services.portfolio_service import PortfolioService, resolve_portfolio_id
+from app.services.portfolio_service import (
+    PortfolioService,
+    resolve_portfolio_id,
+    risk_notes,
+)
 from app.services.position_thesis_service import PositionThesisService
 from app.services.realised_pnl_service import RealisedPnlService
 from app.services.strategy_assignment_service import StrategyAssignmentService
@@ -71,14 +79,11 @@ SHELL_TABS: dict[str, str] = {
     "portfolio": "Portfolio",
     "strategies": "Strategies",
 }
-#: Secondary shell pages reached from the ⚙ menu (AD-4). Realised P&L and
-#: Trade History are interim until #130 folds them into ``/portfolio/trades``.
+#: Secondary shell pages reached from the ⚙ menu (AD-4).
 SECONDARY_PAGES: dict[str, str] = {
     "runlog": "Run Log",
     "data-quality": "Data Quality",
     "settings": "Settings",
-    "realised-pnl": "Realised P&L",
-    "history": "Trade History",
 }
 SHELL_PAGES: dict[str, str] = {**SHELL_TABS, **SECONDARY_PAGES}
 
@@ -177,16 +182,29 @@ def settings_page(request: Request) -> HTMLResponse:
     return render_shell(request, "settings")
 
 
-@router.get("/realised-pnl", response_class=HTMLResponse)
-def realised_pnl_page(request: Request) -> HTMLResponse:
-    """Realised P&L, an interim secondary page until #130."""
-    return render_shell(request, "realised-pnl")
+@router.get("/portfolio/trades", response_class=HTMLResponse)
+def portfolio_trades_page(request: Request) -> HTMLResponse:
+    """Portfolio's Trades & realised P&L sub-view in the full shell (GH-130)."""
+    return render_shell(request, "portfolio", "trades")
 
 
-@router.get("/history", response_class=HTMLResponse)
-def history_page(request: Request) -> HTMLResponse:
-    """Trade History, an interim secondary page until #130."""
-    return render_shell(request, "history")
+@router.get("/realised-pnl")
+def realised_pnl_page(request: Request) -> RedirectResponse:
+    """The retired Realised P&L page is Portfolio's trades view (AD-4)."""
+    return _to_portfolio_trades(request)
+
+
+@router.get("/history")
+def history_page(request: Request) -> RedirectResponse:
+    """The retired Trade History page is Portfolio's trades view (AD-4)."""
+    return _to_portfolio_trades(request)
+
+
+def _to_portfolio_trades(request: Request) -> RedirectResponse:
+    """Redirect to ``/portfolio/trades``, keeping the query (portfolio)."""
+    url = page_url("portfolio", "trades")
+    query = request.url.query
+    return RedirectResponse(f"{url}?{query}" if query else url, 307)
 
 
 @router.get("/partials/account-picker", response_class=HTMLResponse)
@@ -256,19 +274,39 @@ def partial_portfolio_chart(
 def partial_portfolio_risk(
     request: Request,
     portfolio: PortfolioDep,
+    desk: Annotated[DeskService, Depends(get_desk_service)],
     portfolio_id: str | None = None,
 ) -> HTMLResponse:
-    """Render the read-only Portfolio Risk Coach panel (GH-16).
+    """Render the Portfolio's Risk check card (GH-16, GH-130).
 
-    A plain ``def`` for the same reason as ``partial_strategy_assign``: the
-    report reads the ledger, price cache and scan artifact, so FastAPI runs
-    it in its threadpool. Never mutates trades, cash flows, portfolios or
-    Strategy assignments; a holding in a currency other than GBP/GBp/USD may
-    fetch and cache an FX quote exactly as the Portfolio tab render does.
+    Its lines are exactly ``DeskService.risk_items`` -- the same projection
+    as Today's risks (AD-5) -- and the report's policy, limitations and
+    unqueued findings are notes behind the disclosure. A plain ``def``: the
+    projection and report read the ledger, price cache and scan artifact.
+    Never mutates trades, cash flows, portfolios or Strategy assignments; a
+    holding in a currency other than GBP/GBp/USD may fetch and cache an FX
+    quote exactly as the Portfolio tab render does. Either source failing
+    is declared on the card instead of failing the request.
     """
-    report = portfolio.risk_report(optional_int(portfolio_id))
+    pid = optional_int(portfolio_id)
+    try:
+        items: tuple[TodayItem, ...] | None = desk.risk_items(pid)
+    except Exception:
+        logger.exception("Risk items unavailable for %s", pid)
+        items = None
+    try:
+        report: RiskReportV1 | None = portfolio.risk_report(pid)
+    except Exception:
+        logger.exception("Risk report unavailable for %s", pid)
+        report = None
     return templates.TemplateResponse(
-        request, "_portfolio_risk.html", context={"report": report}
+        request,
+        "_portfolio_risk.html",
+        context={
+            "items": items,
+            "report": report,
+            "notes": risk_notes(report) if report is not None else (),
+        },
     )
 
 
@@ -378,40 +416,74 @@ def partial_strategy_assign(
     return templates.TemplateResponse(request, "_strategy_assign.html", context=context)
 
 
-@router.get("/partials/realised-pnl", response_class=HTMLResponse)
-def partial_realised_pnl(
+@router.get("/partials/portfolio/trades", response_class=HTMLResponse)
+def partial_portfolio_trades(
     request: Request,
     trader: TraderDep,
     realised_pnl: RealisedPnlDep,
     portfolio_id: str | None = None,
 ) -> HTMLResponse:
-    # Accept a raw string: the client sends an empty ``portfolio_id=`` when no
-    # account is selected, which an ``int | None`` param rejects with 422 and
-    # breaks the tab (#147 regression).
-    pid = optional_int(portfolio_id)
+    """Portfolio's Trades & realised P&L sub-view (GH-130, AD-4).
+
+    The selected portfolio's realised P&L, then the trade history. Accepts
+    a raw string: the client sends an empty ``portfolio_id=`` when no
+    account is selected, which an ``int | None`` param 422s (#147).
+    """
     portfolios = trader.list_portfolios()
     if not portfolios:
         return templates.TemplateResponse(
-            request, "_realised_pnl.html", context={"no_portfolios": True}
+            request, "_portfolio_trades.html", context={"no_portfolios": True}
         )
-    active_id = resolve_portfolio_id(pid, portfolios)
+    active_id = resolve_portfolio_id(optional_int(portfolio_id), portfolios)
     active_portfolio = next(p for p in portfolios if p.id == active_id)
-    summary = realised_pnl.compute_summary(active_portfolio.id)
-    # Projected from the summary already in hand -- never a second
-    # compute_summary, which would re-run FIFO for the same render (#563).
-    timeline = RealisedPnlService.timeline_points(summary)
     return templates.TemplateResponse(
         request,
-        "_realised_pnl.html",
+        "_portfolio_trades.html",
         context={
             "portfolios": portfolios,
             "active_portfolio": active_portfolio,
-            "summary": summary,
-            "unmatched_sells": summary.unmatched_sells,
-            "pnl_timeline": json.dumps(timeline),
-            "pnl_timeline_count": len(timeline),
+            **_realised_pnl_context(realised_pnl, active_portfolio.id),
+            **_history_context(realised_pnl, portfolios),
         },
     )
+
+
+def _realised_pnl_context(realised_pnl: RealisedPnlService, pid: int) -> dict[str, Any]:
+    """The realised P&L section's context for one portfolio."""
+    summary = realised_pnl.compute_summary(pid)
+    # Projected from the summary already in hand -- never a second
+    # compute_summary, which would re-run FIFO for the same render (#563).
+    timeline = RealisedPnlService.timeline_points(summary)
+    return {
+        "summary": summary,
+        "unmatched_sells": summary.unmatched_sells,
+        "pnl_timeline": json.dumps(timeline),
+        "pnl_timeline_count": len(timeline),
+    }
+
+
+def _history_context(
+    realised_pnl: RealisedPnlService, portfolios: Sequence[Portfolio]
+) -> dict[str, Any]:
+    """The trade history section's context; it spans every portfolio, so a
+    name map feeds the Portfolio column, disambiguating duplicate names with
+    ``#id`` (#147)."""
+    seen = Counter(pf.name for pf in portfolios)
+    names = {
+        pf.id: (f"{pf.name} #{pf.id}" if seen[pf.name] > 1 else pf.name)
+        for pf in portfolios
+    }
+    # FIFO display work is revision-cached in the service. Edit/delete
+    # routes retain their fresh single-lot guards; this snapshot is never a
+    # mutation authority.
+    trades, opening_lot_status = realised_pnl.get_history_presentation(
+        [pf.id for pf in portfolios]
+    )
+    return {
+        "trades": trades,
+        "portfolio_names": names,
+        "opening_lot_status": opening_lot_status,
+    }
 
 
 @router.post(
@@ -448,37 +520,6 @@ def ack_unmatched_sell(
         context={
             "unmatched_sells": summary.unmatched_sells,
             "active_portfolio": active_portfolio,
-        },
-    )
-
-
-@router.get("/partials/history", response_class=HTMLResponse)
-def partial_history(
-    request: Request, trader: TraderDep, realised_pnl: RealisedPnlDep
-) -> HTMLResponse:
-    # Trade History spans every portfolio; a name map feeds the Portfolio
-    # column, disambiguating duplicate names with #id (#147).
-    portfolios = trader.list_portfolios()
-    seen: dict[str, int] = {}
-    for pf in portfolios:
-        seen[pf.name] = seen.get(pf.name, 0) + 1
-    names = {
-        pf.id: (f"{pf.name} #{pf.id}" if seen[pf.name] > 1 else pf.name)
-        for pf in portfolios
-    }
-    # FIFO display work is revision-cached in the service. Edit/delete
-    # routes retain their fresh single-lot guards; this snapshot is never a
-    # mutation authority.
-    trades, opening_lot_status = realised_pnl.get_history_presentation(
-        [pf.id for pf in portfolios]
-    )
-    return templates.TemplateResponse(
-        request,
-        "_history.html",
-        context={
-            "trades": trades,
-            "portfolio_names": names,
-            "opening_lot_status": opening_lot_status,
         },
     )
 

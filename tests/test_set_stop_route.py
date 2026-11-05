@@ -336,7 +336,7 @@ def test_route_refusals_are_visible_409s_without_writing(
     assert resp.status_code == 409
     assert _warning(resp.text) == message
     # The warning arrives inside the re-rendered Portfolio tab.
-    assert 'id="portfolioSelect"' in resp.text
+    assert 'class="portfolio-dashboard' in resp.text
     assert _dump(agent.db_path) == before
 
 

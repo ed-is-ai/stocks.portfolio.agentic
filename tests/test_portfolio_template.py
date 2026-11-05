@@ -8,6 +8,20 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.api.templating import templates
+from app.services.portfolio_agent_view import PortfolioSummary
+from app.services.portfolio_service import holding_columns
+
+
+def _summary(value: float, pnl: float, cost: float, cash: float | None):
+    """The headline numbers' projection (GH-130)."""
+    return PortfolioSummary(
+        name="Portfolio",
+        value_gbp=value,
+        unrealised_gbp=pnl,
+        unrealised_pct=pnl / cost * 100 if cost else None,
+        cash_gbp=cash,
+        positions=1,
+    )
 
 
 def _render(
@@ -43,6 +57,8 @@ def _render(
         "market_value_gbp": 0,
         "total_pnl_gbp": 0,
         "total_cost_gbp_valued": 0,
+        "summary": _summary(cash_balance or 0, 0, 0, cash_balance),
+        "holding_columns": holding_columns(positions or []),
         "prices_as_of": None,
         "gbpusd_rate": None,
         "error_message": None,
@@ -79,6 +95,7 @@ def _render_with_total_pnl(total_pnl_gbp: float) -> str:
         "market_value_gbp": 100 + total_pnl_gbp,
         "total_pnl_gbp": total_pnl_gbp,
         "total_cost_gbp_valued": 100,
+        "summary": _summary(100 + total_pnl_gbp, total_pnl_gbp, 100, 0.0),
         "prices_as_of": None,
         "gbpusd_rate": None,
         "error_message": None,
@@ -94,7 +111,7 @@ def _cash_row(html: str) -> str | None:
     and the row's own hardcoded P&L cell both emit ``£0.00``, so a bare
     ``"£0.00" in html`` passes for any balance and proves nothing.
     """
-    for row in html.split("<tr>"):
+    for row in html.split("<tr"):
         if ">CASH<" in row:
             return row
     return None
@@ -129,7 +146,7 @@ def test_zero_cash_is_visible_with_positions() -> None:
     row = _cash_row(_render(0.0, positions=[_fake_position()]))
 
     assert row is not None
-    assert "<td>£0.00</td>" in row
+    assert '<td class="num">£0.00</td>' in row
 
 
 def test_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> (
@@ -137,9 +154,9 @@ def test_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value()
 ):
     html = _render_with_total_pnl(12.5)
 
-    assert 'class="stat-card pnl-positive"' in html
-    assert 'class="sval pos"' in html
+    assert 'class="portfolio-figure-value pos"' in html
     assert "+£12.50" in html
+    assert "+12.5%" in html
 
 
 def test_zero_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_value() -> (
@@ -147,8 +164,7 @@ def test_zero_unrealised_pnl_summary_uses_positive_directional_cue_and_signed_va
 ):
     html = _render_with_total_pnl(0)
 
-    assert 'class="stat-card pnl-positive"' in html
-    assert 'class="sval pos"' in html
+    assert 'class="portfolio-figure-value pos"' in html
     assert "+£0.00" in html
 
 
@@ -157,9 +173,10 @@ def test_unrealised_pnl_summary_uses_negative_directional_cue_and_signed_value()
 ):
     html = _render_with_total_pnl(-12.5)
 
-    assert 'class="stat-card pnl-negative"' in html
-    assert 'class="sval neg"' in html
-    assert "£-12.50" in html
+    # Signed with a real minus, so colour is never the only cue.
+    assert 'class="portfolio-figure-value neg"' in html
+    assert "−£12.50" in html
+    assert "−12.5%" in html
 
 
 def test_stat_card_pnl_value_colour_beats_the_base_slate_rule() -> None:
@@ -177,40 +194,27 @@ def test_stat_card_pnl_value_colour_beats_the_base_slate_rule() -> None:
     assert "var(--red)" in index_css[neg : neg + 60]
 
 
-def _card(html: str, title: str) -> str:
-    """Return the ``stat-card`` div whose label is ``title``."""
-    for card in html.split('<div class="stat-card'):
+def _figure(html: str, title: str) -> str:
+    """Return the headline figure whose label is ``title``."""
+    for card in html.split('<div class="portfolio-figure">'):
         if f">{title}</div>" in card:
             return card
-    raise AssertionError(f"no stat-card titled {title!r}")
+    raise AssertionError(f"no headline figure titled {title!r}")
 
 
-def test_summary_cards_have_the_required_portfolio_value_first_order() -> None:
+def test_three_headline_numbers_then_market_value_and_cost_basis() -> None:
     html = _render_with_total_pnl(12.5)
+    headline = html.split('class="portfolio-headline"', 1)[1].split("</section>")[0]
 
-    # Market Value sits between the two totals it decomposes: Portfolio
-    # Value folds cash in, Market Value is the holdings alone (#561).
-    labels = [
-        "Portfolio Value",
-        "Market Value",
-        "Cost Basis",
-        "Unrealised P&amp;L",
-        "Cash",
-    ]
-    indices = [html.index(label) for label in labels]
+    # GH-130: value, unrealised P&L and cash, then the secondary line.
+    labels = ["Portfolio value", "Unrealised P&amp;L", "Cash", "Market value"]
+    indices = [headline.index(label) for label in labels]
     assert indices == sorted(indices)
-    assert "Positions</div>" not in html[indices[0] : indices[-1]]
-    # The holdings table keeps its own shorter column header, so the card
-    # title and the column cannot be confused for one another.
-    assert "Mkt Value" in html
-    # One name for cost basis across card, table column and chart legend --
-    # the card used to say "Total Cost" while the other two said Cost Basis.
+    assert headline.count('<div class="portfolio-figure">') == 3
+    assert "Market value £112.50" in headline and "Cost basis £100.00" in headline
+    assert "Open risk" not in html and "Agent findings" not in html
     assert "Total Cost" not in html
-    # The two cash-inclusive cards each carry the screen-reader hint, and
-    # the holdings-only one says so instead.
-    assert "Includes cash." in _card(html, "Portfolio Value")
-    assert "Includes cash." in _card(html, "Cost Basis")
-    assert "Holdings only, excluding cash." in _card(html, "Market Value")
+    assert "Includes cash." in _figure(html, "Portfolio value")
 
 
 def test_portfolio_value_headline_uses_total_value_including_cash() -> None:
@@ -228,23 +232,24 @@ def test_portfolio_value_headline_uses_total_value_including_cash() -> None:
         market_value_gbp=100,
         total_pnl_gbp=0,
         total_cost_gbp_valued=100,
+        summary=_summary(150, 0, 100, 50),
         prices_as_of=None,
         gbpusd_rate=None,
         error_message=None,
         warning_message=None,
     )
 
-    value_card = html.split("Portfolio Value", 1)[1].split("</div>", 2)[1]
+    value_card = _figure(html, "Portfolio value")
     assert "£150.00" in value_card
     assert "£100.00" not in value_card
 
 
 def test_includes_cash_hint_is_suppressed_when_no_gbp_cash_balance() -> None:
     """A multi-currency-only portfolio has ``cash_balance is none`` and its
-    totals exclude cash, so neither card may claim "Includes cash."."""
+    totals exclude cash, so the headline may not claim "Includes cash."."""
     html = _render(None, positions=[_fake_position()])
 
-    assert "Portfolio Value</div>" in html
+    assert "Portfolio value</div>" in html
     assert "Includes cash." not in html
 
 
@@ -256,17 +261,16 @@ def test_dashboard_template_keeps_context_actions_and_chart_fragment_contracts()
     template = Path("app/api/templates/_portfolio.html").read_text(encoding="utf-8")
     chart = Path("app/api/templates/_portfolio_chart.html").read_text(encoding="utf-8")
 
-    assert 'class="portfolio-dashboard"' in template
-    assert 'aria-label="Account and strategy"' in template
+    assert 'class="portfolio-dashboard portfolio-screen"' in template
     assert 'aria-label="Portfolio actions"' in template
-    assert 'class="btn btn-sm btn-primary"' in template
-    assert 'id="portfolioSelect"' in template
+    # The shell's picker is the one account selector (GH-128/GH-130).
+    assert 'id="portfolioSelect"' not in template
     assert 'id="refreshBtn"' in template
     assert 'hx-get="/portfolios/{{ active_portfolio.id }}/recommendations"' in template
     assert 'id="portfolio-chart-card"' in chart
     assert 'hx-target="#portfolio-chart-card" hx-swap="outerHTML"' in chart
-    assert template.index('{% include "_portfolio_chart.html" %}') < template.index(
-        'class="portfolio-summary-grid"'
+    assert template.index('class="portfolio-headline"') < template.index(
+        '{% include "_portfolio_chart.html" %}'
     )
 
 
@@ -594,7 +598,7 @@ def test_zero_cash_is_visible_for_cash_only_portfolio() -> None:
     row = _cash_row(html)
 
     assert row is not None
-    assert "<td>£0.00</td>" in row
+    assert '<td class="num">£0.00</td>' in row
     assert "No open positions yet" not in html
 
 
@@ -620,7 +624,7 @@ def test_negative_cash_is_not_hidden() -> None:
     row = _cash_row(_render(-150.5))
 
     assert row is not None
-    assert "<td>£-150.50</td>" in row
+    assert '<td class="num">£-150.50</td>' in row
 
 
 def test_missing_cash_still_shows_empty_state() -> None:
@@ -631,17 +635,13 @@ def test_missing_cash_still_shows_empty_state() -> None:
 
 
 def test_zero_cash_row_is_distinguishable_from_a_nonzero_balance() -> None:
-    """Guards the assertions above against the row's hardcoded £0.00 P&L cell.
-
-    A £5.00 balance still renders "£0.00" somewhere in its CASH row, so an
-    unanchored substring check would pass here too.
-    """
+    """Guards the assertions above: a £5.00 balance renders its own value
+    cell, not a £0.00 one."""
     row = _cash_row(_render(5.0))
 
     assert row is not None
-    assert "£0.00" in row  # the hardcoded P&L cell
-    assert "<td>£0.00</td>" not in row  # but not the balance cell
-    assert "<td>£5.00</td>" in row
+    assert '<td class="num">£0.00</td>' not in row
+    assert '<td class="num">£5.00</td>' in row
 
 
 def test_partial_refresh_warning_is_visible() -> None:
@@ -942,8 +942,8 @@ def test_a_sterling_cost_under_a_usd_quote_renders_in_pounds() -> None:
 
     row = _position_row(html, "SGLN")
 
-    assert "£70.43" in row and "£704.30" in row
-    assert "$70.43" not in row and "$704.30" not in row
+    assert "£70.43" in row
+    assert "$70.43" not in row
     # The GBP P&L and its percentage of the GBP cost, never the native pair.
     assert "+&pound;15.70" in row
     assert "+2.2%" in row
@@ -997,15 +997,18 @@ _CHART_CONTEXT = {
 # --- suggested stop (Stop column) ---------------------------------------------
 
 
-def test_unstopped_holding_gets_a_lazy_stop_placeholder() -> None:
-    """The suggestion arrives with the agent layer, into this placeholder."""
+def test_unstopped_holding_gets_a_set_stop_control_and_an_empty_slot() -> None:
+    """GH-130: "Set stop" opens a hidden slot the agent layer fills with the
+    Strategy's suggestion -- never a "Loading…" placeholder."""
     row = _position_row(_render(None, [_fake_position()], portfolio_id=7), "AAPL")
 
+    assert 'aria-controls="stop-slot-7-AAPL"' in row and ">Set stop</button>" in row
+    assert '<div id="stop-slot-7-AAPL" class="portfolio-stop-slot" hidden>' in row
     assert (
-        '<span id="agent-7-stop-AAPL" class="agent-cell" '
-        'data-agent-placeholder="7">Loading…</span>'
+        '<div id="agent-7-stop-AAPL" class="agent-cell stop-suggestion" '
+        'data-agent-placeholder="7"></div>'
     ) in row
-    assert "Suggested" not in row
+    assert "Loading" not in row and "Suggested" not in row
     # The suggestion never feeds the Adjust dialog, whose stop stays empty.
     assert "openAdjust('AAPL', 1, 100, '', '', '')" in row
 
