@@ -14,7 +14,7 @@ apscheduler==3.11.2
     # via agents-stocks
 beautifulsoup4==4.15.0
     # via yfinance
-certifi==2026.6.17
+certifi==2026.10.19
     # via
     #   curl-cffi
     #   httpcore
