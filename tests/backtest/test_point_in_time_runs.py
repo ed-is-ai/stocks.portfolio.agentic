@@ -208,11 +208,14 @@ SELECTION = RunUniverseSelectionV1(
 
 
 def test_empty_terminal_exits_keep_v1_and_v2_digests() -> None:
-    v1 = _manifest(engine_version="backtest_engine.v9")
+    # Versions pinned to those the goldens were recorded against.
+    pinned = {
+        "engine_version": "backtest_engine.v9",
+        "protocol_schema_version": "strategy_protocol.v6",
+    }
+    v1 = _manifest(**pinned)
     v2 = build_run_input_manifest_v2(
-        _manifest(
-            engine_version="backtest_engine.v9", parameters={"symbols": ["sec-000"]}
-        ),
+        _manifest(**pinned, parameters={"symbols": ["sec-000"]}),
         selection=SELECTION,
         source_preparation_job_id="prep",
     )
