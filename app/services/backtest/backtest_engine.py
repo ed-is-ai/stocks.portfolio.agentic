@@ -50,7 +50,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from decimal import Decimal, DecimalException, ROUND_DOWN
+from decimal import Decimal, DecimalException, ROUND_CEILING, ROUND_DOWN
 from enum import StrEnum
 from typing import Any, Literal, MutableMapping, Protocol, cast
 
@@ -433,6 +433,37 @@ class EquityCurvePointV1(_EngineModel):
     sequence: int = Field(ge=1)
 
 
+class CashSleeveTradeEventV1(_EngineModel):
+    """One cash-sleeve trade (#140): idle cash buying the sleeve security,
+    or sleeve shares sold to fund a Strategy entry, at a session's open."""
+
+    kind: Literal["cash_sleeve_trade"] = "cash_sleeve_trade"
+    security_id: str = Field(min_length=1)
+    session: date
+    side: SignalSide
+    shares: int = Field(gt=0)
+    price_native: Decimal
+    value_base: Decimal
+    fx_rate: Decimal | None = None
+    fx_session: date | None = None
+    fx_revision: str | None = None
+    sequence: int = Field(ge=1)
+
+
+class CashSleeveValueV1(_EngineModel):
+    """The cash sleeve's holding and base-currency value at a session's
+    close; ``total_equity_base`` on that session's point includes it."""
+
+    session: date
+    shares: Decimal
+    value_base: Decimal
+
+
+#: Everything the cash sleeve records, kept apart from the Strategy's own
+#: Trade Log so sleeve activity never counts as a Strategy trade.
+CashSleeveEvent = CashSleeveTradeEventV1 | DividendAppliedEventV1 | SplitAppliedEventV1
+
+
 class SimulationOutputV1(_EngineModel):
     """One deterministic, complete replay's Trade Log + Equity Curve +
     final open-position marks -- never emitted partially (AC 6)."""
@@ -443,6 +474,9 @@ class SimulationOutputV1(_EngineModel):
     final_cash_base: Decimal
     final_open_positions: tuple[OpenPositionMarkEventV1, ...]
     initial_entry_selection: InitialEntrySelectionV1 | None = None
+    #: Cash-sleeve activity (#140); empty unless a sleeve was supplied.
+    cash_sleeve_events: tuple[CashSleeveEvent, ...] = ()
+    cash_sleeve_values: tuple[CashSleeveValueV1, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -707,6 +741,7 @@ class _Engine:
         month_observer: MonthBoundaryObserver,
         prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
         terminal_exits: tuple[TerminalExitV1, ...] = (),
+        cash_sleeve: SecurityMarketDataV1 | None = None,
     ) -> None:
         self.manifest = manifest
         self.strategy = strategy
@@ -933,6 +968,87 @@ class _Engine:
         self.initial_entry_selection: InitialEntrySelectionV1 | None = None
         self._last_observations: dict[str, date] = {}
 
+        self.sleeve: _EngineSecurityContext | None = None
+        self.sleeve_position: PositionState | None = None
+        self.sleeve_value_base = Decimal(0)
+        self.sleeve_events: list[CashSleeveEvent] = []
+        self.sleeve_values: list[CashSleeveValueV1] = []
+        self._sleeve_sequence = 0
+        if cash_sleeve is not None:
+            self.sleeve = self._sleeve_context(cash_sleeve)
+
+    def _sleeve_context(self, item: SecurityMarketDataV1) -> _EngineSecurityContext:
+        """Validate the cash sleeve (#140) and build its price context.
+
+        The sleeve is held by the engine, never by the Strategy: it is not a
+        pinned trade security, so no Strategy signal can reach it.
+        """
+        if item.security_id in self.market_data:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                self.start_date,
+                "the cash sleeve security must not also be a pinned trade security",
+            )
+        try:
+            if item.price_access is not None:
+                access = item.price_access
+                context = _EngineSecurityContext(
+                    security_id=item.security_id,
+                    data_revision=access.data_revision,
+                    currency=access.currency,
+                    quote_unit=access.quote_unit,
+                    exchange_timezone=access.exchange_timezone,
+                    start=access.start,
+                    end=access.end,
+                    access=access,
+                )
+            elif item.price_evidence is not None:
+                plane = HistoricalMarketPlanes.from_evidence(item.price_evidence)
+                context = _EngineSecurityContext(
+                    security_id=item.security_id,
+                    data_revision=plane.data_revision,
+                    currency=plane.currency,
+                    quote_unit=plane.quote_unit,
+                    exchange_timezone=plane.exchange_timezone,
+                    start=plane.start,
+                    end=plane.end,
+                    plane=plane,
+                )
+            else:
+                raise _fatal(
+                    SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                    self.start_date,
+                    "the cash sleeve has no price evidence or access",
+                )
+            _mic_for_exchange_timezone(
+                context.exchange_timezone, session=self.start_date
+            )
+            if (
+                context.currency != self.manifest.base_currency
+                and self.prepared_fx is None
+            ):
+                if self.fx_evidence is None:
+                    raise _fatal(
+                        SimulationErrorCode.MISSING_PINNED_EVIDENCE,
+                        self.start_date,
+                        "the cash sleeve needs FX evidence to value it in base currency",
+                    )
+                self.prepared_fx = prepare_fx_closes(self.fx_evidence)
+        except MarketDataPolicyError as exc:
+            raise _fatal(exc.code, self.start_date, exc.detail) from exc
+        except CurrencyPolicyError as exc:
+            raise _fatal(exc.code, self.start_date, exc.detail) from exc
+        return context
+
+    def _context(self, security_id: str) -> _EngineSecurityContext:
+        """A pinned security's price context, or the cash sleeve's."""
+        context = self.market_data.get(security_id)
+        if context is not None:
+            return context
+        if self.sleeve is not None and security_id == self.sleeve.security_id:
+            return self.sleeve
+        raise KeyError(security_id)
+
     # -- sequencing -----------------------------------------------------
 
     def _next_seq(self) -> int:
@@ -951,7 +1067,7 @@ class _Engine:
     def _latest_row_on_or_before(
         self, security_id: str, as_of: date
     ) -> AsTradedRow | None:
-        context = self.market_data[security_id]
+        context = self._context(security_id)
         if context.access is not None:
             return context.access.as_traded_row_on_or_before(as_of)
         assert context.plane is not None
@@ -967,14 +1083,14 @@ class _Engine:
         """
         last = self._last_observations.get(security_id)
         if last is None:
-            bound = self.market_data[security_id].end - timedelta(days=1)
+            bound = self._context(security_id).end - timedelta(days=1)
             row = self._latest_row_on_or_before(security_id, bound)
             last = date.min if row is None else row.session
             self._last_observations[security_id] = last
         return session > last
 
     def _row_on(self, security_id: str, session: date) -> AsTradedRow | None:
-        context = self.market_data[security_id]
+        context = self._context(security_id)
         if context.access is not None:
             return context.access.as_traded_row(session)
         assert context.plane is not None
@@ -986,7 +1102,7 @@ class _Engine:
     def _actions_on(
         self, security_id: str, session: date
     ) -> tuple[CorporateAction, ...]:
-        context = self.market_data[security_id]
+        context = self._context(security_id)
         if context.access is not None:
             return context.access.actions_on(session)
         assert context.plane is not None
@@ -1332,6 +1448,8 @@ class _Engine:
                 session,
                 "whole-share BUY cost exceeded its reserved allocation target",
             )
+        if self.sleeve is not None and cost_base > self.cash:
+            self._fund_from_sleeve(cost_base, session)
         if cost_base > self.cash:
             return self._skip_order(
                 order,
@@ -1447,6 +1565,231 @@ class _Engine:
             sequence=self._next_seq(),
         )
 
+    # -- cash sleeve (#140) -------------------------------------------------
+
+    def _next_sleeve_seq(self) -> int:
+        self._sleeve_sequence += 1
+        return self._sleeve_sequence
+
+    def _sleeve_open(self, session: date) -> Decimal | None:
+        """The sleeve's as-traded open on ``session``, or ``None`` when its
+        own exchange does not trade that session."""
+        assert self.sleeve is not None
+        row = self._row_on(self.sleeve.security_id, session)
+        if row is None or row.open is None or row.open <= 0:
+            return None
+        return row.open
+
+    def _trade_sleeve(
+        self, side: SignalSide, shares: int, price_native: Decimal, session: date
+    ) -> Decimal:
+        """Buy or sell ``shares`` of the sleeve at ``price_native``; return
+        the base-currency value moved."""
+        assert self.sleeve is not None
+        try:
+            with deterministic_decimal_context():
+                native_value = price_native * Decimal(shares)
+        except DecimalException as exc:
+            raise _fatal(
+                "integrity_error", session, "cash sleeve arithmetic failed"
+            ) from exc
+        conversion = self._convert(native_value, self.sleeve, valuation_session=session)
+        value = conversion.base_amount
+        held = self.sleeve_position
+        if side is SignalSide.BUY:
+            self.cash = quantize_eight(self.cash - value)
+            with deterministic_decimal_context():
+                total = Decimal(shares) + (held.shares if held else Decimal(0))
+                basis = value + (
+                    held.per_share_basis * held.shares if held else Decimal(0)
+                )
+                per_share = quantize_eight(basis / total)
+            self.sleeve_position = PositionState(
+                shares=total,
+                per_share_basis=per_share,
+                entry_session=held.entry_session if held else session,
+            )
+        else:
+            assert held is not None
+            self.cash = quantize_eight(self.cash + value)
+            remaining = held.shares - Decimal(shares)
+            self.sleeve_position = (
+                None
+                if remaining == 0
+                else PositionState(
+                    shares=remaining,
+                    per_share_basis=held.per_share_basis,
+                    entry_session=held.entry_session,
+                )
+            )
+        if self.cash < 0:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                session,
+                "cash balance went negative in the cash sleeve",
+            )
+        self.sleeve_events.append(
+            CashSleeveTradeEventV1(
+                security_id=self.sleeve.security_id,
+                session=session,
+                side=side,
+                shares=shares,
+                price_native=price_native,
+                value_base=value,
+                fx_rate=conversion.fx_rate,
+                fx_session=conversion.fx_session,
+                fx_revision=conversion.fx_revision,
+                sequence=self._next_sleeve_seq(),
+            )
+        )
+        return value
+
+    def _sleeve_share_value(self, price_native: Decimal, session: date) -> Decimal:
+        assert self.sleeve is not None
+        one_share = self._convert(price_native, self.sleeve, valuation_session=session)
+        if one_share.base_amount <= 0:
+            raise _fatal(
+                SimulationErrorCode.INVARIANT_VIOLATION,
+                session,
+                "converted cash sleeve share price is not positive",
+            )
+        return one_share.base_amount
+
+    def _fund_from_sleeve(self, needed_base: Decimal, session: date) -> None:
+        """Sell just enough whole sleeve shares at this open to cover a BUY.
+
+        A session the sleeve's exchange does not trade leaves it untouched,
+        so the BUY may then be skipped for insufficient cash.
+        """
+        held = self.sleeve_position
+        price = self._sleeve_open(session)
+        if held is None or price is None:
+            return
+        one_share = self._sleeve_share_value(price, session)
+        with deterministic_decimal_context():
+            wanted = ((needed_base - self.cash) / one_share).to_integral_value(
+                rounding=ROUND_CEILING
+            )
+        shares = int(min(wanted, held.shares))
+        if shares > 0:
+            self._trade_sleeve(SignalSide.SELL, shares, price, session)
+
+    def _sweep_cash_into_sleeve(self, session: date) -> None:
+        """After this open's fills, put idle cash into whole sleeve shares."""
+        price = self._sleeve_open(session)
+        if price is None:
+            return
+        one_share = self._sleeve_share_value(price, session)
+        with deterministic_decimal_context():
+            shares = int(self.cash // one_share)
+        # Converting the whole lot can round a cent above shares x one share.
+        while shares > 0:
+            with deterministic_decimal_context():
+                native_value = price * Decimal(shares)
+            assert self.sleeve is not None
+            cost = self._convert(
+                native_value, self.sleeve, valuation_session=session
+            ).base_amount
+            if cost <= self.cash:
+                self._trade_sleeve(SignalSide.BUY, shares, price, session)
+                return
+            shares -= 1
+
+    def _apply_sleeve_actions(self, session: date) -> None:
+        """Apply the sleeve's own pinned splits and dividends exactly once."""
+        held = self.sleeve_position
+        if held is None:
+            return
+        assert self.sleeve is not None
+        security_id = self.sleeve.security_id
+        for action in self._actions_on(security_id, session):
+            action_key = (
+                f"{security_id}:{action.evidence_revision}:"
+                f"{action.session.isoformat()}:{action.action_type}"
+            )
+            if action_key in self.applied_action_keys:
+                continue
+            self.applied_action_keys.add(action_key)
+            held = self.sleeve_position
+            assert held is not None
+            try:
+                if action.action_type == "split":
+                    result = apply_split(
+                        held,
+                        action,
+                        quote_currency=self.sleeve.currency,
+                        quote_unit=self.sleeve.quote_unit,
+                    )
+                    self.sleeve_position = result.position
+                    self.sleeve_events.append(
+                        SplitAppliedEventV1(
+                            security_id=security_id,
+                            session=session,
+                            ratio=action.value,
+                            shares_before=held.shares,
+                            shares_after=result.position.shares,
+                            evidence_revision=action.evidence_revision,
+                            policy_version=result.event.policy_version,
+                            sequence=self._next_sleeve_seq(),
+                        )
+                    )
+                    continue
+                credit = apply_dividend_cash(
+                    shares_carried_into_open=held.shares,
+                    action=action,
+                    quote_currency=self.sleeve.currency,
+                    quote_unit=self.sleeve.quote_unit,
+                )
+            except MarketDataPolicyError as exc:
+                raise _fatal(exc.code, session, exc.detail) from exc
+            conversion = self._convert(
+                credit.cash_credit, self.sleeve, valuation_session=session
+            )
+            self.cash = quantize_eight(self.cash + conversion.base_amount)
+            self.sleeve_events.append(
+                DividendAppliedEventV1(
+                    security_id=security_id,
+                    session=session,
+                    per_share_amount=action.value,
+                    shares_carried=held.shares,
+                    cash_credit_native=credit.cash_credit,
+                    cash_credit_base=conversion.base_amount,
+                    currency=self.sleeve.currency,
+                    quote_unit=self.sleeve.quote_unit,
+                    evidence_revision=action.evidence_revision,
+                    policy_version=credit.event.policy_version,
+                    sequence=self._next_sleeve_seq(),
+                )
+            )
+
+    def _value_sleeve(self, session: date) -> Decimal:
+        """Mark the sleeve at its latest close and record the reading."""
+        held = self.sleeve_position
+        value = Decimal(0)
+        if held is not None:
+            assert self.sleeve is not None
+            row = self._latest_row_on_or_before(self.sleeve.security_id, session)
+            if row is None:
+                raise _fatal(
+                    SimulationErrorCode.MISSING_REQUIRED_CLOSE,
+                    session,
+                    "no as-traded close is available to value the cash sleeve",
+                )
+            with deterministic_decimal_context():
+                native_value = row.close * held.shares
+            value = self._convert(
+                native_value, self.sleeve, valuation_session=session
+            ).base_amount
+        self.sleeve_value_base = value
+        self.sleeve_values.append(
+            CashSleeveValueV1(
+                session=session,
+                shares=held.shares if held is not None else Decimal(0),
+                value_base=value,
+            )
+        )
+        return value
+
     # -- valuation ------------------------------------------------------
 
     def _value_state(self, session: date) -> EquityCurvePointV1:
@@ -1457,6 +1800,8 @@ class _Engine:
                 + self._mark_position_value(security_id, position, session)
             )
         total = quantize_eight(self.cash + positions_value)
+        if self.sleeve is not None:
+            total = quantize_eight(total + self._value_sleeve(session))
         return EquityCurvePointV1(
             session=session,
             cash_base=self.cash,
@@ -1648,7 +1993,14 @@ class _Engine:
                         ),
                         Decimal(0),
                     )
-                    unreserved = quantize_eight(self.cash - reserved)
+                    # The cash sleeve (#140) is sold at the fill open to
+                    # fund entries, so its close value counts as cash here.
+                    available = (
+                        self.cash
+                        if self.sleeve is None
+                        else quantize_eight(self.cash + self.sleeve_value_base)
+                    )
+                    unreserved = quantize_eight(available - reserved)
                     if unreserved < 0:
                         raise _fatal(
                             SimulationErrorCode.INVARIANT_VIOLATION,
@@ -2077,8 +2429,12 @@ class _Engine:
         session_events: list[TradeLogEvent] = []
         candidate_audits: list[CandidateAuditV1] = []
         self._apply_actions(session, session_events)
+        if self.sleeve is not None:
+            self._apply_sleeve_actions(session)
         self._settle_terminal_exits(session, session_events)
         self._execute_fills(session, session_events, candidate_audits)
+        if self.sleeve is not None:
+            self._sweep_cash_into_sleeve(session)
         equity_point = self._value_state(session)
         selection = self._process_signals(
             session, session_events, equity_point.total_equity_base, candidate_audits
@@ -2119,6 +2475,8 @@ class _Engine:
             final_cash_base=self.cash,
             final_open_positions=self.final_open_positions,
             initial_entry_selection=self.initial_entry_selection,
+            cash_sleeve_events=tuple(self.sleeve_events),
+            cash_sleeve_values=tuple(self.sleeve_values),
         )
 
 
@@ -2139,6 +2497,7 @@ def run_simulation(
     month_boundary_observer: MonthBoundaryObserver | None = None,
     prepared_planes: MutableMapping[str, HistoricalMarketPlanes] | None = None,
     terminal_exits: tuple[TerminalExitV1, ...] = (),
+    cash_sleeve: SecurityMarketDataV1 | None = None,
 ) -> SimulationOutputV1:
     """Deterministically replay ``manifest`` and return its complete
     :class:`SimulationOutputV1` (AC 1-7).
@@ -2158,6 +2517,14 @@ def run_simulation(
     ``terminal_exits`` pins company exits (#82); a held position settles in
     cash on the first session on or after its exit. Raises ``ValueError``
     for a non-settling exit type or a repeated security.
+
+    ``cash_sleeve`` (#140, opt-in) holds idle cash in one more security,
+    typically the pinned SPY benchmark: after each open's fills, whole shares
+    are bought with idle cash at that open, and shares are sold at a fill
+    open to fund an entry. Its trades, dividends and daily values are
+    reported in ``cash_sleeve_events``/``cash_sleeve_values``, never in the
+    Strategy's Trade Log; each Equity Curve total includes it. Omitted, the
+    replay is unchanged.
     """
     engine = _Engine(
         manifest=manifest,
@@ -2174,6 +2541,7 @@ def run_simulation(
         ),
         prepared_planes=prepared_planes,
         terminal_exits=terminal_exits,
+        cash_sleeve=cash_sleeve,
     )
     return engine.run()
 
@@ -2183,6 +2551,9 @@ __all__ = [
     "CandidateAuditEvidenceV1",
     "CandidateAuditOrderV1",
     "CandidateAuditV1",
+    "CashSleeveEvent",
+    "CashSleeveTradeEventV1",
+    "CashSleeveValueV1",
     "DividendAppliedEventV1",
     "EntryFillEventV1",
     "EquityCurvePointV1",
