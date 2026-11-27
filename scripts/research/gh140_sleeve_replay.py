@@ -13,7 +13,7 @@ import json
 import sqlite3
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, cast
@@ -29,7 +29,10 @@ from app.repositories.historical_price_repo import (  # noqa: E402
 )
 from app.services.backtest import worker as worker_module  # noqa: E402
 from app.services.backtest.backtest_engine import (  # noqa: E402
+    EntryFillEventV1,
+    ExitFillEventV1,
     InMemorySessionBatchSink,
+    TerminalSettlementEventV1,
     SecurityMarketDataV1,
     run_simulation,
 )
@@ -38,10 +41,10 @@ from app.services.backtest.market_view import MarketView  # noqa: E402
 from app.services.backtest.run_input_manifest import (  # noqa: E402
     RunInputManifestV3,
 )
+from app.services.backtest.trading_calendar import TradingCalendar  # noqa: E402
 
 #: The stored Yau-Weinstein run (Jan 2000 - Aug 2026, upgrades on, MA 150).
 RUN_ID = "93f205c5-35ab-4007-afb8-b22ada16264b"
-OUTPUT = ROOT / "docs/research/gh140"
 
 
 def read_only(path: Path):
@@ -69,11 +72,57 @@ def resolve(run_id: str):
     return repo, prices, engine, manifest, strategy, security_data, fx_evidence, windows
 
 
-def replay(arm: str) -> dict[str, Any]:
-    """Run one arm and return its equity curve and sleeve activity."""
+def week_end(session: date) -> bool:
+    """Whether ``session`` is the last XNYS session of its ISO week."""
+    following = TradingCalendar().first_session_in_range(
+        "XNYS", session + timedelta(days=1), session + timedelta(days=10)
+    )
+    return following is None or following.isocalendar()[:2] != session.isocalendar()[:2]
+
+
+def weekly_exits(strategy: Any, mode: str) -> None:
+    """Research variant (test 4): hold some exits until the week's last session.
+
+    ``sma`` defers exits whose only reason is the close below the 150-session
+    SMA (a weekly close below a ~30-week average); ``sma+upgrade`` also
+    defers upgrade exits. The maximum-loss stop and stage exits stay daily.
+    """
+    original = strategy.exit_signals
+
+    def filtered(view: Any, portfolio: Any, parameters: Any) -> list:
+        signals = original(view, portfolio, parameters)
+        if week_end(view.as_of_session):
+            return signals
+        kept = []
+        for signal in signals:
+            codes = {
+                reason.code
+                for reason in (signal.explanation.reasons if signal.explanation else ())
+            }
+            if codes == {"close_below_sma150"}:
+                continue
+            if mode == "sma+upgrade" and signal.rule_id.endswith("upgrade_exit_v1"):
+                continue
+            kept.append(signal)
+        return kept
+
+    strategy.exit_signals = filtered
+
+
+def replay(
+    arm: str, overrides: dict[str, Any] | None = None, weekly: str = "none"
+) -> dict[str, Any]:
+    """Run one arm, with optional parameter overrides, and return its equity
+    curve, sleeve activity and trade summary."""
     repo, prices, engine, manifest, strategy, security_data, fx, windows = resolve(
         RUN_ID
     )
+    if weekly != "none":
+        weekly_exits(strategy, weekly)
+    if overrides:
+        manifest = manifest.model_copy(
+            update={"parameters": {**manifest.parameters, **overrides}}
+        )
     prepared_planes: dict = {}
     scan_cache: dict = {}
     scan_cache_month: dict = {}
@@ -138,9 +187,28 @@ def replay(arm: str) -> dict[str, Any]:
     for event in (*output.events, *output.cash_sleeve_events):
         kinds[event.kind] = kinds.get(event.kind, 0) + 1
     sleeve = {v.session: v.value_base for v in output.cash_sleeve_values}
+    traded: dict[str, float] = {}
+    closed: list[float] = []
+    for event in output.events:
+        if isinstance(event, EntryFillEventV1):
+            value = float(event.cost_base)
+        elif isinstance(event, ExitFillEventV1):
+            value = float(event.proceeds_base)
+        else:
+            if isinstance(event, TerminalSettlementEventV1):
+                closed.append(float(event.realized_pnl_base / event.cost_basis_base))
+            continue
+        day = event.fill_session.isoformat()
+        traded[day] = traded.get(day, 0.0) + value
+        if isinstance(event, ExitFillEventV1):
+            closed.append(float(event.realized_pnl_base / event.cost_basis_base))
     return {
         "run_id": RUN_ID,
         "arm": arm,
+        "overrides": overrides or {},
+        "weekly_exits": weekly,
+        "traded_base_by_day": traded,
+        "closed_trade_returns": closed,
         "elapsed_seconds": round(time.monotonic() - started, 1),
         "event_counts": kinds,
         "final_cash_base": str(output.final_cash_base),
@@ -179,13 +247,34 @@ def parity(result: dict[str, Any]) -> dict[str, Any]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arm", choices=("off", "sleeve"), required=True)
+    parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="NAME=JSON",
+        help="override one run parameter, e.g. maximum_loss_pct=8.0",
+    )
+    parser.add_argument(
+        "--weekly", choices=("none", "sma", "sma+upgrade"), default="none"
+    )
+    parser.add_argument("--label", help="output file name (default: the arm)")
+    parser.add_argument("--out", default="gh140", help="folder under docs/research")
     args = parser.parse_args()
-    result = replay(args.arm)
-    if args.arm == "off":
+    overrides = {
+        name: json.loads(value)
+        for name, value in (item.split("=", 1) for item in args.param)
+    }
+    result = replay(args.arm, overrides, args.weekly)
+    if args.arm == "off" and not overrides and args.weekly == "none":
         result["parity_with_stored_run"] = parity(result)
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    (OUTPUT / f"{args.arm}.json").write_text(json.dumps(result, indent=1))
-    summary = {k: v for k, v in result.items() if k != "equity_curve"}
+    output = ROOT / "docs/research" / args.out
+    output.mkdir(parents=True, exist_ok=True)
+    (output / f"{args.label or args.arm}.json").write_text(json.dumps(result, indent=1))
+    summary = {
+        k: v
+        for k, v in result.items()
+        if k not in {"equity_curve", "traded_base_by_day", "closed_trade_returns"}
+    }
     summary["final_total"] = result["equity_curve"][-1]["total"]
     print(json.dumps(summary, indent=1), flush=True)
 
